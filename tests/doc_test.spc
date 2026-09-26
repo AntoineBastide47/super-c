@@ -16,7 +16,7 @@ fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
         inner.push(p.txt(args[i]));
     }
     // Trailing comma only when broken.
-    inner.push(p.ifbreak(",", false));
+    inner.push(p.ifbreak(","));
     let ic = p.concat(&inner, 0);
     parts.push(p.indent(ic));
     parts.push(p.softline());

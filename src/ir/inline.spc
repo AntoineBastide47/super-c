@@ -11,7 +11,8 @@
 // non-recursive through the active splice chain, without asm, closures, variadic intrinsics,
 // reflection, asserts, wide literals, static references, or `from` coercions, and without
 // attributes beyond the inline hints (@c.noinline and @c.noreturn therefore reject). Inner calls
-// and fn-value constants must target CONCRETE public functions -- anything else would need the
+// must target CONCRETE public functions or header-declared extern functions, and fn-value
+// constants CONCRETE public functions -- anything else would need the
 // emitter's demand machinery (symbols, prototypes, per-instantiation static_asserts) from a
 // context the splice no longer has -- and a generic callee whose body defers a static_assert per
 // instantiation stays a call so its demand still fires the guard. Generic callees inline when
@@ -38,9 +39,8 @@ pub const IJ_TOO_BIG: u8 = 3;
 pub const IJ_BUDGET: u8 = 4;
 pub const IJ_DEPTH: u8 = 5;
 pub const IJ_GENERIC: u8 = 6; // unbound generic parameter or untranslatable type
-pub const IJ_LOWER_FAIL: u8 = 7;
-pub const IJ_ARITY: u8 = 8; // variadic call or argument/destination count mismatch
-pub const IJ_COUNT: usize = 9;
+pub const IJ_ARITY: u8 = 7; // variadic call or argument/destination count mismatch
+pub const IJ_COUNT: usize = 8;
 
 /// Emission-mode env switches: every setting that changes the C a body renders to. Build stamps
 /// and TU-cache keys read the list by index, so a new switch joins here once and every consumer
@@ -100,7 +100,7 @@ struct Origin {
 pub struct InlineStats {
     pub considered: u32,
     pub inlined: u32,
-    pub reasons: [u32; 9],
+    pub reasons: [u32; 8],
 }
 
 extend InlineStats {
@@ -282,18 +282,9 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
 
 /// The NODE_EXTEND whose item list contains `fnode`, or NODE_NONE.
 fn extend_of(a: &Ast, fnode: NodeId) NodeId {
-    let items = a.at_const(a.root).as_data.program.items;
-    for i in 0..items.len {
-        let nid = unsafe a.list(items)[i as usize];
-        if a.at_const(nid).kind != NodeKind::NODE_EXTEND {
-            continue;
-        }
-        let ms = a.at_const(nid).as_data.extend_def.items;
-        for j in 0..ms.len {
-            if unsafe a.list(ms)[j as usize] == fnode {
-                return nid;
-            }
-        }
+    let c = a.container_of(fnode);
+    if c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_EXTEND {
+        return c;
     }
     return NODE_NONE;
 }
@@ -323,6 +314,33 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
         return false;
     }
     return true;
+}
+
+/// A non-variadic function of an `extern "C" "<header>"` block. Every TU includes that header
+/// (through `__sc_fwd.h`), so a call to it spells the same in any TU.
+fn is_header_extern_fn(pkg: *const loader::Package, d: DefId) bool {
+    let p = unsafe &*pkg;
+    if d.node == NODE_NONE || d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(d.module);
+    let n = a.at_const(d.node);
+    if n.kind != NodeKind::NODE_FUNCTION || !n.as_data.function.is_extern() || n.as_data.function.is_variadic() {
+        return false;
+    }
+    let items = a.at_const(a.root).as_data.program.items;
+    for i in 0..items.len {
+        let b = a.at_const(unsafe a.list(items)[i as usize]);
+        if b.kind == NodeKind::NODE_EXTERN_BLOCK && b.as_data.extern_block.header != NODE_NONE {
+            let fs = b.as_data.extern_block.items;
+            for j in 0..fs.len {
+                if unsafe a.list(fs)[j as usize] == d.node {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 extend InlineCtx {
@@ -499,78 +517,61 @@ extend InlineStore {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
         let f = a.at_const(d.node).as_data.function;
-        let mut rej: u64 = 0;
+        let shape = REJ_BASE | IJ_SHAPE as u64;
         if body.has_reflect || body.has_zst_cond || nclosures != 0 {
-            rej = REJ_BASE | IJ_SHAPE as u64;
+            return shape;
         }
-        if rej == 0 {
-            for i in 0..body.blocks.len() {
-                let tk = &body.blocks.at(i).term;
-                if tk.kind == ir::TM_RETURN && tk.args_len == ir::RET_CANCEL {
-                    // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
-                    // would read the poison value and resume normal flow.
-                    rej = REJ_BASE | IJ_SHAPE as u64;
-                    break;
-                }
-                if tk.kind == ir::TM_ASSERT {
-                    rej = REJ_BASE | IJ_SHAPE as u64; // the assert message renders from the callee module's source
-                    break;
-                }
-                // Inner calls splice into a FOREIGN TU: only a public non-extern CONCRETE
-                // function (no fn/extend generics, no call targs) is guaranteed a global symbol
-                // and a shared prototype there -- a generic inner call would need the emitter's
-                // demand machinery to re-derive substitutions it no longer has context for.
-                if tk.kind == ir::TM_CALL && (tk.callee.node == NODE_NONE || tk.targs_len != 0 || !is_concrete_pub_fn(
-                    pkg,
-                    tk.callee,
-                )) {
-                    rej = REJ_BASE | IJ_SHAPE as u64;
-                    break;
-                }
+        for i in 0..body.blocks.len() {
+            let tk = &body.blocks.at(i).term;
+            if tk.kind == ir::TM_RETURN && tk.args_len == ir::RET_CANCEL {
+                // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
+                // would read the poison value and resume normal flow.
+                return shape;
+            }
+            if tk.kind == ir::TM_ASSERT {
+                return shape; // the assert message renders from the callee module's source
+            }
+            // Inner calls splice into a FOREIGN TU: only a public non-extern CONCRETE
+            // function (no fn/extend generics, no call targs) or a header-declared extern
+            // function is guaranteed a global symbol and a shared prototype there -- a generic
+            // inner call would need the emitter's demand machinery to re-derive substitutions it
+            // no longer has context for.
+            if tk.kind == ir::TM_CALL && (tk.callee.node == NODE_NONE || tk.targs_len != 0 || !is_concrete_pub_fn(
+                pkg,
+                tk.callee,
+            ) && !is_header_extern_fn(pkg, tk.callee)) {
+                return shape;
             }
         }
-        if rej == 0 {
-            for i in 0..body.locals.len() {
-                if body.locals.at(i).storage == ir::LS_STATIC_REF {
-                    rej = REJ_BASE | IJ_SHAPE as u64; // item symbol/linkage is the owner TU's business
-                    break;
-                }
+        for i in 0..body.locals.len() {
+            if body.locals.at(i).storage == ir::LS_STATIC_REF {
+                return shape; // item symbol/linkage is the owner TU's business
             }
         }
-        if rej == 0 {
-            for i in 0..body.rvalues.len() {
-                let rv = body.rvalues.at(i);
-                let mut bad = rv.kind == ir::RV_CLOSURE;
-                if rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM as u32 {
-                    bad = true;
-                }
-                if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT) {
-                    bad = true;
-                }
-                if rv.kind == ir::RV_REPEAT && body.is_generic {
-                    bad = true; // a symbolic repeat count must re-lower per instance
-                }
-                if bad {
-                    rej = REJ_BASE | IJ_SHAPE as u64;
-                    break;
-                }
+        for i in 0..body.rvalues.len() {
+            let rv = body.rvalues.at(i);
+            let mut bad = rv.kind == ir::RV_CLOSURE;
+            if rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM as u32 {
+                bad = true;
+            }
+            if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT) {
+                bad = true;
+            }
+            if rv.kind == ir::RV_REPEAT && body.is_generic {
+                bad = true; // a symbolic repeat count must re-lower per instance
+            }
+            if bad {
+                return shape;
             }
         }
-        if rej == 0 {
-            for i in 0..body.constants.len() {
-                let c9 = body.constants.at(i);
-                if c9.kind == ir::CK_WIDE {
-                    rej = REJ_BASE | IJ_SHAPE as u64; // wide-literal records index the callee module's Ast
-                    break;
-                }
-                if c9.kind == ir::CK_ITEM && (c9.targ_len() != 0 || !is_concrete_pub_fn(pkg, c9.item)) {
-                    rej = REJ_BASE | IJ_SHAPE as u64; // fn-value symbols follow the inner-call rule
-                    break;
-                }
+        for i in 0..body.constants.len() {
+            let c9 = body.constants.at(i);
+            if c9.kind == ir::CK_WIDE {
+                return shape; // wide-literal records index the callee module's Ast
             }
-        }
-        if rej != 0 {
-            return rej;
+            if c9.kind == ir::CK_ITEM && (c9.targ_len() != 0 || !is_concrete_pub_fn(pkg, c9.item)) {
+                return shape; // fn-value symbols follow the inner-call rule
+            }
         }
         let kb = ir::CoreBody::compact_from(body);
         let mut gp = Vector::<NodeId>::new();
@@ -590,39 +591,6 @@ extend InlineStore {
     }
 }
 
-/// Emit `local = RV_USE(op)` into the body's pools (fresh place and rvalue; `op` may be a reused
-/// caller operand or a fresh one).
-fn assign_local_use(b: &mut ir::CoreBody, l: ir::LocalId, op: ir::OperandId, sp: tok::Span) {
-    let ty = b.locals.at(l as usize).ty;
-    b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ty });
-    let pl = b.places.len() as u32 - 1;
-    b.rvalues.push(
-        ir::Rvalue { kind: ir::RV_USE, a: op, b: 0, c: 0, target: ty, item: DefId { module: 0, node: NODE_NONE } },
-    );
-    b.statements.push(
-        ir::Statement { kind: ir::ST_ASSIGN, place: pl, rvalue: b.rvalues.len() as u32 - 1, a: 0, span: sp },
-    );
-}
-
-const fn goto_term(t0: ir::BlockId, sp: tok::Span) ir::Terminator {
-    return ir::Terminator {
-        kind: ir::TM_GOTO,
-        a: ir::IR_NONE,
-        args_start: 0,
-        args_len: 0,
-        dests_start: 0,
-        dests_len: 0,
-        sw_start: 0,
-        sw_len: 0,
-        t0: t0,
-        callee: DefId { module: 0, node: NODE_NONE },
-        targs_start: 0,
-        targs_len: 0,
-        is_variadic: false,
-        span: sp,
-    };
-}
-
 /// Statistics line, bce::stats_line style.
 pub fn stats_line(st: &InlineStats, out: &mut String) {
     out.push_str("inline considered ");
@@ -638,10 +606,8 @@ pub fn stats_line(st: &InlineStats, out: &mut String) {
 
 /// Inline qualifying calls of `lw.body` in place. Appended blocks are revisited, so a spliced
 /// body's own calls inline up to MAX_DEPTH; every decision depends only on the bodies and ASTs.
+/// The caller skips the call when `cx.off`.
 pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
-    if cx.off {
-        return;
-    }
     let mut any = false;
     for i in 0..lw.body.blocks.len() {
         let t = &lw.body.blocks.at(i).term;
@@ -773,17 +739,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         let mut collide = false;
         switch cx.xm_ix.get(&h9) {
             Some(v) => {
-                let kk = cx.xm_key.at((*v) as usize);
-                let mut same = kk.len() == shape.len();
-                if same {
-                    for i in 0..shape.len() {
-                        if kk[i] != shape[i] {
-                            same = false;
-                            break;
-                        }
-                    }
-                }
-                if same {
+                if cx.xm_key.at((*v) as usize).eq(&shape) {
                     cix = (*v) as i64;
                     if unsafe TS_ON {
                         ts_add(TS_XTY_HIT, 1);
@@ -838,12 +794,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 tymap.insert(kk, nt);
             }
             if tok9 && !collide {
-                let mut sk = Vector::<u64>::new();
-                for i in 0..shape.len() {
-                    sk.push(shape[i]);
-                }
                 cix = cx.xms.len() as i64;
-                cx.xm_key.push(sk);
+                cx.xm_key.push(shape.clone());
                 cx.xms.push(replace(&mut tymap, Map::<u64, u64>::new()));
                 cx.xm_ix.insert(h9, cix as u64);
             }
@@ -1127,7 +1079,7 @@ fn splice(
         let kb = *k.blocks.at(i);
         let mut tm = kb.term;
         if tm.kind == ir::TM_RETURN {
-            tm = goto_term(join, sp);
+            tm = ir::goto_term(join, sp);
         } else {
             tm.span = sp;
             if tm.kind == ir::TM_GOTO {
@@ -1164,7 +1116,7 @@ fn splice(
             let opid = b.oper_pool[(t.args_start + j) as usize];
             let mode = wire[j as usize];
             if mode == 0 {
-                assign_local_use(b, al, opid, sp);
+                b.assign_local_use(al, opid, sp);
             } else if mode == 1 {
                 // autoref: the callee's reference parameter takes the caller's place directly
                 let aty = b.locals.at(al as usize).ty;
@@ -1174,26 +1126,7 @@ fn splice(
                 if a9.type_at(aty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                     mf = 1;
                 }
-                b.places.push(ir::Place { base: al, proj_start: 0, proj_len: 0, ty: aty });
-                b.rvalues.push(
-                    ir::Rvalue {
-                        kind: ir::RV_REF,
-                        a: src9,
-                        b: mf,
-                        c: 0,
-                        target: aty,
-                        item: DefId { module: 0, node: NODE_NONE },
-                    },
-                );
-                b.statements.push(
-                    ir::Statement {
-                        kind: ir::ST_ASSIGN,
-                        place: b.places.len() as u32 - 1,
-                        rvalue: b.rvalues.len() as u32 - 1,
-                        a: 0,
-                        span: sp,
-                    },
-                );
+                b.assign_local(al, ir::rv(ir::RV_REF, src9, mf, 0, aty), sp);
             } else {
                 // deref: a reference argument feeds a by-value parameter through one more hop
                 let aty = b.locals.at(al as usize).ty;
@@ -1212,11 +1145,11 @@ fn splice(
                     },
                 );
                 b.operands.push(ir::Operand { kind: ir::OP_COPY, data: b.places.len() as u32 - 1, ty: aty });
-                assign_local_use(b, al, b.operands.len() as u32 - 1, sp);
+                b.assign_local_use(al, b.operands.len() as u32 - 1, sp);
             }
         }
         b.blocks.push(
-            ir::BasicBlock { stmt_start: ps, stmt_len: k.args, term: goto_term(b0 + k.entry, sp), sealed: true },
+            ir::BasicBlock { stmt_start: ps, stmt_len: k.args, term: ir::goto_term(b0 + k.entry, sp), sealed: true },
         );
         blk_origin.push(orec);
     }
@@ -1230,22 +1163,12 @@ fn splice(
                 ir::Operand { kind: ir::OP_MOVE, data: b.places.len() as u32 - 1, ty: b.locals.at(rl as usize).ty },
             );
             let dpl = b.dest_pool[(t.dests_start + r) as usize];
-            b.rvalues.push(
-                ir::Rvalue {
-                    kind: ir::RV_USE,
-                    a: b.operands.len() as u32 - 1,
-                    b: 0,
-                    c: 0,
-                    target: b.places.at(dpl as usize).ty,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
-            b.statements.push(
-                ir::Statement { kind: ir::ST_ASSIGN, place: dpl, rvalue: b.rvalues.len() as u32 - 1, a: 0, span: sp },
-            );
+            b.push_assign(dpl, ir::rv(ir::RV_USE, b.operands.len() as u32 - 1, 0, 0, b.places.at(dpl as usize).ty), sp);
         }
-        b.blocks.push(ir::BasicBlock { stmt_start: js, stmt_len: k.returns, term: goto_term(t.t0, sp), sealed: true });
+        b.blocks.push(
+            ir::BasicBlock { stmt_start: js, stmt_len: k.returns, term: ir::goto_term(t.t0, sp), sealed: true },
+        );
         blk_origin.push(orec);
     }
-    b.blocks[call_blk].term = goto_term(prelude, sp);
+    b.blocks[call_blk].term = ir::goto_term(prelude, sp);
 }

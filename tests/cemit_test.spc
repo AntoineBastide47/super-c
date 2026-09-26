@@ -99,7 +99,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
         let node = bodies.at(i).body.owner.node;
         let mut sym = String::new();
         let tgt = em.mg.method_target(u, node);
-        assert(em.mg.fn_sym(u, node, tgt, true, &mut sym), "symbol renders");
+        assert(em.mg.fn_sym(u, node, tgt, &mut sym), "symbol renders");
         let ok = em.emit_fn(&bodies.at(i).body, sym.as_str());
         assert(ok, "body emits");
     }

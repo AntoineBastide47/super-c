@@ -35,6 +35,14 @@ pub struct Cfg {
     s_stack: Vector<u64>, // reused DFS frames: block << 32 | next successor index
 }
 
+/// The control-flow graph of `b`, freshly allocated, with predecessors built.
+pub fn build_cfg(b: &ir::CoreBody) Cfg {
+    let mut c = Cfg::empty();
+    c.build_into(b);
+    c.build_preds();
+    return c;
+}
+
 extend Cfg {
     /// A graph with no blocks and no heap storage; `build_into` fills it.
     pub fn empty() Cfg {
@@ -57,17 +65,7 @@ extend Cfg {
     pub const fn scratch_bytes(self: &Self) u64 {
         return (self.succ.capacity() * sizeof(u32) + self.succ_start.capacity() * sizeof(u32) + self.pred.capacity() * sizeof(u32) + self.pred_start.capacity() * sizeof(u32) + self.rpo.capacity() * sizeof(u32) + self.rpo_pos.capacity() * sizeof(u32) + self.s_cnt.capacity() * sizeof(u32) + self.s_color.capacity() * sizeof(u8) + self.s_stack.capacity() * sizeof(u64)) as u64;
     }
-}
 
-/// The control-flow graph of `b`, freshly allocated, with predecessors built.
-pub fn build_cfg(b: &ir::CoreBody) Cfg {
-    let mut c = Cfg::empty();
-    c.build_into(b);
-    c.build_preds();
-    return c;
-}
-
-extend Cfg {
     /// Reset-and-fill in place, keeping vector capacity across bodies (the reusable-context path).
     pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let c = self; // keep the body below identical to the by-value builder
@@ -107,9 +105,7 @@ extend Cfg {
             return;
         }
         c.s_color.truncate(0);
-        for _i in 0..n {
-            c.s_color.push(0);
-        }
+        c.s_color.resize_default(n as usize);
         c.s_stack.truncate(0);
         c.s_stack.push(b.entry as u64 << 32);
         c.s_color.set(b.entry as usize, 1);
@@ -149,9 +145,7 @@ extend Cfg {
         }
         let n = c.nblocks;
         c.s_cnt.truncate(0);
-        for _i in 0..n {
-            c.s_cnt.push(0);
-        }
+        c.s_cnt.resize_default(n as usize);
         for bi in 0..n {
             for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
                 let t = c.succ[s as usize];
@@ -165,9 +159,7 @@ extend Cfg {
             c.s_cnt.set(bi as usize, 0);
         }
         c.pred_start.push(acc);
-        for _i in 0..acc {
-            c.pred.push(0);
-        }
+        c.pred.resize_default(acc as usize);
         for bi in 0..n {
             for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
                 let t = c.succ[s as usize] as usize;
@@ -188,6 +180,13 @@ pub struct Liveness {
     s_queued: Vector<bool>,
 }
 
+/// Per-block origin liveness of `f` over `c`, freshly allocated.
+pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
+    let mut lv = Liveness::empty();
+    lv.build_into(f, c);
+    return lv;
+}
+
 extend Liveness {
     /// A solution with no rows; `build_into` fills it.
     pub fn empty() Liveness {
@@ -205,46 +204,25 @@ extend Liveness {
     pub const fn scratch_bytes(self: &Self) u64 {
         return (self.live_in.capacity() * sizeof(u64) + self.live_out.capacity() * sizeof(u64) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool)) as u64;
     }
-}
 
-/// Per-block origin liveness of `f` over `c`, freshly allocated.
-pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
-    let mut lv = Liveness::empty();
-    lv.build_into(f, c);
-    return lv;
-}
-
-extend Liveness {
     /// Solve in place, keeping row capacity from earlier bodies.
     pub fn build_into(self: &mut Self, f: &bf::BodyFacts, c: &Cfg) {
         let lv = self;
         let w = f.lwords;
         lv.words = w;
-        // Rows grow only past the high-water mark, then re-zero through raw stores (see MoveFlow).
+        // Rows keep their capacity from earlier bodies; the zero refill is one memset per row.
         let need = (c.nblocks * w) as usize;
-        while lv.live_in.len() < need {
-            lv.live_in.push(0u64);
-            lv.live_out.push(0u64);
-        }
-        lv.live_in.truncate(need);
-        lv.live_out.truncate(need);
-        unsafe {
-            let zi = lv.live_in.as_ptr() as *mut u64;
-            let zo = lv.live_out.as_ptr() as *mut u64;
-            for i in 0..need {
-                *(zi + i) = 0u64;
-                *(zo + i) = 0u64;
-            }
-        }
+        lv.live_in.truncate(0);
+        lv.live_in.resize_default(need);
+        lv.live_out.truncate(0);
+        lv.live_out.resize_default(need);
         // Seed so the LIFO pops visit reachable blocks in POSTORDER (successors before
         // predecessors): liveness flows backward, so each block then sees converged successors on
         // its first visit instead of zeros. Unreachable blocks still run once, after them, so the
         // converged state matches the old every-block seed exactly.
         lv.s_queued.truncate(0);
         lv.s_queue.truncate(0);
-        for _i in 0..c.nblocks {
-            lv.s_queued.push(false);
-        }
+        lv.s_queued.resize_default(c.nblocks as usize);
         for i in 0..c.rpo.len() {
             lv.s_queued.set(c.rpo[i] as usize, true);
         }
@@ -354,6 +332,7 @@ const fn bit_clear(v: &mut Vector<u64>, i: u32) {
 }
 
 /// Apply one init/move event to caller-held state rows (the transfer function, reporting-free).
+/// EV_MOVE_CUT applies as a move.
 pub fn apply_event(
     forest: &mp::MoveForest,
     ev: &bf::Event,
@@ -363,29 +342,44 @@ pub fn apply_event(
     di: &mut Vector<u64>,
     mm: &mut Vector<u64>,
 ) {
-    forest.subtree(ev.path(), scratch, sub);
-    if ev.kind() == bf::EV_ASSIGN {
+    let k = ev.kind();
+    if k == bf::EV_ASSIGN || k == bf::EV_DEAD || k == bf::EV_MOVE || k == bf::EV_MOVE_CUT {
+        forest.subtree(ev.path(), scratch, sub);
+        transfer(forest, k, ev.path(), sub, mi, di, mm);
+    }
+}
+
+// The state change of an event of kind `k` (EV_ASSIGN, EV_DEAD, or a move) on `path`, whose subtree
+// is `sub`. Inlined into the hot replay so each caller keeps its own straight-line row updates.
+@c.always_inline
+fn transfer(
+    forest: &mp::MoveForest,
+    k: u8,
+    path: u32,
+    sub: &Vector<u32>,
+    mi: &mut Vector<u64>,
+    di: &mut Vector<u64>,
+    mm: &mut Vector<u64>,
+) {
+    if k == bf::EV_ASSIGN {
         for i in 0..sub.len() {
             bit_set(mi, sub[i]);
             bit_set(di, sub[i]);
             bit_clear(mm, sub[i]);
         }
-        let mut p = forest.parent[ev.path() as usize];
+        // A partial write leaves ancestors only maybe-initialized.
+        let mut p = forest.parent[path as usize];
         while p != mp::MP_NONE {
             bit_set(mi, p);
             p = forest.parent[p as usize];
         }
-        return;
-    }
-    if ev.kind() == bf::EV_DEAD {
+    } else if k == bf::EV_DEAD {
         for i in 0..sub.len() {
             bit_clear(mi, sub[i]);
             bit_clear(di, sub[i]);
             bit_clear(mm, sub[i]);
         }
-        return;
-    }
-    if ev.kind() == bf::EV_MOVE || ev.kind() == bf::EV_MOVE_CUT {
+    } else {
         for i in 0..sub.len() {
             bit_clear(mi, sub[i]);
             bit_clear(di, sub[i]);
@@ -419,26 +413,8 @@ extend FlowCtx {
         } else {
             forest.subtree(ev.path(), scratch, sub);
         }
-        if ev.kind() == bf::EV_ASSIGN {
-            for i in 0..sub.len() {
-                bit_set(&mut self.mi, sub[i]);
-                bit_set(&mut self.di, sub[i]);
-                bit_clear(&mut self.mm, sub[i]);
-            }
-            // A partial write leaves ancestors only maybe-initialized.
-            let mut p = forest.parent[ev.path() as usize];
-            while p != mp::MP_NONE {
-                bit_set(&mut self.mi, p);
-                p = forest.parent[p as usize];
-            }
-            return;
-        }
-        if ev.kind() == bf::EV_DEAD {
-            for i in 0..sub.len() {
-                bit_clear(&mut self.mi, sub[i]);
-                bit_clear(&mut self.di, sub[i]);
-                bit_clear(&mut self.mm, sub[i]);
-            }
+        if ev.kind() == bf::EV_ASSIGN || ev.kind() == bf::EV_DEAD {
+            transfer(forest, ev.kind(), ev.path(), sub, &mut self.mi, &mut self.di, &mut self.mm);
             return;
         }
         // EV_MOVE / EV_USE: the read must see an initialized, unmoved place.
@@ -479,13 +455,16 @@ extend FlowCtx {
             }
         }
         if ev.kind() == bf::EV_MOVE {
-            for i in 0..sub.len() {
-                bit_clear(&mut self.mi, sub[i]);
-                bit_clear(&mut self.di, sub[i]);
-                bit_set(&mut self.mm, sub[i]);
-            }
+            transfer(forest, bf::EV_MOVE, ev.path(), sub, &mut self.mi, &mut self.di, &mut self.mm);
         }
     }
+}
+
+/// The move/init solution of `b`, freshly allocated; `errs` holds every move error.
+pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
+    let mut mf = MoveFlow::empty();
+    mf.build_into(b, forest, f, c);
+    return mf;
 }
 
 extend MoveFlow {
@@ -512,16 +491,7 @@ extend MoveFlow {
     pub const fn scratch_bytes(self: &Self) u64 {
         return (self.mi.capacity() * sizeof(u64) + self.di.capacity() * sizeof(u64) + self.mm.capacity() * sizeof(u64) + self.errs.capacity() * sizeof(MoveErr) + self.s_reached.capacity() * sizeof(bool) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool) + self.s_scratch.capacity() * sizeof(u32) + self.s_sub.capacity() * sizeof(u32) + (self.s_ctx.mi.capacity() + self.s_ctx.di.capacity() + self.s_ctx.mm.capacity()) * 8) as u64;
     }
-}
 
-/// The move/init solution of `b`, freshly allocated; `errs` holds every move error.
-pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
-    let mut mf = MoveFlow::empty();
-    mf.build_into(b, forest, f, c);
-    return mf;
-}
-
-extend MoveFlow {
     /// Solve in place, keeping capacity from earlier bodies.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
         let mf = self;
@@ -537,46 +507,22 @@ extend MoveFlow {
         // roots are fully initialized. Unreached blocks start all-empty and fill by union/intersection
         // as predecessors reach them, so the DI intersection needs a reached marker to avoid treating
         // untouched blocks as "everything definite".
-        // Rows grow only past the high-water mark, then re-zero through raw stores: a bulk word
-        // write per element beats a push (with its length/capacity check) for every body after
-        // the largest one seen.
+        // Rows keep their capacity from earlier bodies; the zero refill is one memset per row.
         let need = (c.nblocks * w) as usize;
-        while mf.mi.len() < need {
-            mf.mi.push(0u64);
-            mf.di.push(0u64);
-            mf.mm.push(0u64);
-        }
-        mf.mi.truncate(need);
-        mf.di.truncate(need);
-        mf.mm.truncate(need);
-        unsafe {
-            let zmi = mf.mi.as_ptr() as *mut u64;
-            let zdi = mf.di.as_ptr() as *mut u64;
-            let zmm = mf.mm.as_ptr() as *mut u64;
-            for i in 0..need {
-                *(zmi + i) = 0u64;
-                *(zdi + i) = 0u64;
-                *(zmm + i) = 0u64;
-            }
-        }
-        while mf.s_reached.len() < c.nblocks as usize {
-            mf.s_reached.push(false);
-        }
-        mf.s_reached.truncate(c.nblocks as usize);
-        unsafe {
-            let zr = mf.s_reached.as_ptr() as *mut bool;
-            for i in 0..c.nblocks as usize {
-                *(zr + i) = false;
-            }
-        }
+        mf.mi.truncate(0);
+        mf.mi.resize_default(need);
+        mf.di.truncate(0);
+        mf.di.resize_default(need);
+        mf.mm.truncate(0);
+        mf.mm.resize_default(need);
+        mf.s_reached.truncate(0);
+        mf.s_reached.resize_default(c.nblocks as usize);
         mf.s_ctx.mi.truncate(0);
         mf.s_ctx.di.truncate(0);
         mf.s_ctx.mm.truncate(0);
-        for _i in 0..w {
-            mf.s_ctx.mi.push(0u64);
-            mf.s_ctx.di.push(0u64);
-            mf.s_ctx.mm.push(0u64);
-        }
+        mf.s_ctx.mi.resize_default(w as usize);
+        mf.s_ctx.di.resize_default(w as usize);
+        mf.s_ctx.mm.resize_default(w as usize);
         // Seed the entry block.
         mf.s_scratch.truncate(0);
         mf.s_sub.truncate(0);
@@ -603,9 +549,7 @@ extend MoveFlow {
         mf.s_queued.truncate(0);
         mf.s_queue.truncate(0);
         if !fused {
-            for _i in 0..c.nblocks {
-                mf.s_queued.push(false);
-            }
+            mf.s_queued.resize_default(c.nblocks as usize);
         }
         let mut ri: usize = 0;
         mf.pushes = c.rpo.len() as u32;

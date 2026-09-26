@@ -4,9 +4,15 @@ import build_system::manifest as manifest;
 import utils::errors as diag;
 
 fn parse_ok(src: str) Vector<toml::TomlItem> {
-    let items = toml::parse(src, "test.toml");
+    let mut errs = diag::Errors::new();
+    let items = toml::parse_into(src, &mut errs);
     assert(!items.is_none());
     return items.unwrap();
+}
+
+fn rejects(src: str) bool {
+    let mut errs = diag::Errors::new();
+    return toml::parse_into(src, &mut errs).is_none();
 }
 
 fn find(items: &Vector<toml::TomlItem>, sec: str, key: str) i64 {
@@ -66,15 +72,15 @@ fn toml_string_escapes() {
 @test
 fn toml_rejects_malformed() {
     // Missing '='.
-    assert(toml::parse("bin \"app\"\n", "t").is_none());
+    assert(rejects("bin \"app\"\n"));
     // Unterminated string.
-    assert(toml::parse("bin = \"app\n", "t").is_none());
+    assert(rejects("bin = \"app\n"));
     // Malformed section.
-    assert(toml::parse("[oops\nbin = \"a\"\n", "t").is_none());
+    assert(rejects("[oops\nbin = \"a\"\n"));
     // Non-string array.
-    assert(toml::parse("a = [1, 2]\n", "t").is_none());
+    assert(rejects("a = [1, 2]\n"));
     // Trailing junk.
-    assert(toml::parse("a = \"x\" b = \"y\"\n", "t").is_none());
+    assert(rejects("a = \"x\" b = \"y\"\n"));
 }
 
 fn toml_err(label: str, src: str, want: str) {
@@ -206,6 +212,17 @@ fn manifest_validation_messages() {
         "unknown library type 'dyn' (static | shared)",
     );
     manifest_err("unknown section", "bin = \"a\"\nroot = \"m.spc\"\n[foo]\nx = 1\n", "unknown section 'foo'");
+    // Every subcommand main dispatches is reserved, including `vendor` and `bindgen`.
+    manifest_err(
+        "vendor is built in",
+        "bin = \"a\"\nroot = \"m.spc\"\n[command.vendor]\nrun = [\"x\"]\n",
+        "'vendor' is a built-in subcommand and cannot be overridden; pick another command name",
+    );
+    manifest_err(
+        "bindgen is built in",
+        "bin = \"a\"\nroot = \"m.spc\"\n[command.bindgen]\nrun = [\"x\"]\n",
+        "'bindgen' is a built-in subcommand and cannot be overridden; pick another command name",
+    );
     manifest_err("unknown key", "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n", "unknown key 'vendor-dir'");
 }
 

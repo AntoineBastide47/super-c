@@ -49,14 +49,18 @@ same options, the two trees are compared byte for byte, and generation two is co
 and run: it is the compiler that runs every later step of the gate (the one-worker and
 every-core builds under each task-delay seed, the targets, the profiles). Its
 one-worker tree must equal generation one's every-core tree, so the fixpoint holds
-across generations and worker counts at once.
+across generations and worker counts at once. `check.sh` (the commit hook) ends with
+`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the input lists, the
+fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
+a warm object cache). The targets, profiles and benchmark steps (about 130 s) run in the
+release workflow (`sh ci/gate.sh --no-check`, macOS and Linux).
 
 The rollback boundary is the latest GitHub release: its binary and its tag are the
 named verified compiler and source revision, outside every build directory that
 `super-c clean` removes. A rollback downloads that binary (`check.sh` does, for the
 bootstrap) and checks out the tag. No persistent semantic cache exists: the per-TU
-cache and the object cache are keyed by the compiler binary and the emitted bytes, so
-a rollback converts nothing.
+cache is keyed by the compiler binary and the emitted bytes, and the object cache by the
+C compiler version, the flags and the C text, so a rollback converts nothing.
 
 ## The Natural-Code Principle
 

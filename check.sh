@@ -74,4 +74,17 @@ if ! SC_LEAK_CHECK=fatal ./stage0-super-c build; then
     exit 1
 fi
 rm -f stage0-super-c
+
+# 5) The correctness gate's own checks over the rebuilt compiler (ci/gate.sh --core, under a minute on a
+# warm object cache): the contract's input lists, the two-generation fixpoint under the validation
+# switches, the one-worker and every-core identity under each task-delay seed (emitted C, type table,
+# item index digest, diagnostics), and the strict C warnings and readability of every unit. The full gate
+# runs them itself, so it skips this step.
+if [ -z "${SC_GATE_OUTER:-}" ]; then
+    printf 'check: correctness gate core (ci/gate.sh --core)\n'
+    if ! sh ci/gate.sh --core; then
+        printf 'check: FAILED -- ci/gate.sh --core (above)\n' >&2
+        exit 1
+    fi
+fi
 printf 'check: OK\n'

@@ -30,7 +30,8 @@ Never inferred (the signature barrier):
 
 - An unsuffixed integer literal defaults to `i32`.
 - An unsuffixed float literal defaults to `f32`.
-- A suffix (`5u64`, `1.5f64`) pins the literal type; context cannot change it.
+- A suffix (`5u64`, `1.5f64`) pins the literal type; context cannot change it. A base
+  prefix (`0xFF`) or a minus sign does not pin it.
 - A typed context adapts an unsuffixed literal before the default applies: typed
   operands win over defaults, and the default applies only after all other
   information is exhausted.
@@ -67,7 +68,9 @@ generic argument convert.
 
 - With an expected type, each branch of `if`/`switch` coerces to it independently.
 - Without one, all branch result types must be equal after `Never` absorption
-  (a diverging branch adopts the other branch's type).
+  (a diverging branch adopts the other branch's type) and literal adoption (an
+  unsuffixed literal branch takes the other branches' numeric type).
+- A block that ends in `return`, `break`, `continue` or a diverging call has type `Never`.
 - There is no implicit least-upper-bound: `if c { 1i32; } else { 2i64; }` without an
   expected type is an error.
 - `break value` joins under the same rule: all break values of one loop must agree
@@ -83,7 +86,8 @@ Evidence binds a generic parameter in this order, and all evidence must agree:
 4. The expected result type.
 5. Declared interface bounds (arguments of a proven conformance).
 6. Declared defaults, then literal defaults, only after everything above reaches a
-   fixed point.
+   fixed point. An unsuffixed literal argument is not evidence: it adopts the type the
+   other evidence gives its parameter.
 
 A repeated generic parameter must unify with every use: an existing binding that
 disagrees with a later use is a conflict error, never silently kept. Acceptance
@@ -92,9 +96,12 @@ error at the call, not a downstream failure.
 
 A generic enum variant constructor (`Option::Some(x)`, `Option::None`, `Result::Ok(x)`)
 infers its instance the same way: from an expected instance of the same enum (a return
-type, a declared binding, a parameter, the other side of `==`/`!=`), then from its payload
+type, a declared binding, a parameter, the other side of `==`/`!=`, the element type an
+array literal's context gives it), then from its payload
 arguments, then from declared defaults. A unit variant with nothing to infer from is an
-error; write the instance (`Option::<T>::None`).
+error; write the instance (`Option::<T>::None`). An array literal passes its expected element
+type (from an annotation or an array or slice parameter) to such constructors, to closures,
+and to generic functions named as values (`[twice, id]` for `[fn(i32) i32; 2]`).
 
 ## Const generic inference
 
@@ -156,5 +163,3 @@ regression case in `tests/infer_test.spc`:
   first candidate instead of an ambiguity error.
 - A generic item still declares at most 8 type parameters; there is no spill
   storage above eight generic arguments.
-- An unsuffixed literal argument types eagerly (its class default), so it joins as
-  its default type instead of adapting before the join.

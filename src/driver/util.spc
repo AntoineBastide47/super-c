@@ -10,6 +10,18 @@ import fmt::builder as fbld;
 import driver_shim as shim;
 import driver::rt_c as rtc;
 
+/// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
+pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
+
+/// 64-bit FNV-1a of `s` continued from state `h`: hashing a then b continues over their concatenation.
+pub const fn fnv_cont(h: u64, s: str) u64 {
+    let mut x = h;
+    for k in 0..s.len() {
+        x = (x ^ s.byte_at(k) as u64) * 0x100000001b3u64;
+    }
+    return x;
+}
+
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
 pub type PathBuf = Array<char, 4096>;
 /// Small zero-filled C string scratch buffers.
@@ -107,6 +119,55 @@ pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
     }
     ptrs.push(0);
     return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
+}
+
+/// False when the file cannot be opened, or a short write or failed close left it incomplete.
+pub fn write_file(path: str, body: str) bool {
+    let f = stdio::fopen(path, "wb");
+    if f == null {
+        return false;
+    }
+    let n = unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
+    let rc = unsafe stdio::fclose(f);
+    return n == body.len() && rc == 0;
+}
+
+/// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`
+/// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
+/// failure: an old or missing record only makes the next build redo that work.
+pub fn write_file_atomic(path: str, body: str) bool {
+    let mut tmp = String::from_str(path);
+    tmp.push_str(".tmp");
+    let mut dst = String::from_str(path);
+    if write_file(tmp.as_str(), body) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
+        return true;
+    }
+    let _ = unsafe shim::sc_unlink(tmp.cstr());
+    return false;
+}
+
+/// The entry names of `dir` in directory order, without "." and ".." (and without any dot-entry
+/// unless `hidden`); None when the directory cannot be opened.
+pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        return Option::<Vector<String>>::None;
+    }
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        if nm.starts_with(".") && (!hidden || nm == "." || nm == "..") {
+            continue;
+        }
+        names.push(String::from_str(nm));
+    }
+    unsafe shim::sc_closedir(dh);
+    return Option::<Vector<String>>::Some(names);
 }
 
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
@@ -254,6 +315,24 @@ pub const fn target_sdk(target: i32) i32 {
     return 0;
 }
 
+/// The C compiler command: `cc` when set (the manifest's or the package's), else the cross target
+/// `sdk`'s own toolchain ($CC on the host would build a host binary), else $CC, else `cc`.
+pub fn resolve_cc(cc: str, sdk: i32) String {
+    let mut out = String::from_str(cc);
+    if out.len() == 0 && sdk != 0 {
+        sdk_cc(sdk, &mut out);
+    }
+    if out.len() == 0 {
+        let env = stdlib::getenv("CC");
+        if env != null && unsafe *env != 0 as char {
+            out.push_str(str::from_cstr(env));
+        } else {
+            out.push_str("cc");
+        }
+    }
+    return out;
+}
+
 /// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
 /// into the compiler. Empty when the toolchain is not installed; the caller then falls back and the
 /// C compiler reports what is missing.
@@ -334,7 +413,7 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
         // only freestanding code can build; there is no libc to include.
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         if sdkp != null && unsafe *sdkp != 0 as char {
-            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
             cmd.push_str(" -target wasm32-wasi --sysroot=");
             cmd.push_str(str::from_cstr(sdkp));
             cmd.push_str("/share/wasi-sysroot");
@@ -342,7 +421,7 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
         }
         let sr = stdlib::getenv("WASI_SYSROOT");
         if sr != null && unsafe *sr != 0 as char {
-            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
             cmd.push_str(" -target wasm32-wasi --sysroot=");
             cmd.push_str(str::from_cstr(sr));
             return;
@@ -351,14 +430,15 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
     }
 }
 
-/// Libraries a cross target needs at LINK time only. wasi keeps signals behind an opt-in emulation
-/// library; the runtime's panic path installs a handler, so the build asks for it.
+/// Libraries a cross target needs at LINK time only. wasi keeps signals and the process clock behind
+/// opt-in emulation libraries; the runtime's panic path installs a signal handler and `time::clock`
+/// reads the process clock (emulated by the wall clock), so the build asks for both.
 pub fn push_sdk_libs(cmd: &mut String, sdk: i32) {
     if sdk == 3 {
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         let sr = stdlib::getenv("WASI_SYSROOT");
         if sdkp != null && unsafe *sdkp != 0 as char || sr != null && unsafe *sr != 0 as char {
-            cmd.push_str(" -lwasi-emulated-signal");
+            cmd.push_str(" -lwasi-emulated-signal -lwasi-emulated-process-clocks");
         }
     }
 }

@@ -824,6 +824,7 @@ pub fn run(argv: &Vector<str>, entries: &Vector<Entry>) i32 {
                 // The child: this one benchmark, then its exit code goes back through `main`, so the
                 // runner's own frames are released and the leak tracker's exit report sees a clean process.
                 unsafe G_FRESH = true;
+                unsafe G_FAILED = false; // an earlier benchmark's failure is the parent's, not this one's
                 run_one(e);
                 shutdown_pools();
                 return if unsafe G_FAILED {

@@ -1052,3 +1052,17 @@ fn diagnostics_by_message() {
         "unknown attribute; the 'fmt' namespace supports only '@fmt.skip'",
     );
 }
+
+@test
+fn tuple_let_mut_elements() {
+    h::expect_exit(
+        "tuple let takes mut per element",
+        "fn f() (i32, i32) { return 1, 2; }\nfn main() i32 { let (_, mut x) = f(); x += 10; let (mut a, b) = f(); a += b; return x + a - 15; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "tuple let element without mut stays immutable",
+        "fn f() (i32, i32) { return 1, 2; }\nfn main() i32 { let (a, mut b) = f(); a += 1; b += 1; return a + b; }\n",
+        "cannot assign",
+    );
+}

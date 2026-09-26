@@ -17,7 +17,7 @@ allowed-tools: Bash Read
 
 The compiler is a multi-stage transpiler: Super-C source to readable C99/C11, then an
 external `cc` compiles and links the C. Every stage operates on per-module data within a
-shared `Package`. The production pipeline is `run_package_i` in `src/driver/emit.spc`:
+shared `Package`. The production pipeline is `run_package` in `src/driver/emit.spc`:
 
 ```
 load                      -- module discovery, lex + parse per module (src/module/loader.spc)
@@ -61,7 +61,7 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          TU emission (emit/tu.spc); per body: drop elaboration only for
   |                          a body emission lowered itself, the inliner, bounds-check
   |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs
-serial write-out          -- __sc_fwd.h, per-SCC <module>__types.h, per-module .h, then the
+serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then the
   |                          module TU shards (<module>.c, __p<k>), per-owner instance shards
   |                          (<module>__inst.c), __sc_registry.c and __sc_manifest (a shard
   |                          streams out as includes, head, its chunks, tail); then
@@ -167,8 +167,8 @@ pub struct Package {
     pub std_root: String,  // second import search root
     pub cir: *mut void,    // the Core IR interpreter (opaque to avoid a type cycle)
     pub jobs: u32,         // --jobs worker count (0/1 = serial)
-    // ... plus demand/liveness tables: method_used, method_edges, inst_methods,
-    // extern_privates, always_methods, co_spans (safepoint reachability), ...
+    // ... plus demand/liveness tables: method_used, always_methods,
+    // co_spans (safepoint reachability), ...
 }
 ```
 
@@ -275,7 +275,7 @@ than defining a new context. Two layers:
    - `bc_ir_lower` lowers the item's bodies (closures included) to Core IR; each
      `Lowerer` also records an **event tape** at the walk's AST sites.
    - `bc_replay` replays that tape — the same helper calls the old AST walk made
-     (`bc_let_post`, `bc_assign_pre`, `bc_scope_close`, ...), without traversing the
+     (`bc_let_post`, `bc_assign_pre`, `tc_scope_exit`, ...), without traversing the
      expression tree. The AST walk itself was deleted.
    - `bc_ir_analyze` runs the analyses over the lowered bodies through one reusable
      `BorrowCtx` (`flow_ir.spc`): `body_features` reads the typed IR into feature bits
@@ -378,16 +378,16 @@ check (`Interp::set_reader`): a body or a checked type of an item that item cann
 Full monomorphization is the only generic backend.
 
 - **During typecheck:** `close_instances` records concrete generic instantiations into
-  the per-module `Ast.instances` pool; demand tables (`method_used`, `inst_methods`,
-  `always_methods`, `extern_privates`) gate what emits.
+  the per-module `Ast.instances` pool; demand tables (`method_used`,
+  `always_methods`) gate what emits.
 - **During emission:** `cemit_package` builds an `InstGraph` (`src/graph/instances.spc`)
   seeded with the `irl::Keep` cache and calls `collect()` — it discovers every concrete
   instantiation by walking lowered Core IR bodies from concrete roots, expanding generic
   bodies under substitution frames. Roots are the concrete bodies of every module that
-  emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the shared
-  type header lists aggregates from live modules only. Keys are package ids (decl DefId +
+  emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the
+  definition headers list aggregates from live modules only. Keys are package ids (decl DefId +
   the final TypeId of every argument), so records from different modules compare by id.
-  Only an aggregate record with a concrete pool anchor enters the planned type headers;
+  Only an aggregate record with a concrete pool anchor enters the planned definition headers;
   every other aggregate a body names is defined by the late replay of the mangler's
   spellings, so the closure's breadth decides placement, not existence. The demand cross
   product pairs each declaration with its target's new instances only (`pair_cur`), and
@@ -412,8 +412,8 @@ Full monomorphization is the only generic backend.
 `CemitOut` holds one geometrically grown buffer per TU (`TuBufs`: `tus[t]` plus
 `tu_incs[t]`, `tu_heads[t][k]` per shard, `tu_tail[t]` and the chunk table
 `ck_off`/`ck_end`/`ck_shard` indexed by `tu_chunks[t]`; `inst_c` with
-`inst_incs`/`inst_heads`/`inst_chunks` per owner module; `fwd_h`, `types_h[m]`,
-`protos_h[m]`, `registry_c`). A consumer that inspects the emitted C (the test harness,
+`inst_incs`/`inst_heads`/`inst_chunks` per owner module; `fwd_h`, `defs_h[d]` (one
+definition header per type, file `__sc_t/<defs_stem[d]>.h`), `protos_h[m]`, `registry_c`). A consumer that inspects the emitted C (the test harness,
 the bench sink) must concatenate the headers, every shard head, the buffers and the
 tail; the driver writes each shard piecewise (`OutFile`) and never assembles a file
 image. The layout, ownership and shard rules are in
@@ -464,8 +464,8 @@ out-dir. Module paths map to nested directories (`::` → `/`):
 ```
 <gen_root>/
   super_rt.h super_rt.c    # shared runtime (allocation interposition, leak tracker)
-  __sc_fwd.h               # forward typedefs, enums, dyn/extern/const declarations, shared by every TU
-  app__types.h             # complete by-value types owned by app (one header per type SCC)
+  __sc_fwd.h               # runtime and extern-block includes, dyn/extern declarations, shared by every TU
+  __sc_t/app__Point.h      # one definition header per type: its typedef, definition and layout check
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body
   app__p1.c                # module shards (__p<k>, k from 1): the size policy's count, or the build.toml [shards] override
   app__inst.c              # generic instances, glue, constants and dyn tables app owns

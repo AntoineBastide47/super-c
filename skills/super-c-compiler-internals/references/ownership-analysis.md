@@ -87,9 +87,10 @@ per body, in `bc_validate_facts` and `bc_elaborate`:
   `MoveFlow.pushes`, `Solver.flow_pushes`: the seeds plus one push per row change, a row
   changing at most once per lattice bit);
 - a body outside the schedule gate schedules nothing;
-- the elaborated body passes the structural verifier (`ir::verify`, which now walks the
-  blocks' live statement runs: the flag materialization leaves dead entries in the pool)
-  and the ownership verifier.
+- the elaborated body passes the structural verifier (`ir::verify`, which walks the
+  blocks' live statement runs) and the ownership verifier. The flag materialization
+  re-copies every run and then removes the superseded entries: the emitter's per-local
+  counts read the whole statement pool.
 
 `drops::verify_drops` is the independent check of an elaborated body. It recomputes the
 move/init state of every move path from the elaborated body's own events
@@ -99,9 +100,35 @@ holds (a second release, or a value that was never initialized, fails), a guarde
 releases a value the path may hold and never a partially moved whole, a marker's chain of
 cut drop blocks is judged from the state before the marker and must release every path the
 local may still hold, a marker with no drop must find nothing held, and a return must find
-nothing held by any declared owning local. Closure captures are excluded (the env owns
-them across calls); field-level completeness is not modeled beyond the paths the body
-mentions. A failure prints the body, the failing block and local, and the local's events.
+nothing held by any declared owning local. "Held" counts only the paths that need a release
+(`dv_owned_paths`): the type owns memory, and the path is a leaf or a value some member of
+which has no path of its own; a struct or tuple whose every member has a path is released
+member by member. A definite move below one variant of an enum path proves the variant it
+holds (`dv_prove_variants`): the enum path and its other variants then hold nothing beyond
+that variant's members. Closure captures are excluded (the env owns them across calls). A failure
+prints the body, the failing block and local, and the local's events.
+
+A partially moved struct or tuple (a destructuring `let`, switch arm or `for` pattern moved
+some members out) drops each still-owned member at its marker (`DK_FIELD`). Ownership is
+judged on the member path's concrete type, never on the declared member type, which may be
+a type parameter (`Tuple2<i32, String>` declares `_0: T0`). A member no place names drops
+through its declared type and index, which must be concrete; so a by-value destructuring
+names every member (`Lowerer::mention_members`). Member places use one key per storage: a
+named field (a tuple's `_0` included) is `sub` = the FIELD decl with `data` = IR_NONE, as a
+member access spells it; only a positional member (an `is_tuple` struct, a variant payload)
+keys by index. A partially moved enum drops the still-owned members of the variant that a
+definite move below it proves (a payload member moves only after its tag test passed, and
+only a whole store changes the tag); a member only partly held releases its own parts, at
+any depth (`drops::part_drops`, drops placed by the path's projection chain). So a by-value
+pattern names every member of each struct, tuple and variant payload it destructures
+(`Lowerer::mention_parts`). A part only maybe held (no flag guards a part) leaves the
+flag-guarded whole drop, which the verifier rejects.
+
+A by-value `switch` spills its scrutinee into a temporary declared at the match node and
+registered in every arm's scope: each arm's exits end its storage after the arm's
+bindings, so the elaboration frees there what that arm did not move out. A guarded arm
+binds before its guard; the guard's failure edge stores each binding back into its
+scrutinee place, so the next arm and the arm-end drop see the whole value.
 The emission-side elaboration runs the same checks under the switch.
 
 ## Numbers

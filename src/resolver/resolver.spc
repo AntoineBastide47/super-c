@@ -31,7 +31,6 @@ pub struct Symbol {
 /// An open closure being resolved: a value ref binding below `floor` is a CAPTURE (copied into its env by
 /// codegen), collected here (deduped, discovery order) and committed to the node's `captures` at exit.
 pub struct ClosureScope {
-    pub node: NodeId,
     pub floor: u32,
     pub caps: Vector<NodeId>,
 }
@@ -48,7 +47,6 @@ pub struct Resolver<'a> {
     pub symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
     pub current_self: DefId, // decl 'Self' refers to inside the current interface/extension
     pub current_self_items: NodeList, // the interface/extend items in scope, for `Self::Assoc` projection
-    pub in_generic: bool, // resolving inside a generic fn/extend
     pub closures: Vector<ClosureScope>, // open closures, innermost last
     pub package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
     pub mod_names: Vector<ModEntry>, // leading-segment module names (alias / single-segment path), import order
@@ -131,7 +129,6 @@ extend Resolver {
             symbol_index: Map::<u64, u32>::new(),
             current_self: DefId { module: 0, node: NODE_NONE },
             current_self_items: NodeList { start: 0, len: 0 },
-            in_generic: false,
             closures: Vector::<ClosureScope>::new(),
             package: package,
             mod_names: Vector::<ModEntry>::new(),
@@ -205,9 +202,8 @@ extend Resolver {
             }
             let sname = self.symbols[i].name;
             if span_eq(self.source, sname, name) {
-                self.errors.emit(
-                    name.start,
-                    name.end - name.start,
+                self.errors.emit_span(
+                    name,
                     format("duplicate definition of '{}'", diag::span_str(self.source, name.start, name.end)),
                 );
                 return;
@@ -392,9 +388,8 @@ extend Resolver {
         if decl != NODE_NONE {
             self.ast.set_resolution_def(refn, DefId { module: mid, node: decl });
         } else {
-            self.errors.emit(
-                name.start,
-                name.end - name.start,
+            self.errors.emit_span(
+                name,
                 format(
                     "no public {} '{}' in the imported module",
                     kind,
@@ -511,9 +506,8 @@ extend Resolver {
                     if decl != NODE_NONE {
                         self.ast.set_resolution_def(id, DefId { module: mid, node: decl });
                     } else {
-                        self.errors.emit(
-                            dn.start,
-                            dn.end - dn.start,
+                        self.errors.emit_span(
+                            dn,
                             format(
                                 "no public item '{}' in module '{}'",
                                 diag::span_str(self.source, dn.start, dn.end),
@@ -610,9 +604,8 @@ extend Resolver {
         ) || span_is(self.source, name, "dangling") {
             return;
         }
-        self.errors.emit(
-            name.start,
-            name.end - name.start,
+        self.errors.emit_span(
+            name,
             format("cannot find {} '{}'", kind, diag::span_str(self.source, name.start, name.end)),
         );
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
@@ -706,11 +699,7 @@ extend Resolver {
         if generics.len > MAX_TYPE_PARAMS {
             let over = self.child(generics, MAX_TYPE_PARAMS);
             let sp = self.ast.at_const(over).span;
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format("a generic item may declare at most {} type parameters", MAX_TYPE_PARAMS),
-            );
+            self.errors.emit_span(sp, format("a generic item may declare at most {} type parameters", MAX_TYPE_PARAMS));
         }
         let mut i: u32 = 0;
         while i < generics.len {
@@ -779,11 +768,7 @@ extend Resolver {
                 let name = self.name_span(first);
                 if span_is(self.source, name, "Self") {
                     if self.current_self.node == NODE_NONE {
-                        self.errors.emit(
-                            name.start,
-                            name.end - name.start,
-                            format("'Self' is only valid inside an interface or extension"),
-                        );
+                        self.errors.emit_span(name, format("'Self' is only valid inside an interface or extension"));
                     } else if tp.parts.len >= 2 {
                         // `Self::Assoc` projection: resolve to the associated type alias in scope. In a
                         // concrete extension this alias has a definition (`type Item = i32`), so the type
@@ -803,11 +788,7 @@ extend Resolver {
                         if found != NODE_NONE {
                             self.ast.set_resolution_def(id, DefId { module: self.ast.module, node: found });
                         } else {
-                            self.errors.emit(
-                                assoc.start,
-                                assoc.end - assoc.start,
-                                format("no associated type by this name in scope"),
-                            );
+                            self.errors.emit_span(assoc, format("no associated type by this name in scope"));
                         }
                     } else {
                         let cs = self.current_self;
@@ -875,8 +856,6 @@ extend Resolver {
 
     fn resolve_function(self: &mut Self, id: NodeId) {
         let fd = self.ast.at_const(id).as_data.function;
-        let saved_generic = self.in_generic;
-        self.in_generic = saved_generic || fd.generics.len > 0;
         self.scope_enter();
         self.declare_generics(fd.generics);
         let mut i: u32 = 0;
@@ -904,7 +883,6 @@ extend Resolver {
             self.resolve_block_stmts(fd.body);
         }
         self.scope_exit();
-        self.in_generic = saved_generic;
     }
 
     fn resolve_type_alias(self: &mut Self, id: NodeId) {
@@ -1037,14 +1015,10 @@ extend Resolver {
                 } else {
                     self.current_self = DefId { module: self.ast.module, node: id };
                 }
-                let saved_generic = self.in_generic;
-                // Methods inherit the extend's generics.
-                self.in_generic = saved_generic || ex.generics.len > 0;
                 let old_items = self.current_self_items;
                 self.current_self_items = ex.items;
                 self.resolve_associated_items(ex.items);
                 self.current_self_items = old_items;
-                self.in_generic = saved_generic;
                 self.current_self = old_self;
                 self.scope_exit();
             },
@@ -1188,7 +1162,11 @@ extend Resolver {
                 // Evaluated before the binding is in scope.
                 self.resolve_expr(fr.iterable);
                 self.scope_enter();
-                self.declare(fr.binding, id, Namespace::NS_VALUE);
+                if self.ast.at_const(fr.binding).kind == NodeKind::NODE_IDENTIFIER {
+                    self.declare(fr.binding, id, Namespace::NS_VALUE);
+                } else {
+                    self.resolve_pattern(fr.binding);
+                }
                 self.resolve_block(fr.body);
                 self.scope_exit();
             },
@@ -1469,12 +1447,12 @@ extend Resolver {
     fn resolve_closure(self: &mut Self, id: NodeId) {
         if self.closures.len() >= 8 {
             let sp = self.ast.at_const(id).span;
-            self.errors.emit(sp.start, sp.end - sp.start, format("closures nested too deeply (max 8)"));
+            self.errors.emit_span(sp, format("closures nested too deeply (max 8)"));
             return;
         }
         let cl = self.ast.at_const(id).as_data.closure;
         self.scope_enter();
-        self.closures.push(ClosureScope { node: id, floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new() });
+        self.closures.push(ClosureScope { floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new() });
         for i in 0..cl.params.len {
             let pid = self.child(cl.params, i);
             let param = self.ast.at_const(pid).as_data.parameter;
@@ -1486,14 +1464,7 @@ extend Resolver {
         // went unnoticed: `fn() u8` worked and `fn() SomeStruct` silently had no return type, so every
         // signature check against it (a `F: fn() T` bound, say) compared against nothing.
         for i in 0..cl.returns.len {
-            let rid = self.child(cl.returns, i);
-            let rkind = self.ast.at_const(rid).kind;
-            let tid = if rkind == NodeKind::NODE_PARAMETER {
-                self.ast.at_const(rid).as_data.parameter.ty;
-            } else {
-                rid;
-            };
-            self.resolve_type(tid);
+            self.resolve_type(self.ast.slot_type_node(self.child(cl.returns, i)));
         }
         if cl.expr_body {
             self.resolve_expr(cl.body);
@@ -1582,31 +1553,9 @@ extend Resolver {
                     self.declare(nm, id, Namespace::NS_TYPE);
                 },
                 NODE_EXTERN_BLOCK => {
-                    let inner = self.ast.at_const(id).as_data.extern_block.items;
-                    for j in 0..inner.len {
-                        let iid = self.child(inner, j);
-                        switch self.ast.at_const(iid).kind {
-                            NODE_FUNCTION => {
-                                let nm = self.ast.at_const(iid).as_data.function.name;
-                                self.declare(nm, iid, Namespace::NS_VALUE);
-                            },
-                            NODE_TYPE_ALIAS => {
-                                let nm = self.ast.at_const(iid).as_data.type_alias.name;
-                                self.declare(nm, iid, Namespace::NS_TYPE);
-                            },
-                            NODE_STRUCT | NODE_ENUM => {
-                                // An extern struct/union names a type the same way a top-level one does;
-                                // only its DEFINITION comes from C.
-                                let nm = self.ast.at_const(iid).as_data.aggregate.name;
-                                self.declare(nm, iid, Namespace::NS_TYPE);
-                            },
-                            NODE_CONST => {
-                                let nm = self.ast.at_const(iid).as_data.const_def.name;
-                                self.declare(nm, iid, Namespace::NS_VALUE);
-                            },
-                            _ => {},
-                        };
-                    }
+                    // Extern items name functions, consts and types as top-level ones do; only their
+                    // definitions come from C.
+                    self.collect_items(self.ast.at_const(id).as_data.extern_block.items);
                 },
                 _ => {}, // NODE_EXTEND has no module-scope name
             };
@@ -1678,11 +1627,7 @@ extend Resolver {
         if span_is(self.source, sp, "self") {
             return;
         }
-        self.errors.warn(
-            sp.start,
-            sp.end - sp.start,
-            format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)),
-        );
+        self.errors.warn_span(sp, format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)));
         self.errors.fix(sp.start, sp.start, 1);
     }
     // A decl is used when a node's resolution points at it. Only lets and parameters of
@@ -1922,9 +1867,8 @@ extend Resolver {
                 if nsp.end <= nsp.start || self.source[nsp.start as usize] == b'_' {
                     continue;
                 }
-                self.errors.warn(
-                    sp1.start,
-                    sp1.end - sp1.start,
+                self.errors.warn_span(
+                    sp1,
                     format(
                         "value assigned to '{}' is overwritten before it is read",
                         diag::span_str(self.source, nsp.start, nsp.end),
@@ -1969,7 +1913,7 @@ extend Resolver {
                     }
                 }
                 if !used {
-                    self.errors.warn(lsp.start, lsp.end - lsp.start, format("unused label '{}'", lt));
+                    self.errors.warn_span(lsp, format("unused label '{}'", lt));
                 }
             }
         }

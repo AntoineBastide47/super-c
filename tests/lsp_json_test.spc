@@ -80,7 +80,7 @@ fn json_build_and_emplace() {
     // Overwrite frees the old value.
     o.emplace("x", json::JSON::integer(4));
     let mut a = json::JSON::array();
-    a.push_back(json::JSON::boolean(true));
+    a.push_back(json::JSON::Bool(true));
     a.push_back(json::JSON::string(String::from_str("s")));
     o.emplace("arr", a);
     assert_eq(o.value_i64("x", 0), 4 as i64);

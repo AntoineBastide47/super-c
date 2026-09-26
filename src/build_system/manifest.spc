@@ -5,6 +5,7 @@ import driver_shim as shim;
 import build_system::toml as toml;
 import module::loader as loader;
 import utils::errors as diag;
+import driver::util as dutil;
 
 /// One [profile.NAME]: per-profile cflags/ldflags appended after the manifest-level ones; `strip`
 /// runs strip on the freshly linked binary; `opt` is the `opt-level` (OPT_FLAGS: the flag arrays say
@@ -196,24 +197,6 @@ extend Profile {
     }
 }
 
-fn push_flags(dst: &mut Vector<String>, flags: str) {
-    // Split a flag string on spaces so built-in profiles can be written as one literal.
-    let mut i: usize = 0;
-    let n = flags.len();
-    while i < n {
-        while i < n && flags[i] == b' ' {
-            i = i + 1;
-        }
-        let s = i;
-        while i < n && flags[i] != b' ' {
-            i = i + 1;
-        }
-        if i > s {
-            dst.push(String::from_str(flags.slice(s, i)));
-        }
-    }
-}
-
 /// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
 /// from: `super-c release foo.spc` compiles and links in one command and still has to honour the profile
 /// it was asked for. Free it like any other manifest.
@@ -257,9 +240,34 @@ fn norm_conv_dir(dir: &mut String, key: str, errs: &mut diag::Errors) {
     }
 }
 
-// The `super-c` subcommand names: reserved, so a `[command.NAME]` can never shadow one.
-const fn is_builtin_command(name: str) bool {
-    return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp" || name == "new" || name == "init";
+const COMMANDS: [str<'static>; 14] = [
+    "build",
+    "release",
+    "fmt",
+    "lint",
+    "command",
+    "run",
+    "clean",
+    "test",
+    "bench",
+    "lsp",
+    "new",
+    "init",
+    "vendor",
+    "bindgen",
+];
+
+/// The position of subcommand `name` in `Mode` declaration order after MODE_DEFAULT (main dispatches
+/// position k to Mode k + 1); -1 when `name` is no subcommand. The names are reserved, so a
+/// `[command.NAME]` can never shadow one.
+pub const fn subcommand_index(name: str) i32 {
+    let names: []str = COMMANDS;
+    for k in 0..names.len() {
+        if names[k] == name {
+            return k as i32;
+        }
+    }
+    return -1;
 }
 
 // A section or key outside this compiler's schema: an error, except under bootstrap (see `load`).
@@ -275,6 +283,14 @@ fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
         return;
     }
     *dst = it.val.s.clone();
+}
+
+fn set_u32(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut u32) {
+    if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
+        errs.emit(it.at, it.key.len() as u32, format("'{}' expects a non-negative integer", it.key.as_str()));
+        return;
+    }
+    *dst = it.val.i as u32;
 }
 
 fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
@@ -354,18 +370,10 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
             } else if key == "ldlibs" {
                 take_arr(it, &mut errs, &mut m.ldlibs);
             } else if key == "jobs" {
-                if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
-                    errs.emit(it.at, 4, format("'jobs' expects a non-negative integer"));
-                } else {
-                    m.jobs = it.val.i as u32;
-                }
+                set_u32(it, &mut errs, &mut m.jobs);
             } else if key == "const-eval-steps" {
                 // 0 = engine default; a `--const-eval-steps` CLI flag overrides this at build time.
-                if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
-                    errs.emit(it.at, key.len() as u32, format("'const-eval-steps' expects a non-negative integer"));
-                } else {
-                    m.ce_steps = it.val.i as u32;
-                }
+                set_u32(it, &mut errs, &mut m.ce_steps);
             } else if key == "const-eval-memory" {
                 // bytes; 0 = engine default; a `--const-eval-memory` CLI flag overrides this.
                 if it.val.kind != toml::TV_INT || it.val.i < 0 {
@@ -436,7 +444,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
             let name = sec.slice(8, sec.len());
             // A built-in subcommand cannot be overridden: a `[command.build]` that shadows `build`
             // makes every invocation mean something else per project. Custom names only.
-            if is_builtin_command(name) {
+            if subcommand_index(name) >= 0 {
                 let mut seen = false;
                 for r in 0..rejected.len() {
                     if rejected.at(r).as_str() == name {
@@ -669,33 +677,25 @@ extend Manifest {
     // The profiles available out of the box. A [profile.NAME] section with the same name starts from
     // these values: a key it sets replaces the built-in's (`cflags` the whole array), the rest stay.
     fn add_builtin_profiles(self: &mut Self) {
-        {
-            let mut p = Profile::new("debug");
-            push_flags(
+        // `debug` and `dev` differ only in the optimization level: 0 and 1.
+        let sanitized: [str; 2] = ["debug", "dev"];
+        for name in sanitized {
+            let mut p = Profile::new(name);
+            dutil::split_args(
                 &mut p.cflags,
                 "-g -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
             );
-            push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
-            p.opt = 0;
-            self.profiles.push(p);
-        }
-        {
-            let mut p = Profile::new("dev");
-            push_flags(
-                &mut p.cflags,
-                "-g -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
-            );
-            push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
-            p.opt = 1;
+            dutil::split_args(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
+            p.opt = (name == "dev") as i32;
             self.profiles.push(p);
         }
         {
             let mut p = Profile::new("release");
-            push_flags(
+            dutil::split_args(
                 &mut p.cflags,
                 "-DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -fPIE",
             );
-            push_flags(&mut p.link_args, "-O2");
+            dutil::split_args(&mut p.link_args, "-O2");
             p.strip = true;
             p.opt = 3;
             // Full LTO: ThinLTO relinks in 1.3 s instead of 19 s here, but costs the compiler 3 to 5%
@@ -708,7 +708,7 @@ extend Manifest {
             let mut p = Profile::new("bench");
             // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
             // users run. -g and frame pointers stay so samply profiles remain readable.
-            push_flags(&mut p.cflags, "-DNDEBUG -g -fno-omit-frame-pointer");
+            dutil::split_args(&mut p.cflags, "-DNDEBUG -g -fno-omit-frame-pointer");
             p.opt = 3;
             p.lto = LTO_AUTO;
             // Profile-guided optimization when local training data exists (build with --profile=pgogen,
@@ -729,8 +729,8 @@ extend Manifest {
         // bench profile above picks it up on its next build.
         {
             let mut p = Profile::new("pgogen");
-            push_flags(&mut p.cflags, "-fprofile-generate");
-            push_flags(&mut p.ldflags, "-fprofile-generate");
+            dutil::split_args(&mut p.cflags, "-fprofile-generate");
+            dutil::split_args(&mut p.ldflags, "-fprofile-generate");
             p.opt = 2;
             p.lto = LTO_AUTO;
             self.profiles.push(p);
@@ -748,8 +748,8 @@ extend Manifest {
         // inlining is the price of a report worth acting on.
         {
             let mut p = Profile::new("race");
-            push_flags(&mut p.cflags, "-fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
-            push_flags(&mut p.ldflags, "-fsanitize=thread");
+            dutil::split_args(&mut p.cflags, "-fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
+            dutil::split_args(&mut p.ldflags, "-fsanitize=thread");
             p.opt = 1;
             self.profiles.push(p);
         }

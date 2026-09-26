@@ -95,7 +95,7 @@ pub struct SweptFile {
     pub canon: String,
 }
 
-/// A workspace folder's .spc files from its last directory walk, sorted by `path` (`path_cmp`).
+/// A workspace folder's .spc files from its last directory walk, sorted by `path` (byte order).
 pub struct SweptDir {
     pub folder: String,
     pub files: Vector<SweptFile>,
@@ -104,38 +104,6 @@ pub struct SweptDir {
 // Directory levels a workspace walk descends below its folder. Links are never followed, so only
 // a real directory cycle (a bind mount) could recurse further.
 const SWEEP_MAX_DEPTH: u32 = 64;
-
-fn dir_of(path: str) String {
-    let mut i = path.len();
-    while i > 0 {
-        if path[i - 1] == b'/' {
-            return String::from_str(path.slice(0, i - 1));
-        }
-        i -= 1;
-    }
-    return String::from_str(".");
-}
-
-// Byte-lexicographic path order with a length tiebreak: a deterministic batch member list.
-const fn path_cmp(a: &String, b: &String) i32 {
-    let la = a.len();
-    let lb = b.len();
-    let m = if la < lb {
-        la;
-    } else {
-        lb;
-    };
-    let mut i: usize = 0;
-    while i < m {
-        let ca = a.as_str()[i];
-        let cb = b.as_str()[i];
-        if ca != cb {
-            return ca as i32 - cb as i32;
-        }
-        i += 1;
-    }
-    return la as i32 - lb as i32;
-}
 
 // JSON-RPC plumbing.
 
@@ -158,6 +126,21 @@ fn respond_raw(f: *mut stdio::FILE, id: &json::JSON, result: str) {
     body.push_str(result);
     body.push_byte(b'}');
     transport::write_message(f, body.as_str());
+}
+
+// An LSP Diagnostic object.
+fn diag_json(range: json::JSON, severity: i64, source: str, msg: str) json::JSON {
+    let mut dj = json::JSON::object();
+    dj.emplace("range", range);
+    dj.emplace("severity", json::JSON::integer(severity));
+    dj.emplace("source", json::JSON::str(source));
+    dj.emplace("message", json::JSON::str(msg));
+    return dj;
+}
+
+// Answer request `req` with a null result.
+fn respond_null(f: *mut stdio::FILE, req: &json::JSON) {
+    respond_raw(f, req.at_key("id"), "null");
 }
 
 fn send_error(f: *mut stdio::FILE, id: &json::JSON, code: i64, msg: str) {
@@ -300,6 +283,16 @@ fn uri_doc_path(uri: str) String {
     return analysis::canon_path(raw.as_str());
 }
 
+// The `params.textDocument.uri` of a request; empty when absent.
+fn doc_uri(req: &json::JSON) str {
+    if let Some(params) = req.value("params") {
+        if let Some(td) = params.value("textDocument") {
+            return td.value_str("uri");
+        }
+    }
+    return "";
+}
+
 // `build.toml` is served by the manifest half of the server (src/lsp/buildtoml.spc): it is not Super-C
 // source, so none of the package machinery applies to it.
 const fn is_manifest_path(path: str) bool {
@@ -325,25 +318,14 @@ struct KeyedHit {
 }
 
 fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
-    let c = path_cmp(&x.path, &y.path);
+    let c = x.path.cmp(&y.path);
     if c != 0 {
         return c;
     }
     if x.h.s != y.h.s {
-        return if x.h.s < y.h.s {
-            -1;
-        } else {
-            1;
-        };
+        return x.h.s.cmp(&y.h.s);
     }
-    if x.h.e != y.h.e {
-        return if x.h.e < y.h.e {
-            -1;
-        } else {
-            1;
-        };
-    }
-    return 0;
+    return x.h.e.cmp(&y.h.e);
 }
 
 // A workspace symbol hit keyed by its canonical file path (`r` is the root that found it).
@@ -354,7 +336,7 @@ struct KeyedSym {
 }
 
 fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
-    let c = path_cmp(&x.path, &y.path);
+    let c = x.path.cmp(&y.path);
     if c != 0 {
         return c;
     }
@@ -396,39 +378,10 @@ const fn valid_id(id: &json::JSON) bool {
 /// 1 on EOF (client vanished) or an `exit` without a prior `shutdown`.
 pub fn run(std_dir: str, target: i32) i32 {
     let mut sv = Server {
-        docs: Vector::<Doc>::new(),
-        roots: Vector::<Root>::new(),
-        has_manifest: false,
         std_dir: String::from_str(std_dir),
         target: target,
-        published: Vector::<String>::new(),
-        ws_root: String::new(),
-        folders: Vector::<String>::new(),
-        out_folders: Vector::<String>::new(),
-        out_skips: Vector::<String>::new(),
-        swept: Vector::<SweptDir>::new(),
-        canceled_tick: Vector::<u64>::new(),
-        last_req_tick: 0,
-        shutdown_seen: false,
-        initialized: false,
-        revision: 0,
-        canceled: Vector::<String>::new(),
         pending: Option::<String>::None,
-        cap_hier_symbols: false,
-        cap_doc_changes: false,
-        cap_pull_diags: false,
-        cap_delta_tokens: false,
-        cap_action_literals: false,
-        cap_action_resolve: false,
-        cap_watch_dynreg: false,
-        parent_pid: 0,
         max_results: 5000,
-        budget_mb: 0,
-        tick: 0,
-        tok_uris: Vector::<String>::new(),
-        tok_ids: Vector::<u64>::new(),
-        tok_data: Vector::<Vector<u32>>::new(),
-        tok_next: 0,
     };
     let fin = stdio::stdin();
     let fout = stdio::stdout();
@@ -514,20 +467,16 @@ pub fn run(std_dir: str, target: i32) i32 {
             continue;
         }
         if method == "$/cancelRequest" {
-            switch req.value("params") {
-                Some(params) => switch params.value("id") {
-                    Some(cid) => {
-                        sv.canceled.push(cid.dump());
-                        sv.canceled_tick.push(sv.tick);
-                        if sv.canceled.len() > 64 {
-                            let _ = sv.canceled.remove(0);
-                            let _ = sv.canceled_tick.remove(0);
-                        }
-                    },
-                    None => {},
-                },
-                None => {},
-            };
+            if let Some(params) = req.value("params") {
+                if let Some(cid) = params.value("id") {
+                    sv.canceled.push(cid.dump());
+                    sv.canceled_tick.push(sv.tick);
+                    if sv.canceled.len() > 64 {
+                        let _ = sv.canceled.remove(0);
+                        let _ = sv.canceled_tick.remove(0);
+                    }
+                }
+            }
             continue;
         }
         // A request whose id was already canceled gets the RequestCancelled response and no work.
@@ -572,8 +521,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             sv.rebuild_all(fout, false, true);
         } else if method == "shutdown" {
             sv.shutdown_seen = true;
-            let nullv = json::JSON::default();
-            respond(fout, req.at_key("id"), &nullv);
+            respond_null(fout, &req);
         } else if method == "textDocument/didOpen" {
             sv.revision += 1;
             sv.on_did_open(&req, fout);
@@ -597,9 +545,9 @@ pub fn run(std_dir: str, target: i32) i32 {
         } else if method == "textDocument/hover" && is_req {
             sv.on_hover(&req, fout);
         } else if method == "textDocument/definition" && is_req {
-            sv.on_definition(&req, fout);
+            sv.on_definition(&req, fout, false);
         } else if method == "textDocument/typeDefinition" && is_req {
-            sv.on_type_definition(&req, fout);
+            sv.on_definition(&req, fout, true);
         } else if method == "textDocument/implementation" && is_req {
             sv.on_implementation(&req, fout);
         } else if method == "textDocument/references" && is_req {
@@ -736,19 +684,11 @@ extend Server {
             let alt = self.folder_alt_of(path);
             self.roots.push(
                 Root {
-                    ws: String::new(),
                     root_file: String::from_str(path),
-                    root_dir: dir_of(path),
+                    root_dir: String::from_str(loader::dirname_of(path)),
                     alt_dir: alt,
                     origin: String::from_str(path),
-                    sweep: false,
-                    members: Vector::<String>::new(),
                     pkg: loader::Package::new(),
-                    files: Vector::<String>::new(),
-                    diags: Vector::<analysis::DiagRec>::new(),
-                    pos: Vector::<u32>::new(),
-                    built: false,
-                    last_used: 0,
                 },
             );
         }
@@ -812,7 +752,7 @@ extend Server {
         let osk = String::from_str(self.out_skip_of(folder));
         let mut files = Vector::<SweptFile>::new();
         Server::walk_dir(folder, 0, osk.as_str(), &mut files);
-        files.sort_by(|x: &SweptFile, y: &SweptFile| path_cmp(&x.path, &y.path));
+        files.sort_by(|x: &SweptFile, y: &SweptFile| x.path.cmp(&y.path));
         self.swept.push(SweptDir { folder: String::from_str(folder), files: files });
         return self.swept.len() - 1;
     }
@@ -855,18 +795,11 @@ extend Server {
             self.roots.push(
                 Root {
                     ws: String::from_str(folder),
-                    root_file: String::new(),
                     root_dir: String::from_str(folder),
                     alt_dir: alt,
-                    origin: String::new(),
                     sweep: true,
                     members: cand,
                     pkg: loader::Package::new(),
-                    files: Vector::<String>::new(),
-                    diags: Vector::<analysis::DiagRec>::new(),
-                    pos: Vector::<u32>::new(),
-                    built: false,
-                    last_used: 0,
                 },
             );
             return;
@@ -1145,11 +1078,7 @@ extend Server {
                 lm.update(r, d.module, src);
                 range_json(src, &lm.ls, d.start, d.len);
             };
-            let mut dj = json::JSON::object();
-            dj.emplace("range", range);
-            dj.emplace("severity", json::JSON::integer(d.severity));
-            dj.emplace("source", json::JSON::str("super-c"));
-            dj.emplace("message", json::JSON::str(d.msg.as_str()));
+            let dj = diag_json(range, d.severity, "super-c", d.msg.as_str());
             ps.arrs[slots[m] as usize].push_back(dj);
         }
     }
@@ -1210,11 +1139,7 @@ extend Server {
             let mut any = json::JSON::array();
             for i in 0..diags.len() {
                 let dg = diags.at(i);
-                let mut dj = json::JSON::object();
-                dj.emplace("range", range_json(src, &ls, dg.start, dg.len));
-                dj.emplace("severity", json::JSON::integer(1));
-                dj.emplace("source", json::JSON::str("build.toml"));
-                dj.emplace("message", json::JSON::str(dg.msg.as_str()));
+                let dj = diag_json(range_json(src, &ls, dg.start, dg.len), 1, "build.toml", dg.msg.as_str());
                 any.push_back(dj);
             }
             ps.push_all(doc.uri.clone(), any);
@@ -1337,6 +1262,19 @@ extend Server {
         return out;
     }
 
+    // Add the manifest root of `folder`, first when `primary`; a primary folder's manifest makes the
+    // server a manifest server.
+    fn add_folder_root(self: &mut Self, folder: str, primary: bool) {
+        let at = if primary {
+            0;
+        } else {
+            -1;
+        };
+        if self.add_manifest_root(folder, at) && primary {
+            self.has_manifest = true;
+        }
+    }
+
     // Load `folder`/build.toml and append its manifest root (at `at` when >= 0, else at the end).
     // Returns true when a manifest was found. No process chdir: every path stays absolute.
     fn add_manifest_root(self: &mut Self, folder: str, at: i32) bool {
@@ -1347,22 +1285,8 @@ extend Server {
         }
         let man = mano.unwrap();
         let rf = Server::abs_under(folder, man.root.as_str());
-        let rd = dir_of(rf.as_str());
-        let r = Root {
-            ws: String::from_str(folder),
-            root_file: rf,
-            root_dir: rd,
-            alt_dir: String::new(),
-            origin: String::new(),
-            sweep: false,
-            members: Vector::<String>::new(),
-            pkg: loader::Package::new(),
-            files: Vector::<String>::new(),
-            diags: Vector::<analysis::DiagRec>::new(),
-            pos: Vector::<u32>::new(),
-            built: false,
-            last_used: 0,
-        };
+        let rd = String::from_str(loader::dirname_of(rf.as_str()));
+        let r = Root { ws: String::from_str(folder), root_file: rf, root_dir: rd, pkg: loader::Package::new() };
         if at >= 0 {
             self.roots.insert(at as usize, r);
         } else {
@@ -1373,144 +1297,86 @@ extend Server {
     }
 
     fn on_initialize(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        switch req.value("params") {
-            Some(params) => {
-                switch params.value("workspaceFolders") {
-                    Some(wfs) => {
-                        if wfs.is_array() {
-                            for i in 0..wfs.size() {
-                                let u = wfs.at(i).value_str("uri");
-                                if u.len() != 0 {
-                                    let p = text::uri_to_path(u);
-                                    self.folders.push(analysis::canon_path(p.as_str()));
-                                }
-                            }
-                        }
-                    },
-                    None => {},
-                };
-                if self.folders.len() == 0 {
-                    let ru = params.value_str("rootUri");
-                    if ru.len() != 0 {
-                        let p = text::uri_to_path(ru);
-                        self.folders.push(analysis::canon_path(p.as_str()));
-                    } else {
-                        let rp = params.value_str("rootPath");
-                        if rp.len() != 0 {
-                            self.folders.push(analysis::canon_path(rp));
+        if let Some(params) = req.value("params") {
+            if let Some(wfs) = params.value("workspaceFolders") {
+                if wfs.is_array() {
+                    for i in 0..wfs.size() {
+                        let u = wfs.at(i).value_str("uri");
+                        if u.len() != 0 {
+                            let p = text::uri_to_path(u);
+                            self.folders.push(analysis::canon_path(p.as_str()));
                         }
                     }
                 }
-                // Parent process: polled between messages so a dead client ends the server.
-                self.parent_pid = params.value_i64("processId", 0);
-                // Server settings (the plan's limit knobs live here, not in env vars alone).
-                switch params.value("initializationOptions") {
-                    Some(io) => {
-                        let mr = io.value_i64("maxResults", 0);
-                        if mr > 0 {
-                            self.max_results = mr as usize;
+            }
+            if self.folders.len() == 0 {
+                let ru = params.value_str("rootUri");
+                if ru.len() != 0 {
+                    let p = text::uri_to_path(ru);
+                    self.folders.push(analysis::canon_path(p.as_str()));
+                } else {
+                    let rp = params.value_str("rootPath");
+                    if rp.len() != 0 {
+                        self.folders.push(analysis::canon_path(rp));
+                    }
+                }
+            }
+            // Parent process: polled between messages so a dead client ends the server.
+            self.parent_pid = params.value_i64("processId", 0);
+            // Server settings (the plan's limit knobs live here, not in env vars alone).
+            if let Some(io) = params.value("initializationOptions") {
+                let mr = io.value_i64("maxResults", 0);
+                if mr > 0 {
+                    self.max_results = mr as usize;
+                }
+                self.budget_mb = io.value_i64("budgetMb", 0);
+            }
+            // Negotiated client capabilities that change response SHAPES or gate providers.
+            if let Some(caps) = params.value("capabilities") {
+                if let Some(td) = caps.value("textDocument") {
+                    if let Some(ds) = td.value("documentSymbol") {
+                        self.cap_hier_symbols = ds.value_bool("hierarchicalDocumentSymbolSupport");
+                    }
+                    self.cap_pull_diags = td.value("diagnostic").is_some();
+                    if let Some(st) = td.value("semanticTokens") {
+                        if let Some(rq) = st.value("requests") {
+                            if let Some(fl) = rq.value("full") {
+                                self.cap_delta_tokens = fl.value_bool("delta");
+                            }
                         }
-                        self.budget_mb = io.value_i64("budgetMb", 0);
-                    },
-                    None => {},
-                };
-                // Negotiated client capabilities that change response SHAPES or gate providers.
-                switch params.value("capabilities") {
-                    Some(caps) => {
-                        switch caps.value("textDocument") {
-                            Some(td) => {
-                                switch td.value("documentSymbol") {
-                                    Some(ds) => {
-                                        self.cap_hier_symbols = ds.value("hierarchicalDocumentSymbolSupport").is_some() && ds.at_key(
-                                            "hierarchicalDocumentSymbolSupport",
-                                        ).is_bool() && ds.at_key("hierarchicalDocumentSymbolSupport").get_bool();
-                                    },
-                                    None => {},
-                                };
-                                self.cap_pull_diags = td.value("diagnostic").is_some();
-                                switch td.value("semanticTokens") {
-                                    Some(st) => switch st.value("requests") {
-                                        Some(rq) => switch rq.value("full") {
-                                            Some(fl) => {
-                                                self.cap_delta_tokens = fl.value("delta").is_some() && fl.at_key(
-                                                    "delta",
-                                                ).is_bool() && fl.at_key("delta").get_bool();
-                                            },
-                                            None => {},
-                                        },
-                                        None => {},
-                                    },
-                                    None => {},
-                                };
-                                switch td.value("codeAction") {
-                                    Some(ca) => {
-                                        self.cap_action_literals = ca.value("codeActionLiteralSupport").is_some();
-                                        switch ca.value("resolveSupport") {
-                                            Some(rs) => switch rs.value("properties") {
-                                                Some(props) => {
-                                                    if props.is_array() {
-                                                        for i in 0..props.size() {
-                                                            if props.at(i).is_string() && props.at(i).get_str() == "edit" {
-                                                                self.cap_action_resolve = true;
-                                                            }
-                                                        }
-                                                    }
-                                                },
-                                                None => {},
-                                            },
-                                            None => {},
-                                        };
-                                    },
-                                    None => {},
-                                };
-                            },
-                            None => {},
-                        };
-                        switch caps.value("workspace") {
-                            Some(wc) => {
-                                switch wc.value("workspaceEdit") {
-                                    Some(we) => {
-                                        self.cap_doc_changes = we.value("documentChanges").is_some() && we.at_key(
-                                            "documentChanges",
-                                        ).is_bool() && we.at_key("documentChanges").get_bool();
-                                    },
-                                    None => {},
-                                };
-                                switch wc.value("didChangeWatchedFiles") {
-                                    Some(dw) => {
-                                        self.cap_watch_dynreg = dw.value("dynamicRegistration").is_some() && dw.at_key(
-                                            "dynamicRegistration",
-                                        ).is_bool() && dw.at_key("dynamicRegistration").get_bool();
-                                    },
-                                    None => {},
-                                };
-                            },
-                            None => {},
-                        };
-                    },
-                    None => {},
-                };
-            },
-            None => {},
-        };
+                    }
+                    if let Some(ca) = td.value("codeAction") {
+                        self.cap_action_literals = ca.value("codeActionLiteralSupport").is_some();
+                        if let Some(rs) = ca.value("resolveSupport") {
+                            if let Some(props) = rs.value("properties") {
+                                if props.is_array() {
+                                    for i in 0..props.size() {
+                                        if props.at(i).is_string() && props.at(i).get_str() == "edit" {
+                                            self.cap_action_resolve = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(wc) = caps.value("workspace") {
+                    if let Some(we) = wc.value("workspaceEdit") {
+                        self.cap_doc_changes = we.value_bool("documentChanges");
+                    }
+                    if let Some(dw) = wc.value("didChangeWatchedFiles") {
+                        self.cap_watch_dynreg = dw.value_bool("dynamicRegistration");
+                    }
+                }
+            }
+        }
         if self.folders.len() != 0 {
             self.ws_root = self.folders.at(0).clone();
         }
         // One manifest root per folder that carries a build.toml; the primary folder's sits first.
         for i in 0..self.folders.len() {
             let folder = self.folders.at(i).clone();
-            let primary = i == 0;
-            let got = self.add_manifest_root(
-                folder.as_str(),
-                if primary {
-                    0;
-                } else {
-                    -1;
-                },
-            );
-            if primary && got {
-                self.has_manifest = true;
-            }
+            self.add_folder_root(folder.as_str(), i == 0);
         }
         self.initialized = true;
         let caps = capabilities_with(self.cap_pull_diags, self.cap_delta_tokens, self.cap_action_resolve);
@@ -1518,34 +1384,31 @@ extend Server {
     }
 
     fn on_did_open(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        switch req.value("params") {
-            Some(params) => {
-                let tdo = params.value("textDocument");
-                if tdo.is_none() {
-                    // A malformed notification is dropped.
-                    return;
-                }
-                let td = tdo.unwrap();
-                let uri = td.value_str("uri");
-                let p = uri_doc_path(uri);
-                let di = self.find_doc(uri);
-                if di >= 0 {
-                    self.docs[di as usize].txt = String::from_str(td.value_str("text"));
-                    self.docs[di as usize].version = td.value_i64("version", 0);
-                } else {
-                    self.docs.push(
-                        Doc {
-                            uri: String::from_str(uri),
-                            path: p,
-                            txt: String::from_str(td.value_str("text")),
-                            version: td.value_i64("version", 0),
-                        },
-                    );
-                }
-                self.rebuild_all(f, true, true);
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            let tdo = params.value("textDocument");
+            if tdo.is_none() {
+                // A malformed notification is dropped.
+                return;
+            }
+            let td = tdo.unwrap();
+            let uri = td.value_str("uri");
+            let p = uri_doc_path(uri);
+            let di = self.find_doc(uri);
+            if di >= 0 {
+                self.docs[di as usize].txt = String::from_str(td.value_str("text"));
+                self.docs[di as usize].version = td.value_i64("version", 0);
+            } else {
+                self.docs.push(
+                    Doc {
+                        uri: String::from_str(uri),
+                        path: p,
+                        txt: String::from_str(td.value_str("text")),
+                        version: td.value_i64("version", 0),
+                    },
+                );
+            }
+            self.rebuild_all(f, true, true);
+        }
     }
 
     // One ranged change applied to `txt` in place. False = invalid range (negative positions, a
@@ -1595,43 +1458,37 @@ extend Server {
     // notification (the malformed-notification rule) and keeps the previous buffer and version.
     // True when the notification changed a buffer.
     fn apply_did_change(self: &mut Self, req: &json::JSON) bool {
-        switch req.value("params") {
-            Some(params) => {
-                let tdo = params.value("textDocument");
-                if tdo.is_none() {
-                    return false;
-                }
-                let td = tdo.unwrap();
-                let uri = td.value_str("uri");
-                let di = self.find_doc(uri);
-                if di < 0 {
-                    return false;
-                }
-                switch params.value("contentChanges") {
-                    Some(ch) => {
-                        if ch.is_array() && ch.size() != 0 {
-                            let mut txt = self.docs.at(di as usize).txt.clone();
-                            let mut ok = true;
-                            for i in 0..ch.size() {
-                                if !Server::apply_change(&mut txt, ch.at(i)) {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                            if !ok {
-                                eprintln("lsp: dropped didChange with an invalid range for {}", uri);
-                                return false;
-                            }
-                            self.docs[di as usize].txt = txt;
-                            self.docs[di as usize].version = td.value_i64("version", 0);
-                            return true;
+        if let Some(params) = req.value("params") {
+            let tdo = params.value("textDocument");
+            if tdo.is_none() {
+                return false;
+            }
+            let td = tdo.unwrap();
+            let uri = td.value_str("uri");
+            let di = self.find_doc(uri);
+            if di < 0 {
+                return false;
+            }
+            if let Some(ch) = params.value("contentChanges") {
+                if ch.is_array() && ch.size() != 0 {
+                    let mut txt = self.docs.at(di as usize).txt.clone();
+                    let mut ok = true;
+                    for i in 0..ch.size() {
+                        if !Server::apply_change(&mut txt, ch.at(i)) {
+                            ok = false;
+                            break;
                         }
-                    },
-                    None => {},
-                };
-            },
-            None => {},
-        };
+                    }
+                    if !ok {
+                        eprintln("lsp: dropped didChange with an invalid range for {}", uri);
+                        return false;
+                    }
+                    self.docs[di as usize].txt = txt;
+                    self.docs[di as usize].version = td.value_i64("version", 0);
+                    return true;
+                }
+            }
+        }
         return false;
     }
 
@@ -1671,23 +1528,20 @@ extend Server {
     }
 
     fn on_did_close(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        switch req.value("params") {
-            Some(params) => {
-                let tdo = params.value("textDocument");
-                if tdo.is_none() {
-                    return;
-                }
-                let uri = tdo.unwrap().value_str("uri");
-                let di = self.find_doc(uri);
-                if di >= 0 {
-                    let _ = self.docs.remove(di as usize);
-                }
-                self.token_cache_drop(uri);
-                // Overlays revert to the on-disk content.
-                self.rebuild_all(f, false, true);
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            let tdo = params.value("textDocument");
+            if tdo.is_none() {
+                return;
+            }
+            let uri = tdo.unwrap().value_str("uri");
+            let di = self.find_doc(uri);
+            if di >= 0 {
+                let _ = self.docs.remove(di as usize);
+            }
+            self.token_cache_drop(uri);
+            // Overlays revert to the on-disk content.
+            self.rebuild_all(f, false, true);
+        }
     }
 
     // Map a request's (uri, position) onto (root, module, byte offset). Fails cleanly when the doc is
@@ -1695,100 +1549,67 @@ extend Server {
     // the client never opened lands on a module whose bodies an analysis round released: they
     // come back for the request.
     fn locate(self: &mut Self, req: &json::JSON) Hit {
-        let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
-        let po = req.value("params");
-        if po.is_none() {
-            return miss;
+        let mut pos: Option<&json::JSON> = Option::<&json::JSON>::None;
+        if let Some(params) = req.value("params") {
+            pos = params.value("position");
         }
-        let params = po.unwrap();
-        let tdo = params.value("textDocument");
-        if tdo.is_none() {
-            return miss;
-        }
-        let uri = tdo.unwrap().value_str("uri");
-        if uri.len() == 0 {
-            return miss;
-        }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 {
-            return miss;
-        }
-        let m = self.root_module(r as usize, path.as_str());
-        if m < 0 {
-            return miss;
-        }
-        let pos = params.value("position");
         if pos.is_none() {
-            return miss;
+            return Hit {};
         }
-        analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        let pv = pos.unwrap();
-        let line = pv.value_i64("line", 0);
-        let ch = pv.value_i64("character", 0);
-        let src = self.roots.at(r as usize).pkg.modules.at(m as usize).source.as_str();
-        let ls = text::line_starts(src);
-        let off = text::pos_to_offset(src, &ls, line as u32, ch as u32);
-        return Hit { ok: true, r: r as usize, m: m as usize, off: off, end: off };
+        let mut h = self.doc_hit(doc_uri(req));
+        if h.ok {
+            let pv = pos.unwrap();
+            let src = self.roots.at(h.r).pkg.modules.at(h.m).source.as_str();
+            let ls = text::line_starts(src);
+            h.off = text::pos_to_offset(src, &ls, pv.value_i64("line", 0) as u32, pv.value_i64("character", 0) as u32);
+            h.end = h.off;
+        }
+        return h;
     }
 
     // As `locate`, for requests carrying a `range` instead of a `position` (codeAction).
     fn locate_range(self: &mut Self, req: &json::JSON) Hit {
-        let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
-        let po = req.value("params");
-        if po.is_none() {
-            return miss;
+        let mut h = self.doc_hit(doc_uri(req));
+        let mut ro: Option<&json::JSON> = Option::<&json::JSON>::None;
+        if let Some(params) = req.value("params") {
+            ro = params.value("range");
         }
-        let params = po.unwrap();
-        let tdo = params.value("textDocument");
-        if tdo.is_none() {
-            return miss;
+        if !h.ok || ro.is_none() {
+            return Hit {};
         }
-        let uri = tdo.unwrap().value_str("uri");
+        let rv = ro.unwrap();
+        let src = self.roots.at(h.r).pkg.modules.at(h.m).source.as_str();
+        let ls = text::line_starts(src);
+        if let Some(v) = rv.value("start") {
+            h.off = text::pos_to_offset(src, &ls, v.value_i64("line", 0) as u32, v.value_i64("character", 0) as u32);
+        } else {
+            h.off = text::pos_to_offset(src, &ls, 0, 0);
+        }
+        if let Some(v) = rv.value("end") {
+            h.end = text::pos_to_offset(src, &ls, v.value_i64("line", 0) as u32, v.value_i64("character", 0) as u32);
+        } else {
+            h.end = text::pos_to_offset(src, &ls, 0, 0);
+        }
+        return h;
+    }
+
+    // The built root and module that hold the document `uri`, with its bodies loaded (the client may
+    // never have opened it, so they may be released); `ok` is false when there is none.
+    fn doc_hit(self: &mut Self, uri: str) Hit {
         if uri.len() == 0 {
-            return miss;
+            return Hit {};
         }
         let path = uri_doc_path(uri);
         let r = self.owning_root(path.as_str());
         if r < 0 {
-            return miss;
+            return Hit {};
         }
         let m = self.root_module(r as usize, path.as_str());
-        if m >= 0 {
-            // The bodies of a document the client never opened may be released.
-            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        }
         if m < 0 {
-            return miss;
+            return Hit {};
         }
-        let ro = params.value("range");
-        if ro.is_none() {
-            return miss;
-        }
-        let rv = ro.unwrap();
-        let mut sl: i64 = 0;
-        let mut sc: i64 = 0;
-        let mut el: i64 = 0;
-        let mut ec: i64 = 0;
-        switch rv.value("start") {
-            Some(v) => {
-                sl = v.value_i64("line", 0);
-                sc = v.value_i64("character", 0);
-            },
-            None => {},
-        };
-        switch rv.value("end") {
-            Some(v) => {
-                el = v.value_i64("line", 0);
-                ec = v.value_i64("character", 0);
-            },
-            None => {},
-        };
-        let src = self.roots.at(r as usize).pkg.modules.at(m as usize).source.as_str();
-        let ls = text::line_starts(src);
-        let off = text::pos_to_offset(src, &ls, sl as u32, sc as u32);
-        let end = text::pos_to_offset(src, &ls, el as u32, ec as u32);
-        return Hit { ok: true, r: r as usize, m: m as usize, off: off, end: end };
+        analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        return Hit { ok: true, r: r as usize, m: m as usize };
     }
 
     // A feat::Loc as an LSP Location against root `r`'s modules; `lm` keeps the last module's line starts.
@@ -1830,13 +1651,12 @@ extend Server {
     }
 
     fn on_hover(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let mut moff: usize = 0;
         let mdi = self.manifest_hit(req, &mut moff);
         if mdi >= 0 {
             let doc = btoml::hover(self.docs.at(mdi as usize).txt.as_str(), moff);
             if doc.len() == 0 {
-                respond(f, req.at_key("id"), &nullv);
+                respond_null(f, req);
                 return;
             }
             let mut contents = json::JSON::object();
@@ -1849,7 +1669,7 @@ extend Server {
         }
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         switch feat::hover(&self.roots.at(h.r).pkg, h.m, h.off) {
@@ -1862,26 +1682,32 @@ extend Server {
                 respond(f, req.at_key("id"), &res);
             },
             None => {
-                respond(f, req.at_key("id"), &nullv);
+                respond_null(f, req);
             },
         };
     }
 
-    fn on_definition(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
+    // Definition (or, when `of_type`, type definition) of the symbol at the request's position.
+    fn on_definition(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, of_type: bool) {
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
-        switch feat::definition(&self.roots.at(h.r).pkg, h.m, h.off) {
+        let pkg = &self.roots.at(h.r).pkg;
+        let lo = if of_type {
+            feat::type_definition(pkg, h.m, h.off);
+        } else {
+            feat::definition(pkg, h.m, h.off);
+        };
+        switch lo {
             Some(l) => {
                 let mut lm = LsMemo::new();
                 let lj = self.loc_json(h.r, &l, &mut lm);
                 respond(f, req.at_key("id"), &lj);
             },
             None => {
-                respond(f, req.at_key("id"), &nullv);
+                respond_null(f, req);
             },
         };
     }
@@ -1954,25 +1780,17 @@ extend Server {
     }
 
     fn on_references(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let mut include_decl = false;
-        switch req.value("params") {
-            Some(params) => switch params.value("context") {
-                Some(ctx) => switch ctx.value("includeDeclaration") {
-                    Some(v) => {
-                        include_decl = v.is_bool() && v.get_bool();
-                    },
-                    None => {},
-                },
-                None => {},
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            if let Some(ctx) = params.value("context") {
+                include_decl = ctx.value_bool("includeDeclaration");
+            }
+        }
         let d = feat::def_at(&self.roots.at(h.r).pkg, h.m, h.off);
         let mut hits = Vector::<RefHit>::new();
         if d.node != astn::NODE_NONE {
@@ -2003,27 +1821,26 @@ extend Server {
     }
 
     fn on_prepare_rename(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         // Reject targets whose definition is outside the workspace (std/ffi of an installed compiler).
         let def_file = self.self_def_file(h.r, d.module as usize);
         if !self.in_workspace(def_file) {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let spo = feat::cursor_ref_span(pkg, h.m, h.off);
         if spo.is_none() {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let sp = spo.unwrap();
@@ -2036,19 +1853,15 @@ extend Server {
     }
 
     fn on_rename(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let mut new_name = "";
-        switch req.value("params") {
-            Some(params) => {
-                new_name = params.value_str("newName");
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            new_name = params.value_str("newName");
+        }
         if !valid_ident(new_name) {
             send_error(f, req.at_key("id"), -32803, "the new name is not a valid identifier");
             return;
@@ -2056,7 +1869,7 @@ extend Server {
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         // A rename may only touch files inside the workspace: in a normal project the installed std/ffi
@@ -2088,7 +1901,7 @@ extend Server {
             self.collect_refs(h.r, *related.at(i), true, &mut hits);
         }
         if hits.len() == 0 {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         // Group per canonical file, sort each group by DESCENDING offset, reject overlaps.
@@ -2174,27 +1987,16 @@ extend Server {
     // Formatting / semantic tokens / completion.
 
     fn on_formatting(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
-        let mut uri = "";
-        switch req.value("params") {
-            Some(params) => switch params.value("textDocument") {
-                Some(td) => {
-                    uri = td.value_str("uri");
-                },
-                None => {},
-            },
-            None => {},
-        };
-        let di = self.find_doc(uri);
+        let di = self.find_doc(doc_uri(req));
         if di < 0 {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let doc = self.docs.at(di as usize);
         let mut formatted = String::new();
         if !dutil::format_source(&doc.txt, doc.path.as_str(), 120, &mut formatted) {
             // Unparseable or comment-check tripped: never destructive.
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let mut arr = json::JSON::array();
@@ -2286,38 +2088,16 @@ extend Server {
     }
 
     fn on_semantic_tokens(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, ranged: bool) {
-        let nullv = json::JSON::default();
-        let mut uri = "";
-        switch req.value("params") {
-            Some(params) => switch params.value("textDocument") {
-                Some(td) => {
-                    uri = td.value_str("uri");
-                },
-                None => {},
-            },
-            None => {},
-        };
-        if uri.len() == 0 {
-            respond(f, req.at_key("id"), &nullv);
+        let uri = doc_uri(req);
+        let h = self.doc_hit(uri);
+        if !h.ok {
+            respond_null(f, req);
             return;
         }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let m = self.root_module(r as usize, path.as_str());
-        if m >= 0 {
-            // The bodies of a document the client never opened may be released.
-            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        }
-        if m < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
+        let r = h.r;
+        let m = h.m;
         // Range request: keep only tokens intersecting the requested window.
-        let src_len = self.roots.at(r as usize).pkg.modules.at(m as usize).source.len();
+        let src_len = self.roots.at(r).pkg.modules.at(m).source.len();
         let mut w_start: u32 = 0;
         let mut w_end = src_len as u32;
         if ranged {
@@ -2327,7 +2107,7 @@ extend Server {
                 w_end = h.end;
             }
         }
-        let data = self.token_data(r as usize, m as usize, w_start, w_end);
+        let data = self.token_data(r, m, w_start, w_end);
         let dj = Server::data_json(&data);
         let mut res = json::JSON::object();
         if !ranged && self.cap_delta_tokens {
@@ -2343,41 +2123,20 @@ extend Server {
     // SemanticTokens/full/delta: one splice edit (common prefix/suffix diff) against the cached
     // previous full result; an unknown or stale previousResultId answers with a fresh full result.
     fn on_semantic_tokens_delta(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
-        let mut uri = "";
+        let uri = doc_uri(req);
         let mut prev_id = "";
-        switch req.value("params") {
-            Some(params) => {
-                switch params.value("textDocument") {
-                    Some(td) => {
-                        uri = td.value_str("uri");
-                    },
-                    None => {},
-                };
-                prev_id = params.value_str("previousResultId");
-            },
-            None => {},
-        };
-        if uri.len() == 0 {
-            respond(f, req.at_key("id"), &nullv);
+        if let Some(params) = req.value("params") {
+            prev_id = params.value_str("previousResultId");
+        }
+        let h = self.doc_hit(uri);
+        if !h.ok {
+            respond_null(f, req);
             return;
         }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        let mut m: i32 = -1;
-        if r >= 0 {
-            m = self.root_module(r as usize, path.as_str());
-            if m >= 0 {
-                // The bodies of a document the client never opened may be released.
-                analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-            }
-        }
-        if m < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let src_len = self.roots.at(r as usize).pkg.modules.at(m as usize).source.len();
-        let data = self.token_data(r as usize, m as usize, 0, src_len as u32);
+        let r = h.r;
+        let m = h.m;
+        let src_len = self.roots.at(r).pkg.modules.at(m).source.len();
+        let data = self.token_data(r, m, 0, src_len as u32);
         // The cached previous result for this URI, when its id matches the request: taken out of
         // the cache, which this response's result replaces.
         let mut have_prev = false;
@@ -2567,7 +2326,7 @@ extend Server {
             }
             // Root parameters: the owning root when the doc has one, the per-file recipe otherwise.
             let mut rf = String::from_str(path);
-            let mut rd = dir_of(path);
+            let mut rd = String::from_str(loader::dirname_of(path));
             let mut ad = self.folder_alt_of(path);
             let r = self.owning_root(path);
             if r >= 0 {
@@ -2662,7 +2421,7 @@ extend Server {
             arr.push_back(o);
         }
         let mut list = json::JSON::object();
-        list.emplace("isIncomplete", json::JSON::boolean(false));
+        list.emplace("isIncomplete", json::JSON::Bool(false));
         list.emplace("items", arr);
         return list;
     }
@@ -2721,32 +2480,20 @@ extend Server {
                 arr.push_back(it);
             }
             let mut list = json::JSON::object();
-            list.emplace("isIncomplete", json::JSON::boolean(false));
+            list.emplace("isIncomplete", json::JSON::Bool(false));
             list.emplace("items", arr);
             respond(f, req.at_key("id"), &list);
             return;
         }
-        let mut uri = "";
+        let uri = doc_uri(req);
         let mut line: i64 = 0;
         let mut ch: i64 = 0;
-        switch req.value("params") {
-            Some(params) => {
-                switch params.value("textDocument") {
-                    Some(td) => {
-                        uri = td.value_str("uri");
-                    },
-                    None => {},
-                };
-                switch params.value("position") {
-                    Some(pos) => {
-                        line = pos.value_i64("line", 0);
-                        ch = pos.value_i64("character", 0);
-                    },
-                    None => {},
-                };
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            if let Some(pos) = params.value("position") {
+                line = pos.value_i64("line", 0);
+                ch = pos.value_i64("character", 0);
+            }
+        }
         let di = self.find_doc(uri);
         if di < 0 {
             let none = Vector::<feat::CompItem>::new();
@@ -2919,11 +2666,7 @@ extend Server {
     fn diag_echo(self: &Self, r: usize, m: usize, k: usize, ls: &Vector<u32>) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
         let d = self.roots.at(r).diags.at(k);
-        let mut dj = json::JSON::object();
-        dj.emplace("range", range_json(src, ls, d.start, d.len));
-        dj.emplace("severity", json::JSON::integer(d.severity));
-        dj.emplace("source", json::JSON::str("super-c"));
-        dj.emplace("message", json::JSON::str(d.msg.as_str()));
+        let dj = diag_json(range_json(src, ls, d.start, d.len), d.severity, "super-c", d.msg.as_str());
         let mut dl = json::JSON::array();
         dl.push_back(dj);
         return dl;
@@ -2969,33 +2712,28 @@ extend Server {
         // context.only: absent = everything; present = the listed kind prefixes.
         let mut want_quickfix = true;
         let mut want_fixall = true;
-        switch req.value("params") {
-            Some(params) => switch params.value("context") {
-                Some(ctx) => switch ctx.value("only") {
-                    Some(only) => {
-                        if only.is_array() {
-                            want_quickfix = false;
-                            want_fixall = false;
-                            for i in 0..only.size() {
-                                if !only.at(i).is_string() {
-                                    continue;
-                                }
-                                let kind = only.at(i).get_str();
-                                if kind == "quickfix" || kind.len() == 0 {
-                                    want_quickfix = true;
-                                }
-                                if kind == "source" || kind == "source.fixAll" || kind.len() == 0 {
-                                    want_fixall = true;
-                                }
+        if let Some(params) = req.value("params") {
+            if let Some(ctx) = params.value("context") {
+                if let Some(only) = ctx.value("only") {
+                    if only.is_array() {
+                        want_quickfix = false;
+                        want_fixall = false;
+                        for i in 0..only.size() {
+                            if !only.at(i).is_string() {
+                                continue;
+                            }
+                            let kind = only.at(i).get_str();
+                            if kind == "quickfix" || kind.len() == 0 {
+                                want_quickfix = true;
+                            }
+                            if kind == "source" || kind == "source.fixAll" || kind.len() == 0 {
+                                want_fixall = true;
                             }
                         }
-                    },
-                    None => {},
-                },
-                None => {},
-            },
-            None => {},
-        };
+                    }
+                }
+            }
+        }
         let src = self.roots.at(h.r).pkg.modules.at(h.m).source.as_str();
         let ls = text::line_starts(src);
         let uri = text::path_to_uri(self.roots.at(h.r).files.at(h.m).as_str());
@@ -3059,13 +2797,7 @@ extend Server {
                             if extra.at(x).as_str() == own_path {
                                 continue;
                             }
-                            let mut have = false;
-                            for c0 in 0..cands.len() {
-                                if cands.at(c0).as_str() == extra.at(x).as_str() {
-                                    have = true;
-                                }
-                            }
-                            if !have {
+                            if !cands.contains(extra.at(x)) {
                                 cands.push(extra.at(x).clone());
                             }
                         }
@@ -3099,29 +2831,26 @@ extend Server {
                     }
                 }
                 if nm.len() != 0 && d.msg.as_str().starts_with("missing method") {
-                    switch feat::iface_stub(&self.roots.at(h.r).pkg, h.m, d.start, nm) {
-                        Some(stub) => {
-                            let mut te = json::JSON::object();
-                            te.emplace("range", range_json(src, &ls, stub.at, 0));
-                            te.emplace("newText", json::JSON::str(stub.text.as_str()));
-                            let mut edits = json::JSON::array();
-                            edits.push_back(te);
-                            let mut changes = json::JSON::object();
-                            changes.emplace(uri.as_str(), edits);
-                            let mut we = json::JSON::object();
-                            we.emplace("changes", changes);
-                            let mut title = String::from_str("Implement '");
-                            title.push_str(nm);
-                            title.push_str("'");
-                            let mut act = json::JSON::object();
-                            act.emplace("title", json::JSON::string(title));
-                            act.emplace("kind", json::JSON::str("quickfix"));
-                            act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
-                            act.emplace("edit", we);
-                            arr.push_back(act);
-                        },
-                        None => {},
-                    };
+                    if let Some(stub) = feat::iface_stub(&self.roots.at(h.r).pkg, h.m, d.start, nm) {
+                        let mut te = json::JSON::object();
+                        te.emplace("range", range_json(src, &ls, stub.at, 0));
+                        te.emplace("newText", json::JSON::str(stub.text.as_str()));
+                        let mut edits = json::JSON::array();
+                        edits.push_back(te);
+                        let mut changes = json::JSON::object();
+                        changes.emplace(uri.as_str(), edits);
+                        let mut we = json::JSON::object();
+                        we.emplace("changes", changes);
+                        let mut title = String::from_str("Implement '");
+                        title.push_str(nm);
+                        title.push_str("'");
+                        let mut act = json::JSON::object();
+                        act.emplace("title", json::JSON::string(title));
+                        act.emplace("kind", json::JSON::str("quickfix"));
+                        act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
+                        act.emplace("edit", we);
+                        arr.push_back(act);
+                    }
                 }
             }
         }
@@ -3133,7 +2862,7 @@ extend Server {
                 let mut data = json::JSON::object();
                 data.emplace("uri", json::JSON::str(uri.as_str()));
                 data.emplace("rev", json::JSON::integer(self.revision as i64));
-                data.emplace("fixall", json::JSON::boolean(true));
+                data.emplace("fixall", json::JSON::Bool(true));
                 act.emplace("data", data);
             } else {
                 act.emplace("edit", self.fixall_edit_json(h.r, h.m, &ls));
@@ -3165,35 +2894,28 @@ extend Server {
             send_error(f, req.at_key("id"), -32803, "the document changed; request code actions again");
             return;
         }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        let mut m: i32 = -1;
-        if r >= 0 {
-            m = self.root_module(r as usize, path.as_str());
-            if m >= 0 {
-                // The bodies of a document the client never opened may be released.
-                analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-            }
-        }
-        if m < 0 {
+        let h = self.doc_hit(uri);
+        if !h.ok {
             send_error(f, req.at_key("id"), -32803, "the document is no longer part of a built package");
             return;
         }
+        let r = h.r;
+        let m = h.m;
         let mut out = action.clone();
-        let ls = text::line_starts(self.roots.at(r as usize).pkg.modules.at(m as usize).source.as_str());
+        let ls = text::line_starts(self.roots.at(r).pkg.modules.at(m).source.as_str());
         let fixall = data.value("fixall").is_some();
         if fixall {
-            out.emplace("edit", self.fixall_edit_json(r as usize, m as usize, &ls));
+            out.emplace("edit", self.fixall_edit_json(r, m, &ls));
             respond(f, req.at_key("id"), &out);
             return;
         }
         let k = data.value_i64("diag", -1);
-        let diags = &self.roots.at(r as usize).diags;
+        let diags = &self.roots.at(r).diags;
         if k < 0 || k as usize >= diags.len() || diags.at(k as usize).fix_kind < 0 {
             send_error(f, req.at_key("id"), -32803, "the diagnostic is gone; request code actions again");
             return;
         }
-        out.emplace("edit", self.fix_edit_json(r as usize, m as usize, k as usize, &ls));
+        out.emplace("edit", self.fix_edit_json(r, m, k as usize, &ls));
         respond(f, req.at_key("id"), &out);
     }
 
@@ -3204,34 +2926,30 @@ extend Server {
     // roots that could own it. One rebuild round follows.
     fn on_watched_files(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let mut any = false;
-        switch req.value("params") {
-            Some(params) => switch params.value("changes") {
-                Some(chs) => {
-                    if chs.is_array() {
-                        for i in 0..chs.size() {
-                            let u = chs.at(i).value_str("uri");
-                            if u.len() == 0 {
-                                continue;
-                            }
-                            let p = uri_doc_path(u);
-                            any = true;
-                            if is_manifest_path(p.as_str()) {
-                                self.reload_manifest_for(p.as_str());
-                            } else if p.as_str().ends_with(".spc") {
-                                // The owning packages are stale: force their rebuild.
-                                for r in 0..self.roots.len() {
-                                    if self.root_module(r, p.as_str()) >= 0 {
-                                        self.roots[r].built = false;
-                                    }
+        if let Some(params) = req.value("params") {
+            if let Some(chs) = params.value("changes") {
+                if chs.is_array() {
+                    for i in 0..chs.size() {
+                        let u = chs.at(i).value_str("uri");
+                        if u.len() == 0 {
+                            continue;
+                        }
+                        let p = uri_doc_path(u);
+                        any = true;
+                        if is_manifest_path(p.as_str()) {
+                            self.reload_manifest_for(p.as_str());
+                        } else if p.as_str().ends_with(".spc") {
+                            // The owning packages are stale: force their rebuild.
+                            for r in 0..self.roots.len() {
+                                if self.root_module(r, p.as_str()) >= 0 {
+                                    self.roots[r].built = false;
                                 }
                             }
                         }
                     }
-                },
-                None => {},
-            },
-            None => {},
-        };
+                }
+            }
+        }
         if any {
             self.rebuild_all(f, false, true);
         }
@@ -3240,7 +2958,7 @@ extend Server {
     // Reload the manifest owning `manifest_path` (folder = its directory). An unparseable manifest
     // keeps the previous project model: the last valid model serves until the file parses again.
     fn reload_manifest_for(self: &mut Self, manifest_path: str) {
-        let folder = dir_of(manifest_path);
+        let folder = String::from_str(loader::dirname_of(manifest_path));
         let mp = Server::abs_under(folder.as_str(), "build.toml");
         let mano = bman::load(mp.as_str(), false);
         if mano.is_none() {
@@ -3255,7 +2973,7 @@ extend Server {
                 found = true;
                 if self.roots.at(r).root_file.as_str() != rf.as_str() {
                     self.roots[r].root_file = rf.clone();
-                    self.roots[r].root_dir = dir_of(rf.as_str());
+                    self.roots[r].root_dir = String::from_str(loader::dirname_of(rf.as_str()));
                 }
                 self.roots[r].built = false;
             }
@@ -3263,17 +2981,7 @@ extend Server {
         if !found {
             // A manifest appeared in a folder that had none.
             let primary = folder.as_str() == self.ws_root.as_str();
-            let got = self.add_manifest_root(
-                folder.as_str(),
-                if primary {
-                    0;
-                } else {
-                    -1;
-                },
-            );
-            if primary && got {
-                self.has_manifest = true;
-            }
+            self.add_folder_root(folder.as_str(), primary);
         }
         self.set_out_skip(folder.as_str(), man.out_dir.as_str());
     }
@@ -3281,70 +2989,41 @@ extend Server {
     // Folder add/remove: added folders gain manifest/sweep roots on the next round; removed folders
     // drop every root they own.
     fn on_folders_changed(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        switch req.value("params") {
-            Some(params) => switch params.value("event") {
-                Some(ev) => {
-                    switch ev.value("added") {
-                        Some(ad) => {
-                            if ad.is_array() {
-                                for i in 0..ad.size() {
-                                    let u = ad.at(i).value_str("uri");
-                                    if u.len() != 0 {
-                                        let p = text::uri_to_path(u);
-                                        let c = analysis::canon_path(p.as_str());
-                                        let mut have = false;
-                                        for k in 0..self.folders.len() {
-                                            if self.folders.at(k).as_str() == c.as_str() {
-                                                have = true;
-                                            }
-                                        }
-                                        if !have {
-                                            let cf = c.clone();
-                                            self.folders.push(c);
-                                            let _ = self.add_manifest_root(cf.as_str(), -1);
-                                        }
-                                    }
+        if let Some(params) = req.value("params") {
+            if let Some(ev) = params.value("event") {
+                if let Some(ad) = ev.value("added") {
+                    if ad.is_array() {
+                        for i in 0..ad.size() {
+                            let u = ad.at(i).value_str("uri");
+                            if u.len() != 0 {
+                                let p = text::uri_to_path(u);
+                                let c = analysis::canon_path(p.as_str());
+                                if !self.folders.contains(&c) {
+                                    let cf = c.clone();
+                                    self.folders.push(c);
+                                    let _ = self.add_manifest_root(cf.as_str(), -1);
                                 }
                             }
-                        },
-                        None => {},
-                    };
-                    switch ev.value("removed") {
-                        Some(rm) => {
-                            if rm.is_array() {
-                                for i in 0..rm.size() {
-                                    let u = rm.at(i).value_str("uri");
-                                    if u.len() == 0 {
-                                        continue;
-                                    }
-                                    let p = text::uri_to_path(u);
-                                    let c = analysis::canon_path(p.as_str());
-                                    let mut k: usize = 0;
-                                    while k < self.folders.len() {
-                                        if self.folders.at(k).as_str() == c.as_str() {
-                                            let _ = self.folders.remove(k);
-                                        } else {
-                                            k += 1;
-                                        }
-                                    }
-                                    let mut r: usize = 0;
-                                    while r < self.roots.len() {
-                                        if self.roots.at(r).ws.as_str() == c.as_str() {
-                                            let _ = self.roots.remove(r);
-                                        } else {
-                                            r += 1;
-                                        }
-                                    }
-                                }
+                        }
+                    }
+                }
+                if let Some(rm) = ev.value("removed") {
+                    if rm.is_array() {
+                        for i in 0..rm.size() {
+                            let u = rm.at(i).value_str("uri");
+                            if u.len() == 0 {
+                                continue;
                             }
-                        },
-                        None => {},
-                    };
-                },
-                None => {},
-            },
-            None => {},
-        };
+                            let p = text::uri_to_path(u);
+                            let c = analysis::canon_path(p.as_str());
+                            let cs = c.as_str();
+                            self.folders.retain(|x: &String| x.as_str() != cs);
+                            self.roots.retain(|x: &Root| x.ws.as_str() != cs);
+                        }
+                    }
+                }
+            }
+        }
         if self.folders.len() != 0 {
             self.ws_root = self.folders.at(0).clone();
         }
@@ -3353,30 +3032,10 @@ extend Server {
 
     // Navigation and information requests.
 
-    fn on_type_definition(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
-        let h = self.locate(req);
-        if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        switch feat::type_definition(&self.roots.at(h.r).pkg, h.m, h.off) {
-            Some(l) => {
-                let mut lm = LsMemo::new();
-                let lj = self.loc_json(h.r, &l, &mut lm);
-                respond(f, req.at_key("id"), &lj);
-            },
-            None => {
-                respond(f, req.at_key("id"), &nullv);
-            },
-        };
-    }
-
     fn on_implementation(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let locs = feat::implementations(&self.roots.at(h.r).pkg, h.m, h.off);
@@ -3389,10 +3048,9 @@ extend Server {
     }
 
     fn on_document_highlight(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let locs = feat::document_highlights(&self.roots.at(h.r).pkg, h.m, h.off);
@@ -3411,10 +3069,9 @@ extend Server {
     }
 
     fn on_signature_help(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         switch feat::signature_help(&self.roots.at(h.r).pkg, h.m, h.off) {
@@ -3437,7 +3094,7 @@ extend Server {
                 respond(f, req.at_key("id"), &res);
             },
             None => {
-                respond(f, req.at_key("id"), &nullv);
+                respond_null(f, req);
             },
         };
     }
@@ -3445,39 +3102,17 @@ extend Server {
     // Hierarchical DocumentSymbol trees when the client negotiated them, flat SymbolInformation
     // otherwise.
     fn on_document_symbol(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
-        let mut uri = "";
-        switch req.value("params") {
-            Some(params) => switch params.value("textDocument") {
-                Some(td) => {
-                    uri = td.value_str("uri");
-                },
-                None => {},
-            },
-            None => {},
-        };
-        if uri.len() == 0 {
-            respond(f, req.at_key("id"), &nullv);
+        let uri = doc_uri(req);
+        let h = self.doc_hit(uri);
+        if !h.ok {
+            respond_null(f, req);
             return;
         }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let m = self.root_module(r as usize, path.as_str());
-        if m >= 0 {
-            // The bodies of a document the client never opened may be released.
-            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        }
-        if m < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let pkg = &self.roots.at(r as usize).pkg;
-        let syms = feat::document_symbols(pkg, m as usize, true);
-        let src = pkg.modules.at(m as usize).source.as_str();
+        let r = h.r;
+        let m = h.m;
+        let pkg = &self.roots.at(r).pkg;
+        let syms = feat::document_symbols(pkg, m, true);
+        let src = pkg.modules.at(m).source.as_str();
         let ls = text::line_starts(src);
         if self.cap_hier_symbols {
             let mut arr = json::JSON::array();
@@ -3530,12 +3165,9 @@ extend Server {
 
     fn on_workspace_symbol(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
         let mut query = "";
-        switch req.value("params") {
-            Some(params) => {
-                query = params.value_str("query");
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            query = params.value_str("query");
+        }
         // Hits from every built root's workspace modules (std/ffi noise stays out of workspace symbol
         // lists), each root capped before the merge, so a filtered-out module never uses up the cap.
         let mut keyed = Vector::<KeyedSym>::new();
@@ -3586,35 +3218,17 @@ extend Server {
     }
 
     fn on_folding_range(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
-        let mut uri = "";
-        switch req.value("params") {
-            Some(params) => switch params.value("textDocument") {
-                Some(td) => {
-                    uri = td.value_str("uri");
-                },
-                None => {},
-            },
-            None => {},
-        };
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 {
-            respond(f, req.at_key("id"), &nullv);
+        let uri = doc_uri(req);
+        let h = self.doc_hit(uri);
+        if !h.ok {
+            respond_null(f, req);
             return;
         }
-        let m = self.root_module(r as usize, path.as_str());
-        if m >= 0 {
-            // The bodies of a document the client never opened may be released.
-            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        }
-        if m < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let pkg = &self.roots.at(r as usize).pkg;
-        let locs = feat::folding_ranges(pkg, m as usize);
-        let src = pkg.modules.at(m as usize).source.as_str();
+        let r = h.r;
+        let m = h.m;
+        let pkg = &self.roots.at(r).pkg;
+        let locs = feat::folding_ranges(pkg, m);
+        let src = pkg.modules.at(m).source.as_str();
         let ls = text::line_starts(src);
         let mut arr = json::JSON::array();
         for i in 0..locs.len() {
@@ -3633,45 +3247,29 @@ extend Server {
     }
 
     fn on_selection_range(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let po = req.value("params");
         if po.is_none() {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let params = po.unwrap();
-        let mut uri = "";
-        switch params.value("textDocument") {
-            Some(td) => {
-                uri = td.value_str("uri");
-            },
-            None => {},
-        };
         let pso = params.value("positions");
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 || pso.is_none() || !pso.unwrap().is_array() {
-            respond(f, req.at_key("id"), &nullv);
+        let h = self.doc_hit(doc_uri(req));
+        if !h.ok || pso.is_none() || !pso.unwrap().is_array() {
+            respond_null(f, req);
             return;
         }
         let positions = pso.unwrap();
-        let m = self.root_module(r as usize, path.as_str());
-        if m >= 0 {
-            // The bodies of a document the client never opened may be released.
-            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        }
-        if m < 0 {
-            respond(f, req.at_key("id"), &nullv);
-            return;
-        }
-        let pkg = &self.roots.at(r as usize).pkg;
-        let src = pkg.modules.at(m as usize).source.as_str();
+        let r = h.r;
+        let m = h.m;
+        let pkg = &self.roots.at(r).pkg;
+        let src = pkg.modules.at(m).source.as_str();
         let ls = text::line_starts(src);
         let mut arr = json::JSON::array();
         for pi in 0..positions.size() {
             let pv = positions.at(pi);
             let off = text::pos_to_offset(src, &ls, pv.value_i64("line", 0) as u32, pv.value_i64("character", 0) as u32);
-            let chain = feat::selection_ranges(pkg, m as usize, off);
+            let chain = feat::selection_ranges(pkg, m, off);
             // Innermost-first chain nests via `parent`.
             let mut cur = json::JSON::default();
             let mut i = chain.len();
@@ -3696,10 +3294,9 @@ extend Server {
     }
 
     fn on_inlay_hint(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate_range(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
@@ -3746,31 +3343,14 @@ extend Server {
         return json::JSON::array();
     }
 
-    const fn fnv64(s: str) u64 {
-        let mut h: u64 = 0xCBF29CE484222325;
-        for i in 0..s.len() {
-            h = (h ^ s[i] as u64) * 0x100000001B3;
-        }
-        return h;
-    }
-
     // TextDocument/diagnostic: a full report with a content-derived stable resultId; when the
     // client's previousResultId matches the current content, an `unchanged` report instead.
     fn on_pull_diagnostic(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let mut uri = "";
+        let uri = doc_uri(req);
         let mut prev = "";
-        switch req.value("params") {
-            Some(params) => {
-                switch params.value("textDocument") {
-                    Some(td) => {
-                        uri = td.value_str("uri");
-                    },
-                    None => {},
-                };
-                prev = params.value_str("previousResultId");
-            },
-            None => {},
-        };
+        if let Some(params) = req.value("params") {
+            prev = params.value_str("previousResultId");
+        }
         if uri.len() == 0 {
             send_error(f, req.at_key("id"), -32602, "textDocument.uri is required");
             return;
@@ -3778,7 +3358,7 @@ extend Server {
         let arr = self.current_diags_for(uri);
         let dumped = arr.dump();
         let mut rid = String::from_str("d");
-        rid.push_u64(Server::fnv64(dumped.as_str()));
+        rid.push_u64(dumped.as_str().hash());
         let mut res = json::JSON::object();
         if prev.len() != 0 && prev == rid.as_str() {
             res.emplace("kind", json::JSON::str("unchanged"));
@@ -3825,7 +3405,7 @@ extend Server {
 
     // The (root, module, offset) a hierarchy item's `data` names, re-resolved on the current state.
     fn hier_locate(self: &mut Self, req: &json::JSON) Hit {
-        let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
+        let miss = Hit {};
         let po = req.value("params");
         if po.is_none() {
             return miss;
@@ -3843,24 +3423,16 @@ extend Server {
         if uri.len() == 0 || off < 0 {
             return miss;
         }
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 {
-            return miss;
-        }
-        let m = self.root_module(r as usize, path.as_str());
-        if m < 0 {
-            return miss;
-        }
-        analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
-        return Hit { ok: true, r: r as usize, m: m as usize, off: off as u32, end: off as u32 };
+        let mut h = self.doc_hit(uri);
+        h.off = off as u32;
+        h.end = off as u32;
+        return h;
     }
 
     fn on_prepare_call_hierarchy(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
@@ -3870,7 +3442,7 @@ extend Server {
             // Not on a function name: the function whose body contains the cursor.
             let fnid = feat::enclosing_function(pkg, h.m, h.off);
             if fnid == astn::NODE_NONE {
-                respond(f, req.at_key("id"), &nullv);
+                respond_null(f, req);
                 return;
             }
             d = astn::DefId { module: h.m as astn::ModuleId, node: fnid };
@@ -3881,16 +3453,15 @@ extend Server {
     }
 
     fn on_incoming_calls(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let mut hits = Vector::<RefHit>::new();
@@ -3939,15 +3510,14 @@ extend Server {
     }
 
     fn on_outgoing_calls(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let d = feat::def_at(&self.roots.at(h.r).pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         // The callee's own body may belong to a closed document.
@@ -3984,16 +3554,15 @@ extend Server {
     }
 
     fn on_prepare_type_hierarchy(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
-        let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let k = unsafe (&*pkg.module_ast_const(d.module)).at_const(d.node).kind;
@@ -4008,7 +3577,7 @@ extend Server {
             // Interface.
             kind = 11;
         } else {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let mut arr = json::JSON::array();
@@ -4019,23 +3588,18 @@ extend Server {
     // typeHierarchy/supertypes (`up` = true): the interfaces a type conforms to.
     // typeHierarchy/subtypes: an interface's conforming types.
     fn on_type_hierarchy_related(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, up: bool) {
-        let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
-            respond(f, req.at_key("id"), &nullv);
+            respond_null(f, req);
             return;
         }
-        let locs = if up {
-            feat::type_ifaces(pkg, d);
-        } else {
-            feat::iface_conformers(pkg, d);
-        };
+        let locs = feat::extend_relations(pkg, d, up);
         let mut arr = json::JSON::array();
         for i in 0..locs.len() {
             let l = locs.at(i);

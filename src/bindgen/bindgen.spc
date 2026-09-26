@@ -23,7 +23,7 @@ import stdlib;
 import driver_shim as shim;
 import module::loader as loader;
 import driver::util as *;
-import build_system::build as bsys;
+import lexer::lexer as lex;
 
 const TK_EOF: i32 = 0;
 const TK_IDENT: i32 = 1;
@@ -252,63 +252,19 @@ extend CType {
 // that is what it means, not because this host happens to spell it `unsigned long`.
 fn wellknown(name: str, out: &mut String) bool {
     let sub = switch name {
-        "size_t" => {
-            "usize";
-        },
-        "ssize_t" => {
-            "isize";
-        },
-        "ptrdiff_t" => {
-            "isize";
-        },
-        "intptr_t" => {
-            "isize";
-        },
-        "uintptr_t" => {
-            "usize";
-        },
-        "int8_t" => {
-            "i8";
-        },
-        "int16_t" => {
-            "i16";
-        },
-        "int32_t" => {
-            "i32";
-        },
-        "int64_t" => {
-            "i64";
-        },
-        "uint8_t" => {
-            "u8";
-        },
-        "uint16_t" => {
-            "u16";
-        },
-        "uint32_t" => {
-            "u32";
-        },
-        "uint64_t" => {
-            "u64";
-        },
-        "_Bool" => {
-            "bool";
-        },
-        "bool" => {
-            "bool";
-        },
-        "va_list" => {
-            "va_list";
-        },
-        "__builtin_va_list" => {
-            "va_list";
-        },
-        "__gnuc_va_list" => {
-            "va_list";
-        },
-        _ => {
-            "";
-        },
+        "size_t" | "uintptr_t" => "usize",
+        "ssize_t" | "ptrdiff_t" | "intptr_t" => "isize",
+        "int8_t" => "i8",
+        "int16_t" => "i16",
+        "int32_t" => "i32",
+        "int64_t" => "i64",
+        "uint8_t" => "u8",
+        "uint16_t" => "u16",
+        "uint32_t" => "u32",
+        "uint64_t" => "u64",
+        "_Bool" | "bool" => "bool",
+        "va_list" | "__builtin_va_list" | "__gnuc_va_list" => "va_list",
+        _ => "",
     };
     if sub.len() == 0 {
         return false;
@@ -392,7 +348,6 @@ struct EnumDef {
     pub tag: String,
     pub vals: Vector<EnumVal>,
     pub ok: bool,
-    pub partial: bool, // at least one enumerator was not evaluable and is absent
     pub mine: bool,
 }
 
@@ -438,15 +393,24 @@ const fn noise_call(s: str) bool {
     return s == "__attribute__" || s == "__attribute" || s == "__declspec" || s == "asm" || s == "__asm" || s == "__asm__" || s == "__has_attribute";
 }
 
-// A Super-C keyword cannot name a parameter; a trailing underscore keeps the C name recognisable.
+// A Super-C keyword cannot name a parameter, field or function, and `str`/`int` would shadow the
+// prelude's names; a trailing underscore keeps the C name recognisable.
 const fn keyword(s: str) bool {
-    return s == "as" || s == "import" || s == "break" || s == "case" || s == "const" || s == "continue" || s == "defer" || s == "asm" || s == "do" || s == "dyn" || s == "else" || s == "enum" || s == "extern" || s == "false" || s == "fn" || s == "for" || s == "if" || s == "extend" || s == "in" || s == "let" || s == "loop" || s == "switch" || s == "move" || s == "mut" || s == "new" || s == "null" || s == "pub" || s == "sizeof" || s == "alignof" || s == "return" || s == "self" || s == "Self" || s == "struct" || s == "interface" || s == "true" || s == "type" || s == "union" || s == "unsafe" || s == "where" || s == "while" || s == "str" || s == "int";
+    return lex::is_keyword(s) || s == "str" || s == "int";
 }
 
 fn safe_name(s: str, out: &mut String) {
     out.push_str(s);
     if keyword(s) {
         out.push_byte(b'_');
+    }
+}
+
+// A symbol whose name is a keyword binds under its escaped spelling (`safe_name`); the import
+// pins the C symbol to the original name.
+fn pin_keyword(s: str, out: &mut String) {
+    if keyword(s) {
+        out.format_into("    @c.import(\"{}\")\n", s);
     }
 }
 
@@ -510,22 +474,6 @@ extend EnumDef {
     }
 }
 
-fn path_contains(a: str, needle: str) bool {
-    let n = a.len();
-    let m = needle.len();
-    if m == 0 || n < m {
-        return false;
-    }
-    let mut i: usize = 0;
-    while i + m <= n {
-        if a.slice(i, i + m) == needle {
-            return true;
-        }
-        i = i + 1;
-    }
-    return false;
-}
-
 // The preprocessor prints the path it opened, which is only the same STRING as the requested header when
 // the request was already absolute: compare by identity, not by spelling. `--from=` widens the set: a
 // platform that splits its headers (macOS declares `printf` in `_printf.h`, not `stdio.h`) puts the
@@ -538,7 +486,7 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
         return true;
     }
     for i in 0..extra.len() {
-        if path_contains(a, extra[i].as_str()) {
+        if extra[i].len() != 0 && a.contains(extra[i].as_str()) {
             return true;
         }
     }
@@ -583,16 +531,6 @@ fn cpp_command(cc: str, header: str, incs: &Vector<String>, cflags: &Vector<Stri
     }
     args.push(String::from_str(header));
     return args;
-}
-
-// Run `args` without a shell, stdout+stderr captured into `out`: exit code, -1 on spawn failure.
-fn bg_exec(args: &mut Vector<String>, out: *const char) i32 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
-    }
-    ptrs.push(0);
-    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, out);
 }
 
 // One line of `text` starting at `i`, without its terminator. A `\r` is dropped with the `\n`: the
@@ -844,22 +782,19 @@ extend CExpr {
                 self.lx.advance();
                 let r = self.ex_unary(c, e, dump, depth);
                 v = self.mul_checked(v, r);
-            } else if self.lx.at_punct(b'/') {
+            } else if self.lx.at_punct(b'/') || self.lx.at_punct(b'%') {
+                let div = self.lx.at_punct(b'/');
                 self.lx.advance();
                 let d = self.ex_unary(c, e, dump, depth);
                 if d == 0 || v == I64_MIN && d == -1 {
                     self.ok = false;
                     return 0;
                 }
-                v = v / d;
-            } else if self.lx.at_punct(b'%') {
-                self.lx.advance();
-                let d = self.ex_unary(c, e, dump, depth);
-                if d == 0 || v == I64_MIN && d == -1 {
-                    self.ok = false;
-                    return 0;
-                }
-                v = v % d;
+                v = if div {
+                    v / d;
+                } else {
+                    v % d;
+                };
             } else {
                 return v;
             }
@@ -1212,20 +1147,17 @@ fn run_one(
 
     let mut mdump = String::new();
     let mut mcmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, true);
-    if bg_exec(&mut mcmd, mpath.cstr()) == 0 {
-        switch loader::read_file(mpath.as_str()) {
-            Some(t) => {
-                c.widths = read_widths(t.as_str());
-                c.index_macros(t.as_str());
-                mdump = t;
-            },
-            None => {},
-        };
+    if exec_args(&mut mcmd, mpath.cstr()) == 0 {
+        if let Some(t) = loader::read_file(mpath.as_str()) {
+            c.widths = read_widths(t.as_str());
+            c.index_macros(t.as_str());
+            mdump = t;
+        }
     }
     let _ = unsafe shim::sc_unlink(mpath.cstr());
 
     let mut cmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, false);
-    let prc = bg_exec(&mut cmd, ipath.cstr());
+    let prc = exec_args(&mut cmd, ipath.cstr());
     if prc != 0 {
         unsafe stdio::fprintf(
             stdio::stderr(),
@@ -1264,7 +1196,7 @@ fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
         }
         return 0;
     }
-    if !bsys::write_file_atomic(out_path, text) {
+    if !write_file_atomic(out_path, text) {
         unsafe stdio::fprintf(
             stdio::stderr(),
             "super-c: cannot write '%.*s'\n".ptr() as *const char,
@@ -1320,11 +1252,7 @@ fn dir_part(p: str) str {
 }
 
 fn stem_of(p: str) str {
-    let mut k = p.len();
-    while k > 0 && p.byte_at(k - 1) != b'/' {
-        k = k - 1;
-    }
-    let base = p.slice(k, p.len());
+    let base = loader::basename_of(p);
     if base.ends_with(".h") {
         return base.slice(0, base.len() - 2);
     }
@@ -1374,7 +1302,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
         names.push(String::from_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dh);
-    names.sort_by(|a: &String, b: &String| loader::name_cmp(a, b));
+    names.sort();
     let mut ok = true;
     for i in 0..names.len() {
         let mut child = join_path(dir, names[i].as_str());
@@ -1584,8 +1512,6 @@ extend Lexer {
             }
             if known {
                 e.vals.push(EnumVal { name: nm, value: next });
-            } else {
-                e.partial = true;
             }
             // C gives the enumerator after I64_MAX no representable value.
             if next == I64_MAX {
@@ -2014,11 +1940,7 @@ extend Lexer {
             }
             *is_fn = true;
             *variadic = va;
-            for i in 0..ps.len() {
-                params.push(
-                    Param { name: String::from_str(ps[i].name.as_str()), ty: String::from_str(ps[i].ty.as_str()) },
-                );
-            }
+            *params = ps; // every caller passes an empty vector
         }
         // An array PARAMETER is a pointer: that is C's own rule. An array FIELD is not: dropping its extent
         // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
@@ -2429,12 +2351,9 @@ extend Collected {
             }
         }
         let mut names = Vector::<String>::new();
-        switch loader::read_file(header) {
-            Some(src) => {
-                header_macro_names(src.as_str(), &mut names);
-            },
-            None => {},
-        };
+        if let Some(src) = loader::read_file(header) {
+            header_macro_names(src.as_str(), &mut names);
+        }
         for i in 0..names.len() {
             let mut raw = String::new();
             if self.macro_value(dump, names[i].as_str(), &mut raw) {
@@ -2460,7 +2379,9 @@ extend Collected {
         // itself, so it is emitted last, immediately above it.
         for i in 0..self.consts.len() {
             let cd = self.consts.at(i);
-            out.format_into("pub const {}: {} = {};\n", cd.name.as_str(), cd.ty.as_str(), cd.value.as_str());
+            out.push_str("pub const ");
+            safe_name(cd.name.as_str(), out);
+            out.format_into(": {} = {};\n", cd.ty.as_str(), cd.value.as_str());
         }
         if self.consts.len() != 0 {
             out.push_byte(b'\n');
@@ -2497,7 +2418,9 @@ extend Collected {
             }
             out.format_into("    pub enum {} {{\n", e.tag.as_str());
             for j in 0..e.vals.len() {
-                out.format_into("        {} = {},\n", e.vals[j].name.as_str(), e.vals[j].value);
+                out.push_str("        ");
+                safe_name(e.vals[j].name.as_str(), out);
+                out.format_into(" = {},\n", e.vals[j].value);
             }
             out.push_str("    }\n\n");
         }
@@ -2526,22 +2449,27 @@ extend Collected {
             out.push_str("    }\n\n");
         }
         for i in 0..self.globals.len() {
-            if self.globals[i].mutable {
-                out.format_into(
-                    "    pub static mut {}: {};\n",
-                    self.globals[i].name.as_str(),
-                    self.globals[i].ty.as_str(),
-                );
-            } else {
-                out.format_into("    pub const {}: {};\n", self.globals[i].name.as_str(), self.globals[i].ty.as_str());
-            }
+            let g = self.globals.at(i);
+            pin_keyword(g.name.as_str(), out);
+            out.push_str(
+                if g.mutable {
+                    "    pub static mut ";
+                } else {
+                    "    pub const ";
+                },
+            );
+            safe_name(g.name.as_str(), out);
+            out.format_into(": {};\n", g.ty.as_str());
         }
         if self.globals.len() != 0 {
             out.push_byte(b'\n');
         }
         for i in 0..self.fns.len() {
             let f = self.fns.at(i);
-            out.format_into("    pub fn {}(", f.name.as_str());
+            pin_keyword(f.name.as_str(), out);
+            out.push_str("    pub fn ");
+            safe_name(f.name.as_str(), out);
+            out.push_byte(b'(');
             for j in 0..f.params.len() {
                 if j != 0 {
                     out.push_str(", ");

@@ -727,3 +727,121 @@ fn to_string_every_radix() {
     let mx = u128::max().to_string();
     assert(mx.as_str() == "340282366920938463463374607431768211455");
 }
+
+// The built-in integers' bit counts, packed as trailing * 10000 + leading * 100 + ones so one compare
+// checks all three. The same `const fn`s run at compile time (the static_asserts below) and in the
+// emitted C (the test, whose inputs come from a Vector).
+const fn packed(t: usize, l: usize, c: usize) usize {
+    return t * 10000 + l * 100 + c;
+}
+const fn bits_u8(x: u8) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_u16(x: u16) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_u32(x: u32) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_u64(x: u64) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_usize(x: usize) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_i8(x: i8) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_i16(x: i16) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_i32(x: i32) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_i64(x: i64) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const fn bits_isize(x: isize) usize {
+    return packed(x.trailing_zeros(), x.leading_zeros(), x.count_ones());
+}
+const USIZE_W: usize = sizeof(usize) * 8;
+
+static_assert(bits_u8(0) == packed(8, 8, 0) && bits_u8(1) == packed(0, 7, 1), "u8 zero, one");
+static_assert(bits_u8(0x80) == packed(7, 0, 1) && bits_u8(0xFF) == packed(0, 0, 8), "u8 top, all");
+static_assert(bits_u16(0) == packed(16, 16, 0) && bits_u16(1) == packed(0, 15, 1), "u16 zero, one");
+static_assert(bits_u16(0x8000) == packed(15, 0, 1) && bits_u16(0xFFFF) == packed(0, 0, 16), "u16 top, all");
+static_assert(bits_u32(0) == packed(32, 32, 0) && bits_u32(1) == packed(0, 31, 1), "u32 zero, one");
+static_assert(bits_u32(0x80000000) == packed(31, 0, 1) && bits_u32(0xFFFFFFFF) == packed(0, 0, 32), "u32 top, all");
+static_assert(bits_u64(0) == packed(64, 64, 0) && bits_u64(1) == packed(0, 63, 1), "u64 zero, one");
+static_assert(bits_u64(0x8000000000000000) == packed(63, 0, 1), "u64 top");
+static_assert(bits_u64(0xFFFFFFFFFFFFFFFF) == packed(0, 0, 64), "u64 all");
+static_assert(bits_u64(0x50) == packed(4, 57, 2), "u64 inner bits");
+static_assert(bits_usize(0) == packed(USIZE_W, USIZE_W, 0) && bits_usize(1) == packed(0, USIZE_W - 1, 1), "usize zero, one");
+static_assert(bits_usize(1 << USIZE_W - 1) == packed(USIZE_W - 1, 0, 1), "usize top");
+static_assert(bits_i8(0) == packed(8, 8, 0) && bits_i8(-128) == packed(7, 0, 1) && bits_i8(-1) == packed(0, 0, 8), "i8");
+static_assert(bits_i16(0) == packed(16, 16, 0) && bits_i16(-1) == packed(0, 0, 16), "i16");
+static_assert(bits_i32(1) == packed(0, 31, 1) && bits_i32(-1) == packed(0, 0, 32), "i32");
+static_assert(bits_i64(0) == packed(64, 64, 0) && bits_i64(-1) == packed(0, 0, 64), "i64");
+static_assert(bits_isize(0) == packed(USIZE_W, USIZE_W, 0) && bits_isize(-1) == packed(0, 0, USIZE_W), "isize");
+
+@test
+fn builtin_bit_counts_at_run_time() {
+    let mut v: Vector<u64> = Vector::new();
+    v.push(0);
+    v.push(1);
+    v.push(0xFFFFFFFFFFFFFFFF);
+    v.push(0x50);
+    let z = v[0];
+    let one = v[1];
+    let all = v[2];
+    let mid = v[3];
+    assert_eq(bits_u8(z as u8), packed(8, 8, 0));
+    assert_eq(bits_u8(one as u8), packed(0, 7, 1));
+    assert_eq(bits_u8((one << 7) as u8), packed(7, 0, 1));
+    assert_eq(bits_u8(all as u8), packed(0, 0, 8));
+    assert_eq(bits_u8(mid as u8), packed(4, 1, 2));
+    assert_eq(bits_u16(z as u16), packed(16, 16, 0));
+    assert_eq(bits_u16(one as u16), packed(0, 15, 1));
+    assert_eq(bits_u16((one << 15) as u16), packed(15, 0, 1));
+    assert_eq(bits_u16(all as u16), packed(0, 0, 16));
+    assert_eq(bits_u32(z as u32), packed(32, 32, 0));
+    assert_eq(bits_u32(one as u32), packed(0, 31, 1));
+    assert_eq(bits_u32((one << 31) as u32), packed(31, 0, 1));
+    assert_eq(bits_u32(all as u32), packed(0, 0, 32));
+    assert_eq(bits_u64(z), packed(64, 64, 0));
+    assert_eq(bits_u64(one), packed(0, 63, 1));
+    assert_eq(bits_u64(one << 63), packed(63, 0, 1));
+    assert_eq(bits_u64(all), packed(0, 0, 64));
+    assert_eq(bits_u64(mid), packed(4, 57, 2));
+    assert_eq(bits_usize(z as usize), packed(USIZE_W, USIZE_W, 0));
+    assert_eq(bits_usize(one as usize), packed(0, USIZE_W - 1, 1));
+    assert_eq(bits_usize((one << (USIZE_W - 1) as u64) as usize), packed(USIZE_W - 1, 0, 1));
+    assert_eq(bits_usize(all as usize), packed(0, 0, USIZE_W));
+    // Signed values count the two's complement pattern.
+    assert_eq(bits_i8(z as i8), packed(8, 8, 0));
+    assert_eq(bits_i8(((one << 7) as u8) as i8), packed(7, 0, 1));
+    assert_eq(bits_i8((all as u8) as i8), packed(0, 0, 8));
+    assert_eq(bits_i16((all as u16) as i16), packed(0, 0, 16));
+    assert_eq(bits_i32(one as i32), packed(0, 31, 1));
+    assert_eq(bits_i32((all as u32) as i32), packed(0, 0, 32));
+    assert_eq(bits_i64(all as i64), packed(0, 0, 64));
+    assert_eq(bits_isize((all as usize) as isize), packed(0, 0, USIZE_W));
+}
+
+// The wide counts run per limb on the u64 counts: limb boundaries and a partial top limb.
+@test
+fn wide_bit_counts_per_limb() {
+    let hi = u256::one() << 200;
+    assert_eq(hi.trailing_zeros(), 200);
+    assert_eq(hi.leading_zeros(), 55);
+    assert_eq(hi.count_ones(), 1);
+    assert_eq(u256::max().count_ones(), 256);
+    assert_eq(u256::zero().leading_zeros(), 256);
+    let p = UInt::<100>::one() << 99;
+    assert_eq(p.leading_zeros(), 0);
+    assert_eq(p.trailing_zeros(), 99);
+    assert_eq(UInt::<100>::max().count_ones(), 100);
+    assert_eq(UInt::<100>::zero().trailing_zeros(), 100);
+    assert_eq(i256::from_i64(-1).count_ones(), 256);
+    assert_eq(i256::from_i64(-8).trailing_zeros(), 3);
+}

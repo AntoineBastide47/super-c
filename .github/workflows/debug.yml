@@ -281,7 +281,7 @@ jobs:
           rm -rf src/build
           ./super-c src/main.spc --target=wasm
           "$HOME/wasi-sdk/bin/clang" -O2 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
-            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
             $(find src/build/raw -name '*.c') -lm -o super-c.wasm
           rm -rf src/build
@@ -302,7 +302,7 @@ jobs:
             /tmp/wwasm/super-c.wasm /tmp/wwasm/src/main.spc --target=wasm
           mv /tmp/wwasm/src/build /tmp/wasm-gen1
           "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
-            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
             $(find /tmp/wasm-gen1/raw -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
           wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \

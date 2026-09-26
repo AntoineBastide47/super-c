@@ -7,6 +7,7 @@ import ast::ast as *;
 import module::loader as loader;
 import typechecker::typechecker as tc;
 import ast::parser as par;
+import lsp::text as ltext;
 
 type HovBuf = Array<char, 512>;
 
@@ -461,18 +462,9 @@ fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
 
 const fn tok_cmp(a: &Tok, b: &Tok) i32 {
     if a.start != b.start {
-        if a.start < b.start {
-            return -1;
-        }
-        return 1;
+        return a.start.cmp(&b.start);
     }
-    if a.end != b.end {
-        if a.end < b.end {
-            return -1;
-        }
-        return 1;
-    }
-    return 0;
+    return a.end.cmp(&b.end);
 }
 
 /// Every classifiable token in module `mi`: resolved references (through their name spans) plus each
@@ -995,10 +987,9 @@ pub fn complete_attributes() Vector<CompItem> {
 /// Identifiers valid inside `@platform(...)`.
 pub fn complete_platform_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let mut names = Vector::<String>::new();
-    par::platform_arg_names(&mut names);
+    let names = par::axis_names(false);
     for i in 0..names.len() {
-        comp_push(&mut out, names.at(i).as_str(), 14, String::from_str("platform"));
+        comp_push(&mut out, names[i], 14, String::from_str("platform"));
     }
     return out;
 }
@@ -1006,10 +997,9 @@ pub fn complete_platform_args() Vector<CompItem> {
 /// Identifiers valid inside `@arch(...)`.
 pub fn complete_arch_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let mut names = Vector::<String>::new();
-    par::arch_arg_names(&mut names);
+    let names = par::axis_names(true);
     for i in 0..names.len() {
-        comp_push(&mut out, names.at(i).as_str(), 14, String::from_str("architecture"));
+        comp_push(&mut out, names[i], 14, String::from_str("architecture"));
     }
     return out;
 }
@@ -1265,13 +1255,6 @@ pub struct WsSym {
     pub end: u32,
 }
 
-const fn ascii_low(b: u8) u8 {
-    if b >= b'A' && b <= b'Z' {
-        return b + 32;
-    }
-    return b;
-}
-
 // Case-insensitive substring match (an empty query matches everything).
 fn fuzzy_has(name: str, q: str) bool {
     if q.len() == 0 {
@@ -1281,13 +1264,7 @@ fn fuzzy_has(name: str, q: str) bool {
         return false;
     }
     for i in 0..name.len() - q.len() + 1 {
-        let mut hit = true;
-        for k in 0..q.len() {
-            if ascii_low(name[i + k]) != ascii_low(q[k]) {
-                hit = false;
-            }
-        }
-        if hit {
+        if ltext::ci_at(name, i, q) {
             return true;
         }
     }
@@ -1753,20 +1730,9 @@ pub fn find_decl_by_key(p: &loader::Package, mi: usize, kind: u8, name: str) Nod
 
 const fn loc_span_cmp(a: &Loc, b: &Loc) i32 {
     if a.start != b.start {
-        return if a.start < b.start {
-            -1;
-        } else {
-            1;
-        };
+        return a.start.cmp(&b.start);
     }
-    if a.end != b.end {
-        return if a.end < b.end {
-            -1;
-        } else {
-            1;
-        };
-    }
-    return 0;
+    return a.end.cmp(&b.end);
 }
 
 // Append the reference sites of `d` in module `mm` to `out`, sorted by span with duplicate spans
@@ -2357,8 +2323,10 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
     return none;
 }
 
-/// Interfaces the aggregate `d` conforms to: each `extend T as I` block's interface name span.
-pub fn type_ifaces(p: &loader::Package, d: DefId) Vector<Loc> {
+/// The `extend T as I` relations of `d`. When `up`, `d` is the aggregate and the result holds the
+/// name span of each interface it conforms to; otherwise `d` is the interface and the result holds
+/// the name span of each conforming struct or enum.
+pub fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     for mm in 0..p.modules.len() {
         if !p.modules.at(mm).has_ast {
@@ -2376,65 +2344,33 @@ pub fn type_ifaces(p: &loader::Package, d: DefId) Vector<Loc> {
             if tgt == NODE_NONE || it == NODE_NONE || !unsafe (*am).valid(tgt) || !unsafe (*am).valid(it) {
                 continue;
             }
-            let td = unsafe (*am).resolution_def(tgt);
-            if td.module != d.module || td.node != d.node {
+            let (mine, other) = if up {
+                (tgt, it);
+            } else {
+                (it, tgt);
+            };
+            let md = unsafe (*am).resolution_def(mine);
+            if md.module != d.module || md.node != d.node {
                 continue;
             }
-            let idf = unsafe (*am).resolution_def(it);
-            if idf.node == NODE_NONE {
+            let od = unsafe (*am).resolution_def(other);
+            if od.node == NODE_NONE {
                 continue;
             }
-            let ia = mod_ast(p, idf.module as usize);
-            if unsafe (*ia).at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
-                continue;
-            }
-            let nm = unsafe (*ia).at_const(idf.node).as_data.interface_def.name;
-            let sp = unsafe (*ia).at_const(nm).span;
-            out.push(Loc { module: idf.module, start: sp.start, end: sp.end });
-        }
-    }
-    return out;
-}
-
-/// Conforming target-type declaration name spans for interface `d` (`extend T as I` -> T's decl).
-pub fn iface_conformers(p: &loader::Package, d: DefId) Vector<Loc> {
-    let mut out = Vector::<Loc>::new();
-    for mm in 0..p.modules.len() {
-        if !p.modules.at(mm).has_ast {
-            continue;
-        }
-        let am = mod_ast(p, mm);
-        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe (*am).list(items)[i as usize];
-            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
-            let it = unsafe (*am).at_const(iid).as_data.extend_def.interface_type;
-            if tgt == NODE_NONE || it == NODE_NONE || !unsafe (*am).valid(tgt) || !unsafe (*am).valid(it) {
-                continue;
-            }
-            let idf = unsafe (*am).resolution_def(it);
-            if idf.module != d.module || idf.node != d.node {
-                continue;
-            }
-            let td = unsafe (*am).resolution_def(tgt);
-            if td.node == NODE_NONE {
-                continue;
-            }
-            let ta = mod_ast(p, td.module as usize);
-            let tn = unsafe (*ta).at_const(td.node);
-            let nm = if tn.kind == NodeKind::NODE_STRUCT || tn.kind == NodeKind::NODE_ENUM {
-                tn.as_data.aggregate.name;
+            let oa = mod_ast(p, od.module as usize);
+            let on = unsafe (*oa).at_const(od.node);
+            let nm = if up && on.kind == NodeKind::NODE_INTERFACE {
+                on.as_data.interface_def.name;
+            } else if !up && (on.kind == NodeKind::NODE_STRUCT || on.kind == NodeKind::NODE_ENUM) {
+                on.as_data.aggregate.name;
             } else {
                 NODE_NONE;
             };
             if nm == NODE_NONE {
                 continue;
             }
-            let sp = unsafe (*ta).at_const(nm).span;
-            out.push(Loc { module: td.module, start: sp.start, end: sp.end });
+            let sp = unsafe (*oa).at_const(nm).span;
+            out.push(Loc { module: od.module, start: sp.start, end: sp.end });
         }
     }
     return out;

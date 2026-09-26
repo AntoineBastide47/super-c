@@ -356,23 +356,9 @@ pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
         p.parse_line();
     }
     let bad = p.errors.has_errors();
-    for i in 0..p.errors.errors.len() {
-        let d = p.errors.errors.at(i);
-        errs.emit(d.start, d.len, d.msg.clone());
-    }
+    errs.append(&mut p.errors);
     if bad {
         return Option::<Vector<TomlItem>>::None;
     }
     return Option::<Vector<TomlItem>>::Some(replace(&mut p.items, Vector::<TomlItem>::new()));
-}
-
-/// Parse a manifest text into its items; None after printing the parse errors for `file`.
-pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
-    let mut errs = diag::Errors::new();
-    let r = parse_into(src, &mut errs);
-    if errs.has_errors() {
-        errs.finalize(src, file);
-        errs.log();
-    }
-    return r;
 }

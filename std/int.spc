@@ -154,13 +154,7 @@ extend<const BITS: usize> IntBits<BITS> {
             i = i - 1;
             let l = self.get(i);
             if l != 0 {
-                let mut b: usize = 64;
-                while b > 0 {
-                    b = b - 1;
-                    if (l >> b as u64 & 1u64) != 0 {
-                        return (i * 64 + b) as i64;
-                    }
-                }
+                return (i * 64 + 63 - l.leading_zeros()) as i64;
             }
         }
         return -1;
@@ -668,11 +662,7 @@ extend<const BITS: usize> UInt<BITS> {
     pub fn count_ones(self: &UInt<BITS>) usize {
         let mut n: usize = 0;
         for i in 0..UInt::<BITS>::limbs() {
-            let mut l = self.bits.get(i);
-            while l != 0 {
-                n = n + (l & 1u64) as usize;
-                l = l >> 1;
-            }
+            n = n + self.bits.get(i).count_ones();
         }
         return n;
     }
@@ -684,24 +674,13 @@ extend<const BITS: usize> UInt<BITS> {
 
     /// Zero bits below the least significant set bit (BITS for zero).
     pub fn trailing_zeros(self: &UInt<BITS>) usize {
-        if self.is_zero() {
-            return BITS;
-        }
-        let mut n: usize = 0;
-        let mut i: usize = 0;
-        loop {
+        for i in 0..UInt::<BITS>::limbs() {
             let l = self.bits.get(i);
             if l != 0 {
-                let mut v = l;
-                while (v & 1u64) == 0 {
-                    n = n + 1;
-                    v = v >> 1;
-                }
-                return n;
+                return i * 64 + l.trailing_zeros();
             }
-            n = n + 64;
-            i = i + 1;
         }
+        return BITS;
     }
 
     /// Rotation at the type's own width: bits leaving one end come back in at the other, so a partial

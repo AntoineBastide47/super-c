@@ -72,7 +72,7 @@ typecheck: the deferred-constant flush and the always-panics probe are where bod
 | `pre_off`, `pre_edges` | the schedule dependency ranges: CSR by owner, targets ascending, deduplicated (the edges below) |
 | `fin_off`, `fin_edges` | the final ranges, filled by `finalize` |
 | `comp`, `ncomp` | the strongly connected component of each item in the schedule graph, numbered dependency-first (a callee's component before its caller's; an import or recursion cycle is one component; an extend and its members are one) |
-| `cdep_off`, `cdep`; `csucc_off`, `csucc`; `citem_off`, `citem` | the component graph: per component the components it depends on, the components that depend on it, and its items ascending (CSR each) |
+| `cdep_off`, `cdep`; `citem_off`, `citem` | the component graph: per component the components it depends on and its items ascending (CSR each) |
 | `reach`, `reach_w` | per component a row of `reach_w` words: the bits of every component it depends on, transitively |
 | `top_lo`, `body_hi` | the own ranges: per item the node of the top-level item before it in node order (the exclusive start of its module-arena range; a member carries its extend's), and per by_node position the largest function body block id so far (the body-arena owner search) |
 | `state` | the readiness state |

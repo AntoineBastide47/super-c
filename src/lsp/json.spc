@@ -6,10 +6,12 @@
 // positions and ids are integers).
 import string as cstring;
 import stdlib;
+import lsp::text as text;
 
 const MAX_NESTING_DEPTH: usize = 1024;
 
 /// One ordered object member
+@derive(Clone)
 pub struct JSONPair {
     pub key: String,
     pub value: JSON,
@@ -26,16 +28,6 @@ pub enum JSON {
 }
 
 extend JSON {
-    /// A boolean value.
-    pub fn boolean(value: bool) JSON {
-        return JSON::Bool(value);
-    }
-
-    /// A number value.
-    pub fn number(value: f64) JSON {
-        return JSON::Num(value);
-    }
-
     /// An integer, stored as f64 (exact below 2^53).
     pub fn integer(value: i64) JSON {
         return JSON::Num(value as f64);
@@ -65,14 +57,6 @@ extend JSON {
     pub const fn is_null(self: &Self) bool {
         return switch self {
             Null => true,
-            _ => false,
-        };
-    }
-
-    /// Kind test.
-    pub const fn is_bool(self: &Self) bool {
-        return switch self {
-            Bool(_) => true,
             _ => false,
         };
     }
@@ -134,17 +118,12 @@ extend JSON {
         return n as i64;
     }
 
-    /// The string. Panics: not a string.
-    pub const fn get_string(self: &Self) &String {
-        return switch self {
-            Str(s) => s,
-            _ => panic("JSON::get_string called on a non-string type"),
-        };
-    }
-
     /// The string as a view. Panics: not a string.
     pub const fn get_str(self: &Self) str {
-        return self.get_string().as_str();
+        return switch self {
+            Str(s) => s.as_str(),
+            _ => panic("JSON::get_str called on a non-string type"),
+        };
     }
 
     /// Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
@@ -193,6 +172,16 @@ extend JSON {
         return dflt;
     }
 
+    /// Member `key` as a bool; false when absent or not a bool.
+    pub fn value_bool(self: &Self, key: str) bool {
+        if let Some(v) = self.value(key) {
+            if let Bool(b) = v {
+                return *b;
+            }
+        }
+        return false;
+    }
+
     /// Member `key` as a string view; empty when absent or not a string.
     pub fn value_str(self: &Self, key: str) str {
         if let Some(v) = self.value(key) {
@@ -234,38 +223,6 @@ extend JSON {
             }
         }
         o.push(JSONPair { key: String::from_str(key), value: value });
-    }
-
-    /// Deep copy
-    pub fn clone(self: &Self) JSON {
-        switch self {
-            Arr(a) => {
-                let mut c = Vector::<JSON>::with_capacity(a.len());
-                for i in 0..a.len() {
-                    c.push(a.at(i).clone());
-                }
-                return JSON::Arr(c);
-            },
-            Obj(o) => {
-                let mut c = Vector::<JSONPair>::with_capacity(o.len());
-                for i in 0..o.len() {
-                    c.push(JSONPair { key: o.at(i).key.clone(), value: o.at(i).value.clone() });
-                }
-                return JSON::Obj(c);
-            },
-            Str(s) => {
-                return JSON::Str(s.clone());
-            },
-            Num(n) => {
-                return JSON::Num(*n);
-            },
-            Bool(b) => {
-                return JSON::Bool(*b);
-            },
-            Null => {
-                return JSON::Null;
-            },
-        };
     }
 
     /// Reserve capacity for `size` elements or members. Panics: a scalar.
@@ -339,6 +296,20 @@ extend JSON {
                 }
                 out.push_byte(b'}');
             },
+        };
+    }
+}
+
+extend JSON as Clone {
+    /// Deep copy
+    pub fn clone(self: &Self) JSON {
+        return switch self {
+            Arr(a) => JSON::Arr(a.clone()),
+            Obj(o) => JSON::Obj(o.clone()),
+            Str(s) => JSON::Str(s.clone()),
+            Num(n) => JSON::Num(*n),
+            Bool(b) => JSON::Bool(*b),
+            Null => JSON::Null,
         };
     }
 }
@@ -452,7 +423,6 @@ struct JSONParser<'a> {
     pub pending_key_set: bool,
     pub comma_detected: bool,
     pub found_data: bool,
-    pub depth: usize,
     pub err: String, // first error message; empty = no error so far
 }
 
@@ -520,6 +490,14 @@ extend JSONParser {
         self.comma_detected = false;
         let idx = o.len() - 1;
         return ((&mut o[idx].value) as *mut JSON) as usize;
+    }
+
+    // Add `json` to the open object or array; its slot (as usize), or 0 on an error.
+    fn add_value(self: &mut Self, json: JSON) usize {
+        if unsafe (*(self.top() as *mut JSON)).is_object() {
+            return self.set_object_value(json);
+        }
+        return self.set_array_value(json);
     }
 
     // Append `json` to the open array and return its slot (as usize), 0 on a comma error (which frees
@@ -634,18 +612,12 @@ extend JSONParser {
     fn parse_hex4(self: &mut Self, at: usize) u32 {
         let mut code: u32 = 0;
         for k in 0..4 as usize {
-            let c = self.src[at + k];
-            code = code << 4;
-            if c >= b'0' && c <= b'9' {
-                code = code | (c - b'0') as u32;
-            } else if c >= b'a' && c <= b'f' {
-                code = code | (c - b'a') as u32 + 10;
-            } else if c >= b'A' && c <= b'F' {
-                code = code | (c - b'A') as u32 + 10;
-            } else {
+            let h = text::hex_val(self.src[at + k]);
+            if h < 0 {
                 self.fail("Invalid hex digit in \\uXXXX");
                 return 0;
             }
+            code = code << 4 | h as u32;
         }
         return code;
     }
@@ -720,21 +692,16 @@ extend JSONParser {
             if is_ws(c) {
                 // Skip.
             } else if c == b'{' {
-                self.depth += 1;
-                if self.depth > MAX_NESTING_DEPTH {
+                // Each open container holds one stack slot (the root container holds the root slot), so
+                // the stack length is the nesting depth.
+                if self.stack.len() >= MAX_NESTING_DEPTH {
                     self.fail("Nesting depth limit exceeded");
                     return i;
                 }
                 let t = self.top() as *mut JSON;
                 let child = JSON::Obj(Vector::<JSONPair>::with_capacity(8));
-                if unsafe (*t).is_object() {
-                    let slot = self.set_object_value(child);
-                    if slot == 0 {
-                        return i;
-                    }
-                    self.stack.push(slot);
-                } else if unsafe (*t).is_array() {
-                    let slot = self.set_array_value(child);
+                if unsafe (*t).is_object() || unsafe (*t).is_array() {
+                    let slot = self.add_value(child);
                     if slot == 0 {
                         return i;
                     }
@@ -758,7 +725,6 @@ extend JSONParser {
                         self.fail("Trailing ',' before closing '}'");
                         return i;
                     }
-                    self.depth -= 1;
                     self.stack.pop();
                     if self.stack.len() == 0 {
                         return i + 1;
@@ -772,20 +738,13 @@ extend JSONParser {
                 }
                 self.found_data = true;
             } else if c == b'[' {
-                self.depth += 1;
-                if self.depth > MAX_NESTING_DEPTH {
+                if self.stack.len() >= MAX_NESTING_DEPTH {
                     self.fail("Nesting depth limit exceeded");
                     return i;
                 }
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).is_object() {
-                    let slot = self.set_object_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
-                    if slot == 0 {
-                        return i;
-                    }
-                    self.stack.push(slot);
-                } else if unsafe (*t).is_array() {
-                    let slot = self.set_array_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
+                if unsafe (*t).is_object() || unsafe (*t).is_array() {
+                    let slot = self.add_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
                     if slot == 0 {
                         return i;
                     }
@@ -806,7 +765,6 @@ extend JSONParser {
                         self.fail("Trailing ',' before closing ']'");
                         return i;
                     }
-                    self.depth -= 1;
                     self.stack.pop();
                     if self.stack.len() == 0 {
                         return i + 1;
@@ -933,12 +891,10 @@ extend JSONParser {
                     return i;
                 }
                 self.found_data = true;
-                if unsafe (*t).is_object() {
-                    self.set_object_value(JSON::number(num));
-                } else if unsafe (*t).is_array() {
-                    self.set_array_value(JSON::number(num));
+                if unsafe (*t).is_object() || unsafe (*t).is_array() {
+                    let _ = self.add_value(JSON::Num(num));
                 } else if self.stack.len() == 1 {
-                    unsafe *t = JSON::number(num);
+                    unsafe *t = JSON::Num(num);
                     self.stack.pop();
                     return q;
                 }
@@ -967,15 +923,13 @@ extend JSONParser {
                 }
                 let mut val = JSON::default();
                 if c == b't' {
-                    val = JSON::boolean(true);
+                    val = JSON::Bool(true);
                 } else if c == b'f' {
-                    val = JSON::boolean(false);
+                    val = JSON::Bool(false);
                 }
                 self.found_data = true;
-                if unsafe (*t).is_object() {
-                    self.set_object_value(val);
-                } else if unsafe (*t).is_array() {
-                    self.set_array_value(val);
+                if unsafe (*t).is_object() || unsafe (*t).is_array() {
+                    let _ = self.add_value(val);
                 } else if self.stack.len() == 1 {
                     unsafe *t = val;
                     return i + lit.len();
@@ -1004,7 +958,6 @@ pub fn parse(src: str) Result<JSON, String> {
         pending_key_set: false,
         comma_detected: true,
         found_data: false,
-        depth: 0,
         err: String::new(),
     };
     p.stack.push(((&mut root) as *mut JSON) as usize);

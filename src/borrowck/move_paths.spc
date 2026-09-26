@@ -103,9 +103,7 @@ extend MoveForest {
         // The tree is final here, so the dense mirrors are filled in one pass.
         f.leaf.truncate(0);
         f.parent.truncate(0);
-        for _i in 0..(f.paths.len() + 63) / 64 {
-            f.leaf.push(0u64);
-        }
+        f.leaf.resize_default((f.paths.len() + 63) / 64);
         for p in 0..f.paths.len() {
             let mp = f.paths.at(p);
             f.parent.push(mp.parent);

@@ -144,72 +144,63 @@ extend TypedFacts {
 /// checker finished. SC_FACTS_CHECK compares these after later stages -- borrow checking must change
 /// nothing; codegen/propagation changes must stay inside the documented allowlist above.
 pub struct FactsWatermark {
-    pub nodes: usize,
-    pub children: usize,
-    pub resolutions: usize,
-    pub types: usize,
-    /// The body arena's counts, checked only while the arena is live (the driver releases it
-    /// after the constant flush; see `Ast::release_bodies`).
-    pub body_nodes: usize,
-    pub body_children: usize,
-    pub body_resolutions: usize,
-    pub body_types: usize,
-    pub mono: usize,
-    pub method_insts: usize,
-    pub method_refs: usize,
-    pub coerces: usize,
-    pub coerce_map: usize,
-    pub dyn_uses: usize,
-    pub deref_uses: usize,
-    pub wide_lits: usize,
-    pub attrs: usize,
-    pub metas: usize,
-    pub lifetime_decls: usize,
-    pub call_infos: usize,
-    pub op_methods: usize,
+    pub n: [usize; WM_N],
 }
 
-/// Snapshot module `a`'s semantic-table lengths.
+const WM_N: usize = 20;
+// The first WM_BODY entries are module tables; the next four are body-arena tables, checked only
+// while the arena is live (the driver releases it after the constant flush; see
+// `Ast::release_bodies`).
+const WM_BODY: usize = 4;
+const WM_NAMES: [str<'static>; WM_N] = [
+    "nodes",
+    "children",
+    "resolutions",
+    "types",
+    "body nodes",
+    "body children",
+    "body resolutions",
+    "body types",
+    "coerces",
+    "coerce_at",
+    "mono",
+    "method_refs",
+    "dyn_uses",
+    "deref_uses",
+    "wide_lits",
+    "attrs",
+    "metas",
+    "lifetime_decls",
+    "call_info",
+    "op_method",
+];
+
+/// Snapshot module `a`'s semantic-table lengths, in WM_NAMES order.
 pub const fn watermark(a: &Ast) FactsWatermark {
     return FactsWatermark {
-        nodes: a.nodes.len(),
-        children: a.children.len(),
-        resolutions: a.resolutions.len(),
-        types: a.types.len(),
-        body_nodes: a.b.nodes.len(),
-        body_children: a.b.children.len(),
-        body_resolutions: a.b.resolutions.len(),
-        body_types: a.b.types.len(),
-        mono: a.mono.len(),
-        method_insts: a.method_insts.len(),
-        method_refs: a.method_refs.len(),
-        coerces: a.coerces.len(),
-        coerce_map: a.coerce_at.len(),
-        dyn_uses: a.dyn_uses.len(),
-        deref_uses: a.deref_uses.len(),
-        wide_lits: a.wide_lits.len(),
-        attrs: a.attrs.len(),
-        metas: a.metas.len(),
-        lifetime_decls: a.lifetime_decls.len(),
-        call_infos: a.call_info.len(),
-        op_methods: a.op_method.len(),
+        n: [
+            a.nodes.len(),
+            a.children.len(),
+            a.resolutions.len(),
+            a.types.len(),
+            a.b.nodes.len(),
+            a.b.children.len(),
+            a.b.resolutions.len(),
+            a.b.types.len(),
+            a.coerces.len(),
+            a.coerce_at.len(),
+            a.mono.len(),
+            a.method_refs.len(),
+            a.dyn_uses.len(),
+            a.deref_uses.len(),
+            a.wide_lits.len(),
+            a.attrs.len(),
+            a.metas.len(),
+            a.lifetime_decls.len(),
+            a.call_info.len(),
+            a.op_method.len(),
+        ],
     };
-}
-
-// Report one changed table to stderr; returns 1 so callers can count differences.
-@c.cold
-fn wm_diff(mid: u32, what: str, was: usize, now: usize) u32 {
-    eprint("facts-check: module ");
-    let mut s = String::new();
-    s.push_u64(mid);
-    s.push_str(": ");
-    s.push_str(what);
-    s.push_str(" ");
-    s.push_u64(was as u64);
-    s.push_str(" -> ");
-    s.push_u64(now as u64);
-    s.eprintln();
-    return 1;
 }
 
 /// Compare a stored watermark against module `a`'s current tables; report every difference through
@@ -218,71 +209,25 @@ fn wm_diff(mid: u32, what: str, was: usize, now: usize) u32 {
 /// semantic data; only the intern pools (see the module header) may grow.
 @c.cold
 pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32) u32 {
+    let now = watermark(a);
+    let live_body = a.b.nodes.len() != 0;
     let mut d: u32 = 0;
-    if a.nodes.len() != w.nodes {
-        d += wm_diff(mid, "nodes", w.nodes, a.nodes.len());
-    }
-    if a.children.len() != w.children {
-        d += wm_diff(mid, "children", w.children, a.children.len());
-    }
-    if a.resolutions.len() != w.resolutions {
-        d += wm_diff(mid, "resolutions", w.resolutions, a.resolutions.len());
-    }
-    if a.types.len() != w.types {
-        d += wm_diff(mid, "types", w.types, a.types.len());
-    }
-    if a.b.nodes.len() != 0 {
-        if a.b.nodes.len() != w.body_nodes {
-            d += wm_diff(mid, "body nodes", w.body_nodes, a.b.nodes.len());
+    for k in 0..WM_N {
+        let was = unsafe w.n[k];
+        let cur = unsafe now.n[k];
+        if was == cur || !live_body && k >= WM_BODY && k < 2 * WM_BODY {
+            continue;
         }
-        if a.b.children.len() != w.body_children {
-            d += wm_diff(mid, "body children", w.body_children, a.b.children.len());
-        }
-        if a.b.resolutions.len() != w.body_resolutions {
-            d += wm_diff(mid, "body resolutions", w.body_resolutions, a.b.resolutions.len());
-        }
-        if a.b.types.len() != w.body_types {
-            d += wm_diff(mid, "body types", w.body_types, a.b.types.len());
-        }
-    }
-    if a.coerces.len() != w.coerces {
-        d += wm_diff(mid, "coerces", w.coerces, a.coerces.len());
-    }
-    if a.coerce_at.len() != w.coerce_map {
-        d += wm_diff(mid, "coerce_at", w.coerce_map, a.coerce_at.len());
-    }
-    if a.mono.len() != w.mono {
-        d += wm_diff(mid, "mono", w.mono, a.mono.len());
-    }
-    if a.method_insts.len() != w.method_insts {
-        d += wm_diff(mid, "method_insts", w.method_insts, a.method_insts.len());
-    }
-    if a.method_refs.len() != w.method_refs {
-        d += wm_diff(mid, "method_refs", w.method_refs, a.method_refs.len());
-    }
-    if a.dyn_uses.len() != w.dyn_uses {
-        d += wm_diff(mid, "dyn_uses", w.dyn_uses, a.dyn_uses.len());
-    }
-    if a.deref_uses.len() != w.deref_uses {
-        d += wm_diff(mid, "deref_uses", w.deref_uses, a.deref_uses.len());
-    }
-    if a.wide_lits.len() != w.wide_lits {
-        d += wm_diff(mid, "wide_lits", w.wide_lits, a.wide_lits.len());
-    }
-    if a.attrs.len() != w.attrs {
-        d += wm_diff(mid, "attrs", w.attrs, a.attrs.len());
-    }
-    if a.metas.len() != w.metas {
-        d += wm_diff(mid, "metas", w.metas, a.metas.len());
-    }
-    if a.lifetime_decls.len() != w.lifetime_decls {
-        d += wm_diff(mid, "lifetime_decls", w.lifetime_decls, a.lifetime_decls.len());
-    }
-    if a.call_info.len() != w.call_infos {
-        d += wm_diff(mid, "call_info", w.call_infos, a.call_info.len());
-    }
-    if a.op_method.len() != w.op_methods {
-        d += wm_diff(mid, "op_method", w.op_methods, a.op_method.len());
+        let mut s = String::from_str("facts-check: module ");
+        s.push_u64(mid);
+        s.push_str(": ");
+        s.push_str(unsafe WM_NAMES[k]);
+        s.push_str(" ");
+        s.push_u64(was as u64);
+        s.push_str(" -> ");
+        s.push_u64(cur as u64);
+        s.eprintln();
+        d += 1;
     }
     return d;
 }

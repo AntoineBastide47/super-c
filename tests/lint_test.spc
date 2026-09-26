@@ -197,6 +197,47 @@ fn local_analysis_lints() {
     assert(fixed.as_str().contains("let c = r;"));
 }
 
+// Lint runs the package-wide checks a build runs once every module is typechecked: a conformance
+// declared in two modules fails the lint as it fails the build.
+@test
+fn lint_reports_cross_module_duplicate_conformance() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        "pub struct P {\n    pub a: i32,\n}\n\nextend P as Default {\n    pub fn default() P {\n        return P { a: 1 };\n    }\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nextend lib::P as Default {\n    pub fn default() lib::P {\n        return lib::P { a: 2 };\n    }\n}\n\nfn main() i32 {\n    let p = lib::P::default();\n    return p.a;\n}\n",
+    );
+    // Run from the project root, which has no `src/`, so `import lib` resolves beside main.spc. The path
+    // is absolute: a wasm guest has no working directory.
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/main.spc\"");
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", args.as_str());
+    assert(r.out_shows("duplicate conformance"));
+    assert(r.exit != 0, "the lint fails");
+}
+
+// Char-range patterns compare decoded code points: two ranges of different non-ASCII chars that
+// share a UTF-8 lead byte are disjoint, so neither arm is reported unreachable.
+@test
+fn non_ascii_char_ranges_are_disjoint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn cls(c: char) i32 {\n    return switch c {\n        'à'..='ÿ' => 1,\n        'À'..='Ö' => 2,\n        _ => 3,\n    };\n}\n\nfn main() i32 {\n    return cls('a') - 3;\n}\n",
+    );
+    let mut args = String::from_str("lint \"");
+    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(!r.out_has("unreachable arm"));
+    assert_eq(r.exit, 0);
+}
+
 // The driver lints: unused imports (fixable), never-read private fields, unused tagged-enum
 // variants, and discarded results of provably pure calls.
 @test
@@ -496,4 +537,50 @@ fn main() i32 {
     assert(r.out_has("main.spc:7:5"), "the statement after the diverging `if` is reported");
     assert(r.out_has("main.spc:13:5"), "the statement after the endless `loop` is reported");
     assert(!r.out_has("main.spc:23:5"), "the statement after a loop with a `break` is not");
+}
+
+// A `mut` on one tuple-let element is checked like any binding's.
+@test
+fn tuple_let_element_mut_lint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn f() (i32, i32) {\n    return 1, 2;\n}\n\nfn main() i32 {\n    let (mut a, mut b) = f();\n    a += 1;\n    return a + b - 4;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(r.exit != 0);
+    assert(r.out_has("'b' does not need to be mutable"));
+    assert(!r.out_has("'a' does not need"));
+}
+
+// A format argument is checked once before the call rewrites into its format block and again
+// inside the block: its warnings and fixes are reported once, and `--fix` deletes the unnecessary
+// `unsafe` once.
+@test
+fn format_argument_warnings_report_once() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    let g = [1, 2];\n    print(\"{}\\n\", unsafe g[1]);\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    let out = str::from_cstr(r.out);
+    let needle = "unnecessary 'unsafe'";
+    let first = out.find(needle);
+    assert(first >= 0, "the warning is reported");
+    let rest = out.slice(first as usize + needle.len(), out.len());
+    assert(rest.find(needle) < 0, "the warning is reported once");
+    let mut fargs = String::from_str("lint --fix \"");
+    fargs.push_str(root);
+    fargs.push_str("/main.spc\"");
+    p.run_raw(fargs.as_str());
+    let mut mp = String::from_str(root);
+    mp.push_str("/main.spc");
+    let fixed = loader::read_file(mp.as_str()).unwrap();
+    assert(fixed.as_str().contains("print(\"{}\\n\", g[1]);"));
 }

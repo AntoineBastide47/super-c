@@ -7,6 +7,7 @@
 import atomic;
 import stdio;
 import unistd;
+import sc_runtime;
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
@@ -912,6 +913,11 @@ pub fn cancel_membership(b: &mut bench::Bencher) {
             left = left - n;
         }
         history = history + MEMB_TASKS;
+        // `done` runs inside each task, before the runtime counts its completion: wait, bounded, for the count.
+        let deadline = platform::now_ns() + SETTLE_NS;
+        while rt::completed_tasks() - base < MEMB_TASKS as usize && platform::now_ns() <= deadline {
+            unsafe sc_runtime::sc_rt_cpu_relax();
+        }
         b.tally(MEMB_TASKS, (rt::completed_tasks() - base) as i64);
     }
     // The cancel after the history: members parked in a sleep, then one request sweep.

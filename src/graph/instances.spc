@@ -78,7 +78,6 @@ pub struct InstGraph {
     pub recs: Vector<InstRec>,
     pub keys: Vector<ArgKey>, // flat argument-key pool
     index: Vector<u32>, // open addressing over recs (hash lookup, exact compare)
-    ix_used: u32,
     cursor: usize, // worklist: recs[cursor..] await expansion
     exts: Vector<ExtRow>, // every extend in the package with a resolved target declaration
     // Indexes over `exts`: expansion asks per call site and per aggregate record, so owner and
@@ -132,7 +131,6 @@ extend InstGraph {
             recs: Vector::<InstRec>::new(),
             keys: Vector::<ArgKey>::new(),
             index: Vector::<u32>::new(),
-            ix_used: 0,
             cursor: 0,
             exts: Vector::<ExtRow>::new(),
             ext_of: Map::<u64, u64>::new(),
@@ -179,12 +177,12 @@ extend InstGraph {
             ts_add(TS_IGADD, 1);
             t0 = ts_now();
         }
-        let mut h = skey_mix(skey_mix(1469598103934665603u64, kind), def.module);
+        let mut h = skey_mix(skey_mix(0xcbf29ce484222325u64, kind), def.module);
         h = skey_mix(h, def.node);
         for i in 0..self.argbuf.len() {
             h = skey_mix(h, self.argbuf.at(i).ty);
         }
-        if self.index.len() == 0 || (self.ix_used as usize + 1) * 4 >= self.index.len() * 3 {
+        if self.index.len() == 0 || (self.recs.len() + 1) * 4 >= self.index.len() * 3 {
             let mut cap: usize = 64;
             while cap < (self.recs.len() + 1) * 4 {
                 cap = cap * 2;
@@ -203,7 +201,6 @@ extend InstGraph {
                 nix.set(i2, r as u32);
             }
             self.index = nix;
-            self.ix_used = self.recs.len() as u32;
         }
         let mask = self.index.len() - 1;
         let mut i = h as usize & mask;
@@ -238,7 +235,6 @@ extend InstGraph {
                 );
                 let id = self.recs.len() as u32 - 1;
                 self.index.set(i, id);
-                self.ix_used += 1;
                 *fresh = true;
                 if ts {
                     ts_add(TS_IGADD_NS, ts_now() - t0);
@@ -289,10 +285,7 @@ extend InstGraph {
         } else if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *a.instance(y.as_data.inst);
             for i in 0..it.n {
-                let c = self.nest_depth(a, unsafe it.args[i]);
-                if c > d {
-                    d = c;
-                }
+                d = d.max(self.nest_depth(a, unsafe it.args[i]));
             }
         }
         if d <= ARG_NEST_MAX {
@@ -602,20 +595,8 @@ extend InstGraph {
     // instance binds the extend's params; the method body walks under that frame. No extend search:
     // the checker already selected the method.
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
-        // The method's enclosing extend, if it is generic.
-        let ma = unsafe &*(&*self.pkg).module_ast_const(t.callee.module);
-        let ext = switch self.ext_of.get(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
-            Some(v) => (*v) as NodeId,
-            None => NODE_NONE,
-        };
-        if ext == NODE_NONE {
-            return;
-        }
-        let ed = ma.at_const(ext).as_data.extend_def;
-        if ed.generics.len == 0 {
-            return;
-        }
-        if t.args_len == 0 {
+        // Only a method of a generic extend.
+        if t.args_len == 0 || self.enclosing_extend(t.callee) == NODE_NONE {
             return;
         }
         // Peel the receiver to its instance.
@@ -783,38 +764,39 @@ extend InstGraph {
                 continue;
             }
             let target = self.ext_target(a, ext);
-            if target.node == NODE_NONE {
-                continue;
+            if target.node != NODE_NONE {
+                let ck = skey_mix(skey_mix(0, md.module as u64 << 32 | md.node as u64), 1);
+                self.pair_group(&gk, &groups, target, ck, md);
             }
-            let gi = switch gk.get(&skey_mix(0, target.module as u64 << 32 | target.node as u64)) {
-                Some(v) => (*v) as i64,
-                None => (-1) as i64,
-            };
-            if gi < 0 {
-                continue;
-            }
-            let ck = skey_mix(skey_mix(0, md.module as u64 << 32 | md.node as u64), 1);
-            let glen = groups[gi as usize].len();
-            for k9 in self.pair_start(ck)..glen {
-                let rec = *self.recs.at(groups[gi as usize][k9] as usize);
-                self.argbuf.truncate(0);
-                for k in 0..rec.args_len {
-                    let k0 = *self.keys.at((rec.args_start + k) as usize);
-                    self.argbuf.push(k0);
-                }
-                let mut fresh = false;
-                let _ = self.add(IG_METHOD, md, &mut fresh);
-            }
-            self.pair_cur.insert(ck, glen as u64);
         }
     }
 
-    // The group position a cross-product cursor resumes from.
-    fn pair_start(self: &Self, ck: u64) usize {
-        return switch self.pair_cur.get(&ck) {
+    // Pair decl `def` with every instance of aggregate `target` that cross-product cursor `ck` has
+    // not paired yet.
+    fn pair_group(self: &mut Self, gk: &Map<u64, u64>, groups: &Vector<Vector<u32>>, target: DefId, ck: u64, def: DefId) {
+        let gi = switch gk.get(&skey_mix(0, target.module as u64 << 32 | target.node as u64)) {
+            Some(v) => (*v) as i64,
+            None => (-1) as i64,
+        };
+        if gi < 0 {
+            return;
+        }
+        let start: usize = switch self.pair_cur.get(&ck) {
             Some(v) => (*v) as usize,
             None => 0,
         };
+        let glen = groups[gi as usize].len();
+        for k9 in start..glen {
+            let rec = *self.recs.at(groups[gi as usize][k9] as usize);
+            self.argbuf.truncate(0);
+            for k in 0..rec.args_len {
+                let k0 = *self.keys.at((rec.args_start + k) as usize);
+                self.argbuf.push(k0);
+            }
+            let mut fresh = false;
+            let _ = self.add(IG_METHOD, def, &mut fresh);
+        }
+        self.pair_cur.insert(ck, glen as u64);
     }
 
     // Interface default bodies: every extend that conforms `Target as Iface` emits one copy of each
@@ -855,33 +837,15 @@ extend InstGraph {
                     let osp = a.at_const(on.as_data.function.name).as_data.name.text;
                     if src.slice(osp.start as usize, osp.end as usize) == iname {
                         overridden = true;
+                        break;
                     }
                 }
-                if overridden {
-                    continue;
+                if !overridden {
+                    // Pair with every instance of the extend's target.
+                    let tg = self.ext_target(a, row.enode);
+                    let ck = skey_mix(skey_mix(0, x as u64 << 32 | imid as u64), 2);
+                    self.pair_group(gk, groups, tg, ck, DefId { module: iface.module, node: imid });
                 }
-                // Pair with every instance of the extend's target.
-                let tg = self.ext_target(a, row.enode);
-                let gi = switch gk.get(&skey_mix(0, tg.module as u64 << 32 | tg.node as u64)) {
-                    Some(v) => (*v) as i64,
-                    None => (-1) as i64,
-                };
-                if gi < 0 {
-                    continue;
-                }
-                let ck = skey_mix(skey_mix(0, x as u64 << 32 | imid as u64), 2);
-                let glen = groups[gi as usize].len();
-                for r9 in self.pair_start(ck)..glen {
-                    let rec = *self.recs.at(groups[gi as usize][r9] as usize);
-                    self.argbuf.truncate(0);
-                    for k in 0..rec.args_len {
-                        let k0 = *self.keys.at((rec.args_start + k) as usize);
-                        self.argbuf.push(k0);
-                    }
-                    let mut fresh = false;
-                    let _ = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &mut fresh);
-                }
-                self.pair_cur.insert(ck, glen as u64);
             }
         }
     }
@@ -922,26 +886,9 @@ extend InstGraph {
             if fd.body == NODE_NONE || fd.is_extern() {
                 continue;
             }
-            // Bind the declaration's non-lifetime params to the record's arg keys.
             let mut frame = Vector::<Subst>::new();
-            let mut ai: u32 = 0;
-            for g in 0..fd.generics.len {
-                let gp = unsafe da.list(fd.generics)[g as usize];
-                if da.at_const(gp).as_data.generic_param.is_lifetime {
-                    continue;
-                }
-                if ai < r.args_len {
-                    frame.push(
-                        Subst { pmod: r.def.module, pdecl: gp, key: *self.keys.at((r.args_start + ai) as usize) },
-                    );
-                }
-                ai += 1;
-            }
-            let bi = self.body_idx(r.def.module, r.def.node, false);
-            if bi >= 0 {
-                self.walk_kept(bi, da, &frame);
-                self.expand_closures(bi, r.def.module, &frame);
-            }
+            self.bind_generics(da, fd.generics, &r, 0, &mut frame);
+            self.seed_body(r.def.module, r.def.node, da, &frame);
         }
     }
 
@@ -951,17 +898,7 @@ extend InstGraph {
         if tt == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
-        let d = a.resolution_def(tt);
-        if d.node != NODE_NONE {
-            return d;
-        }
-        if a.at_const(tt).kind == NodeKind::NODE_TYPE_PATH {
-            let parts = a.at_const(tt).as_data.type_path.parts;
-            if parts.len != 0 {
-                return a.resolution_def(unsafe a.list(parts)[(parts.len - 1) as usize]);
-            }
-        }
-        return DefId { module: 0, node: NODE_NONE };
+        return a.path_def(tt);
     }
 
     // A fresh aggregate instantiation reaches its FIELD types: `Vector<String>` demands String and
@@ -971,30 +908,14 @@ extend InstGraph {
         let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
         let n = a.at_const(r.def.node);
         let mut frame = Vector::<Subst>::new();
-        let gs = n.as_data.aggregate.generics;
-        let mut ai: u32 = 0;
-        for g in 0..gs.len {
-            let gp = unsafe a.list(gs)[g as usize];
-            if a.at_const(gp).as_data.generic_param.is_lifetime {
-                continue;
-            }
-            if ai < r.args_len {
-                frame.push(Subst { pmod: r.def.module, pdecl: gp, key: *self.keys.at((r.args_start + ai) as usize) });
-            }
-            ai += 1;
-        }
+        self.bind_generics(a, n.as_data.aggregate.generics, r, 0, &mut frame);
         let is_tuple = n.as_data.aggregate.is_tuple;
         let ms = n.as_data.aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
             let mk = a.at_const(mid).kind;
-            // Tuple members are bare type nodes; named members carry their type in field.ty.
             if mk == NodeKind::NODE_FIELD || is_tuple {
-                let tnode = if mk == NodeKind::NODE_FIELD {
-                    a.at_const(mid).as_data.field.ty;
-                } else {
-                    mid;
-                };
+                let tnode = a.member_type_node(mid, is_tuple);
                 let mut t = a.type_of(mid);
                 if t == TYPE_NONE && tnode != NODE_NONE {
                     t = a.type_of(tnode);
@@ -1020,17 +941,7 @@ extend InstGraph {
         if it == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
-        let d = a.resolution_def(it);
-        if d.node != NODE_NONE {
-            return d;
-        }
-        if a.at_const(it).kind == NodeKind::NODE_TYPE_PATH {
-            let ps = a.at_const(it).as_data.type_path.parts;
-            if ps.len != 0 {
-                return a.resolution_def(unsafe a.list(ps)[(ps.len - 1) as usize]);
-            }
-        }
-        return DefId { module: 0, node: NODE_NONE };
+        return a.path_def(it);
     }
 
     // Signature-level propagation (established reintern_method_signature_deps semantics): every
@@ -1073,13 +984,7 @@ extend InstGraph {
         let targs = a.at_const(tt).as_data.type_path.args;
         for k in 0..targs.len {
             let an = unsafe a.list(targs)[k as usize];
-            let mut bind = a.resolution_def(an);
-            if bind.node == NODE_NONE && a.at_const(an).kind == NodeKind::NODE_TYPE_PATH {
-                let ps = a.at_const(an).as_data.type_path.parts;
-                if ps.len != 0 {
-                    bind = a.resolution_def(unsafe a.list(ps)[(ps.len - 1) as usize]);
-                }
-            }
+            let bind = a.path_def(an);
             if bind.node != NODE_NONE && pos < r.args_len {
                 let bk = unsafe (&*(&*self.pkg).module_ast_const(bind.module)).at_const(bind.node).kind;
                 if bk == NodeKind::NODE_GENERIC_PARAM {
@@ -1091,6 +996,22 @@ extend InstGraph {
             pos += 1;
         }
         return pos;
+    }
+
+    // Bind the non-lifetime generic params `gs` of record `r`'s declaration (in AST `a`) to the
+    // record's keys from position `pos` on, into `frame`.
+    fn bind_generics(self: &Self, a: &Ast, gs: NodeList, r: &InstRec, pos: u32, frame: &mut Vector<Subst>) {
+        let mut ai = pos;
+        for g in 0..gs.len {
+            let gp = unsafe a.list(gs)[g as usize];
+            if a.at_const(gp).as_data.generic_param.is_lifetime {
+                continue;
+            }
+            if ai < r.args_len {
+                frame.push(Subst { pmod: r.def.module, pdecl: gp, key: *self.keys.at((r.args_start + ai) as usize) });
+            }
+            ai += 1;
+        }
     }
 
     // The first `exts` row whose extend targets `d` (IG_NONE = none); `ext_next` chains the rest
@@ -1130,24 +1051,9 @@ extend InstGraph {
         let mut frame = Vector::<Subst>::new();
         let pos = self.bind_ext_params(a, ed.target_type, r, &mut frame);
         let fd = a.at_const(r.def.node).as_data.function;
-        let mut ai = pos;
-        for g in 0..fd.generics.len {
-            let gp = unsafe a.list(fd.generics)[g as usize];
-            if a.at_const(gp).as_data.generic_param.is_lifetime {
-                continue;
-            }
-            if ai < r.args_len {
-                frame.push(Subst { pmod: r.def.module, pdecl: gp, key: *self.keys.at((r.args_start + ai) as usize) });
-            }
-            ai += 1;
-        }
-        if fd.body == NODE_NONE {
-            return;
-        }
-        let bi = self.body_idx(r.def.module, r.def.node, false);
-        if bi >= 0 {
-            self.walk_kept(bi, a, &frame);
-            self.expand_closures(bi, r.def.module, &frame);
+        self.bind_generics(a, fd.generics, r, pos, &mut frame);
+        if fd.body != NODE_NONE {
+            self.seed_body(r.def.module, r.def.node, a, &frame);
         }
     }
 
@@ -1161,48 +1067,42 @@ extend InstGraph {
         if hit != -2 {
             return hit;
         }
+        let mut kb = irl::KeptBody::empty(m, node);
+        let mut ki: i64 = -1;
         if self.keep != null {
             let kp = unsafe &mut *self.keep;
-            let ki = switch kp.ix.get(&key) {
+            ki = (switch kp.ix.get(&key) {
                 Some(v) => (*v) as i64,
-                None => (-1) as i64,
-            };
+                None => -1,
+            });
             if ki >= 0 {
                 assert(kp.viewers == 0);
-                let klw = replace(&mut kp.kept[ki as usize], irl::KeptBody::empty(m, node));
-                let slot = self.kept.len() as i64;
-                self.kept.push(klw);
-                self.wcache.push(
-                    WalkCache {
-                        built: false,
-                        tys: Vector::<TypeId>::new(),
-                        consts: Vector::<u32>::new(),
-                        calls: Vector::<u32>::new(),
-                    },
-                );
-                self.kept_ix.insert(key, slot as u64);
-                return slot;
+                kb = replace(&mut kp.kept[ki as usize], irl::KeptBody::empty(m, node));
             }
         }
-        self.low.retarget(m);
-        let ok = if closure {
-            self.low.lower_closure_body(node);
-        } else {
-            self.low.lower_fn(node);
-        };
-        let mut slot = (-1) as i64;
-        if ok {
-            slot = self.kept.len() as i64;
-            self.kept.push(irl::KeptBody::copy(&self.low.body, &self.low.closures));
-            self.wcache.push(
-                WalkCache {
-                    built: false,
-                    tys: Vector::<TypeId>::new(),
-                    consts: Vector::<u32>::new(),
-                    calls: Vector::<u32>::new(),
-                },
-            );
+        if ki < 0 {
+            self.low.retarget(m);
+            let ok = if closure {
+                self.low.lower_closure_body(node);
+            } else {
+                self.low.lower_fn(node);
+            };
+            if !ok {
+                self.kept_ix.insert(key, ki as u64);
+                return ki;
+            }
+            kb = irl::KeptBody::copy(&self.low.body, &self.low.closures);
         }
+        let slot = self.kept.len() as i64;
+        self.kept.push(kb);
+        self.wcache.push(
+            WalkCache {
+                built: false,
+                tys: Vector::<TypeId>::new(),
+                consts: Vector::<u32>::new(),
+                calls: Vector::<u32>::new(),
+            },
+        );
         self.kept_ix.insert(key, slot as u64);
         return slot;
     }
@@ -1369,14 +1269,8 @@ extend InstGraph {
                     // an exported alias of a concrete instantiation (`pub type u128 = UInt<128>`)
                     // is API surface: the instance is reachable without any body naming it.
                     if n.as_data.type_alias.is_public && n.as_data.type_alias.ty != NODE_NONE {
-                        let t = a.type_of(n.as_data.type_alias.ty);
-                        if t != TYPE_NONE {
-                            self.note_type(a, t, &empty, 0);
-                        }
-                        let t2 = a.type_of(nid);
-                        if t2 != TYPE_NONE {
-                            self.note_type(a, t2, &empty, 0);
-                        }
+                        self.note_type(a, a.type_of(n.as_data.type_alias.ty), &empty, 0);
+                        self.note_type(a, a.type_of(nid), &empty, 0);
                     }
                 }
             }
@@ -1393,12 +1287,12 @@ extend InstGraph {
         return p.modules.at(m).prelude && !unsafe self.live[m];
     }
 
-    fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, empty: &Vector<Subst>) {
+    // Walk function `fnode`'s body (lowered on first demand) and its closures under `frame`.
+    fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, frame: &Vector<Subst>) {
         let bi = self.body_idx(m, fnode, false);
-        if bi < 0 {
-            return;
+        if bi >= 0 {
+            self.walk_kept(bi, a, frame);
+            self.expand_closures(bi, m, frame);
         }
-        self.walk_kept(bi, a, empty);
-        self.expand_closures(bi, m, empty);
     }
 }

@@ -82,8 +82,7 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
     b.emit_tail_list(prev_end, source.len() as u32);
     let doc = b.cat(0);
     b.p.render(doc, width, out);
-    let n = b.emitted_trivia;
-    return n;
+    return b.emitted_trivia;
 }
 
 /// Precedence ladder for parenthesis re-insertion; binary operators use Parser::precedence (2..11).
@@ -210,47 +209,19 @@ extend Builder {
     fn emit_gap_vertical(self: &mut Self, from: u32, to: u32) {
         let mut segs = Vector::<TriviaSeg>::new();
         self.scan_gap(from, to, &mut segs);
-        let mut i: usize = 0;
-        while i < segs.len() && segs.at(i).trailing {
-            let sg = *segs.at(i);
-            self.st.push(self.p.txt(" "));
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
-            i = i + 1;
-        }
+        let i = self.push_trailing(&segs);
         // Separation after the previous element (before the first leading seg or the next element).
-        let mut blank = false;
-        if i < segs.len() {
-            blank = segs.at(i).blank_before;
+        let blank = if i < segs.len() {
+            segs.at(i).blank_before;
         } else {
-            blank = self.count_gap_newlines(from, to) >= 2;
-        }
+            self.count_gap_newlines(from, to) >= 2;
+        };
         if blank {
             self.st.push(self.p.blankline());
         } else {
             self.st.push(self.p.hardline());
         }
-        while i < segs.len() {
-            let sg = *segs.at(i);
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
-            let mut nb = false;
-            if i + 1 < segs.len() {
-                nb = segs.at(i + 1).blank_before;
-            } else {
-                nb = self.count_gap_newlines(sg.end, to) >= 2;
-            }
-            if nb {
-                self.st.push(self.p.blankline());
-            } else {
-                self.st.push(self.p.hardline());
-            }
-            i = i + 1;
-        }
+        self.push_leading(&segs, i, to);
     }
 
     // Leading trivia at the start of a braced body or file: each segment on its own line, followed by
@@ -258,18 +229,39 @@ extend Builder {
     fn emit_lead_list(self: &mut Self, from: u32, to: u32) {
         let mut segs = Vector::<TriviaSeg>::new();
         self.scan_gap(from, to, &mut segs);
-        for k in 0..segs.len() {
+        self.push_leading(&segs, 0, to);
+    }
+
+    // Push trivia segment `sg`; a comment (not an attribute) counts toward `emitted_trivia`.
+    fn push_seg(self: &mut Self, sg: &TriviaSeg) {
+        self.st.push(self.p.span(sg.start, sg.end));
+        if !sg.is_attr {
+            self.emitted_trivia = self.emitted_trivia + 1;
+        }
+    }
+
+    // Push the trailing segments that open `segs`, each after a space; the index of the first other one.
+    fn push_trailing(self: &mut Self, segs: &Vector<TriviaSeg>) usize {
+        let mut i: usize = 0;
+        while i < segs.len() && segs.at(i).trailing {
+            self.st.push(self.p.txt(" "));
+            self.push_seg(segs.at(i));
+            i = i + 1;
+        }
+        return i;
+    }
+
+    // Push segs[i..] each on its own line, each followed by its separation (a blank line or a line
+    // break) from what comes next, up to `to`.
+    fn push_leading(self: &mut Self, segs: &Vector<TriviaSeg>, i: usize, to: u32) {
+        for k in i..segs.len() {
             let sg = *segs.at(k);
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
-            let mut nb = false;
-            if k + 1 < segs.len() {
-                nb = segs.at(k + 1).blank_before;
+            self.push_seg(&sg);
+            let nb = if k + 1 < segs.len() {
+                segs.at(k + 1).blank_before;
             } else {
-                nb = self.count_gap_newlines(sg.end, to) >= 2;
-            }
+                self.count_gap_newlines(sg.end, to) >= 2;
+            };
             if nb {
                 self.st.push(self.p.blankline());
             } else {
@@ -291,10 +283,7 @@ extend Builder {
             } else {
                 self.st.push(self.p.hardline());
             }
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
+            self.push_seg(&sg);
         }
     }
 
@@ -329,7 +318,6 @@ extend Builder {
                 return PREC_PRIMARY;
             },
         };
-        return PREC_PRIMARY;
     }
 
     fn b_expr_prec(self: &mut Self, id: NodeId, min_prec: i32) d::DocId {
@@ -339,8 +327,7 @@ extend Builder {
             self.st.push(self.p.txt("("));
             self.st.push(e);
             self.st.push(self.p.txt(")"));
-            let r = self.cat(v);
-            return r;
+            return self.cat(v);
         }
         return e;
     }
@@ -358,25 +345,11 @@ extend Builder {
     fn push_gap_inline(self: &mut Self, from: u32, to: u32, sep: d::DocId) {
         let mut segs = Vector::<TriviaSeg>::new();
         self.scan_gap(from, to, &mut segs);
-        let mut i: usize = 0;
-        while i < segs.len() && segs.at(i).trailing {
-            let sg = *segs.at(i);
-            self.st.push(self.p.txt(" "));
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
-            i = i + 1;
-        }
+        let i = self.push_trailing(&segs);
         self.st.push(sep);
-        while i < segs.len() {
-            let sg = *segs.at(i);
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
+        for k in i..segs.len() {
+            self.push_seg(segs.at(k));
             self.st.push(self.p.hardline());
-            i = i + 1;
         }
     }
 
@@ -492,10 +465,7 @@ extend Builder {
             } else {
                 self.st.push(self.p.hardline());
             }
-            self.st.push(self.p.span(sg.start, sg.end));
-            if !sg.is_attr {
-                self.emitted_trivia = self.emitted_trivia + 1;
-            }
+            self.push_seg(&sg);
         }
         let ic = self.cat(inner);
         self.st.truncate(elems);
@@ -526,7 +496,7 @@ extend Builder {
             self.st.push(self.st[elems + i]);
         }
         if trailing_comma {
-            self.st.push(self.p.ifbreak(",", false));
+            self.st.push(self.p.ifbreak(","));
         }
         let ic = self.cat(inner);
         self.st.truncate(elems);
@@ -606,29 +576,7 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_TYPE_PATH => {
-                let parts = n.as_data.type_path.parts;
-                for i in 0..parts.len {
-                    if i > 0 {
-                        self.st.push(self.p.txt("::"));
-                    }
-                    let __h = self.list_at(parts, i);
-                    self.st.push(self.node_text(__h));
-                }
-                let args = n.as_data.type_path.args;
-                if args.len > 0 {
-                    let az = self.st.len();
-                    for i in 0..args.len {
-                        let a = self.list_at(args, i);
-                        if self.nd(a).kind == NodeKind::NODE_LITERAL {
-                            self.st.push(self.node_text(a));
-                        } else if self.fmt_const_arg(a) {
-                            self.st.push(self.b_const_arg(a));
-                        } else {
-                            self.st.push(self.b_type(a));
-                        }
-                    }
-                    self.st.push(self.b_comma_list("<", az, ">", false));
-                }
+                self.b_type_path(n.as_data.type_path, false);
             },
             NODE_POINTER_TYPE => {
                 if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
@@ -709,8 +657,7 @@ extend Builder {
                 self.st.push(self.node_text(id));
             },
         };
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // Return types: one type bare, several as "(A, B)".
@@ -722,8 +669,7 @@ extend Builder {
         }
         let ts = self.st.len();
         self.b_each(rets, 1);
-        let r = self.b_comma_list("(", ts, ")", false);
-        return r;
+        return self.b_comma_list("(", ts, ")", false);
     }
 
     fn b_param(self: &mut Self, id: NodeId) d::DocId {
@@ -731,8 +677,7 @@ extend Builder {
         let v = self.st.len();
         if n.kind != NodeKind::NODE_PARAMETER {
             // Function-type params may be bare types.
-            let r0 = self.b_type(id);
-            return r0;
+            return self.b_type(id);
         }
         if n.as_data.parameter.is_mutable {
             self.st.push(self.p.txt("mut "));
@@ -746,8 +691,7 @@ extend Builder {
         } else if n.as_data.parameter.ty != NODE_NONE {
             self.st.push(self.b_type(n.as_data.parameter.ty));
         }
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_generic_param(self: &mut Self, id: NodeId) d::DocId {
@@ -764,20 +708,13 @@ extend Builder {
         }
         if g.bounds.len > 0 {
             self.st.push(self.p.txt(": "));
-            for i in 0..g.bounds.len {
-                if i > 0 {
-                    self.st.push(self.p.txt(" + "));
-                }
-                let __h = self.list_at(g.bounds, i);
-                self.st.push(self.b_type(__h));
-            }
+            self.b_bounds(g.bounds);
         }
         if g.default_type != NODE_NONE {
             self.st.push(self.p.txt(" = "));
             self.st.push(self.b_type(g.default_type));
         }
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // `for<'a, 'b> `: the higher-ranked prefix of a bound, held in the lifetime side table.
@@ -874,8 +811,7 @@ extend Builder {
                 self.st.push(self.node_text(id));
             },
         };
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // A pattern head (`Option::Some`, `Some`): identifier or type path.
@@ -1078,8 +1014,7 @@ extend Builder {
                     } else {
                         self.st.push(self.b_block(c.body));
                     }
-                    let rc = self.cat(v);
-                    return rc;
+                    return self.cat(v);
                 }
                 let np = self.st.len() - ps;
                 if np == 0 {
@@ -1221,8 +1156,7 @@ extend Builder {
                 self.st.push(self.node_text(id));
             },
         };
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // A type path in EXPRESSION position (struct initializer heads): generic args need the turbofish
@@ -1233,32 +1167,37 @@ extend Builder {
             return self.b_type(id);
         }
         let v = self.st.len();
-        let parts = n.as_data.type_path.parts;
-        for i in 0..parts.len {
+        self.b_type_path(n.as_data.type_path, true);
+        return self.cat(v);
+    }
+
+    // Push type path `tp`: its parts joined by `::`, then its generic arguments, after a `::` when
+    // `turbofish`.
+    fn b_type_path(self: &mut Self, tp: TypePathData, turbofish: bool) {
+        for i in 0..tp.parts.len {
             if i > 0 {
                 self.st.push(self.p.txt("::"));
             }
-            let __h = self.list_at(parts, i);
-            self.st.push(self.node_text(__h));
+            self.st.push(self.node_text(self.list_at(tp.parts, i)));
         }
-        let args = n.as_data.type_path.args;
-        if args.len > 0 {
+        if tp.args.len == 0 {
+            return;
+        }
+        if turbofish {
             self.st.push(self.p.txt("::"));
-            let az = self.st.len();
-            for i in 0..args.len {
-                let a = self.list_at(args, i);
-                if self.nd(a).kind == NodeKind::NODE_LITERAL {
-                    self.st.push(self.node_text(a));
-                } else if self.fmt_const_arg(a) {
-                    self.st.push(self.b_const_arg(a));
-                } else {
-                    self.st.push(self.b_type(a));
-                }
-            }
-            self.st.push(self.b_comma_list("<", az, ">", false));
         }
-        let r = self.cat(v);
-        return r;
+        let az = self.st.len();
+        for i in 0..tp.args.len {
+            let a = self.list_at(tp.args, i);
+            if self.nd(a).kind == NodeKind::NODE_LITERAL {
+                self.st.push(self.node_text(a));
+            } else if self.fmt_const_arg(a) {
+                self.st.push(self.b_const_arg(a));
+            } else {
+                self.st.push(self.b_type(a));
+            }
+        }
+        self.st.push(self.b_comma_list("<", az, ">", false));
     }
 
     // A const-generic argument written as an expression. It reaches here as an ordinary expression node
@@ -1301,7 +1240,7 @@ extend Builder {
             }
             self.st.push(self.st[fz + i]);
         }
-        self.st.push(self.p.ifbreak(",", false));
+        self.st.push(self.p.ifbreak(","));
         let ic = self.cat(inner);
         self.st.truncate(fz);
         self.st.push(self.p.txt("{"));
@@ -1313,115 +1252,59 @@ extend Builder {
     }
 
     fn op_text(self: &mut Self, op: tt::TokenType) d::DocId {
-        switch op {
-            Plus => {
-                return self.p.txt("+");
-            },
-            Minus => {
-                return self.p.txt("-");
-            },
-            Star => {
-                return self.p.txt("*");
-            },
-            Slash => {
-                return self.p.txt("/");
-            },
-            Percent => {
-                return self.p.txt("%");
-            },
-            EqualEqual => {
-                return self.p.txt("==");
-            },
-            BangEqual => {
-                return self.p.txt("!=");
-            },
-            LessThan => {
-                return self.p.txt("<");
-            },
-            LessThanEqual => {
-                return self.p.txt("<=");
-            },
-            GreaterThan => {
-                return self.p.txt(">");
-            },
-            GreaterThanEqual => {
-                return self.p.txt(">=");
-            },
-            AmpersandAmpersand => {
-                return self.p.txt("&&");
-            },
-            PipePipe => {
-                return self.p.txt("||");
-            },
-            Ampersand => {
-                return self.p.txt("&");
-            },
-            Pipe => {
-                return self.p.txt("|");
-            },
-            Caret => {
-                return self.p.txt("^");
-            },
-            LeftShift => {
-                return self.p.txt("<<");
-            },
-            RightShift => {
-                return self.p.txt(">>");
-            },
-            Equal => {
-                return self.p.txt("=");
-            },
-            PlusEqual => {
-                return self.p.txt("+=");
-            },
-            MinusEqual => {
-                return self.p.txt("-=");
-            },
-            StarEqual => {
-                return self.p.txt("*=");
-            },
-            SlashEqual => {
-                return self.p.txt("/=");
-            },
-            PercentEqual => {
-                return self.p.txt("%=");
-            },
-            AmpersandEqual => {
-                return self.p.txt("&=");
-            },
-            PipeEqual => {
-                return self.p.txt("|=");
-            },
-            CaretEqual => {
-                return self.p.txt("^=");
-            },
-            LeftShiftEqual => {
-                return self.p.txt("<<=");
-            },
-            RightShiftEqual => {
-                return self.p.txt(">>=");
-            },
-            _ => {
-                // Every binary and assignment operator the parser produces has a spelling above; the
-                // output is not re-parsed, so a missing one must stop the formatter, not print garbage.
-                panic("fmt: operator token without a spelling");
-            },
+        let t = switch op {
+            Plus => "+",
+            Minus => "-",
+            Star => "*",
+            Slash => "/",
+            Percent => "%",
+            EqualEqual => "==",
+            BangEqual => "!=",
+            LessThan => "<",
+            LessThanEqual => "<=",
+            GreaterThan => ">",
+            GreaterThanEqual => ">=",
+            AmpersandAmpersand => "&&",
+            PipePipe => "||",
+            Ampersand => "&",
+            Pipe => "|",
+            Caret => "^",
+            LeftShift => "<<",
+            RightShift => ">>",
+            Equal => "=",
+            PlusEqual => "+=",
+            MinusEqual => "-=",
+            StarEqual => "*=",
+            SlashEqual => "/=",
+            PercentEqual => "%=",
+            AmpersandEqual => "&=",
+            PipeEqual => "|=",
+            CaretEqual => "^=",
+            LeftShiftEqual => "<<=",
+            RightShiftEqual => ">>=",
+            _ => "",
         };
+        // Every binary and assignment operator the parser produces has a spelling above; the output
+        // is not re-parsed, so a missing one must stop the formatter, not print garbage.
+        if t.len() == 0 {
+            panic("fmt: operator token without a spelling");
+        }
+        return self.p.txt(t);
+    }
+
+    // The types of `l` joined by ` + ` (a bound list).
+    fn b_bounds(self: &mut Self, l: NodeList) {
+        for i in 0..l.len {
+            if i > 0 {
+                self.st.push(self.p.txt(" + "));
+            }
+            self.st.push(self.b_type(self.list_at(l, i)));
+        }
     }
 
     fn stmt_starts_with(self: &Self, id: NodeId, kw: str) bool {
         let s = self.nd(id).span;
-        if (s.end - s.start) as usize < kw.len() {
-            return false;
-        }
-        let mut i: usize = 0;
-        while i < kw.len() {
-            if self.src.byte_at(s.start as usize + i) != kw.byte_at(i) {
-                return false;
-            }
-            i = i + 1;
-        }
-        return true;
+        return self.src.slice(s.start as usize, s.end as usize).starts_with(kw);
     }
 
     fn b_stmt(self: &mut Self, id: NodeId) d::DocId {
@@ -1511,7 +1394,10 @@ extend Builder {
             NODE_DEFER => {
                 self.st.push(self.p.txt("defer "));
                 self.st.push(self.b_expr(n.as_data.single.value));
-                self.st.push(self.p.txt(";"));
+                // A block operand ends the statement: `defer { .. };` does not parse.
+                if self.nd(n.as_data.single.value).kind != NodeKind::NODE_BLOCK {
+                    self.st.push(self.p.txt(";"));
+                }
             },
             NODE_LAUNCH => {
                 // Sugar marker (pre-desugar): SingleData wraps the placeholder call; print its sole operand.
@@ -1607,8 +1493,7 @@ extend Builder {
                 self.st.push(self.p.txt(";"));
             },
         };
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_if(self: &mut Self, id: NodeId) d::DocId {
@@ -1623,8 +1508,7 @@ extend Builder {
             self.st.push(self.p.txt(" else "));
             self.st.push(self.b_else(f.else_branch));
         }
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // An else branch: `else if`, `else if let`, or a block.
@@ -1682,30 +1566,9 @@ extend Builder {
         }
         self.st.push(self.b_expr(m.value));
         self.st.push(self.p.txt(" {"));
-        let body = self.st.len();
-        let mut prev_end = 0u32;
-        for i in 0..m.arms.len {
-            let arm = self.list_at(m.arms, i);
-            let asp = self.nd(arm).span;
-            if i == 0 {
-                self.st.push(self.p.hardline());
-                let floor = self.item_gap_floor(n.span.start, asp.start);
-                self.emit_lead_list(floor, asp.start);
-            } else {
-                self.emit_gap_vertical(prev_end, asp.start);
-            }
-            self.st.push(self.b_match_arm(arm));
-            prev_end = asp.end;
-        }
-        if m.arms.len > 0 {
-            self.emit_tail_list(prev_end, n.span.end - 1);
-            let ic = self.cat(body);
-            self.st.push(self.p.indent(ic));
-            self.st.push(self.p.hardline());
-        }
+        self.b_vertical(m.arms, n.span, 0);
         self.st.push(self.p.txt("}"));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // `select { .. }` (sugar marker, pre-desugar). Laid out like `switch`, but its arms carry no separator and
@@ -1715,30 +1578,9 @@ extend Builder {
         let arms = n.as_data.block.statements;
         let v = self.st.len();
         self.st.push(self.p.txt("select {"));
-        let body = self.st.len();
-        let mut prev_end = 0u32;
-        for i in 0..arms.len {
-            let arm = self.list_at(arms, i);
-            let asp = self.nd(arm).span;
-            if i == 0 {
-                self.st.push(self.p.hardline());
-                let floor = self.item_gap_floor(n.span.start, asp.start);
-                self.emit_lead_list(floor, asp.start);
-            } else {
-                self.emit_gap_vertical(prev_end, asp.start);
-            }
-            self.st.push(self.b_select_arm(arm));
-            prev_end = asp.end;
-        }
-        if arms.len > 0 {
-            self.emit_tail_list(prev_end, n.span.end - 1);
-            let ic = self.cat(body);
-            self.st.push(self.p.indent(ic));
-            self.st.push(self.p.hardline());
-        }
+        self.b_vertical(arms, n.span, 1);
         self.st.push(self.p.txt("}"));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_select_arm(self: &mut Self, id: NodeId) d::DocId {
@@ -1771,8 +1613,7 @@ extend Builder {
         };
         self.st.push(self.p.txt(" => "));
         self.st.push(self.b_block(a.body));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_match_arm(self: &mut Self, id: NodeId) d::DocId {
@@ -1791,8 +1632,7 @@ extend Builder {
             self.st.push(self.b_expr(a.body));
         }
         self.st.push(self.p.txt(","));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // A block: `{}` when empty (dangling comments kept), otherwise always broken.
@@ -1838,10 +1678,7 @@ extend Builder {
                     } else {
                         self.st.push(self.p.hardline());
                     }
-                    self.st.push(self.p.span(sg.start, sg.end));
-                    if !sg.is_attr {
-                        self.emitted_trivia = self.emitted_trivia + 1;
-                    }
+                    self.push_seg(&sg);
                 }
                 let ic = self.cat(inner);
                 self.st.push(self.p.indent(ic));
@@ -1849,8 +1686,7 @@ extend Builder {
             }
         }
         self.st.push(self.p.txt("}"));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // The comment tokens inside `s`: an item printed verbatim prints them with its text. The lexer
@@ -1940,13 +1776,7 @@ extend Builder {
                         let w = self.nd(self.list_at(f.where_clause, i)).as_data.where_predicate;
                         self.st.push(self.b_type(w.ty));
                         self.st.push(self.p.txt(": "));
-                        for k in 0..w.bounds.len {
-                            if k > 0 {
-                                self.st.push(self.p.txt(" + "));
-                            }
-                            let __h = self.list_at(w.bounds, k);
-                            self.st.push(self.b_type(__h));
-                        }
+                        self.b_bounds(w.bounds);
                     }
                 }
                 if f.body != NODE_NONE {
@@ -1986,31 +1816,15 @@ extend Builder {
                     }
                 } else {
                     self.st.push(self.p.txt(" {"));
-                    let body = self.st.len();
-                    let first_sp = self.nd(self.list_at(a.members, 0)).span;
-                    let mut prev_end = first_sp.start;
-                    for i in 0..a.members.len {
-                        let mid = self.list_at(a.members, i);
-                        let msp = self.nd(mid).span;
-                        if i == 0 {
-                            self.st.push(self.p.hardline());
-                            let floor = self.item_gap_floor(n.span.start, msp.start);
-                            self.emit_lead_list(floor, msp.start);
-                        } else {
-                            self.emit_gap_vertical(prev_end, msp.start);
-                        }
+                    self.b_vertical(
+                        a.members,
+                        n.span,
                         if n.kind == NodeKind::NODE_ENUM {
-                            self.st.push(self.b_variant(mid));
+                            2;
                         } else {
-                            self.st.push(self.b_field(mid));
-                        }
-                        self.st.push(self.p.txt(","));
-                        prev_end = msp.end;
-                    }
-                    self.emit_tail_list(prev_end, n.span.end - 1);
-                    let ic = self.cat(body);
-                    self.st.push(self.p.indent(ic));
-                    self.st.push(self.p.hardline());
+                            3;
+                        },
+                    );
                     self.st.push(self.p.txt("}"));
                 }
             },
@@ -2024,13 +1838,7 @@ extend Builder {
                 self.b_generics_lt(unsafe (*self.ast).lifetimes_of(id), itf.generics);
                 if itf.bounds.len > 0 {
                     self.st.push(self.p.txt(": "));
-                    for i in 0..itf.bounds.len {
-                        if i > 0 {
-                            self.st.push(self.p.txt(" + "));
-                        }
-                        let __h = self.list_at(itf.bounds, i);
-                        self.st.push(self.b_type(__h));
-                    }
+                    self.b_bounds(itf.bounds);
                 }
                 self.st.push(self.p.txt(" "));
                 self.st.push(self.b_item_body(itf.items, n.span));
@@ -2132,8 +1940,7 @@ extend Builder {
                 self.st.push(self.node_text(id));
             },
         };
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_field(self: &mut Self, id: NodeId) d::DocId {
@@ -2145,8 +1952,7 @@ extend Builder {
         self.st.push(self.node_text(f.name));
         self.st.push(self.p.txt(": "));
         self.st.push(self.b_type(f.ty));
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     fn b_variant(self: &mut Self, id: NodeId) d::DocId {
@@ -2174,8 +1980,7 @@ extend Builder {
             self.st.push(self.p.txt(" = "));
             self.st.push(self.b_expr(va.value));
         }
-        let r = self.cat(v);
-        return r;
+        return self.cat(v);
     }
 
     // The `{ items }` body of interfaces, extends, extern blocks: items with gap trivia, always broken.
@@ -2183,60 +1988,64 @@ extend Builder {
         let v = self.st.len();
         if items.len == 0 {
             self.st.push(self.p.txt("{}"));
-            let r0 = self.cat(v);
-            return r0;
+            return self.cat(v);
         }
         self.st.push(self.p.txt("{"));
+        self.b_vertical(items, outer, 4);
+        self.st.push(self.p.txt("}"));
+        return self.cat(v);
+    }
+
+    // The nodes of `l` one per line inside the braces of `outer` (its `{` already pushed), each after
+    // its leading trivia, then the trailing trivia, all indented, and a line break. `what`: 0 match
+    // arm, 1 select arm, 2 variant, 3 field (2 and 3 end with ','), 4 item. Nothing for an empty list.
+    fn b_vertical(self: &mut Self, l: NodeList, outer: tok::Span, what: i32) {
+        if l.len == 0 {
+            return;
+        }
         let body = self.st.len();
         let mut prev_end = 0u32;
-        for i in 0..items.len {
-            let iid = self.list_at(items, i);
-            let isp = self.nd(iid).span;
+        for i in 0..l.len {
+            let id = self.list_at(l, i);
+            let sp = self.nd(id).span;
             if i == 0 {
                 self.st.push(self.p.hardline());
-                let floor = self.item_gap_floor(outer.start, isp.start);
-                self.emit_lead_list(floor, isp.start);
+                let floor = self.item_gap_floor(outer.start, sp.start);
+                self.emit_lead_list(floor, sp.start);
             } else {
-                self.emit_gap_vertical(prev_end, isp.start);
+                self.emit_gap_vertical(prev_end, sp.start);
             }
-            self.st.push(self.b_item(iid));
-            prev_end = isp.end;
+            let doc = if what == 0 {
+                self.b_match_arm(id);
+            } else if what == 1 {
+                self.b_select_arm(id);
+            } else if what == 2 {
+                self.b_variant(id);
+            } else if what == 3 {
+                self.b_field(id);
+            } else {
+                self.b_item(id);
+            };
+            self.st.push(doc);
+            if what == 2 || what == 3 {
+                self.st.push(self.p.txt(","));
+            }
+            prev_end = sp.end;
         }
         self.emit_tail_list(prev_end, outer.end - 1);
         let ic = self.cat(body);
         self.st.push(self.p.indent(ic));
         self.st.push(self.p.hardline());
-        self.st.push(self.p.txt("}"));
-        let r = self.cat(v);
-        return r;
     }
 
     // Find the `{` between `from` and `to` so leading trivia scans start after it. Scans FORWARD and
     // skips comment interiors: the first member's leading comment may itself contain a brace, and a
     // backward scan would land inside it, dropping the comment from the lead-trivia window.
     fn item_gap_floor(self: &Self, from: u32, to: u32) u32 {
-        let mut i = from as usize;
-        while i < to as usize {
-            let c = self.src.byte_at(i);
-            if c == b'/' && i + 1 < to as usize && self.src.byte_at(i + 1) == b'/' {
-                while i < to as usize && self.src.byte_at(i) != b'\n' {
-                    i = i + 1;
-                }
-                continue;
-            }
-            if c == b'/' && i + 1 < to as usize && self.src.byte_at(i + 1) == b'*' {
-                i = i + 2;
-                while i + 1 < to as usize && !(self.src.byte_at(i) == b'*' && self.src.byte_at(i + 1) == b'/') {
-                    i = i + 1;
-                }
-                i = i + 2;
-                continue;
-            }
-            if c == b'{' {
-                return (i + 1) as u32;
-            }
-            i = i + 1;
+        let c = self.find_close(from, to, b'{');
+        if c == from && (from >= to || self.src.byte_at(from as usize) != b'{') {
+            return from;
         }
-        return from;
+        return c + 1;
     }
 }

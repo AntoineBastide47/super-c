@@ -9,6 +9,7 @@ import stdio;
 import stdlib;
 import driver_shim as shim;
 import std::parallel::platform as platform;
+import lsp::json as ljson;
 
 // Allocation statistics of the generated runtime (super_rt.c, see driver::rt_c).
 extern "C" {
@@ -283,22 +284,6 @@ fn push_mib(out: &mut String, bytes: u64) {
     out.push_f64_prec(bytes as f64 / 1048576.0, 3);
 }
 
-fn push_json_str(out: &mut String, s: str) {
-    out.push_byte(b'"');
-    for i in 0..s.len() {
-        let c = s[i];
-        if c == b'"' || c == b'\\' {
-            out.push_byte(b'\\');
-            out.push_byte(c);
-        } else if c < 32 {
-            out.push_byte(b' ');
-        } else {
-            out.push_byte(c);
-        }
-    }
-    out.push_byte(b'"');
-}
-
 fn push_bool(out: &mut String, v: bool) {
     if v {
         out.push_str("true");
@@ -326,9 +311,9 @@ pub fn json(g: &BuildStats, out: &mut String) {
     out.push_str("{\"v\":1,\"ok\":");
     push_bool(out, g.rc == 0);
     out.push_str(",\"profile\":");
-    push_json_str(out, g.profile.as_str());
+    ljson::dump_escaped(g.profile.as_str(), out);
     out.push_str(",\"bin\":");
-    push_json_str(out, g.bin.as_str());
+    ljson::dump_escaped(g.bin.as_str(), out);
     out.push_str(",\"jobs\":");
     out.push_u64(g.jobs);
     out.push_str(",\"skip_emit\":");
@@ -340,13 +325,13 @@ pub fn json(g: &BuildStats, out: &mut String) {
     out.push_str(",\"linked\":");
     push_bool(out, g.linked);
     out.push_str(",\"cc_version\":");
-    push_json_str(out, g.cc_version.as_str());
+    ljson::dump_escaped(g.cc_version.as_str(), out);
     out.push_str(",\"ccache\":");
     push_bool(out, g.ccache);
     out.push_str(",\"lto\":");
-    push_json_str(out, g.lto.as_str());
+    ljson::dump_escaped(g.lto.as_str(), out);
     out.push_str(",\"lto_reason\":");
-    push_json_str(out, g.lto_reason.as_str());
+    ljson::dump_escaped(g.lto_reason.as_str(), out);
     out.push_str(",\"ccache_disabled\":");
     push_bool(out, stdlib::getenv("CCACHE_DISABLE") != null);
     out.push_str(",\"emit_cache\":");
@@ -360,7 +345,7 @@ pub fn json(g: &BuildStats, out: &mut String) {
         if k != 1 {
             out.push_byte(b',');
         }
-        push_json_str(out, unsafe PHASE_NAMES[k - 1]);
+        ljson::dump_escaped(unsafe PHASE_NAMES[k - 1], out);
         out.push_byte(b':');
         push_ms(out, g.t[k] - g.t[k - 1]);
     }
@@ -387,7 +372,7 @@ pub fn json(g: &BuildStats, out: &mut String) {
         }
         out.push_byte(b'{');
         out.push_str("\"at\":");
-        push_json_str(out, unsafe MEM_NAMES[k]);
+        ljson::dump_escaped(unsafe MEM_NAMES[k], out);
         out.push_str(",\"rss_mib\":");
         push_mib(out, g.rss[k] as u64);
         out.push_str(",\"alloc_n\":");
@@ -412,7 +397,7 @@ pub fn json(g: &BuildStats, out: &mut String) {
                 out.push_byte(b',');
             }
             out.push_str("{\"from\":");
-            push_json_str(out, unsafe MEM_NAMES[e]);
+            ljson::dump_escaped(unsafe MEM_NAMES[e], out);
             out.push_str(",\"n\":");
             out.push_u64(g.live[(k * EPOCHS + e) * 2]);
             out.push_str(",\"mib\":");

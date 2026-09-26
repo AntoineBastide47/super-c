@@ -159,93 +159,69 @@ extend BcStats {
     pub fn report(self: &Self, ctx: &BorrowCtx, out: &mut String) {
         let names: []str = BP_NAMES;
         self.pr.report_regions(out, "borrow-probe", names);
-        out.push_str("  bodies ");
-        out.push_u64(self.t[BT_BODIES]);
-        out.push_str(": every stage skipped ");
-        out.push_u64(self.t[BT_BORING]);
-        out.push_str(", loans skipped ");
-        out.push_u64(self.t[BT_LOAN_SKIP]);
-        out.push_str(", held by generics ");
-        out.push_u64(self.t[BT_GENERIC_HELD]);
-        out.push_str(", scratch trims ");
-        out.push_u64(self.t[BT_TRIMS]);
-        out.push_str(", moves skipped ");
-        out.push_u64(self.t[BT_MV_SKIP]);
-        out.push_str(", liveness skipped ");
-        out.push_u64(self.t[BT_LV_SKIP]);
-        out.push_str(", cfg skipped ");
-        out.push_u64(self.t[BT_CFG_SKIP]);
-        out.push_str(", elaborated ");
-        out.push_u64(self.t[BT_ELAB]);
-        out.push_str(" (");
-        out.push_u64(self.t[BT_DROPS]);
-        out.push_str(" drops)\n  sizes: blocks ");
-        out.push_u64(self.t[BT_BLOCKS]);
-        out.push_str(", statements ");
-        out.push_u64(self.t[BT_STMTS]);
-        out.push_str(", locals ");
-        out.push_u64(self.t[BT_LOCALS]);
-        out.push_str(", places ");
-        out.push_u64(self.t[BT_PLACES]);
-        out.push_str(", projections ");
-        out.push_u64(self.t[BT_PROJS]);
-        out.push_str(", points ");
-        out.push_u64(self.t[BT_POINTS]);
-        out.push_str(", move paths ");
-        out.push_u64(self.t[BT_PATHS]);
-        out.push_str(", loans ");
-        out.push_u64(self.t[BT_LOANS]);
-        out.push_str("\n  lowered: ");
-        out.push_u64(self.t[BT_IR_BYTES] >> 10);
-        out.push_str(" KiB of Core IR, ");
-        out.push_u64(self.t[BT_TY_SLOTS]);
-        out.push_str(" type slots; tape ");
-        out.push_u64(self.t[BT_TAPE]);
-        out.push_str(" entries (");
-        out.push_u64(self.t[BT_TAPE] * 8 >> 10);
-        out.push_str(" KiB):");
+        let t = &self.t;
+        out.format_into(
+            "  bodies {}: every stage skipped {}, loans skipped {}, held by generics {}, scratch trims {}, moves skipped {}, liveness skipped {}, cfg skipped {}, elaborated {} ({} drops)\n",
+            t[BT_BODIES],
+            t[BT_BORING],
+            t[BT_LOAN_SKIP],
+            t[BT_GENERIC_HELD],
+            t[BT_TRIMS],
+            t[BT_MV_SKIP],
+            t[BT_LV_SKIP],
+            t[BT_CFG_SKIP],
+            t[BT_ELAB],
+            t[BT_DROPS],
+        );
+        out.format_into(
+            "  sizes: blocks {}, statements {}, locals {}, places {}, projections {}, points {}, move paths {}, loans {}\n",
+            t[BT_BLOCKS],
+            t[BT_STMTS],
+            t[BT_LOCALS],
+            t[BT_PLACES],
+            t[BT_PROJS],
+            t[BT_POINTS],
+            t[BT_PATHS],
+            t[BT_LOANS],
+        );
+        out.format_into(
+            "  lowered: {} KiB of Core IR, {} type slots; tape {} entries ({} KiB):",
+            t[BT_IR_BYTES] >> 10,
+            t[BT_TY_SLOTS],
+            t[BT_TAPE],
+            t[BT_TAPE] * 8 >> 10,
+        );
         for k in 0..TP_KINDS {
             if self.tape[k] == 0 {
                 continue;
             }
-            out.push_str(" ");
-            out.push_u64(k as u64);
-            out.push_str("=");
-            out.push_u64(self.tape[k]);
+            out.format_into(" {}={}", k, self.tape[k]);
         }
         out.push_str("\n  slowest bodies (module:node ms blocks/points):");
         for k in 0..TOP_N {
             if self.top_ns[k] == 0 {
                 break;
             }
-            out.push_str(" ");
-            out.push_u64(self.top_id[k] >> 32);
-            out.push_str(":");
-            out.push_u64(self.top_id[k] & 0xFFFFFFFFu64);
-            out.push_str(" ");
-            out.push_f64_prec(self.top_ns[k] as f64 / 1000000.0, 2);
-            out.push_str(" ");
-            out.push_u64(self.top_sz[k] >> 32);
-            out.push_str("/");
-            out.push_u64(self.top_sz[k] & 0xFFFFFFFFu64);
+            out.format_into(
+                " {}:{} {:.2} {}/{}",
+                self.top_id[k] >> 32,
+                self.top_id[k] & 0xFFFFFFFFu64,
+                self.top_ns[k] as f64 / 1000000.0,
+                self.top_sz[k] >> 32,
+                self.top_sz[k] & 0xFFFFFFFFu64,
+            );
         }
-        out.push_str("\n  retained scratch: forest ");
-        out.push_u64(ctx.forest.scratch_bytes() >> 10);
-        out.push_str(" KiB, facts ");
-        out.push_u64(ctx.facts.scratch_bytes() >> 10);
-        out.push_str(" KiB, cfg ");
-        out.push_u64(ctx.cfg.scratch_bytes() >> 10);
-        out.push_str(" KiB, liveness ");
-        out.push_u64(ctx.liveness.scratch_bytes() >> 10);
-        out.push_str(" KiB, moves ");
-        out.push_u64(ctx.moves.scratch_bytes() >> 10);
-        out.push_str(" KiB, solver ");
-        out.push_u64(ctx.solver.scratch_bytes() >> 10);
-        out.push_str(" KiB, drops ");
-        out.push_u64(ctx.el.scratch_bytes() >> 10);
-        out.push_str(" KiB, lowerer pool ");
-        out.push_u64(ctx.lower_pool.len() as u64);
-        out.push_str(" entries\n");
+        out.format_into(
+            "\n  retained scratch: forest {} KiB, facts {} KiB, cfg {} KiB, liveness {} KiB, moves {} KiB, solver {} KiB, drops {} KiB, lowerer pool {} entries\n",
+            ctx.forest.scratch_bytes() >> 10,
+            ctx.facts.scratch_bytes() >> 10,
+            ctx.cfg.scratch_bytes() >> 10,
+            ctx.liveness.scratch_bytes() >> 10,
+            ctx.moves.scratch_bytes() >> 10,
+            ctx.solver.scratch_bytes() >> 10,
+            ctx.el.scratch_bytes() >> 10,
+            ctx.lower_pool.len(),
+        );
     }
 }
 
@@ -330,20 +306,13 @@ pub struct BorrowCtx {
 /// bounded by its own needs.
 pub const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
 
-// Heap bytes a pooled Lowerer keeps: its body's pools and its replay tape, the storage that grows
-// with the largest body it lowered.
-const fn lowerer_bytes(lw: &irl::Lowerer) u64 {
-    let b = &lw.body;
-    return (b.locals.capacity() * sizeof(ir::LocalDecl) + b.blocks.capacity() * sizeof(ir::BasicBlock) + b.statements.capacity() * sizeof(ir::Statement) + b.places.capacity() * sizeof(ir::Place) + b.projections.capacity() * sizeof(ir::Projection) + b.operands.capacity() * sizeof(ir::Operand) + b.rvalues.capacity() * sizeof(ir::Rvalue) + b.constants.capacity() * sizeof(ir::Constant) + b.oper_pool.capacity() * sizeof(ir::OperandId) + b.dest_pool.capacity() * sizeof(ir::PlaceId) + b.targ_pool.capacity() * sizeof(TypeId) + b.asms.capacity() * sizeof(ir::AsmRec) + b.asm_spans.capacity() * sizeof(tok::Span) + (b.switch_pool.capacity() + b.user_moves.capacity() + lw.tape.capacity()) * 8) as u64;
-}
-
 extend BorrowCtx {
     /// Heap bytes the analyses, the elaboration and the Lowerer pool keep across bodies (capacity,
     /// not length).
     pub const fn scratch_bytes(self: &Self) u64 {
         let mut pool: u64 = 0;
         for i in 0..self.lower_pool.len() {
-            pool += lowerer_bytes(self.lower_pool.at(i));
+            pool += self.lower_pool.at(i).retained_bytes();
         }
         return pool + self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes() + self.el.scratch_bytes();
     }
@@ -363,6 +332,26 @@ extend BorrowCtx {
         self.lower_pool = Vector::<irl::Lowerer>::new();
         if self.st.pr.on {
             self.st.t[BT_TRIMS] += 1;
+        }
+    }
+
+    /// Build the control-flow graph of `body` unless it already describes it.
+    fn ensure_cfg(self: &mut Self, body: &ir::CoreBody) {
+        if !self.have_cfg {
+            let t = self.st.pr.start();
+            self.cfg.build_into(body);
+            self.have_cfg = true;
+            self.st.pr.stop(BP_CFG, t);
+        }
+    }
+
+    /// Solve the move/init flow of `body` unless it already describes it.
+    fn ensure_moves(self: &mut Self, body: &ir::CoreBody) {
+        if !self.have_moves {
+            let t = self.st.pr.start();
+            self.moves.build_into(body, &self.forest, &self.facts, &self.cfg);
+            self.have_moves = true;
+            self.st.pr.stop(BP_MOVES, t);
         }
     }
 
@@ -535,10 +524,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     // The CFG feeds only those two; a body needing neither never walks it (the solver's early
     // return only stores the stale pointer).
     if lv_need || mv_need {
-        let t2 = ctx.st.pr.start();
-        ctx.cfg.build_into(body);
-        ctx.have_cfg = true;
-        ctx.st.pr.stop(BP_CFG, t2);
+        ctx.ensure_cfg(body);
     }
     if lv_need {
         // Liveness is the only predecessor consumer.
@@ -548,10 +534,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
         ctx.st.pr.stop(BP_LIVE, t3);
     }
     if mv_need {
-        let t4 = ctx.st.pr.start();
-        ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
-        ctx.have_moves = true;
-        ctx.st.pr.stop(BP_MOVES, t4);
+        ctx.ensure_moves(body);
     } else {
         ctx.moves.errs.truncate(0);
     }
@@ -680,18 +663,8 @@ pub fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::Cor
         ow.generate_into(body, &ctx.forest, &mut ctx.facts, false);
         ctx.built = true;
     }
-    if !ctx.have_cfg {
-        let t2 = ctx.st.pr.start();
-        ctx.cfg.build_into(body);
-        ctx.have_cfg = true;
-        ctx.st.pr.stop(BP_CFG, t2);
-    }
-    if !ctx.have_moves {
-        let t4 = ctx.st.pr.start();
-        ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
-        ctx.have_moves = true;
-        ctx.st.pr.stop(BP_MOVES, t4);
-    }
+    ctx.ensure_cfg(body);
+    ctx.ensure_moves(body);
     ird::elaborate_into(ow, body, &ctx.forest, &ctx.facts, &ctx.moves, &mut ctx.el);
     if ctx.validate && !want {
         assert(ctx.el.sched.drops.len() == 0, "a body outside the schedule gate schedules nothing");
@@ -727,9 +700,6 @@ pub fn bc_validate_elaborated(ow: &mut bfx::Owner, body: &ir::CoreBody) {
             v,
             text.as_str(),
         );
-        if ird::last_bad_local() != 0xFFFFFFFFu32 {
-            ird::dump_events(ow, body, ird::last_bad_local());
-        }
         assert(false, "an elaborated body verifies and releases every value once");
     }
 }
@@ -769,11 +739,7 @@ extend tc::TypeChecker {
         } else {
             unsafe (*a).at_const(owner).span;
         };
-        self.errors.emit(
-            sp.start,
-            sp.end - sp.start,
-            format("cannot borrow-check this body: unsupported construct ({})", lw.err),
-        );
+        self.errors.emit_span(sp, format("cannot borrow-check this body: unsupported construct ({})", lw.err));
         self.errors.note(format("this is a compiler limitation; please report it"));
     }
 
@@ -833,7 +799,13 @@ extend tc::TypeChecker {
                 let mut c = bw.body.owner.node;
                 loop {
                     let idx = self.tc_capture_index(c, d);
-                    if idx >= 0 {
+                    // An owning capture the env holds is mutated in place: no `&mut` capture
+                    // (the checker already moved any it borrows into mut_caps).
+                    if idx >= 0 && !self.tc_capture_owns(
+                        unsafe (*self.cur_ast()).type_of(
+                            unsafe (*self.cur_ast()).list(unsafe (*self.cur_ast()).at_const(c).as_data.closure.captures)[idx as usize],
+                        ),
+                    ) {
                         let old = (unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps) as u64;
                         unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
                         let cf = unsafe (*self.cur_ast()).closure_fact_mut(c);
@@ -883,26 +855,8 @@ extend tc::TypeChecker {
     // them under `bc_quiet`). Only USER-consumption moves (CoreBody.user_moves, set by the
     // lowerer at let/return/argument/aggregate/assign positions) are checked, so pattern binds
     // and spill plumbing never fire. Unsafe regions come from the walk's recorded spans; a
-    // `.free()` receiver is exempt like the walk's bc_free_recv.
-    fn bc_ir_free_rules(
-        self: &mut Self,
-        ow: &mut bfx::Owner,
-        body: &ir::CoreBody,
-        seen: &mut Vector<u64>,
-        out: &mut Vector<FlowErr>,
-    ) {
-        // Every rule moves a Free value INTO some local (a binding or a temp), so a body with no
-        // owned-typed local cannot fire any of them: skip the sweep.
-        let mut owned = false;
-        for l in 0..body.locals.len() {
-            if ow.owns(body.owner, body.module, body.locals.at(l).ty) {
-                owned = true;
-                break;
-            }
-        }
-        if !owned {
-            return;
-        }
+    // `.free()` receiver is exempt.
+    fn bc_ir_free_rules(self: &mut Self, body: &ir::CoreBody, seen: &mut Vector<u64>, out: &mut Vector<FlowErr>) {
         // In a closure body, argument locals after the declared parameters are the captures; a
         // whole-binding user move of a Free one is the walk's capture-move error.
         let mut cap_lo: u32 = 0xFFFFFFFFu32;
@@ -930,11 +884,28 @@ extend tc::TypeChecker {
                     self.bc_free_rule_op(body, cap_lo, cap_hi, rv.a, s.span, false, seen, out);
                     self.bc_free_rule_op(body, cap_lo, cap_hi, rv.b, s.span, false, seen, out);
                 } else if k == ir::RV_AGGREGATE || k == ir::RV_CLOSURE {
-                    for i in 0..rv.b {
-                        let oi = body.oper_pool[(rv.a + i) as usize];
-                        if oi != ir::IR_NONE {
-                            self.bc_free_rule_op(body, cap_lo, cap_hi, oi, s.span, false, seen, out);
+                    // A capture taken by pointer (mutated or borrowed) is not a move.
+                    let mut by_ptr: u64 = 0;
+                    if k == ir::RV_CLOSURE && rv.item.node != NODE_NONE {
+                        let cf = unsafe (*self.mod_ast(body.module)).closure_fact(rv.item.node);
+                        if cf != null {
+                            by_ptr = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
                         }
+                    }
+                    for i in 0..rv.b {
+                        if by_ptr != 0 && (by_ptr >> i as u64 & 1u64) != 0 {
+                            continue;
+                        }
+                        self.bc_free_rule_op(
+                            body,
+                            cap_lo,
+                            cap_hi,
+                            body.oper_pool[(rv.a + i) as usize],
+                            s.span,
+                            false,
+                            seen,
+                            out,
+                        );
                     }
                 }
             }
@@ -950,15 +921,19 @@ extend tc::TypeChecker {
                     }
                 }
                 for i in 0..t.args_len {
-                    let oi = body.oper_pool[(t.args_start + i) as usize];
-                    if oi != ir::IR_NONE {
-                        self.bc_free_rule_op(body, cap_lo, cap_hi, oi, t.span, exempt, seen, out);
-                    }
+                    self.bc_free_rule_op(
+                        body,
+                        cap_lo,
+                        cap_hi,
+                        body.oper_pool[(t.args_start + i) as usize],
+                        t.span,
+                        exempt,
+                        seen,
+                        out,
+                    );
                 }
             } else if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT {
-                if t.a != ir::IR_NONE {
-                    self.bc_free_rule_op(body, cap_lo, cap_hi, t.a, t.span, false, seen, out);
-                }
+                self.bc_free_rule_op(body, cap_lo, cap_hi, t.a, t.span, false, seen, out);
             }
         }
     }
@@ -1056,8 +1031,11 @@ extend tc::TypeChecker {
         } else {
             TypeKind::TYPE_ERROR;
         };
-        let deref_of_ind = lik == TypeKind::TYPE_REFERENCE || lik == TypeKind::TYPE_POINTER;
-        if deref_of_ind && (last.kind == ir::PJ_DEREF || last.kind == ir::PJ_INDEX_CONST || last.kind == ir::PJ_INDEX_OP) {
+        // An indexed element of a view (slice, str, Vector: an instance or struct) lives in storage
+        // the view reaches through a pointer; only an array holds its elements in place.
+        let is_index = last.kind == ir::PJ_INDEX_CONST || last.kind == ir::PJ_INDEX_OP;
+        let deref_of_ind = lik == TypeKind::TYPE_REFERENCE || lik == TypeKind::TYPE_POINTER || is_index && (lik == TypeKind::TYPE_INSTANCE || lik == TypeKind::TYPE_STRUCT);
+        if deref_of_ind && (last.kind == ir::PJ_DEREF || is_index) {
             if !in_unsafe && !exempt {
                 let msg = if self.type_at(pl.ty).kind == TypeKind::TYPE_GENERIC {
                     format(
@@ -1080,12 +1058,7 @@ extend tc::TypeChecker {
         if mk == TypeKind::TYPE_POINTER || mk == TypeKind::TYPE_REFERENCE {
             return;
         }
-        let mut has_deref = false;
-        for i in 0..pl.proj_len {
-            if body.projections.at((pl.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                has_deref = true;
-            }
-        }
+        let has_deref = body.place_has_deref(op.data);
         if bk == TypeKind::TYPE_REFERENCE && has_deref {
             if !in_unsafe && !exempt {
                 self.bc_ir_push(
@@ -1142,7 +1115,11 @@ extend tc::TypeChecker {
     ) {
         bc_run_stages(ow, ctx, body);
         let tr = ctx.st.pr.start();
-        self.bc_ir_free_rules(ow, body, seen, out);
+        // Every free rule moves a Free value INTO some local (a binding or a temp), so a body with no
+        // owned-typed local cannot fire any of them.
+        if (ctx.ft & FT_OWNED) != 0 {
+            self.bc_ir_free_rules(body, seen, out);
+        }
         // Capture sites: a move-of-moved AT a closure creation is worded as a capture. Only the
         // move-error wording below reads them, so scan the body only when an error exists at all.
         ctx.cap_spans.truncate(0);

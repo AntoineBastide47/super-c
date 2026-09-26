@@ -218,6 +218,51 @@ fn errors() {
         "struct A { v: i32, }\nstruct B {}\nextend B { fn peek(a: A) i32 { return a.v; } }\n",
         "field 'v' is private",
     );
+    // A pattern that names a field reads it: the same rule as member access, in every pattern form.
+    h::expect_err_msg(
+        "private field in a switch struct pattern",
+        "struct S { v: i32, }\nfn f(s: S) i32 { return switch s { S { v } => v, }; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field in an if-let struct pattern",
+        "struct S { v: i32, pub w: i32, }\nfn f(s: S) i32 { if let S { w, v: x } = s { return w + x; } return 0; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field in a while-let struct pattern",
+        "struct S { v: i32, }\nfn f(o: Option<S>) i32 { while let Some(S { v }) = o { return v; } return 0; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field in a for pattern",
+        "struct S { v: i32, }\nfn f(a: [S; 2]) i32 { let mut n = 0; for S { v } in a { n += v; } return n; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field in a nested struct pattern",
+        "struct S { v: i32, }\nfn f(o: Option<S>) i32 { return switch o { Some(S { v: 1 }) => 1, _ => 0, }; }\n",
+        "field 'v' is private",
+    );
+    h::expect_ok(
+        "a rest pattern names no field",
+        "struct S { v: i32, pub w: i32, }\nfn f(s: S) i32 { return switch s { S { w, .. } => w, }; }\n",
+    );
+    h::expect_ok(
+        "private field in a struct pattern inside the type's extend",
+        "struct S { v: i32, }\nextend S { fn get(self: S) i32 { return switch self { S { v } => v, }; } }\n",
+    );
+    // Patterns name a variant bare; a qualified path gets a direct diagnostic at the qualifier.
+    h::expect_err_msg(
+        "qualified variant in a switch pattern",
+        "enum E { A(i32, i32), B, }\nfn f(e: E) i32 { return switch e { E::A(x, _) => x, _ => 0, }; }\n",
+        "a pattern names a variant without its enum: write 'A', not 'E::A'",
+    );
+    h::expect_err_msg(
+        "qualified variant in an if-let pattern",
+        "enum E { A(i32, i32), B, }\nfn f(e: E) bool { if let E::A(..) = e { return true; } return false; }\n",
+        "a pattern names a variant without its enum: write 'A', not 'E::A'",
+    );
     h::expect_err_msg("non-bool condition", "fn main() i32 { if (1) { } }\n", "must be 'bool'");
     h::expect_err_msg("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
     h::expect_err_msg(
@@ -1063,10 +1108,10 @@ fn closures() {
         "fn eat(s: String) i32 { return s.len() as i32; }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + eat(s);\n  return f(1);\n}\n",
         "cannot move a captured value out of a closure",
     );
-    h::expect_err_msg(
-        "owning closure needs a fn move bound",
+    h::expect_exit(
+        "a closure reading an owning capture borrows it through a plain fn bound",
         "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
-        "does not satisfy bound",
+        3,
     );
     h::expect_ok(
         "owning closure through a fn move bound",
@@ -1077,10 +1122,9 @@ fn closures() {
         "fn use_once<F: fn move(i32) i32>(f: F) i32 { return f(1); }\nfn both<F: fn move(i32) i32>(f: F) i32 { return use_once(f) + use_once(f); }\nfn main() i32 { return both(|x: i32| x + 1); }\n",
         "use of moved value",
     );
-    h::expect_err_msg(
-        "capturing a fixed-size array",
+    h::expect_ok(
+        "capturing a fixed-size array by copy",
         "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n",
-        "closure cannot capture a fixed-size array",
     );
 }
 
@@ -2956,8 +3000,9 @@ fn split_init_reference_to_free() {
 }
 
 // A closure that captures a REFERENCE to an owning value borrows through it: the capture owns
-// nothing, so the closure satisfies a plain `fn(..)` bound (a by-value capture of the owning
-// value would move it into the env and need `fn move`).
+// nothing, so the closure satisfies a plain `fn(..)` bound. A closure that captures the owning value
+// itself borrows it too when it meets a plain `fn(..)` bound (it would move it into the env only for
+// a `fn move` bound).
 @test
 fn closure_reference_capture_is_not_owning() {
     h::expect_exit(
@@ -2965,10 +3010,10 @@ fn closure_reference_capture_is_not_owning() {
         "fn main() i32 {\n    let mut keys = Vector::<u32>::new();\n    keys.push(3);\n    keys.push(1);\n    keys.push(2);\n    let mut idx = Vector::<u32>::new();\n    idx.push(0);\n    idx.push(1);\n    idx.push(2);\n    let kp = &keys;\n    idx.sort_by(|a: &u32, b: &u32| *kp.at(*a as usize) as i32 - *kp.at(*b as usize) as i32);\n    return idx[0] as i32 - 1 + keys.len() as i32 - 3;\n}\n",
         0,
     );
-    h::expect_err_msg(
-        "a by-value capture of an owning value still needs a move bound",
+    h::expect_exit(
+        "a closure over an owning Vector borrows it through a plain fn bound",
         "fn main() i32 {\n    let mut keys = Vector::<u32>::new();\n    keys.push(3);\n    keys.push(1);\n    let mut idx = Vector::<u32>::new();\n    idx.push(0);\n    idx.push(1);\n    idx.sort_by(|a: &u32, b: &u32| *keys.at(*a as usize) as i32 - *keys.at(*b as usize) as i32);\n    return idx[0] as i32 - 1;\n}\n",
-        "does not satisfy bound",
+        0,
     );
 }
 
@@ -3021,6 +3066,17 @@ fn owning_constants() {
         "a stateful allocator is rejected",
         "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Pool> = mk();\nfn main() i32 { return 0; }\n",
         "cannot use the stateful allocator",
+    );
+    // A constant in a block gets the same checks as one at item level.
+    h::expect_err_msg(
+        "a local constant with a stateful allocator is rejected",
+        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nfn main() i32 {\n    const V: Vector<i32, Pool> = mk();\n    return 0;\n}\n",
+        "cannot use the stateful allocator",
+    );
+    h::expect_exit(
+        "a local constant's value takes the declared type",
+        "fn main() i32 {\n    const V: Vector<i32> = [1, 2].into();\n    return V.len() as i32 - 2;\n}\n",
+        0,
     );
     h::expect_exit(
         "allocators stored as DATA are not the container's allocator",
@@ -3499,5 +3555,132 @@ fn self_resolves_in_its_own_extend() {
         "bounded extend calls a sibling extend",
         "struct P<T> { pub v: Vector<T> }\nextend<T: Copy> P<T> { fn pad(self: &mut Self, v: T) { self.push(v); self.push(v); } }\nextend<T> P<T> { fn push(self: &mut Self, v: T) { self.v.push(v); } }\nfn main() i32 { let mut p = P::<i32> { v: Vector::<i32>::new() }; p.pad(3); return p.v.len() as i32 - 2; }\n",
         0,
+    );
+}
+
+@test
+fn branch_types_unify_literals_and_divergence() {
+    h::expect_exit(
+        "switch literal arms adopt the typed arm",
+        "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7; }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == 8, \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
+        0,
+    );
+    h::expect_exit(
+        "if literal branch adopts the other branch",
+        "fn f(k: i32, n: u64) u64 { let d = if k == 1 { 1; } else { n; }; let e = if k == 1 { n; } else { 2; }; return d + e; }\nfn main() i32 { return (f(1, 5) + f(0, 5)) as i32 - 13; }\n",
+        0,
+    );
+    h::expect_exit(
+        "diverging block branch unifies with a value",
+        "fn f(k: i32, n: usize) usize { let a: usize = switch k { 1 => n, _ => { return 9; }, }; let b = if k == 1 { n; } else { return 3; }; return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3)) as i32 - 15; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a literal that does not fit the typed arm is still rejected",
+        "fn f(k: i32, n: u8) u8 { return switch k { 0 => 300, _ => n, }; }\nfn main() i32 { return f(1, 1) as i32; }\n",
+        "out of range for 'u8'",
+    );
+}
+
+// Moves the batch's ownership rules reject: a `?` payload or a `for` element taken from storage the
+// code does not own, a Free element moved out of an array by index, and a binding moved while a
+// closure borrows it. A bound failure names the closure's full type, return type included.
+@test
+fn ownership_of_question_for_and_closure_captures() {
+    h::expect_err_msg(
+        "? through a reference moves a Free payload",
+        "fn f(r: &Option<String>) Option<usize> {\n    let s = (*r)?;\n    return Option::<usize>::Some(s.len());\n}\nfn main() i32 { return 0; }\n",
+        "cannot move a Free value out of a dereference",
+    );
+    h::expect_err_msg(
+        "for by value over a slice of Free elements",
+        "fn f(v: &Vector<String>) usize {\n    let mut n: usize = 0;\n    for s in v[0..1] { n += s.len(); }\n    return n;\n}\nfn main() i32 { return 0; }\n",
+        "cannot move a Free value out of a dereference",
+    );
+    h::expect_err_msg(
+        "for by value over a borrowed array of Free elements",
+        "fn f(r: &[String; 2]) usize {\n    let mut n: usize = 0;\n    for s in *r { n += s.len(); }\n    return n;\n}\nfn main() i32 { return 0; }\n",
+        "cannot move a field out of a reference",
+    );
+    h::expect_err_msg(
+        "a Free element moved out of an array by index",
+        "fn main() i32 {\n    let arr = [String::from_str(\"a\"), String::from_str(\"b\")];\n    let x = arr[0];\n    return x.len() as i32;\n}\n",
+        "cannot move a field out of a value implementing Free",
+    );
+    h::expect_err_msg(
+        "a closure bound failure names the return type",
+        "fn apply<F: fn(i32)>(f: F) { f(1); }\nfn main() i32 {\n    let t: i32 = 1;\n    apply(|x: i32| t + x);\n    return 0;\n}\n",
+        "type 'fn(i32) i32' does not satisfy bound 'fn(i32)'",
+    );
+    h::expect_err_msg(
+        "a binding moved while a closure borrows it",
+        "fn keep<F: fn(&String) bool>(v: &mut Vector<String>, f: F) { v.retain(f); }\nfn main() i32 {\n    let mut v = Vector::<String>::new();\n    let key = String::from_str(\"keep\");\n    let f = |s: &String| s.as_str() == key.as_str();\n    let k2 = key;\n    keep(&mut v, f);\n    return k2.len() as i32;\n}\n",
+        "cannot move this value while it is borrowed",
+    );
+}
+
+// A constant index proven within an array's known length is safe at every nesting level: an
+// unannotated nested literal takes its inner length from its elements, and an index through a
+// reference to an array follows the array's rules. A constant index past the length is an error.
+@test
+fn nested_constant_indexes_are_safe() {
+    h::expect_ok(
+        "constant indexes into unannotated nested literals",
+        "fn main() i32 {\n    let x: i32 = 4;\n    let g = [[1, 2], [3, x]];\n    let k = [[[x, 1], [2, x]], [[3, 4], [x, 7]]];\n    return g[1][1] + k[1][0][1] - 8;\n}\n",
+    );
+    h::expect_ok(
+        "indexes through references to arrays",
+        "fn rd(r: &[[i32; 2]; 3]) i32 { return r[2][1]; }\nfn wr(r: &mut [i32; 3]) { r[1] = 9; }\nfn main() i32 {\n    let m = [[1, 2], [3, 4], [5, 6]];\n    let mut a = [1, 2, 3];\n    wr(&mut a);\n    return rd(&m) + a[1] - 15;\n}\n",
+    );
+    h::expect_err_msg(
+        "a constant inner index past the inner length",
+        "fn main() i32 {\n    let g = [[1, 2], [3, 4]];\n    return g[1][2];\n}\n",
+        "index 2 is out of bounds for an array of length 2",
+    );
+    h::expect_err_msg(
+        "a nested literal whose elements differ in length",
+        "fn main() i32 {\n    let g = [[1, 2], [3, 4, 5]];\n    return g[0][0];\n}\n",
+        "array literal element has length 3, but the first element has length 2",
+    );
+    h::expect_err_msg(
+        "writing through a shared reference to an array",
+        "fn wr(r: &[i32; 3]) { r[1] = 9; }\nfn main() i32 { return 0; }\n",
+        "cannot assign",
+    );
+}
+
+// A mutable capture is an exclusive borrow held while the closure lives: reading, borrowing,
+// assigning or moving the captured variable before the closure's last call is rejected; after its
+// last call the variable is free again.
+@test
+fn mutable_captures_are_exclusive_borrows() {
+    h::expect_err_msg(
+        "a shared borrow while a mutating closure lives",
+        "fn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    let r = &n;\n    c();\n    return *r;\n}\n",
+        "cannot borrow this value as immutable while it is already borrowed as mutable",
+    );
+    h::expect_err_msg(
+        "a second mutable borrow while a mutating closure lives",
+        "fn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    let q = &mut n;\n    c();\n    *q = 3;\n    return n;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as mutable",
+    );
+    h::expect_err_msg(
+        "a read while a mutating closure lives",
+        "fn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    let m = n;\n    c();\n    return m;\n}\n",
+        "cannot use this value while it is mutably borrowed",
+    );
+    h::expect_err_msg(
+        "an assignment while a mutating closure lives",
+        "fn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    n = 5;\n    c();\n    return n;\n}\n",
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a move while a closure holding a mutable capture lives",
+        "fn keep<F: fn()>(f: F) F { return f; }\nfn main() i32 {\n    let mut s = String::from_str(\"a\");\n    let c = keep(|| s.push_str(\"b\"));\n    let t = s;\n    c();\n    return t.len() as i32;\n}\n",
+        "cannot move this value while it is borrowed",
+    );
+    h::expect_ok(
+        "the variable is usable after the closure's last call",
+        "fn run<F: fn()>(f: F) { f(); }\nfn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    c();\n    c();\n    let m = n;\n    let mut s = String::from_str(\"a\");\n    run(|| s.push_str(\"b\"));\n    s.push_str(\"c\");\n    let t = s;\n    return m + t.len() as i32 - 5;\n}\n",
     );
 }

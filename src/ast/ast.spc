@@ -1,7 +1,7 @@
 // The per-module AST and type arena. Nodes live in one flat Vector indexed by NodeId (0 = NODE_NONE);
 // child lists are (start, len) windows into `children`, built through `scratch` via mark/push/commit.
-// Types are interned: TypeIds number `type_pool` in INSERTION order, so interned identity (and every
-// downstream emission) is independent of hashing. Analysis results for later passes hang off NodeIds
+// Types are interned: TypeIds number the type pool (`pool`, or the package table `gt`) in INSERTION
+// order, so interned identity (and every downstream emission) is independent of hashing. Analysis results for later passes hang off NodeIds
 // in side tables (resolutions, types, mono/dyn/deref uses, attrs, lifetime_decls, call_info).
 import string as cstring;
 import atomic;
@@ -27,7 +27,7 @@ pub type ModuleId = u16;
 /// (`is_closure`) or a `fn(..)` type written in a body. From `cap_start` in `cap_facts`: its
 /// `ncaps` captures in capture order, then its `nparams` parameter types, then its `nrets` return
 /// types (one entry, possibly TYPE_NONE, for an expression-bodied closure); and the closure's
-/// mutable-capture mask.
+/// mutable-capture and borrowed-capture masks.
 pub struct ClosureFact {
     pub node: NodeId,
     pub is_closure: bool,
@@ -36,6 +36,7 @@ pub struct ClosureFact {
     pub ncaps: u32,
     pub cap_start: u32,
     pub mut_caps: u64,
+    pub ref_caps: u64,
 }
 
 /// One capture (the captured binding's name text and its type) or one signature type (empty name).
@@ -92,14 +93,14 @@ pub struct LifetimeDecl {
     pub list: NodeList,
 }
 
-/// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `where_applies` matches
-/// it to a type parameter through the resolver's binding of its type (`Ast::where_scope`).
-/// `Ast::where_scope` answers.
+/// How a `where` predicate bounds a type parameter for a code point: `Ast::where_scope` answers.
 pub const WHERE_NONE: u8 = 0;
 pub const WHERE_OWN: u8 = 1;
 pub const WHERE_IN: u8 = 2;
 pub const WHERE_OUT: u8 = 3;
 
+/// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `Ast::where_scope`
+/// matches it to a type parameter through the resolver's binding of its type.
 pub struct WhereBound {
     pub func: NodeId,
     pub pred: NodeId,
@@ -231,7 +232,6 @@ pub enum NodeKind {
     // rewrites it in place into the same `sugar_fmt_*` value block `format()` desugars to, so
     // borrowck/const-eval/codegen never see this kind.
     NODE_INTERP,
-    NODE_KIND_COUNT,
 }
 
 pub const VA_START: u8 = 0;
@@ -381,62 +381,38 @@ pub struct WherePredicateData {
     pub ty: NodeId,
     pub bounds: NodeList,
 }
+/// `a` when `c`, else `b`. Both are evaluated.
+pub const fn pick<T: Copy>(c: bool, a: T, b: T) T {
+    if c {
+        return a;
+    }
+    return b;
+}
+
 /// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
 /// table lives here too: the typechecker's renderer/lookup delegates to it, and const-eval uses it to
 /// fold builtin-targeted casts demanded before their module is typechecked.
 pub const fn bt_name(b: BuiltinType) str<'static> {
-    if b == BuiltinType::BT_BOOL {
-        return "bool";
-    }
-    if b == BuiltinType::BT_CHAR {
-        return "char";
-    }
-    if b == BuiltinType::BT_I8 {
-        return "i8";
-    }
-    if b == BuiltinType::BT_I16 {
-        return "i16";
-    }
-    if b == BuiltinType::BT_I32 {
-        return "i32";
-    }
-    if b == BuiltinType::BT_I64 {
-        return "i64";
-    }
-    if b == BuiltinType::BT_ISIZE {
-        return "isize";
-    }
-    if b == BuiltinType::BT_U8 {
-        return "u8";
-    }
-    if b == BuiltinType::BT_U16 {
-        return "u16";
-    }
-    if b == BuiltinType::BT_U32 {
-        return "u32";
-    }
-    if b == BuiltinType::BT_U64 {
-        return "u64";
-    }
-    if b == BuiltinType::BT_USIZE {
-        return "usize";
-    }
-    if b == BuiltinType::BT_F32 {
-        return "f32";
-    }
-    if b == BuiltinType::BT_F64 {
-        return "f64";
-    }
-    if b == BuiltinType::BT_C32 {
-        return "c32";
-    }
-    if b == BuiltinType::BT_C64 {
-        return "c64";
-    }
-    if b == BuiltinType::BT_VALIST {
-        return "va_list";
-    }
-    return "void";
+    return switch b {
+        BT_BOOL => "bool",
+        BT_CHAR => "char",
+        BT_I8 => "i8",
+        BT_I16 => "i16",
+        BT_I32 => "i32",
+        BT_I64 => "i64",
+        BT_ISIZE => "isize",
+        BT_U8 => "u8",
+        BT_U16 => "u16",
+        BT_U32 => "u32",
+        BT_U64 => "u64",
+        BT_USIZE => "usize",
+        BT_F32 => "f32",
+        BT_F64 => "f64",
+        BT_C32 => "c32",
+        BT_C64 => "c64",
+        BT_VALIST => "va_list",
+        _ => "void",
+    };
 }
 
 /// The BuiltinType whose name the span spells, -1 if none.
@@ -517,6 +493,9 @@ pub struct ForData {
     pub iterable: NodeId,
     pub body: NodeId,
     pub label: tok::Span,
+    // Set by the checker: the loop iterates an array by value and its elements own (the loop
+    // consumes the array, see Lowerer::lower_for_indexed).
+    pub consumes: bool,
 }
 pub struct FlowData {
     pub value: NodeId,
@@ -538,6 +517,10 @@ pub struct CallData {
 }
 // mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
 // ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node needs no 8-byte padding.
+// own_mut marks the OWNING captures the body mutates: the env owns them and the body mutates its own
+// copy, unless the closure meets a plain `fn(..)` bound, which requires a closure that owns nothing.
+// Then its owning captures are borrowed instead: the mutated ones join mut_caps (an implicit
+// `&mut`), the others ref_caps (an implicit `&`).
 pub struct ClosureData {
     pub params: NodeList,
     pub returns: NodeList,
@@ -545,6 +528,8 @@ pub struct ClosureData {
     pub expr_body: bool,
     pub captures: NodeList,
     pub mut_caps: u32,
+    pub ref_caps: u32,
+    pub own_mut: u32,
 }
 pub struct IndexData {
     pub object: NodeId,
@@ -1017,7 +1002,7 @@ fn ts_delta(i: usize) u64 {
     return unsafe TS[i] - unsafe TS_LAST[i];
 }
 
-/// One mixing round, the mixer behind type_skey and inst_method_key. A plain FNV-1a round is NOT
+/// One mixing round, the mixer behind the type, instance and body-cache keys. A plain FNV-1a round is NOT
 /// enough here: its output has no avalanche, so the small structured inputs these keys are built from
 /// (node ids, const widths) land clustered, and two live (method, instance) pairs have collided in
 /// practice -- silently dropping a demand seed. The splitmix64 finalizer after the FNV step makes
@@ -1098,7 +1083,7 @@ extend Ty as Hash {
         // leaves the index a function of the payload's low bits alone, and records that differ
         // only above them (an array's length, a projection's binder) then probe in one chain.
         let p = (self as *const Ty) as *const u64;
-        let mut h: u64 = 1469598103934665603u64;
+        let mut h: u64 = 0xcbf29ce484222325u64;
         for i in 0..sizeof(Ty) / 8 {
             h = skey_mix(h, unsafe p[i]);
         }
@@ -1119,9 +1104,9 @@ pub struct TyInstance {
     pub args: [TypeId; 8],
 }
 /// One method reference the type checker resolved, with the receiver type it resolved it ON. The
-/// receiver may still mention the enclosing generic's parameters, so what instance it stands for is
-/// settled per instantiation (seed_mono_body_instances), not here. Recorded in the referring module's
-/// own Ast so modules can be checked in parallel.
+/// receiver may still mention the enclosing generic's parameters. The unused-item lint reads these
+/// records (`lint_unused_items`). Recorded in the referring module's own Ast so modules can be
+/// checked in parallel.
 pub struct MethodRef {
     pub owner: NodeId, // the function or method the reference sits in; NODE_NONE at item level
     pub recv: TypeId,
@@ -1174,12 +1159,6 @@ pub struct DerefUse {
     pub recv: [TypeId; 8],
     pub method: [DefId; 8],
 }
-pub struct MethodInst {
-    pub instance: TypeId,
-    pub method: NodeId,
-    pub n: u8,
-    pub targs: [TypeId; 8],
-}
 
 // Field-wise Hash/Eq over the SIGNIFICANT prefix (module/decl/n + args[0..n]) — deliberately NOT a
 // sizeof-memcmp, so the unused args[n..8] tail (left uninitialized by the `{module,decl,n}` literal) can
@@ -1190,7 +1169,7 @@ extend TyInstance as Hash {
         if unsafe TS_COLLIDE {
             return 7;
         }
-        let mut h = skey_mix(1469598103934665603u64, self.module as u64 << 32 | self.decl as u64);
+        let mut h = skey_mix(0xcbf29ce484222325u64, self.module as u64 << 32 | self.decl as u64);
         h = skey_mix(h, self.n);
         for i in 0..self.n {
             h = skey_mix(h, unsafe self.args[i]);
@@ -1205,31 +1184,6 @@ extend TyInstance as Eq {
         }
         for i in 0..self.n {
             if unsafe self.args[i] != unsafe other.args[i] {
-                return false;
-            }
-        }
-        return true;
-    }
-}
-extend MethodInst as Hash {
-    pub fn hash(self: &Self) u64 {
-        let mut h: u64 = 1469598103934665603u64;
-        h = (h ^ self.instance as u64) * 1099511628211u64;
-        h = (h ^ self.method as u64) * 1099511628211u64;
-        h = (h ^ self.n as u64) * 1099511628211u64;
-        for i in 0..self.n {
-            h = (h ^ (unsafe self.targs[i]) as u64) * 1099511628211u64;
-        }
-        return h;
-    }
-}
-extend MethodInst as Eq {
-    pub fn eq(self: &Self, other: &Self) bool {
-        if self.instance != other.instance || self.method != other.method || self.n != other.n {
-            return false;
-        }
-        for i in 0..self.n {
-            if unsafe self.targs[i] != unsafe other.targs[i] {
                 return false;
             }
         }
@@ -1522,6 +1476,85 @@ pub fn memo2_set(v: &mut Vector<u64>, i: usize, r: bool) {
     }
     v[w] = v[w] & ~(3u64 << sh) | val << sh;
 }
+// Rebuild index `ix` over `pool` when it is empty or at the 0.75 load trigger; true when it did.
+// The sizing keeps the load after a rebuild strictly under the trigger, so the next call cannot
+// rebuild again (an equal load rebuilt on every intern, hits included, until the pool grew past the
+// boundary: about 2,000 rebuilds per transpile of the compiler).
+fn ix_ready<T: Copy + Hash>(ix: &mut Vector<u32>, used: &mut u32, pool: &ChunkPool<T>) bool {
+    if ix.len() != 0 && ((*used) as usize + 1) * 4 < ix.len() * 3 {
+        return false;
+    }
+    let mut cap: usize = 16;
+    while cap * 3 <= (pool.len() + 1) * 4 {
+        cap = cap * 2;
+    }
+    ix.clear();
+    ix.reserve(cap);
+    for _ in 0..cap {
+        ix.push(0xFFFFFFFFu32);
+    }
+    *used = pool.len() as u32;
+    let mask = cap - 1;
+    for id in 0..pool.len() {
+        let mut i = pool.at(id).hash() as usize & mask;
+        while ix[i] != 0xFFFFFFFFu32 {
+            i = i + 1 & mask;
+        }
+        ix.set(i, id as u32);
+    }
+    return true;
+}
+
+// The slot of `v` in index `ix` over `pool` (`*hit`), or the empty slot where it belongs. Under
+// TS_ON, counts a hit at `stat` and each extra probe step at `stat + 1`. Requires a ready index.
+@c.always_inline
+fn ix_slot<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: &T, hit: &mut bool, stat: usize) usize {
+    let ts = unsafe TS_ON;
+    let mask = ix.len() - 1;
+    let ixp = ix.as_ptr();
+    let pn = pool.len();
+    let mut i = v.hash() as usize & mask;
+    loop {
+        let idx = unsafe ixp[i];
+        if idx == 0xFFFFFFFFu32 {
+            *hit = false;
+            return i;
+        }
+        if idx as usize < pn && *pool.at(idx as usize) == *v {
+            if ts {
+                ts_add(stat, 1);
+            }
+            *hit = true;
+            return i;
+        }
+        if ts {
+            ts_add(stat + 1, 1);
+        }
+        i = i + 1 & mask;
+    }
+}
+
+// The pool id of `v` through index `ix`, or -1. Read-only: safe on a frozen table.
+const fn ix_find<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: &T) i64 {
+    if ix.len() == 0 {
+        return -1;
+    }
+    let mask = ix.len() - 1;
+    let ixp = ix.as_ptr();
+    let pn = pool.len();
+    let mut i = v.hash() as usize & mask;
+    loop {
+        let idx = unsafe ixp[i];
+        if idx == 0xFFFFFFFFu32 {
+            return -1;
+        }
+        if idx as usize < pn && *pool.at(idx as usize) == *v {
+            return idx;
+        }
+        i = i + 1 & mask;
+    }
+}
+
 pub const TYPE_MAX: TypeId = 0x1FFFFFF0;
 
 /// A type pool: the Ty records, the instance and const-expression side tables, and the
@@ -1543,19 +1576,6 @@ pub struct TypePool {
 }
 
 extend TypePool {
-    pub fn new() TypePool {
-        return TypePool {
-            tys: ChunkPool::<Ty>::new(),
-            tix: Vector::<u32>::new(),
-            tix_used: 0,
-            insts: ChunkPool::<TyInstance>::new(),
-            iix: Vector::<u32>::new(),
-            iix_used: 0,
-            clins: Vector::<ConstLin>::new(),
-            open: false,
-        };
-    }
-
     pub fn free(self: &mut Self) {
         self.tys.free();
         self.tix.free();
@@ -1616,155 +1636,51 @@ extend TypePool {
         return self.tys.retained() + self.tix.capacity() * 4 + self.insts.retained() + self.iix.capacity() * 4 + self.clins.capacity() * sizeof(ConstLin);
     }
 
-    // Rebuild an index table over `pool_len` live pool ids (wipes stale slots). `used` resets to the
-    // live count; sizing keeps the load after the rebuild strictly under the 0.75 trigger, so the next
-    // call cannot rebuild again (an equal load rebuilt on every intern, hits included, until the pool
-    // grew past the boundary: about 2,000 rebuilds per transpile of the compiler).
-    fn ix_rebuild(ix: &mut Vector<u32>, pool_len: usize) usize {
-        let mut cap: usize = 16;
-        while cap * 3 <= (pool_len + 1) * 4 {
-            cap = cap * 2;
-        }
-        ix.clear();
-        ix.reserve(cap);
-        for _ in 0..cap {
-            ix.push(0xFFFFFFFFu32);
-        }
-        return pool_len;
-    }
-
     fn tix_ready(self: &mut Self) {
-        if self.tix.len() == 0 || (self.tix_used as usize + 1) * 4 >= self.tix.len() * 3 {
-            if unsafe TS_ON {
-                ts_add(TS_INTERN_REBUILD, 1);
-                ts_add(TS_REBUILD_N, self.tys.len() as u64);
-            }
-            self.tix_used = TypePool::ix_rebuild(&mut self.tix, self.tys.len()) as u32;
-            for id in 0..self.tys.len() {
-                let mask = self.tix.len() - 1;
-                let mut i = self.tys.at(id).hash() as usize & mask;
-                while self.tix[i] != 0xFFFFFFFFu32 {
-                    i = i + 1 & mask;
-                }
-                self.tix.set(i, id as u32);
-            }
+        if ix_ready(&mut self.tix, &mut self.tix_used, &self.tys) && unsafe TS_ON {
+            ts_add(TS_INTERN_REBUILD, 1);
+            ts_add(TS_REBUILD_N, self.tys.len() as u64);
         }
     }
 
     /// The id of canonical `nt` (`concrete` set), or -1. Read-only: safe on a frozen table.
     pub const fn find_ty(self: &Self, nt: &Ty) i64 {
-        if self.tix.len() == 0 {
-            return -1;
-        }
-        let mask = self.tix.len() - 1;
-        let ixp = self.tix.as_ptr();
-        let pn = self.tys.len();
-        let mut i = nt.hash() as usize & mask;
-        loop {
-            let idx = unsafe ixp[i];
-            if idx == 0xFFFFFFFFu32 {
-                return -1;
-            }
-            if idx as usize < pn && *self.tys.at(idx as usize) == *nt {
-                return idx;
-            }
-            i = i + 1 & mask;
-        }
+        return ix_find(&self.tix, &self.tys, nt);
     }
 
     /// Find or append canonical `nt`.
     pub fn insert_ty(self: &mut Self, nt: Ty) TypeId {
         self.tix_ready();
-        let ts = unsafe TS_ON;
-        let mask = self.tix.len() - 1;
-        let ixp = self.tix.as_ptr();
-        let pn = self.tys.len();
-        let mut i = nt.hash() as usize & mask;
-        loop {
-            let idx = unsafe ixp[i];
-            if idx == 0xFFFFFFFFu32 {
-                let id = self.tys.len() as TypeId;
-                self.tys.push(nt);
-                self.tix.set(i, id);
-                self.tix_used = self.tix_used + 1;
-                return id;
-            }
-            if idx as usize < pn && *self.tys.at(idx as usize) == nt {
-                if ts {
-                    ts_add(TS_INTERN_HIT, 1);
-                }
-                return idx;
-            }
-            if ts {
-                ts_add(TS_INTERN_PROBE, 1);
-            }
-            i = i + 1 & mask;
+        let mut hit = false;
+        let i = ix_slot(&self.tix, &self.tys, &nt, &mut hit, TS_INTERN_HIT);
+        if hit {
+            return self.tix[i];
         }
-    }
-
-    fn iix_ready(self: &mut Self) {
-        if self.iix.len() == 0 || (self.iix_used as usize + 1) * 4 >= self.iix.len() * 3 {
-            self.iix_used = TypePool::ix_rebuild(&mut self.iix, self.insts.len()) as u32;
-            for id in 0..self.insts.len() {
-                let mask = self.iix.len() - 1;
-                let mut i = self.insts.at(id).hash() as usize & mask;
-                while self.iix[i] != 0xFFFFFFFFu32 {
-                    i = i + 1 & mask;
-                }
-                self.iix.set(i, id as u32);
-            }
-        }
+        let id = self.tys.len() as TypeId;
+        self.tys.push(nt);
+        self.tix.set(i, id);
+        self.tix_used = self.tix_used + 1;
+        return id;
     }
 
     /// The index of instance record `it`, or -1. Read-only.
     pub const fn find_inst(self: &Self, it: &TyInstance) i64 {
-        if self.iix.len() == 0 {
-            return -1;
-        }
-        let mask = self.iix.len() - 1;
-        let ixp = self.iix.as_ptr();
-        let pn = self.insts.len();
-        let mut i = it.hash() as usize & mask;
-        loop {
-            let cur = unsafe ixp[i];
-            if cur == 0xFFFFFFFFu32 {
-                return -1;
-            }
-            if cur as usize < pn && *self.insts.at(cur as usize) == *it {
-                return cur;
-            }
-            i = i + 1 & mask;
-        }
+        return ix_find(&self.iix, &self.insts, it);
     }
 
     /// Find or append instance record `it`; its index.
     pub fn insert_inst(self: &mut Self, it: &TyInstance) u32 {
-        self.iix_ready();
-        let ts = unsafe TS_ON;
-        let mask = self.iix.len() - 1;
-        let ixp = self.iix.as_ptr();
-        let pn = self.insts.len();
-        let mut i = it.hash() as usize & mask;
-        loop {
-            let cur = unsafe ixp[i];
-            if cur == 0xFFFFFFFFu32 {
-                let idx = self.insts.len() as u32;
-                self.insts.push(*it);
-                self.iix.set(i, idx);
-                self.iix_used = self.iix_used + 1;
-                return idx;
-            }
-            if cur as usize < pn && *self.insts.at(cur as usize) == *it {
-                if ts {
-                    ts_add(TS_INST_HIT, 1);
-                }
-                return cur;
-            }
-            if ts {
-                ts_add(TS_INST_PROBE, 1);
-            }
-            i = i + 1 & mask;
+        let _ = ix_ready(&mut self.iix, &mut self.iix_used, &self.insts);
+        let mut hit = false;
+        let i = ix_slot(&self.iix, &self.insts, it, &mut hit, TS_INST_HIT);
+        if hit {
+            return self.iix[i];
         }
+        let idx = self.insts.len() as u32;
+        self.insts.push(*it);
+        self.iix.set(i, idx);
+        self.iix_used = self.iix_used + 1;
+        return idx;
     }
 
     /// The index of const-expression form `l`, or -1 (linear: these are rare).
@@ -1880,12 +1796,7 @@ extend BodyArena {
         return BodyArena {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
-            types: Vector::<u32>::new(),
             resolutions: SplitVec::<DefId>::new(),
-            mono_at: Vector::<u32>::new(),
-            dyn_at: Vector::<u32>::new(),
-            deref_at: Vector::<u32>::new(),
-            released: false,
         };
     }
 
@@ -1899,7 +1810,7 @@ pub struct Ast {
     pub children: SplitVec<u32>,
     /// The body arena (ids tagged NODE_BODY) and the sink `add`/`commit` write to: the parser
     /// turns it on for a releasable body, and a later stage that appends nodes sets it to the
-    /// arena of the body it works in (`add_in`).
+    /// arena of the body it works in (`sink_body`).
     pub b: BodyArena,
     pub sink_body: bool,
     pub scratch: Vector<u32>,
@@ -1936,8 +1847,6 @@ pub struct Ast {
     pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
     pub coerce_at: Map<u32, u32>,
-    pub method_insts: Vector<MethodInst>,
-    pub method_inst_index: Vector<u32>,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
     pub deref_uses: Vector<DerefUse>,
@@ -2002,8 +1911,6 @@ extend Ast as Free {
         self.wide_lits.free();
         self.coerces.free();
         self.coerce_at.free();
-        self.method_insts.free();
-        self.method_inst_index.free();
         self.dyn_uses.free();
         self.dyn_at.free();
         self.deref_uses.free();
@@ -2028,36 +1935,8 @@ extend Ast {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
             b: BodyArena::new(),
-            sink_body: false,
-            scratch: Vector::<u32>::new(),
-            ilock_on: false,
             ilock_sem: psy::Semaphore::new(1),
-            ilock_owner: 0,
-            ilock_depth: 0,
             resolutions: SplitVec::<DefId>::new(),
-            pool: TypePool::new(),
-            gt: null,
-            used: Vector::<TypeId>::new(),
-            used_inst: Vector::<u32>::new(),
-            used_bits: Vector::<u64>::new(),
-            types: Vector::<u32>::new(),
-            mono: Vector::<MonoUse>::new(),
-            proj_obs: Vector::<ProjOb>::new(),
-            mono_at: Vector::<u32>::new(),
-            method_refs: Vector::<MethodRef>::new(),
-            wide_lits: Vector::<WideLit>::new(),
-            coerces: Vector::<CoerceUse>::new(),
-            coerce_at: Map::<u32, u32>::new(),
-            method_insts: Vector::<MethodInst>::new(),
-            method_inst_index: Vector::<u32>::new(),
-            dyn_uses: Vector::<DynUse>::new(),
-            dyn_at: Vector::<u32>::new(),
-            deref_uses: Vector::<DerefUse>::new(),
-            deref_at: Vector::<u32>::new(),
-            attrs: Vector::<Attr>::new(),
-            metas: Vector::<MetaAttr>::new(),
-            root: NODE_NONE,
-            module: 0,
         };
         // nodes/tokens sits at ~0.78 across real corpora, with bodies holding about 87% of the
         // nodes and 65% of the list entries; the reserves keep the high-ratio outlier modules from
@@ -2553,13 +2432,6 @@ extend Ast {
             let o = self.proj_obs.index_mut(i);
             o.owner = pub_map1(map, o.owner);
         }
-        for i in 0..self.method_insts.len() {
-            let mi = self.method_insts.index_mut(i);
-            mi.instance = pub_map1(map, mi.instance);
-            for k in 0..mi.n {
-                unsafe mi.targs[k as usize] = pub_map1(map, unsafe mi.targs[k as usize]);
-            }
-        }
         for i in 0..self.dyn_uses.len() {
             let d = self.dyn_uses.index_mut(i);
             d.src = pub_map1(map, d.src);
@@ -2591,11 +2463,10 @@ extend Ast {
             }
             self.used_bits[w] = self.used_bits[w] | 1u64 << (id & 63) as u64;
         }
-        self.method_inst_index.clear();
         // Every provisional record is published: release the pool's chunks (a module that interns
         // again after the checkpoint allocates one fresh chunk).
         self.pool.free();
-        self.pool = TypePool::new();
+        self.pool = TypePool {};
     }
 
     /// Does any table of this module still hold a provisional id? (Validation after a publication.)
@@ -2626,11 +2497,6 @@ extend Ast {
                 if (unsafe u.args[k as usize] & TYPE_PROV) != 0 {
                     return true;
                 }
-            }
-        }
-        for i in 0..self.method_insts.len() {
-            if (self.method_insts.at(i).instance & TYPE_PROV) != 0 {
-                return true;
             }
         }
         for i in 0..self.method_refs.len() {
@@ -2864,12 +2730,9 @@ extend Ast {
     }
 
     pub const fn coerce_of(self: &Self, node: NodeId) *const CoerceUse {
-        switch self.coerce_at.get(&node) {
-            Some(i) => {
-                return self.coerces.at((*i) as usize);
-            },
-            None => {},
-        };
+        if let Some(i) = self.coerce_at.get(&node) {
+            return self.coerces.at((*i) as usize);
+        }
         return null;
     }
 
@@ -3027,6 +2890,7 @@ extend Ast {
         nparams: u32,
         nrets: u32,
         mut_caps: u64,
+        ref_caps: u64,
         entries: Vector<CapFact>,
     ) {
         let start = self.cap_facts.len() as u32;
@@ -3042,6 +2906,7 @@ extend Ast {
             ncaps: n,
             cap_start: start,
             mut_caps: mut_caps,
+            ref_caps: ref_caps,
         };
         switch self.closure_at.get(&node) {
             Some(i) => {
@@ -3105,6 +2970,133 @@ extend Ast {
         return self.cap_facts.at((unsafe (&*f).cap_start) as usize);
     }
 
+    /// `id` with its `move` and `unsafe` prefixes removed, and its `as` casts too when `casts`.
+    pub const fn peel(self: &Self, id: NodeId, casts: bool) NodeId {
+        let mut e = id;
+        loop {
+            let n = self.at_const(e);
+            if casts && n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == tt::TokenType::Move || n.as_data.unary.op == tt::TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                return e;
+            }
+        }
+    }
+
+    /// The parameter and return lists of signature node `id` (a function, closure or function type) in
+    /// `ps` and `rs`; false, leaving both untouched, for any other node.
+    pub const fn sig_lists(self: &Self, id: NodeId, ps: &mut NodeList, rs: &mut NodeList) bool {
+        let n = self.at_const(id);
+        if n.kind == NodeKind::NODE_FUNCTION {
+            *ps = n.as_data.function.params;
+            *rs = n.as_data.function.returns;
+        } else if n.kind == NodeKind::NODE_CLOSURE {
+            *ps = n.as_data.closure.params;
+            *rs = n.as_data.closure.returns;
+        } else if n.kind == NodeKind::NODE_FUNCTION_TYPE {
+            *ps = n.as_data.function_type.params;
+            *rs = n.as_data.function_type.returns;
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    /// The type node of signature slot `slot`: a parameter's declared type (NODE_NONE when it has none),
+    /// or `slot` itself (a bare type in a return list).
+    pub const fn slot_type_node(self: &Self, slot: NodeId) NodeId {
+        let n = self.at_const(slot);
+        if n.kind == NodeKind::NODE_PARAMETER {
+            return n.as_data.parameter.ty;
+        }
+        return slot;
+    }
+
+    /// The declaration type-path node `tn` resolves to: its own resolution, else its last part's
+    /// (node NODE_NONE when neither resolves).
+    pub const fn path_def(self: &Self, tn: NodeId) DefId {
+        let d = self.resolution_def(tn);
+        if d.node != NODE_NONE || self.at_const(tn).kind != NodeKind::NODE_TYPE_PATH {
+            return d;
+        }
+        let parts = self.at_const(tn).as_data.type_path.parts;
+        if parts.len == 0 {
+            return d;
+        }
+        return self.resolution_def(unsafe self.list(parts)[(parts.len - 1) as usize]);
+    }
+
+    /// The top-level extend or interface whose item list holds `fnode`; NODE_NONE when none.
+    pub const fn container_of(self: &Self, fnode: NodeId) NodeId {
+        let items = self.at_const(self.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe self.list(items)[i as usize];
+            let n = self.at_const(iid);
+            if n.kind != NodeKind::NODE_EXTEND && n.kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let ms = if n.kind == NodeKind::NODE_EXTEND {
+                n.as_data.extend_def.items;
+            } else {
+                n.as_data.interface_def.items;
+            };
+            for j in 0..ms.len {
+                if unsafe self.list(ms)[j as usize] == fnode {
+                    return iid;
+                }
+            }
+        }
+        return NODE_NONE;
+    }
+
+    /// The first attribute of `kind` on `owner`; null when none.
+    pub const fn attr_of(self: &Self, owner: NodeId, kind: AttrKind) *const Attr {
+        for i in 0..self.attrs.len() {
+            let at = self.attrs.at(i);
+            if at.owner == owner && at.kind == kind as u8 {
+                return at;
+            }
+        }
+        return null;
+    }
+
+    /// True when enum `decl` has a variant with a payload (it emits as a tagged struct, tagged by
+    /// declaration ordinal).
+    pub const fn enum_has_payload(self: &Self, decl: NodeId) bool {
+        let ms = self.at_const(decl).as_data.aggregate.members;
+        for i in 0..ms.len {
+            if self.at_const(unsafe self.list(ms)[i as usize]).as_data.variant.payload.len != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The type node of aggregate member `mid`: a named member's (NODE_FIELD) declared type, a tuple
+    /// member itself (tuple members are bare type nodes), NODE_NONE otherwise.
+    pub const fn member_type_node(self: &Self, mid: NodeId, is_tuple: bool) NodeId {
+        let n = self.at_const(mid);
+        if n.kind == NodeKind::NODE_FIELD {
+            return n.as_data.field.ty;
+        }
+        return if is_tuple {
+            mid;
+        } else {
+            NODE_NONE;
+        };
+    }
+
+    /// The type of aggregate member `mid`: its recorded type, else a named member's declared type.
+    pub const fn member_ty(self: &Self, mid: NodeId) TypeId {
+        let t = self.type_of(mid);
+        if t == TYPE_NONE && self.at_const(mid).kind == NodeKind::NODE_FIELD {
+            return self.type_of(self.at_const(mid).as_data.field.ty);
+        }
+        return t;
+    }
+
     /// The name text of binding declaration `decl` (a let, parameter, loop binding, pattern name
     /// or bare identifier); empty otherwise.
     pub const fn decl_name_span(self: &Self, decl: NodeId) tok::Span {
@@ -3116,7 +3108,15 @@ extend Ast {
             return self.at_const(n.as_data.parameter.name).as_data.name.text;
         }
         if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
-            return self.at_const(n.as_data.for_stmt.binding).as_data.name.text;
+            // A pattern binding's names declare themselves; a lone `mut x` names the loop's local.
+            let b = self.at_const(n.as_data.for_stmt.binding);
+            if b.kind == NodeKind::NODE_IDENTIFIER {
+                return b.as_data.name.text;
+            }
+            if b.kind == NodeKind::NODE_PATTERN_NAME && b.as_data.pattern.children.len == 0 {
+                return self.at_const(b.as_data.pattern.name).as_data.name.text;
+            }
+            return tok::Span { start: 0, end: 0 };
         }
         if n.kind == NodeKind::NODE_PATTERN_NAME {
             return self.at_const(n.as_data.pattern.name).as_data.name.text;
@@ -3184,7 +3184,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
@@ -3248,24 +3248,6 @@ pub struct SyntaxStats {
     pub tables: usize, // every other per-module side table
 }
 
-extend SyntaxStats {
-    pub const fn new() SyntaxStats {
-        return SyntaxStats {
-            nodes: 0,
-            body_nodes: 0,
-            bodies: 0,
-            children: 0,
-            body_children: 0,
-            nodes_cap: 0,
-            children_cap: 0,
-            resolutions: 0,
-            types: 0,
-            pool: 0,
-            tables: 0,
-        };
-    }
-}
-
 // The per-node index slot of `node` in the module (`v`) or body (`vb`) table, 0 when unrecorded.
 @c.always_inline
 const fn slot_of(v: &Vector<u32>, vb: &Vector<u32>, node: NodeId) u32 {
@@ -3303,60 +3285,17 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) B
         hexf = (src[i as usize] | 0x20u8) == b'p';
         i = i + 1;
     }
-    if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "isize".ptr(), 5) == 0 {
-        *sfx_start = end - 5;
-        return BuiltinType::BT_ISIZE;
-    }
-    if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "usize".ptr(), 5) == 0 {
-        *sfx_start = end - 5;
-        return BuiltinType::BT_USIZE;
-    }
-    let mut n: u32 = 3;
-    if end - start > n {
-        let p = unsafe (src.ptr() + (end - n) as usize);
-        if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
+    // The suffixes are the names from i8 to f64; no one of them ends another.
+    for k in BuiltinType::BT_I8 as u32..BuiltinType::BT_C32 as u32 {
+        let name = bt_name(k as BuiltinType);
+        let n = name.len() as u32;
+        if end - start > n && (k < BuiltinType::BT_F32 as u32 || !hex || hexf) && unsafe cstring::memcmp(
+            unsafe (src.ptr() + (end - n) as usize),
+            name.ptr(),
+            n as usize,
+        ) == 0 {
             *sfx_start = end - n;
-            return BuiltinType::BT_I16;
-        }
-        if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_I32;
-        }
-        if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_I64;
-        }
-        if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_U16;
-        }
-        if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_U32;
-        }
-        if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_U64;
-        }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_F32;
-        }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_F64;
-        }
-    }
-    n = 2;
-    if end - start > n {
-        let p = unsafe (src.ptr() + (end - n) as usize);
-        if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_I8;
-        }
-        if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 {
-            *sfx_start = end - n;
-            return BuiltinType::BT_U8;
+            return k as BuiltinType;
         }
     }
     return BuiltinType::BT_COUNT;

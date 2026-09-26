@@ -23,8 +23,9 @@ pub struct TuEmit {
     pub pkg: *const loader::Package,
     pub mg: mbe::Mangler,
     pub out: String,
-    /// Every forward typedef, kept apart from `out`: the assembly splices ALL of them ahead of
-    /// ALL bodies, so a pointer field may name an aggregate defined later (or replayed late).
+    /// Every forward typedef, kept apart from `out`: the assembly puts each one ahead of the
+    /// body in the definition header of its aggregate and copies it into every other file that
+    /// spells it, so a pointer field may name an aggregate defined later (or replayed late).
     pub fwd2: String,
     pub skipped: u64, // aggregates outside the frozen subset (dyn/env fields, unbound params)
     /// FNVs of closure-env struct names this pass DEFINED (embedded in aggregates): the body
@@ -32,30 +33,18 @@ pub struct TuEmit {
     pub env_defined: Vector<u64>,
     pub emitted: u64,
     /// Every definition chunk of `out` in order: its start offset, its owner module (the
-    /// declaring module; a generic instance's is the generic's) and whether it is a payload-less
-    /// enum, which prototypes need complete and so lives in the shared forward header.
+    /// declaring module; a generic instance's is the generic's), whether it is a payload-less
+    /// enum, which prototypes need complete: the assembly copies it into every other header
+    /// that spells it (its include guard makes the copies one definition), and the C name it
+    /// defines (`chunk_name[chunk_name_end[i-1]..chunk_name_end[i]]`).
     pub chunk_off: Vector<u32>,
     pub chunk_own: Vector<ModuleId>,
     pub chunk_enum: Vector<bool>,
-    /// Module-level by-value graph, n*n bytes: `dep_mat[a*n+b]` when an aggregate owned by `a`
-    /// embeds one owned by `b`; module `a`'s type header then includes `b`'s.
-    pub dep_mat: Vector<u8>,
-    cur_own: i64, // the owner whose body is being built (-1 outside a body)
-    cur_deps: Vector<ModuleId>, // owners noted for the bodies being built (a DFS stack of ranges)
-    last_chunk: Vector<u32>, // per module: the index of the latest chunk it owns (0xFFFFFFFF none)
-    owners: Map<u64, u64>, // emitted aggregate (name FNV) -> its owner module
-    last_owner: i64, // the owner of the aggregate the last emit_agg defined or found (-1 none)
+    pub chunk_name: String,
+    pub chunk_name_end: Vector<u32>,
     // Emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done.
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
-}
-
-const fn fnv(s: str) u64 {
-    let mut h = 1469598103934665603u64;
-    for i in 0..s.len() {
-        h = (h ^ s.byte_at(i) as u64) * 1099511628211u64;
-    }
-    return h;
 }
 
 extend TuEmit {
@@ -71,48 +60,24 @@ extend TuEmit {
             chunk_off: Vector::<u32>::new(),
             chunk_own: Vector::<ModuleId>::new(),
             chunk_enum: Vector::<bool>::new(),
-            dep_mat: Vector::<u8>::new(),
-            cur_own: -1,
-            cur_deps: Vector::<ModuleId>::new(),
-            last_chunk: Vector::<u32>::new(),
-            owners: Map::<u64, u64>::new(),
-            last_owner: -1,
+            chunk_name: String::new(),
+            chunk_name_end: Vector::<u32>::new(),
             env_defined: Vector::<u64>::new(),
             state: Map::<u64, u64>::new(),
             fwds: Map::<u64, u64>::new(),
         };
     }
 
-    /// Note that the body being built embeds a definition owned by `dep` (`finish_chunk` turns
-    /// the notes into module edges under the chunk's chosen owner).
-    fn dep_note(self: &mut Self, dep: ModuleId) {
-        if self.cur_own >= 0 {
-            self.cur_deps.push(dep);
-        }
-    }
-
-    /// True when module `a`'s type definitions embed module `b`'s.
-    pub const fn dep_hit(self: &Self, a: usize, b: usize) bool {
-        if self.dep_mat.len() == 0 {
-            return false;
-        }
-        return *self.dep_mat.at(a * self.p().modules.len() + b) != 0;
-    }
-
-    // Append one finished definition body as a chunk of `out` owned by `own`.
-    fn push_chunk(self: &mut Self, body: &String, own: ModuleId, is_enum: bool) {
+    // Append one finished definition body of C name `nm` as a chunk of `out` owned by `own`.
+    fn push_chunk(self: &mut Self, body: &String, nm: str, own: ModuleId, is_enum: bool) {
         if body.len() == 0 {
             return;
         }
-        if self.last_chunk.len() == 0 {
-            for _i in 0..self.p().modules.len() {
-                self.last_chunk.push(0xFFFFFFFF);
-            }
-        }
-        self.last_chunk.set(own as usize, self.chunk_off.len() as u32);
         self.chunk_off.push(self.out.len() as u32);
         self.chunk_own.push(own);
         self.chunk_enum.push(is_enum);
+        self.chunk_name.push_str(nm);
+        self.chunk_name_end.push(self.chunk_name.len() as u32);
         self.out.push_string(body);
     }
 
@@ -137,13 +102,7 @@ extend TuEmit {
         if gens.len as u8 > inst.n {
             return -1;
         }
-        let mut n: i64 = 0;
-        for i in 0..gens.len {
-            let gid = unsafe (*da).list(gens)[i as usize];
-            self.mg.push_sub(it.m, gid, it.amod, unsafe inst.args[i as usize]);
-            n += 1;
-        }
-        return n;
+        return self.mg.push_generics(it.m, gens, it.amod, &inst) as i64;
     }
 
     // The mangled C type name of the item (instance names come from the anchor).
@@ -156,7 +115,7 @@ extend TuEmit {
             );
             return true;
         }
-        return self.mg.type_m(it.amod, it.aty, out);
+        return self.mg.type_name(it.amod, it.aty, out);
     }
 
     /// Emit `it` (and, first, every by-value aggregate it depends on). False only on cycle
@@ -167,160 +126,57 @@ extend TuEmit {
             self.skipped += 1;
             return true;
         }
-        let key = fnv(nm.as_str());
+        let key = nm.as_str().hash();
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,
         };
         if st != 0 {
             // 1 = in progress: a by-value cycle would be an upstream bug.
-            self.last_owner = (switch self.owners.get(&key) {
-                Some(v) => (*v) as i64,
-                None => -1,
-            });
             return st != 1;
         }
         self.state.insert(key, 1);
         self.emit_fwd(it);
-        let own = self.emit_agg_body(it, nm.as_str());
-        if own >= 0 {
-            self.owners.insert(key, own as u64);
+        let nb = self.bind_item(it);
+        if nb < 0 {
+            self.skipped += 1;
+        } else {
+            self.agg_chunk(it, nm.as_str(), nb as usize);
         }
-        self.last_owner = own;
         self.state.insert(key, 2);
         return true;
     }
 
-    // The owner module of the aggregate named by the emitted chunk of `it` (-1 when skipped):
-    // its declaring module, or for a generic instance the owner of its by-value argument
-    // defined latest, so the instance lives beside the types it embeds.
-    fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) i64 {
+    // Render the chunk of `it` with its generics bound (`nb` bindings, popped here) and define it,
+    // owned by the declaring module (a generic instance's: the generic's); a body that leaves the
+    // subset counts as skipped.
+    fn agg_chunk(self: &mut Self, it: &AggItem, nm: str, nb: usize) {
         let da = self.p().module_ast_const(it.m);
-        let n = unsafe (*da).at_const(it.decl);
-        let is_enum = n.kind == NodeKind::NODE_ENUM;
-        let nb = self.bind_item(it);
-        if nb < 0 {
-            self.skipped += 1;
-            return -1;
-        }
+        let is_enum = unsafe (*da).at_const(it.decl).kind == NodeKind::NODE_ENUM;
         let mut body = String::new();
-        let saved = self.cur_own;
-        let d0 = self.cur_deps.len();
-        self.cur_own = it.m;
         let ok = if is_enum {
             self.enum_body(it, nm, &mut body);
         } else {
             self.struct_body(it, nm, &mut body);
         };
-        self.cur_own = saved;
-        self.mg.pop_subs(nb as usize);
+        self.mg.pop_subs(nb);
         if !ok {
-            self.cur_deps.truncate(d0);
             self.skipped += 1;
-            return -1;
+            return;
         }
-        let mut own = it.m;
-        if it.aty != TYPE_NONE {
-            let aa = self.p().module_ast_const(it.amod);
-            let inst = *unsafe (*aa).instance(unsafe (*aa).type_at(it.aty).as_data.inst);
-            own = self.pick_owner(it.m, it.amod, &inst, d0);
-        }
-        self.finish_chunk(&body, own, is_enum && !enum_has_payload(unsafe &*da, it.decl), d0);
-        return own;
+        self.finish_chunk(&body, nm, it.m, is_enum && !unsafe (*da).enum_has_payload(it.decl));
     }
 
-    // Close a body: re-home its noted dependencies under the chosen owner, define the chunk.
-    fn finish_chunk(self: &mut Self, body: &String, own: ModuleId, is_enum: bool, d0: usize) {
-        for i in d0..self.cur_deps.len() {
-            let dep = self.cur_deps[i];
-            if dep != own {
-                let n = self.p().modules.len();
-                if self.dep_mat.len() == 0 {
-                    self.dep_mat.resize_default(n * n);
-                }
-                self.dep_mat.set(own as usize * n + dep as usize, 1);
-            }
-        }
-        self.cur_deps.truncate(d0);
-        self.push_chunk(body, own, is_enum);
+    // Define the finished chunk `body` of C name `nm`, owned by `own`.
+    fn finish_chunk(self: &mut Self, body: &String, nm: str, own: ModuleId, is_enum: bool) {
+        self.push_chunk(body, nm, own, is_enum);
         self.emitted += 1;
     }
 
-    // The owner of instance `inst` (args in `pm`) of generic module `gm`: among its arguments'
-    // owners that the body embeds by value (noted from `d0` on), the one defined latest; `gm`
-    // when none. Every TU that spells the instance name spells its argument owners too, so
-    // the owner's type header is always included where the instance is used.
-    fn pick_owner(self: &mut Self, gm: ModuleId, pm: ModuleId, inst: &TyInstance, d0: usize) ModuleId {
-        let mut own = gm;
-        let mut best: i64 = -1;
-        for i in 0..inst.n {
-            let c = self.type_owner(pm, unsafe inst.args[i as usize]);
-            if c < 0 {
-                continue;
-            }
-            let mut noted = false;
-            for k in d0..self.cur_deps.len() {
-                if self.cur_deps[k] as i64 == c {
-                    noted = true;
-                    break;
-                }
-            }
-            if !noted {
-                continue;
-            }
-            let lc = self.last_chunk[c as usize];
-            if lc != 0xFFFFFFFF && lc as i64 > best {
-                best = lc;
-                own = c as ModuleId;
-            }
-        }
-        return own;
-    }
-
-    /// Define `(pm, t)` and everything it embeds, as a by-value field would: descriptor data
-    /// names aggregates (`FieldInfo`, `MetaInfo`, ...) that no live body reaches.
-    pub fn ensure_by_value(self: &mut Self, pm: ModuleId, t: TypeId) bool {
-        return self.field_dep(pm, t);
-    }
-
-    /// The module whose type header defines `(pm, t)` when it is used by value: an aggregate's
-    /// declaring module, an emitted instance's chosen owner, an array's element owner, a
-    /// capturing closure's module; -1 for everything else.
-    pub fn type_owner(self: &mut Self, pm: ModuleId, t: TypeId) i64 {
-        let mut rm = pm;
-        let mut rt = t;
-        if !self.mg.resolve(pm, t, &mut rm, &mut rt) {
-            return -1;
-        }
-        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            return y.module;
-        }
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let mut nm = String::new();
-            if !self.mg.type_m(rm, rt, &mut nm) {
-                return -1;
-            }
-            return switch self.owners.get(&fnv(nm.as_str())) {
-                Some(v) => (*v) as i64,
-                None => unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst).module,
-            };
-        }
-        if y.kind == TypeKind::TYPE_ARRAY {
-            return self.type_owner(rm, y.as_data.arr.elem);
-        }
-        if y.kind == TypeKind::TYPE_FUNCTION {
-            let cf = unsafe (*self.p().module_ast_const(y.module)).closure_fact(y.as_data.decl);
-            if cf != null && unsafe (&*cf).ncaps != 0 {
-                return y.module;
-            }
-        }
-        return -1;
-    }
-
-    // Emit dependencies of a by-value field type, then spell it. Pointers/references need only the
-    // forward typedef (already global), so they never recurse.
-    fn field_dep(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+    /// Emit dependencies of a by-value field type, then spell it. Pointers/references need only the
+    /// forward typedef (the assembly gives it to every header that spells it), so they never recurse. Descriptor data also calls it for the
+    /// aggregates it names (`FieldInfo`, `MetaInfo`, ...) that no live body reaches.
+    pub fn field_dep(self: &mut Self, pm: ModuleId, t: TypeId) bool {
         let mut rm = pm;
         let mut rt = t;
         if !self.mg.resolve(pm, t, &mut rm, &mut rt) {
@@ -330,18 +186,12 @@ extend TuEmit {
         let y = *unsafe (*a).type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             let dep = AggItem { m: y.module, decl: y.as_data.decl, amod: rm, aty: TYPE_NONE };
-            let r = self.emit_agg(&dep);
-            self.dep_note(y.module);
-            return r;
+            return self.emit_agg(&dep);
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let inst = *unsafe (*a).instance(y.as_data.inst);
             let dep = AggItem { m: inst.module, decl: inst.decl, amod: rm, aty: rt };
-            let r = self.emit_agg(&dep);
-            if self.last_owner >= 0 {
-                self.dep_note(self.last_owner as ModuleId);
-            }
-            return r;
+            return self.emit_agg(&dep);
         }
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.field_dep(rm, y.as_data.arr.elem);
@@ -372,23 +222,16 @@ extend TuEmit {
                 let mut nm = String::new();
                 self.mg.closure_sym(y.module, y.as_data.decl, &mut nm);
                 nm.push_str("_env");
-                let key = fnv(nm.as_str());
+                let key = nm.as_str().hash();
                 let st = switch self.state.get(&key) {
                     Some(v) => *v,
                     None => 0u64,
                 };
-                // Every embedder gets the edge to the env's module, the defining visit and the
-                // later ones alike: an instance owned elsewhere that embeds this env by value
-                // includes the closure module's type header through it.
-                self.dep_note(y.module);
                 if st != 0 {
                     return st != 1;
                 }
                 self.state.insert(key, 1);
                 self.env_defined.push(key);
-                let saved = self.cur_own;
-                let d0 = self.cur_deps.len();
-                self.cur_own = y.module;
                 self.fwd2.push_str("typedef struct ");
                 self.fwd2.push_str(nm.as_str());
                 self.fwd2.push_str(" ");
@@ -430,11 +273,9 @@ extend TuEmit {
                     body.push_str("unsigned char _sc_zenv; ");
                 }
                 body.push_str("};\n");
-                self.cur_own = saved;
                 if ok {
-                    self.finish_chunk(&body, y.module, false, d0);
+                    self.finish_chunk(&body, nm.as_str(), y.module, false);
                 } else {
-                    self.cur_deps.truncate(d0);
                     self.skipped += 1;
                 }
                 self.state.insert(key, 2);
@@ -486,10 +327,7 @@ extend TuEmit {
                 keep.push(2);
                 continue;
             }
-            let mut fty = unsafe (*da).type_of(fid);
-            if fty == TYPE_NONE && !is_tuple {
-                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
-            }
+            let fty = unsafe (*da).member_ty(fid);
             if fty == TYPE_NONE {
                 return false;
             }
@@ -517,7 +355,7 @@ extend TuEmit {
             // Over-aligned elided field with an unlayoutable sibling: no safe C shape.
             return false;
         }
-        let kw = if_str2(is_union, "union ", "struct ");
+        let kw = mbe::if_s(is_union, "union ", "struct ");
         body.push_str(kw);
         // layout attributes ride the keyword: `struct __attribute__((packed)) X { .. }`.
         if packed {
@@ -536,10 +374,7 @@ extend TuEmit {
                 continue;
             }
             let fid = unsafe (*da).list(ms)[i as usize];
-            let mut fty = unsafe (*da).type_of(fid);
-            if fty == TYPE_NONE && !is_tuple {
-                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
-            }
+            let fty = unsafe (*da).member_ty(fid);
             if !self.field_dep(it.m, fty) {
                 return false;
             }
@@ -598,9 +433,7 @@ extend TuEmit {
         force_align: &mut u64,
     ) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = unsafe (*da).at_const(it.decl);
-        let is_tuple = n.as_data.aggregate.is_tuple;
-        let ms = n.as_data.aggregate.members;
+        let ms = unsafe (*da).at_const(it.decl).as_data.aggregate.members;
         let mut soff: u64 = 0; // semantic running offset (all fields)
         let mut moff: u64 = 0; // natural C offset (stored fields only)
         let mut samax: u64 = 1;
@@ -613,10 +446,7 @@ extend TuEmit {
                 continue;
             }
             let fid = unsafe (*da).list(ms)[i as usize];
-            let mut fty = unsafe (*da).type_of(fid);
-            if fty == TYPE_NONE && !is_tuple {
-                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
-            }
+            let fty = unsafe (*da).member_ty(fid);
             let lo = self.mg.layout_sub(it.m, fty);
             if !lo.ok {
                 return false;
@@ -716,15 +546,15 @@ extend TuEmit {
             return true;
         }
         let ms = n.as_data.aggregate.members;
-        let has_payload = enum_has_payload(unsafe &*da, it.decl);
+        let has_payload = unsafe (*da).enum_has_payload(it.decl);
         // The tag enum (or the whole payload-less enum) belongs to the GENERIC declaration and is
         // shared by every instance: guard it and spell it from the decl, not the anchor.
         let mut q = String::new();
         self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q);
-        body.push_str(if_str2(has_payload, "#ifndef SUPER_ENUMTAG_", "#ifndef SUPER_ENUM_"));
+        body.push_str(mbe::if_s(has_payload, "#ifndef SUPER_ENUMTAG_", "#ifndef SUPER_ENUM_"));
         body.push_string(&q);
         body.push_str("\n");
-        body.push_str(if_str2(has_payload, "#define SUPER_ENUMTAG_", "#define SUPER_ENUM_"));
+        body.push_str(mbe::if_s(has_payload, "#define SUPER_ENUMTAG_", "#define SUPER_ENUM_"));
         body.push_string(&q);
         body.push_str("\ntypedef enum { ");
         let mut first = true;
@@ -784,10 +614,7 @@ extend TuEmit {
             let mut vmat: usize = 0;
             for k in 0..pl.len {
                 let pid = unsafe (*da).list(pl)[k as usize];
-                let mut pty = unsafe (*da).type_of(pid);
-                if pty == TYPE_NONE && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
-                    pty = unsafe (*da).type_of(unsafe (*da).at_const(pid).as_data.field.ty);
-                }
+                let pty = unsafe (*da).member_ty(pid);
                 if pty == TYPE_NONE {
                     return false;
                 }
@@ -802,10 +629,7 @@ extend TuEmit {
             body.push_str("    struct { ");
             for k in 0..pl.len {
                 let pid = unsafe (*da).list(pl)[k as usize];
-                let mut pty = unsafe (*da).type_of(pid);
-                if pty == TYPE_NONE && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
-                    pty = unsafe (*da).type_of(unsafe (*da).at_const(pid).as_data.field.ty);
-                }
+                let pty = unsafe (*da).member_ty(pid);
                 if self.mg.is_zst(it.m, pty) {
                     continue;
                 }
@@ -856,7 +680,7 @@ extend TuEmit {
         if n.as_data.aggregate.is_extern {
             return;
         }
-        let fk = fnv(nm);
+        let fk = nm.hash();
         switch self.fwds.get(&fk) {
             Some(_v) => {
                 return;
@@ -866,11 +690,11 @@ extend TuEmit {
         self.fwds.insert(fk, 1);
         if n.kind == NodeKind::NODE_ENUM {
             // Payload-less enums typedef in their own guarded block; payload enums fwd as structs.
-            if !enum_has_payload(unsafe &*da, decl) {
+            if !unsafe (*da).enum_has_payload(decl) {
                 return;
             }
         }
-        let kw = if_str2(n.kind != NodeKind::NODE_ENUM && n.as_data.aggregate.is_union, "union", "struct");
+        let kw = mbe::if_s(n.kind != NodeKind::NODE_ENUM && n.as_data.aggregate.is_union, "union", "struct");
         self.fwd2.push_str("typedef ");
         self.fwd2.push_str(kw);
         self.fwd2.push_str(" ");
@@ -897,11 +721,11 @@ extend TuEmit {
     pub fn emit_agg_inst(self: &mut Self, pm: ModuleId, inst0: TyInstance) bool {
         let inst = &inst0;
         let mut nm = String::new();
-        if !self.mg.inst_name(pm, inst, &mut nm) {
+        if !self.mg.inst_type_name(pm, inst, &mut nm) {
             self.skipped += 1;
             return true;
         }
-        let key = fnv(nm.as_str());
+        let key = nm.as_str().hash();
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,
@@ -909,67 +733,17 @@ extend TuEmit {
         if st != 0 {
             return st != 1;
         }
-        let da = self.p().module_ast_const(inst.module);
-        let n = unsafe (*da).at_const(inst.decl);
-        let gens = n.as_data.aggregate.generics;
+        let gens = unsafe (*self.p().module_ast_const(inst.module)).at_const(inst.decl).as_data.aggregate.generics;
         if gens.len as u8 > inst.n {
             self.skipped += 1;
             return true;
         }
         self.state.insert(key, 1);
         self.emit_fwd_named(inst.module, inst.decl, nm.as_str());
-        let mut nb: usize = 0;
-        for i in 0..gens.len {
-            let gid = unsafe (*da).list(gens)[i as usize];
-            self.mg.push_sub(inst.module, gid, pm, unsafe inst.args[i as usize]);
-            nb += 1;
-        }
+        let nb = self.mg.push_generics(inst.module, gens, pm, inst);
         let it = AggItem { m: inst.module, decl: inst.decl, amod: pm, aty: TYPE_NONE };
-        let mut body = String::new();
-        let saved = self.cur_own;
-        let d0 = self.cur_deps.len();
-        self.cur_own = inst.module;
-        let ok = if n.kind == NodeKind::NODE_ENUM {
-            self.enum_body(&it, nm.as_str(), &mut body);
-        } else {
-            self.struct_body(&it, nm.as_str(), &mut body);
-        };
-        self.cur_own = saved;
-        self.mg.pop_subs(nb);
-        if ok {
-            let own = self.pick_owner(inst.module, pm, inst, d0);
-            self.owners.insert(key, own);
-            self.finish_chunk(
-                &body,
-                own,
-                n.kind == NodeKind::NODE_ENUM && !enum_has_payload(unsafe &*da, inst.decl),
-                d0,
-            );
-        } else {
-            self.cur_deps.truncate(d0);
-            self.skipped += 1;
-        }
+        self.agg_chunk(&it, nm.as_str(), nb);
         self.state.insert(key, 2);
         return true;
     }
-}
-
-/// True when enum `decl` of `da` has a variant with a payload (it emits as a tagged struct).
-fn enum_has_payload(da: &Ast, decl: NodeId) bool {
-    let n = da.at_const(decl);
-    let ms = n.as_data.aggregate.members;
-    for i in 0..ms.len {
-        let vid = unsafe da.list(ms)[i as usize];
-        if da.at_const(vid).kind == NodeKind::NODE_VARIANT && da.at_const(vid).as_data.variant.payload.len != 0 {
-            return true;
-        }
-    }
-    return false;
-}
-
-const fn if_str2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
-    if c {
-        return a;
-    }
-    return b;
 }

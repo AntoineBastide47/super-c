@@ -6,7 +6,7 @@
 |---------|-----------|---------|
 | Functions, variables, files | `snake_case` | `parse_size`, `token_count` |
 | Types, enum variants | `PascalCase` | `Counter`, `Shape::Circle` |
-| Constants | `UPPER_SNAKE_CASE` | `EOF_CH`, `SOURCE_PAD` |
+| Constants | `UPPER_SNAKE_CASE` | `SOURCE_PAD`, `ERRORS_MAX` |
 
 - Choose precise nouns and verbs that describe the domain.
 - Units and qualifiers go **last**, most significant to least: `latency_ms_max`.

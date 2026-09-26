@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 13.
+# Super-C compatibility contract, version 14.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=13
+CONTRACT_VERSION=14
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -38,7 +38,8 @@ CONTRACT_FIXPOINT_GEN2="./gen1-super-c build"
 # and the gen2 binary is what runs every later step (generation two is compiled and run).
 # The worker-count identity: gen2, `--jobs=1` (also compared with gen1's tree) against `--jobs=<max>` under
 # every SC_TASK_DELAY seed below: the same tree comparison, the SC_TYPE_TABLE dumps, the SC_ITEM_STATS
-# index digest and the diagnostics byte for byte.
+# index digest and the diagnostics byte for byte. check.sh (the commit hook) runs these steps on each run
+# (`ci/gate.sh --core`).
 CONTRACT_WORKERS_MIN=1
 CONTRACT_DELAY_SEEDS="1 2 3"
 
@@ -51,7 +52,7 @@ CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror"
 # ---- readability of the emitted C tree (build/raw) ------------------------------------------------------
 # Checked by the gate on the gen1 tree:
 #   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
-#   module owning generic instances <module>__inst.c, an SCC of by-value types <module>__types.h),
+#   module owning generic instances <module>__inst.c, one definition header per type __sc_t/<name>.h),
 #   the shared __sc_fwd.h, the registry TU, the manifest and the runtime super_rt.h/super_rt.c,
 #   every include relative (the tree compiles with no -I flag),
 #   no #line directives, and symbols mangled by module path (lexer__Lexer__scan_tokens).
@@ -117,6 +118,7 @@ tests/lsp_transport_test.spc
 tests/lsp_v2_test.spc
 tests/map_test.spc
 tests/mutex_test.spc
+tests/parallel_harness.spc
 tests/parser_test.spc
 tests/pattern_test.spc
 tests/raii_gen_test.spc

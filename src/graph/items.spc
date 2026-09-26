@@ -23,11 +23,11 @@ const fn mix(h: u64, v: u64) u64 {
     return (h ^ v) * FNV_PRIME;
 }
 
-fn hash_bytes(mut h: u64, b: str) u64 {
-    for i in 0..b.len() {
-        h = mix(h, b[i]);
-    }
-    return h;
+// A node-id range [s, e] of one arena and the item `o` that owns it.
+struct Range {
+    pub s: u32,
+    pub e: u32,
+    pub o: u32,
 }
 
 /// Per-module declaration spans for the owner lookup (items in source order; members nest
@@ -157,10 +157,8 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             out.push(i as u64 << 32 | ow as u64);
         }
     }
-    // Module-arena ranges [rs, re] -> owner, ascending; the per-item own range for the self test.
-    let mut rs = Vector::<u32>::new();
-    let mut re = Vector::<u32>::new();
-    let mut ro = Vector::<u32>::new();
+    // Module-arena ranges [s, e] -> owner, ascending; the per-item own range for the self test.
+    let mut rs = Vector::<Range>::new();
     let mut mstart = Vector::<u32>::new();
     mstart.resize_default(nl);
     let mut mend = Vector::<u32>::new();
@@ -175,26 +173,20 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             // The extend's header (generics, target, interface) precedes its first member.
             let ed = a.at_const(p.idx.items.at(meta.owner as usize).node).as_data.extend_def;
             let mut he = ed.target_type;
-            if ed.interface_type != NODE_NONE && ed.interface_type > he {
-                he = ed.interface_type;
+            if ed.interface_type != NODE_NONE {
+                he = he.max(ed.interface_type);
             }
             for g in 0..ed.generics.len {
                 let gn = unsafe a.list(ed.generics)[g as usize];
-                if gn > he {
-                    he = gn;
-                }
+                he = he.max(gn);
             }
-            rs.push(prev);
-            re.push(he);
-            ro.push(meta.owner);
+            rs.push(Range { s: prev, e: he, o: meta.owner });
             mstart.set((meta.owner - i0 as u32) as usize, prev);
             mend.set((meta.owner - i0 as u32) as usize, he);
             opened.set((meta.owner - i0 as u32) as usize, true);
             prev = he + 1;
         }
-        rs.push(prev);
-        re.push(meta.node);
-        ro.push(it);
+        rs.push(Range { s: prev, e: meta.node, o: it });
         if meta.owner == loader::ITEM_NONE && !opened[(it - i0 as u32) as usize] {
             mstart.set((it - i0 as u32) as usize, prev);
             mend.set((it - i0 as u32) as usize, meta.node);
@@ -203,9 +195,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
     }
     // Body-arena ranges: each function's body run, in node order. Body id 0 is a real node (only
     // the module arena reserves slot 0), so the starts are inclusive in both arenas.
-    let mut bs = Vector::<u32>::new();
-    let mut be = Vector::<u32>::new();
-    let mut bo = Vector::<u32>::new();
+    let mut bs = Vector::<Range>::new();
     let mut bstart = Vector::<u32>::new();
     bstart.resize_default(nl);
     let mut bend = Vector::<u32>::new();
@@ -217,16 +207,14 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
         let nd = a.at_const(meta.node);
         if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
             let end = nd.as_data.function.body & NODE_BODY_MASK;
-            bs.push(prev);
-            be.push(end);
-            bo.push(it);
+            bs.push(Range { s: prev, e: end, o: it });
             bstart.set((it - i0 as u32) as usize, prev);
             bend.set((it - i0 as u32) as usize, end);
             prev = end + 1;
         }
     }
     let first_span = if rs.len() != 0 {
-        a.at_const(p.idx.items.at(ro[0] as usize).node).span.start;
+        a.at_const(p.idx.items.at(rs.at(0).o as usize).node).span.start;
     } else {
         0u32;
     };
@@ -253,22 +241,12 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
         } else {
             &a.nodes;
         };
-        let rng_s = if body {
+        let rng = if body {
             &bs;
         } else {
             &rs;
         };
-        let rng_e = if body {
-            &be;
-        } else {
-            &re;
-        };
-        let rng_o = if body {
-            &bo;
-        } else {
-            &ro;
-        };
-        let nr = rng_e.len();
+        let nr = rng.len();
         let mut r: usize = 0;
         let n = sv.len();
         let nb = sv.base_len();
@@ -282,15 +260,15 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
                 continue;
             }
             for _ in r..nr {
-                if x as u32 > rng_e[r] {
+                if x as u32 > rng.at(r).e {
                     r += 1;
                 } else {
                     break;
                 }
             }
             let mut owner = NONE;
-            if r < nr && x as u32 >= rng_s[r] {
-                owner = rng_o[r];
+            if r < nr && x as u32 >= rng.at(r).s {
+                owner = rng.at(r).o;
                 if !body && r == 0 && (unsafe &*nv.ptr_at(x)).span.start < first_span {
                     continue; // an import path, before the first item
                 }
@@ -389,9 +367,7 @@ fn csr(n: usize, edges: &Vector<u64>, off: &mut Vector<u32>, tgt: &mut Vector<u3
 fn tgt_max(tgt: &Vector<u32>) usize {
     let mut m: usize = 0;
     for i in 0..tgt.len() {
-        if tgt[i] as usize > m {
-            m = tgt[i] as usize;
-        }
+        m = m.max(tgt[i] as usize);
     }
     return m;
 }
@@ -402,11 +378,11 @@ pub fn open(p: &mut loader::Package) {
     p.ensure_index();
     let n = p.idx.items.len();
     let nm = p.modules.len();
-    let mut sch = loader::ItemSched::new();
+    let mut sch = loader::ItemSched {};
     // Stable keys: the module path, the top-level ordinal, the member ordinal (0 at top level).
     sch.key.reserve(n);
     for m in 0..nm {
-        let mh = hash_bytes(FNV_OFF, p.modules.at(m).path.as_str());
+        let mh = p.modules.at(m).path.as_str().hash();
         let mut top: u64 = 0;
         let mut mem: u64 = 0;
         for i in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
@@ -468,9 +444,7 @@ pub fn open(p: &mut loader::Package) {
                 let nd = p.modules.at(m).ast.at_const(meta.node);
                 if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
                     let b = nd.as_data.function.body & NODE_BODY_MASK;
-                    if b > bmax {
-                        bmax = b;
-                    }
+                    bmax = bmax.max(b);
                 }
             }
             sch.body_hi.set(k, bmax);
@@ -561,17 +535,15 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     csr(n, &all, &mut off, &mut tgt);
     let mut comp = Vector::<u32>::new();
     let ncomp = condense(n, &off, &tgt, &mut comp) as u32;
-    // The component graph: dependencies, dependents, and each component's items ascending.
+    // The component graph: dependencies and each component's items ascending.
     let nc = ncomp as usize;
     let mut ce = Vector::<u64>::new();
-    let mut cr = Vector::<u64>::new();
     for i in 0..n {
         let a = comp[i];
         for e in off[i] as usize..off[i + 1] as usize {
             let b = comp[tgt[e] as usize];
             if a != b {
                 ce.push(a as u64 << 32 | b as u64);
-                cr.push(b as u64 << 32 | a as u64);
             }
         }
     }
@@ -580,7 +552,6 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
         ci.push(comp[i] as u64 << 32 | i as u64);
     }
     csr(nc, &ce, &mut p.sched.cdep_off, &mut p.sched.cdep);
-    csr(nc, &cr, &mut p.sched.csucc_off, &mut p.sched.csucc);
     csr(nc, &ci, &mut p.sched.citem_off, &mut p.sched.citem);
     // Transitive dependencies per component: the numbering is dependency-first, so one pass in
     // component order folds each dependency's finished row in.
@@ -807,14 +778,7 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
     let it = *p.idx.items.at(i);
     let m = it.module as usize;
     let a = &p.modules.at(m).ast;
-    let mut h = mix(
-        mix(p.sched.key[i], it.kind),
-        if it.is_public {
-            1u64;
-        } else {
-            0u64;
-        },
-    );
+    let mut h = mix(mix(p.sched.key[i], it.kind), it.is_public as u64);
     let mut k = switch akeys.binary_search(&(it.node as u64 << 32)) {
         Ok(x) => x,
         Err(x) => x,
@@ -832,23 +796,7 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
         let fd = nd.as_data.function;
         h = mix(
             h,
-            if fd.is_extern() {
-                1u64;
-            } else {
-                0u64;
-            } | if fd.is_variadic() {
-                2u64;
-            } else {
-                0u64;
-            } | if fd.is_const() {
-                4u64;
-            } else {
-                0u64;
-            } | if fd.is_unsafe() {
-                8u64;
-            } else {
-                0u64;
-            },
+            fd.is_extern() as u64 | fd.is_variadic() as u64 << 1 | fd.is_const() as u64 << 2 | fd.is_unsafe() as u64 << 3,
         );
         h = mix(h, fd.generics.len);
         for g in 0..fd.generics.len {
@@ -936,7 +884,7 @@ fn decl_key(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: usize, n
     let s = a.at_const(node).span.start;
     let ow = owner_at(p, sps, c, m as u32, s);
     if ow == NONE {
-        return mix(hash_bytes(FNV_OFF, p.modules.at(m).path.as_str()), s);
+        return mix(p.modules.at(m).path.as_str().hash(), s);
     }
     return mix(p.sched.key[ow as usize], s - c.s);
 }
@@ -990,7 +938,7 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
 
 // Tarjan's algorithm, iterative, over the CSR graph: `comp[i]` is the component of item `i`,
 // components numbered after every component they reference (dependency-first).
-fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vector<u32>) usize {
+pub fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vector<u32>) usize {
     let mut index = Vector::<u32>::new();
     index.resize_default(n);
     let mut low = Vector::<u32>::new();
@@ -1113,31 +1061,17 @@ fn makespan_w(
 ) u64 {
     assert(n < 1usize << 20, "the ready heap packs a job id into 20 bits");
     // Dependents (reverse CSR) and the pending-dependency counts.
+    let mut redges = Vector::<u64>::with_capacity(deps.len());
+    let mut pending = Vector::<u32>::with_capacity(n);
+    for j in 0..n {
+        pending.push(dep_off[j + 1] - dep_off[j]);
+        for k in dep_off[j] as usize..dep_off[j + 1] as usize {
+            redges.push(deps[k] as u64 << 32 | j as u64);
+        }
+    }
     let mut rev_off = Vector::<u32>::new();
-    rev_off.resize_default(n + 1);
-    for j in 0..n {
-        for k in dep_off[j] as usize..dep_off[j + 1] as usize {
-            let d = deps[k] as usize;
-            rev_off.set(d + 1, rev_off[d + 1] + 1);
-        }
-    }
-    for j in 0..n {
-        rev_off.set(j + 1, rev_off[j + 1] + rev_off[j]);
-    }
     let mut rev = Vector::<u32>::new();
-    rev.resize_default(rev_off[n] as usize);
-    let mut fill = Vector::<u32>::new();
-    fill.resize_default(n);
-    let mut pending = Vector::<u32>::new();
-    pending.resize_default(n);
-    for j in 0..n {
-        pending.set(j, dep_off[j + 1] - dep_off[j]);
-        for k in dep_off[j] as usize..dep_off[j + 1] as usize {
-            let d = deps[k] as usize;
-            rev.set((rev_off[d] + fill[d]) as usize, j as u32);
-            fill.set(d, fill[d] + 1);
-        }
-    }
+    csr(n, &redges, &mut rev_off, &mut rev);
     // The ready heap (time << 20 | job): min by ready time, then job id.
     let mut heap = Vector::<u64>::new();
     for j in 0..n {
@@ -1152,9 +1086,7 @@ fn makespan_w(
         if heap.len() == 0 {
             break;
         }
-        if heap.len() as u64 > wd.max {
-            wd.max = heap.len() as u64;
-        }
+        wd.max = wd.max.max(heap.len() as u64);
         wd.sum += heap.len() as u64;
         wd.picks += 1;
         let e = heap_pop(&mut heap);
@@ -1166,16 +1098,9 @@ fn makespan_w(
                 w = x;
             }
         }
-        let start = if ready > free[w] {
-            ready;
-        } else {
-            free[w];
-        };
-        let f = start + cost[j] + task_ns;
+        let f = ready.max(free[w]) + cost[j] + task_ns;
         free.set(w, f);
-        if f > end {
-            end = f;
-        }
+        end = end.max(f);
         for k in rev_off[j] as usize..rev_off[j + 1] as usize {
             let d = rev[k] as usize;
             pending.set(d, pending[d] - 1);
@@ -1270,19 +1195,8 @@ pub fn report(p: &mut loader::Package, task_ns: u64) {
         ccost.set(c, ccost[c] + icost[i]);
         csize.set(c, csize[c] + 1);
     }
-    let mut cedges = Vector::<u64>::new();
-    for i in 0..n {
-        for e in s.pre_off[i] as usize..s.pre_off[i + 1] as usize {
-            let a = s.comp[i];
-            let b = s.comp[s.pre_edges[e] as usize];
-            if a != b {
-                cedges.push(a as u64 << 32 | b as u64);
-            }
-        }
-    }
-    let mut dep_off = Vector::<u32>::new();
-    let mut deps = Vector::<u32>::new();
-    csr(nc, &cedges, &mut dep_off, &mut deps);
+    let dep_off = &s.cdep_off;
+    let deps = &s.cdep;
     let mut longest = Vector::<u64>::new();
     longest.resize_default(nc);
     let mut crit: u64 = 0;
@@ -1290,14 +1204,10 @@ pub fn report(p: &mut loader::Package, task_ns: u64) {
     for c in 0..nc {
         let mut best: u64 = 0;
         for k2 in dep_off[c] as usize..dep_off[c + 1] as usize {
-            if longest[deps[k2] as usize] > best {
-                best = longest[deps[k2] as usize];
-            }
+            best = best.max(longest[deps[k2] as usize]);
         }
         longest.set(c, best + ccost[c]);
-        if longest[c] > crit {
-            crit = longest[c];
-        }
+        crit = crit.max(longest[c]);
         if csize[c] > csize[biggest] {
             biggest = c;
         }
@@ -1350,15 +1260,10 @@ pub fn report(p: &mut loader::Package, task_ns: u64) {
         ms(task_ns * nc as u64),
         nc,
     );
-    let mut ps = Vector::<usize>::new();
-    ps.push(1);
-    ps.push(2);
-    ps.push(4);
-    ps.push(8);
-    ps.push(14);
+    let ps: []usize = [1usize, 2, 4, 8, 14];
     for i in 0..ps.len() {
         let mut wd = Width { max: 0, sum: 0, picks: 0 };
-        let mk = makespan_w(nc, ps[i], &ccost, &dep_off, &deps, task_ns, &mut wd);
+        let mk = makespan_w(nc, ps[i], &ccost, dep_off, deps, task_ns, &mut wd);
         eprint(
             " p{}={} ms (ready width max {}, mean {})",
             ps[i],
@@ -1417,9 +1322,7 @@ fn frontier_line(p: &loader::Package, what: str, rec: &Vector<u64>, task_ns: u64
         sum += ns;
         per_mod.set(m, per_mod[m] + ns);
         units.push(ns);
-        if ns > maxu {
-            maxu = ns;
-        }
+        maxu = maxu.max(ns);
     }
     let mut maxm: u64 = 0;
     let mut maxi: usize = 0;
@@ -1457,25 +1360,18 @@ fn sort_longest_first(v: &mut Vector<u64>) {
     v.reverse();
 }
 
-// The module-level schedule the type check ran before the item scheduler, over the measured
-// module costs: import-SCC levels, the prelude one sequential group at level 0, every
-// non-prelude level after the prelude's; a level takes its slowest group.
-fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
+/// Import-SCC levels into `lvl` (one per SCC): 1 + the highest level among the imported SCCs. With
+/// `lift`, every non-prelude SCC also sits above every prelude SCC.
+pub fn import_levels(p: &loader::Package, lift: bool, lvl: &mut Vector<u32>) {
     let n = p.modules.len();
-    let mut nscc: u32 = 0;
+    let mut nscc: usize = 0;
     for i in 0..n {
-        if p.idx.scc_of[i] + 1 > nscc {
-            nscc = p.idx.scc_of[i] + 1;
-        }
+        nscc = nscc.max(p.idx.scc_of[i] as usize + 1);
     }
-    let mut lvl = Vector::<u32>::new();
-    lvl.resize_default(nscc as usize);
-    let mut changed = true;
+    lvl.clear();
+    lvl.resize_default(nscc);
     for _ in 0..nscc + 2 {
-        if !changed {
-            break;
-        }
-        changed = false;
+        let mut changed = false;
         for i in 0..n {
             let si = p.idx.scc_of[i] as usize;
             for e in p.idx.mod_imports[i] as usize..p.idx.mod_imports[i + 1] as usize {
@@ -1486,27 +1382,42 @@ fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
                 }
             }
         }
-        let mut plvl: u32 = 0;
-        for i in 0..n {
-            if p.modules.at(i).prelude && lvl[p.idx.scc_of[i] as usize] + 1 > plvl {
-                plvl = lvl[p.idx.scc_of[i] as usize] + 1;
+        if lift {
+            let mut plvl: u32 = 0;
+            for i in 0..n {
+                if p.modules.at(i).prelude {
+                    plvl = plvl.max(lvl[p.idx.scc_of[i] as usize] + 1);
+                }
+            }
+            for i in 0..n {
+                let si = p.idx.scc_of[i] as usize;
+                if !p.modules.at(i).prelude && lvl[si] < plvl {
+                    lvl.set(si, plvl);
+                    changed = true;
+                }
             }
         }
-        for i in 0..n {
-            let si = p.idx.scc_of[i] as usize;
-            if !p.modules.at(i).prelude && lvl[si] < plvl {
-                lvl.set(si, plvl);
-                changed = true;
-            }
+        if !changed {
+            break;
         }
     }
+}
+
+// The module-level schedule the type check ran before the item scheduler, over the measured
+// module costs: import-SCC levels, the prelude one sequential group at level 0, every
+// non-prelude level after the prelude's; a level takes its slowest group.
+fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
+    let n = p.modules.len();
+    let mut lvl = Vector::<u32>::new();
+    import_levels(p, true, &mut lvl);
+    let nscc = lvl.len();
     let mut gcost = Vector::<u64>::new();
-    gcost.resize_default(nscc as usize + 1);
+    gcost.resize_default(nscc + 1);
     let mut glvl = Vector::<u32>::new();
-    glvl.resize_default(nscc as usize + 1);
+    glvl.resize_default(nscc + 1);
     for i in 0..n {
         if p.modules.at(i).prelude {
-            gcost.set(nscc as usize, gcost[nscc as usize] + mcost[i]);
+            gcost.set(nscc, gcost[nscc] + mcost[i]);
         } else {
             let si = p.idx.scc_of[i] as usize;
             gcost.set(si, gcost[si] + mcost[i]);
@@ -1514,15 +1425,13 @@ fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
         }
     }
     let mut maxlvl: u32 = 0;
-    for c in 0..nscc as usize + 1 {
-        if glvl[c] > maxlvl {
-            maxlvl = glvl[c];
-        }
+    for c in 0..nscc + 1 {
+        maxlvl = maxlvl.max(glvl[c]);
     }
     let mut total: u64 = 0;
     for l in 0..maxlvl + 1 {
         let mut worst: u64 = 0;
-        for c in 0..nscc as usize + 1 {
+        for c in 0..nscc + 1 {
             if glvl[c] == l && gcost[c] > worst {
                 worst = gcost[c];
             }

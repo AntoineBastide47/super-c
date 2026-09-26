@@ -52,7 +52,10 @@ body (the `pinned` argument, the `pin_scope` of an interface or generic extend, 
 function's own generics decide) and restores it after the block and its named-return
 bindings. A later stage that appends nodes sets the sink to the arena of the body it
 extends: the HIR lowering per marker, the checker per function body (`check_item`), the
-LSP's `reparse_fn_body` from the old body's arena.
+LSP's `reparse_fn_body` from the old body's arena. Two body constructs parse into the module
+arena because a later reader needs them after the release: a local `const` (its value may
+enter a type) and the target of `dyn` (a `dyn fn` signature node is the identity of its type,
+which emission spells, see `Parser::parse_dyn_target`).
 
 Rules for every scan and every table indexed by node id:
 
@@ -69,7 +72,7 @@ Rules for every scan and every table indexed by node id:
 ## Release contract
 
 A batch build frees each module's body arena at the end of the module's borrow pass
-(`Package.free_bodies`, set by `run_package_i`; the driver's serial loop and `bc_run_one`):
+(`Package.free_bodies`, set by `run_package`; the driver's serial loop and `bc_run_one`):
 the module's bodies are lowered, kept (`irl::Keep`) and analyzed, and what a later pass read
 of the syntax is recorded first: the callees' return attributability (`ItemSched.ret_attr`,
 recorded after the type check), the module's emission dependency row (`Package.emit_deps`),
@@ -90,7 +93,7 @@ What emission reads of a body after the release, and the owned record that carri
 |--------|--------|
 | the inliner's callee vetting (`callee_slot` lowered callees from syntax per task) | `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering that some kept body calls is vetted once in `cemit_package` (size gate first), accepted callees copied compact; `Package.inl_store` for the emission's lifetime, read by every task |
 | a user local's declaration: its name text, kind (`let`, parameter, loop binding, pattern name) and a `[T; 0]` annotation | `LocalDecl.name()` (offset and length inside its span), `LocalDecl.dkind` (`LK_*`), `LocalDecl.zero_len`, filled by `Lowerer::local_decl`; the record stays 32 bytes |
-| a closure's captures (names and types), parameter and return types, mutable-capture mask; a `fn(..)` type written in a body | `Ast.closure_facts` / `cap_facts` (`ClosureFact`, `CapFact`): recorded by `check_closure_in` and by the `fn` type lowering, the mask finalized by the borrow checker (`flow_ir`), types remapped at publication |
+| a closure's captures (names and types), parameter and return types, mutable-capture and borrowed-capture masks; a `fn(..)` type written in a body | `Ast.closure_facts` / `cap_facts` (`ClosureFact`, `CapFact`): recorded by `check_closure_in` and by the `fn` type lowering; the checker sets mask bits while it checks the body (`tc_note_capture_mut`) and at a plain `fn(..)` bound (`tc_borrow_owned_caps`), the borrow checker (`flow_ir`) adds the mutable bits Core IR shows; types remapped at publication |
 | inline assembly text | `CoreBody.asms` / `asm_spans` (`AsmRec`), copied by `lower_asm`; the rvalue's `item.node` is the record index |
 | the declarations a `free` method's body touches (free-glue completion) | `Ast.free_touched`, recorded by `tc_record_free_touches` after the body check |
 

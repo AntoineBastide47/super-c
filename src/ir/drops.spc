@@ -29,14 +29,38 @@ pub struct DropAt {
     pub kind: u8,
     pub stmt: u32, // the storage marker's statement index (body order)
     pub block: u32,
-    pub fdecl: NodeId, // DK_FIELD: the dropped field's decl (NODE_NONE when not a field drop)
+    // DK_FIELD of a member no place names (`path` is the root): its projection's `data` and `sub`
+    // (a named field's decl, or the positional index) and its declared type.
+    pub fdata: u32,
+    pub fsub: NodeId,
+    pub fty: TypeId,
+}
+
+/// A drop of `local`'s move path `path` at statement `stmt` of `block`.
+const fn drop_at(local: u32, path: u32, kind: u8, stmt: u32, block: u32) DropAt {
+    return DropAt {
+        local: local,
+        path: path,
+        kind: kind,
+        stmt: stmt,
+        block: block,
+        fdata: 0,
+        fsub: NODE_NONE,
+        fty: TYPE_NONE,
+    };
+}
+
+/// A MOVE event of a root local's path (stmt 0xFFFFFFFF = at the block's terminator).
+pub struct MoveAt {
+    pub local: u32,
+    pub stmt: u32,
+    pub block: u32,
 }
 
 pub struct Schedule {
     pub drops: Vector<DropAt>,
-    /// Whole-root MOVE events (kind unused; stmt 0xFFFFFFFF = at the block's terminator): the
-    /// rewrite turns them into flag clears so guarded drops test real state.
-    pub moves: Vector<DropAt>,
+    /// The MOVE events: the rewrite turns them into flag clears so guarded drops test real state.
+    pub moves: Vector<MoveAt>,
 }
 
 // Overwrite classification of an assignment target: 2 = fully tracked (dataflow decides),
@@ -66,7 +90,6 @@ fn place_over_class(a: &Ast, b: &ir::CoreBody, pl: &ir::Place) u8 {
     return cls;
 }
 
-/// Classify every storage-death point of `b` against the move/init solution.
 // A tuple member's fdecl is a bare type node (not NODE_FIELD); its move path is keyed positionally.
 fn tuple_member_child(ow: &bf::Owner, forest: &mp::MoveForest, root: u32, m: ModuleId, fdecl: NodeId, idx: u32) u32 {
     if fdecl != NODE_NONE && unsafe (&*(&*ow.pkg).module_ast_const(m)).at_const(fdecl).kind != NodeKind::NODE_FIELD {
@@ -102,7 +125,7 @@ pub struct ElabCtx {
 extend ElabCtx {
     pub fn empty() ElabCtx {
         return ElabCtx {
-            sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<DropAt>::new() },
+            sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<MoveAt>::new() },
             mi: Vector::<u64>::new(),
             di: Vector::<u64>::new(),
             mm: Vector::<u64>::new(),
@@ -124,7 +147,7 @@ extend ElabCtx {
 
     /// Heap bytes the context keeps across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return ((self.sched.drops.capacity() + self.sched.moves.capacity()) * sizeof(DropAt) + (self.mi.capacity() + self.di.capacity() + self.mm.capacity()) * 8 + (self.scratch.capacity() + self.sub.capacity() + self.ins_cond_l.capacity() + self.ins_cond_f.capacity() + self.ins_clr_at.capacity() + self.ins_clr_fl.capacity() + self.ins_clr_blk.capacity() + self.ins_clr_blk_fl.capacity() + self.ins_off.capacity() + self.ins_idx.capacity() + self.ins_fill.capacity() + self.fdecls.capacity() + self.ftys.capacity()) * 4) as u64;
+        return (self.sched.drops.capacity() * sizeof(DropAt) + self.sched.moves.capacity() * sizeof(MoveAt) + (self.mi.capacity() + self.di.capacity() + self.mm.capacity()) * 8 + (self.scratch.capacity() + self.sub.capacity() + self.ins_cond_l.capacity() + self.ins_cond_f.capacity() + self.ins_clr_at.capacity() + self.ins_clr_fl.capacity() + self.ins_clr_blk.capacity() + self.ins_clr_blk_fl.capacity() + self.ins_off.capacity() + self.ins_idx.capacity() + self.ins_fill.capacity() + self.fdecls.capacity() + self.ftys.capacity()) * 4) as u64;
     }
 }
 
@@ -163,6 +186,7 @@ pub fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
     return assign_may_schedule(ow, b);
 }
 
+/// Classify every storage-death point of `b` against the move/init solution.
 pub fn elaborate_into(
     ow: &mut bf::Owner,
     b: &ir::CoreBody,
@@ -183,14 +207,7 @@ pub fn elaborate_into(
     let fdecls = &mut cx.fdecls;
     let ftys = &mut cx.ftys;
     for bi in 0..b.blocks.len() {
-        mi.clear();
-        di.clear();
-        mm.clear();
-        for k in 0..w {
-            mi.push(fl.mi[bi * w + k]);
-            di.push(fl.di[bi * w + k]);
-            mm.push(fl.mm[bi * w + k]);
-        }
+        dv_load(w, bi, &fl.mi, &fl.di, &fl.mm, mi, di, mm);
         let blk = *b.blocks.at(bi);
         let mut ev = facts.ev_start[bi];
         let ev_end = facts.ev_start[bi + 1];
@@ -205,14 +222,7 @@ pub fn elaborate_into(
                     // FIELD moves clear the root local's guard flag too: an overwrite drop of a
                     // conditionally-moved FIELD must not free what the branch moved out
                     sched.moves.push(
-                        DropAt {
-                            local: forest.paths.at(e.path() as usize).base,
-                            path: e.path(),
-                            kind: 0,
-                            stmt: sx as u32,
-                            block: bi as u32,
-                            fdecl: NODE_NONE,
-                        },
+                        MoveAt { local: forest.paths.at(e.path() as usize).base, stmt: sx as u32, block: bi as u32 },
                     );
                 }
                 df::apply_event(forest, &e, scratch, sub, mi, di, mm);
@@ -236,27 +246,9 @@ pub fn elaborate_into(
                         }
                         if dp0 != mp::MP_NONE {
                             if bits::bit_get(di, dp0) && !bits::bit_get(mi, dp0) {
-                                sched.drops.push(
-                                    DropAt {
-                                        local: pl0.base,
-                                        path: s.place,
-                                        kind: DK_OVER,
-                                        stmt: sx as u32,
-                                        block: bi as u32,
-                                        fdecl: NODE_NONE,
-                                    },
-                                );
+                                sched.drops.push(drop_at(pl0.base, s.place, DK_OVER, sx as u32, bi as u32));
                             } else if bits::bit_get(mi, dp0) && bits::bit_get(di, dp0) {
-                                sched.drops.push(
-                                    DropAt {
-                                        local: pl0.base,
-                                        path: s.place,
-                                        kind: DK_OVERC,
-                                        stmt: sx as u32,
-                                        block: bi as u32,
-                                        fdecl: NODE_NONE,
-                                    },
-                                );
+                                sched.drops.push(drop_at(pl0.base, s.place, DK_OVERC, sx as u32, bi as u32));
                             } else if cls0 == 1 {
                                 // A place reached through a REFERENCE deref (cls == 1) names storage
                                 // the referent owns: the borrow checker guarantees it holds an
@@ -266,16 +258,7 @@ pub fn elaborate_into(
                                 // is not seeded for such a referent -- a spliced-in block boundary
                                 // (an inlined call) can leave it clear -- so cls == 1 frees here
                                 // regardless, as place_over_class documents.
-                                sched.drops.push(
-                                    DropAt {
-                                        local: pl0.base,
-                                        path: s.place,
-                                        kind: DK_OVER,
-                                        stmt: sx as u32,
-                                        block: bi as u32,
-                                        fdecl: NODE_NONE,
-                                    },
-                                );
+                                sched.drops.push(drop_at(pl0.base, s.place, DK_OVER, sx as u32, bi as u32));
                             }
                         }
                     }
@@ -303,90 +286,79 @@ pub fn elaborate_into(
                             sub_moved = true;
                         }
                     }
+                    let mut fom: ModuleId = 0;
                     if all_di {
-                        sched.drops.push(
-                            DropAt {
-                                local: l,
-                                path: root,
-                                kind: DK_UNCOND,
-                                stmt: sx as u32,
-                                block: bi as u32,
-                                fdecl: NODE_NONE,
-                            },
-                        );
-                    } else if sub_moved && !bits::bit_get(mm, root) {
-                        // Partially moved (never wholly): every still-owned FIELD drops -- fields
-                        // never mentioned have no move path and are owned by construction.
-                        fdecls.clear();
-                        ftys.clear();
-                        let mut fom: ModuleId = 0;
-                        if ow.agg_fields(b.module, lty, fdecls, ftys, &mut fom) {
-                            for fi in 0..fdecls.len() {
-                                let child = tuple_member_child(ow, forest, root, fom, fdecls[fi], fi as u32);
-                                let mut live = child == mp::MP_NONE;
-                                if child != mp::MP_NONE {
-                                    live = bits::bit_get(di, child);
+                        sched.drops.push(drop_at(l, root, DK_UNCOND, sx as u32, bi as u32));
+                    } else if sub_moved && !bits::bit_get(mm, root) && ow.agg_fields(
+                        b.module,
+                        lty,
+                        fdecls,
+                        ftys,
+                        &mut fom,
+                    ) {
+                        // Partially moved struct or tuple (never wholly): every still-owned member
+                        // drops. A member some place names has a move path of concrete type. A
+                        // member no place names is owned by construction and drops through its
+                        // declared type, which must be concrete: a destructuring names every
+                        // member (the lowering's `mention_members`), since a declared type
+                        // parameter says nothing about the instance. A member only partly held
+                        // releases its own held parts (`part_drops`).
+                        for fi in 0..fdecls.len() {
+                            let child = tuple_member_child(ow, forest, root, fom, fdecls[fi], fi as u32);
+                            if child != mp::MP_NONE {
+                                let _ = part_drops(
+                                    ow,
+                                    b,
+                                    forest,
+                                    mi,
+                                    di,
+                                    l,
+                                    child,
+                                    sx as u32,
+                                    bi as u32,
+                                    &mut sched.drops,
+                                    scratch,
+                                    sub,
+                                );
+                            } else if ow.ast_of(fom).type_concrete(ftys[fi]) && ow.owns(b.owner, fom, ftys[fi]) {
+                                let mut da = drop_at(l, root, DK_FIELD, sx as u32, bi as u32);
+                                if ow.ast_of(fom).at_const(fdecls[fi]).kind == NodeKind::NODE_FIELD {
+                                    da.fdata = ir::IR_NONE;
+                                    da.fsub = fdecls[fi];
+                                } else {
+                                    da.fdata = fi as u32;
                                 }
-                                if live && ow.owns(b.owner, fom, ftys[fi]) {
-                                    let mut pth = root;
-                                    if child != mp::MP_NONE {
-                                        pth = child;
-                                    }
-                                    sched.drops.push(
-                                        DropAt {
-                                            local: l,
-                                            path: pth,
-                                            kind: DK_FIELD,
-                                            stmt: sx as u32,
-                                            block: bi as u32,
-                                            fdecl: fdecls[fi],
-                                        },
-                                    );
-                                }
+                                da.fty = ftys[fi];
+                                sched.drops.push(da);
                             }
                         }
+                    } else if sub_moved && !bits::bit_get(mm, root) && part_drops(
+                        ow,
+                        b,
+                        forest,
+                        mi,
+                        di,
+                        l,
+                        root,
+                        sx as u32,
+                        bi as u32,
+                        &mut sched.drops,
+                        scratch,
+                        sub,
+                    ) {
+                        // A partially moved enum: the members of the variant it holds drop.
                     } else if bits::bit_get(di, root) || bits::bit_get(mi, root) {
                         // The whole value may or may not still be here: one flag guards it.
-                        sched.drops.push(
-                            DropAt {
-                                local: l,
-                                path: root,
-                                kind: DK_COND,
-                                stmt: sx as u32,
-                                block: bi as u32,
-                                fdecl: NODE_NONE,
-                            },
-                        );
-                    } else if any_mi {
-                        fdecls.clear();
-                        ftys.clear();
-                        let mut fom2: ModuleId = 0;
-                        let have2 = ow.agg_fields(b.module, lty, fdecls, ftys, &mut fom2);
+                        sched.drops.push(drop_at(l, root, DK_COND, sx as u32, bi as u32));
+                    } else if any_mi && member_count(ow, b.module, lty) >= 0 {
+                        // A wholly moved struct or tuple with members stored again: those drop.
                         for i in 0..sub.len() {
-                            if sub[i] != root && bits::bit_get(di, sub[i]) && ow.owns(
+                            if forest.parent[sub[i] as usize] == root && bits::bit_get(di, sub[i]) && ow.owns(
                                 b.owner,
                                 b.module,
                                 forest.paths.at(sub[i] as usize).ty,
                             ) {
-                                let mut fd2 = NODE_NONE;
-                                if have2 {
-                                    for fi2 in 0..fdecls.len() {
-                                        if tuple_member_child(ow, forest, root, fom2, fdecls[fi2], fi2 as u32) == sub[i] {
-                                            fd2 = fdecls[fi2];
-                                            break;
-                                        }
-                                    }
-                                }
-                                sched.drops.push(
-                                    DropAt {
-                                        local: l,
-                                        path: sub[i],
-                                        kind: DK_FIELD,
-                                        stmt: sx as u32,
-                                        block: bi as u32,
-                                        fdecl: fd2,
-                                    },
-                                );
+                                sched.drops.push(drop_at(l, sub[i], DK_FIELD, sx as u32, bi as u32));
                             }
                         }
                     }
@@ -398,14 +370,7 @@ pub fn elaborate_into(
                     // FIELD moves clear the root local's guard flag too: an overwrite drop of a
                     // conditionally-moved FIELD must not free what the branch moved out
                     sched.moves.push(
-                        DropAt {
-                            local: forest.paths.at(e.path() as usize).base,
-                            path: e.path(),
-                            kind: 0,
-                            stmt: sx as u32,
-                            block: bi as u32,
-                            fdecl: NODE_NONE,
-                        },
+                        MoveAt { local: forest.paths.at(e.path() as usize).base, stmt: sx as u32, block: bi as u32 },
                     );
                 }
                 df::apply_event(forest, &e, scratch, sub, mi, di, mm);
@@ -417,14 +382,7 @@ pub fn elaborate_into(
             let e = *facts.events.at(ev as usize);
             if e.kind() == bf::EV_MOVE || e.kind() == bf::EV_MOVE_CUT {
                 sched.moves.push(
-                    DropAt {
-                        local: forest.paths.at(e.path() as usize).base,
-                        path: e.path(),
-                        kind: 0,
-                        stmt: 0xFFFFFFFFu32,
-                        block: bi as u32,
-                        fdecl: NODE_NONE,
-                    },
+                    MoveAt { local: forest.paths.at(e.path() as usize).base, stmt: 0xFFFFFFFFu32, block: bi as u32 },
                 );
             }
             ev += 1;
@@ -432,9 +390,197 @@ pub fn elaborate_into(
     }
 }
 
-/// Rewrite `b` so every scheduled whole-value drop is an explicit `Drop(place)` terminator: the
-/// marker's block splits there, the drop chains to the remainder, and `args_len` carries the
-/// conditional flag. Statement storage is shared -- split parts reference subranges.
+// The member count of struct or tuple type `ty` (as `Owner::agg_fields` lists them), or -1 for
+// every other shape.
+fn member_count(ow: &bf::Owner, mid: ModuleId, ty: TypeId) i64 {
+    let y = *ow.ast_of(mid).type_at(ty);
+    let mut om: ModuleId = 0;
+    let mut od = NODE_NONE;
+    if y.kind == TypeKind::TYPE_STRUCT {
+        om = y.module;
+        od = y.as_data.decl;
+    } else if y.kind == TypeKind::TYPE_INSTANCE {
+        let it = *ow.ast_of(mid).instance(y.as_data.inst);
+        om = it.module;
+        od = it.decl;
+    } else {
+        return 0 - 1;
+    }
+    let oa = ow.ast_of(om);
+    let dn = *oa.at_const(od);
+    if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+        return 0 - 1;
+    }
+    if dn.as_data.aggregate.is_tuple {
+        return dn.as_data.aggregate.members.len;
+    }
+    let mut n: i64 = 0;
+    for i in 0..dn.as_data.aggregate.members.len {
+        if oa.at_const(unsafe oa.list(dn.as_data.aggregate.members)[i as usize]).kind == NodeKind::NODE_FIELD {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// The payload member count of the variant downcast path `d` names (its key's `sub` is the variant
+// declaration, in the module of the enum type's declaration), or -1.
+fn payload_count(ow: &bf::Owner, mid: ModuleId, forest: &mp::MoveForest, d: u32) i64 {
+    let y = *ow.ast_of(mid).type_at(forest.paths.at(d as usize).ty);
+    let mut om: ModuleId = 0;
+    if y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_STRUCT {
+        om = y.module;
+    } else if y.kind == TypeKind::TYPE_INSTANCE {
+        om = ow.ast_of(mid).instance(y.as_data.inst).module;
+    } else {
+        return 0 - 1;
+    }
+    let vn = *ow.ast_of(om).at_const((forest.paths.at(d as usize).elem & 0xFFFFFFFFu64) as NodeId);
+    if vn.kind != NodeKind::NODE_VARIANT {
+        return 0 - 1;
+    }
+    return vn.as_data.variant.payload.len;
+}
+
+// The number of tracked children of path `p`.
+fn child_count(forest: &mp::MoveForest, p: u32) i64 {
+    let mut n: i64 = 0;
+    let mut c = forest.paths.at(p as usize).first_child;
+    while c != mp::MP_NONE {
+        n += 1;
+        c = forest.paths.at(c as usize).next_sibling;
+    }
+    return n;
+}
+
+// Schedule a DK_FIELD drop, at the storage death (`stmt`, `block`) of local `l`, for every part of
+// its path `p` still held. A path held whole drops whole; a struct or tuple releases member by
+// member; an enum releases the members of the variant that a definite move below it proves: a
+// payload member moves only after its tag test passed, and only a whole store changes the tag,
+// which initializes every path below again. Every member of an aggregate released by parts has a
+// path (the lowering's `mention_parts`). False, with nothing scheduled for
+// `p`, when a part is only maybe held: no flag guards a part.
+fn part_drops(
+    ow: &mut bf::Owner,
+    b: &ir::CoreBody,
+    forest: &mp::MoveForest,
+    mi: &Vector<u64>,
+    di: &Vector<u64>,
+    l: u32,
+    p: u32,
+    stmt: u32,
+    block: u32,
+    drops: &mut Vector<DropAt>,
+    scratch: &mut Vector<u32>,
+    sub: &mut Vector<u32>,
+) bool {
+    forest.subtree(p, scratch, sub);
+    let mut all_di = true;
+    let mut any_mi = false;
+    for i in 0..sub.len() {
+        if !bits::bit_get(di, sub[i]) {
+            all_di = false;
+        }
+        if bits::bit_get(mi, sub[i]) {
+            any_mi = true;
+        }
+    }
+    if all_di {
+        if ow.owns(b.owner, b.module, forest.paths.at(p as usize).ty) {
+            drops.push(drop_at(l, p, DK_FIELD, stmt, block));
+        }
+        return true;
+    }
+    if !any_mi {
+        return true; // moved out whole
+    }
+    if !bits::bit_get(di, p) {
+        return false;
+    }
+    let mut c = forest.paths.at(p as usize).first_child;
+    if c != mp::MP_NONE && (forest.paths.at(c as usize).elem >> 56) as u8 == ir::PJ_DOWNCAST {
+        let mut held = mp::MP_NONE;
+        while c != mp::MP_NONE {
+            forest.subtree(c, scratch, sub);
+            let mut proven = false;
+            for i in 0..sub.len() {
+                if !bits::bit_get(mi, sub[i]) {
+                    proven = true;
+                }
+            }
+            if proven {
+                if held != mp::MP_NONE {
+                    return false;
+                }
+                held = c;
+            }
+            c = forest.paths.at(c as usize).next_sibling;
+        }
+        if held == mp::MP_NONE || payload_count(ow, b.module, forest, held) != child_count(forest, held) {
+            return false;
+        }
+        c = forest.paths.at(held as usize).first_child;
+    } else if member_count(ow, b.module, forest.paths.at(p as usize).ty) != child_count(forest, p) {
+        return false;
+    }
+    let mark = drops.len();
+    while c != mp::MP_NONE {
+        if !part_drops(ow, b, forest, mi, di, l, c, stmt, block, drops, scratch, sub) {
+            drops.truncate(mark);
+            return false;
+        }
+        c = forest.paths.at(c as usize).next_sibling;
+    }
+    return true;
+}
+
+// A fresh place of local `l` naming move path `path` (not a root): the path's projection chain,
+// rebuilt from the keys (bits 56.. the kind, 32..55 the `data` with 0xFFFFFF for a named field's
+// IR_NONE, the low 32 the `sub`).
+fn path_place(b: &mut ir::CoreBody, forest: &mp::MoveForest, l: u32, path: u32) ir::Place {
+    let mut n: u32 = 0;
+    let mut p = path;
+    while forest.paths.at(p as usize).parent != mp::MP_NONE {
+        n += 1;
+        p = forest.paths.at(p as usize).parent;
+    }
+    let start = b.projections.len() as u32;
+    for _i in 0..n {
+        b.projections.push(ir::Projection { kind: 0, data: 0, sub: 0, ty: TYPE_NONE });
+    }
+    p = path;
+    for i in 0..n {
+        let mp0 = *forest.paths.at(p as usize);
+        let mut data = (mp0.elem >> 32 & 0xFFFFFFu64) as u32;
+        if data == 0xFFFFFF {
+            data = ir::IR_NONE;
+        }
+        b.projections.set(
+            (start + n - 1 - i) as usize,
+            ir::Projection {
+                kind: (mp0.elem >> 56) as u8,
+                data: data,
+                sub: (mp0.elem & 0xFFFFFFFFu64) as u32,
+                ty: mp0.ty,
+            },
+        );
+        p = mp0.parent;
+    }
+    return ir::Place { base: l, proj_start: start, proj_len: n, ty: forest.paths.at(path as usize).ty };
+}
+
+const NO_FLAG: u32 = 0xFFFFFFFF;
+
+// The guard flag local of conditionally dropped local `l`; NO_FLAG when it has none.
+fn flag_of(cond_l: &Vector<u32>, cond_f: &Vector<u32>, l: u32) u32 {
+    for i in 0..cond_l.len() {
+        if cond_l[i] == l {
+            return cond_f[i];
+        }
+    }
+    return NO_FLAG;
+}
+
 // One `flag = <v>` statement appended to the pool (fresh constant/operand/rvalue/place entries).
 fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
     let bt = Ast::builtin(BuiltinType::BT_BOOL);
@@ -442,28 +588,12 @@ fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
         ir::Constant { kind: ir::CK_BOOL, ty: bt, val: v, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
     );
     b.operands.push(ir::Operand { kind: ir::OP_CONST, data: b.constants.len() as u32 - 1, ty: bt });
-    b.rvalues.push(
-        ir::Rvalue {
-            kind: ir::RV_USE,
-            a: b.operands.len() as u32 - 1,
-            b: 0,
-            c: 0,
-            target: bt,
-            item: DefId { module: 0, node: NODE_NONE },
-        },
-    );
-    b.places.push(ir::Place { base: fl, proj_start: 0, proj_len: 0, ty: bt });
-    b.statements.push(
-        ir::Statement {
-            kind: ir::ST_ASSIGN,
-            place: b.places.len() as u32 - 1,
-            rvalue: b.rvalues.len() as u32 - 1,
-            a: 0,
-            span: sp,
-        },
-    );
+    b.assign_local_use(fl, b.operands.len() as u32 - 1, sp);
 }
 
+/// Rewrite `b` so every scheduled whole-value drop is an explicit `Drop(place)` terminator: the
+/// marker's block splits there, the drop chains to the remainder, and `args_len` carries the
+/// conditional flag. Statement storage is shared -- split parts reference subranges.
 pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveForest) {
     let nb = b.blocks.len();
     // Scratch rides in the context (capacity survives across bodies); every vector is taken here
@@ -491,30 +621,12 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         if da.kind != DK_COND && da.kind != DK_OVERC {
             continue;
         }
-        let mut have = false;
-        for i in 0..cond_l.len() {
-            if cond_l[i] == da.local {
-                have = true;
-                break;
-            }
-        }
-        if have {
+        if flag_of(&cond_l, &cond_f, da.local) != NO_FLAG {
             continue;
         }
         cond_l.push(da.local);
         b.locals.push(
-            ir::LocalDecl {
-                ty: Ast::builtin(BuiltinType::BT_BOOL),
-                storage: ir::LS_TEMP,
-                is_mutable: true,
-                span: b.locals.at(da.local as usize).span,
-                decl: NODE_NONE,
-                item: DefId { module: 0, node: NODE_NONE },
-                name_off: 0,
-                name_len: 0,
-                dkind: ir::LK_NONE,
-                zero_len: false,
-            },
+            ir::LocalDecl::anon(Ast::builtin(BuiltinType::BT_BOOL), ir::LS_TEMP, b.locals.at(da.local as usize).span),
         );
         cond_f.push(b.locals.len() as u32 - 1);
     }
@@ -523,14 +635,8 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
     if cond_l.len() != 0 {
         for mvi in 0..sched.moves.len() {
             let mv = *sched.moves.at(mvi);
-            let mut fl = 0xFFFFFFFFu32;
-            for i in 0..cond_l.len() {
-                if cond_l[i] == mv.local {
-                    fl = cond_f[i];
-                    break;
-                }
-            }
-            if fl == 0xFFFFFFFFu32 {
+            let fl = flag_of(&cond_l, &cond_f, mv.local);
+            if fl == NO_FLAG {
                 continue;
             }
             if mv.stmt != 0xFFFFFFFFu32 {
@@ -549,26 +655,18 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         }
     }
     // The scheduled whole-value drops per block in schedule order (statement order within a block),
-    // as one bucketed index list: `ins_idx[ins_off[bi] .. ins_off[bi + 1]]`. A field drop with no
-    // reconstructible place is left out (better a leak than a wrong member).
-    ins_off.truncate(0);
-    for _i in 0..nb + 1 {
-        ins_off.push(0);
-    }
+    // as one bucketed index list: `ins_idx[ins_off[bi] .. ins_off[bi + 1]]`.
+    ins_off.clear();
+    ins_off.resize_default(nb + 1);
     for d in 0..sched.drops.len() {
         let da = sched.drops.at(d);
-        if da.kind == DK_FIELD && da.fdecl == NODE_NONE {
-            continue;
-        }
         ins_off.set(da.block as usize + 1, ins_off[da.block as usize + 1] + 1);
     }
     for bi in 0..nb {
         ins_off.set(bi + 1, ins_off[bi] + ins_off[bi + 1]);
     }
-    ins_idx.truncate(0);
-    for _i in 0..ins_off[nb] {
-        ins_idx.push(0);
-    }
+    ins_idx.clear();
+    ins_idx.resize_default(ins_off[nb] as usize);
     {
         let mut fill = replace(&mut cx.ins_fill, Vector::<u32>::new());
         fill.truncate(0);
@@ -577,9 +675,6 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         }
         for d in 0..sched.drops.len() {
             let da = sched.drops.at(d);
-            if da.kind == DK_FIELD && da.fdecl == NODE_NONE {
-                continue;
-            }
             let k = fill[da.block as usize];
             ins_idx.set(k as usize, d as u32);
             fill.set(da.block as usize, k + 1);
@@ -608,26 +703,20 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                 cut + 1 - run_start;
             };
             let l = da.local;
-            let mut ty = b.locals.at(l as usize).ty;
-            if over {
-                ty = b.places.at(da.path as usize).ty;
-            } else if kind == DK_FIELD {
-                // the still-owned field: one PJ_FIELD projection reconstructed from the move-path
-                // key -- bits 32..55 are the original `data` (a tuple member's positional index),
-                // the low 32 the original `sub` (a named field's decl, or NODE_NONE for a tuple)
+            if kind == DK_FIELD {
+                // the still-owned part: a member no place names (the path is the root) from its
+                // decl, index and type; else the path's projection chain from the root
                 let mp0 = *forest.paths.at(da.path as usize);
-                ty = mp0.ty;
-                b.projections.push(
-                    ir::Projection {
-                        kind: ir::PJ_FIELD,
-                        data: (mp0.elem >> 32 & 0xFFFFFFu64) as u32,
-                        sub: (mp0.elem & 0xFFFFFFFFu64) as u32,
-                        ty: ty,
-                    },
-                );
-                b.places.push(ir::Place { base: l, proj_start: b.projections.len() as u32 - 1, proj_len: 1, ty: ty });
+                if mp0.parent == mp::MP_NONE {
+                    b.projections.push(ir::Projection { kind: ir::PJ_FIELD, data: da.fdata, sub: da.fsub, ty: da.fty });
+                    b.places.push(
+                        ir::Place { base: l, proj_start: b.projections.len() as u32 - 1, proj_len: 1, ty: da.fty },
+                    );
+                } else {
+                    b.places.push(path_place(b, forest, l, da.path));
+                }
             } else if !over {
-                b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ty });
+                b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: b.locals.at(l as usize).ty });
             }
             let pl = if over {
                 da.path;
@@ -636,30 +725,12 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
             };
             let next = b.add_block();
             let sp = b.statements.at(cut as usize).span;
-            let mut t = ir::Terminator {
-                kind: ir::TM_DROP,
-                a: pl,
-                args_start: 0,
-                args_len: 0,
-                dests_start: 0,
-                dests_len: 0,
-                sw_start: 0,
-                sw_len: 0,
-                t0: next,
-                callee: DefId { module: 0, node: NODE_NONE },
-                targs_start: 0,
-                targs_len: 0,
-                is_variadic: false,
-                span: sp,
-            };
+            let mut t = ir::term0(ir::TM_DROP, sp);
+            t.a = pl;
+            t.t0 = next;
             if kind == DK_COND || kind == DK_OVERC {
                 t.args_len = 1;
-                for i in 0..cond_l.len() {
-                    if cond_l[i] == l {
-                        t.args_start = cond_f[i];
-                        break;
-                    }
-                }
+                t.args_start = flag_of(&cond_l, &cond_f, l);
             }
             b.blocks[cur as usize].stmt_start = run_start;
             b.blocks[cur as usize].stmt_len = keep;
@@ -679,9 +750,11 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         b.blocks[cur as usize].sealed = true;
     }
     // Materialize the flag statements: every block's run is re-copied to the pool's end with the
-    // inits/retrues/clears spliced in (runs stay contiguous; old entries simply go dead).
+    // inits/retrues/clears spliced in (runs stay contiguous), then the old entries are removed: the
+    // emitter's per-local counts read the whole pool.
     if cond_l.len() != 0 {
         let nb2 = b.blocks.len();
+        let old = b.statements.len();
         for bi in 0..nb2 {
             let blk = *b.blocks.at(bi);
             let ns = b.statements.len() as u32;
@@ -699,23 +772,16 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                 let sx = blk.stmt_start + si;
                 let st = *b.statements.at(sx as usize);
                 b.statements.push(st);
+                // a storage-live or a whole-local store re-arms the local's flag
+                let mut rl = NO_FLAG;
                 if st.kind == ir::ST_STORAGE_LIVE {
-                    for i in 0..cond_l.len() {
-                        if cond_l[i] == st.a {
-                            flag_stmt(b, cond_f[i], 1, st.span);
-                            break;
-                        }
-                    }
-                } else if st.kind == ir::ST_ASSIGN {
-                    let pl = *b.places.at(st.place as usize);
-                    if pl.proj_len == 0 {
-                        for i in 0..cond_l.len() {
-                            if cond_l[i] == pl.base {
-                                flag_stmt(b, cond_f[i], 1, st.span);
-                                break;
-                            }
-                        }
-                    }
+                    rl = st.a;
+                } else if st.kind == ir::ST_ASSIGN && b.places.at(st.place as usize).proj_len == 0 {
+                    rl = b.places.at(st.place as usize).base;
+                }
+                let rf = flag_of(&cond_l, &cond_f, rl);
+                if rf != NO_FLAG {
+                    flag_stmt(b, rf, 1, st.span);
                 }
                 for i in 0..clr_at.len() {
                     if clr_at[i] == sx {
@@ -725,6 +791,15 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
             }
             b.blocks[bi].stmt_start = ns;
             b.blocks[bi].stmt_len = b.statements.len() as u32 - ns;
+        }
+        let n = b.statements.len();
+        for i in old..n {
+            let st = *b.statements.at(i);
+            b.statements.set(i - old, st);
+        }
+        b.statements.truncate(n - old);
+        for bi in 0..nb2 {
+            b.blocks[bi].stmt_start -= old as u32;
         }
     }
     cx.ins_cond_l = cond_l;
@@ -745,13 +820,10 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
 // A marker's drops follow it in a chain of cut blocks, so the chain is judged against the state
 // before the marker, releasing path by path.
 
-const fn dv_bit(row: &Vector<u64>, p: u32) bool {
-    return (row[(p / 64) as usize] >> (p & 63) as u64 & 1u64) != 0;
-}
-
-fn dv_any(row: &Vector<u64>, sub: &Vector<u32>) bool {
+// True when `row` holds a path of `sub` that `owned` marks (see `dv_owned_paths`).
+fn dv_any_owned(row: &Vector<u64>, owned: &Vector<u64>, sub: &Vector<u32>) bool {
     for i in 0..sub.len() {
-        if dv_bit(row, sub[i]) {
+        if bits::bit_get(row, sub[i]) && bits::bit_get(owned, sub[i]) {
             return true;
         }
     }
@@ -760,7 +832,7 @@ fn dv_any(row: &Vector<u64>, sub: &Vector<u32>) bool {
 
 fn dv_all(row: &Vector<u64>, sub: &Vector<u32>) bool {
     for i in 0..sub.len() {
-        if !dv_bit(row, sub[i]) {
+        if !bits::bit_get(row, sub[i]) {
             return false;
         }
     }
@@ -796,12 +868,12 @@ fn dv_check_drop(
             return "drop-of-unowned"; // a second release, or a value not definitely initialized
         }
         if t.args_len == 1 {
-            if !dv_bit(mi, root) && !dv_bit(di, root) {
+            if !bits::bit_get(mi, root) && !bits::bit_get(di, root) {
                 return "guarded-drop-of-unowned";
             }
-            if !dv_bit(mm, root) {
+            if !bits::bit_get(mm, root) {
                 for i in 0..sub.len() {
-                    if sub[i] != root && dv_bit(mm, sub[i]) && !dv_bit(di, sub[i]) {
+                    if sub[i] != root && bits::bit_get(mm, sub[i]) && !bits::bit_get(di, sub[i]) {
                         return "guarded-drop-of-partial"; // the flag would free a moved-out field
                     }
                 }
@@ -815,14 +887,63 @@ fn dv_check_drop(
         return ""; // a store through a reference or an element: not this body's tracked storage
     }
     forest.subtree(path, scratch, sub);
-    if t.args_len == 0 && !dv_bit(di, path) {
+    if t.args_len == 0 && !bits::bit_get(di, path) {
         return "field-drop-of-unowned";
     }
-    if t.args_len == 1 && !dv_bit(mi, path) && !dv_bit(di, path) {
+    if t.args_len == 1 && !bits::bit_get(mi, path) && !bits::bit_get(di, path) {
         return "guarded-field-drop-of-unowned";
     }
     dv_release(mi, di, mm, sub);
     return "";
+}
+
+// A definite move below one variant of an enum path proves the value holds that variant (see
+// `part_drops`): the enum and its variant paths then hold nothing beyond that variant's members,
+// which are judged as paths of their own. Clears those paths' bits in `mi` for every enum path of
+// `sub` with exactly one proven variant.
+fn dv_prove_variants(
+    forest: &mp::MoveForest,
+    sub: &Vector<u32>,
+    mi: &mut Vector<u64>,
+    scratch: &mut Vector<u32>,
+    csub: &mut Vector<u32>,
+) {
+    for i in 0..sub.len() {
+        let e = sub[i];
+        let c0 = forest.paths.at(e as usize).first_child;
+        if c0 == mp::MP_NONE || (forest.paths.at(c0 as usize).elem >> 56) as u8 != ir::PJ_DOWNCAST {
+            continue;
+        }
+        let mut held = mp::MP_NONE;
+        let mut proofs: u32 = 0;
+        let mut c = c0;
+        while c != mp::MP_NONE {
+            forest.subtree(c, scratch, csub);
+            for k in 0..csub.len() {
+                if !bits::bit_get(mi, csub[k]) {
+                    held = c;
+                    proofs += 1;
+                    break;
+                }
+            }
+            c = forest.paths.at(c as usize).next_sibling;
+        }
+        if proofs != 1 {
+            continue;
+        }
+        bits::bit_clear(mi, e);
+        bits::bit_clear(mi, held);
+        c = c0;
+        while c != mp::MP_NONE {
+            if c != held {
+                forest.subtree(c, scratch, csub);
+                for k in 0..csub.len() {
+                    bits::bit_clear(mi, csub[k]);
+                }
+            }
+            c = forest.paths.at(c as usize).next_sibling;
+        }
+    }
 }
 
 // Copy row `bi` of the three tables into the working rows.
@@ -846,20 +967,50 @@ fn dv_load(
     }
 }
 
-// The failing block and local, for the validation build's report; the local is kept for the
-// event dump the report ends with.
-static mut DV_BAD: u32 = 0xFFFFFFFF;
-
-fn dv_where(bi: usize, l: u32) {
+// The failing block and local, with the local's init/move events, for the validation build's report.
+fn dv_where(ow: &mut bf::Owner, b: &ir::CoreBody, bi: usize, l: u32) {
     eprintln("verify_drops: block bb{} local _{}", bi, l);
-    unsafe DV_BAD = l;
+    dump_events(ow, b, l);
 }
 
 /// Independent check of an elaborated body (validation builds): with the move/init state of
 /// every move path recomputed from the body's events, every drop terminator releases a value the
 /// path definitely holds (or may hold, through a flag guard), never a partially moved whole, and
 /// every storage death and return leaves nothing a declared owning local may still hold. Returns
-/// "" or the first violated rule.
+/// "" or the first violated rule; a violation also prints its block and local, and the local's
+/// events, to stderr.
+// The paths whose holding needs a release: the type owns memory, and the path is a leaf or a
+// value some member of which has no path of its own. A held member that owns nothing (an integer
+// beside a moved-out string) needs none, and a struct or tuple whose every member has a path (a
+// destructuring names them all, see the lowering's `mention_members`) is released member by
+// member.
+fn dv_owned_paths(ow: &mut bf::Owner, b: &ir::CoreBody, forest: &mp::MoveForest) Vector<u64> {
+    let mut owned = Vector::<u64>::new();
+    owned.resize_default((forest.paths.len() + 63) / 64);
+    let mut fdecls = Vector::<NodeId>::new();
+    let mut ftys = Vector::<TypeId>::new();
+    for p in 0..forest.paths.len() {
+        let ty = forest.paths.at(p).ty;
+        if !ow.owns(b.owner, b.module, ty) {
+            continue;
+        }
+        let mut covered = false;
+        let mut fom: ModuleId = 0;
+        if !forest.is_leaf(p as u32) && ow.agg_fields(b.module, ty, &mut fdecls, &mut ftys, &mut fom) {
+            covered = true;
+            for fi in 0..fdecls.len() {
+                if tuple_member_child(ow, forest, p as u32, fom, fdecls[fi], fi as u32) == mp::MP_NONE {
+                    covered = false;
+                }
+            }
+        }
+        if !covered {
+            bits::bit_set(&mut owned, p as u32);
+        }
+    }
+    return owned;
+}
+
 pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
     let nl = b.locals.len();
     // A closure's captures are argument locals the body never destroys: the env owns them across
@@ -882,6 +1033,7 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
     }
     let mut forest = mp::MoveForest::empty();
     forest.build_into(b);
+    let owned = dv_owned_paths(ow, b, &forest);
     let mut facts = bf::BodyFacts::empty();
     ow.generate_into(b, &forest, &mut facts, false);
     let mut cfg = df::Cfg::empty();
@@ -902,6 +1054,7 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
     }
     let mut scratch = Vector::<u32>::new();
     let mut sub = Vector::<u32>::new();
+    let mut csub = Vector::<u32>::new();
     let eb = b.entry as usize * w;
     for l in 0..nl {
         let st = b.locals.at(l).storage;
@@ -1024,7 +1177,7 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
                         }
                         let r = dv_check_drop(b, &forest, &ct, &mut smi, &mut sdi, &mut smm, &mut scratch, &mut sub);
                         if r.len() != 0 {
-                            dv_where(cb, s.a);
+                            dv_where(ow, b, cb, s.a);
                             return r;
                         }
                         chain.set(cb, true);
@@ -1034,14 +1187,20 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
                         }
                     }
                     forest.subtree(root, &mut scratch, &mut sub);
-                    if dv_any(&smi, &sub) {
-                        dv_where(bi, s.a);
+                    dv_prove_variants(&forest, &sub, &mut smi, &mut scratch, &mut csub);
+                    if dv_any_owned(&smi, &owned, &sub) {
+                        dv_where(ow, b, bi, s.a);
                         return "dead-with-unreleased-value"; // a maybe-held path the chain never drops
                     }
                 } else {
                     forest.subtree(root, &mut scratch, &mut sub);
-                    if dv_any(&mi, &sub) {
-                        dv_where(bi, s.a);
+                    smi.clear();
+                    for k in 0..w {
+                        smi.push(mi[k]);
+                    }
+                    dv_prove_variants(&forest, &sub, &mut smi, &mut scratch, &mut csub);
+                    if dv_any_owned(&smi, &owned, &sub) {
+                        dv_where(ow, b, bi, s.a);
                         return "dead-without-drop";
                     }
                 }
@@ -1063,7 +1222,7 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
             // An overwrite drop or a user-written destruction: judged where it stands.
             let r = dv_check_drop(b, &forest, &t, &mut mi, &mut di, &mut mm, &mut scratch, &mut sub);
             if r.len() != 0 {
-                dv_where(bi, b.places.at(t.a as usize).base);
+                dv_where(ow, b, bi, b.places.at(t.a as usize).base);
                 return r;
             }
         }
@@ -1077,8 +1236,8 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
                     continue;
                 }
                 forest.subtree(forest.local_root[l], &mut scratch, &mut sub);
-                if dv_any(&mi, &sub) {
-                    dv_where(bi, l as u32);
+                if dv_any_owned(&mi, &owned, &sub) {
+                    dv_where(ow, b, bi, l as u32);
                     return "return-with-live-value";
                 }
             }
@@ -1087,8 +1246,8 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
     return "";
 }
 
-/// The init/move events of local `l` in `b`, one line each, for a validation report.
-pub fn dump_events(ow: &mut bf::Owner, b: &ir::CoreBody, l: u32) {
+// The init/move events of local `l` in `b`, one line each, for a validation report.
+fn dump_events(ow: &mut bf::Owner, b: &ir::CoreBody, l: u32) {
     let mut forest = mp::MoveForest::empty();
     forest.build_into(b);
     let mut facts = bf::BodyFacts::empty();
@@ -1112,9 +1271,4 @@ pub fn dump_events(ow: &mut bf::Owner, b: &ir::CoreBody, l: u32) {
             eb,
         );
     }
-}
-
-/// The local the last failed `verify_drops` reported (0xFFFFFFFF when none).
-pub fn last_bad_local() u32 {
-    return unsafe DV_BAD;
 }

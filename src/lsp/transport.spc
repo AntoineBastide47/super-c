@@ -4,6 +4,7 @@
 // without blocking. Writes flush per message: the client blocks on responses.
 import stdio;
 import driver_shim as shim;
+import lsp::text as text;
 
 const FILL: usize = 65536; // bytes asked of the descriptor per read
 const HDR_MAX: usize = 511; // a header line longer than this (without its newline) is malformed
@@ -106,24 +107,9 @@ extend Reader {
     }
 }
 
-const fn ascii_lower(b: u8) u8 {
-    if b >= b'A' && b <= b'Z' {
-        return b + 32;
-    }
-    return b;
-}
-
 // Case-insensitive header-name prefix test (`name` is the lowercase spelling with its colon).
 fn header_is(line: str, name: str) bool {
-    if line.len() < name.len() {
-        return false;
-    }
-    for i in 0..name.len() {
-        if ascii_lower(line[i]) != name[i] {
-            return false;
-        }
-    }
-    return true;
+    return line.len() >= name.len() && text::ci_at(line, 0, name);
 }
 
 // True when a Content-Type value names an acceptable charset: none stated, or utf-8/utf8.
@@ -131,13 +117,7 @@ fn charset_ok(v: str) bool {
     let key = "charset=";
     let mut i: usize = 0;
     while i + key.len() <= v.len() {
-        let mut hit = true;
-        for k in 0..key.len() {
-            if ascii_lower(v[i + k]) != key[k] {
-                hit = false;
-            }
-        }
-        if hit {
+        if text::ci_at(v, i, key) {
             let mut e = i + key.len();
             while e < v.len() && v[e] != b';' && v[e] != b' ' {
                 e += 1;
@@ -146,7 +126,7 @@ fn charset_ok(v: str) bool {
             let mut low = String::with_capacity(cs.len());
             for k in 0..cs.len() {
                 if cs[k] != b'"' {
-                    low.push_byte(ascii_lower(cs[k]));
+                    low.push_byte(text::ascii_lower(cs[k]));
                 }
             }
             return low.as_str() == "utf-8" || low.as_str() == "utf8";

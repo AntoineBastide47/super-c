@@ -116,71 +116,6 @@ pub struct DecisionTree {
     pub ok: bool, // false: budget exceeded; the caller keeps sequential lowering
 }
 
-/// The code point of a `'x'` / `b'x'` literal (escape rules mirror the checker's decode).
-pub fn char_of(src: str, sp: tok::Span) Option<i64> {
-    if sp.end <= sp.start + 2 {
-        return Option::<i64>::None;
-    }
-    let mut i = sp.start + 1;
-    if src[sp.start as usize] == b'b' {
-        i = i + 1;
-    }
-    if i >= sp.end {
-        return Option::<i64>::None;
-    }
-    if src[i as usize] != b'\\' {
-        return Option::<i64>::Some(src[i as usize]);
-    }
-    if i + 1 >= sp.end {
-        return Option::<i64>::None;
-    }
-    let e = src[(i + 1) as usize];
-    if e == b'n' {
-        return Option::<i64>::Some(10);
-    }
-    if e == b't' {
-        return Option::<i64>::Some(9);
-    }
-    if e == b'r' {
-        return Option::<i64>::Some(13);
-    }
-    if e == b'0' {
-        return Option::<i64>::Some(0);
-    }
-    if e == b'\\' {
-        return Option::<i64>::Some(92);
-    }
-    if e == 39 {
-        return Option::<i64>::Some(39);
-    }
-    if e == 34 {
-        return Option::<i64>::Some(34);
-    }
-    if e == b'x' {
-        let mut v: i64 = 0;
-        let mut k = i + 2;
-        while k < sp.end - 1 {
-            let c = src[k as usize];
-            let d: i64 = if c >= b'0' && c <= b'9' {
-                c - b'0';
-            } else if c >= b'a' && c <= b'f' {
-                c - b'a' + 10;
-            } else if c >= b'A' && c <= b'F' {
-                c - b'A' + 10;
-            } else {
-                -1;
-            };
-            if d < 0 {
-                return Option::<i64>::None;
-            }
-            v = v * 16 + d;
-            k = k + 1;
-        }
-        return Option::<i64>::Some(v);
-    }
-    return Option::<i64>::None;
-}
-
 fn dec_of(src: str, sp: tok::Span) Option<i64> {
     let mut i = sp.start as usize;
     let mut neg = false;
@@ -207,6 +142,15 @@ fn dec_of(src: str, sp: tok::Span) Option<i64> {
         v = 0 - v;
     }
     return Option::<i64>::Some(v);
+}
+
+// One child's normalized alternatives during norm_children: its sub-slot, its run in the
+// alternative list, and the cartesian cursor over that run.
+struct ChildAlts {
+    pub slot: i64,
+    pub start: u32,
+    pub len: u32,
+    pub cursor: u32,
 }
 
 extend PatCx {
@@ -242,10 +186,15 @@ extend PatCx {
     }
 
     fn wild(self: &mut Self, node: NodeId) u32 {
+        return self.leaf(PC_WILD, 0, node);
+    }
+
+    // Append a pattern of `kind` with value `val` and no declaration or sub-patterns; its index.
+    fn leaf(self: &mut Self, kind: u8, val: i64, node: NodeId) u32 {
         self.pats.push(
             NPat {
-                kind: PC_WILD,
-                val: 0,
+                kind: kind,
+                val: val,
                 hi: 0,
                 decl: DefId { module: 0, node: NODE_NONE },
                 node: node,
@@ -399,7 +348,6 @@ extend PatCx {
                 DefId { module: 0, node: NODE_NONE },
                 pd.children,
                 false,
-                0,
                 NodeList { start: 0, len: 0 },
                 pd.children.len,
                 PC_TUPLE,
@@ -423,19 +371,7 @@ extend PatCx {
             return;
         }
         // Unknown pattern shape: cover nothing beyond itself.
-        self.pats.push(
-            NPat {
-                kind: PC_OPAQUE,
-                val: pid,
-                hi: 0,
-                decl: DefId { module: 0, node: NODE_NONE },
-                node: pid,
-                sub_start: 0,
-                sub_len: 0,
-                arity: 0,
-            },
-        );
-        out.push(self.pats.len() as u32 - 1);
+        out.push(self.leaf(PC_OPAQUE, pid, pid));
     }
 
     const fn decl_kind(self: &Self, d: DefId) NodeKind {
@@ -456,14 +392,13 @@ extend PatCx {
         }
         let ld = self.f.node(v).as_data.literal;
         if ld.token_type == tt::TokenType::CharacterLiteral || ld.token_type == tt::TokenType::ByteCharacterLiteral {
-            return char_of(self.src, ld.raw);
+            return tok::char_literal_value(self.src, ld.raw);
         }
         return dec_of(self.src, ld.raw);
     }
 
     fn norm_literal(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
         let v = self.f.node(pid).as_data.single.value;
-        let no = DefId { module: 0, node: NODE_NONE };
         let vk = self.f.node(v).kind;
         if vk == NodeKind::NODE_LITERAL {
             let ld = self.f.node(v).as_data.literal;
@@ -473,35 +408,17 @@ extend PatCx {
                 } else {
                     0;
                 };
-                self.pats.push(
-                    NPat { kind: PC_BOOL, val: bv, hi: 0, decl: no, node: pid, sub_start: 0, sub_len: 0, arity: 0 },
-                );
-                out.push(self.pats.len() as u32 - 1);
+                out.push(self.leaf(PC_BOOL, bv, pid));
                 return;
             }
             let ivo = dec_of(self.src, ld.raw);
             if ivo.is_some() {
-                self.pats.push(
-                    NPat {
-                        kind: PC_INT,
-                        val: ivo.unwrap(),
-                        hi: 0,
-                        decl: no,
-                        node: pid,
-                        sub_start: 0,
-                        sub_len: 0,
-                        arity: 0,
-                    },
-                );
-                out.push(self.pats.len() as u32 - 1);
+                out.push(self.leaf(PC_INT, ivo.unwrap(), pid));
                 return;
             }
         }
         // Chars, strings, floats, negated/hex spellings, const paths: opaque, keyed by node.
-        self.pats.push(
-            NPat { kind: PC_OPAQUE, val: pid, hi: 0, decl: no, node: pid, sub_start: 0, sub_len: 0, arity: 0 },
-        );
-        out.push(self.pats.len() as u32 - 1);
+        out.push(self.leaf(PC_OPAQUE, pid, pid));
     }
 
     // A variant pattern: subs = the full payload in declaration order (`by_name` aligns struct-
@@ -512,31 +429,19 @@ extend PatCx {
         let arity = self.variant_arity(vd);
         let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
         let payload = a.at_const(vd.node).as_data.variant.payload;
-        self.norm_children(pid, vd, ch, by_name, vd.module, payload, arity, PC_VARIANT, ord, out);
+        self.norm_children(pid, vd, ch, by_name, payload, arity, PC_VARIANT, ord, out);
     }
 
     fn norm_struct(self: &mut Self, pid: NodeId, sd: DefId, out: &mut Vector<u32>) {
         if sd.node == NODE_NONE || self.decl_kind(sd) != NodeKind::NODE_STRUCT {
             // An unresolved struct pattern covers nothing beyond itself.
-            self.pats.push(
-                NPat {
-                    kind: PC_OPAQUE,
-                    val: pid,
-                    hi: 0,
-                    decl: DefId { module: 0, node: NODE_NONE },
-                    node: pid,
-                    sub_start: 0,
-                    sub_len: 0,
-                    arity: 0,
-                },
-            );
-            out.push(self.pats.len() as u32 - 1);
+            out.push(self.leaf(PC_OPAQUE, pid, pid));
             return;
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(sd.module);
         let ms = a.at_const(sd.node).as_data.aggregate.members;
         let ch = self.f.node(pid).as_data.pattern.children;
-        self.norm_children(pid, sd, ch, true, sd.module, ms, ms.len, PC_STRUCT, 0, out);
+        self.norm_children(pid, sd, ch, true, ms, ms.len, PC_STRUCT, 0, out);
     }
 
     // Shared child alignment: build `arity` sub-slots (wild by default), place each listed child
@@ -547,7 +452,6 @@ extend PatCx {
         decl: DefId,
         ch: NodeList,
         by_name: bool,
-        dmod: ModuleId,
         dlist: NodeList,
         arity: u32,
         kind: u8,
@@ -571,7 +475,7 @@ extend PatCx {
                 // sub-pattern (missing = a pure binding of the field name).
                 let fpd = self.f.node(cid).as_data.pattern;
                 let fd = self.f.res(fpd.name);
-                slot = self.field_ordinal(dmod, dlist, fd.node);
+                slot = self.field_ordinal(decl.module, dlist, fd.node);
                 if fpd.children.len != 0 {
                     sub = unsafe self.f.list(fpd.children)[0];
                 } else {
@@ -711,10 +615,8 @@ extend PatCx {
         let wm_r = self.mrows.len();
         let wm_p = self.pats.len();
         if q0k != PC_WILD {
-            let r = self.useful_spec(rs, rn, qrow, q0);
-            self.mcells.truncate(wm_c);
-            self.mrows.truncate(wm_r);
-            self.pats.truncate(wm_p);
+            let r = self.useful_by(rs, rn, qrow, q0, true);
+            self.cut(wm_c, wm_r, wm_p);
             return r;
         }
         // Wildcard q0: distinct head constructors + completeness.
@@ -725,16 +627,7 @@ extend PatCx {
             if self.pats.at(h as usize).kind == PC_WILD {
                 continue;
             }
-            let mut dup = false;
-            for s2 in wm_s..self.seen.len() {
-                let sv = self.seen[s2];
-                if self.head_covers(sv, h) && self.head_covers(h, sv) {
-                    dup = true;
-                }
-            }
-            if !dup {
-                self.seen.push(h);
-            }
+            self.note_head(wm_s, h);
         }
         let complete = self.ctors_complete(&self.seen, wm_s);
         if !complete {
@@ -762,87 +655,55 @@ extend PatCx {
             let nq = self.mrows.len();
             self.mrows.push(nqs as u64 << 32 | (ql - 1) as u64);
             let r = self.useful_rec(drs, drn, nq);
-            self.mcells.truncate(wm_c);
-            self.mrows.truncate(wm_r);
-            self.pats.truncate(wm_p);
+            self.cut(wm_c, wm_r, wm_p);
             self.seen.truncate(wm_s);
             return r;
         }
         // Complete head set: useful iff useful under some constructor.
-        let seen_end = self.seen.len();
-        let mut s2 = wm_s;
-        while s2 < seen_end {
-            let rep = self.seen[s2];
-            let r = self.useful_ctor(rs, rn, qrow, rep);
-            if r {
-                self.mcells.truncate(wm_c);
-                self.mrows.truncate(wm_r);
-                self.pats.truncate(wm_p);
-                self.seen.truncate(wm_s);
-                return true;
+        let mut found = false;
+        for s2 in wm_s..self.seen.len() {
+            found = self.useful_by(rs, rn, qrow, self.seen[s2], false);
+            self.cut(wm_c, wm_r, wm_p);
+            if found {
+                break;
             }
-            self.mcells.truncate(wm_c);
-            self.mrows.truncate(wm_r);
-            self.pats.truncate(wm_p);
-            s2 += 1;
         }
         self.seen.truncate(wm_s);
-        return false;
+        return found;
     }
 
-    // Specialize on the QUERY's own constructor q0 and recurse.
-    fn useful_spec(self: &mut Self, rs: usize, rn: usize, qrow: usize, q0: u32) bool {
+    // Drop the arena cells, rows and patterns appended past watermarks `wc`, `wr`, `wp`.
+    fn cut(self: &mut Self, wc: usize, wr: usize, wp: usize) {
+        self.mcells.truncate(wc);
+        self.mrows.truncate(wr);
+        self.pats.truncate(wp);
+    }
+
+    // Append head constructor `h` to `seen` unless `seen[from..]` already holds the same one.
+    fn note_head(self: &mut Self, from: usize, h: u32) {
+        for s2 in from..self.seen.len() {
+            if self.same_ctor(self.seen[s2], h) {
+                return;
+            }
+        }
+        self.seen.push(h);
+    }
+
+    // Whether head constructors `a` and `b` cover each other.
+    fn same_ctor(self: &Self, a: u32, b: u32) bool {
+        return self.head_covers(a, b) && self.head_covers(b, a);
+    }
+
+    // Specialize on constructor `c` and recurse. With `from_query`, `c` is the query's own head:
+    // rows whose head covers it stay, and the query contributes c's sub-patterns. Otherwise `c` is a
+    // head constructor of the rows: wild rows and rows with the same constructor stay, and the query
+    // (wild-headed) contributes wildcards.
+    fn useful_by(self: &mut Self, rs: usize, rn: usize, qrow: usize, c: u32, from_query: bool) bool {
         let q = self.mrows[qrow];
         let qs = (q >> 32) as usize;
         let ql = (q & 0xFFFFFFFFu64) as usize;
-        let arity = self.pats.at(q0 as usize).sub_len as usize;
-        let nrs = self.mrows.len();
-        let mut nrn: usize = 0;
-        for r in 0..rn {
-            let row = self.mrows[rs + r];
-            let rstart = (row >> 32) as usize;
-            let rlen = (row & 0xFFFFFFFFu64) as usize;
-            let h = self.mcells[rstart];
-            if !self.head_covers(h, q0) {
-                continue;
-            }
-            let hp = *self.pats.at(h as usize);
-            let ns = self.mcells.len();
-            if hp.kind == PC_WILD {
-                for k in 0..arity {
-                    let w = self.wild(hp.node);
-                    self.mcells.push(w);
-                }
-            } else {
-                for k in 0..hp.sub_len {
-                    self.mcells.push(self.subs[(hp.sub_start + k) as usize]);
-                }
-            }
-            for c in 1..rlen {
-                self.mcells.push(self.mcells[rstart + c]);
-            }
-            self.mrows.push(ns as u64 << 32 | (arity + rlen - 1) as u64);
-            nrn += 1;
-        }
-        let qp = *self.pats.at(q0 as usize);
-        let nqs = self.mcells.len();
-        for k in 0..qp.sub_len {
-            self.mcells.push(self.subs[(qp.sub_start + k) as usize]);
-        }
-        for c in 1..ql {
-            self.mcells.push(self.mcells[qs + c]);
-        }
-        let nq = self.mrows.len();
-        self.mrows.push(nqs as u64 << 32 | (arity + ql - 1) as u64);
-        return self.useful_rec(nrs, nrn, nq);
-    }
-
-    // Specialize on head constructor `rep` with a wild-expanded query and recurse.
-    fn useful_ctor(self: &mut Self, rs: usize, rn: usize, qrow: usize, rep: u32) bool {
-        let q = self.mrows[qrow];
-        let qs = (q >> 32) as usize;
-        let ql = (q & 0xFFFFFFFFu64) as usize;
-        let arity = self.pats.at(rep as usize).sub_len as usize;
+        let cp = *self.pats.at(c as usize);
+        let arity = cp.sub_len as usize;
         let nrs = self.mrows.len();
         let mut nrn: usize = 0;
         for r in 0..rn {
@@ -851,10 +712,10 @@ extend PatCx {
             let rlen = (row & 0xFFFFFFFFu64) as usize;
             let h = self.mcells[rstart];
             let hp = *self.pats.at(h as usize);
-            let cov = if hp.kind == PC_WILD {
-                true;
+            let cov = if from_query {
+                self.head_covers(h, c);
             } else {
-                self.head_covers(h, rep) && self.head_covers(rep, h);
+                hp.kind == PC_WILD || self.same_ctor(h, c);
             };
             if !cov {
                 continue;
@@ -870,8 +731,8 @@ extend PatCx {
                     self.mcells.push(self.subs[(hp.sub_start + k) as usize]);
                 }
             }
-            for c in 1..rlen {
-                self.mcells.push(self.mcells[rstart + c]);
+            for c2 in 1..rlen {
+                self.mcells.push(self.mcells[rstart + c2]);
             }
             self.mrows.push(ns as u64 << 32 | (arity + rlen - 1) as u64);
             nrn += 1;
@@ -879,11 +740,15 @@ extend PatCx {
         let qn = self.pats.at(self.mcells[qs] as usize).node;
         let nqs = self.mcells.len();
         for k in 0..arity {
-            let w = self.wild(qn);
-            self.mcells.push(w);
+            let cell = if from_query {
+                self.subs[(cp.sub_start + k as u32) as usize];
+            } else {
+                self.wild(qn);
+            };
+            self.mcells.push(cell);
         }
-        for c in 1..ql {
-            self.mcells.push(self.mcells[qs + c]);
+        for c2 in 1..ql {
+            self.mcells.push(self.mcells[qs + c2]);
         }
         let nq = self.mrows.len();
         self.mrows.push(nqs as u64 << 32 | (arity + ql - 1) as u64);
@@ -975,18 +840,7 @@ extend PatCx {
         }
         return self.overflow;
     }
-}
 
-// One child's normalized alternatives during norm_children: its sub-slot, its run in the
-// alternative list, and the cartesian cursor over that run.
-struct ChildAlts {
-    pub slot: i64,
-    pub start: u32,
-    pub len: u32,
-    pub cursor: u32,
-}
-
-extend PatCx {
     /// Build the decision tree for the recorded rows (call add_arm for EVERY arm first; matches
     /// with guards must keep sequential lowering and never reach this). `ok=false` on overflow.
     pub fn build_tree(self: &mut Self) DecisionTree {
@@ -1034,10 +888,7 @@ extend PatCx {
 
     // The subtree for arena rows trows[rs..rs+rn].
     fn tree_rec(self: &mut Self, t: &mut DecisionTree, rs: usize, rn: usize) u32 {
-        if !self.spend(rn as u32 + 1) {
-            return self.tree_leaf(t, DT_FAIL, 0);
-        }
-        if rn == 0 {
+        if !self.spend(rn as u32 + 1) || rn == 0 {
             return self.tree_leaf(t, DT_FAIL, 0);
         }
         // First row all-wild: it matches; later rows are this path's dead tail.
@@ -1063,16 +914,7 @@ extend PatCx {
             if self.pats.at(h as usize).kind == PC_WILD {
                 continue;
             }
-            let mut dup = false;
-            for s2 in wm_s..self.seen.len() {
-                let sv = self.seen[s2];
-                if self.head_covers(sv, h) && self.head_covers(h, sv) {
-                    dup = true;
-                }
-            }
-            if !dup {
-                self.seen.push(h);
-            }
+            self.note_head(wm_s, h);
         }
         let n = self.seen.len() - wm_s;
         let complete = self.ctors_complete(&self.seen, wm_s);
@@ -1106,12 +948,7 @@ extend PatCx {
                 let row = *self.trows.at(rs + r);
                 let h = self.tpats[(row.start + c) as usize];
                 let hp = *self.pats.at(h as usize);
-                let cov = if hp.kind == PC_WILD {
-                    true;
-                } else {
-                    self.head_covers(h, rep) && self.head_covers(rep, h);
-                };
-                if !cov {
+                if hp.kind != PC_WILD && !self.same_ctor(h, rep) {
                     continue;
                 }
                 let ns = self.tpats.len();

@@ -69,6 +69,21 @@ fn build_mem_budget_suffixes() {
     assert_eq(tctl::budget_from_env(), 4096u64);
 }
 
+// The one size parser behind SC_BUILD_MEM_BUDGET and --const-eval-memory: a value past u64 is
+// rejected, never wrapped.
+@test
+fn size_parser_rejects_overflow() {
+    assert_eq(tctl::parse_size("16m").unwrap(), 16u64 << 20);
+    assert_eq(tctl::parse_size("18446744073709551615").unwrap(), 0xFFFFFFFFFFFFFFFFu64);
+    assert(tctl::parse_size("18446744073709551616").is_none(), "one past u64");
+    assert(tctl::parse_size("99999999999G").is_none(), "the suffix overflows");
+    assert(tctl::parse_size("17179869184G").is_none(), "exactly 2^64 bytes");
+    assert(tctl::parse_size("-1").is_none(), "a sign");
+    assert(tctl::parse_size(" 5").is_none(), "a space");
+    assert(tctl::parse_size("5KB").is_none(), "a two-letter suffix");
+    assert(tctl::parse_size("").is_none(), "empty");
+}
+
 @test
 fn library_artifact_names_per_platform() {
     // Static is lib<name>.a everywhere; shared is platform-shaped.

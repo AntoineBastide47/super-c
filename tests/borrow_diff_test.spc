@@ -1,7 +1,7 @@
 // Rejection parity: every snippet runs through BOTH the production borrow pass and the raw Core IR
 // loan-analysis stages on one typed package. Both must reject, and (unless a case is marked as a
-// reviewed precision difference) a primary error line must coincide. One acceptance case pins
-// behavior the checker permits, so the analysis cannot drift stricter there.
+// reviewed precision difference) a primary error line must coincide. Acceptance cases pin behavior
+// the checker permits, so the analysis cannot drift stricter there.
 import driver_shim as shim;
 import driver::emit as demit;
 import module::loader as loader;
@@ -301,15 +301,21 @@ fn diff_return_field_move_reviewed() {
 
 @test
 fn diff_closure_capture_accepted() {
-    // The established walk permits writes to a mutably captured variable while the closure is
-    // live; capture loans must not reject it either (they only guard storage death and escapes).
+    // A mutable capture is an exclusive loan held while the closure lives: once the closure is
+    // dead, the captured variable is usable again.
     let mut old_errs = Vector::<u32>::new();
     let p = typed_both(
-        "fn main() i32 { let mut x = 1;\nlet c = || { x += 1; };\nx += 2;\nc();\nreturn x; }",
+        "fn main() i32 { let mut x = 1;\nlet c = || { x += 1; };\nc();\nx += 2;\nreturn x; }",
         &mut old_errs,
     );
-    assert(old_errs.len() == 0, "the established walk accepts");
+    assert(old_errs.len() == 0, "the production pass accepts");
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, "main", &mut new_errs);
     assert(new_errs.len() == 0, "the loan analysis accepts");
+}
+
+@test
+fn diff_closure_capture_conflict() {
+    // Writing the captured variable while the closure that holds `&mut` of it is still called.
+    both_reject_same_line("fn main() i32 { let mut x = 1;\nlet c = || { x += 1; };\nx += 2;\nc();\nreturn x; }", "main");
 }

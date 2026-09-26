@@ -6,23 +6,13 @@
 import build_system::manifest as bsys;
 import utils::errors as diag;
 
-/// One manifest diagnostic: a raw byte span and its message, ready for the server to map to a range.
-pub struct TomlDiag {
-    pub start: u32,
-    pub len: u32,
-    pub msg: String,
-}
-
-/// Validate `src` as a manifest. The build's own checker produces these, so the editor never disagrees
-/// with `super-c build` about what is wrong.
-pub fn diagnostics(src: str) Vector<TomlDiag> {
-    let mut out = Vector::<TomlDiag>::new();
-    let (m, errs) = bsys::parse_check(src, "", false);
-    for i in 0..errs.errors.len() {
-        let d = errs.errors.at(i);
-        out.push(TomlDiag { start: d.start, len: d.len, msg: d.msg.clone() });
-    }
-    return out;
+/// Validate `src` as a manifest: raw byte spans and messages, ready for the server to map to ranges.
+/// The build's own checker produces these, so the editor never disagrees with `super-c build` about
+/// what is wrong.
+pub fn diagnostics(src: str) Vector<diag::Diagnostic> {
+    let (_, errs) = bsys::parse_check(src, "", false);
+    let mut e = errs;
+    return replace(&mut e.errors, Vector::<diag::Diagnostic>::new());
 }
 
 // --- schema, for completion and hover ---------------------------------------------------------------

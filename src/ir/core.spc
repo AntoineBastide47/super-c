@@ -30,10 +30,8 @@ pub const LS_INL: u8 = 5;
 /// the body syntax is released.
 pub const LK_NONE: u8 = 0;
 pub const LK_LET: u8 = 1;
-pub const LK_PARAM: u8 = 2;
 pub const LK_FOR: u8 = 3; // `for` / `inline for` binding
 pub const LK_PATTERN: u8 = 4;
-pub const LK_IDENT: u8 = 5;
 
 /// One local slot: argument, return slot, user variable, or compiler temporary.
 pub struct LocalDecl {
@@ -52,6 +50,22 @@ pub struct LocalDecl {
 }
 
 extend LocalDecl {
+    /// A mutable nameless local of `storage` class with no binding decl and no item.
+    pub const fn anon(ty: TypeId, storage: u8, span: tok::Span) LocalDecl {
+        return LocalDecl {
+            ty: ty,
+            storage: storage,
+            is_mutable: true,
+            dkind: LK_NONE,
+            zero_len: false,
+            span: span,
+            decl: NODE_NONE,
+            name_off: 0,
+            name_len: 0,
+            item: DefId { module: 0, node: NODE_NONE },
+        };
+    }
+
     /// The binding's name text span (empty for a temporary).
     pub const fn name(self: &Self) tok::Span {
         return tok::Span {
@@ -98,7 +112,6 @@ pub struct Place {
 pub const OP_COPY: u8 = 0; // data = PlaceId
 pub const OP_MOVE: u8 = 1; // data = PlaceId
 pub const OP_CONST: u8 = 2; // data = ConstId
-pub const OP_ITEM: u8 = 3; // a function/constant item value; data = ConstId carrying the DefId
 
 pub struct Operand {
     pub kind: u8,
@@ -270,6 +283,11 @@ pub struct Rvalue {
     pub c: u8,
 }
 
+/// An Rvalue that selects no item.
+pub const fn rv(kind: u8, a: u32, b: u32, c: u8, target: TypeId) Rvalue {
+    return Rvalue { a: a, b: b, target: target, item: DefId { module: 0, node: NODE_NONE }, kind: kind, c: c };
+}
+
 /// Statement kinds.
 pub const ST_ASSIGN: u8 = 0; // place = rvalue
 pub const ST_STORAGE_LIVE: u8 = 1; // a = LocalId
@@ -312,6 +330,33 @@ pub struct Terminator {
     pub span: tok::Span,
     pub kind: u8,
     pub is_variadic: bool,
+}
+
+/// A terminator of `kind` with no operands and no successor.
+pub const fn term0(kind: u8, sp: tok::Span) Terminator {
+    return Terminator {
+        kind: kind,
+        a: IR_NONE,
+        args_start: 0,
+        args_len: 0,
+        dests_start: 0,
+        dests_len: 0,
+        sw_start: 0,
+        sw_len: 0,
+        t0: IR_NONE,
+        callee: DefId { module: 0, node: NODE_NONE },
+        targs_start: 0,
+        targs_len: 0,
+        is_variadic: false,
+        span: sp,
+    };
+}
+
+/// A goto to `to`.
+pub const fn goto_term(to: BlockId, sp: tok::Span) Terminator {
+    let mut t = term0(TM_GOTO, sp);
+    t.t0 = to;
+    return t;
 }
 
 /// One basic block: a statement range plus exactly one terminator.
@@ -365,7 +410,39 @@ pub struct CoreBody {
     pub entry: BlockId,
 }
 
+// An exact-capacity copy of `v` (a kept body never grows).
+fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
+    let mut out = Vector::<T>::with_capacity(v.len());
+    for i in 0..v.len() {
+        out.push(*v.at(i));
+    }
+    return out;
+}
+
+// Restated derived conformances: the bootstrap compiler checks `exact`'s `T: Copy` bound against
+// written conformances only.
+extend LocalDecl as Copy {}
+extend BasicBlock as Copy {}
+extend Statement as Copy {}
+extend Place as Copy {}
+extend Projection as Copy {}
+extend Operand as Copy {}
+extend Rvalue as Copy {}
+extend Constant as Copy {}
+extend AsmRec as Copy {}
+
 extend CoreBody {
+    /// True when a projection of place `pl` is a deref: the place reaches through a reference.
+    pub const fn place_has_deref(self: &Self, pl: PlaceId) bool {
+        let p = self.places.at(pl as usize);
+        for i in 0..p.proj_len {
+            if self.projections.at((p.proj_start + i) as usize).kind == PJ_DEREF {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Rewrite every type this body holds through a publication map (`Package::map_type` for the
     /// body's module): locals, places, projections, operands, constants, generic arguments, rvalue
     /// result types and the type payloads of dyn construction and the measuring intrinsics.
@@ -489,63 +566,40 @@ extend CoreBody {
         out.elaborated = src.elaborated;
         out.inline_size_ok = src.inline_size_ok;
         out.entry = src.entry;
-        out.locals.reserve(src.locals.len());
-        for i in 0..src.locals.len() {
-            out.locals.push(*src.locals.at(i));
-        }
-        out.blocks.reserve(src.blocks.len());
-        for i in 0..src.blocks.len() {
-            out.blocks.push(*src.blocks.at(i));
-        }
-        out.statements.reserve(src.statements.len());
-        for i in 0..src.statements.len() {
-            out.statements.push(*src.statements.at(i));
-        }
-        out.places.reserve(src.places.len());
-        for i in 0..src.places.len() {
-            out.places.push(*src.places.at(i));
-        }
-        out.projections.reserve(src.projections.len());
-        for i in 0..src.projections.len() {
-            out.projections.push(*src.projections.at(i));
-        }
-        out.operands.reserve(src.operands.len());
-        for i in 0..src.operands.len() {
-            out.operands.push(*src.operands.at(i));
-        }
-        out.rvalues.reserve(src.rvalues.len());
-        for i in 0..src.rvalues.len() {
-            out.rvalues.push(*src.rvalues.at(i));
-        }
-        out.constants.reserve(src.constants.len());
-        for i in 0..src.constants.len() {
-            out.constants.push(*src.constants.at(i));
-        }
-        out.oper_pool.reserve(src.oper_pool.len());
-        for i in 0..src.oper_pool.len() {
-            out.oper_pool.push(*src.oper_pool.at(i));
-        }
-        out.dest_pool.reserve(src.dest_pool.len());
-        for i in 0..src.dest_pool.len() {
-            out.dest_pool.push(*src.dest_pool.at(i));
-        }
-        out.switch_pool.reserve(src.switch_pool.len());
-        for i in 0..src.switch_pool.len() {
-            out.switch_pool.push(*src.switch_pool.at(i));
-        }
-        out.targ_pool.reserve(src.targ_pool.len());
-        for i in 0..src.targ_pool.len() {
-            out.targ_pool.push(*src.targ_pool.at(i));
-        }
-        out.asms.reserve(src.asms.len());
-        for i in 0..src.asms.len() {
-            out.asms.push(*src.asms.at(i));
-        }
-        out.asm_spans.reserve(src.asm_spans.len());
-        for i in 0..src.asm_spans.len() {
-            out.asm_spans.push(*src.asm_spans.at(i));
-        }
+        out.locals = exact(&src.locals);
+        out.blocks = exact(&src.blocks);
+        out.statements = exact(&src.statements);
+        out.places = exact(&src.places);
+        out.projections = exact(&src.projections);
+        out.operands = exact(&src.operands);
+        out.rvalues = exact(&src.rvalues);
+        out.constants = exact(&src.constants);
+        out.oper_pool = exact(&src.oper_pool);
+        out.dest_pool = exact(&src.dest_pool);
+        out.switch_pool = exact(&src.switch_pool);
+        out.targ_pool = exact(&src.targ_pool);
+        out.asms = exact(&src.asms);
+        out.asm_spans = exact(&src.asm_spans);
         return out;
+    }
+
+    /// Append statement `place = rv`.
+    pub fn push_assign(self: &mut Self, place: PlaceId, rv: Rvalue, sp: tok::Span) {
+        self.rvalues.push(rv);
+        self.statements.push(
+            Statement { kind: ST_ASSIGN, place: place, rvalue: self.rvalues.len() as u32 - 1, a: 0, span: sp },
+        );
+    }
+
+    /// Append `l = rv` through a fresh whole-local place.
+    pub fn assign_local(self: &mut Self, l: LocalId, rv: Rvalue, sp: tok::Span) {
+        self.places.push(Place { base: l, proj_start: 0, proj_len: 0, ty: self.locals.at(l as usize).ty });
+        self.push_assign(self.places.len() as u32 - 1, rv, sp);
+    }
+
+    /// Append `l = op` (RV_USE at the local's type).
+    pub fn assign_local_use(self: &mut Self, l: LocalId, op: OperandId, sp: tok::Span) {
+        self.assign_local(l, rv(RV_USE, op, 0, 0, self.locals.at(l as usize).ty), sp);
     }
 
     pub fn add_local(self: &mut Self, d: LocalDecl) LocalId {
@@ -559,22 +613,7 @@ extend CoreBody {
             BasicBlock {
                 stmt_start: 0,
                 stmt_len: 0,
-                term: Terminator {
-                    kind: TM_UNREACHABLE,
-                    a: IR_NONE,
-                    args_start: 0,
-                    args_len: 0,
-                    dests_start: 0,
-                    dests_len: 0,
-                    sw_start: 0,
-                    sw_len: 0,
-                    t0: IR_NONE,
-                    callee: DefId { module: 0, node: NODE_NONE },
-                    targs_start: 0,
-                    targs_len: 0,
-                    is_variadic: false,
-                    span: tok::Span { start: 0, end: 0 },
-                },
+                term: term0(TM_UNREACHABLE, tok::Span { start: 0, end: 0 }),
                 sealed: false,
             },
         );

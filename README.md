@@ -1,84 +1,94 @@
 # Super-C
 
-Super-C is a small, statically-typed systems language that **compiles to readable C**. It pairs a modern frontend of features I liked from other languages
-(RAII, memory safety, first class coroutines, compile time execution, ...), with C's portability and performance model.
-The transpiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
+Super-C is a small, statically typed systems language that **compiles to readable C**.
+
+It takes features I like from other languages (automatic cleanup, memory safety, coroutines,
+code that runs at compile time) and keeps C's portability and performance. The compiler turns your
+program into ordinary C99/C11, and Clang, GCC or MSVC turns that into a native binary.
 
 ## Pipeline
 
 ```text
 Super-C source (.spc)
-    -> lexer          (UTF-8, packed tokens)
-    -> parser         (context-free LL(1), left-factored operators, no predicates/backtracking; flat AST arena)
-    -> resolver       (name binding, scopes, modules)
-    -> desugar        (lowers sugar keywords like `launch` to core nodes; no other pass sees them)
-    -> typechecker    (type inference, generics, monomorphization; always-on compile-time evaluation)
-    -> borrow checker (moves, aliasing, lifetimes: a typed-AST pass plus a Core IR loan analysis)
-    -> Core IR        (the typed body lowered to a compact control-flow IR; drop elaboration,
-                       verified layout, and compile-time evaluation all run on it)
-    -> C emitter      (streaming Core IR -> readable per-module C: build/ tree of .h/.c, RAII frees inserted)
+    -> lexer          (UTF-8 source into tokens)
+    -> parser         (tokens into a syntax tree; simple grammar, no backtracking)
+    -> resolver       (connects each name to what it refers to)
+    -> desugar        (rewrites shorthand like `launch` into plain code)
+    -> typechecker    (types, generics, compile-time evaluation)
+    -> borrow checker (moves, aliasing, lifetimes)
+    -> Core IR        (a small control-flow form where cleanup is inserted and layouts are checked)
+    -> C emitter      (writes one readable .h/.c pair per module)
     -> cc / clang / gcc
     -> native binary
 ```
 
 ## Installation
 
-macOS/Linux — installs the latest release (the `super-c` binary plus the `std/` and `ffi/` trees it compiles from) into `~/.super-c` and adds `~/.super-c/bin` to your PATH:
+macOS and Linux: this installs the latest release into `~/.super-c` and adds `~/.super-c/bin` to
+your PATH. The release contains the `super-c` binary and the `std/` and `ffi/` folders it needs.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AntoineBastide47/super-c/main/install.sh | sh
 ```
 
-Windows — download the `super-c-windows-*.zip` from the [GitHub Releases](https://github.com/AntoineBastide47/super-c/releases), unpack it anywhere, and add that folder to your PATH (it bundles `std/` and `ffi/` next to the binary).
+Windows: download `super-c-windows-*.zip` from the
+[GitHub Releases](https://github.com/AntoineBastide47/super-c/releases), unzip it anywhere, and add
+that folder to your PATH.
 
 ## Quick start
 
 ```sh
-# scaffold a project and run it
+# create a project and run it
 super-c new hello
 cd hello
 super-c run
 
-# or compile + run a single file directly
+# write the C for one file into build/, without linking
 super-c path/to/app.spc
 
-# emit the readable C and compile it yourself
+# build one file into a binary
 super-c build path/to/app.spc -o app
 ```
 
 ## Building and testing
 
 ```sh
-super-c build                     # dev build (ASan/UBSan)
-super-c release                   # optimized build (-O3 -flto)
-super-c run                       # build the project, then execute its binary
-super-c test                      # run the full test suite (tests/ by convention)
-super-c bench                     # run the benchmarks (bench/ by convention)
-super-c clean                     # drop build outputs
+super-c build                     # dev build (with ASan/UBSan)
+super-c release                   # optimized build (-O3, link-time optimization)
+super-c run                       # build the project, then run it
+super-c test                      # run the tests (in tests/)
+super-c bench                     # run the benchmarks (in bench/)
+super-c clean                     # delete build outputs
 ```
 
-The build is driven by `build.toml` and works for any project, not just the compiler: declare
-`bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
-own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
-conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `--cc=`, `--bin=`, `--lib`, `-o`.
-`--jobs=N` sets one shared worker count for the whole build: the compiler's own parallel stages
-(module discovery/parsing, type checking over import levels, borrow checking) run on that many
-coroutine workers, and the same count bounds the parallel C compile window. The default is one
-worker per CPU; `--jobs=1` runs the fully serial reference pipeline, which produces byte-identical
-output to every parallel run.
-Custom `[command.NAME]` entries run via `super-c command NAME`; built-in subcommand names are reserved
-and cannot be shadowed (this repo's bootstrap lives under `super-c command bootstrap`). Library targets
-come from a `[lib]` section (`type = ["static", "shared"]`), extra binaries from `[bin.NAME]` sections.
-The rest of the toolchain:
+A project is described by a `build.toml` file. At minimum it names the binary (`bin`) and its entry
+file (`root`). From that, `super-c build` gives you:
 
-* `super-c fmt` — the canonical formatter (Wadler-style, width 120, `@fmt.skip` escape hatch).
-* `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
-  `unsafe`, unreachable statements and arms, dead stores, discarded pure results, redundant casts,
-  owning unions without a `free`, ...); `--fix` applies the machine fixes — including generated
-  code — and re-lints to a fixpoint. `--const` flags functions the CTFE interpreter proves
-  always evaluable.
-* `super-c lsp` — a language server (diagnostics as you type, hover, go-to-definition, references,
-  rename, completion, formatting, quick fixes); `editors/vscode/` wires it up.
+* build profiles: `debug`, `dev`, `release`, `bench`, and any you define;
+* incremental, parallel C compilation that only rebuilds what changed;
+* the `tests/` and `bench/` folder conventions.
+
+Useful flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `--cc=`, `--bin=`, `--lib`, `-o`.
+
+`--jobs=N` sets how many workers the whole build uses, both inside the compiler (parsing, type
+checking, borrow checking) and for the C compiler processes. The default is one per CPU.
+`--jobs=1` runs everything serially and gives byte-identical output.
+
+`build.toml` can also declare:
+
+* custom commands in `[command.NAME]` sections, run with `super-c command NAME` (built-in command
+  names are reserved);
+* libraries in a `[lib]` section (`type = ["static", "shared"]`);
+* extra binaries in `[bin.NAME]` sections.
+
+Other tools:
+
+* `super-c fmt`: the code formatter (lines up to 120 columns; `@fmt.skip` opts a piece of code out).
+* `super-c lint [--fix]`: warnings for unused code, unneeded `mut` or `unsafe`, unreachable code,
+  dead stores, and more. `--fix` applies the automatic fixes and repeats until nothing changes.
+  `--const` lists functions that can always run at compile time.
+* `super-c lsp`: a language server (errors as you type, hover, go to definition, references, rename,
+  completion, formatting, quick fixes). `editors/vscode/` connects it to VS Code.
 
 ## Language tour
 
@@ -91,8 +101,8 @@ fn divmod(p: (i32, i32)) (i32, i32) {
 
 fn main() i32 {
     let x: i32 = 10;                   // explicit type
-    let (div, mod) = divmod((x, 20));  // inferred + destructuring
-    let mut sum = 0;                   // mutable binding
+    let (div, mod) = divmod((x, 20));  // inferred type, unpacked into two names
+    let mut sum = 0;                   // `mut` makes a binding changeable
     for i in 0..=mod {
         sum = sum + i;
     }
@@ -100,18 +110,18 @@ fn main() i32 {
 }
 ```
 
-Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32 f64`,
-`c32 c64` (C `_Complex`), `void`.`while`, `for`, and `do { .. } while (cond);` loops are all available.
+Built-in types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32 f64`,
+`c32 c64` (C complex numbers), and `void`. Loops: `while`, `for`, and `do { .. } while (cond);`.
 
-The main function is either: `fn main() i32` or `fn main(args: Vector<str>) i32`
+`main` is either `fn main() i32` or `fn main(args: Vector<str>) i32`.
 
-Tuples are first-class values (2-4 elements): store them in fields, pass them to functions, put
-them in containers (`Vector<(i32, bool)>`). Nested element access needs parens: `(t.0).1`.
+Tuples hold 2 to 4 values. They work anywhere other values do: in fields, as arguments, in
+containers (`Vector<(i32, bool)>`). To reach into a nested tuple, add parentheses: `(t.0).1`.
 
 ### Structs, methods, and visibility
 
 ```superc
-struct Counter { pub n: i32 }    // fields are private by default; `pub` exposes them
+struct Counter { pub n: i32 }    // fields are private unless marked `pub`
 
 extend Counter {
     fn get(self: &Counter) i32 { return self.n; }
@@ -146,17 +156,16 @@ fn area(s: Shape) i32 {
 fn classify(n: i32) i32 {
     return switch n {
         0          => 0,
-        1 | 2 | 3  => 1,    // or-pattern: any alternative matches
+        1 | 2 | 3  => 1,    // any of these values
         4..=9      => 1,
-        n if n < 0 => -1,   // guards can use the bound value
+        n if n < 0 => -1,   // a guard can test the matched value
         _          => 2,
     };
 }
 ```
 
-`switch` is exhaustive and usable as an expression. Arms may combine alternatives with `|` (literals,
-ranges, or variants). Payload-less enums lower to plain C `enum`s; payload-bearing ones lower to tagged
-unions.
+A `switch` must cover every case, and it can produce a value. One arm can list several patterns
+with `|`. Enums without data become plain C `enum`s; enums with data become tagged unions.
 
 ### Loops, labels, and `let` conditionals
 
@@ -165,14 +174,14 @@ fn main() i32 {
     let mut v = Vector::<i32>::new();
     v.push(3); v.push(8); v.push(5);
 
-    // `loop` is an expression: `break <value>` yields it
+    // `loop` produces a value: `break <value>` returns it
     let mut n = 0;
     let seed = loop {
         n += 1;
         if n * n > 20 { break n; }
     };
 
-    // labels route break/continue through nested loops (defers still run, innermost first)
+    // a label lets break/continue leave several loops at once
     let mut pairs = 0;
     'outer: for i in 0..4 {
         for j in 0..4 {
@@ -181,7 +190,7 @@ fn main() i32 {
         }
     }
 
-    // `while let` drains a source; `if let` tests one pattern
+    // `while let` repeats while the pattern matches; `if let` tests it once
     let mut last_even = 0;
     while let Some(x) = v.pop() {
         if let 8 = x { last_even = x; }
@@ -192,10 +201,11 @@ fn main() i32 {
 }
 ```
 
-Format placeholders accept `{:[fill][<^>][0][width][.precision][x|X|b]}` — `{:08.2}` zero-pads a float to width 8 with 2
-decimals, `{:b}` prints binary — and `eprint` / `eprintln` mirror `print` / `println` onto stderr.
+Format placeholders follow `{:[fill][<^>][0][width][.precision][x|X|b]}`. For example `{:08.2}`
+prints a float 8 wide with 2 decimals and leading zeros, and `{:b}` prints binary. `eprint` and
+`eprintln` work like `print` and `println` but write to stderr.
 
-### Generics (monomorphized)
+### Generics
 
 ```superc
 fn id<T>(x: T) T { return x; }
@@ -208,59 +218,56 @@ fn main() i32 {
 }
 ```
 
-Generic functions, structs, enums, and methods (including methods with their own type parameters, e.g.
-`map<U>`) are specialized per instantiation, across module boundaries.
+Functions, structs, enums and methods can be generic, and a method can have its own type
+parameters (for example `map<U>`). The compiler writes a separate copy of the code for each type
+you use, also across modules, so generic code is as fast as hand-written code.
 
 ### Closures and function pointers
 
 ```superc
-fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }            // a plain function pointer
+fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }            // takes a plain function pointer
 
-fn scale<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x) * 2; }  // any function value, incl. captures
+fn scale<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x) * 2; }  // takes any function, closures too
 
 fn main() i32 {
-    let g = |x: i32| x * 2;                       // compact closure
+    let g = |x: i32| x * 2;                       // short closure
     let h = fn(x: i32) i32 { return x + 1; };     // anonymous function
     let k = 10;
-    let add_k = |x: i32| x + k;                   // captures k BY COPY at this point
+    let add_k = |x: i32| x + k;                   // copies k in at this point
     return apply(g, 20) + apply(h, 0) + scale(5, add_k) + add_k(1) - 40; // 42
 }
 ```
 
-A non-capturing closure lowers to a hoisted static C function and a plain function pointer — no hidden
-environment or allocation. A **capturing** closure copies the locals it uses into a per-closure
-environment struct (its value IS that struct — still no allocation); it cannot be a bare `fn(..) ..`
-pointer, but it satisfies an `F: fn(..) ..` generic bound (also spellable as `where F: fn(..) ..`),
-which monomorphizes the function per closure and calls it directly. The std higher-order methods
-(`Vector::map`/`find`/`retain`, `Option::map`/`and_then`/`filter`, `Result::map`/`map_err`/`and_then`,
-`Box::map`) all take `F: fn(..) ..`, so they accept named functions, function pointers, and capturing
-closures alike.
+A closure that captures nothing becomes a normal C function: no hidden data, no allocation.
 
-Captures come in three flavors, decided per variable by how the body uses it:
+A closure that captures variables stores copies of them in a small struct, still without
+allocation. It cannot be passed as a plain `fn(..)` pointer, but it can be passed to a generic
+parameter bounded by `F: fn(..) ..`. The compiler then calls it directly. The standard library's
+higher-order methods (`map`, `find`, `retain`, `and_then`, `filter`, ...) all take this kind of
+parameter, so they accept functions, function pointers and closures.
 
-* **read** — captured by copy at creation (a later write to the original is invisible to the closure);
-* **mutated** (`FnMut`-style) — a capture the body assigns to, `&mut`-borrows, or calls a `&mut self`
-  method on becomes an implicit `&mut` capture: the env holds a pointer and writes land on the OUTER
-  variable (`let mut n = 0; each(5, fn(x: i32) { n += x; });` leaves `n == 10`). The outer binding
-  must be `mut`;
-* **owned** (`FnOnce`-style) — capturing a destructor-owning (`Free`) value MOVES it into the env:
-  the outer binding is spent, the closure value itself becomes `Free` (move-tracked; its env frees the
-  value exactly once — at scope exit, or inside the generic that consumed it), and the body may use
-  but not move the value out. An owning closure satisfies only the ownership-marked bound
-  `F: fn move(..) ..` — under it the generic body move-tracks `f`, so passing it on twice is a
-  use-after-move error, while *calling* it any number of times is fine (calls only borrow the env).
+How a closure captures each variable depends on how its body uses the variable:
 
-Capturing a fixed-size array by copy is rejected (capture a slice instead).
+* **Read only**: the closure keeps a copy. Later changes to the original are not seen.
+* **Changed**: if the body assigns to the variable or takes `&mut` of it, the closure keeps a
+  pointer, and changes go to the original variable. The original must be `mut`. After
+  `let mut n = 0; each(5, fn(x: i32) { n += x; });`, `n` is 10.
+* **Owned**: if the variable owns memory (a `String`, a `Vector`, ...), it moves into the closure.
+  The original can no longer be used, and the closure frees the value exactly once. Such a
+  closure only fits a bound written `F: fn move(..) ..`. You can call it as often as you like,
+  but you can pass it on only once.
+
+A closure cannot capture a fixed-size array by copy; capture a slice instead.
 
 ### Trait objects (`dyn`)
 
-When the concrete type is a *runtime* choice — heterogeneous collections, plugin-style open
-extension, closures stored in fields — a dyn-compatible interface can be dispatched dynamically:
+Sometimes the concrete type is only known at run time: a list of different shapes, plugins, or
+closures stored in a field. For those cases an interface can be called through `dyn`:
 
 ```superc
 interface Shape {
     fn area(self: &Self) i32;
-    fn tag(self: &Self) i32 { return 0; }        // default bodies back vtable slots too
+    fn tag(self: &Self) i32 { return 0; }        // default methods work through dyn too
 }
 struct Circle { pub r: i32 }
 struct Sq { pub s: i32 }
@@ -270,64 +277,69 @@ extend Sq as Shape { pub fn area(self: &Sq) i32 { return self.s * self.s; } }
 fn total(a: &dyn Shape, b: &dyn Shape) i32 { return a.area() + b.area(); }  // one fn, any Shapes
 
 fn main() i32 {
-    let mut v: Vector<Box<dyn Shape>> = Vector::<Box<dyn Shape>>::new();    // OWNED, mixed types
+    let mut v: Vector<Box<dyn Shape>> = Vector::<Box<dyn Shape>>::new();    // owns mixed types
     v.push(Box::<Circle>::new(Circle { r: 1 }));
     v.push(Box::<Sq>::new(Sq { s: 2 }));
     let mut sum = 0;
     for i in 0..v.len() { sum = sum + v.at(i).area(); }                     // 3 + 4
-    return sum;                                                             // elements auto-free
+    return sum;                                                             // elements are freed
 }
 ```
 
-A `dyn` value is a 2-word fat pair `{data, vtable}` passed by value (the slice model — never a hidden
-allocation). Three spellings: `&dyn I` (borrowed view), `&mut dyn I` (mutable view — required for
-`&mut self` methods), and `Box<dyn I>` (owned: `Box<T>` moves in; the vtable's drop glue deep-frees
-the pointee and releases the block, riding the same RAII/move analysis as everything else). `&T`
-erases implicitly wherever `&dyn I` is expected when `T` implements `I`; one `static const` vtable
-per (type, interface) is emitted in each using TU. Dyn-compatibility is checked with a reason: every
-method takes `Self` by reference and mentions it nowhere else, no interface/method generics.
+A `dyn` value is two pointers: the data and a table of its methods. Creating one never allocates.
+There are three forms:
 
-Closures get the same treatment — `dyn fn(..) ..` is a one-method trait object with **structural**
-identity, unlocking heterogeneous handler lists and closure storage:
+* `&dyn I`: a borrowed view;
+* `&mut dyn I`: a mutable view, needed for methods that take `&mut self`;
+* `Box<dyn I>`: an owned value that is freed automatically.
+
+Wherever a `&dyn I` is expected, you can pass a `&T` for any `T` that implements `I`. An interface
+can be used with `dyn` only if every method takes `self` by reference, does not mention `Self`
+anywhere else, and has no generic parameters. The compiler tells you which rule is broken.
+
+Closures work the same way. `dyn fn(..) ..` stores any function or closure with that signature:
 
 ```superc
-fn make_adder(k: i32) Box<dyn fn(i32) i32> { return |x: i32| x + k; }  // env moves to the heap
+fn make_adder(k: i32) Box<dyn fn(i32) i32> { return |x: i32| x + k; }  // captures move to the heap
 
 let mut on_event: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();
 on_event.push(make_adder(10));
-on_event.push(double_it);              // a named fn erases too (no allocation)
-let r = (*on_event.at(0))(5);          // 15 — dispatched through the vtable
+on_event.push(double_it);              // a named function works too, with no allocation
+let r = (*on_event.at(0))(5);          // 15
 ```
 
-A capturing closure is borrowed into a view (`&f` → `&dyn fn(..) ..`) or moved into a `Box<dyn fn>`
-(its env is heap-copied; owning captures are deep-freed by the drop glue). Static dispatch through
-`F: fn(..) ..` bounds stays the zero-cost default — `dyn` is the opt-in for the places
-monomorphization cannot reach.
+A capturing closure is borrowed as `&dyn fn(..)` with `&f`, or moved into a `Box<dyn fn>`. Generic
+`F: fn(..)` parameters stay the zero-cost default; use `dyn` only where generics cannot help.
 
 ### Memory: pointers, references, `new`
 
 ```superc
 fn main() i32 {
-    let p = new i32(41);        // heap-allocated *mut i32
-    unsafe { *p = *p + 1; }     // raw-pointer access must carry the `unsafe` marker
-    let r: &i32 = unsafe &*p;   // reborrow the raw pointer as a reference (&T -> const T*)
-    return *r;                  // 42 (reference operations need no unsafe)
+    let p = new i32(41);        // allocate an i32 on the heap: p is a *mut i32
+    unsafe { *p = *p + 1; }     // using a raw pointer requires `unsafe`
+    let r: &i32 = unsafe &*p;   // turn the raw pointer into a reference
+    return *r;                  // 42 (references need no `unsafe`)
 }
 ```
 
-`*const T` / `*mut T` are raw pointers; `&T` / `&mut T` are references. `new T(expr)` and `new T { .. }`
-allocate; `sizeof(T)` and `alignof(T)` give the byte size and alignment.
+`*const T` and `*mut T` are raw pointers. `&T` and `&mut T` are references. `new T(expr)` and
+`new T { .. }` allocate. `sizeof(T)` and `alignof(T)` give a type's size and alignment in bytes.
 
-Raw-pointer manipulation — dereference, indexing, arithmetic, field access through a pointer — and
-every call to an `extern "C"` function must sit inside an `unsafe { ... }` block or be prefixed with
-`unsafe`: the compiler cannot vouch for those operations, so the marker delimits exactly where its
-guarantees stop. Pointer comparison and reference operations stay safe.
+The compiler cannot check raw pointers or C functions. So every raw-pointer operation
+(dereference, indexing, arithmetic, field access) and every call to an `extern "C"` function must
+be inside an `unsafe { ... }` block or start with `unsafe`. This marks exactly where the compiler's
+guarantees stop. Comparing pointers and using references stay safe.
 
-References are borrow-checked statically: a place admits many `&` or one `&mut` (overlap is
-field-precise — `p.a` and `p.b` don't conflict), a place can't be read or moved while an overlapping
-`&mut` is live, a stored borrow ends at its last use (non-lexical), and returning a reference that
-traces to a local is rejected. Type-level lifetimes tie borrows to their owners across function
-boundaries — annotations are Rust-style and almost always elided:
+References are checked at compile time:
+
+* a value can have many `&` references or one `&mut` reference at a time (fields count
+  separately, so `p.a` and `p.b` do not conflict);
+* a value cannot be read or moved while a `&mut` to it is in use;
+* a borrow ends at its last use, not at the end of the block;
+* returning a reference to a local variable is an error.
+
+Lifetimes connect a returned reference to the arguments it came from. You rarely write them; when
+you do, the syntax is the same as Rust's:
 
 ```superc
 fn longer<'a>(a: &'a String, b: &'a String) &'a String {
@@ -338,15 +350,14 @@ fn longer<'a>(a: &'a String, b: &'a String) &'a String {
 }
 ```
 
-Struct fields holding references carry lifetime parameters (`struct View<'a> { s: str<'a> }`), view
-types pin the container they borrow from, and higher-ranked bounds (`for<'x> fn(&'x T) &'x U`) and
-generic associated types are supported. Lifetimes are erased at codegen — they exist only to prove
-the program safe.
+Structs that hold references declare lifetime parameters (`struct View<'a> { s: str<'a> }`).
+Higher-ranked bounds (`for<'x> fn(&'x T) &'x U`) and generic associated types are supported.
+Lifetimes are only used for checking; they do not appear in the generated C.
 
-### Ownership and destructors (RAII)
+### Ownership and automatic cleanup
 
-Values that own memory are freed automatically, deterministically, and exactly once — without
-writing a destructor:
+Values that own memory are freed automatically, exactly once, when they go out of scope. You do not
+write the cleanup code:
 
 ```superc
 struct Session {
@@ -358,64 +369,69 @@ fn main() i32 {
     let s = Session { name: String::from_str("alice"), log: Vector::<String>::new() };
     let n = s.name.len() as i32;
     return n - 5;
-}   // s.log and s.name are freed here -- no impl was written
+}   // s.log and s.name are freed here, with no code written for it
 ```
 
-The `Free` interface is the destructor hook (`fn free(self: &mut Self)`), and ownership is
-**derived**: a struct or enum whose members own memory (a `String`, a container, another owning
-aggregate, an enum payload) is itself owning — the compiler synthesizes its `free`, recursively,
-per variant for enums, per instantiation for generics. Write an explicit `extend T as Free` only
-when cleanup needs custom behavior; any owning field the body does not touch is still freed by
-generated glue, so a hand-written destructor cannot silently leak a field. `union`s are the one
-exception: only the author knows the active member, so an owning union without an explicit `Free`
-impl is a compile error. Pointers and references never count as owning — a raw pointer is a borrow;
-ownership is always spelled as a type with a free (`Box<T>`, `Vector<T>`, `String`).
+The cleanup hook is the `Free` interface (`fn free(self: &mut Self)`). A struct or enum that
+contains owning values (a `String`, a container, another owning struct) becomes owning itself, and
+the compiler writes its `free` for you. Write `extend T as Free` only when you need custom cleanup;
+any owning field your code does not free is still freed for you, so a custom `free` cannot leak a
+field by mistake.
 
-Owning values **move** instead of copying, and the compiler enforces single ownership statically:
+Two special cases:
+
+* A `union` that owns memory must have a hand-written `Free`, because only you know which member is
+  active.
+* Pointers and references never own. To own memory, use a type with a `free`, like `Box<T>`,
+  `Vector<T>` or `String`.
+
+Owning values **move** instead of being copied, and the compiler rejects any use after a move:
 
 ```superc
 let a = String::from_str("owned");
-let b = a;              // ownership moves to b
+let b = a;              // a's value moves to b
 // a.len()              // error: use of moved value
 ```
 
-Assignment frees the place's old value first (`s.name = fresh;` never leaks the previous string),
-moving a field out of an owning value or out of a reference is rejected (the destructor would run
-on a partial value / the owner would free it again), and the sanctioned idioms are:
+More rules:
+
+* Assigning to a place frees its old value first, so `s.name = fresh;` does not leak.
+* You cannot move a field out of an owning value or out of a reference, because the owner would
+  free it a second time. Use `replace` to swap a value out instead.
+* `forget(value)` leaks a value on purpose. The leak tracker still reports it, so deliberate leaks
+  stay easy to find.
 
 ```superc
 fn retitle(s: &mut Session) String {
-    return replace(&mut s.name, String::from_str("bob"));  // swap ownership out, atomically
+    return replace(&mut s.name, String::from_str("bob"));  // take the old name, put a new one in
 }
 
-forget(expensive);      // the sanctioned DELIBERATE leak: never freed, still visible to the
-                        // leak tracker -- intentional leaks stay greppable, never laundered
+forget(expensive);      // never freed, still visible to the leak tracker
 ```
 
-An `unsafe` block may still take a field out of a reference directly, accepting responsibility for
-the ownership transfer — the same marker contract as raw-pointer code.
+Inside an `unsafe` block you may move a field out of a reference directly. You then take
+responsibility for the ownership, as with raw pointers.
 
-For cleanup RAII does not cover — a raw pointer, an FFI handle — `defer` runs an arbitrary statement
-at scope exit:
+For cleanup that automatic freeing does not cover, such as a raw pointer or a C handle, `defer`
+runs a statement when the block ends:
 
 ```superc
 extern "C" { fn free(p: *mut void) void; }
 
 fn main() i32 {
     let p = new i32(42);
-    defer unsafe free(p);   // runs at scope exit, even on an early return
-    return unsafe *p;       // the value is read before the defer runs
+    defer unsafe free(p);   // runs when main returns
+    return unsafe *p;       // the return value is computed before the defer runs
 }
 ```
 
-`defer` fires when the enclosing block exits — on fall-through, `return`, `break`, or `continue` —
-in last-in-first-out order. On a `return`, the return value is evaluated first, then the deferred
-statements run.
+A `defer` runs on every exit from its block (normal end, `return`, `break`, `continue`). Several
+defers run in reverse order.
 
 ### Slices and arrays
 
 ```superc
-fn sum(xs: []i32) i32 {              // []T is a (ptr, len) fat-pointer view
+fn sum(xs: []i32) i32 {              // []T is a view: a pointer and a length
     let mut t = 0;
     for x in xs { t = t + x; }
     return t;
@@ -423,12 +439,12 @@ fn sum(xs: []i32) i32 {              // []T is a (ptr, len) fat-pointer view
 
 fn main() i32 {
     let a: [i32; 4] = [10, 20, 30, 40];
-    let t: [i32; 128] = [['a'] = 1, ['z'] = 2];   // designated (sparse) initializers
+    let t: [i32; 128] = [['a'] = 1, ['z'] = 2];   // set only the listed indexes
     return a[0] + a[3] + t['a'];
 }
 ```
 
-### The standard prelude
+### The standard library
 
 ```superc
 fn main() i32 {
@@ -444,19 +460,19 @@ fn main() i32 {
 }
 ```
 
-`Box<T>`, `Option<T>`, `Result<T, E>`, `Vector<T>`, `Map<K, V>`, `Set<T>`, `String`, and `str` ship in
-`std/` and are auto-imported, along with iterators and the algorithms built on them. `panic("msg")`
-aborts with a message (no unwinding); `Option`/`Result` provide the panicking accessors `unwrap()` /
-`expect(msg)` (+ `unwrap_err()`), and a `@c.noreturn` call types as `never`, so a panicking arm
-unifies with value-producing siblings in a `switch` or `if`. The containers and
-`String` are allocator-parameterized: implement the `Allocator` interface and pass it via the `*_in`
-constructors (`new_in`, `with_capacity_in`, `from_str_in`).
+These types are always available, with no import: `Box<T>`, `Option<T>`, `Result<T, E>`,
+`Vector<T>`, `Map<K, V>`, `Set<T>`, `String` and `str`, plus iterators.
 
-Anything implementing `Iterator<T>` composes into lazy adapter pipelines — `map` / `filter` /
-`enumerate` / `zip` build one, and `for x in ..`, `fold`, `for_each`, `count`, or `collect` drain it.
-The closure's signature (or the source's conformance) pins the element types, so no turbofish is
-needed; adapters are plain monomorphized structs holding the closure by value (no allocation,
-direct calls):
+* `panic("msg")` stops the program with a message. `unwrap()`, `expect(msg)` and `unwrap_err()`
+  panic when the value is missing.
+* A function that never returns (such as `panic`) can be used where a value is expected, for
+  example in one arm of a `switch`.
+* Containers and `String` can use a custom allocator: implement the `Allocator` interface and pass
+  it to `new_in`, `with_capacity_in` or `from_str_in`.
+
+Iterators chain lazily: `map`, `filter`, `enumerate` and `zip` build a pipeline, and `for`, `fold`,
+`for_each`, `count` or `collect` run it. No allocation happens, and the closures are called
+directly:
 
 ```superc
 let doubled_sum = fold(map(v.iter(), |x: &i32| *x * 2), 0, |a: i32, x: i32| a + x);
@@ -467,8 +483,8 @@ let picked: Vector<i32> = collect(map(v.iter(), |x: &i32| *x + 1));
 
 ### Modules
 
-A project is a tree of `.spc` files. `import` pulls another module in; `pub` controls what crosses the
-boundary.
+A project is a folder tree of `.spc` files. `import` loads another module, and `pub` decides what
+other modules can see.
 
 ```superc
 // geom.spc
@@ -486,12 +502,12 @@ fn main() i32 {
 }
 ```
 
-`import P as Q;` aliases a module and `import P as *;` brings its public items into scope unqualified.
-Imports are public, C-style: a glob import of a facade module also exposes everything the facade
-itself imports, and any transitively loaded module stays reachable by its qualified path (`b::foo()`)
-without a direct import. Import cycles are legal — mutually-recursive modules (pointer-linked types,
-mutually-recursive functions) resolve order-independently; only a mutual *by-value* embedding is
-rejected (the type would have infinite size).
+* `import P as Q;` gives a module a shorter name.
+* `import P as *;` makes its public items usable without the `P::` prefix.
+* Imports pass through: if module A imports B, code that imports A can also use B (as `B::foo()`
+  or through a glob).
+* Two modules may import each other. The only error is two types that contain each other by value,
+  because their size would be infinite.
 
 ### C interop (FFI)
 
@@ -503,39 +519,36 @@ extern "C" {
 }
 ```
 
-`extern "C"` declarations bind directly to C symbols with no wrapper or mangling, so existing C
-libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`: a header
-that exists relative to the declaring `.spc` file is rewritten to the right path from inside the
-generated `build/` tree (you never reason about the build layout), anything else is included as
-written (`<...>` for bare names). Calling any extern binding requires an `unsafe` block or prefix at
-the call site.
+`extern "C"` declarations call C functions directly, with no wrapper, so existing C libraries work
+as they are. Every call to them needs `unsafe`.
 
-Whole C sources and libraries come along automatically: a backing header that resolves next to the
-`.spc` file pulls in its same-stem `.c` sibling with no ceremony —
+`extern "C" "header.h" { .. }` also includes that header in the generated C. If the header is next
+to your `.spc` file, the compiler fixes the include path for you; otherwise it is included as
+written.
+
+C source files come along automatically. If `native.h` sits next to the `.spc` file, its `native.c`
+is found and compiled too:
 
 ```superc
-extern "C" "native.h" {      // native.c beside it is discovered and compiled into the build
+extern "C" "native.h" {      // native.c next to it is compiled into the build
     fn native_mix(a: i32, b: i32) i32;
 }
 ```
 
-— while `@c.source("impl.c")` names an implementation that lives elsewhere, and `@c.link("m")`
-declares a library (a value starting with `-` passes through verbatim). Each source becomes a
-wrapper translation unit in `build/` (an absolute `#include`, so the file's own relative includes
-keep resolving), meaning `cc build/**/*.c` picks everything up; paths resolve relative to the
-declaring `.spc` file. Link flags are written to `build/__ldflags` (one per line —
-`cc ... $(cat build/__ldflags)`) and applied automatically to `--test` builds. A library declares
-its flag once where its bindings live — the bundled `math`/`pthread`/`dlfcn` ffi modules already
-do, so importing them is all it takes.
+* `@c.source("impl.c")` names a C file stored somewhere else.
+* `@c.link("m")` links a library (a value that starts with `-` is passed as is).
+* Link flags are collected in `build/raw/__ldflags`, one per line, and applied automatically.
+* The bundled `math`, `pthread` and `dlfcn` modules already declare their libraries, so importing
+  them is enough.
 
-Variadics work in both directions. A binding can take `...`:
+Variadic functions work in both directions. You can call a C function that takes `...`:
 
 ```superc
 extern "C" { fn printf(fmt: *const char, ...) i32; }
 ```
 
-and a Super-C function can *define* one, reading its arguments with the `va_list` type and the
-`va_start` / `va_arg(ap, T)` / `va_end` intrinsics:
+and you can write one, reading its arguments with `va_list`, `va_start`, `va_arg(ap, T)` and
+`va_end`:
 
 ```superc
 extern "C" { fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_list) i32; }
@@ -551,7 +564,7 @@ fn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 
 ### Attributes
 
-`@c.*` attributes annotate an item (before any `pub`) and lower to portable C keywords or GNU
+`@c.*` attributes go before an item (and before `pub`). They become C keywords or GNU
 `__attribute__`s:
 
 ```superc
@@ -564,14 +577,13 @@ struct Header { pub magic: u32, pub version: u16 }
 @c.align(64)
 struct CacheLine { pub data: [u8; 64] }
 
-@c.export("superc_init")     // pin the exact C symbol (no module mangling)
+@c.export("superc_init")     // use exactly this C symbol name
 pub fn init() i32 { return 0; }
 ```
 
 Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
-`import("sym")`, `section("s")`, `used`, `unused`. `export`/`import` set a function's exact C symbol at
-both its definition and every call site. Bare `@emit_macro` on a generic struct or enum additionally
-exports it as a reusable C macro for consumption from plain C.
+`import("sym")`, `section("s")`, `used`, `unused`. `export` and `import` fix a function's C name.
+`@emit_macro` on a generic struct or enum also writes it as a C macro, for use from plain C.
 
 ### Testing
 
@@ -579,14 +591,14 @@ exports it as a reusable C macro for consumption from plain C.
 struct Fx { pub v: Vector<i32> }
 
 @test_init
-fn setup() Fx {                       // per-module fixture: built fresh for each test that asks
+fn setup() Fx {                       // a fresh fixture for each test that asks for one
     let mut v = Vector::<i32>::new();
     v.push(1); v.push(2);
     return Fx { v: v };
 }
 
 @test
-fn drains(fx: &mut Fx) {              // declare the parameter to receive the fixture
+fn drains(fx: &mut Fx) {              // add a parameter to receive the fixture
     let mut s = 0;
     while let Some(x) = fx.v.pop() { s += x; }
     assert_eq(s, 3);
@@ -597,29 +609,27 @@ fn rejects_bad_input() { panic("boom"); }
 ```
 
 ```sh
-super-c --test app.spc                      # collect @test fns, build, run (fork-isolated, parallel)
-super-c --test --test-filter=drains app.spc # substring selection
-super-c --test --test-shard=1/2 app.spc     # stable one-based CI shard
-super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
-super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
-super-c --test --quiet app.spc              # only the failures and the tally
+super-c --test app.spc                      # find the @test functions, build, run them in parallel
+super-c --test --test-filter=drains app.spc # only tests whose name contains "drains"
+super-c --test --test-shard=1/2 app.spc     # run half of the tests (for CI)
+super-c --test --test-jobs=4 app.spc        # at most 4 test processes at once
+super-c --test --test-no-fork app.spc       # run in one process, for a debugger
+super-c --test --quiet app.spc              # print only failures and the totals
 ```
 
-Each test runs in a forked child, so a panic, a failed assertion, or a crash fails just that test —
-and `@test(should_panic)` passes only when the body aborts. A test's output is captured and shown
-only if the test fails: after the run, a `failures:` section replays each failed test's output under
-its own header, says how its process ended, and lists the failed names again (`--test-no-fork`
-captures nothing). `@test_init` returns a fixture value the
-test takes by parameter (torn down by the optional `@test_free`, then RAII); `@test_init(global)` /
-`@test_free(global)` build a suite-wide env once in the parent, passed to tests as a shared `&` —
-fork's copy-on-write makes cross-test mutation impossible by construction. `assert(cond[, "msg"])`,
-`assert_eq(a, b)`, and `assert_ne(a, b)` are compiler builtins: a failure prints the expression's
-source text, the left/right values, and its `file:line`, and the arguments are only read (asserting
-on an owned `String` leaves it usable). In a normal (non-`--test`) build, test functions are not
-emitted at all.
+* Each test runs in its own process, so a crash or a failed assertion fails only that test.
+* `@test(should_panic)` passes only if the test panics.
+* A test's output is shown only when it fails. At the end, a `failures:` section repeats each
+  failed test's output and how it ended.
+* `@test_init` builds a fixture that the test receives as a parameter. `@test_free` (optional)
+  tears it down. `@test_init(global)` and `@test_free(global)` build one shared environment for the
+  whole run; each test gets it as a read-only `&`.
+* `assert(cond[, "msg"])`, `assert_eq(a, b)` and `assert_ne(a, b)` print the failing expression,
+  both values, and the file and line.
+* Tests are left out of normal builds.
 
-Tests can also be grouped as **method suites** on a type — the receiver *is* the fixture, produced
-by a `@test_init` method in the same (non-generic, inherent) `extend`:
+You can also group tests as methods on a type. The type's `@test_init` method creates the value,
+and each test receives it as `self`:
 
 ```superc
 extend Counter {
@@ -634,20 +644,18 @@ extend Counter {
 }
 ```
 
-Suite tests report as `module::Counter::starts_at_zero`, may take the global env as a second
-parameter, and follow the same lifecycle (setup → test → `@test_free` method → RAII). A module may
-host several suites (one per type), and a local extension of an imported type can define its own —
-each module's suite uses its own `@test_init`.
+These tests show up as `module::Counter::starts_at_zero`. A module can have one such group per
+type.
 
 ### Finding leaks and double frees
 
-Every compiled binary carries a built-in leak sanitizer, inert until asked for (works everywhere,
-including Apple Silicon where LeakSanitizer does not exist):
+Every compiled program includes a leak checker. It is off until you turn it on, and it works
+everywhere, including Apple Silicon where LeakSanitizer is not available:
 
 ```sh
-super-c lint                 # statically detect leaks and logs an error per leak
-SC_LEAK_CHECK=1 ./app          # report allocations that survive to exit, with call stacks
-SC_LEAK_CHECK=fatal ./app      # same report, exit code 23 on leaks -- a CI gate
+super-c lint                   # finds many leaks at compile time
+SC_LEAK_CHECK=1 ./app          # at exit, report memory that was never freed, with call stacks
+SC_LEAK_CHECK=fatal ./app      # same, and exit with code 23 if anything leaked (for CI)
 ```
 
 ```text
@@ -658,23 +666,20 @@ leak: 1 allocation(s), 46 byte(s)
     4   app    main + 64
 ```
 
-The runtime (`super_rt.c`, generated into every build) interposes the emitted code's
-`malloc`/`calloc`/`realloc`/`free` call sites over a registry keyed by pointer. Freed entries are
-kept, so a **double free** is detected and reported with both stacks (the block is *not* freed a
-second time, so the report replaces the crash), and `realloc` of a freed pointer is flagged as a
-use-after-free. Off by default it costs one predictable branch per allocation; this repo's check
-script runs the whole test suite under `SC_LEAK_CHECK=fatal`, so compiler and standard library are
-leak-free by construction, not by audit.
+The checker tracks every `malloc`, `calloc`, `realloc` and `free` in the generated code. It also
+catches a **double free**: it prints both call stacks and skips the second free, so you get a report
+instead of a crash. A `realloc` of a freed pointer is reported as a use after free. When the checker
+is off, it costs one branch per allocation. This repository runs its whole test suite with
+`SC_LEAK_CHECK=fatal`, so the compiler and standard library have no leaks.
 
 ### Compile-time evaluation
 
-Always on. A constant evaluator, a layout engine (64-bit C data model), and a CTFE interpreter run
-as part of every compile; two flags bound how much work a single compile-time evaluation may do
-(exhausting a budget is never an error for plain functions — the expression simply stays a runtime
-one; `const fn` calls and const initializers are held to a stricter standard, below):
+The compiler can run your code while it compiles. This is always on. Two flags limit how much work
+one evaluation may do. When a normal function runs out of budget, it simply runs at run time
+instead; `const fn` and constants have stricter rules (below).
 
 ```sh
-super-c app.spc                                          # defaults: ~2M steps, ~96 MiB
+super-c app.spc                                          # defaults: about 2M steps, 96 MiB
 super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
 ```
 
@@ -683,40 +688,32 @@ struct Header { magic: u32, version: u16 }
 static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 ```
 
-* `static_assert(cond, "msg")` is valid at item or statement scope; conditions Super-C can fold are
-  decided here with source spans — including `sizeof`/`alignof` over structs, enums, tuples, and
-  generic instances — and unfoldable ones (opaque `extern "C"` types, `va_list`) lower to C
-  `_Static_assert` for the downstream C compiler to evaluate.
-* Array designator indices may be any constant expression (`[K] = v`, `[K + 1] = v`); non-constant
-  indices become a Super-C error instead of invalid C. An array length that cannot be evaluated is
-  likewise a named error ("array length must be a constant expression") instead of silently
-  becoming length 0.
-* Array lengths become part of the type — `[i32; 4]` and `[i32; 8]` are distinct — which makes
-  fixed-size arrays legal as generic type arguments (`Wrap<[i32; 4]>` embeds the array by value).
-  Passing bare arrays through the std containers is not supported; wrap them in a struct.
-* Every layout the compiler computes is verified in the generated C by an emitted
-  `_Static_assert(sizeof(T) == N, ...)`, so the downstream C compiler proves the layout model on
-  the actual target — a mismatch is a named compile error, never silent.
-* Implicit CTFE: a call whose arguments are compile-time constants is RUN
-  by an interpreter — loops, recursion, structs, arrays, payload enums, generic methods, floats
-  (including the libm externs), and even heap code (`malloc`/`realloc`/`free` are intercepted into
-  an abstract compile-time heap, so a `Vector`-building function folds to its result). For a plain
-  function anything unmodeled, or over budget, stays a runtime call. A `static_assert` may call
-  functions defined anywhere (undecidable asserts are re-checked once the whole package has
-  type-checked), and one that would trap reports the reason (`division by zero`, `use after
-  free`, ...) together with the CTFE call stack and steps consumed.
-* Diagnosed misuse: a constant-dependency cycle (`const A = B; const B = A;`) is reported as
-  `cyclic constant dependency` instead of burning the step budget, and an emitted expression whose
-  evaluation *proves* undefined behavior (division by zero, out-of-bounds access, use after free)
-  fails the build even where folding is otherwise optional — a short-circuited `&&`/`||` operand
-  that never executes is exempt.
+* `static_assert(cond, "msg")` works at the top level and inside functions. If the compiler can
+  compute the condition, it checks it right away (including `sizeof` and `alignof` of any type).
+  Otherwise it becomes a C `_Static_assert`.
+* Array indexes in initializers and array lengths may be any constant expression. A length that
+  is not constant is a clear error.
+* An array's length is part of its type: `[i32; 4]` and `[i32; 8]` are different types. That is
+  why an array can be a generic argument (`Wrap<[i32; 4]>`). To store arrays in the standard
+  containers, wrap them in a struct.
+* Every struct layout the compiler computes is double-checked in the C output with
+  `_Static_assert(sizeof(T) == N, ...)`, so the real C compiler confirms it on the real target.
+* A call whose arguments are all known at compile time runs at compile time. This covers loops,
+  recursion, structs, arrays, enums, generics, floating point (including math functions) and heap
+  memory: a function that builds a `Vector` can run at compile time. If something is not supported
+  or runs over budget, a normal function simply runs at run time.
+* A failing `static_assert` explains why (for example `division by zero` or `use after free`) and
+  shows the compile-time call stack.
+* Constants that depend on each other in a loop (`const A = B; const B = A;`) are reported as
+  `cyclic constant dependency`. Code that would certainly divide by zero, read out of bounds or use
+  freed memory is a compile error.
 
-#### `const fn` and mandatory evaluation
+#### `const fn` and required evaluation
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
 
-fn evens() Array<u32, 5> {                     // plain functions work too (Vectors, loops, ...)
+fn evens() Array<u32, 5> {                     // normal functions work too (Vectors, loops, ...)
     let mut v = Vector::<u32>::new();
     for i in 0..5u32 { v.push(i * 2); }
     let mut a = Array::<u32, 5>::new();
@@ -724,180 +721,156 @@ fn evens() Array<u32, 5> {                     // plain functions work too (Vect
     return a;
 }
 
-const N: usize = table_size(8);                // mandatory: must evaluate, or compile error
-const V: Array<u32, 5> = evens();              // materialized as static C data (relocations included)
+const N: usize = table_size(8);                // must be computed at compile time, or it is an error
+const V: Array<u32, 5> = evens();              // stored as static data in the C output
 ```
 
-`const fn` marks a function as compile-time evaluable and is validated at the definition: a
-`const fn` that certainly cannot evaluate (calls a non-intercepted extern, touches a `static mut`,
-is variadic — directly or transitively) is a compile error naming the disqualifier. Calls through
-function values, dyn, or generic bounds are permitted at the definition and enforced where they are
-used. A `const fn` is still a normal C function at runtime.
+`const fn` marks a function that must be able to run at compile time. The compiler checks it where
+it is defined: if it calls an unsupported C function, touches a `static mut`, or is variadic, you
+get an error naming the reason. A `const fn` is still an ordinary function at run time.
 
-The strictness rules:
+The rules:
 
-* A call to a `const fn` whose arguments are compile-time known MUST evaluate — any failure
-  (unsupported operation, budget exhaustion, trap) is a compile error, in every context. Only
-  plain (non-`const`) functions keep the silent runtime fallback.
-* A const declaration whose initializer contains a call must evaluate at compile time; failure is
-  an error carrying the trap reason and CTFE call stack. Call-free initializers keep best-effort
-  folding (they are already valid C constant expressions). Local consts inside generic functions
-  are exempt until instantiation.
-* Aggregate results materialize: structs, arrays, strings, shared and even cyclic pointer graphs
-  built at compile time are emitted as deterministic `static const` C data, with auxiliary
-  objects (`NAME__ct0`, ...) and pointer relocations. A const that points at freed compile-time
-  memory is rejected.
-* Owning (`Free`) types are unrepresentable as global consts: `const V: Vector<u32> = ...` at item
-  scope is a compile error — the data would live in immutable static storage, but the type's
-  contract lets any by-value copy `free()` or grow it. Use a value type (`[T; N]`, `Array<T, N>`)
-  instead. A *local* const of an owning type is legal — it lowers to a runtime value freed at scope
-  exit (like a non-`mut` `let`); moving it out is rejected (a `const` stays put), so it never
-  double-frees. Owning containers remain fully usable *inside* compile-time evaluation.
+* A `const fn` call with constant arguments **must** run at compile time. Any failure is a compile
+  error. Only normal functions fall back to run time.
+* A constant whose value contains a call must be computed at compile time. If that fails, the
+  error shows why and where.
+* Complex results (structs, arrays, strings, even linked structures) are written into the C output
+  as static data. A constant that points to freed memory is an error.
+* A constant can have an owning type (`const V: Vector<i32> = [1, 2].into();`). Its data lives in
+  static storage, and the compiler rejects moving it out, so it is never freed. Its allocator must
+  not keep state; the default one does not.
 
-Running `super-c lint --const` indicates all functions the compiler has proven to be const evaluatable.
-Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
+`super-c lint --const` lists the functions that can always run at compile time. With `--fix`, it
+marks them `const fn`, which also saves the compiler from proving it again.
 
 ## Concurrency
 
-The `std::parallel` modules build a real concurrency stack on OS threads:
+The `std::parallel` modules provide a full concurrency toolkit on top of OS threads:
 
-* **Atomics** — `Atomic<T>` over the integer builtins, every operation taking an explicit `MemoryOrder`
-  (`Relaxed` … `SeqCst`); load/store/swap, the fetch-`add`/`sub`/`and`/`or`/`xor` family, and strong/weak
-  `compare_exchange`.
-* **Threads and shared ownership** — `thread::spawn` → `JoinHandle<T>`, and `Arc<T>` for atomically
-  reference-counted sharing.
-* **`Send` / `Sync`** — marker interfaces with structural auto-conformance (modelled on the `Free` query);
-  a raw pointer is neither, so it cannot cross a thread boundary, and the bound is enforced at every spawn
-  and `launch`. Share through `Arc`, mutate through an atomic or a lock.
-* **Synchronization** — `Mutex<T>`, `RwLock<T>`, `Condvar`, `Once`, `WaitGroup`, `Barrier`, `Semaphore`,
-  with RAII lock guards that release on scope exit. Every wait is *task-aware*: a coroutine that cannot
-  proceed parks and its worker thread runs something else, so far more tasks than workers can contend for
-  the same lock. Timed forms (`acquire_timeout`, `wait_timeout`, `Condvar::wait_until`) and
-  `time::sleep` park on the scheduler's timer list.
-* **Channels** — `Channel<T>::bounded(n)` for backpressure or `unbounded()`, vending cloneable
-  `Sender<T>` / `Receiver<T>` handles, with waiting, timed and non-blocking send/recv and
-  close-on-last-handle-drop.
-* **Preemption** — a task that never blocks cannot hold its worker: the compiler emits a safepoint at
-  every loop backedge (only in programs that use `launch`, so nothing else pays for it) and the scheduler
-  yields there when other work is waiting.
-* **Async I/O** — a reactor (kqueue / epoll) turns descriptor readiness into a wake, so `net::TcpStream`'s
-  `accept` / `read` / `write` / `connect` park the coroutine: a hundred connections are a hundred parked
-  tasks and one poller thread, not a hundred threads. `UdpSocket` too, IPv4 or IPv6, with every failure a
-  `Result<T, IoError>` carrying a kind and the errno. POSIX only.
-* **Blocking calls and diagnostics** — `blocking::call` (or `@blocking` on an extern function) runs
-  something that blocks its OS thread on a separate pool while the calling coroutine parks; every task has
-  an id that panics report (`panic: [task 7] …`), `SC_TASK_TRACE=1` traces the scheduler, and
-  `runtime::live_tasks()` plus a shutdown report account for tasks that never finished.
-* **Data parallelism** — `parallel::range` / `each` / `each_mut` / `chunks_mut` / `reduce` / `sections`
-  split work into chunked, stackless jobs on the same pool and return when all of it is done, under static
-  or dynamic scheduling. The body's `fn(..) + Send + Sync` bound is what makes it safe: a closure that owns
-  or mutates a capture is `fn move`, so the classic parallel data race does not compile.
-* **`launch`** — a statement keyword for detached tasks: `launch || { … };` moves an owning `Send` closure
-  onto a lazily-started worker pool (one thread per CPU, or `runtime::set_worker_count(n)`). Each task is a
-  **stackful coroutine** on its own guard-paged stack, so blocking inside one parks the coroutine rather
-  than its worker, and each worker owns a lock-free Chase–Lev deque that idle workers steal from. The bound
-  `fn move() + Send + 'static` is the safety rule: `Send` keeps un-sendable values out, and `'static` — which
-  looks through the closure at its captures — stops a detached task from borrowing the launcher's frame.
-  `runtime::shutdown()` drains and joins the pool. `launch` is a
-  *sugar keyword*: the parser emits a marker that a dedicated desugar pass lowers to a `runtime::submit(…)`
-  call before the type checker, so the rest of the compiler never sees it — the same mechanism future sugar
-  keywords (e.g. `select`) reuse.
+* **Atomics**: `Atomic<T>` for integers, with an explicit memory order on every operation
+  (`Relaxed` to `SeqCst`).
+* **Threads**: `thread::spawn` returns a `JoinHandle<T>`. `Arc<T>` shares a value between threads.
+* **`Send` and `Sync`**: the compiler checks that only thread-safe values cross threads. A raw
+  pointer is neither, so it cannot. Share through `Arc`; change through an atomic or a lock.
+* **Synchronization**: `Mutex<T>`, `RwLock<T>`, `Condvar`, `Once`, `WaitGroup`, `Barrier`,
+  `Semaphore`. Locks unlock automatically at the end of the scope. A coroutine that waits does not
+  block its thread: the thread runs other work meanwhile. Timed waits and `time::sleep` are
+  available.
+* **Channels**: `Channel<T>::bounded(n)` or `unbounded()`, with cloneable `Sender<T>` and
+  `Receiver<T>`. Sends and receives can wait, time out, or return right away. The channel closes
+  when the last sender is dropped.
+* **`select`**: waits on several channel operations at once and runs the first one that is ready,
+  with optional `timeout(d)` and `default` arms.
+* **Fair scheduling**: a coroutine that never waits cannot hog its thread. In programs that use
+  `launch`, the compiler adds a yield check to every loop.
+* **Async I/O**: TCP (`net::TcpStream`) and UDP sockets, IPv4 and IPv6. A coroutine waiting on the
+  network is parked, so a hundred connections cost a hundred parked coroutines, not a hundred
+  threads. Errors come back as `Result<T, IoError>`. POSIX only.
+* **Blocking calls**: `blocking::call` (or `@blocking` on a C function) runs code that blocks on a
+  separate thread pool. Each task has an id that panic messages show, `SC_TASK_TRACE=1` traces the
+  scheduler, and `runtime::live_tasks()` reports tasks that never finished.
+* **Data parallelism**: `parallel::range`, `each`, `each_mut`, `chunks_mut`, `reduce` and `sections`
+  split work across all cores and return when it is done. The compiler rejects a closure that could
+  cause a data race.
+* **`launch`**: `launch || { … };` starts a task in the background on a worker pool (one thread
+  per CPU by default, or `runtime::set_worker_count(n)`). Each task is a coroutine with its own
+  stack, and idle workers steal work from busy ones. A task cannot borrow data from the function
+  that launched it, and it can only hold thread-safe values. `runtime::shutdown()` waits for
+  the pool to finish.
 
 ## Generated output
 
-`super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
+`super-c app.spc` writes a `build/raw/` folder next to the source:
 
 ```text
-build/
-  super_rt.h        # shared runtime (C standard-library includes + allocation interposition)
-  super_rt.c        # the leak/double-free tracker backing SC_LEAK_CHECK (inert when unset)
-  app.h  app.c      # one .h/.c per module
-  __std/            # the prelude modules
-    string.h string.c  option.h option.c  ...
+build/raw/
+  super_rt.h  super_rt.c   # small runtime: standard includes and the leak checker
+  __sc_fwd.h               # forward declarations shared by all files
+  app.h  app.c             # one .h/.c pair per module
+  __ldflags                # link flags, one per line
 ```
 
-Includes are relative, so the whole tree builds with `cc build/**/*.c` and no `-I` flags. Symbols are
-module-mangled only when more than one user module is present, so single-file programs emit plain C
-names.
+Includes are relative, so the folder builds with no `-I` flags:
+`cc $(find build/raw -name '*.c') $(cat build/raw/__ldflags) -o app`. With a single module, the C names stay plain (no module prefix).
 
 ## Environment variables
 
-All knobs are environment variables prefixed `SC_`; none is required for normal use.
+Every setting is an environment variable starting with `SC_`. None is needed for normal use.
 
-### Build system and caches (`src/build_system`, `src/driver/tuc.spc`)
-
-| Variable | Effect |
-| --- | --- |
-| `SC_CACHE_DIR` | override the build-record cache directory |
-| `SC_NO_CACHE` | disable the build-record cache |
-| `SC_NO_EMIT_CACHE` | disable the emit stamp (the whole-transpile skip when no input changed) |
-| `SC_NO_TU_CACHE` | disable the per-TU journal/replay cache |
-| `SC_BUILD_MEM_BUDGET` | cap the estimated bytes the parallel emission holds in flight (`64M`, `2G`; unset = unlimited) |
-| `SC_TIMINGS` | print per-phase timing for a build |
-
-### Verification passes (dev gates in `src/driver/emit.spc`; each runs only when set)
+### Build system and caches
 
 | Variable | Effect |
 | --- | --- |
-| `SC_FACTS_CHECK` | snapshot semantic-table watermarks after typecheck; report any table a later stage changed (the freeze contract) |
-| `SC_CORE_IR` | re-verify every inlined body and re-prove every bounds-check elimination |
-| `SC_LAYOUT` | validate every concrete pool type against the C layout invariants |
-| `SC_CEMIT_STATS` | per-phase wall times (load/resolve/typecheck/borrowck/panics/emission stages) and const/reflect group statistics |
+| `SC_CACHE_DIR` | where the build cache lives |
+| `SC_NO_CACHE` | turn off the build cache |
+| `SC_NO_EMIT_CACHE` | always regenerate the C, even when no source changed |
+| `SC_NO_TU_CACHE` | turn off the per-file C cache |
+| `SC_BUILD_MEM_BUDGET` | limit the memory the parallel C generation may use (`64M`, `2G`; unset means no limit) |
+| `SC_TIMINGS` | print how long each build phase takes |
 
-### Debug traces
-
-| Variable | Effect |
-| --- | --- |
-| `SC_INLINE_STATS` | per-body inliner decision counters |
-| `SC_BCE_STATS` | per-body bounds-check elimination counters |
-
-### LSP (`src/lsp/server.spc`)
+### Extra checks (for compiler development; each runs only when set)
 
 | Variable | Effect |
 | --- | --- |
-| `SC_LSP_NO_INCR` | disable incremental per-edit recompilation (full rebuild each edit) |
-| `SC_LSP_BUDGET_MB` | memory budget for the analysis cache |
+| `SC_FACTS_CHECK` | check that no stage after type checking changes type-checking results |
+| `SC_CORE_IR` | re-check every inlined function and every removed bounds check |
+| `SC_LAYOUT` | check every type layout against the C layout rules |
+| `SC_CEMIT_STATS` | print the time of each compiler phase and constant statistics |
+
+### Debug output
+
+| Variable | Effect |
+| --- | --- |
+| `SC_INLINE_STATS` | counts of the inliner's decisions per function |
+| `SC_BCE_STATS` | counts of removed bounds checks per function |
+
+### Language server
+
+| Variable | Effect |
+| --- | --- |
+| `SC_LSP_NO_INCR` | recompile everything on each edit instead of only what changed |
+| `SC_LSP_BUDGET_MB` | memory limit for the analysis cache |
 
 ### Test harness
 
 | Variable | Effect |
 | --- | --- |
-| `SC_TEST_SUPERC` | path of the compiler under test (the wasm lane sets it to a wasmtime wrapper) |
+| `SC_TEST_SUPERC` | path of the compiler to test (the WebAssembly CI lane points it at a wasmtime wrapper) |
 
-### Runtime — read by compiled programs, so they also gate the compiler itself and every test binary
+### Runtime (read by every compiled program, including the compiler itself)
 
 | Variable | Effect |
 | --- | --- |
-| `SC_LEAK_CHECK` | the self-hosted leak/double-free/UAF tracker; any non-`0` value reports at exit, `f...`/`F...` (e.g. `fatal`) makes findings exit 23 — the CI gate |
-| `SC_TASK_TRACE` | coroutine/task tracing for the life of the process |
-| `SC_SCHED_SEED` | scheduler seed for the parallel pool, read only when the program set none; replays a race in a shipped binary without a rebuild |
-| `SC_LOCK_ORDER` | lock-order checking (`ffi/sc_rt.c`); non-`0` reports violations, `f...`/`F...` aborts |
+| `SC_LEAK_CHECK` | the leak, double-free and use-after-free checker: any value except `0` reports at exit; a value starting with `f`/`F` (like `fatal`) also exits with code 23 |
+| `SC_TASK_TRACE` | trace coroutines and tasks |
+| `SC_SCHED_SEED` | fix the scheduler's random seed, to replay a race without rebuilding |
+| `SC_LOCK_ORDER` | check lock ordering: any value except `0` reports violations; `f...`/`F...` aborts |
 
 ## Status and roadmap
 
-Everything in the tour above is implemented and working. Beyond it, Super-C also has:
+Everything above is implemented and works. Super-C also has:
+
 * operator overloading (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`)
 * untagged `union`s
-* the `?` early-return operator with `From`-based error conversion
-* module-level `static mut` globals
-* `_` discard bindings
+* the `?` operator for early return on errors, with automatic error conversion through `From`
+* global `static mut` variables
+* `_` to discard a value
 * unit and tuple structs (`struct S;`, `struct Pair(i32, str)` with `p.0` and `Pair(1, "a")`)
 * associated constants (`T::N`)
-* `x @ pat` and rest patterns (`V(a, ..)`, `S { f, .. }`)
-* `Deref` / `DerefMut` auto-deref (up to 8 hops, cycle-checked)
-* float `Eq` / `Ord` / `Hash` via the IEEE-754 total order (`total_cmp`, so floats sort and key `Map`s) plus
-`Vector::sort_by` / `sort_by_key`, 
-* raw strings (`r#"…"#`)
+* `x @ pat` bindings and `..` in patterns (`V(a, ..)`, `S { f, .. }`)
+* automatic dereference through `Deref` / `DerefMut`
+* float `Eq` / `Ord` / `Hash` (floats can be sorted and used as `Map` keys), plus
+  `Vector::sort_by` / `sort_by_key`
+* matchertext strings that need no escapes: `M"(say "hi")"`, with `{expr}` placeholders in the
+  `M{}"(...)"` form
 * hex floats (`0x1.8p3`)
-* byte strings (`b"…"` → `[]u8`),
-* numeric literal suffixes (`1u8`, `1.0f32`) with lossless widening (`i32 → i64`, `f32 → f64`).
+* byte strings (`b"…"`, of type `[]u8`)
+* number suffixes (`1u8`, `1.0f32`) and automatic widening (`i32` to `i64`, `f32` to `f64`)
 
-Roadmap, in priority order:
+Next, in priority order:
 
-1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
-   embarrassingly parallel per module.
-2. **Benchmarking to the state of the art** — the concurrency stack is correct but unmeasured; the next
-   pass benchmarks it against Go, Rust and C and closes the gaps it finds (a real assembly context switch,
-   smaller task stacks, fewer allocations per task).
-3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
-   (file/console IO is currently FFI-only; this subsumes it).
+1. **Benchmark against the state of the art**: compare the concurrency runtime with Go, Rust and C,
+   and close the gaps.
+2. **A self-contained standard library**: port a Go/Odin/Rust-style standard library to Super-C.
+   File and console I/O currently go through C.

@@ -1,19 +1,14 @@
-// Diagnostics for every pass: structured records accumulate as (severity, span, message, note chain)
-// rows against one source buffer; `finalize` dedups the records, then renders each one into a
-// caret-annotated terminal block held in a parallel `rendered_*` store (it never rewrites a stored
-// record), and `log` prints warnings then errors. The LSP and the build system read the records
+// Diagnostics for every pass: structured records accumulate as (span, message, note chain) rows,
+// one vector per severity, against one source buffer; `finalize` dedups the records, then renders
+// each one into a caret-annotated terminal block held in a parallel `rendered_*` store (it never
+// rewrites a stored record), and `log` prints warnings then errors. The LSP and the build system read the records
 // directly; nothing parses rendered text back into data.
 // LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`, each
 // attached to the warning it repairs (kind 4 carries generated text via `fix_texts`).
-import string;
+import lexer::token as tok;
 
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
 pub const ERRORS_MAX: usize = 256;
-
-/// Severity values match the LSP's DiagnosticSeverity, so consumers forward them unchanged.
-pub const SEV_ERROR: u8 = 1;
-/// Non-fatal severity; see SEV_ERROR.
-pub const SEV_WARNING: u8 = 2;
 
 /// Empty note-chain link (note indexes are dense u32s into Errors.note_pool).
 pub const NOTE_NONE: u32 = 0xFFFFFFFF;
@@ -32,18 +27,13 @@ pub struct LintFix {
     pub module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
-/// One structured diagnostic. The span is bytes into the owning source buffer; `code` is a reserved
-/// stable diagnostic code (0 = none); `sequence` records emission order across both severities, so a
-/// later consumer can merge diagnostics from several producers in a stable order.
+/// One structured diagnostic. The span is bytes into the owning source buffer.
 pub struct Diagnostic {
-    pub severity: u8, // SEV_ERROR / SEV_WARNING
-    pub code: u16, // reserved diagnostic code; 0 = none
     pub start: u32,
     pub len: u32,
     pub msg: String,
     pub note_head: u32, // first attached note in Errors.note_pool; NOTE_NONE = none
     pub note_tail: u32,
-    pub sequence: u32,
 }
 
 /// One note line, chained per diagnostic through the shared pool (no vector per diagnostic).
@@ -62,13 +52,39 @@ pub struct Errors {
     pub rendered_warns: Vector<String>,
     pub fixes: Vector<LintFix>,
     pub fix_texts: Vector<String>, // generated replacement payloads for kind-4 fixes
-    pub seq: u32, // next emission sequence
 }
 
-/// A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
-/// Safety: `p` must be non-null and NUL-terminated; the view is only valid while the bytes live.
-pub fn cstr<'a>(p: *const char) str<'a> {
-    return str::from_raw(p as *const u8, unsafe string::strlen(p));
+// A diagnostic at [at, at+len) with no notes.
+fn diagnostic(at: u32, len: u32, msg: String) Diagnostic {
+    return Diagnostic { start: at, len: len, msg: msg, note_head: NOTE_NONE, note_tail: NOTE_NONE };
+}
+
+// A note link of an appended container, shifted by the `nb` notes already in the pool.
+const fn note_rebase(link: u32, nb: u32) u32 {
+    return if link == NOTE_NONE {
+        NOTE_NONE;
+    } else {
+        link + nb;
+    };
+}
+
+// Move the records of `src` to the end of `dst` up to ERRORS_MAX, with note links shifted by `nb`.
+fn append_diags(dst: &mut Vector<Diagnostic>, src: &mut Vector<Diagnostic>, nb: u32) {
+    for k in 0..src.len() {
+        if dst.len() >= ERRORS_MAX {
+            break;
+        }
+        let d = src.index_mut(k);
+        dst.push(
+            Diagnostic {
+                start: d.start,
+                len: d.len,
+                msg: replace(&mut d.msg, String::new()),
+                note_head: note_rebase(d.note_head, nb),
+                note_tail: note_rebase(d.note_tail, nb),
+            },
+        );
+    }
 }
 
 /// A borrowed `str` view of the source bytes in the span [start, end), for diagnostic arguments.
@@ -79,16 +95,7 @@ pub const fn span_str(src: str, start: u32, end: u32) str {
 extend Errors {
     /// An empty accumulator with no heap storage.
     pub fn new() Errors {
-        return Errors {
-            errors: Vector::<Diagnostic>::new(),
-            warns: Vector::<Diagnostic>::new(),
-            note_pool: Vector::<Note>::new(),
-            rendered_errors: Vector::<String>::new(),
-            rendered_warns: Vector::<String>::new(),
-            fixes: Vector::<LintFix>::new(),
-            fix_texts: Vector::<String>::new(),
-            seq: 0,
-        };
+        return Errors {};
     }
 
     /// True once any error is recorded.
@@ -107,25 +114,18 @@ extend Errors {
         if self.warns.len() >= ERRORS_MAX {
             return;
         }
-        let s = self.seq;
-        self.seq = s + 1;
-        self.warns.push(
-            Diagnostic {
-                severity: SEV_WARNING,
-                code: 0,
-                start: at,
-                len: len,
-                msg: msg,
-                note_head: NOTE_NONE,
-                note_tail: NOTE_NONE,
-                sequence: s,
-            },
-        );
+        self.warns.push(diagnostic(at, len, msg));
+    }
+
+    /// `warn` over the source span `sp`.
+    @c.cold
+    pub fn warn_span(self: &mut Self, sp: tok::Span, msg: String) {
+        self.warn(sp.start, sp.end - sp.start, msg);
     }
 
     /// Move every record of `o` (an item's diagnostics) to the end of this container, in `o`'s
-    /// order: note chains, fixes and their payloads keep their links through rebased indexes,
-    /// and the sequences continue this container's. `o` is left empty. What a module's
+    /// order: note chains, fixes and their payloads keep their links through rebased indexes.
+    /// `o` is left empty. What a module's
     /// per-item outputs concatenate through, in item order, before `finalize`.
     @c.cold
     pub fn append(self: &mut Self, o: &mut Errors) {
@@ -134,69 +134,10 @@ extend Errors {
         let tb = self.fix_texts.len() as u32;
         for k in 0..o.note_pool.len() {
             let n = o.note_pool.index_mut(k);
-            self.note_pool.push(
-                Note {
-                    text: replace(&mut n.text, String::new()),
-                    next: if n.next == NOTE_NONE {
-                        NOTE_NONE;
-                    } else {
-                        n.next + nb;
-                    },
-                },
-            );
+            self.note_pool.push(Note { text: replace(&mut n.text, String::new()), next: note_rebase(n.next, nb) });
         }
-        for k in 0..o.errors.len() {
-            if self.errors.len() >= ERRORS_MAX {
-                break;
-            }
-            let d = o.errors.index_mut(k);
-            self.errors.push(
-                Diagnostic {
-                    severity: d.severity,
-                    code: d.code,
-                    start: d.start,
-                    len: d.len,
-                    msg: replace(&mut d.msg, String::new()),
-                    note_head: if d.note_head == NOTE_NONE {
-                        NOTE_NONE;
-                    } else {
-                        d.note_head + nb;
-                    },
-                    note_tail: if d.note_tail == NOTE_NONE {
-                        NOTE_NONE;
-                    } else {
-                        d.note_tail + nb;
-                    },
-                    sequence: d.sequence + self.seq,
-                },
-            );
-        }
-        for k in 0..o.warns.len() {
-            if self.warns.len() >= ERRORS_MAX {
-                break;
-            }
-            let d = o.warns.index_mut(k);
-            self.warns.push(
-                Diagnostic {
-                    severity: d.severity,
-                    code: d.code,
-                    start: d.start,
-                    len: d.len,
-                    msg: replace(&mut d.msg, String::new()),
-                    note_head: if d.note_head == NOTE_NONE {
-                        NOTE_NONE;
-                    } else {
-                        d.note_head + nb;
-                    },
-                    note_tail: if d.note_tail == NOTE_NONE {
-                        NOTE_NONE;
-                    } else {
-                        d.note_tail + nb;
-                    },
-                    sequence: d.sequence + self.seq,
-                },
-            );
-        }
+        append_diags(&mut self.errors, &mut o.errors, nb);
+        append_diags(&mut self.warns, &mut o.warns, nb);
         for k in 0..o.fix_texts.len() {
             self.fix_texts.push(replace(o.fix_texts.index_mut(k), String::new()));
         }
@@ -210,24 +151,23 @@ extend Errors {
             }
             self.fixes.push(f);
         }
-        self.seq = self.seq + o.seq;
         o.errors.clear();
         o.warns.clear();
         o.note_pool.clear();
         o.fixes.clear();
         o.fix_texts.clear();
-        o.seq = 0;
     }
 
     /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
     /// past the ERRORS_MAX cap the index degrades to the last kept warning).
     @c.cold
     pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
-        let mut w: u32 = 0xFFFFFFFF;
-        if self.warns.len() != 0 {
-            w = (self.warns.len() - 1) as u32;
-        }
-        self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w, text: 0xFFFFFFFF });
+        self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: self.last_warn(), text: 0xFFFFFFFF });
+    }
+
+    // The index of the last warning, or 0xFFFFFFFF when there is none.
+    const fn last_warn(self: &Self) u32 {
+        return self.warns.len() as u32 - 1;
     }
 
     /// Attach a replace fix to the WARNING just emitted (kind 4): `lint --fix` deletes [start, end) and
@@ -238,11 +178,7 @@ extend Errors {
     pub fn fix_replace(self: &mut Self, start: u32, end: u32, text: String) {
         let t = self.fix_texts.len() as u32;
         self.fix_texts.push(text);
-        let mut w: u32 = 0xFFFFFFFF;
-        if self.warns.len() != 0 {
-            w = (self.warns.len() - 1) as u32;
-        }
-        self.fixes.push(LintFix { start: start, end: end, kind: 4, warn: w, text: t });
+        self.fixes.push(LintFix { start: start, end: end, kind: 4, warn: self.last_warn(), text: t });
     }
 
     /// Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
@@ -252,28 +188,20 @@ extend Errors {
         if self.errors.len() >= ERRORS_MAX {
             return;
         }
-        let s = self.seq;
-        self.seq = s + 1;
-        self.errors.push(
-            Diagnostic {
-                severity: SEV_ERROR,
-                code: 0,
-                start: at,
-                len: len,
-                msg: msg,
-                note_head: NOTE_NONE,
-                note_tail: NOTE_NONE,
-                sequence: s,
-            },
-        );
+        self.errors.push(diagnostic(at, len, msg));
+    }
+
+    /// `emit` over the source span `sp`.
+    @c.cold
+    pub fn emit_span(self: &mut Self, sp: tok::Span, msg: String) {
+        self.emit(sp.start, sp.end - sp.start, msg);
     }
 
     /// Record a diagnostic produced OUT of source order: a region/lifetime error the solver
     /// only discovers after the whole function body has been walked. `from` is the index the enclosing
     /// function's diagnostics start at; the record is inserted at the first position in [from, len)
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
-    /// diagnostic in the function. Diagnostics already recorded keep their relative order (and their
-    /// emission `sequence`). Returns the index it landed at, for `note_at`.
+    /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the index it landed at, for `note_at`.
     @c.cold
     pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
@@ -288,21 +216,7 @@ extend Errors {
         while k < n && self.errors[k].start <= at {
             k = k + 1;
         }
-        let s = self.seq;
-        self.seq = s + 1;
-        self.errors.insert(
-            k,
-            Diagnostic {
-                severity: SEV_ERROR,
-                code: 0,
-                start: at,
-                len: len,
-                msg: msg,
-                note_head: NOTE_NONE,
-                note_tail: NOTE_NONE,
-                sequence: s,
-            },
-        );
+        self.errors.insert(k, diagnostic(at, len, msg));
         return k;
     }
 
@@ -340,11 +254,11 @@ extend Errors {
         self.attach_note(index, msg);
     }
 
-    // Structural equality for dedup: span, code, message bytes, and the note chains. Severity is
+    // Structural equality for dedup: span, message bytes, and the note chains. Severity is
     // implied (dedup runs within one record vector).
     @c.cold
     fn same_diag(self: &Self, a: &Diagnostic, b: &Diagnostic) bool {
-        if a.start != b.start || a.len != b.len || a.code != b.code || !a.msg.equals(&b.msg) {
+        if a.start != b.start || a.len != b.len || !a.msg.equals(&b.msg) {
             return false;
         }
         let mut x = a.note_head;
@@ -367,7 +281,7 @@ extend Errors {
         if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
         }
-        // Cold path: clone survivors into a fresh vector, drop the rest (note chains stay valid: the
+        // Cold path: move survivors into a fresh vector, drop the rest (note chains stay valid: the
         // pool is append-only and chains are copied by index).
         let mut uniq = Vector::<Diagnostic>::new();
         for k in 0..self.errors.len() {
@@ -378,17 +292,14 @@ extend Errors {
                 }
             }
             if !seen {
-                let d = self.errors.at(k);
+                let d = self.errors.index_mut(k);
                 uniq.push(
                     Diagnostic {
-                        severity: d.severity,
-                        code: d.code,
                         start: d.start,
                         len: d.len,
-                        msg: d.msg.clone(),
+                        msg: replace(&mut d.msg, String::new()),
                         note_head: d.note_head,
                         note_tail: d.note_tail,
-                        sequence: d.sequence,
                     },
                 );
             }

@@ -187,7 +187,7 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     return !had;
 }
 
-// emit::typecheck_module with the diagnostics drained instead of logged.
+// Typecheck module `i` and drain its diagnostics into `diags` instead of logging them.
 fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut Vector<DiagRec>) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -423,20 +423,9 @@ fn push_slot_range(p: &loader::Package, m: usize, k: u32, out: &mut Vector<u32>)
 
 const fn ref_edge_cmp(a: &loader::RefEdge, b: &loader::RefEdge) i32 {
     if a.key != b.key {
-        return if a.key < b.key {
-            0 - 1;
-        } else {
-            1;
-        };
+        return a.key.cmp(&b.key);
     }
-    if a.owner != b.owner {
-        return if a.owner < b.owner {
-            0 - 1;
-        } else {
-            1;
-        };
-    }
-    return 0;
+    return a.owner.cmp(&b.owner);
 }
 
 // Record module `i`'s references (`Package.def_refs`) from its resolution tables once a round's
@@ -771,6 +760,14 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
     return out;
 }
 
+// Shift span `sp` by `delta` when it starts at or after `from`.
+fn shift_span(sp: &mut ltok::Span, from: u32, delta: i64) {
+    if sp.start >= from {
+        sp.start = (sp.start as i64 + delta) as u32;
+        sp.end = (sp.end as i64 + delta) as u32;
+    }
+}
+
 // Shift every source offset >= `from` by `delta` across the OLD prefix of the arena (the freshly
 // appended splice nodes already carry new-source offsets) plus the old attr/meta span tables.
 fn shift_spans(
@@ -796,49 +793,25 @@ fn shift_spans(
         }
         // Literal/name payload spans ride the same source: shift the union arms that carry one.
         if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_LIFETIME {
-            if n.as_data.name.text.start >= from {
-                n.as_data.name.text.start = (n.as_data.name.text.start as i64 + delta) as u32;
-                n.as_data.name.text.end = (n.as_data.name.text.end as i64 + delta) as u32;
-            }
+            shift_span(&mut n.as_data.name.text, from, delta);
         } else if n.kind == NodeKind::NODE_LITERAL {
-            if n.as_data.literal.raw.start >= from {
-                n.as_data.literal.raw.start = (n.as_data.literal.raw.start as i64 + delta) as u32;
-                n.as_data.literal.raw.end = (n.as_data.literal.raw.end as i64 + delta) as u32;
-            }
+            shift_span(&mut n.as_data.literal.raw, from, delta);
         } else if n.kind == NodeKind::NODE_WHILE {
-            if n.as_data.while_stmt.label.start >= from {
-                n.as_data.while_stmt.label.start = (n.as_data.while_stmt.label.start as i64 + delta) as u32;
-                n.as_data.while_stmt.label.end = (n.as_data.while_stmt.label.end as i64 + delta) as u32;
-            }
+            shift_span(&mut n.as_data.while_stmt.label, from, delta);
         } else if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR || n.kind == NodeKind::NODE_PARALLEL_FOR {
-            if n.as_data.for_stmt.label.start >= from {
-                n.as_data.for_stmt.label.start = (n.as_data.for_stmt.label.start as i64 + delta) as u32;
-                n.as_data.for_stmt.label.end = (n.as_data.for_stmt.label.end as i64 + delta) as u32;
-            }
+            shift_span(&mut n.as_data.for_stmt.label, from, delta);
         } else if n.kind == NodeKind::NODE_BREAK || n.kind == NodeKind::NODE_CONTINUE {
-            if n.as_data.flow.label.start >= from {
-                n.as_data.flow.label.start = (n.as_data.flow.label.start as i64 + delta) as u32;
-                n.as_data.flow.label.end = (n.as_data.flow.label.end as i64 + delta) as u32;
-            }
+            shift_span(&mut n.as_data.flow.label, from, delta);
         }
     }
     for i in 0..old_attrs {
         let at = &mut a.attrs[i];
-        if at.str_span.start >= from {
-            at.str_span.start = (at.str_span.start as i64 + delta) as u32;
-            at.str_span.end = (at.str_span.end as i64 + delta) as u32;
-        }
+        shift_span(&mut at.str_span, from, delta);
     }
     for i in 0..old_metas {
         let mt = &mut a.metas[i];
-        if mt.key.start >= from {
-            mt.key.start = (mt.key.start as i64 + delta) as u32;
-            mt.key.end = (mt.key.end as i64 + delta) as u32;
-        }
-        if mt.vspan.start >= from {
-            mt.vspan.start = (mt.vspan.start as i64 + delta) as u32;
-            mt.vspan.end = (mt.vspan.end as i64 + delta) as u32;
-        }
+        shift_span(&mut mt.key, from, delta);
+        shift_span(&mut mt.vspan, from, delta);
     }
 }
 

@@ -82,18 +82,12 @@ extend Parser {
         return Parser {
             source: source,
             tokens: tokens,
-            current: 0,
-            depth: 0,
             ast: Ast::new(token_count),
             file: file,
             errors: diag::Errors::new(),
-            bootstrap_tags: false,
             nrets: Vector::<NodeId>::new(),
             derive_ifaces: Vector::<NodeId>::new(),
-            derive_start: 0,
-            derive_end: 0,
             expand_derive: true,
-            pin_scope: false,
             pending_metas: Vector::<MetaAttr>::new(),
         };
     }
@@ -160,6 +154,18 @@ extend Parser {
         return 0;
     }
 
+    /// Add a node with the given kind, span and payload.
+    @c.always_inline
+    fn mk(self: &mut Self, kind: NodeKind, span: Span, data: NodeAs) NodeId {
+        return self.ast.add(Node { kind: kind, span: span, as_data: data });
+    }
+
+    /// Add a node whose span runs from `start` to the end of the previous token.
+    @c.always_inline
+    fn fin(self: &mut Self, kind: NodeKind, start: u32, data: NodeAs) NodeId {
+        return self.mk(kind, Span::new(start, self.previous_end()), data);
+    }
+
     pub const fn node_span(self: &Self, id: NodeId) Span {
         if id == NODE_NONE {
             return Span::empty();
@@ -167,16 +173,26 @@ extend Parser {
         return self.ast.at_const(id).span;
     }
 
+    // Report `message` at the current token, skip that token, and return NODE_NONE.
+    @c.cold
+    fn error_skip(self: &mut Self, message: str) NodeId {
+        self.error_here(message);
+        if !self.at_end() {
+            self.advance();
+        }
+        return NODE_NONE;
+    }
+
     @c.cold
     pub fn error_here(self: &mut Self, message: str) {
         let t = self.raw_peek();
-        self.errors.emit(t.start(), t.len(), String::from_str(message));
+        self.errors.emit_span(t.span(), String::from_str(message));
     }
 
     @c.cold
     fn expect_fail(self: &mut Self, display: str) bool {
         let t = self.raw_peek();
-        self.errors.emit(t.start(), t.len(), format("expected {}", display));
+        self.errors.emit_span(t.span(), format("expected {}", display));
         return false;
     }
 
@@ -192,7 +208,7 @@ extend Parser {
     }
 
     pub const fn is_type_start(kind: TokenType) bool {
-        return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
+        return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::AmpersandAmpersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
     }
 
     pub const fn is_identifier_token(kind: TokenType) bool {
@@ -202,20 +218,10 @@ extend Parser {
     @c.always_inline
     pub fn identifier(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
-            self.error_here("expected identifier");
-            if !self.at_end() {
-                self.advance();
-            }
-            return NODE_NONE;
+            return self.error_skip("expected identifier");
         }
         let token = self.advance();
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_IDENTIFIER,
-                span: token.span(),
-                as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
-            },
-        );
+        return self.make_name(token.span());
     }
 
     // A lifetime name (`'a`). The lexer already emits `'name` as a `Label` (loop labels share the
@@ -228,13 +234,7 @@ extend Parser {
             return NODE_NONE;
         }
         let token = self.advance();
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_LIFETIME,
-                span: token.span(),
-                as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
-            },
-        );
+        return self.mk(NodeKind::NODE_LIFETIME, token.span(), NodeAs { name: NameData { text: token.span() } });
     }
 
     // The outlives bounds of a LIFETIME param: `'a: 'b + 'c`. These can only ever be lifetimes, so
@@ -254,30 +254,18 @@ extend Parser {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) && !self.check(
             TokenType::New,
         ) {
-            self.error_here("expected identifier");
-            if !self.at_end() {
-                self.advance();
-            }
-            return NODE_NONE;
+            return self.error_skip("expected identifier");
         }
         let token = self.advance();
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_IDENTIFIER,
-                span: token.span(),
-                as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
-            },
-        );
+        return self.make_name(token.span());
     }
 
     pub fn literal(self: &mut Self) NodeId {
         let token = self.advance();
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_LITERAL,
-                span: token.span(),
-                as_data: NodeAs { literal: LiteralData { raw: token.span(), token_type: token.kind(), seg: false } },
-            },
+        return self.mk(
+            NodeKind::NODE_LITERAL,
+            token.span(),
+            NodeAs { literal: LiteralData { raw: token.span(), token_type: token.kind() } },
         );
     }
 
@@ -287,17 +275,11 @@ extend Parser {
         if to <= from {
             return;
         }
-        let n = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_LITERAL,
-                span: Span::new(from, to),
-                as_data: NodeAs {
-                    literal: LiteralData {
-                        raw: Span::new(from, to),
-                        token_type: TokenType::MatchertextLiteral,
-                        seg: true,
-                    },
-                },
+        let n = self.mk(
+            NodeKind::NODE_LITERAL,
+            Span::new(from, to),
+            NodeAs {
+                literal: LiteralData { raw: Span::new(from, to), token_type: TokenType::MatchertextLiteral, seg: true },
             },
         );
         self.ast.push(n);
@@ -320,7 +302,7 @@ extend Parser {
         loop {
             if self.check(TokenType::MatchertextMid) || self.check(TokenType::MatchertextEnd) {
                 let t = self.raw_peek();
-                self.errors.emit(t.start(), t.len(), format("matchertext interpolation hole is empty"));
+                self.errors.emit_span(t.span(), format("matchertext interpolation hole is empty"));
             } else {
                 let e = self.parse_expression();
                 self.ast.push(e);
@@ -336,17 +318,11 @@ extend Parser {
                 break;
             }
             let t = self.raw_peek();
-            self.errors.emit(t.start(), t.len(), format("expected the rest of the matchertext literal"));
+            self.errors.emit_span(t.span(), format("expected the rest of the matchertext literal"));
             break;
         }
         let kids = self.ast.commit(mark);
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_INTERP,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { block: BlockData { statements: kids } },
-            },
-        );
+        return self.fin(NodeKind::NODE_INTERP, start, NodeAs { block: BlockData { statements: kids } });
     }
 
     pub fn parse_comma_types(self: &mut Self, close: TokenType) NodeList {
@@ -405,12 +381,10 @@ extend Parser {
         } else {
             NodeList { start: 0, len: 0 };
         };
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_TYPE_PATH,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { type_path: TypePathData { parts: parts, args: args } },
-            },
+        return self.fin(
+            NodeKind::NODE_TYPE_PATH,
+            start,
+            NodeAs { type_path: TypePathData { parts: parts, args: args } },
         );
     }
 
@@ -431,14 +405,10 @@ extend Parser {
         while self.match(TokenType::PathSeparator) {
             self.ast.push(self.identifier());
         }
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_TYPE_PATH,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    type_path: TypePathData { parts: self.ast.commit(mark), args: NodeList { start: 0, len: 0 } },
-                },
-            },
+        return self.fin(
+            NodeKind::NODE_TYPE_PATH,
+            start,
+            NodeAs { type_path: TypePathData { parts: self.ast.commit(mark) } },
         );
     }
 
@@ -452,13 +422,20 @@ extend Parser {
         return TypeQualifier::TYPE_QUAL_NONE;
     }
 
+    // The type after `dyn`. A `dyn fn` signature node is the identity of its type (every equal
+    // signature shares the first one's node) and emission reads it after the body syntax is
+    // released: module syntax, whatever body holds it.
+    fn parse_dyn_target(self: &mut Self) NodeId {
+        let outer_sink = self.ast.sink_body;
+        self.ast.sink_body = false;
+        let inner = self.parse_type();
+        self.ast.sink_body = outer_sink;
+        return inner;
+    }
+
     pub fn parse_type(self: &mut Self) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
-            self.error_here("type nested too deeply");
-            if !self.at_end() {
-                self.advance();
-            }
-            return NODE_NONE;
+            return self.error_skip("type nested too deeply");
         }
         self.depth = self.depth + 1;
         let t = self.parse_type_inner();
@@ -466,60 +443,75 @@ extend Parser {
         return t;
     }
 
-    pub fn parse_type_inner(self: &mut Self) NodeId {
-        let start = self.raw_peek().start();
-        if self.match(TokenType::Star) || self.match(TokenType::Ampersand) {
-            let opener = self.tokens[self.current - 1].kind();
-            // `&'a T` / `&'a mut T`: the lifetime binds immediately after `&`, before `mut`/`dyn`.
-            // Single-token peek; pointers never carry one.
-            let mut life = NODE_NONE;
-            if opener == TokenType::Ampersand && self.check(TokenType::Label) {
-                life = self.parse_lifetime();
+    // The rest of a pointer or reference type after its `*` / `&` opener at `start`.
+    fn parse_indirect_type(self: &mut Self, opener: TokenType, start: u32) NodeId {
+        // `&'a T` / `&'a mut T`: the lifetime binds immediately after `&`, before `mut`/`dyn`.
+        // Single-token peek; pointers never carry one.
+        let mut life = NODE_NONE;
+        if opener == TokenType::Ampersand && self.check(TokenType::Label) {
+            life = self.parse_lifetime();
+        }
+        let mut qualifier: TypeQualifier;
+        if opener == TokenType::Star {
+            qualifier = self.parse_qualifier();
+        } else if self.match(TokenType::Mut) {
+            qualifier = TypeQualifier::TYPE_QUAL_MUT;
+        } else {
+            qualifier = TypeQualifier::TYPE_QUAL_NONE;
+            if self.check(TokenType::Const) {
+                self.error_here("references use '&T' or '&mut T', not '&const T'");
+                self.advance();
             }
-            let mut qualifier: TypeQualifier;
-            if opener == TokenType::Star {
-                qualifier = self.parse_qualifier();
-            } else if self.match(TokenType::Mut) {
-                qualifier = TypeQualifier::TYPE_QUAL_MUT;
-            } else {
-                qualifier = TypeQualifier::TYPE_QUAL_NONE;
-                if self.check(TokenType::Const) {
-                    self.error_here("references use '&T' or '&mut T', not '&const T'");
-                    self.advance();
-                }
-            }
-            if opener == TokenType::Ampersand && self.match(TokenType::Dyn) {
-                let inner = self.parse_type();
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_DYN_TYPE,
-                        span: Span::new(start, self.node_span(inner).end),
-                        as_data: NodeAs {
-                            indirect_type: IndirectTypeData {
-                                ty: inner,
-                                qualifier: if qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                                    TypeQualifier::TYPE_QUAL_MUT;
-                                } else {
-                                    TypeQualifier::TYPE_QUAL_CONST;
-                                },
-                                lifetime: life,
-                            },
+        }
+        if opener == TokenType::Ampersand && self.match(TokenType::Dyn) {
+            let inner = self.parse_dyn_target();
+            return self.mk(
+                NodeKind::NODE_DYN_TYPE,
+                Span::new(start, self.node_span(inner).end),
+                NodeAs {
+                    indirect_type: IndirectTypeData {
+                        ty: inner,
+                        qualifier: if qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                            TypeQualifier::TYPE_QUAL_MUT;
+                        } else {
+                            TypeQualifier::TYPE_QUAL_CONST;
                         },
+                        lifetime: life,
                     },
-                );
-            }
-            let ty = self.parse_type();
-            return self.ast.add(
-                Node {
-                    kind: if opener == TokenType::Star {
-                        NodeKind::NODE_POINTER_TYPE;
-                    } else {
-                        NodeKind::NODE_REFERENCE_TYPE;
-                    },
-                    span: Span::new(start, self.node_span(ty).end),
-                    as_data: NodeAs { indirect_type: IndirectTypeData { ty: ty, qualifier: qualifier, lifetime: life } },
                 },
             );
+        }
+        let ty = self.parse_type();
+        return self.mk(
+            if opener == TokenType::Star {
+                NodeKind::NODE_POINTER_TYPE;
+            } else {
+                NodeKind::NODE_REFERENCE_TYPE;
+            },
+            Span::new(start, self.node_span(ty).end),
+            NodeAs { indirect_type: IndirectTypeData { ty: ty, qualifier: qualifier, lifetime: life } },
+        );
+    }
+
+    pub fn parse_type_inner(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        if self.match(TokenType::AmpersandAmpersand) {
+            // `&&T` lexes as one token: it is `&(&T)`, and the inner `&` takes any lifetime/`mut`.
+            let inner = self.parse_indirect_type(TokenType::Ampersand, start + 1);
+            return self.mk(
+                NodeKind::NODE_REFERENCE_TYPE,
+                Span::new(start, self.node_span(inner).end),
+                NodeAs {
+                    indirect_type: IndirectTypeData {
+                        ty: inner,
+                        qualifier: TypeQualifier::TYPE_QUAL_NONE,
+                        lifetime: NODE_NONE,
+                    },
+                },
+            );
+        }
+        if self.match(TokenType::Star) || self.match(TokenType::Ampersand) {
+            return self.parse_indirect_type(self.tokens[self.current - 1].kind(), start);
         }
         if self.match(TokenType::LeftBracket) {
             if self.match(TokenType::RightBracket) {
@@ -529,24 +521,20 @@ extend Parser {
                     TypeQualifier::TYPE_QUAL_NONE;
                 };
                 let element = self.parse_type();
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_SLICE_TYPE,
-                        span: Span::new(start, self.node_span(element).end),
-                        as_data: NodeAs { indirect_type: IndirectTypeData { ty: element, qualifier: qualifier } },
-                    },
+                return self.mk(
+                    NodeKind::NODE_SLICE_TYPE,
+                    Span::new(start, self.node_span(element).end),
+                    NodeAs { indirect_type: IndirectTypeData { ty: element, qualifier: qualifier } },
                 );
             }
             let element = self.parse_type();
             self.expect(TokenType::Semicolon, "';'");
             let length = self.parse_expression();
             self.expect(TokenType::RightBracket, "']'");
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_ARRAY_TYPE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { array_type: ArrayTypeData { element: element, length: length } },
-                },
+            return self.fin(
+                NodeKind::NODE_ARRAY_TYPE,
+                start,
+                NodeAs { array_type: ArrayTypeData { element: element, length: length } },
             );
         }
         if self.match(TokenType::Fn) {
@@ -554,14 +542,10 @@ extend Parser {
             let params = self.parse_comma_types(TokenType::RightParen);
             self.expect(TokenType::RightParen, "')'");
             let returns = self.parse_function_returns();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_FUNCTION_TYPE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        function_type: FunctionTypeData { params: params, returns: returns, is_move: false },
-                    },
-                },
+            return self.fin(
+                NodeKind::NODE_FUNCTION_TYPE,
+                start,
+                NodeAs { function_type: FunctionTypeData { params: params, returns: returns } },
             );
         }
         if self.match(TokenType::LeftParen) {
@@ -570,34 +554,24 @@ extend Parser {
             if elems.len < 2 {
                 self.errors.emit(start, self.previous_end() - start, format("a tuple type needs at least 2 elements"));
             }
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_TUPLE_TYPE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems, repeat: false } },
-                },
+            return self.fin(
+                NodeKind::NODE_TUPLE_TYPE,
+                start,
+                NodeAs { array_literal: ArrayLiteralData { elements: elems } },
             );
         }
         if self.match(TokenType::Dyn) {
-            let inner = self.parse_type();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_DYN_TYPE,
-                    span: Span::new(start, self.node_span(inner).end),
-                    as_data: NodeAs {
-                        indirect_type: IndirectTypeData { ty: inner, qualifier: TypeQualifier::TYPE_QUAL_NONE },
-                    },
-                },
+            let inner = self.parse_dyn_target();
+            return self.mk(
+                NodeKind::NODE_DYN_TYPE,
+                Span::new(start, self.node_span(inner).end),
+                NodeAs { indirect_type: IndirectTypeData { ty: inner, qualifier: TypeQualifier::TYPE_QUAL_NONE } },
             );
         }
         if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
             return self.parse_type_path();
         }
-        self.error_here("expected type");
-        if !self.at_end() {
-            self.advance();
-        }
-        return NODE_NONE;
+        return self.error_skip("expected type");
     }
 
     // `for<'a, 'b>` -- the HIGHER-RANKED prefix of a bound. These lifetimes are bound by the BOUND
@@ -617,21 +591,10 @@ extend Parser {
             let lstart = self.previous_end();
             let lt = self.parse_lifetime();
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_GENERIC_PARAM,
-                        span: Span::new(lstart, self.previous_end()),
-                        as_data: NodeAs {
-                            generic_param: GenericParamData {
-                                name: lt,
-                                bounds: NodeList { start: 0, len: 0 },
-                                default_type: NODE_NONE,
-                                is_const: false,
-                                const_type: NODE_NONE,
-                                is_lifetime: true,
-                            },
-                        },
-                    },
+                self.fin(
+                    NodeKind::NODE_GENERIC_PARAM,
+                    lstart,
+                    NodeAs { generic_param: GenericParamData { name: lt, is_lifetime: true } },
                 ),
             );
             if !self.match(TokenType::Comma) {
@@ -662,14 +625,10 @@ extend Parser {
         let params = self.parse_comma_types(TokenType::RightParen);
         self.expect(TokenType::RightParen, "')'");
         let returns = self.parse_function_returns();
-        let fnty = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_FUNCTION_TYPE,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    function_type: FunctionTypeData { params: params, returns: returns, is_move: is_move },
-                },
-            },
+        let fnty = self.fin(
+            NodeKind::NODE_FUNCTION_TYPE,
+            start,
+            NodeAs { function_type: FunctionTypeData { params: params, returns: returns, is_move: is_move } },
         );
         if hr.len != 0 {
             self.ast.set_lifetimes(fnty, hr);
@@ -704,21 +663,10 @@ extend Parser {
                 lbounds = self.parse_lifetime_bounds();
             }
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_GENERIC_PARAM,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs {
-                            generic_param: GenericParamData {
-                                name: lt,
-                                bounds: lbounds,
-                                default_type: NODE_NONE,
-                                is_const: false,
-                                const_type: NODE_NONE,
-                                is_lifetime: true,
-                            },
-                        },
-                    },
+                self.fin(
+                    NodeKind::NODE_GENERIC_PARAM,
+                    start,
+                    NodeAs { generic_param: GenericParamData { name: lt, bounds: lbounds, is_lifetime: true } },
                 ),
             );
             if !self.match(TokenType::Comma) {
@@ -752,19 +700,16 @@ extend Parser {
                 NODE_NONE;
             };
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_GENERIC_PARAM,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs {
-                            generic_param: GenericParamData {
-                                name: name,
-                                bounds: bounds,
-                                default_type: default_type,
-                                is_const: is_const,
-                                const_type: const_type,
-                                is_lifetime: false,
-                            },
+                self.fin(
+                    NodeKind::NODE_GENERIC_PARAM,
+                    start,
+                    NodeAs {
+                        generic_param: GenericParamData {
+                            name: name,
+                            bounds: bounds,
+                            default_type: default_type,
+                            is_const: is_const,
+                            const_type: const_type,
                         },
                     },
                 ),
@@ -798,12 +743,10 @@ extend Parser {
                 self.parse_bounds();
             };
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_WHERE_PREDICATE,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { where_predicate: WherePredicateData { ty: ty, bounds: bounds } },
-                    },
+                self.fin(
+                    NodeKind::NODE_WHERE_PREDICATE,
+                    start,
+                    NodeAs { where_predicate: WherePredicateData { ty: ty, bounds: bounds } },
                 ),
             );
             if !self.match(TokenType::Comma) || self.check(TokenType::LeftBrace) || self.check(TokenType::Semicolon) {
@@ -816,14 +759,13 @@ extend Parser {
     pub fn parse_parameter_name(self: &mut Self) NodeId {
         if self.match(TokenType::SelfLower) {
             let token = self.tokens[self.current - 1];
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_IDENTIFIER,
-                    span: token.span(),
-                    as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
-                },
-            );
+            return self.make_name(token.span());
         }
+        return self.binder_name();
+    }
+
+    // A binding name with an optional `mut`: the name node carries the mutability.
+    fn binder_name(self: &mut Self) NodeId {
         let is_mut = self.match(TokenType::Mut);
         let id = self.identifier();
         if is_mut && id != NODE_NONE {
@@ -857,12 +799,10 @@ extend Parser {
                 let span_start = self.node_span(name).start;
                 let span_end = self.node_span(ty).end;
                 let is_mutable = self.ast.at_const(name).as_data.name.is_mutable;
-                let param = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_PARAMETER,
-                        span: Span::new(span_start, span_end),
-                        as_data: NodeAs { parameter: ParameterData { name: name, ty: ty, is_mutable: is_mutable } },
-                    },
+                let param = self.mk(
+                    NodeKind::NODE_PARAMETER,
+                    Span::new(span_start, span_end),
+                    NodeAs { parameter: ParameterData { name: name, ty: ty, is_mutable: is_mutable } },
                 );
                 self.ast.push(param);
             }
@@ -890,12 +830,10 @@ extend Parser {
                 if self.match(TokenType::Colon) {
                     let ty = self.parse_type();
                     self.ast.push(
-                        self.ast.add(
-                            Node {
-                                kind: NodeKind::NODE_PARAMETER,
-                                span: Span::new(start, self.node_span(ty).end),
-                                as_data: NodeAs { parameter: ParameterData { name: head, ty: ty, is_mutable: false } },
-                            },
+                        self.mk(
+                            NodeKind::NODE_PARAMETER,
+                            Span::new(start, self.node_span(ty).end),
+                            NodeAs { parameter: ParameterData { name: head, ty: ty } },
                         ),
                     );
                 } else {
@@ -950,30 +888,28 @@ extend Parser {
         }
         self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
-        let __decl = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_FUNCTION,
-                span: Span::new(
-                    start,
-                    if body != NODE_NONE {
-                        self.node_span(body).end;
+        let __decl = self.mk(
+            NodeKind::NODE_FUNCTION,
+            Span::new(
+                start,
+                if body != NODE_NONE {
+                    self.node_span(body).end;
+                } else {
+                    self.previous_end();
+                },
+            ),
+            NodeAs {
+                function: FunctionData {
+                    name: name,
+                    generics: generics,
+                    params: params,
+                    returns: returns,
+                    where_clause: where_clause,
+                    body: body,
+                    flags: if is_variadic {
+                        FN_VARIADIC;
                     } else {
-                        self.previous_end();
-                    },
-                ),
-                as_data: NodeAs {
-                    function: FunctionData {
-                        name: name,
-                        generics: generics,
-                        params: params,
-                        returns: returns,
-                        where_clause: where_clause,
-                        body: body,
-                        flags: if is_variadic {
-                            FN_VARIADIC;
-                        } else {
-                            0;
-                        },
+                        0;
                     },
                 },
             },
@@ -1030,6 +966,12 @@ extend Parser {
         return nnamed;
     }
 
+    // A fresh identifier with the name and span of the named return `r`.
+    fn nret_name(self: &mut Self, r: NodeId) NodeId {
+        let name = *self.ast.at_const(self.ast.at_const(r).as_data.parameter.name);
+        return self.mk(NodeKind::NODE_IDENTIFIER, name.span, NodeAs { name: NameData { text: name.as_data.name.text } });
+    }
+
     // Prepend one synthetic `let mut <name>: <ty>;` per named return to `body`'s statements. The
     // let/name spans are the SIGNATURE spans (before the block starts): downstream stages treat them
     // as ordinary uninitialized bindings, and the formatter skips pre-block statements when printing.
@@ -1038,27 +980,11 @@ extend Parser {
         let mark = self.ast.mark();
         for i in 0..self.nrets.len() {
             let r = *self.nrets.at(i);
-            let pd = self.ast.at_const(r).as_data.parameter;
-            let ntext = self.ast.at_const(pd.name).as_data.name.text;
-            let nspan = self.ast.at_const(pd.name).span;
-            let nm = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_IDENTIFIER,
-                    span: nspan,
-                    as_data: NodeAs { name: NameData { text: ntext, is_mutable: false } },
-                },
-            );
+            let nm = self.nret_name(r);
+            let ty = self.ast.at_const(r).as_data.parameter.ty;
             let rspan = self.ast.at_const(r).span;
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_LET,
-                        span: rspan,
-                        as_data: NodeAs {
-                            let_stmt: LetData { name: nm, ty: pd.ty, value: NODE_NONE, is_mutable: true },
-                        },
-                    },
-                ),
+                self.mk(NodeKind::NODE_LET, rspan, NodeAs { let_stmt: LetData { name: nm, ty: ty, is_mutable: true } }),
             );
         }
         for i in 0..stmts.len {
@@ -1078,16 +1004,14 @@ extend Parser {
         let name = self.identifier();
         self.expect(TokenType::Colon, "':'");
         let ty = self.parse_type();
-        let fid = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_FIELD,
-                span: Span::new(start, self.node_span(ty).end),
-                as_data: NodeAs { field: FieldData { name: name, ty: ty, value: NODE_NONE, is_public: is_public } },
-            },
+        let fid = self.mk(
+            NodeKind::NODE_FIELD,
+            Span::new(start, self.node_span(ty).end),
+            NodeAs { field: FieldData { name: name, ty: ty, is_public: is_public } },
         );
         if fattrs.len() > 0 {
             let sp0 = self.ast.at_const(fid).span;
-            self.errors.emit(sp0.start, sp0.end - sp0.start, format("only '@reflect' applies to a field declaration"));
+            self.errors.emit_span(sp0, format("only '@reflect' applies to a field declaration"));
         }
         self.add_attrs_to(&mut fattrs, fid);
         return fid;
@@ -1110,71 +1034,25 @@ extend Parser {
         let name = self.identifier();
         let mut lifetimes = NodeList { start: 0, len: 0 };
         let generics = self.parse_generics_split(&mut lifetimes);
-        if self.match(TokenType::Semicolon) {
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_STRUCT,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        aggregate: AggregateData {
-                            name: name,
-                            generics: generics,
-                            members: NodeList { start: 0, len: 0 },
-                            is_public: false,
-                            is_union: false,
-                            is_tuple: false,
-                            is_extern: false,
-                        },
-                    },
-                },
-            );
-        }
+        let mut members = NodeList { start: 0, len: 0 };
+        let mut is_tuple = false;
         if self.match(TokenType::LeftParen) {
-            let types = self.parse_comma_types(TokenType::RightParen);
+            members = self.parse_comma_types(TokenType::RightParen);
+            is_tuple = true;
             self.expect(TokenType::RightParen, "')'");
             self.expect(TokenType::Semicolon, "';'");
-            let __tdecl = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_STRUCT,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        aggregate: AggregateData {
-                            name: name,
-                            generics: generics,
-                            members: types,
-                            is_public: false,
-                            is_union: false,
-                            is_tuple: true,
-                            is_extern: false,
-                        },
-                    },
-                },
-            );
-            self.ast.set_lifetimes(__tdecl, lifetimes);
-            return __tdecl;
+        } else if !self.match(TokenType::Semicolon) {
+            self.expect(TokenType::LeftBrace, "'{'");
+            members = self.parse_fields();
+            self.expect(TokenType::RightBrace, "'}'");
         }
-        self.expect(TokenType::LeftBrace, "'{'");
-        let fields = self.parse_fields();
-        self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_STRUCT,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    aggregate: AggregateData {
-                        name: name,
-                        generics: generics,
-                        members: fields,
-                        is_public: false,
-                        is_union: false,
-                        is_tuple: false,
-                        is_extern: false,
-                    },
-                },
-            },
+        let decl = self.fin(
+            NodeKind::NODE_STRUCT,
+            start,
+            NodeAs { aggregate: AggregateData { name: name, generics: generics, members: members, is_tuple: is_tuple } },
         );
-        self.ast.set_lifetimes(__decl, lifetimes);
-        return __decl;
+        self.ast.set_lifetimes(decl, lifetimes);
+        return decl;
     }
 
     pub fn parse_variant(self: &mut Self) NodeId {
@@ -1196,18 +1074,16 @@ extend Parser {
         } else if self.match(TokenType::Equal) {
             value = self.parse_expression();
         }
-        let vid = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_VARIANT,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    variant: VariantData { name: name, payload: payload, struct_payload: struct_payload, value: value },
-                },
+        let vid = self.fin(
+            NodeKind::NODE_VARIANT,
+            start,
+            NodeAs {
+                variant: VariantData { name: name, payload: payload, struct_payload: struct_payload, value: value },
             },
         );
         if vattrs.len() > 0 {
             let sp0 = self.ast.at_const(vid).span;
-            self.errors.emit(sp0.start, sp0.end - sp0.start, format("only '@reflect' applies to a variant declaration"));
+            self.errors.emit_span(sp0, format("only '@reflect' applies to a variant declaration"));
         }
         self.pending_metas = saved_metas;
         self.add_attrs_to(&mut vattrs, vid);
@@ -1230,22 +1106,10 @@ extend Parser {
         }
         let variants = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_ENUM,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    aggregate: AggregateData {
-                        name: name,
-                        generics: generics,
-                        members: variants,
-                        is_public: false,
-                        is_union: false,
-                        is_tuple: false,
-                        is_extern: false,
-                    },
-                },
-            },
+        let __decl = self.fin(
+            NodeKind::NODE_ENUM,
+            start,
+            NodeAs { aggregate: AggregateData { name: name, generics: generics, members: variants } },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
         return __decl;
@@ -1271,14 +1135,10 @@ extend Parser {
             ty = self.parse_type();
         }
         self.expect(TokenType::Semicolon, "';'");
-        let alias = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_TYPE_ALIAS,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    type_alias: TypeAliasData { name: name, generics: generics, ty: ty, is_public: false },
-                },
-            },
+        let alias = self.fin(
+            NodeKind::NODE_TYPE_ALIAS,
+            start,
+            NodeAs { type_alias: TypeAliasData { name: name, generics: generics, ty: ty } },
         );
         self.ast.set_lifetimes(alias, lifetimes);
         return alias;
@@ -1314,11 +1174,14 @@ extend Parser {
             self.error_here("expected 'fn', 'const fn' or 'extend' after 'unsafe' at item scope");
             return NODE_NONE;
         }
+        return self.parse_qualified_fn(start, is_const, true);
+    }
+
+    // A function after its `const`/`unsafe` qualifiers, which start at `start`.
+    fn parse_qualified_fn(self: &mut Self, start: u32, is_const: bool, is_unsafe: bool) NodeId {
         let f = self.parse_function(true, is_const);
-        self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
-        if is_const {
-            self.ast.at(f).as_data.function.set(FN_CONST, true);
-        }
+        self.ast.at(f).as_data.function.set(FN_CONST, is_const);
+        self.ast.at(f).as_data.function.set(FN_UNSAFE, is_unsafe);
         self.ast.at(f).span.start = start;
         return f;
     }
@@ -1329,24 +1192,24 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Fn) {
-            let f = self.parse_function(true, true);
-            self.ast.at(f).as_data.function.set(FN_CONST, true);
-            self.ast.at(f).span.start = start;
-            return f;
+            return self.parse_qualified_fn(start, true, false);
         }
-        if self.check(TokenType::Unsafe) {
-            self.advance();
+        if self.match(TokenType::Unsafe) {
             if !self.check(TokenType::Fn) {
                 self.error_here("expected 'fn' after 'const unsafe'");
                 return NODE_NONE;
             }
-            let f = self.parse_function(true, true);
-            self.ast.at(f).as_data.function.set(FN_CONST, true);
-            self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
-            self.ast.at(f).span.start = start;
-            return f;
+            return self.parse_qualified_fn(start, true, true);
         }
         return self.parse_const_after(start);
+    }
+
+    // A closure's block body: the enclosing function's named returns do not apply inside it.
+    fn parse_closure_block(self: &mut Self) NodeId {
+        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
+        let body = self.parse_block();
+        self.nrets = outer_nrets;
+        return body;
     }
 
     fn parse_const_after(self: &mut Self, start: u32) NodeId {
@@ -1356,21 +1219,10 @@ extend Parser {
         self.expect(TokenType::Equal, "'='");
         let value = self.parse_expression();
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_CONST,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    const_def: ConstData {
-                        name: name,
-                        ty: ty,
-                        value: value,
-                        is_public: false,
-                        is_extern: false,
-                        is_static_mut: false,
-                    },
-                },
-            },
+        return self.fin(
+            NodeKind::NODE_CONST,
+            start,
+            NodeAs { const_def: ConstData { name: name, ty: ty, value: value } },
         );
     }
 
@@ -1380,28 +1232,9 @@ extend Parser {
         if !self.match(TokenType::Mut) {
             self.error_here("expected 'mut' after 'static' (immutable module-level data is a 'const')");
         }
-        let name = self.identifier();
-        self.expect(TokenType::Colon, "':'");
-        let ty = self.parse_type();
-        self.expect(TokenType::Equal, "'='");
-        let value = self.parse_expression();
-        self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_CONST,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    const_def: ConstData {
-                        name: name,
-                        ty: ty,
-                        value: value,
-                        is_public: false,
-                        is_extern: false,
-                        is_static_mut: true,
-                    },
-                },
-            },
-        );
+        let c = self.parse_const_after(start);
+        self.ast.at(c).as_data.const_def.is_static_mut = true;
+        return c;
     }
 
     pub fn parse_static_assert(self: &mut Self) NodeId {
@@ -1419,12 +1252,10 @@ extend Parser {
         }
         self.expect(TokenType::RightParen, "')'");
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_STATIC_ASSERT,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { binary: BinaryData { op: TokenType::Equal, left: cond, right: msg } },
-            },
+        return self.fin(
+            NodeKind::NODE_STATIC_ASSERT,
+            start,
+            NodeAs { binary: BinaryData { op: TokenType::Equal, left: cond, right: msg } },
         );
     }
 
@@ -1497,20 +1328,10 @@ extend Parser {
         self.pin_scope = outer_pin;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_INTERFACE,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    interface_def: InterfaceData {
-                        name: name,
-                        generics: generics,
-                        bounds: bounds,
-                        items: items,
-                        is_public: false,
-                    },
-                },
-            },
+        let __decl = self.fin(
+            NodeKind::NODE_INTERFACE,
+            start,
+            NodeAs { interface_def: InterfaceData { name: name, generics: generics, bounds: bounds, items: items } },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
         return __decl;
@@ -1575,18 +1396,16 @@ extend Parser {
         self.pin_scope = outer_pin;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_EXTEND,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    extend_def: ExtendData {
-                        generics: generics,
-                        interface_type: interface_type,
-                        target_type: target,
-                        items: items,
-                        is_unsafe: false, // set by parse_unsafe_fn when an `unsafe` preceded this
-                    },
+        // parse_unsafe_fn sets is_unsafe when an `unsafe` preceded this.
+        let __decl = self.fin(
+            NodeKind::NODE_EXTEND,
+            start,
+            NodeAs {
+                extend_def: ExtendData {
+                    generics: generics,
+                    interface_type: interface_type,
+                    target_type: target,
+                    items: items,
                 },
             },
         );
@@ -1620,11 +1439,7 @@ extend Parser {
                 let f = self.parse_function(false, true);
                 if self.ast.at_const(f).as_data.function.body != NODE_NONE {
                     let sp = self.node_span(f);
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("extern function declarations cannot have a body"),
-                    );
+                    self.errors.emit_span(sp, format("extern function declarations cannot have a body"));
                 }
                 self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
                 self.ast.at(f).as_data.function.set(FN_EXTERN, true);
@@ -1650,9 +1465,8 @@ extend Parser {
                     self.ast.at(sd).as_data.aggregate.is_union = is_union;
                     if self.ast.at_const(sd).as_data.aggregate.generics.len != 0 {
                         let sp = self.node_span(sd);
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
+                        self.errors.emit_span(
+                            sp,
                             format("an extern type cannot be generic: C has no such declaration to match"),
                         );
                     }
@@ -1667,71 +1481,46 @@ extend Parser {
                 // Attached, not dropped: `@c.import` on an opaque handle is what pins its C spelling.
                 self.add_attrs_to(&mut attrs, ta);
                 self.ast.push(ta);
-            } else if self.check(TokenType::Const) {
+            } else if self.check(TokenType::Const) || self.check(TokenType::Static) {
+                // `static mut` is a writable C global: it DECLARES what the header defines, so it
+                // takes no initializer and codegen emits no definition -- only the accesses, which
+                // carry `static mut`'s unsafe rules across the FFI unchanged.
                 let cstart = self.raw_peek().start();
-                self.advance();
-                if self.check(TokenType::Fn) {
+                let is_static = self.advance().kind() == TokenType::Static;
+                if !is_static && self.check(TokenType::Fn) {
                     self.error_here("an extern function cannot be 'const'");
+                }
+                if is_static && !self.match(TokenType::Mut) {
+                    self.error_here("expected 'mut' after 'static' (a read-only C global is an extern 'const')");
                 }
                 let cname = self.identifier();
                 self.expect(TokenType::Colon, "':'");
                 let ctype = self.parse_type();
                 if self.check(TokenType::Equal) {
-                    self.error_here("extern const declarations cannot have an initializer");
+                    self.error_here(
+                        if is_static {
+                            "an extern static takes no initializer: the C side defines it";
+                        } else {
+                            "extern const declarations cannot have an initializer";
+                        },
+                    );
                 }
                 self.expect(TokenType::Semicolon, "';'");
-                let cnode = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CONST,
-                        span: Span::new(cstart, self.previous_end()),
-                        as_data: NodeAs {
-                            const_def: ConstData {
-                                name: cname,
-                                ty: ctype,
-                                value: NODE_NONE,
-                                is_public: is_public,
-                                is_extern: true,
-                                is_static_mut: false,
-                            },
+                let cnode = self.fin(
+                    NodeKind::NODE_CONST,
+                    cstart,
+                    NodeAs {
+                        const_def: ConstData {
+                            name: cname,
+                            ty: ctype,
+                            is_public: is_public,
+                            is_extern: true,
+                            is_static_mut: is_static,
                         },
                     },
                 );
                 self.add_attrs_to(&mut attrs, cnode);
                 self.ast.push(cnode);
-            } else if self.check(TokenType::Static) {
-                // A writable C global: `static mut` DECLARES what the header defines, so it takes no
-                // initializer and codegen emits no definition -- only the accesses, which carry
-                // `static mut`'s unsafe rules across the FFI unchanged.
-                let sstart = self.raw_peek().start();
-                self.advance();
-                if !self.match(TokenType::Mut) {
-                    self.error_here("expected 'mut' after 'static' (a read-only C global is an extern 'const')");
-                }
-                let sname = self.identifier();
-                self.expect(TokenType::Colon, "':'");
-                let stype = self.parse_type();
-                if self.check(TokenType::Equal) {
-                    self.error_here("an extern static takes no initializer: the C side defines it");
-                }
-                self.expect(TokenType::Semicolon, "';'");
-                let snode = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CONST,
-                        span: Span::new(sstart, self.previous_end()),
-                        as_data: NodeAs {
-                            const_def: ConstData {
-                                name: sname,
-                                ty: stype,
-                                value: NODE_NONE,
-                                is_public: is_public,
-                                is_extern: true,
-                                is_static_mut: true,
-                            },
-                        },
-                    },
-                );
-                self.add_attrs_to(&mut attrs, snode);
-                self.ast.push(snode);
             } else {
                 self.error_here(
                     if is_public {
@@ -1745,12 +1534,10 @@ extend Parser {
         }
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_EXTERN_BLOCK,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { extern_block: ExternBlockData { abi: abi, header: header, items: items } },
-            },
+        return self.fin(
+            NodeKind::NODE_EXTERN_BLOCK,
+            start,
+            NodeAs { extern_block: ExternBlockData { abi: abi, header: header, items: items } },
         );
     }
 
@@ -1877,13 +1664,7 @@ extend Parser {
     }
 
     fn make_name(self: &mut Self, sp: Span) NodeId {
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_IDENTIFIER,
-                span: sp,
-                as_data: NodeAs { name: NameData { text: sp, is_mutable: false } },
-            },
-        );
+        return self.mk(NodeKind::NODE_IDENTIFIER, sp, NodeAs { name: NameData { text: sp } });
     }
 
     // A bare `Name` type path whose text is `sp` -- the synthesized reference resolves by name like
@@ -1892,13 +1673,7 @@ extend Parser {
         let mark = self.ast.mark();
         self.ast.push(self.make_name(sp));
         let parts = self.ast.commit(mark);
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_TYPE_PATH,
-                span: sp,
-                as_data: NodeAs { type_path: TypePathData { parts: parts, args: NodeList { start: 0, len: 0 } } },
-            },
-        );
+        return self.mk(NodeKind::NODE_TYPE_PATH, sp, NodeAs { type_path: TypePathData { parts: parts } });
     }
 
     // `@derive(I, ..)` on the just-parsed aggregate: one empty `extend<G..> T<G..> as I {}` sibling
@@ -1943,32 +1718,20 @@ extend Parser {
                 self.ast.push(self.make_simple_type(gsp_copy[g]));
             }
             let targs = self.ast.commit(amark);
-            let target = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_TYPE_PATH,
-                    span: nsp,
-                    as_data: NodeAs { type_path: TypePathData { parts: parts, args: targs } },
-                },
+            let target = self.mk(
+                NodeKind::NODE_TYPE_PATH,
+                nsp,
+                NodeAs { type_path: TypePathData { parts: parts, args: targs } },
             );
             let gmark = self.ast.mark();
             for g in 0..gid_copy.len() {
                 self.ast.push(gid_copy[g]);
             }
             let egen = self.ast.commit(gmark);
-            let ext = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_EXTEND,
-                    span: Span::new(self.derive_start, self.derive_end),
-                    as_data: NodeAs {
-                        extend_def: ExtendData {
-                            generics: egen,
-                            interface_type: iface,
-                            target_type: target,
-                            items: NodeList { start: 0, len: 0 },
-                            is_unsafe: false,
-                        },
-                    },
-                },
+            let ext = self.mk(
+                NodeKind::NODE_EXTEND,
+                Span::new(self.derive_start, self.derive_end),
+                NodeAs { extend_def: ExtendData { generics: egen, interface_type: iface, target_type: target } },
             );
             for a in 0..attrs.len() {
                 let at = *attrs.at(a);
@@ -2003,12 +1766,10 @@ extend Parser {
                 value = self.parse_expression();
             }
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_FIELD_INITIALIZER,
-                        span: Span::new(field_start, self.node_span(value).end),
-                        as_data: NodeAs { field_initializer: FieldInitializerData { name: name, value: value } },
-                    },
+                self.mk(
+                    NodeKind::NODE_FIELD_INITIALIZER,
+                    Span::new(field_start, self.node_span(value).end),
+                    NodeAs { field_initializer: FieldInitializerData { name: name, value: value } },
                 ),
             );
             if !self.match(TokenType::Comma) {
@@ -2017,12 +1778,10 @@ extend Parser {
         }
         let fields = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_STRUCT_INITIALIZER,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { struct_initializer: StructInitializerData { ty: ty, fields: fields } },
-            },
+        return self.fin(
+            NodeKind::NODE_STRUCT_INITIALIZER,
+            start,
+            NodeAs { struct_initializer: StructInitializerData { ty: ty, fields: fields } },
         );
     }
 
@@ -2035,13 +1794,7 @@ extend Parser {
                 self.ast.push(self.parse_pattern());
             }
             let alts = self.ast.commit(alt_mark);
-            pattern = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_OR,
-                    span: Span::new(arm_start, self.previous_end()),
-                    as_data: NodeAs { pattern: PatternData { name: NODE_NONE, children: alts } },
-                },
-            );
+            pattern = self.fin(NodeKind::NODE_PATTERN_OR, arm_start, NodeAs { pattern: PatternData { children: alts } });
         }
         return pattern;
     }
@@ -2068,12 +1821,10 @@ extend Parser {
                 self.parse_expression();
             };
             self.ast.push(
-                self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_MATCH_ARM,
-                        span: Span::new(arm_start, self.node_span(body).end),
-                        as_data: NodeAs { match_arm: MatchArmData { pattern: pattern, guard: guard, body: body } },
-                    },
+                self.mk(
+                    NodeKind::NODE_MATCH_ARM,
+                    Span::new(arm_start, self.node_span(body).end),
+                    NodeAs { match_arm: MatchArmData { pattern: pattern, guard: guard, body: body } },
                 ),
             );
             if !self.match(TokenType::Comma) && !self.check(TokenType::RightBrace) {
@@ -2082,68 +1833,50 @@ extend Parser {
         }
         let arms = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_MATCH,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { match_expr: MatchData { value: value, arms: arms } },
-            },
-        );
+        return self.fin(NodeKind::NODE_MATCH, start, NodeAs { match_expr: MatchData { value: value, arms: arms } });
     }
 
     pub fn parse_pattern_atom(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         if self.match(TokenType::Minus) {
             if !Parser::is_literal_token(self.peek_type()) {
-                self.error_here("expected literal");
-                if !self.at_end() {
-                    self.advance();
-                }
-                return NODE_NONE;
+                return self.error_skip("expected literal");
             }
             let value = self.literal();
-            let neg = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_UNARY,
-                    span: Span::new(start, self.node_span(value).end),
-                    as_data: NodeAs {
-                        unary: UnaryData {
-                            op: TokenType::Minus,
-                            operand: value,
-                            qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                        },
-                    },
+            let neg = self.mk(
+                NodeKind::NODE_UNARY,
+                Span::new(start, self.node_span(value).end),
+                NodeAs {
+                    unary: UnaryData { op: TokenType::Minus, operand: value, qualifier: TypeQualifier::TYPE_QUAL_NONE },
                 },
             );
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_LITERAL,
-                    span: Span::new(start, self.node_span(value).end),
-                    as_data: NodeAs { single: SingleData { value: neg } },
-                },
+            return self.mk(
+                NodeKind::NODE_PATTERN_LITERAL,
+                Span::new(start, self.node_span(value).end),
+                NodeAs { single: SingleData { value: neg } },
             );
         }
         if Parser::is_literal_token(self.peek_type()) {
             let value = self.literal();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_LITERAL,
-                    span: self.node_span(value),
-                    as_data: NodeAs { single: SingleData { value: value } },
-                },
+            return self.mk(
+                NodeKind::NODE_PATTERN_LITERAL,
+                self.node_span(value),
+                NodeAs { single: SingleData { value: value } },
             );
         }
         if self.match(TokenType::LeftParen) {
-            let inner = self.parse_pattern();
-            self.expect(TokenType::RightParen, "')'");
+            // One element is a parenthesized pattern; two or more are a tuple pattern. Both are a
+            // nameless NODE_PATTERN_TUPLE, told apart by the child count.
             let mark = self.ast.mark();
-            self.ast.push(inner);
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_TUPLE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { pattern: PatternData { name: NODE_NONE, children: self.ast.commit(mark) } },
-                },
+            self.ast.push(self.parse_pattern());
+            while self.match(TokenType::Comma) && !self.check(TokenType::RightParen) {
+                self.ast.push(self.parse_pattern());
+            }
+            self.expect(TokenType::RightParen, "')'");
+            return self.fin(
+                NodeKind::NODE_PATTERN_TUPLE,
+                start,
+                NodeAs { pattern: PatternData { children: self.ast.commit(mark) } },
             );
         }
         if self.check(TokenType::Underscore) {
@@ -2159,96 +1892,126 @@ extend Parser {
             if is_mut {
                 self.ast.at(name).as_data.name.is_mutable = true;
             }
-            if self.match(TokenType::LeftParen) {
-                let mark = self.ast.mark();
-                while !self.check(TokenType::RightParen) && !self.at_end() {
-                    if self.check(TokenType::Range) {
-                        let rt = self.advance();
-                        self.ast.push(self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: rt.span() }));
-                        break;
-                    }
-                    self.ast.push(self.parse_pattern());
-                    if !self.match(TokenType::Comma) {
-                        break;
-                    }
+            return self.pattern_after_name(start, name);
+        }
+        return self.error_skip("expected pattern");
+    }
+
+    // The rest of a pattern that starts with name `name` at `start`: a tuple-variant or struct
+    // pattern, an `@` binding, or the plain binding.
+    fn pattern_after_name(self: &mut Self, start: u32, mut name: NodeId) NodeId {
+        if self.check(TokenType::PathSeparator) {
+            name = self.pattern_path_tail(name);
+            if name == NODE_NONE {
+                return NODE_NONE;
+            }
+        }
+        if self.match(TokenType::LeftParen) {
+            let mark = self.ast.mark();
+            while !self.check(TokenType::RightParen) && !self.at_end() {
+                if self.check(TokenType::Range) {
+                    let rt = self.advance();
+                    self.ast.push(self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: rt.span() }));
+                    break;
                 }
-                let children = self.ast.commit(mark);
-                self.expect(TokenType::RightParen, "')'");
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_PATTERN_TUPLE,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { pattern: PatternData { name: name, children: children } },
-                    },
-                );
-            }
-            if self.match(TokenType::LeftBrace) {
-                let mark = self.ast.mark();
-                while !self.check(TokenType::RightBrace) && !self.at_end() {
-                    if self.match(TokenType::Range) {
-                        break;
-                    }
-                    let field_start = self.raw_peek().start();
-                    let field_name = self.identifier();
-                    let mut child = field_name;
-                    if self.match(TokenType::Colon) {
-                        child = self.parse_pattern();
-                    }
-                    let child_mark = self.ast.mark();
-                    self.ast.push(child);
-                    self.ast.push(
-                        self.ast.add(
-                            Node {
-                                kind: NodeKind::NODE_PATTERN_FIELD,
-                                span: Span::new(field_start, self.node_span(child).end),
-                                as_data: NodeAs {
-                                    pattern: PatternData { name: field_name, children: self.ast.commit(child_mark) },
-                                },
-                            },
-                        ),
-                    );
-                    if !self.match(TokenType::Comma) {
-                        break;
-                    }
+                self.ast.push(self.parse_pattern());
+                if !self.match(TokenType::Comma) {
+                    break;
                 }
-                let children = self.ast.commit(mark);
-                self.expect(TokenType::RightBrace, "'}'");
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_PATTERN_STRUCT,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { pattern: PatternData { name: name, children: children } },
-                    },
-                );
             }
-            if self.match(TokenType::At) {
-                let sub = self.parse_pattern();
-                let submark = self.ast.mark();
-                self.ast.push(sub);
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_PATTERN_NAME,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { pattern: PatternData { name: name, children: self.ast.commit(submark) } },
-                    },
-                );
-            }
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_NAME,
-                    // From `start`, not the identifier's own span: a `mut` binding is part of the
-                    // pattern's text, and the formatter prints patterns from their span -- an
-                    // identifier-only span silently REWROTE `Some(mut x)` to `Some(x)`.
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { pattern: PatternData { name: name, children: NodeList { start: 0, len: 0 } } },
-                },
+            let children = self.ast.commit(mark);
+            self.expect(TokenType::RightParen, "')'");
+            return self.fin(
+                NodeKind::NODE_PATTERN_TUPLE,
+                start,
+                NodeAs { pattern: PatternData { name: name, children: children } },
             );
         }
-        self.error_here("expected pattern");
-        if !self.at_end() {
-            self.advance();
+        if self.match(TokenType::LeftBrace) {
+            let mark = self.ast.mark();
+            while !self.check(TokenType::RightBrace) && !self.at_end() {
+                if self.match(TokenType::Range) {
+                    break;
+                }
+                let field_start = self.raw_peek().start();
+                let field_name = self.identifier();
+                let mut child = field_name;
+                if self.match(TokenType::Colon) {
+                    child = self.parse_pattern();
+                }
+                let child_mark = self.ast.mark();
+                self.ast.push(child);
+                self.ast.push(
+                    self.mk(
+                        NodeKind::NODE_PATTERN_FIELD,
+                        Span::new(field_start, self.node_span(child).end),
+                        NodeAs { pattern: PatternData { name: field_name, children: self.ast.commit(child_mark) } },
+                    ),
+                );
+                if !self.match(TokenType::Comma) {
+                    break;
+                }
+            }
+            let children = self.ast.commit(mark);
+            self.expect(TokenType::RightBrace, "'}'");
+            return self.fin(
+                NodeKind::NODE_PATTERN_STRUCT,
+                start,
+                NodeAs { pattern: PatternData { name: name, children: children } },
+            );
         }
-        return NODE_NONE;
+        if self.match(TokenType::At) {
+            let sub = self.parse_pattern();
+            let submark = self.ast.mark();
+            self.ast.push(sub);
+            return self.fin(
+                NodeKind::NODE_PATTERN_NAME,
+                start,
+                NodeAs { pattern: PatternData { name: name, children: self.ast.commit(submark) } },
+            );
+        }
+        // The span starts at `start`, not at the identifier: a `mut` binding is part of the
+        // pattern's text, and the formatter prints patterns from their span.
+        return self.fin(NodeKind::NODE_PATTERN_NAME, start, NodeAs { pattern: PatternData { name: name } });
+    }
+
+    // A qualified path at a pattern name (`E::A(..)`). Patterns name a variant without its enum, so
+    // this reports the qualifier and returns the last segment, which the pattern then continues with.
+    @c.cold
+    fn pattern_path_tail(self: &mut Self, name: NodeId) NodeId {
+        let start = self.node_span(name).start;
+        let mut last = name;
+        while self.match(TokenType::PathSeparator) {
+            last = self.identifier();
+            if last == NODE_NONE {
+                return NODE_NONE;
+            }
+        }
+        let vs = self.node_span(last);
+        self.errors.emit(
+            start,
+            vs.start - start,
+            format(
+                "a pattern names a variant without its enum: write '{}', not '{}'",
+                diag::span_str(self.source, vs.start, vs.end),
+                diag::span_str(self.source, start, vs.end),
+            ),
+        );
+        return last;
+    }
+
+    // A `for` loop's binding: a plain name (the loop node declares it), else an irrefutable
+    // pattern (`(a, b)`, `_`, `mut x`, `Point { x, y }`) that declares its own names.
+    fn parse_for_binding(self: &mut Self) NodeId {
+        if Parser::is_identifier_token(self.peek_type()) {
+            let start = self.raw_peek().start();
+            let name = self.identifier();
+            if self.check(TokenType::In) || name == NODE_NONE {
+                return name;
+            }
+            return self.pattern_after_name(start, name);
+        }
+        return self.parse_pattern();
     }
 
     pub fn parse_pattern(self: &mut Self) NodeId {
@@ -2279,15 +2042,13 @@ extend Parser {
                 );
             }
             let value = self.parse_expression();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_FIELD_INITIALIZER,
-                    span: Span::new(start, self.node_span(value).end),
-                    as_data: NodeAs { field_initializer: FieldInitializerData { name: index, value: value } },
-                },
+            return self.mk(
+                NodeKind::NODE_FIELD_INITIALIZER,
+                Span::new(start, self.node_span(value).end),
+                NodeAs { field_initializer: FieldInitializerData { name: index, value: value } },
             );
         }
-        let p = self.parse_postfix_after(group);
+        let p = self.parse_postfix_after_mode(group, ExpressionGrammar::EXPR_FULL);
         return self.parse_expression_from_mode(p, ExpressionGrammar::EXPR_FULL);
     }
 
@@ -2311,12 +2072,10 @@ extend Parser {
         }
         let elements = self.ast.commit(mark);
         self.expect(TokenType::RightBracket, "']'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_ARRAY_LITERAL,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { array_literal: ArrayLiteralData { elements: elements, repeat: repeat } },
-            },
+        return self.fin(
+            NodeKind::NODE_ARRAY_LITERAL,
+            start,
+            NodeAs { array_literal: ArrayLiteralData { elements: elements, repeat: repeat } },
         );
     }
 
@@ -2333,13 +2092,7 @@ extend Parser {
         }
         if kind == TokenType::SelfLower {
             let token = self.advance();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_IDENTIFIER,
-                    span: token.span(),
-                    as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
-                },
-            );
+            return self.make_name(token.span());
         }
         if kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd {
             let va = if kind == TokenType::VaStart {
@@ -2366,13 +2119,7 @@ extend Parser {
                 extra = self.parse_expression();
             }
             self.expect(TokenType::RightParen, "')'");
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_VA_EXPR,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { va_op: VaOpData { op: va, ap: ap, extra: extra } },
-                },
-            );
+            return self.fin(NodeKind::NODE_VA_EXPR, start, NodeAs { va_op: VaOpData { op: va, ap: ap, extra: extra } });
         }
         if Parser::is_identifier_token(kind) {
             let value = self.identifier();
@@ -2391,12 +2138,10 @@ extend Parser {
                 }
                 let elems = self.ast.commit(mark);
                 self.expect(TokenType::RightParen, "')'");
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_TUPLE,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems, repeat: false } },
-                    },
+                return self.fin(
+                    NodeKind::NODE_TUPLE,
+                    start,
+                    NodeAs { array_literal: ArrayLiteralData { elements: elems } },
                 );
             }
             self.expect(TokenType::RightParen, "')'");
@@ -2411,14 +2156,10 @@ extend Parser {
         if kind == TokenType::Loop {
             self.advance();
             let body = self.parse_block();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_WHILE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        while_stmt: WhileData { condition: NODE_NONE, body: body, is_do: false, label: Span::empty() },
-                    },
-                },
+            return self.fin(
+                NodeKind::NODE_WHILE,
+                start,
+                NodeAs { while_stmt: WhileData { body: body, label: Span::empty() } },
             );
         }
         if self.check(TokenType::Sizeof) || self.check(TokenType::Alignof) {
@@ -2427,16 +2168,14 @@ extend Parser {
             self.expect(TokenType::LeftParen, "'('");
             let ty = self.parse_type();
             self.expect(TokenType::RightParen, "')'");
-            return self.ast.add(
-                Node {
-                    kind: if is_align {
-                        NodeKind::NODE_ALIGNOF;
-                    } else {
-                        NodeKind::NODE_SIZEOF;
-                    },
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { single: SingleData { value: ty } },
+            return self.fin(
+                if is_align {
+                    NodeKind::NODE_ALIGNOF;
+                } else {
+                    NodeKind::NODE_SIZEOF;
                 },
+                start,
+                NodeAs { single: SingleData { value: ty } },
             );
         }
         if self.match(TokenType::New) {
@@ -2448,12 +2187,10 @@ extend Parser {
                 initializer = self.parse_expression();
                 self.expect(TokenType::RightParen, "')'");
             }
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_NEW,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { new_expr: NewData { ty: new_type, initializer: initializer } },
-                },
+            return self.fin(
+                NodeKind::NODE_NEW,
+                start,
+                NodeAs { new_expr: NewData { ty: new_type, initializer: initializer } },
             );
         }
         if self.check(TokenType::LeftBracket) {
@@ -2466,24 +2203,11 @@ extend Parser {
                 self.error_here("anonymous functions cannot be variadic");
             }
             let returns = self.parse_function_returns();
-            let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-            let body = self.parse_block();
-            self.nrets = outer_nrets;
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_CLOSURE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        closure: ClosureData {
-                            params: params,
-                            returns: returns,
-                            body: body,
-                            expr_body: false,
-                            captures: NodeList { start: 0, len: 0 },
-                            mut_caps: 0,
-                        },
-                    },
-                },
+            let body = self.parse_closure_block();
+            return self.fin(
+                NodeKind::NODE_CLOSURE,
+                start,
+                NodeAs { closure: ClosureData { params: params, returns: returns, body: body } },
             );
         }
         if self.check(TokenType::Pipe) || self.check(TokenType::PipePipe) {
@@ -2501,12 +2225,10 @@ extend Parser {
                         ty = self.parse_type();
                     }
                     self.ast.push(
-                        self.ast.add(
-                            Node {
-                                kind: NodeKind::NODE_PARAMETER,
-                                span: Span::new(pstart, self.previous_end()),
-                                as_data: NodeAs { parameter: ParameterData { name: name, ty: ty, is_mutable: false } },
-                            },
+                        self.fin(
+                            NodeKind::NODE_PARAMETER,
+                            pstart,
+                            NodeAs { parameter: ParameterData { name: name, ty: ty } },
                         ),
                     );
                     if !self.match(TokenType::Comma) {
@@ -2516,50 +2238,19 @@ extend Parser {
                 self.expect(TokenType::Pipe, "'|'");
             }
             let params = self.ast.commit(mark);
-            if self.check(TokenType::LeftBrace) {
-                let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-                let block = self.parse_block();
-                self.nrets = outer_nrets;
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CLOSURE,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs {
-                            closure: ClosureData {
-                                params: params,
-                                returns: NodeList { start: 0, len: 0 },
-                                body: block,
-                                expr_body: false,
-                                captures: NodeList { start: 0, len: 0 },
-                                mut_caps: 0,
-                            },
-                        },
-                    },
-                );
-            }
-            let body = self.parse_expression();
-            return self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_CLOSURE,
-                    span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs {
-                        closure: ClosureData {
-                            params: params,
-                            returns: NodeList { start: 0, len: 0 },
-                            body: body,
-                            expr_body: true,
-                            captures: NodeList { start: 0, len: 0 },
-                            mut_caps: 0,
-                        },
-                    },
-                },
+            let is_block = self.check(TokenType::LeftBrace);
+            let body = if is_block {
+                self.parse_closure_block();
+            } else {
+                self.parse_expression();
+            };
+            return self.fin(
+                NodeKind::NODE_CLOSURE,
+                start,
+                NodeAs { closure: ClosureData { params: params, body: body, expr_body: !is_block } },
             );
         }
-        self.error_here("expected expression");
-        if !self.at_end() {
-            self.advance();
-        }
-        return NODE_NONE;
+        return self.error_skip("expected expression");
     }
 
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
@@ -2583,13 +2274,7 @@ extend Parser {
             j = j - 1;
         }
         let parts = self.ast.commit(mark);
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_TYPE_PATH,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { type_path: TypePathData { parts: parts, args: NodeList { start: 0, len: 0 } } },
-            },
-        );
+        return self.fin(NodeKind::NODE_TYPE_PATH, start, NodeAs { type_path: TypePathData { parts: parts } });
     }
 
     fn parse_postfix_after_mode(self: &mut Self, mut expr: NodeId, grammar: ExpressionGrammar) NodeId {
@@ -2598,23 +2283,11 @@ extend Parser {
             if self.match(TokenType::LeftParen) {
                 let args = self.parse_arguments();
                 self.expect(TokenType::RightParen, "')'");
-                expr = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CALL,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { call: CallData { callee: expr, args: args } },
-                    },
-                );
+                expr = self.fin(NodeKind::NODE_CALL, start, NodeAs { call: CallData { callee: expr, args: args } });
             } else if self.match(TokenType::LeftBracket) {
                 let index = self.parse_range(RangeContext::RANGE_EXPR);
                 self.expect(TokenType::RightBracket, "']'");
-                expr = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_INDEX,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { index: IndexData { object: expr, index: index } },
-                    },
-                );
+                expr = self.fin(NodeKind::NODE_INDEX, start, NodeAs { index: IndexData { object: expr, index: index } });
             } else if self.check(TokenType::Dot) || self.check(TokenType::Arrow) {
                 let pointer = self.match(TokenType::Arrow);
                 if !pointer {
@@ -2622,13 +2295,7 @@ extend Parser {
                 }
                 let member = if self.check(TokenType::IntegerLiteral) {
                     let tok = self.advance();
-                    self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_IDENTIFIER,
-                            span: tok.span(),
-                            as_data: NodeAs { name: NameData { text: tok.span(), is_mutable: false } },
-                        },
-                    );
+                    self.make_name(tok.span());
                 } else if self.check(TokenType::FloatLiteral) {
                     self.error_here("nested tuple access needs parentheses: write '(t.0).1'");
                     self.advance();
@@ -2636,23 +2303,19 @@ extend Parser {
                 } else {
                     self.callable_name();
                 };
-                expr = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_MEMBER,
-                        span: Span::new(start, self.node_span(member).end),
-                        as_data: NodeAs { member: MemberData { object: expr, member: member, path: false } },
-                    },
+                expr = self.mk(
+                    NodeKind::NODE_MEMBER,
+                    Span::new(start, self.node_span(member).end),
+                    NodeAs { member: MemberData { object: expr, member: member } },
                 );
             } else if self.match(TokenType::PathSeparator) {
                 if self.check(TokenType::LessThan) {
                     let types = self.parse_type_args();
                     let inner = expr;
-                    expr = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_GENERIC_SPECIALIZATION,
-                            span: Span::new(start, self.previous_end()),
-                            as_data: NodeAs { specialization: SpecializationData { expression: inner, types: types } },
-                        },
+                    expr = self.fin(
+                        NodeKind::NODE_GENERIC_SPECIALIZATION,
+                        start,
+                        NodeAs { specialization: SpecializationData { expression: inner, types: types } },
                     );
                     if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                         let mut tp: NodeId;
@@ -2661,17 +2324,10 @@ extend Parser {
                         } else {
                             let mark = self.ast.mark();
                             self.ast.push(inner);
-                            tp = self.ast.add(
-                                Node {
-                                    kind: NodeKind::NODE_TYPE_PATH,
-                                    span: Span::new(start, self.previous_end()),
-                                    as_data: NodeAs {
-                                        type_path: TypePathData {
-                                            parts: self.ast.commit(mark),
-                                            args: NodeList { start: 0, len: 0 },
-                                        },
-                                    },
-                                },
+                            tp = self.fin(
+                                NodeKind::NODE_TYPE_PATH,
+                                start,
+                                NodeAs { type_path: TypePathData { parts: self.ast.commit(mark) } },
                             );
                         }
                         self.ast.at(tp).as_data.type_path.args = types;
@@ -2679,12 +2335,10 @@ extend Parser {
                     }
                 } else {
                     let member = self.callable_name();
-                    expr = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_MEMBER,
-                            span: Span::new(start, self.node_span(member).end),
-                            as_data: NodeAs { member: MemberData { object: expr, member: member, path: true } },
-                        },
+                    expr = self.mk(
+                        NodeKind::NODE_MEMBER,
+                        Span::new(start, self.node_span(member).end),
+                        NodeAs { member: MemberData { object: expr, member: member, path: true } },
                     );
                     if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                         let tp = self.path_chain_to_type_path(expr, start);
@@ -2692,16 +2346,14 @@ extend Parser {
                     }
                 }
             } else if self.match(TokenType::Question) {
-                expr = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_UNARY,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs {
-                            unary: UnaryData {
-                                op: TokenType::Question,
-                                operand: expr,
-                                qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                            },
+                expr = self.fin(
+                    NodeKind::NODE_UNARY,
+                    start,
+                    NodeAs {
+                        unary: UnaryData {
+                            op: TokenType::Question,
+                            operand: expr,
+                            qualifier: TypeQualifier::TYPE_QUAL_NONE,
                         },
                     },
                 );
@@ -2712,22 +2364,40 @@ extend Parser {
         return expr;
     }
 
-    pub fn parse_postfix_after(self: &mut Self, expr: NodeId) NodeId {
-        return self.parse_postfix_after_mode(expr, ExpressionGrammar::EXPR_FULL);
-    }
-
-    fn parse_postfix_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
-        return self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar);
-    }
-
     fn parse_unary_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
             self.error_here("expression nested too deeply");
             return NODE_NONE;
         }
         self.depth = self.depth + 1;
-        let result = if !Parser::unary_operator(self.peek_type()) {
-            self.parse_postfix_mode(grammar);
+        let result = if self.check(TokenType::AmpersandAmpersand) {
+            // `&&x` lexes as one token: it is `&(&x)`, and the inner `&` takes any `mut`.
+            let op = self.advance();
+            let qualifier = if self.match(TokenType::Mut) {
+                TypeQualifier::TYPE_QUAL_MUT;
+            } else {
+                TypeQualifier::TYPE_QUAL_NONE;
+            };
+            let operand = self.parse_unary_mode(grammar);
+            let end = self.node_span(operand).end;
+            let inner = self.mk(
+                NodeKind::NODE_UNARY,
+                Span::new(op.start() + 1, end),
+                NodeAs { unary: UnaryData { op: TokenType::Ampersand, operand: operand, qualifier: qualifier } },
+            );
+            self.mk(
+                NodeKind::NODE_UNARY,
+                Span::new(op.start(), end),
+                NodeAs {
+                    unary: UnaryData {
+                        op: TokenType::Ampersand,
+                        operand: inner,
+                        qualifier: TypeQualifier::TYPE_QUAL_NONE,
+                    },
+                },
+            );
+        } else if !Parser::unary_operator(self.peek_type()) {
+            self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar);
         } else {
             let op = self.advance();
             let qualifier = if op.kind() == TokenType::Ampersand && self.match(TokenType::Mut) {
@@ -2740,30 +2410,22 @@ extend Parser {
             } else {
                 self.parse_unary_mode(grammar);
             };
-            self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_UNARY,
-                    span: Span::new(op.start(), self.node_span(operand).end),
-                    as_data: NodeAs { unary: UnaryData { op: op.kind(), operand: operand, qualifier: qualifier } },
-                },
+            self.mk(
+                NodeKind::NODE_UNARY,
+                Span::new(op.start(), self.node_span(operand).end),
+                NodeAs { unary: UnaryData { op: op.kind(), operand: operand, qualifier: qualifier } },
             );
         };
         self.depth = self.depth - 1;
         return result;
     }
 
-    pub fn parse_unary(self: &mut Self) NodeId {
-        return self.parse_unary_mode(ExpressionGrammar::EXPR_FULL);
-    }
-
     @c.always_inline
     fn add_binary(self: &mut Self, left: NodeId, op: TokenType, right: NodeId) NodeId {
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_BINARY,
-                span: Span::new(self.node_span(left).start, self.node_span(right).end),
-                as_data: NodeAs { binary: BinaryData { op: op, left: left, right: right } },
-            },
+        return self.mk(
+            NodeKind::NODE_BINARY,
+            Span::new(self.node_span(left).start, self.node_span(right).end),
+            NodeAs { binary: BinaryData { op: op, left: left, right: right } },
         );
     }
 
@@ -2772,12 +2434,10 @@ extend Parser {
     fn parse_cast_after(self: &mut Self, mut expr: NodeId) NodeId {
         while self.match(TokenType::As) {
             let cast_type = self.parse_cast_type();
-            expr = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_CAST,
-                    span: Span::new(self.node_span(expr).start, self.node_span(cast_type).end),
-                    as_data: NodeAs { cast: CastData { expression: expr, ty: cast_type } },
-                },
+            expr = self.mk(
+                NodeKind::NODE_CAST,
+                Span::new(self.node_span(expr).start, self.node_span(cast_type).end),
+                NodeAs { cast: CastData { expression: expr, ty: cast_type } },
             );
         }
         return expr;
@@ -2841,12 +2501,12 @@ extend Parser {
         if relation_left != NODE_NONE {
             expression = self.add_binary(relation_left, relation_op, expression);
         }
-        return BinaryParse { expression: expression, shift_assignment: false };
+        return BinaryParse { expression: expression };
     }
 
     fn parse_binary_level_from_mode(self: &mut Self, left: NodeId, level: i32, grammar: ExpressionGrammar) BinaryParse {
         if level > 11 {
-            return BinaryParse { expression: left, shift_assignment: false };
+            return BinaryParse { expression: left };
         }
         if level == 8 {
             return self.parse_shift_relational_from_mode(left, grammar);
@@ -2882,16 +2542,8 @@ extend Parser {
         return self.parse_binary_level_from_mode(self.parse_cast_mode(grammar), level, grammar);
     }
 
-    fn parse_binary_from_mode(self: &mut Self, left: NodeId, grammar: ExpressionGrammar) BinaryParse {
-        return self.parse_binary_level_from_mode(left, 1, grammar);
-    }
-
-    fn parse_binary_mode(self: &mut Self, grammar: ExpressionGrammar) BinaryParse {
-        return self.parse_binary_level_mode(1, grammar);
-    }
-
     fn parse_expression_from_mode(self: &mut Self, first: NodeId, grammar: ExpressionGrammar) NodeId {
-        let parsed = self.parse_binary_from_mode(first, grammar);
+        let parsed = self.parse_binary_level_from_mode(first, 1, grammar);
         let left = parsed.expression;
         if self.check(TokenType::Range) || self.check(TokenType::RangeInclusive) {
             return self.parse_range_value_mode(left, grammar);
@@ -2914,12 +2566,10 @@ extend Parser {
         }
         let right = self.parse_expression_mode(grammar);
         self.depth = self.depth - 1;
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_ASSIGNMENT,
-                span: Span::new(self.node_span(left).start, self.node_span(right).end),
-                as_data: NodeAs { binary: BinaryData { op: op, left: left, right: right } },
-            },
+        return self.mk(
+            NodeKind::NODE_ASSIGNMENT,
+            Span::new(self.node_span(left).start, self.node_span(right).end),
+            NodeAs { binary: BinaryData { op: op, left: left, right: right } },
         );
     }
 
@@ -2972,6 +2622,16 @@ extend Parser {
         } else {
             NODE_NONE;
         };
+        let kind = if context == RangeContext::RANGE_PATTERN {
+            NodeKind::NODE_PATTERN_RANGE;
+        } else {
+            NodeKind::NODE_RANGE;
+        };
+        return self.finish_range(kind, start_node, op_start, inclusive, end);
+    }
+
+    // The range node from its parts; `op_start` is where the `..` or `..=` starts.
+    fn finish_range(self: &mut Self, kind: NodeKind, start_node: NodeId, op_start: u32, inclusive: bool, end: NodeId) NodeId {
         if start_node == NODE_NONE && end == NODE_NONE {
             self.error_here("a range needs a start and/or an end");
         } else if inclusive && end == NODE_NONE {
@@ -2987,18 +2647,10 @@ extend Parser {
         } else {
             self.previous_end();
         };
-        return self.ast.add(
-            Node {
-                kind: if context == RangeContext::RANGE_PATTERN {
-                    NodeKind::NODE_PATTERN_RANGE;
-                } else {
-                    NodeKind::NODE_RANGE;
-                },
-                span: Span::new(lo, hi),
-                as_data: NodeAs {
-                    pattern_range: PatternRangeData { start: start_node, end: end, inclusive: inclusive },
-                },
-            },
+        return self.mk(
+            kind,
+            Span::new(lo, hi),
+            NodeAs { pattern_range: PatternRangeData { start: start_node, end: end, inclusive: inclusive } },
         );
     }
 
@@ -3010,34 +2662,11 @@ extend Parser {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(RangeContext::RANGE_EXPR) {
-            self.parse_binary_mode(grammar).expression;
+            self.parse_binary_level_mode(1, grammar).expression;
         } else {
             NODE_NONE;
         };
-        if start_node == NODE_NONE && end == NODE_NONE {
-            self.error_here("a range needs a start and/or an end");
-        } else if inclusive && end == NODE_NONE {
-            self.error_here("an inclusive range '..=' needs an end");
-        }
-        let lo = if start_node != NODE_NONE {
-            self.node_span(start_node).start;
-        } else {
-            op_start;
-        };
-        let hi = if end != NODE_NONE {
-            self.node_span(end).end;
-        } else {
-            self.previous_end();
-        };
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_RANGE,
-                span: Span::new(lo, hi),
-                as_data: NodeAs {
-                    pattern_range: PatternRangeData { start: start_node, end: end, inclusive: inclusive },
-                },
-            },
-        );
+        return self.finish_range(NodeKind::NODE_RANGE, start_node, op_start, inclusive, end);
     }
 
     pub fn parse_let(self: &mut Self) NodeId {
@@ -3049,20 +2678,14 @@ extend Parser {
             self.advance();
             let mark = self.ast.mark();
             while !self.check(TokenType::RightParen) && !self.at_end() {
-                self.ast.push(self.identifier());
+                self.ast.push(self.binder_name());
                 if !self.match(TokenType::Comma) {
                     break;
                 }
             }
             let children = self.ast.commit(mark);
             self.expect(TokenType::RightParen, "')'");
-            self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_PATTERN_TUPLE,
-                    span: Span::new(tstart, self.previous_end()),
-                    as_data: NodeAs { pattern: PatternData { name: NODE_NONE, children: children } },
-                },
-            );
+            self.fin(NodeKind::NODE_PATTERN_TUPLE, tstart, NodeAs { pattern: PatternData { children: children } });
         } else {
             self.identifier();
         };
@@ -3079,12 +2702,10 @@ extend Parser {
             self.error_here("expected type annotation or initializer");
         }
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_LET,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { let_stmt: LetData { name: name, ty: ty, value: value, is_mutable: is_mutable } },
-            },
+        return self.fin(
+            NodeKind::NODE_LET,
+            start,
+            NodeAs { let_stmt: LetData { name: name, ty: ty, value: value, is_mutable: is_mutable } },
         );
     }
 
@@ -3098,41 +2719,33 @@ extend Parser {
     ) NodeId {
         let end = self.previous_end();
         if else_branch == NODE_NONE {
-            else_branch = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_BLOCK,
-                    span: Span::new(end, end),
-                    as_data: NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
-                },
+            else_branch = self.mk(
+                NodeKind::NODE_BLOCK,
+                Span::new(end, end),
+                NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
             );
         }
         let wild = self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: Span::new(start, start) });
         let mark = self.ast.mark();
         self.ast.push(
-            self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_MATCH_ARM,
-                    span: self.node_span(then_block),
-                    as_data: NodeAs { match_arm: MatchArmData { pattern: pattern, guard: NODE_NONE, body: then_block } },
-                },
+            self.mk(
+                NodeKind::NODE_MATCH_ARM,
+                self.node_span(then_block),
+                NodeAs { match_arm: MatchArmData { pattern: pattern, body: then_block } },
             ),
         );
         self.ast.push(
-            self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_MATCH_ARM,
-                    span: self.node_span(else_branch),
-                    as_data: NodeAs { match_arm: MatchArmData { pattern: wild, guard: NODE_NONE, body: else_branch } },
-                },
+            self.mk(
+                NodeKind::NODE_MATCH_ARM,
+                self.node_span(else_branch),
+                NodeAs { match_arm: MatchArmData { pattern: wild, body: else_branch } },
             ),
         );
         let arms = self.ast.commit(mark);
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_MATCH,
-                span: Span::new(start, end),
-                as_data: NodeAs { match_expr: MatchData { value: value, arms: arms } },
-            },
+        return self.mk(
+            NodeKind::NODE_MATCH,
+            Span::new(start, end),
+            NodeAs { match_expr: MatchData { value: value, arms: arms } },
         );
     }
 
@@ -3165,23 +2778,19 @@ extend Parser {
                 else_branch = self.parse_block();
             }
         }
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_IF,
-                span: Span::new(
-                    start,
-                    self.node_span(
-                        if else_branch != NODE_NONE {
-                            else_branch;
-                        } else {
-                            then_branch;
-                        },
-                    ).end,
-                ),
-                as_data: NodeAs {
-                    if_stmt: IfData { condition: condition, then_branch: then_branch, else_branch: else_branch },
-                },
-            },
+        return self.mk(
+            NodeKind::NODE_IF,
+            Span::new(
+                start,
+                self.node_span(
+                    if else_branch != NODE_NONE {
+                        else_branch;
+                    } else {
+                        then_branch;
+                    },
+                ).end,
+            ),
+            NodeAs { if_stmt: IfData { condition: condition, then_branch: then_branch, else_branch: else_branch } },
         );
     }
 
@@ -3201,50 +2810,36 @@ extend Parser {
                     let brk = self.ast.add(Node { kind: NodeKind::NODE_BREAK, span: Span::new(end, end) });
                     let bmark = self.ast.mark();
                     self.ast.push(brk);
-                    let brk_block = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_BLOCK,
-                            span: Span::new(end, end),
-                            as_data: NodeAs { block: BlockData { statements: self.ast.commit(bmark) } },
-                        },
+                    let brk_block = self.mk(
+                        NodeKind::NODE_BLOCK,
+                        Span::new(end, end),
+                        NodeAs { block: BlockData { statements: self.ast.commit(bmark) } },
                     );
                     let m = self.desugar_let_match(start, pattern, value, body, brk_block);
-                    let ms = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_EXPRESSION_STATEMENT,
-                            span: self.node_span(m),
-                            as_data: NodeAs { single: SingleData { value: m } },
-                        },
+                    let ms = self.mk(
+                        NodeKind::NODE_EXPRESSION_STATEMENT,
+                        self.node_span(m),
+                        NodeAs { single: SingleData { value: m } },
                     );
                     let lmark = self.ast.mark();
                     self.ast.push(ms);
-                    let lbody = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_BLOCK,
-                            span: Span::new(start, end),
-                            as_data: NodeAs { block: BlockData { statements: self.ast.commit(lmark) } },
-                        },
+                    let lbody = self.mk(
+                        NodeKind::NODE_BLOCK,
+                        Span::new(start, end),
+                        NodeAs { block: BlockData { statements: self.ast.commit(lmark) } },
                     );
-                    result = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_WHILE,
-                            span: Span::new(start, end),
-                            as_data: NodeAs {
-                                while_stmt: WhileData { condition: NODE_NONE, body: lbody, is_do: false, label: label },
-                            },
-                        },
+                    result = self.mk(
+                        NodeKind::NODE_WHILE,
+                        Span::new(start, end),
+                        NodeAs { while_stmt: WhileData { body: lbody, label: label } },
                     );
                 } else {
                     let condition = self.parse_condition_expression();
                     let body = self.parse_block();
-                    result = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_WHILE,
-                            span: Span::new(start, self.node_span(body).end),
-                            as_data: NodeAs {
-                                while_stmt: WhileData { condition: condition, body: body, is_do: false, label: label },
-                            },
-                        },
+                    result = self.mk(
+                        NodeKind::NODE_WHILE,
+                        Span::new(start, self.node_span(body).end),
+                        NodeAs { while_stmt: WhileData { condition: condition, body: body, label: label } },
                     );
                 }
             },
@@ -3254,14 +2849,10 @@ extend Parser {
                 self.expect(TokenType::While, "'while'");
                 let condition = self.parse_expression();
                 self.expect(TokenType::Semicolon, "';'");
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_WHILE,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs {
-                            while_stmt: WhileData { condition: condition, body: body, is_do: true, label: label },
-                        },
-                    },
+                result = self.fin(
+                    NodeKind::NODE_WHILE,
+                    start,
+                    NodeAs { while_stmt: WhileData { condition: condition, body: body, is_do: true, label: label } },
                 );
             },
             For | InlineFor | ParallelFor => {
@@ -3278,7 +2869,11 @@ extend Parser {
                     // (A label cannot reach here: the Label arm admits only while/do/for/loop.)
                     self.expect(TokenType::For, "'for'");
                 }
-                let binding = self.identifier();
+                let binding = if kind == NodeKind::NODE_FOR {
+                    self.parse_for_binding();
+                } else {
+                    self.identifier();
+                };
                 self.expect(TokenType::In, "'in'");
                 let iterable = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
                 let mut body = self.parse_block();
@@ -3287,55 +2882,32 @@ extend Parser {
                     // and fills its captures; desugar then only wraps it in the std range() call.
                     let pmark = self.ast.mark();
                     self.ast.push(
-                        self.ast.add(
-                            Node {
-                                kind: NodeKind::NODE_PARAMETER,
-                                span: self.node_span(binding),
-                                as_data: NodeAs {
-                                    parameter: ParameterData { name: binding, ty: NODE_NONE, is_mutable: false },
-                                },
-                            },
+                        self.mk(
+                            NodeKind::NODE_PARAMETER,
+                            self.node_span(binding),
+                            NodeAs { parameter: ParameterData { name: binding } },
                         ),
                     );
                     let params = self.ast.commit(pmark);
-                    body = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_CLOSURE,
-                            span: Span::new(start, self.node_span(body).end),
-                            as_data: NodeAs {
-                                closure: ClosureData {
-                                    params: params,
-                                    returns: NodeList { start: 0, len: 0 },
-                                    body: body,
-                                    expr_body: false,
-                                    captures: NodeList { start: 0, len: 0 },
-                                    mut_caps: 0,
-                                },
-                            },
-                        },
+                    body = self.mk(
+                        NodeKind::NODE_CLOSURE,
+                        Span::new(start, self.node_span(body).end),
+                        NodeAs { closure: ClosureData { params: params, body: body } },
                     );
                 }
-                result = self.ast.add(
-                    Node {
-                        kind: kind,
-                        span: Span::new(start, self.node_span(body).end),
-                        as_data: NodeAs {
-                            for_stmt: ForData { binding: binding, iterable: iterable, body: body, label: label },
-                        },
-                    },
+                result = self.mk(
+                    kind,
+                    Span::new(start, self.node_span(body).end),
+                    NodeAs { for_stmt: ForData { binding: binding, iterable: iterable, body: body, label: label } },
                 );
             },
             _ => {
                 self.advance();
                 let body = self.parse_block();
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_WHILE,
-                        span: Span::new(start, self.node_span(body).end),
-                        as_data: NodeAs {
-                            while_stmt: WhileData { condition: NODE_NONE, body: body, is_do: false, label: label },
-                        },
-                    },
+                result = self.mk(
+                    NodeKind::NODE_WHILE,
+                    Span::new(start, self.node_span(body).end),
+                    NodeAs { while_stmt: WhileData { body: body, label: label } },
                 );
             },
         };
@@ -3344,11 +2916,7 @@ extend Parser {
 
     pub fn parse_statement(self: &mut Self) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
-            self.error_here("statement nested too deeply");
-            if !self.at_end() {
-                self.advance();
-            }
-            return NODE_NONE;
+            return self.error_skip("statement nested too deeply");
         }
         self.depth = self.depth + 1;
         let s = self.parse_statement_inner();
@@ -3391,30 +2959,12 @@ extend Parser {
                     // bare `return;` in a named-return fn: return the named bindings (the synthetic
                     // identifiers keep the signature spans, so the formatter prints `return;` back)
                     for i in 0..self.nrets.len() {
-                        let r = *self.nrets.at(i);
-                        let pd = self.ast.at_const(r).as_data.parameter;
-                        let ntext = self.ast.at_const(pd.name).as_data.name.text;
-                        let nspan = self.ast.at_const(pd.name).span;
-                        self.ast.push(
-                            self.ast.add(
-                                Node {
-                                    kind: NodeKind::NODE_IDENTIFIER,
-                                    span: nspan,
-                                    as_data: NodeAs { name: NameData { text: ntext, is_mutable: false } },
-                                },
-                            ),
-                        );
+                        self.ast.push(self.nret_name(*self.nrets.at(i)));
                     }
                 }
                 let values = self.ast.commit(mark);
                 self.expect(TokenType::Semicolon, "';'");
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_RETURN,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { return_stmt: ReturnData { values: values } },
-                    },
-                );
+                result = self.fin(NodeKind::NODE_RETURN, start, NodeAs { return_stmt: ReturnData { values: values } });
             },
             Break | Continue => {
                 let kind = if self.check(TokenType::Break) {
@@ -3434,13 +2984,7 @@ extend Parser {
                     value = self.parse_expression();
                 }
                 self.expect(TokenType::Semicolon, "';'");
-                result = self.ast.add(
-                    Node {
-                        kind: kind,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { flow: FlowData { value: value, label: label } },
-                    },
-                );
+                result = self.fin(kind, start, NodeAs { flow: FlowData { value: value, label: label } });
             },
             Defer => {
                 self.advance();
@@ -3453,13 +2997,7 @@ extend Parser {
                 if !is_block {
                     self.expect(TokenType::Semicolon, "';'");
                 }
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_DEFER,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { single: SingleData { value: value } },
-                    },
-                );
+                result = self.fin(NodeKind::NODE_DEFER, start, NodeAs { single: SingleData { value: value } });
             },
             Asm => {
                 result = self.parse_asm();
@@ -3473,31 +3011,17 @@ extend Parser {
                 self.advance();
                 let operand = self.parse_expression();
                 self.expect(TokenType::Semicolon, "';'");
-                let callee = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_IDENTIFIER,
-                        span: kwspan,
-                        as_data: NodeAs { name: NameData { text: kwspan, is_mutable: false } },
-                    },
-                );
+                let callee = self.make_name(kwspan);
                 let mark = self.ast.mark();
                 self.ast.push(operand);
                 let args = self.ast.commit(mark);
-                let inner = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CALL,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { call: CallData { callee: callee, args: args } },
-                    },
+                let inner = self.fin(
+                    NodeKind::NODE_CALL,
+                    start,
+                    NodeAs { call: CallData { callee: callee, args: args } },
                 );
                 self.ast.sugar_marks += 1;
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_LAUNCH,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { single: SingleData { value: inner } },
-                    },
-                );
+                result = self.fin(NodeKind::NODE_LAUNCH, start, NodeAs { single: SingleData { value: inner } });
             },
             Select => {
                 result = self.parse_select();
@@ -3506,12 +3030,10 @@ extend Parser {
                 let f = self.parse_if();
                 // if-let desugars to a match EXPRESSION; wrap it so it statement-positions
                 if f != NODE_NONE && self.ast.at_const(f).kind == NodeKind::NODE_MATCH {
-                    result = self.ast.add(
-                        Node {
-                            kind: NodeKind::NODE_EXPRESSION_STATEMENT,
-                            span: self.node_span(f),
-                            as_data: NodeAs { single: SingleData { value: f } },
-                        },
+                    result = self.mk(
+                        NodeKind::NODE_EXPRESSION_STATEMENT,
+                        self.node_span(f),
+                        NodeAs { single: SingleData { value: f } },
                     );
                 } else {
                     result = f;
@@ -3539,19 +3061,13 @@ extend Parser {
                 let operand = if is_block {
                     self.parse_block();
                 } else {
-                    self.parse_unary();
+                    self.parse_unary_mode(ExpressionGrammar::EXPR_FULL);
                 };
-                let unary = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_UNARY,
-                        span: Span::new(start, self.node_span(operand).end),
-                        as_data: NodeAs {
-                            unary: UnaryData {
-                                op: op.kind(),
-                                operand: operand,
-                                qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                            },
-                        },
+                let unary = self.mk(
+                    NodeKind::NODE_UNARY,
+                    Span::new(start, self.node_span(operand).end),
+                    NodeAs {
+                        unary: UnaryData { op: op.kind(), operand: operand, qualifier: TypeQualifier::TYPE_QUAL_NONE },
                     },
                 );
                 let cast = self.parse_cast_after(unary);
@@ -3561,23 +3077,19 @@ extend Parser {
                 if !is_block || expression != unary {
                     self.expect(TokenType::Semicolon, "';'");
                 }
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_EXPRESSION_STATEMENT,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { single: SingleData { value: expression } },
-                    },
+                result = self.fin(
+                    NodeKind::NODE_EXPRESSION_STATEMENT,
+                    start,
+                    NodeAs { single: SingleData { value: expression } },
                 );
             },
             _ => {
                 let expression = self.parse_expression();
                 self.expect(TokenType::Semicolon, "';'");
-                result = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_EXPRESSION_STATEMENT,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { single: SingleData { value: expression } },
-                    },
+                result = self.fin(
+                    NodeKind::NODE_EXPRESSION_STATEMENT,
+                    start,
+                    NodeAs { single: SingleData { value: expression } },
                 );
             },
         };
@@ -3618,35 +3130,17 @@ extend Parser {
         let arms = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         if channels == 0 {
-            self.errors.emit(
-                kw.start,
-                kw.end - kw.start,
-                String::from_str("'select' needs at least one 'ch.recv()' or 'ch.send(v)' arm"),
-            );
+            self.errors.emit_span(kw, String::from_str("'select' needs at least one 'ch.recv()' or 'ch.send(v)' arm"));
         }
         if timeouts > 1 || defaults > 1 {
-            self.errors.emit(
-                kw.start,
-                kw.end - kw.start,
-                String::from_str("'select' allows at most one 'timeout' and one 'default' arm"),
-            );
+            self.errors.emit_span(kw, String::from_str("'select' allows at most one 'timeout' and one 'default' arm"));
         }
         if timeouts != 0 && defaults != 0 {
             // `default` means "never wait", which makes any deadline unreachable.
-            self.errors.emit(
-                kw.start,
-                kw.end - kw.start,
-                String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"),
-            );
+            self.errors.emit_span(kw, String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"));
         }
         self.ast.sugar_marks += 1;
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_SELECT,
-                span: Span::new(kw.start, self.previous_end()),
-                as_data: NodeAs { block: BlockData { statements: arms } },
-            },
-        );
+        return self.fin(NodeKind::NODE_SELECT, kw.start, NodeAs { block: BlockData { statements: arms } });
     }
 
     // One `select` arm. The operation call is taken APART here -- `ch.recv()` keeps only `ch` -- so the
@@ -3664,15 +3158,7 @@ extend Parser {
             } else {
                 // A value-less `let`: the resolver declares it (so the body can use the name) and the
                 // desugar fills in the operation as its initializer.
-                binding = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_LET,
-                        span: self.node_span(name),
-                        as_data: NodeAs {
-                            let_stmt: LetData { name: name, ty: NODE_NONE, value: NODE_NONE, is_mutable: false },
-                        },
-                    },
-                );
+                binding = self.mk(NodeKind::NODE_LET, self.node_span(name), NodeAs { let_stmt: LetData { name: name } });
             }
             expr = self.ast.at_const(expr).as_data.binary.right;
         }
@@ -3742,14 +3228,10 @@ extend Parser {
         if bad {
             return NODE_NONE;
         }
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_SELECT_ARM,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs {
-                    select_arm: SelectArmData { binding: binding, op: op, value: value, body: body, kind: kind },
-                },
-            },
+        return self.fin(
+            NodeKind::NODE_SELECT_ARM,
+            start,
+            NodeAs { select_arm: SelectArmData { binding: binding, op: op, value: value, body: body, kind: kind } },
         );
     }
 
@@ -3781,66 +3263,20 @@ extend Parser {
         }
         let statements = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_BLOCK,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { block: BlockData { statements: statements } },
-            },
-        );
+        return self.fin(NodeKind::NODE_BLOCK, start, NodeAs { block: BlockData { statements: statements } });
     }
 
     pub const fn attr_kind_of(self: &Self, name: Token, wants_str: &mut bool, wants_int: &mut bool) i32 {
+        let t: []str = C_ATTR_NAMES;
+        for i in 0..t.len() {
+            if self.text_is(name, t[i]) {
+                *wants_str = i > C_ATTR_ALIGN;
+                *wants_int = i == C_ATTR_ALIGN;
+                return (unsafe C_ATTR_KINDS[i]) as i32;
+            }
+        }
         *wants_str = false;
         *wants_int = false;
-        if self.text_is(name, "inline") {
-            return AttrKind::ATTR_INLINE as i32;
-        }
-        if self.text_is(name, "always_inline") {
-            return AttrKind::ATTR_ALWAYS_INLINE as i32;
-        }
-        if self.text_is(name, "noinline") {
-            return AttrKind::ATTR_NOINLINE as i32;
-        }
-        if self.text_is(name, "cold") {
-            return AttrKind::ATTR_COLD as i32;
-        }
-        if self.text_is(name, "noreturn") {
-            return AttrKind::ATTR_NORETURN as i32;
-        }
-        if self.text_is(name, "packed") {
-            return AttrKind::ATTR_PACKED as i32;
-        }
-        if self.text_is(name, "used") {
-            return AttrKind::ATTR_USED as i32;
-        }
-        if self.text_is(name, "unused") {
-            return AttrKind::ATTR_UNUSED as i32;
-        }
-        if self.text_is(name, "align") {
-            *wants_int = true;
-            return AttrKind::ATTR_ALIGN as i32;
-        }
-        if self.text_is(name, "export") {
-            *wants_str = true;
-            return AttrKind::ATTR_EXPORT as i32;
-        }
-        if self.text_is(name, "import") {
-            *wants_str = true;
-            return AttrKind::ATTR_IMPORT as i32;
-        }
-        if self.text_is(name, "section") {
-            *wants_str = true;
-            return AttrKind::ATTR_SECTION as i32;
-        }
-        if self.text_is(name, "source") {
-            *wants_str = true;
-            return AttrKind::ATTR_C_SOURCE as i32;
-        }
-        if self.text_is(name, "link") {
-            *wants_str = true;
-            return AttrKind::ATTR_C_LINK as i32;
-        }
         return -1;
     }
 
@@ -3849,14 +3285,7 @@ extend Parser {
         let empty = Token::new(TokenType::Eof, self.previous_end(), 0);
         if !Parser::is_identifier_token(self.peek_type()) {
             self.error_here("expected an attribute path after '@'");
-            return AttrSyntax {
-                namespace: empty,
-                name: empty,
-                parts: 0,
-                has_args: false,
-                arg_start: self.current,
-                arg_end: self.current,
-            };
+            return AttrSyntax { namespace: empty, name: empty, arg_start: self.current, arg_end: self.current };
         }
         let namespace = self.advance();
         let mut name = namespace;
@@ -3939,7 +3368,7 @@ extend Parser {
                 };
                 v = v * base + d as u64;
                 if v > 0xFFFFFFFF {
-                    self.errors.emit(lit.start(), lit.len(), String::from_str("integer argument does not fit in u32"));
+                    self.errors.emit_span(lit.span(), String::from_str("integer argument does not fit in u32"));
                     return 0;
                 }
             }
@@ -3961,9 +3390,10 @@ extend Parser {
                     "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
                 );
             };
-            self.errors.emit(syntax.namespace.start(), syntax.namespace.len(), msg);
+            self.errors.emit_span(syntax.namespace.span(), msg);
             return;
         }
+        let names = axis_names(is_arch);
         let count = Parser::attr_arg_count(syntax);
         let mut i: usize = 0;
         let mut mask: u32 = 0;
@@ -3979,47 +3409,23 @@ extend Parser {
             }
             let p = self.attr_arg(syntax, i);
             let mut bit: u32 = 0;
-            if is_arch {
-                bit = if self.text_is(p, "x86_64") {
-                    1u32;
-                } else if self.text_is(p, "aarch64") {
-                    2u32;
-                } else if self.text_is(p, "wasm32") {
-                    4u32;
-                } else {
-                    0u32;
-                };
-            } else {
-                bit = if self.text_is(p, "windows") {
-                    1u32;
-                } else if self.text_is(p, "macos") {
-                    2u32;
-                } else if self.text_is(p, "linux") {
-                    4u32;
-                } else if self.text_is(p, "wasm") {
-                    8u32;
-                } else if self.text_is(p, "ios") {
-                    16u32;
-                } else if self.text_is(p, "android") {
-                    32u32;
-                } else {
-                    0u32;
-                };
+            for k in 0..names.len() {
+                if self.text_is(p, names[k]) {
+                    bit = 1u32 << k as u32;
+                }
             }
             if bit == 0 {
                 if is_arch {
-                    self.errors.emit(
-                        p.start(),
-                        p.len(),
+                    self.errors.emit_span(
+                        p.span(),
                         format(
                             "unknown architecture '{}'; expected x86_64, aarch64, or wasm32",
                             diag::span_str(self.source, p.start(), p.end()),
                         ),
                     );
                 } else {
-                    self.errors.emit(
-                        p.start(),
-                        p.len(),
+                    self.errors.emit_span(
+                        p.span(),
                         format(
                             "unknown platform '{}'; expected windows, macos, linux, wasm, ios, or android",
                             diag::span_str(self.source, p.start(), p.end()),
@@ -4029,11 +3435,7 @@ extend Parser {
                 return;
             }
             // `!x` is every OTHER platform: the complement over the whole set, which grows with it.
-            let all = if is_arch {
-                7u32;
-            } else {
-                63u32;
-            };
+            let all = (1u32 << names.len() as u32) - 1;
             mask = mask | if neg {
                 bit ^ all;
             } else {
@@ -4055,15 +3457,10 @@ extend Parser {
                 syntax.name;
             };
             if is_arch {
-                self.errors.emit(
-                    t.start(),
-                    t.len(),
-                    format("expected an architecture name: x86_64, aarch64, or wasm32"),
-                );
+                self.errors.emit_span(t.span(), format("expected an architecture name: x86_64, aarch64, or wasm32"));
             } else {
-                self.errors.emit(
-                    t.start(),
-                    t.len(),
+                self.errors.emit_span(
+                    t.span(),
                     format("expected a platform name: windows, macos, linux, wasm, ios, or android"),
                 );
             }
@@ -4094,12 +3491,10 @@ extend Parser {
         }
         self.expect(TokenType::RightParen, "')'");
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_ASM,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { asm_stmt: AsmData { template: template, outputs: outs, inputs: ins, clobbers: clob } },
-            },
+        return self.fin(
+            NodeKind::NODE_ASM,
+            start,
+            NodeAs { asm_stmt: AsmData { template: template, outputs: outs, inputs: ins, clobbers: clob } },
         );
     }
 
@@ -4139,7 +3534,7 @@ extend Parser {
             return self.literal();
         }
         let t = self.raw_peek();
-        self.errors.emit(t.start(), t.len(), format("{} must be a string literal", what));
+        self.errors.emit_span(t.span(), format("{} must be a string literal", what));
         self.advance();
         return NODE_NONE;
     }
@@ -4151,17 +3546,32 @@ extend Parser {
         }
         let ns = syntax.namespace;
         let argc = Parser::attr_arg_count(&syntax);
-        if syntax.parts == 1 && self.text_is(ns, "emit_macro") {
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_EMIT_MACRO as u8, arg: 0, str_span: Span::empty() };
+        // The flag attributes: no arguments.
+        let flag = if syntax.parts != 1 {
+            -1;
+        } else if self.text_is(ns, "emit_macro") {
+            AttrKind::ATTR_EMIT_MACRO as i32;
+        } else if self.text_is(ns, "blocking") {
+            AttrKind::ATTR_BLOCKING as i32;
+        } else if self.text_is(ns, "no_const") {
+            AttrKind::ATTR_NO_CONST as i32;
+        } else {
+            -1;
+        };
+        if flag >= 0 {
+            *out = Attr { kind: flag as u8, str_span: Span::empty() };
             if syntax.has_args {
-                self.errors.emit(ns.start(), ns.len(), format("attribute '@emit_macro' takes no arguments"));
+                self.errors.emit_span(
+                    ns.span(),
+                    format("attribute '@{}' takes no arguments", diag::span_str(self.source, ns.start(), ns.end())),
+                );
             }
             return true;
         }
         if syntax.parts == 1 && self.text_is(ns, "bench") {
             // `arg` is 1 when the benchmark reports for itself: `@bench(log_results = false)` suppresses the
             // line the runner would otherwise print, for a benchmark whose output IS its own table.
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_BENCH as u8, arg: 0, str_span: Span::empty() };
+            *out = Attr { kind: AttrKind::ATTR_BENCH as u8, str_span: Span::empty() };
             if syntax.has_args {
                 let mut ok = false;
                 if argc == 3 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && self.text_is(
@@ -4175,9 +3585,8 @@ extend Parser {
                     }
                 }
                 if !ok {
-                    self.errors.emit(
-                        ns.start(),
-                        ns.len(),
+                    self.errors.emit_span(
+                        ns.span(),
                         format("attribute '@bench' accepts only '(log_results = true)' or '(log_results = false)'"),
                     );
                 }
@@ -4194,7 +3603,7 @@ extend Parser {
             -1;
         };
         if syntax.parts == 1 && test_kind >= 0 {
-            *out = Attr { owner: NODE_NONE, kind: test_kind as u8, arg: 0, str_span: Span::empty() };
+            *out = Attr { kind: test_kind as u8, str_span: Span::empty() };
             if syntax.has_args {
                 let valid = argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && if test_kind == AttrKind::ATTR_TEST as i32 {
                     self.text_is(self.attr_arg(&syntax, 0), "should_panic");
@@ -4204,9 +3613,8 @@ extend Parser {
                 if valid {
                     out.arg = 1;
                 } else {
-                    self.errors.emit(
-                        ns.start(),
-                        ns.len(),
+                    self.errors.emit_span(
+                        ns.span(),
                         String::from_str(
                             if test_kind == AttrKind::ATTR_TEST as i32 {
                                 "attribute '@test' accepts only '(should_panic)'";
@@ -4219,28 +3627,13 @@ extend Parser {
             }
             return true;
         }
-        if syntax.parts == 1 && self.text_is(ns, "blocking") {
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_BLOCKING as u8, arg: 0, str_span: Span::empty() };
-            if syntax.has_args {
-                self.errors.emit(ns.start(), ns.len(), format("attribute '@blocking' takes no arguments"));
-            }
-            return true;
-        }
-        if syntax.parts == 1 && self.text_is(ns, "no_const") {
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_NO_CONST as u8, arg: 0, str_span: Span::empty() };
-            if syntax.has_args {
-                self.errors.emit(ns.start(), ns.len(), format("attribute '@no_const' takes no arguments"));
-            }
-            return true;
-        }
         if syntax.parts == 1 && self.text_is(ns, "derive") {
             // Sugar, fully expanded at parse: each listed interface becomes an empty
             // `extend T as I {}` sibling of the next struct/union/enum, which then INHERITS the
             // interface's default bodies. No Attr record survives -- the extends are the record.
             if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
-                self.errors.emit(
-                    ns.start(),
-                    ns.len(),
+                self.errors.emit_span(
+                    ns.span(),
                     format(
                         "attribute '@derive' requires an interface list, e.g. '@derive(Format)' or '@derive(Format, Hash)'",
                     ),
@@ -4261,11 +3654,7 @@ extend Parser {
                     }
                     if self.current < syntax.arg_end && !self.match(TokenType::Comma) {
                         let bad = self.raw_peek();
-                        self.errors.emit(
-                            bad.start(),
-                            bad.len(),
-                            format("expected ',' between '@derive' interface names"),
-                        );
+                        self.errors.emit_span(bad.span(), format("expected ',' between '@derive' interface names"));
                         break;
                     }
                 }
@@ -4278,9 +3667,8 @@ extend Parser {
             // `@reflect(label = "Speed", max = 100)`. Keys with no value read as `true`. Stored in
             // the metas side table; no Attr record survives.
             if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
-                self.errors.emit(
-                    ns.start(),
-                    ns.len(),
+                self.errors.emit_span(
+                    ns.span(),
                     format(
                         "attribute '@reflect' requires entries, e.g. '@reflect(hidden)' or '@reflect(label = \"x\", max = 100)'",
                     ),
@@ -4292,10 +3680,10 @@ extend Parser {
             while i < count {
                 let k = self.attr_arg(&syntax, i);
                 if k.kind() != TokenType::Identifier {
-                    self.errors.emit(k.start(), k.len(), format("expected a '@reflect' key name"));
+                    self.errors.emit_span(k.span(), format("expected a '@reflect' key name"));
                     break;
                 }
-                let mut ma = MetaAttr { owner: NODE_NONE, vkind: 0, ival: 1, key: k.span(), vspan: Span::empty() };
+                let mut ma = MetaAttr { ival: 1, key: k.span(), vspan: Span::empty() };
                 i = i + 1;
                 if i < count && self.attr_arg(&syntax, i).kind() == TokenType::Equal {
                     i = i + 1;
@@ -4322,9 +3710,8 @@ extend Parser {
                         } else {
                             syntax.name;
                         };
-                        self.errors.emit(
-                            at.start(),
-                            at.len(),
+                        self.errors.emit_span(
+                            at.span(),
                             format("a '@reflect' value is an integer, a string, 'true', or 'false'"),
                         );
                         break;
@@ -4335,7 +3722,7 @@ extend Parser {
                 if i < count {
                     if self.attr_arg(&syntax, i).kind() != TokenType::Comma {
                         let at = self.attr_arg(&syntax, i);
-                        self.errors.emit(at.start(), at.len(), format("expected ',' between '@reflect' entries"));
+                        self.errors.emit_span(at.span(), format("expected ',' between '@reflect' entries"));
                         break;
                     }
                     i = i + 1;
@@ -4344,35 +3731,33 @@ extend Parser {
             return false;
         }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
+            *out = Attr { kind: AttrKind::ATTR_PLATFORM as u8, str_span: Span::empty() };
             self.parse_axis_attr(&syntax, out, false);
             return true;
         }
         if syntax.parts == 1 && self.text_is(ns, "arch") {
-            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_ARCH as u8, arg: 0, str_span: Span::empty() };
+            *out = Attr { kind: AttrKind::ATTR_ARCH as u8, str_span: Span::empty() };
             self.parse_axis_attr(&syntax, out, true);
             return true;
         }
         if self.text_is(ns, "fmt") {
             if syntax.parts == 2 && self.text_is(syntax.name, "skip") {
-                *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_FMT_SKIP as u8, arg: 0, str_span: Span::empty() };
+                *out = Attr { kind: AttrKind::ATTR_FMT_SKIP as u8, str_span: Span::empty() };
                 if syntax.has_args {
-                    self.errors.emit(ns.start(), ns.len(), format("attribute '@fmt.skip' takes no arguments"));
+                    self.errors.emit_span(ns.span(), format("attribute '@fmt.skip' takes no arguments"));
                 }
                 return true;
             }
-            self.errors.emit(
-                syntax.name.start(),
-                syntax.name.len(),
+            self.errors.emit_span(
+                syntax.name.span(),
                 format("unknown attribute; the 'fmt' namespace supports only '@fmt.skip'"),
             );
             return false;
         }
         if !self.text_is(ns, "c") {
             if !self.bootstrap_tags {
-                self.errors.emit(
-                    ns.start(),
-                    ns.len(),
+                self.errors.emit_span(
+                    ns.span(),
                     format(
                         "unknown attribute '@{}'; pass --bootstrap-tags to accept unknown attributes",
                         diag::span_str(self.source, ns.start(), ns.end()),
@@ -4382,9 +3767,8 @@ extend Parser {
             return false;
         }
         if syntax.parts != 2 {
-            self.errors.emit(
-                syntax.name.start(),
-                syntax.name.len(),
+            self.errors.emit_span(
+                syntax.name.span(),
                 String::from_str(
                     if syntax.parts < 2 {
                         "expected an attribute name after '@c.'";
@@ -4400,9 +3784,8 @@ extend Parser {
         let kind = self.attr_kind_of(syntax.name, &mut wants_str, &mut wants_int);
         if kind < 0 {
             if !self.bootstrap_tags {
-                self.errors.emit(
-                    syntax.name.start(),
-                    syntax.name.len(),
+                self.errors.emit_span(
+                    syntax.name.span(),
                     format(
                         "unknown attribute '@c.{}'; pass --bootstrap-tags to accept unknown attributes",
                         diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
@@ -4416,12 +3799,11 @@ extend Parser {
             }
             return false;
         }
-        *out = Attr { owner: NODE_NONE, kind: kind as u8, arg: 0, str_span: Span::empty() };
+        *out = Attr { kind: kind as u8, str_span: Span::empty() };
         if wants_str || wants_int {
             if !syntax.has_args {
-                self.errors.emit(
-                    syntax.name.start(),
-                    syntax.name.len(),
+                self.errors.emit_span(
+                    syntax.name.span(),
                     format(
                         "attribute '@c.{}' requires an argument",
                         diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
@@ -4436,9 +3818,8 @@ extend Parser {
                 } else {
                     syntax.name;
                 };
-                self.errors.emit(
-                    t.start(),
-                    t.len(),
+                self.errors.emit_span(
+                    t.span(),
                     String::from_str(
                         if wants_int {
                             "expected an integer argument";
@@ -4456,9 +3837,8 @@ extend Parser {
                 }
             }
         } else if syntax.has_args {
-            self.errors.emit(
-                syntax.name.start(),
-                syntax.name.len(),
+            self.errors.emit_span(
+                syntax.name.span(),
                 format(
                     "attribute '@c.{}' takes no arguments",
                     diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
@@ -4481,7 +3861,7 @@ extend Parser {
         }
         attrs.reserve(expected);
         while self.check(TokenType::At) {
-            let mut attr = Attr { owner: NODE_NONE, kind: 0, arg: 0, str_span: Span::empty() };
+            let mut attr = Attr { str_span: Span::empty() };
             if self.parse_attribute(&mut attr) {
                 attrs.push(attr);
             }
@@ -4511,9 +3891,8 @@ extend Parser {
         for i in 0..self.pending_metas.len() {
             let mut ma = *self.pending_metas.at(i);
             if !ok {
-                self.errors.emit(
-                    ma.key.start,
-                    ma.key.end - ma.key.start,
+                self.errors.emit_span(
+                    ma.key,
                     format("'@reflect' applies to a struct, enum, field, variant, or function declaration"),
                 );
                 break;
@@ -4537,43 +3916,32 @@ extend Parser {
                 generic_aggregate = (d.kind == NodeKind::NODE_STRUCT || d.kind == NodeKind::NODE_ENUM) && d.as_data.aggregate.generics.len != 0;
             }
             if attr.kind == AttrKind::ATTR_BENCH as u8 && !valid_test {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("'@bench' may only be applied to a non-generic function"),
-                );
+                self.errors.emit_span(sp, format("'@bench' may only be applied to a non-generic function"));
             }
             if (attr.kind == AttrKind::ATTR_TEST as u8 || attr.kind == AttrKind::ATTR_TEST_INIT as u8 || attr.kind == AttrKind::ATTR_TEST_FREE as u8) && !valid_test {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
+                self.errors.emit_span(
+                    sp,
                     format("'@test' / '@test_init' / '@test_free' may only be applied to a non-generic function"),
                 );
             }
             if (attr.kind == AttrKind::ATTR_C_SOURCE as u8 || attr.kind == AttrKind::ATTR_C_LINK as u8) && (owner == NODE_NONE || self.ast.at_const(
                 owner,
             ).kind != NodeKind::NODE_EXTERN_BLOCK) {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
+                self.errors.emit_span(
+                    sp,
                     format("'@c.source' / '@c.link' may only be applied to an 'extern \"C\"' block"),
                 );
             }
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
                 owner,
             ).kind != NodeKind::NODE_ENUM) {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
+                self.errors.emit_span(
+                    sp,
                     format("'@no_const' may only be applied to a struct, union, or enum declaration"),
                 );
             }
             if attr.kind == AttrKind::ATTR_EMIT_MACRO as u8 && !generic_aggregate {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("'@emit_macro' may only be applied to a generic struct or enum"),
-                );
+                self.errors.emit_span(sp, format("'@emit_macro' may only be applied to a generic struct or enum"));
                 self.errors.note(
                     format("write it before a declaration like 'struct Box<T> {{ ... }}' or 'enum Option<T> {{ ... }}'"),
                 );
@@ -4601,12 +3969,10 @@ extend Parser {
             }
         }
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
-            Node {
-                kind: NodeKind::NODE_IMPORT,
-                span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { import_decl: ImportData { path: path, alias: alias, glob: glob } },
-            },
+        return self.fin(
+            NodeKind::NODE_IMPORT,
+            start,
+            NodeAs { import_decl: ImportData { path: path, alias: alias, glob: glob } },
         );
     }
 
@@ -4652,12 +4018,10 @@ extend Parser {
             }
         }
         let items = self.ast.commit(mark);
-        self.ast.root = self.ast.add(
-            Node {
-                kind: NodeKind::NODE_PROGRAM,
-                span: Span::new(0, self.source.len() as u32),
-                as_data: NodeAs { program: ProgramData { items: items } },
-            },
+        self.ast.root = self.mk(
+            NodeKind::NODE_PROGRAM,
+            Span::new(0, self.source.len() as u32),
+            NodeAs { program: ProgramData { items: items } },
         );
         self.errors.finalize(self.source, self.file);
     }
@@ -4674,7 +4038,7 @@ extend Parser {
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list.
 pub fn known_attributes(out: &mut Vector<String>) {
-    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip c.inline c.always_inline c.noinline c.cold c.noreturn c.packed c.used c.unused c.align c.export c.import c.section c.source c.link";
+    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip";
     let mut it = names.split(" ");
     loop {
         let w = it.next();
@@ -4683,21 +4047,62 @@ pub fn known_attributes(out: &mut Vector<String>) {
         }
         out.push(String::from_str(w.unwrap()));
     }
+    let t: []str = C_ATTR_NAMES;
+    for i in 0..t.len() {
+        let mut n = String::from_str("c.");
+        n.push_str(t[i]);
+        out.push(n);
+    }
 }
 
-/// The identifier vocabulary accepted inside `@platform(...)` (negatable with '!').
-pub fn platform_arg_names(out: &mut Vector<String>) {
-    out.push(String::from_str("macos"));
-    out.push(String::from_str("linux"));
-    out.push(String::from_str("windows"));
-    out.push(String::from_str("wasm"));
-    out.push(String::from_str("ios"));
-    out.push(String::from_str("android"));
-}
+// The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
+// `align` takes an integer, the rest take a string.
+const C_ATTR_NAMES: [str<'static>; 14] = [
+    "inline",
+    "always_inline",
+    "noinline",
+    "cold",
+    "noreturn",
+    "packed",
+    "used",
+    "unused",
+    "align",
+    "export",
+    "import",
+    "section",
+    "source",
+    "link",
+];
+const C_ATTR_ALIGN: usize = 8;
+const C_ATTR_KINDS: [AttrKind; 14] = [
+    AttrKind::ATTR_INLINE,
+    AttrKind::ATTR_ALWAYS_INLINE,
+    AttrKind::ATTR_NOINLINE,
+    AttrKind::ATTR_COLD,
+    AttrKind::ATTR_NORETURN,
+    AttrKind::ATTR_PACKED,
+    AttrKind::ATTR_USED,
+    AttrKind::ATTR_UNUSED,
+    AttrKind::ATTR_ALIGN,
+    AttrKind::ATTR_EXPORT,
+    AttrKind::ATTR_IMPORT,
+    AttrKind::ATTR_SECTION,
+    AttrKind::ATTR_C_SOURCE,
+    AttrKind::ATTR_C_LINK,
+];
 
-/// The identifier vocabulary accepted inside `@arch(...)`.
-pub fn arch_arg_names(out: &mut Vector<String>) {
-    out.push(String::from_str("x86_64"));
-    out.push(String::from_str("aarch64"));
-    out.push(String::from_str("wasm32"));
+/// The identifiers accepted inside `@platform(...)` (negatable with '!'). The index of a name is
+/// its bit in the platform mask.
+const PLATFORM_NAMES: [str<'static>; 6] = ["windows", "macos", "linux", "wasm", "ios", "android"];
+
+/// The identifiers accepted inside `@arch(...)`. The index of a name is its bit in the arch mask.
+const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
+
+/// The identifiers accepted inside `@arch(...)` (`is_arch`) or `@platform(...)`.
+pub fn axis_names(is_arch: bool) []str {
+    return if is_arch {
+        ARCH_NAMES;
+    } else {
+        PLATFORM_NAMES;
+    };
 }

@@ -83,7 +83,6 @@ Each `Projection` carries the type **after** it applies.
 | `OP_COPY` | Read a place (`data` = PlaceId) |
 | `OP_MOVE` | Read and consume (`user_moves` marks user-visible consumptions) |
 | `OP_CONST` | `data` = ConstId |
-| `OP_ITEM` | A function/constant item value (ConstId carrying the DefId) |
 
 `Constant` kinds: `CK_INT`, `CK_FLOAT` (raw span keeps the literal spelling), `CK_BOOL`,
 `CK_STR`, `CK_UNIT`, `CK_ITEM` (resolved DefId + bound generic args in `targ_pool`; the range is packed into

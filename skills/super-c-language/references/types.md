@@ -40,6 +40,13 @@ cross-kind casts.
 - Shifts past the bit width and `MIN / -1` for signed types **trap** (undefined behavior
   in C is a defined compile error or runtime trap here).
 - Division uses explicit rounding operations when the rule matters.
+- `usize`/`isize` have the target's pointer width (32 bits on wasm32), in compile-time evaluation
+  too.
+
+Every built-in integer has `trailing_zeros()`, `leading_zeros()` and `count_ones()`, returning
+`usize` (the `UInt`/`Int` convention); a zero input gives the bit width, and a signed value counts
+its two's complement pattern. They lower to the C compiler's bit-count builtins (`std/bits.h`) and
+evaluate at compile time, also inside a `const fn`.
 
 ## Struct Layout
 
@@ -61,7 +68,9 @@ with `static_assert(sizeof(T) == N, "...")`.
 | `alignof(T)` | Alignment |
 
 Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` lowers to
-`const T*` in C; `&mut T` lowers to `T*`.
+`const T*` in C; `&mut T` lowers to `T*`. `&&T` and `&&x` are two references (`& &T`,
+`&(&x)`). Indexing a reference to an array (`r[i]` for `r: &[T; N]`) indexes the array, with
+the array's rules; it assigns only through `&mut`.
 
 ## Generics
 
@@ -94,9 +103,14 @@ ownership section of the skill) makes it copyable.
 | `Box<dyn fn(i32) i32>` | Owned dyn closure |
 
 Capture rules:
-- **Read**: value copied at closure creation (default).
-- **Mutated**: body assigns/borrows mutably → implicit `&mut` capture. Outer must be `mut`.
+- **Read**: value copied at closure creation (default); a fixed-size array copies whole.
+- **Mutated**: body assigns, borrows mutably or calls a `&mut self` method on a non-`Free`
+  capture → implicit `&mut` capture. Outer must be `mut`. The outer binding stays mutably
+  borrowed while the closure lives.
 - **Owned**: body uses a `Free` value → moved into env. Closure becomes `Free`.
+- **Borrowed**: the closure meets a plain `F: fn(..)` bound → its `Free` captures are borrowed
+  (`&`, or `&mut` when mutated) and the closure owns nothing. The outer binding stays borrowed
+  (not moved) while the closure lives. A closure with a `&mut` capture is not `Sync`.
 
 ## Trait Objects (dyn)
 
@@ -136,7 +150,14 @@ First-class values, 2–4 elements. Lower to prelude `Tuple2`..`Tuple4`.
 let t = ((1, true), 2);
 let a = t.1;          // access by index
 let b = (t.0).1;      // nested access needs parens
+let c = switch t {    // tuple patterns: nested patterns, literals, `_`, `mut` bindings
+    ((1, true), n) => n,
+    ((_, _), _) => 0,
+};
 ```
+
+A tuple pattern `(p0, p1, ..)` also works in `if let` and `while let`; the element count must
+match the tuple's arity.
 
 ## Unions
 

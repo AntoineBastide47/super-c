@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 4;
+const TUC_VER: u32 = 5;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -33,18 +33,6 @@ const fn fnv_mix(h: u64, v: u64) u64 {
     x = (x ^ v >> 48 & 0xFF) * 1099511628211u64;
     x = (x ^ v >> 56 & 0xFF) * 1099511628211u64;
     return x;
-}
-
-fn fnv_str(h: u64, s: str) u64 {
-    let mut x = h;
-    for k in 0..s.len() {
-        x = (x ^ s.byte_at(k) as u64) * 1099511628211u64;
-    }
-    return x;
-}
-
-fn w8(o: &mut String, v: u8) {
-    o.push_byte(v);
 }
 
 fn w32(o: &mut String, v: u32) {
@@ -97,8 +85,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     if mt == 0 {
         return 0;
     }
-    let mut h = 1469598103934665603u64;
-    h = fnv_str(h, ep);
+    let mut h = FNV_BASIS;
+    h = fnv_cont(h, ep);
     h = fnv_mix(h, mt as u64);
     h = fnv_mix(h, TUC_VER);
     // Emission-mode switches change the C a body renders to: a record written under one mode
@@ -106,32 +94,18 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     for i in 0..inl::EMIT_MODE_ENV_N {
         let e = stdlib::getenv(inl::emit_mode_env(i));
         if e != null {
-            h = fnv_str(h, str::from_cstr(e));
+            h = fnv_cont(h, str::from_cstr(e));
             h = fnv_mix(h, 101 + i as u64);
         }
     }
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
-    h = fnv_mix(
-        h,
-        if p.bootstrap {
-            1u64;
-        } else {
-            0 as u64;
-        },
-    );
+    h = fnv_mix(h, p.bootstrap as u64);
     h = fnv_mix(h, p.modules.len() as u64);
     // The ordered path list: prefixing (`user_mods > 1`), short-prefix collisions and ModuleId
     // numbering are all pure functions of it.
     for i in 0..p.modules.len() {
-        h = fnv_str(h, p.modules[i].path.as_str());
-        h = fnv_mix(
-            h,
-            if p.modules[i].has_ast {
-                1u64;
-            } else {
-                0 as u64;
-            },
-        );
+        h = fnv_cont(h, p.modules[i].path.as_str());
+        h = fnv_mix(h, p.modules[i].has_ast as u64);
     }
     // The extend surface: method_by_name resolves first-match over EVERY module's extends, so a
     // method added or renamed anywhere may respell calls in modules that never import it.
@@ -148,14 +122,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                 continue;
             }
             h = fnv_mix(h, i as u64 ^ 0xE0);
-            h = fnv_mix(
-                h,
-                if n.as_data.extend_def.interface_type != NODE_NONE {
-                    1u64;
-                } else {
-                    0 as u64;
-                },
-            );
+            h = fnv_mix(h, (n.as_data.extend_def.interface_type != NODE_NONE) as u64);
             let tg = a.resolution_def(n.as_data.extend_def.target_type);
             h = fnv_mix(h, tg.module);
             if tg.node != NODE_NONE {
@@ -164,7 +131,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                 if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
                     {
                         let sp9 = da.at_const(dn.as_data.aggregate.name).as_data.name.text;
-                        h = fnv_str(
+                        h = fnv_cont(
                             h,
                             p.modules[tg.module as usize].source.as_str().slice(sp9.start as usize, sp9.end as usize),
                         );
@@ -181,7 +148,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                 if mn.kind == NodeKind::NODE_FUNCTION {
                     {
                         let sp9 = a.at_const(mn.as_data.function.name).as_data.name.text;
-                        h = fnv_str(h, p.modules[i].source.as_str().slice(sp9.start as usize, sp9.end as usize));
+                        h = fnv_cont(h, p.modules[i].source.as_str().slice(sp9.start as usize, sp9.end as usize));
                     }
                 }
             }
@@ -210,7 +177,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         loop {
             switch it.next() {
                 Some(e) => {
-                    acc = acc ^ fnv_mix(1469598103934665603u64, *e);
+                    acc = acc ^ fnv_mix(FNV_BASIS, *e);
                 },
                 _ => {
                     break;
@@ -228,7 +195,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     let n = p.modules.len();
     let mut srch = Vector::<u64>::new();
     for i in 0..n {
-        srch.push(fnv_str(1469598103934665603u64, p.modules[i].source.as_str()));
+        srch.push(fnv_cont(FNV_BASIS, p.modules[i].source.as_str()));
     }
     let mut inq = Vector::<u8>::new();
     inq.resize_default(n);
@@ -261,9 +228,9 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
                 }
             }
         }
-        let mut h = 1469598103934665603u64;
+        let mut h = FNV_BASIS;
         h = fnv_mix(h, m as u64);
-        h = fnv_str(h, p.modules[m].path.as_str());
+        h = fnv_cont(h, p.modules[m].path.as_str());
         for i in 0..n {
             if *inq.at(i) != 0 {
                 h = fnv_mix(h, i as u64);
@@ -285,7 +252,8 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
 }
 
 /// Open the cache for this build: compute every live module's key, load the previous image from
-/// `gen_root`, and mark the modules whose sections still match. Off when SC_NO_TU_CACHE is set.
+/// `gen_root`, and mark the modules whose sections still match. Off when SC_NO_TU_CACHE is set, which
+/// also removes an existing image.
 pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str) Tuc {
     let mut t = Tuc {
         on: false,
@@ -299,12 +267,18 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
         path: String::new(),
     };
     let n = p.modules.len();
-    for _i in 0..n {
-        t.hit.push(false);
-        t.soff.push(0);
-        t.slen.push(0);
+    t.hit.resize_default(n);
+    t.soff.resize_default(n);
+    t.slen.resize_default(n);
+    if gen_root.len() == 0 || n == 0 {
+        return t;
     }
-    if stdlib::getenv("SC_NO_TU_CACHE") != null || gen_root.len() == 0 || n == 0 {
+    if stdlib::getenv("SC_NO_TU_CACHE") != null {
+        // Remove the image an earlier cached build left: prune_orphans keeps every non-C file, so
+        // the tree would otherwise hold a cache this build did not produce.
+        let mut old = String::from_str(gen_root);
+        old.push_str("/.tu_cache");
+        let _ = unsafe shim::sc_unlink(old.cstr());
         return t;
     }
     t.hdr = header_hash(p, target);
@@ -397,31 +371,17 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
     let k = ty.kind;
     if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         let er = tt_ref(p, r, am, ty.as_data.elem);
-        w8(&mut r.tab, TT_WRAP);
-        w8(&mut r.tab, k as u8);
-        w8(&mut r.tab, ty.qualifier);
-        w8(
-            &mut r.tab,
-            if ty.concrete {
-                1u8;
-            } else {
-                0 as u8;
-            },
-        );
+        r.tab.push_byte(TT_WRAP);
+        r.tab.push_byte(k as u8);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, er);
     } else if k == TypeKind::TYPE_ARRAY {
         let er = tt_ref(p, r, am, ty.as_data.arr.elem);
-        w8(&mut r.tab, TT_ARR);
-        w8(&mut r.tab, ty.qualifier);
-        w8(
-            &mut r.tab,
-            if ty.concrete {
-                1u8;
-            } else {
-                0 as u8;
-            },
-        );
+        r.tab.push_byte(TT_ARR);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, er);
         w32(&mut r.tab, ty.as_data.arr.len);
@@ -431,51 +391,30 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         for i in 0..it.n {
             ar[i as usize] = tt_ref(p, r, am, unsafe it.args[i as usize]);
         }
-        w8(&mut r.tab, TT_INST);
-        w8(&mut r.tab, k as u8);
-        w8(&mut r.tab, ty.qualifier);
-        w8(
-            &mut r.tab,
-            if ty.concrete {
-                1u8;
-            } else {
-                0 as u8;
-            },
-        );
+        r.tab.push_byte(TT_INST);
+        r.tab.push_byte(k as u8);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, it.module);
         w32(&mut r.tab, it.decl);
-        w8(&mut r.tab, it.n);
+        r.tab.push_byte(it.n);
         for i in 0..it.n {
             w32(&mut r.tab, ar[i as usize]);
         }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         let orf = tt_ref(p, r, am, ty.as_data.proj.owner);
-        w8(&mut r.tab, TT_PROJ);
-        w8(&mut r.tab, ty.qualifier);
-        w8(
-            &mut r.tab,
-            if ty.concrete {
-                1u8;
-            } else {
-                0 as u8;
-            },
-        );
+        r.tab.push_byte(TT_PROJ);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, orf);
         w32(&mut r.tab, ty.as_data.proj.binder);
     } else if k == TypeKind::TYPE_CONST_EXPR {
         let l = *a.const_lin_at(ty.as_data.inst);
-        w8(&mut r.tab, TT_LIN);
-        w8(&mut r.tab, ty.qualifier);
-        w8(
-            &mut r.tab,
-            if ty.concrete {
-                1u8;
-            } else {
-                0 as u8;
-            },
-        );
+        r.tab.push_byte(TT_LIN);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w64(&mut r.tab, l.k as u64);
         w64(&mut r.tab, l.div_of() as u64);
@@ -487,7 +426,7 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         }
     } else {
         // Nominal / leaf payloads carry no pool-relative data: raw bytes round-trip.
-        w8(&mut r.tab, TT_RAW);
+        r.tab.push_byte(TT_RAW);
         let tp = ((&ty) as *const Ty) as *const u8;
         for b in 0..sizeof(Ty) {
             r.tab.push_byte(unsafe tp[b]);
@@ -606,7 +545,7 @@ fn ev_tr(
 ) {
     *b_out = ev.b;
     *d_out = ev.d;
-    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE {
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
         *d_out = tt_ref(p, r, ev.a as ModuleId, ev.d);
     } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
         *b_out = tt_ref(p, r, ev.a as ModuleId, ev.b);
@@ -641,10 +580,7 @@ const fn tt_ref_ok(tab: &Vector<TtEnt>, r: u32) bool {
 
 // Every table ref `ev_patch` rewrites is in range.
 fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
-    if (ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(
-        tab,
-        ev.d,
-    ) {
+    if (ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(tab, ev.d) {
         return false;
     }
     if (ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(
@@ -676,7 +612,7 @@ pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u
     if !ev_refs_ok(tab, ev) {
         return false;
     }
-    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE {
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
         ev.d = tt_id(p, tab, cache, ev.d, ev.a as ModuleId);
     } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
         ev.b = tt_id(p, tab, cache, ev.b, ev.a as ModuleId);
@@ -713,7 +649,7 @@ fn ser_ev_tr(
     xs.truncate(0);
     sat.truncate(0);
     ev_tr(p, r, ev, &mut b, &mut d, xs, sat);
-    w8(o, ev.kind);
+    o.push_byte(ev.kind);
     w32(o, ev.a);
     w32(o, b);
     w32(o, ev.c);
@@ -747,7 +683,7 @@ pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, fr
         let ev = evs.at(i);
         if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
             // Chunk text lives in the bodies buffer at record time (a/b are its bounds).
-            w8(&mut eb, ev.kind);
+            eb.push_byte(ev.kind);
             w32(&mut eb, 0);
             w32(&mut eb, 0);
             w32(&mut eb, 0);

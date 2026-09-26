@@ -348,12 +348,8 @@ extend Proj {
         );
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
-        if env.len() == 0 {
-            return exec(&base[0], &op[0]);
-        }
-        let mut envb = Path512 {};
-        unsafe stdio::snprintf(&mut envb[0], 512, "%.*s".ptr() as *const char, env.len() as i32, env.ptr());
-        return exec_env(&base[0], &op[0], &envb[0]);
+        let mut envb = cache_env(str::from_cstr(self.rootp()), env);
+        return exec_env(&base[0], &op[0], envb.cstr());
     }
 
     /// Run the compiler on `mainrel`, capturing output.
@@ -375,7 +371,8 @@ extend Proj {
         );
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
-        return exec(&base[0], &op[0]);
+        let mut envb = cache_env(str::from_cstr(self.rootp()), "");
+        return exec_env(&base[0], &op[0], envb.cstr());
     }
 
     // Append every `*.c` under `dir` (recursively) to `out`, each double-quoted: the `find` a shell
@@ -590,16 +587,32 @@ extend Proj as Free {
     }
 }
 
-/// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
-/// object-cache tests need: the engine resolves build.toml from its working directory and the cache
+/// `env` ("NAME=VALUE" pairs, space separated) with the build cache set under the scratch directory
+/// `root` unless `env` sets one: a compiler the harness runs never writes into the user's global
+/// cache, and the cache goes away with the scratch directory.
+pub fn cache_env(root: str, env: str) String {
+    let mut out = String::new();
+    if env.find("SC_CACHE_DIR=") < 0 {
+        out.format_into("SC_CACHE_DIR={}/.sccache", root);
+        if env.len() != 0 {
+            out.push_byte(b' ');
+        }
+    }
+    out.push_str(env);
+    return out;
+}
+
+/// Run the compiler under test FROM `dir` with one environment variable set (and the build cache under
+/// `dir`, see `cache_env`): the shape the global object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,
 /// so the directory moves via chdir (the runner restores it after the test) and the
 /// variable rides sc_run's env parameter. superc_path() resolves before the chdir moves ".".
 pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
     let mut cmd = String::new();
     cmd.format_into("\"{}\" {}", superc_path(), args);
-    let mut env = String::new();
-    env.format_into("{}={}", key, val);
+    let mut kv = String::new();
+    kv.format_into("{}={}", key, val);
+    let mut env = cache_env(dir, kv.as_str());
     let mut op = String::new();
     op.format_into("{}/.envout", dir);
     let mut d = String::from_str(dir);

@@ -254,8 +254,10 @@ fn transpile_once() Timing {
         demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
         // Write the whole package to the sink FILE exactly as a build does, so out_bytes is real.
         unsafe stdio::fwrite(o.fwd_h.as_ptr(), 1, o.fwd_h.len(), f);
+        for d in 0..o.defs_h.len() {
+            unsafe stdio::fwrite(o.defs_h.at(d).as_ptr(), 1, o.defs_h.at(d).len(), f);
+        }
         for m in 0..n {
-            unsafe stdio::fwrite(o.types_h.at(m).as_ptr(), 1, o.types_h.at(m).len(), f);
             unsafe stdio::fwrite(o.protos_h.at(m).as_ptr(), 1, o.protos_h.at(m).len(), f);
         }
         for m in 0..n {
@@ -465,18 +467,16 @@ fn real_build(js: &mut String) bool {
     let mut bin = dir.clone();
     bin.push_str("/super-c");
     bst::arm();
-    let rc = bsys::manifest_build(
-        &m,
-        "dev",
-        bin.as_str(),
-        jobs,
-        STD_DIR,
-        0,
-        0,
-        unsafe dshim::sc_host_platform(),
-        false,
-        true,
-    );
+    let cx = bsys::BuildCtx {
+        jobs: jobs,
+        std_dir: STD_DIR,
+        ce_steps: 0,
+        ce_mem: 0,
+        target: unsafe dshim::sc_host_platform(),
+        bootstrap_tags: false,
+        lint: true,
+    };
+    let rc = bsys::manifest_build(&m, "dev", bin.as_str(), &cx);
     let gp = bst::last();
     if gp == null {
         eprintln("bench: the build produced no statistics record");

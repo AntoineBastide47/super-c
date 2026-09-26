@@ -57,7 +57,7 @@ fn rollback_restores_every_cell(fx: &mut Fx) {
     fx.sv.bind(v, i64t);
     fx.sv.s_cval(c, 2);
     fx.sv.s_cval(c, 3);
-    fx.sv.s_lb(t, i64t, 1);
+    fx.sv.s_lb(t, i64t);
     assert_eq(fx.sv.cconflicts.len(), 1);
     fx.sv.rollback(&snap);
     let after = fx.sv.snapshot();
@@ -79,15 +79,15 @@ fn nested_session_keeps_the_outer_one(fx: &mut Fx) {
     fx.sv.session_begin();
     let t = fx.sv.map_param(DefId { module: 0, node: 5 }, false);
     let u = fx.sv.map_param(DefId { module: 0, node: 6 }, false);
-    fx.sv.s_lb(u, i64t, 1);
+    fx.sv.s_lb(u, i64t);
     // A call checked inside the outer call (a postponed closure body) runs its own session.
     let outer = fx.sv.session_open();
     fx.sv.session_begin();
     let a = fx.sv.map_param(DefId { module: 0, node: 7 }, false);
     assert_eq(a, 0);
     assert_eq(fx.sv.slot_of(DefId { module: 0, node: 5 }), -1);
-    fx.sv.s_lb(a, boolt, 2);
-    fx.sv.s_lb(a, i32t, 3);
+    fx.sv.s_lb(a, boolt);
+    fx.sv.s_lb(a, i32t);
     assert_eq(fx.sv.s_resolve(a, test_conv), TYPE_NONE);
     assert_eq(fx.sv.type_conflicts.len(), 1);
     fx.sv.session_close(&outer);
@@ -107,7 +107,7 @@ fn const_conflicts_are_recorded(fx: &mut Fx) {
     assert(fx.sv.cbind(c, two), "first const value binds");
     assert(!fx.sv.cbind(c, three), "a later disagreeing value is a conflict");
     assert_eq(fx.sv.cconflicts.len(), 1);
-    assert_eq(fx.sv.cconflicts[0].old, two);
+    assert_eq(fx.sv.cconflicts[0].first, two);
     assert_eq(fx.sv.cconflicts[0].later, three);
     assert(fx.sv.cbind(c, two), "the equal value still binds");
 }
@@ -120,14 +120,14 @@ fn session_join_is_order_independent(fx: &mut Fx) {
     // Order 1: i32 evidence then i64.
     fx.sv.session_begin();
     let s1 = fx.sv.map_param(d, false);
-    fx.sv.s_lb(s1, i32t, 1);
-    fx.sv.s_lb(s1, i64t, 2);
+    fx.sv.s_lb(s1, i32t);
+    fx.sv.s_lb(s1, i64t);
     let r1 = fx.sv.s_resolve(s1, test_conv);
     // Order 2: i64 evidence then i32.
     fx.sv.session_begin();
     let s2 = fx.sv.map_param(d, false);
-    fx.sv.s_lb(s2, i64t, 1);
-    fx.sv.s_lb(s2, i32t, 2);
+    fx.sv.s_lb(s2, i64t);
+    fx.sv.s_lb(s2, i32t);
     let r2 = fx.sv.s_resolve(s2, test_conv);
     assert_eq(r1, i64t);
     assert_eq(r2, i64t);
@@ -143,13 +143,13 @@ fn session_explicit_wins_and_conflict_stays_unresolved(fx: &mut Fx) {
     fx.sv.session_begin();
     let s1 = fx.sv.map_param(d, false);
     fx.sv.s_explicit(s1, i64t);
-    fx.sv.s_lb(s1, i32t, 1);
+    fx.sv.s_lb(s1, i32t);
     assert_eq(fx.sv.s_resolve(s1, test_conv), i64t);
     // Incomparable evidence has no source-order fallback.
     fx.sv.session_begin();
     let s2 = fx.sv.map_param(d, false);
-    fx.sv.s_lb(s2, boolt, 1);
-    fx.sv.s_lb(s2, i32t, 2);
+    fx.sv.s_lb(s2, boolt);
+    fx.sv.s_lb(s2, i32t);
     assert_eq(fx.sv.s_resolve(s2, test_conv), TYPE_NONE);
     assert_eq(fx.sv.type_conflicts.len(), 1);
 }

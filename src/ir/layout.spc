@@ -72,11 +72,26 @@ pub struct EnumLayout {
 // argument) reaches it; the walk then fails instead of exhausting the stack.
 const MAX_DEPTH: i32 = 1024;
 
-const fn round_up(v: u64, a: u64) u64 {
+/// `v` rounded up to a multiple of `a` (`a` <= 1: `v`).
+pub const fn round_up(v: u64, a: u64) u64 {
     if a <= 1 {
         return v;
     }
     return (v + a - 1) / a * a;
+}
+
+/// The frame that binds instance `it`'s arguments (types of module `argm`) to the generic
+/// parameters of its declaration in `da`, below `parent`.
+pub fn inst_frame(da: &Ast, it: &TyInstance, argm: ModuleId, parent: *const LayoutEnv) LayoutEnv {
+    let gens = da.at_const(it.decl).as_data.aggregate.generics;
+    let mut frame = LayoutEnv { parent: parent, penv: parent, pmod: it.module, params: da.list(gens), argm: argm, n: 0 };
+    let mut i: u32 = 0;
+    while i < gens.len && i as u8 < it.n && frame.n < 8 {
+        unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
+        frame.n = frame.n + 1;
+        i = i + 1;
+    }
+    return frame;
 }
 
 pub struct Svc {
@@ -116,14 +131,7 @@ extend Svc {
     }
 
     fn attr(self: &Self, m: ModuleId, decl: NodeId, kind: AttrKind) *const Attr {
-        let ap = self.p().module_ast_const(m);
-        let ast = unsafe &*ap;
-        for i in 0..ast.attrs.len() {
-            if ast.attrs.at(i).owner == decl && ast.attrs.at(i).kind == kind as u8 {
-                return ast.attrs.at(i);
-            }
-        }
-        return null;
+        return self.a(m).attr_of(decl, kind);
     }
 
     // A member type node's recorded type (TYPE_NONE when the checker recorded none).
@@ -366,15 +374,7 @@ extend Svc {
             if !self.has_ast(it.module) {
                 return Layout { ok: false };
             }
-            let da = self.a(it.module);
-            let gens = da.at_const(it.decl).as_data.aggregate.generics;
-            let mut frame = LayoutEnv { parent: env, penv: env, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
-            let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && frame.n < 8 {
-                unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
-                frame.n = frame.n + 1;
-                i = i + 1;
-            }
+            let frame = inst_frame(self.a(it.module), &it, m, env);
             return self.aggregate_layout(it.module, it.decl, &frame, depth + 1);
         }
         return Layout { ok: false };
@@ -473,14 +473,7 @@ extend Svc {
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
         let ms = ast.at_const(dn).as_data.aggregate.members;
-        let mut payload = false;
-        for i in 0..ms.len {
-            let mid = unsafe ast.list(ms)[i as usize];
-            if ast.at_const(mid).as_data.variant.payload.len > 0 {
-                payload = true;
-            }
-        }
-        if !payload {
+        if !ast.enum_has_payload(dn) {
             return EnumLayout { ok: true, payload_off: 0, size: 4, align: 4 };
         }
         let mut un = LayoutAcc { is_union: true };
@@ -538,16 +531,7 @@ extend Svc {
             let it = *self.a(m).instance(y.as_data.inst);
             dm = it.module;
             dn = it.decl;
-            let da = self.a(dm);
-            let gens = da.at_const(dn).as_data.aggregate.generics;
-            frame.pmod = dm;
-            frame.params = da.list(gens);
-            let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && frame.n < 8 {
-                unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
-                frame.n = frame.n + 1;
-                i = i + 1;
-            }
+            frame = inst_frame(self.a(dm), &it, m, null);
             env = &frame;
         } else {
             return -1;
@@ -571,12 +555,7 @@ extend Svc {
             if !is_tuple && ast.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let ftn = if is_tuple {
-                fid;
-            } else {
-                ast.at_const(fid).as_data.field.ty;
-            };
-            let fl = self.member_layout(dm, ftn, env, 1);
+            let fl = self.member_layout(dm, ast.member_type_node(fid, is_tuple), env, 1);
             if !fl.ok {
                 return -1;
             }
@@ -605,14 +584,7 @@ extend Svc {
             if da.at_const(it.decl).kind != NodeKind::NODE_ENUM {
                 return EnumLayout { ok: false };
             }
-            let gens = da.at_const(it.decl).as_data.aggregate.generics;
-            let mut frame = LayoutEnv { parent: null, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
-            let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && frame.n < 8 {
-                unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
-                frame.n = frame.n + 1;
-                i = i + 1;
-            }
+            let frame = inst_frame(da, &it, m, null);
             return self.enum_shape(it.module, it.decl, &frame, 0);
         }
         return EnumLayout { ok: false };

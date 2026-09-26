@@ -12,6 +12,7 @@
 // -MMD/-c/-o are assumed, so MSVC's cl.exe is out of contract and has no /showIncludes lane.
 import stdio;
 import stdlib;
+import time;
 import driver_shim as shim;
 import driver::stats as bst;
 import std::parallel::platform as platform;
@@ -22,6 +23,7 @@ import ir::interp as iri;
 import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
+import lsp::json as json;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
 const LOG_LIMIT: usize = 65536;
@@ -60,21 +62,9 @@ fn cat_file_bounded(path: str, limit: usize) {
 
 // Recursively collect regular files under dir as paths relative to `base` (no leading '/').
 fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
-        return;
-    }
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        if unsafe nm[0] == '.' as char {
-            continue;
-        }
-        let mut p = loader::join2(dir, str::from_cstr(nm));
+    let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let mut p = loader::join2(dir, names.at(i).as_str());
         if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
             walk_files(p.as_str(), base_len, out);
         } else {
@@ -82,7 +72,22 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
             out.push(String::from_str(full.slice(base_len + 1, full.len())));
         }
     }
-    unsafe shim::sc_closedir(dh);
+}
+
+// `walk_files` over a generated tree: a `.c` or `.h` name there is a file, so only other names cost
+// a stat (the tree holds one definition header per type).
+fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
+    let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let nm = names.at(i).as_str();
+        let mut p = loader::join2(dir, nm);
+        if !nm.ends_with(".c") && !nm.ends_with(".h") && unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+            walk_gen_files(p.as_str(), base_len, out);
+        } else {
+            let full = p.as_str();
+            out.push(String::from_str(full.slice(base_len + 1, full.len())));
+        }
+    }
 }
 
 fn contains(v: &Vector<String>, s: str) bool {
@@ -102,25 +107,10 @@ pub fn rm_rf(path: str) {
     if isdir == 2 {
         unsafe shim::sc_rmdir(p.cstr());
     } else if isdir == 1 {
-        let dh = unsafe shim::sc_opendir(p.cstr());
-        if dh != null {
-            let mut names = Vector::<String>::new();
-            loop {
-                let e = unsafe shim::sc_readdir(dh);
-                if e == null {
-                    break;
-                }
-                let nm = unsafe shim::sc_dirent_name(e);
-                if unsafe nm[0] == '.' as char && (unsafe nm[1] == 0 as char || unsafe nm[1] == '.' as char && unsafe nm[2] == 0 as char) {
-                    continue;
-                }
-                names.push(String::from_cstr(nm));
-            }
-            unsafe shim::sc_closedir(dh);
-            for i in 0..names.len() {
-                let c = loader::join2(path, names.at(i).as_str());
-                rm_rf(c.as_str());
-            }
+        let names = list_dir(path, true).unwrap_or(Vector::<String>::new());
+        for i in 0..names.len() {
+            let c = loader::join2(path, names.at(i).as_str());
+            rm_rf(c.as_str());
         }
         unsafe shim::sc_rmdir(p.cstr());
     } else if isdir == 0 {
@@ -134,12 +124,30 @@ pub fn rm_rf(path: str) {
 
 // The global object cache: ~/.super-c/cache, content-addressed
 // A translation unit whose C text, quoted-include closure, compiler version and flags all match a
-// previous compile (in ANY project on this machine) reuses that compile's object instead of
-// running the C compiler again. The key hashes CONTENT, never paths, so the cache needs no
-// invalidation story: different content is a different key. System headers (<...>) are outside the
-// key; the compiler-version fingerprint stands in for them, the same bet ccache's direct mode makes.
+// previous compile of the same local object tree reuses that compile's object instead of running
+// the C compiler again. The key hashes content, so the cache needs no invalidation story: different
+// content is a different key. The content includes paths: every unit includes __sc_fwd.h, which
+// names the runtime headers by absolute path, so a tree at another path gets other keys. System
+// headers (<...>) are outside the key; the compiler-version fingerprint stands in for them, the same
+// bet ccache's direct mode makes.
+//
+// Retention: each local object tree (a profile directory such as build/dev) owns the namespace
+// `<root>/o/<hash of its real path>`. A successful build writes the key set of its units as a
+// generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
+// every object and dependency list no kept generation names (`obj_cache_commit`). A daily sweep
+// removes dead namespaces and idle linker caches (`cache_sweep`).
 
-/// The object cache directory (the cache root itself); empty = caching disabled (SC_NO_CACHE set,
+/// The generations an object cache namespace keeps: the current build and three older ones.
+const OBJ_GENS: usize = 4;
+/// A namespace whose owner directory exists is removed after this many seconds with no entry
+/// changed (a build refreshes its current generation at most daily).
+const OBJ_NS_IDLE: i64 = 30 * 86400;
+/// A linker cache namespace is removed after this many seconds with no entry written or used.
+const LTO_NS_IDLE: i64 = 7 * 86400;
+/// A temp file an interrupted install left behind is removed after this many seconds.
+const TMP_IDLE: i64 = 3600;
+
+/// The object cache root: the build cache root, or empty when caching is disabled (SC_NO_CACHE set,
 /// or no resolvable home).
 pub fn object_cache_dir() String {
     let off = stdlib::getenv("SC_NO_CACHE");
@@ -150,7 +158,7 @@ pub fn object_cache_dir() String {
 }
 
 /// The build cache root: $SC_CACHE_DIR, else <home>/.super-c/cache; empty when no home resolves.
-/// Objects live directly below it, the linker's ThinLTO caches under `lto/<namespace>`.
+/// Objects live under `o/<namespace>`, the linker's ThinLTO caches under `lto/<namespace>`.
 pub fn cache_root() String {
     let dir = stdlib::getenv("SC_CACHE_DIR");
     if dir != null && unsafe *dir != 0 as char {
@@ -168,15 +176,248 @@ pub fn cache_root() String {
     return out;
 }
 
-// Two independent mixing lanes: an object served for the WRONG key would be a silent mislink, so the
-// key is 128 bits, not 64.
-const fn ch_mix(h: u64, v: u64) u64 {
-    let mut x = (h ^ v) * 1099511628211u64;
-    x = (x ^ x >> 30) * 0xBF58476D1CE4E5B9u64;
-    x = (x ^ x >> 27) * 0x94D049BB133111EBu64;
-    return x ^ x >> 31;
+/// The real path of `p`; empty when it does not resolve.
+fn real_path(p: str) String {
+    let mut buf = PathBuf {};
+    let mut pp = String::from_str(p);
+    if unsafe shim::sc_realpath(pp.cstr(), &mut buf[0]) == null {
+        return String::new();
+    }
+    return String::from_cstr(&buf[0]);
 }
 
+/// The object cache namespace of the local object tree `pdir` below cache root `root`:
+/// `<root>/o/<hash of pdir's real path>`. Empty when `root` is empty (caching disabled).
+fn obj_cache_ns(root: str, pdir: str) String {
+    if root.len() == 0 {
+        return String::new();
+    }
+    let rp = real_path(pdir);
+    let mut out = loader::join2(root, "o/");
+    hex64(
+        fnv_cont(
+            FNV_BASIS,
+            if rp.len() != 0 {
+                rp.as_str();
+            } else {
+                pdir;
+            },
+        ),
+        &mut out,
+    );
+    return out;
+}
+
+/// `name` starts with a cache key (32 lowercase hex digits) and a dot: `<key>.o`, `<key>.d`, or the
+/// temp file of an install.
+const fn key_prefixed(name: str) bool {
+    if name.len() < 34 || name[32] != b'.' {
+        return false;
+    }
+    for i in 0..32 {
+        let c = name[i as usize];
+        if !(c >= b'0' && c <= b'9' || c >= b'a' && c <= b'f') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The newest mtime of `dir` and its entries (0 when `dir` is missing).
+fn newest_mtime(dir: str) i64 {
+    let mut d = String::from_str(dir);
+    let mut best = unsafe shim::sc_mtime(d.cstr());
+    let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let mut p = loader::join2(dir, names.at(i).as_str());
+        let mt = unsafe shim::sc_mtime(p.cstr());
+        if mt > best {
+            best = mt;
+        }
+    }
+    return best;
+}
+
+/// The generation file `g<seq>` of namespace `ns`.
+fn gen_path(ns: str, seq: u64) String {
+    let mut p = loader::join2(ns, "g");
+    p.push_u64(seq);
+    return p;
+}
+
+const fn seq_desc(a: &u64, b: &u64) i32 {
+    if *a > *b {
+        return -1;
+    }
+    if *a < *b {
+        return 1;
+    }
+    return 0;
+}
+
+/// Insert every line of generation text `text` into `live`.
+fn add_keys(live: &mut Set<String>, text: str) {
+    let mut a: usize = 0;
+    for i in 0..text.len() {
+        if text[i] == b'\n' {
+            if i > a {
+                live.insert(String::from_str(text.slice(a, i)));
+            }
+            a = i + 1;
+        }
+    }
+}
+
+/// Record the cache keys `keys` of a successful build in namespace `ns` and trim the namespace.
+/// A changed key set becomes the next generation; an unchanged set trims nothing and only refreshes
+/// its generation's mtime once a day (the age `cache_sweep` reads), so a no-op build reads one
+/// directory and one file. The trim keeps the newest OBJ_GENS generations and deletes each object
+/// and dependency list none of them names. Only builds of this object tree write the namespace, and
+/// every object this build installed is in `keys`. A restore that loses a race with the trim cannot
+/// open the file and compiles instead. A failed step leaves its files to the next trim. `src_dir`
+/// is the source directory recorded as the namespace owner.
+fn obj_cache_commit(ns: str, keys: &mut Vector<String>, src_dir: str, now: i64) {
+    let lo = list_dir(ns, false);
+    if lo.is_none() {
+        return;
+    }
+    let names = lo.unwrap();
+    keys.sort();
+    let mut text = String::new();
+    for i in 0..keys.len() {
+        if i == 0 || keys.at(i).as_str() != keys.at(i - 1).as_str() {
+            text.push_string(keys.at(i));
+            text.push_byte(b'\n');
+        }
+    }
+    let mut seqs = Vector::<u64>::new();
+    let mut has_owner = false;
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        if n == "owner" {
+            has_owner = true;
+        } else if n.len() > 1 && n.len() <= 12 && n[0] == b'g' {
+            let s = n.slice(1, n.len()).parse_u64();
+            if !s.is_none() {
+                seqs.push(s.unwrap());
+            }
+        }
+    }
+    seqs.sort_by(seq_desc);
+    let mut next: u64 = 1;
+    if seqs.len() != 0 {
+        next = seqs[0] + 1;
+        let mut gp = gen_path(ns, seqs[0]);
+        let old = loader::read_file(gp.as_str());
+        if !old.is_none() {
+            let ob = old.unwrap();
+            if ob.as_str() == text.as_str() {
+                if now - unsafe shim::sc_mtime(gp.cstr()) >= 86400 {
+                    let _ = write_file_atomic(gp.as_str(), text.as_str());
+                }
+                return;
+            }
+        }
+    }
+    let gp = gen_path(ns, next);
+    if !write_file_atomic(gp.as_str(), text.as_str()) {
+        return;
+    }
+    if !has_owner {
+        let own = real_path(src_dir);
+        if own.len() != 0 {
+            let op = loader::join2(ns, "owner");
+            let _ = write_file_atomic(op.as_str(), own.as_str());
+        }
+    }
+    let mut live = Set::<String>::new();
+    add_keys(&mut live, text.as_str());
+    for i in 0..seqs.len() {
+        let mut p = gen_path(ns, seqs[i]);
+        if i + 1 < OBJ_GENS {
+            let g = loader::read_file(p.as_str());
+            if !g.is_none() {
+                let gb = g.unwrap();
+                add_keys(&mut live, gb.as_str());
+            }
+        } else {
+            let _ = unsafe shim::sc_unlink(p.cstr());
+        }
+    }
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        let mut p = loader::join2(ns, n);
+        if n.ends_with(".tmp") {
+            if now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
+                let _ = unsafe shim::sc_unlink(p.cstr());
+            }
+        } else if n.len() == 34 && key_prefixed(n) {
+            let stem = String::from_str(n.slice(0, 32));
+            if !live.contains(&stem) {
+                let _ = unsafe shim::sc_unlink(p.cstr());
+            }
+        }
+    }
+}
+
+/// An object namespace no build reads again: its owner directory is gone, or nothing in it
+/// (generations, owner record, objects) changed for OBJ_NS_IDLE.
+fn ns_dead(ns: str, now: i64) bool {
+    let op = loader::join2(ns, "owner");
+    let own = loader::read_file(op.as_str());
+    if !own.is_none() {
+        let ob = own.unwrap();
+        let mut od = String::from_str(ob.as_str());
+        if unsafe shim::sc_mtime(od.cstr()) == 0 {
+            return true;
+        }
+    }
+    return now - newest_mtime(ns) >= OBJ_NS_IDLE;
+}
+
+/// At most once a day (the mtime of `<root>/o/.sweep`), delete what no build reads again: dead object
+/// namespaces (`ns_dead`), linker cache namespaces with no entry written or used for LTO_NS_IDLE (a
+/// toolchain upgrade leaves the old one behind), and the flat `<key>.o`/`<key>.d` files that
+/// compilers before namespaces installed directly in the root.
+fn cache_sweep(root: str, now: i64) {
+    let od = loader::join2(root, "o");
+    let mut stamp = loader::join2(od.as_str(), ".sweep");
+    let last = unsafe shim::sc_mtime(stamp.cstr());
+    if last != 0 && now - last < 86400 {
+        return;
+    }
+    mkdir_p(od.as_str());
+    let mut body = String::new();
+    body.push_i64(now);
+    if !write_file_atomic(stamp.as_str(), body.as_str()) {
+        return;
+    }
+    let nss = list_dir(od.as_str(), false).unwrap_or(Vector::<String>::new());
+    for i in 0..nss.len() {
+        let ns = loader::join2(od.as_str(), nss.at(i).as_str());
+        if ns_dead(ns.as_str(), now) {
+            rm_rf(ns.as_str());
+        }
+    }
+    let ld = loader::join2(root, "lto");
+    let ltos = list_dir(ld.as_str(), false).unwrap_or(Vector::<String>::new());
+    for i in 0..ltos.len() {
+        let lp = loader::join2(ld.as_str(), ltos.at(i).as_str());
+        if now - newest_mtime(lp.as_str()) >= LTO_NS_IDLE {
+            rm_rf(lp.as_str());
+        }
+    }
+    let flat = list_dir(root, false).unwrap_or(Vector::<String>::new());
+    for i in 0..flat.len() {
+        if key_prefixed(flat.at(i).as_str()) {
+            let mut fp = loader::join2(root, flat.at(i).as_str());
+            let _ = unsafe shim::sc_unlink(fp.cstr());
+        }
+    }
+}
+
+// Two independent mixing lanes: an object served for the WRONG key would be a silent mislink, so the
+// key is 128 bits, not 64.
 fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
     let mut a = *h1;
     let mut b = *h2;
@@ -188,8 +429,8 @@ fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
             w = w | (unsafe p[i + k]) as u64 << (k * 8) as u64;
             k = k + 1;
         }
-        a = ch_mix(a, w);
-        b = ch_mix(b, ~w);
+        a = skey_mix(a, w);
+        b = skey_mix(b, ~w);
         i = i + 8;
     }
     let mut tail: u64 = 0;
@@ -199,8 +440,8 @@ fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
         i = i + 1;
         k = k + 1;
     }
-    a = ch_mix(a, tail ^ n as u64);
-    b = ch_mix(b, ~(tail ^ n as u64));
+    a = skey_mix(a, tail ^ n as u64);
+    b = skey_mix(b, ~(tail ^ n as u64));
     *h1 = a;
     *h2 = b;
 }
@@ -241,10 +482,7 @@ fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Ma
     if depth > 64 {
         return false;
     }
-    let mut pk = 1469598103934665603u64;
-    for i in 0..path.len() {
-        pk = (pk ^ path[i] as u64) * 1099511628211u64;
-    }
+    let pk = path.hash();
     let hit = switch memo.get(&pk) {
         Some(v) => *v,
         None => 0xFFFFFFFFFFFFFFFFu64,
@@ -258,15 +496,15 @@ fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Ma
             if a == 0 && b == 0 {
                 return false;
             }
-            *h1 = ch_mix(*h1, a);
-            *h2 = ch_mix(*h2, b);
+            *h1 = skey_mix(*h1, a);
+            *h2 = skey_mix(*h2, b);
         }
         return true;
     }
     memo.insert(pk, 0);
     let body = loader::read_file(path);
     let mut ok = !body.is_none();
-    let mut a: u64 = 0xcbf29ce484222325;
+    let mut a = FNV_BASIS;
     let mut b: u64 = 0x9e3779b97f4a7c15;
     if ok {
         let bd = body.unwrap();
@@ -338,8 +576,8 @@ fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Ma
     if !ok {
         return false;
     }
-    *h1 = ch_mix(*h1, a);
-    *h2 = ch_mix(*h2, b);
+    *h1 = skey_mix(*h1, a);
+    *h2 = skey_mix(*h2, b);
     return true;
 }
 
@@ -419,7 +657,7 @@ fn file_eq(a: str, b: &String) bool {
 // the safety net compares only what the stream never heard about.
 fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
     let mut rels = Vector::<String>::new();
-    walk_files(srcdir, srcdir.len(), &mut rels);
+    walk_gen_files(srcdir, srcdir.len(), &mut rels);
     for i in 0..rels.len() {
         if synced.contains(rels.at(i)) {
             continue;
@@ -435,15 +673,7 @@ fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
         let body = content.unwrap();
         if !file_eq(dp.as_str(), &body) {
             // Ensure parent dirs, then write.
-            let full = dp.as_str();
-            let mut k = full.len();
-            while k > 0 && full[k - 1] != b'/' {
-                k = k - 1;
-            }
-            if k > 0 {
-                let dir = String::from_str(full.slice(0, k - 1));
-                mkdir_p(dir.as_str());
-            }
+            mkdir_p(loader::dirname_of(dp.as_str()));
             if !write_file(dp.as_str(), body.as_str()) {
                 eprintln("build: cannot write '{}'", dp.as_str());
                 return 1;
@@ -456,7 +686,7 @@ fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
         live.insert(rels.at(i).clone());
     }
     let mut old = Vector::<String>::new();
-    walk_files(dstdir, dstdir.len(), &mut old);
+    walk_gen_files(dstdir, dstdir.len(), &mut old);
     for i in 0..old.len() {
         if !live.contains(old.at(i)) {
             let mut dp = loader::join2(dstdir, old.at(i).as_str());
@@ -466,11 +696,19 @@ fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
     return 0;
 }
 
-// Staleness: obj missing, or any dependency in its -MMD .d file newer than the object.
+// Staleness: obj or its -MMD .d file missing, or any dependency in the .d file newer than the object.
+// Every compile writes a .d, so an object without one has unknown header dependencies.
 // Is the object older than its source or any recorded dependency? Mtimes have second granularity, so
 // a file the sync rewrote in this build counts as newer whatever its mtime says: an edit landing in the
 // same second its previous object was compiled would otherwise keep a stale object.
-fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str, rewritten: &Set<String>, gen: str) bool {
+fn obj_stale(
+    cpath: &mut String,
+    opath: &mut String,
+    dpath: str,
+    rewritten: &Set<String>,
+    gen: str,
+    mtimes: &mut Map<String, i64>,
+) bool {
     let omt = unsafe shim::sc_mtime(opath.cstr());
     if omt == 0 {
         return true;
@@ -480,7 +718,7 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str, rewritten: &Set
     }
     let dep = loader::read_file(dpath);
     if dep.is_none() {
-        return unsafe shim::sc_mtime(cpath.cstr()) > omt;
+        return true;
     }
     let d = dep.unwrap();
     let s = d.as_str();
@@ -506,6 +744,16 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str, rewritten: &Set
             0u8;
         };
         let sep = c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' || c == b'\\' && (next == b'\n' || next == b'\r');
+        if !sep && c != b'\\' && c != b'$' {
+            // A run of plain bytes copies as one slice.
+            let mut j = i + 1;
+            while j < s.len() && s[j] != b' ' && s[j] != b'\t' && s[j] != b'\n' && s[j] != b'\r' && s[j] != b'\\' && s[j] != b'$' {
+                j = j + 1;
+            }
+            dep_path.push_str(s.slice(i, j));
+            i = j;
+            continue;
+        }
         if !sep {
             if c == b'\\' && (next == b' ' || next == b'#') || c == b'$' && next == b'$' {
                 i = i + 1;
@@ -516,7 +764,15 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str, rewritten: &Set
         }
         i = i + 1;
         if dep_path.len() != 0 {
-            let mt = unsafe shim::sc_mtime(dep_path.cstr());
+            // Units share most headers: one stat per spelled path per build.
+            let mt = switch mtimes.get(&dep_path) {
+                Some(v) => *v,
+                None => {
+                    let v9 = unsafe shim::sc_mtime(dep_path.cstr());
+                    mtimes.insert(dep_path.clone(), v9);
+                    v9;
+                },
+            };
             stale = mt == 0 || mt > omt || rewritten_dep(dep_path.as_str(), rewritten, gen);
             dep_path.clear();
         }
@@ -525,40 +781,20 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str, rewritten: &Set
 }
 
 // Whether `path` (as the compiler's dependency list spells it) is a gen-tree file rewritten this build.
+// The list spells a header through the including file's directory (`__std/../__sc_fwd.h`), so the
+// path is normalized before the lookup.
 fn rewritten_dep(path: str, rewritten: &Set<String>, gen: str) bool {
     if rewritten.is_empty() || path.len() <= gen.len() + 1 || !path.starts_with(gen) || path[gen.len()] != b'/' {
         return false;
     }
-    let rel = String::from_str(path.slice(gen.len() + 1, path.len()));
+    let mut rel = String::new();
+    norm_path(path.slice(gen.len() + 1, path.len()), &mut rel);
     return rewritten.contains(&rel);
 }
 
 // The build itself
 // The compiler named by manifest/$CC/default, WITHOUT the ccache decision (that probe costs a
 // shell round-trip, so the engine runs it in the background: see CcStream::ensure_cc).
-fn resolve_cc_raw(m: &mf::Manifest) String {
-    let mut cc = String::new();
-    if m.cc.len() != 0 {
-        cc.push_string(&m.cc);
-        return cc;
-    }
-    // A cross target picks its own toolchain: an explicit `cc` in the manifest still wins, but nothing
-    // else can name these compilers, and $CC on the host would be the wrong one.
-    if m.sdk != 0 {
-        sdk_cc(m.sdk, &mut cc);
-        if cc.len() != 0 {
-            return cc;
-        }
-    }
-    let env = stdlib::getenv("CC");
-    if env != null && unsafe *env != 0 as char {
-        cc.push_str(str::from_cstr(env));
-        return cc;
-    }
-    cc.push_str("cc");
-    return cc;
-}
-
 fn push_all(cmd: &mut String, flags: &Vector<String>) {
     for i in 0..flags.len() {
         cmd.push_byte(b' ');
@@ -612,37 +848,6 @@ fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
     }
     ptrs.push(0);
     return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
-}
-
-fn json_escape(out: &mut String, s: str) {
-    for i in 0..s.len() {
-        let c = s[i];
-        if c == b'"' || c == b'\\' {
-            out.push_byte(b'\\');
-            out.push_byte(c);
-        } else if c < 0x20u8 {
-            out.push_str("\\u00");
-            let hx: str = "0123456789abcdef";
-            out.push_byte(hx[(c >> 4) as usize]);
-            out.push_byte(hx[(c & 15u8) as usize]);
-        } else {
-            out.push_byte(c);
-        }
-    }
-}
-
-/// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`
-/// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
-/// failure: an old or missing record only makes the next build redo that work.
-pub fn write_file_atomic(path: str, body: str) bool {
-    let mut tmp = String::from_str(path);
-    tmp.push_str(".tmp");
-    let mut dst = String::from_str(path);
-    if write_file(tmp.as_str(), body) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
-        return true;
-    }
-    let _ = unsafe shim::sc_unlink(tmp.cstr());
-    return false;
 }
 
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
@@ -710,47 +915,41 @@ pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     return out;
 }
 
-// False when the file cannot be opened, or a short write or failed close left it incomplete.
-fn write_file(path: str, body: str) bool {
-    let f = stdio::fopen(path, "wb");
-    if f == null {
-        return false;
-    }
-    let n = unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
-    let rc = unsafe stdio::fclose(f);
-    return n == body.len() && rc == 0;
-}
-
 // First line of `<argv> ` (a `--version` invocation): part of every command fingerprint so a
 // toolchain upgrade invalidates objects whose sources and flags did not change.
 fn cc_version_argv(args: &mut Vector<String>, dir: str) String {
     let mut vf = loader::join2(dir, ".ccver");
     let _ = exec_args(args, vf.cstr());
-    let mut out = String::new();
-    let v = loader::read_file(vf.as_str());
-    unsafe shim::sc_unlink(vf.cstr());
-    if !v.is_none() {
-        let body = v.unwrap();
-        let s = body.as_str();
-        let mut e: usize = 0;
-        while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
-            e = e + 1;
-        }
-        out.push_str(s.slice(0, e));
+    return take_first_line(vf.as_str()).unwrap_or(String::new());
+}
+
+// The first line of file `path`, which is then removed; None when it cannot be read.
+fn take_first_line(path: str) Option<String> {
+    let v = loader::read_file(path);
+    let mut pc = String::from_str(path);
+    unsafe shim::sc_unlink(pc.cstr());
+    if v.is_none() {
+        return Option::<String>::None;
     }
-    return out;
+    let body = v.unwrap();
+    let s = body.as_str();
+    let mut e: usize = 0;
+    while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
+        e = e + 1;
+    }
+    return Option::<String>::Some(String::from_str(s.slice(0, e)));
 }
 
 /// The linker cache namespace and probe record schema: bump when the emitted C changes shape in a
 /// way that must not share a namespace with, or reuse the verdict of, an older compiler.
 const LTO_SCHEMA: u32 = 1;
 
-/// The `idx`-th line of `s` (empty when absent).
-fn line_of(s: str, idx: usize) str {
+// Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
+fn field_of(s: str, sep: u8, idx: usize) str {
     let mut a: usize = 0;
     let mut k: usize = 0;
     for i in 0..s.len() {
-        if s[i] == b'\n' {
+        if s[i] == sep {
             if k == idx {
                 return s.slice(a, i);
             }
@@ -878,7 +1077,8 @@ fn cache_has_entry(dir: str) bool {
 
 /// The linker cache options of `form` (1 Apple ld, 2 lld, 3 the LLVM gold plugin under gold or
 /// bfd) for cache directory `dir`, through the compiler driver. Every form bounds the cache itself:
-/// entries unused for a week go, the cache stays under a tenth of the disk, checked at most hourly.
+/// entries unused for a week go, the cache stays under a tenth of the disk (lld and gold: also under
+/// 1 GiB; Apple ld has only the relative limit), checked at most hourly.
 /// The directory is one verbatim argument (never split).
 fn lto_cache_args(form: i32, dir: str, out: &mut Vector<String>) {
     if form == 1 {
@@ -892,12 +1092,18 @@ fn lto_cache_args(form: i32, dir: str, out: &mut Vector<String>) {
         let mut a = String::from_str("-Wl,--thinlto-cache-dir=");
         a.push_str(dir);
         out.push(a);
-        push_arg(out, "-Wl,--thinlto-cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%");
+        push_arg(
+            out,
+            "-Wl,--thinlto-cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%:cache_size_bytes=1g",
+        );
     } else {
         let mut a = String::from_str("-Wl,-plugin-opt,cache-dir=");
         a.push_str(dir);
         out.push(a);
-        push_arg(out, "-Wl,-plugin-opt,cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%");
+        push_arg(
+            out,
+            "-Wl,-plugin-opt,cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%:cache_size_bytes=1g",
+        );
     }
 }
 
@@ -906,7 +1112,7 @@ struct Pend {
     pub args: Vector<String>, // full compile argv (no shell; the spawn API captures the log)
     pub fp: String, // fingerprint: cc version + the command driving the object
     pub log: String,
-    pub cmdpath: String, // <obj>.cmd: fingerprint + last duration
+    pub cmdpath: String, // <obj>.cmd: fingerprint, last duration, cache key (empty when not cacheable)
     pub prev_ms: i64, // last recorded duration; longest-first scheduling shrinks the tail
     pub cobj: String, // global-cache install target for the object; empty = not cacheable
     pub oout: String, // the object this compile writes (the install source)
@@ -926,10 +1132,10 @@ struct Job {
 }
 
 extend Job {
-    // On success, persist fingerprint + duration, and install the object into the global cache, via a
-    // temp named by key and pid + rename, so concurrent builds never write the same temp file. On
-    // failure, report the exit status and replay a bounded part of the captured compiler output; the
-    // log file stays for inspection (the unit's next successful compile removes it).
+    // On success, persist fingerprint, duration and cache key, and install the object into the global
+    // cache, via a temp named by key and pid + rename, so concurrent builds never write the same temp
+    // file. On failure, report the exit status and replay a bounded part of the captured compiler
+    // output; the log file stays for inspection (the unit's next successful compile removes it).
     // `gen` is the gen root, which the portable .d rewrite replaces.
     fn finish(self: &mut Self, code: i32, gen: str) i32 {
         let end_ns = platform::now_ns();
@@ -939,7 +1145,12 @@ extend Job {
             cat_file_bounded(self.log.as_str(), LOG_LIMIT);
             return code;
         } else {
-            let rec = format("{}\n{}", self.fp.as_str(), (end_ns - self.start_ns) / 1000000);
+            let rec = format(
+                "{}\n{}\n{}",
+                self.fp.as_str(),
+                (end_ns - self.start_ns) / 1000000,
+                cache_key(self.cobj.as_str()),
+            );
             let _ = write_file_atomic(self.cmdpath.as_str(), rec.as_str());
             if self.cobj.len() != 0 {
                 let pid = unsafe shim::sc_getpid();
@@ -967,24 +1178,13 @@ extend Job {
     }
 }
 
-fn dirname_of(p: str) str {
-    let mut k = p.len();
-    while k > 0 && p[k - 1] != b'/' {
-        k = k - 1;
+// The cache key of install target `cobj` (`<namespace>/<key>.o`); empty when not cacheable.
+const fn cache_key(cobj: str) str {
+    let b = loader::basename_of(cobj);
+    if b.len() < 2 {
+        return "";
     }
-    if k == 0 {
-        return ".";
-    }
-    return p.slice(0, k - 1);
-}
-
-// The last path component of `p`.
-const fn base_name(p: str) str {
-    let mut k = p.len();
-    while k > 0 && p[k - 1] != b'/' {
-        k = k - 1;
-    }
-    return p.slice(k, p.len());
+    return b.slice(0, b.len() - 2);
 }
 
 /// Platform artifact name for a library target: static -> lib<name>.a everywhere (mingw uses ar
@@ -1031,7 +1231,7 @@ pub fn exe_name(base: str, target: i32) String {
 // `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
 fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
     let dir = loader::join2(m.out_dir.as_str(), prof_name);
-    let leaf = exe_name(base_name(m.bin.as_str()), target);
+    let leaf = exe_name(loader::basename_of(m.bin.as_str()), target);
     return loader::join2(dir.as_str(), leaf.as_str());
 }
 
@@ -1114,8 +1314,10 @@ struct CcStream {
     pub pending: String,
     pub marked: bool, // this build wrote `pending`
     pub ret: i32,
-    pub cache: String, // the global object cache directory; empty = disabled
+    pub cache: String, // this object tree's namespace of the global object cache; empty = disabled
+    pub keys: Vector<String>, // the cache key of every planned unit that has one (`obj_cache_commit`)
     pub rewritten: Set<String>, // gen-relative files whose content changed in this build's sync
+    pub mtimes: Map<String, i64>, // dependency path (as a depfile spells it) -> its mtime, stat once per build
     pub synced: Set<String>, // every gen-relative file the stream synced (equal on both sides now)
     pub made_dirs: Set<String>, // gen directories this build's sync created or verified
     pub ccdb: Vector<String>, // compile_commands.json rows, one per planned unit (stale or not)
@@ -1157,17 +1359,10 @@ extend CcStream {
         if self.probe_ver_pid >= 0 {
             let mut code2: i32 = 0;
             let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code2);
-            let v = loader::read_file(self.ccver_path.as_str());
-            let mut vp = String::from_str(self.ccver_path.as_str());
-            unsafe shim::sc_unlink(vp.cstr());
+            let v = take_first_line(self.ccver_path.as_str());
             if !v.is_none() {
-                let body = v.unwrap();
-                let s = body.as_str();
-                let mut e: usize = 0;
-                while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
-                    e = e + 1;
-                }
-                self.ccver.push_str(s.slice(0, e));
+                let line = v.unwrap();
+                self.ccver.push_string(&line);
                 have_ver = true;
             }
         }
@@ -1226,12 +1421,12 @@ extend CcStream {
         if !old.is_none() {
             let ob = old.unwrap();
             let s = ob.as_str();
-            let l1 = line_of(s, 1);
+            let l1 = field_of(s, b'\n', 1);
             let mut ldp = String::from_str(stamp_field(l1, 1));
             let ldmt = stamp_field(l1, 2).parse_i64();
             let same_ld = ldp.as_str() == "-" || !ldmt.is_none() && unsafe shim::sc_mtime(ldp.cstr()) == ldmt.unwrap();
-            if line_of(s, 0) == key.as_str() && same_ld {
-                let l2 = line_of(s, 2);
+            if field_of(s, b'\n', 0) == key.as_str() && same_ld {
+                let l2 = field_of(s, b'\n', 2);
                 if stamp_field(l2, 0) == "thin" {
                     let f = stamp_field(l2, 1).parse_i64();
                     if !f.is_none() && f.unwrap() >= 0 && f.unwrap() <= 3 {
@@ -1258,17 +1453,8 @@ extend CcStream {
         if root.len() == 0 {
             return;
         }
-        let mut h: u64 = 0xcbf29ce484222325;
-        let ks = key.as_str();
-        for i in 0..ks.len() {
-            h = (h ^ ks[i] as u64) * 1099511628211u64;
-        }
-        let ls = ld.as_str();
-        for i in 0..ls.len() {
-            h = (h ^ ls[i] as u64) * 1099511628211u64;
-        }
         let mut dir = loader::join2(root.as_str(), "lto/");
-        hex64(h, &mut dir);
+        hex64(fnv_cont(fnv_cont(FNV_BASIS, key.as_str()), ld.as_str()), &mut dir);
         mkdir_p(dir.as_str());
         lto_cache_args(form, dir.as_str(), &mut self.lto_ld);
         self.lto_cache = true;
@@ -1370,18 +1556,11 @@ extend CcStream {
         let body = content.unwrap();
         let dp = loader::join2(self.gen.as_str(), rel);
         if !file_eq(dp.as_str(), &body) {
-            let full = dp.as_str();
-            let mut k = full.len();
-            while k > 0 && full[k - 1] != b'/' {
-                k = k - 1;
-            }
-            if k > 0 {
-                // One mkdir walk per directory per build, not one per file.
-                let dir = String::from_str(full.slice(0, k - 1));
-                if !self.made_dirs.contains(&dir) {
-                    mkdir_p(dir.as_str());
-                    self.made_dirs.insert(dir);
-                }
+            // One mkdir walk per directory per build, not one per file.
+            let dir = String::from_str(loader::dirname_of(dp.as_str()));
+            if !self.made_dirs.contains(&dir) {
+                mkdir_p(dir.as_str());
+                self.made_dirs.insert(dir);
             }
             if !write_file(dp.as_str(), body.as_str()) {
                 eprintln("build: cannot write '{}'", dp.as_str());
@@ -1422,43 +1601,44 @@ extend CcStream {
         // compile_commands.json row (every unit, stale or not): tooling attaches to the generated
         // tree through it, so it reflects the exact argv this build would run.
         {
-            let mut row = String::from_str("  {\"directory\": \"");
-            json_escape(&mut row, self.ccdb_dir.as_str());
-            row.push_str("\", \"file\": \"");
-            json_escape(&mut row, cpath.as_str());
-            row.push_str("\", \"output\": \"");
-            json_escape(&mut row, opath.as_str());
-            row.push_str("\", \"arguments\": [");
+            let mut row = String::from_str("  {\"directory\": ");
+            json::dump_escaped(self.ccdb_dir.as_str(), &mut row);
+            row.push_str(", \"file\": ");
+            json::dump_escaped(cpath.as_str(), &mut row);
+            row.push_str(", \"output\": ");
+            json::dump_escaped(opath.as_str(), &mut row);
+            row.push_str(", \"arguments\": [");
             for ai in 0..args.len() {
                 if ai != 0 {
                     row.push_str(", ");
                 }
-                row.push_byte(b'"');
-                json_escape(&mut row, args.at(ai).as_str());
-                row.push_byte(b'"');
+                json::dump_escaped(args.at(ai).as_str(), &mut row);
             }
             row.push_str("]}");
             self.ccdb.push(row);
         }
         let mut fp_ok = false;
         let mut prev_ms: i64 = 0;
+        let mut prev_key = String::new();
         let old = loader::read_file(cmdpath.as_str());
         if !old.is_none() {
             let ob = old.unwrap();
             let s = ob.as_str();
-            let mut e: usize = 0;
-            while e < s.len() && s[e] != b'\n' {
-                e = e + 1;
+            fp_ok = field_of(s, b'\n', 0) == fp.as_str();
+            let ms = field_of(s, b'\n', 1).parse_i64();
+            if !ms.is_none() {
+                prev_ms = ms.unwrap();
             }
-            fp_ok = s.slice(0, e) == fp.as_str();
-            if e < s.len() {
-                let ms = s.slice(e + 1, s.len()).parse_i64();
-                if !ms.is_none() {
-                    prev_ms = ms.unwrap();
-                }
-            }
+            prev_key.push_str(field_of(s, b'\n', 2));
         }
-        if !fp_ok || obj_stale(&mut cpath, &mut opath, dpath.as_str(), &self.rewritten, self.gen.as_str()) {
+        if !fp_ok || obj_stale(
+            &mut cpath,
+            &mut opath,
+            dpath.as_str(),
+            &self.rewritten,
+            self.gen.as_str(),
+            &mut self.mtimes,
+        ) {
             if !self.marked {
                 self.marked = true;
                 if !write_file(self.pending.as_str(), "") {
@@ -1466,16 +1646,10 @@ extend CcStream {
                     self.ret = 1;
                 }
             }
-            let full = opath.as_str();
-            let mut k = full.len();
-            while k > 0 && full[k - 1] != b'/' {
-                k = k - 1;
-            }
-            let dir = String::from_str(full.slice(0, k - 1));
-            mkdir_p(dir.as_str());
+            mkdir_p(loader::dirname_of(opath.as_str()));
             let mut cobj = String::new();
             if self.cache.len() != 0 {
-                let mut h1: u64 = 0xcbf29ce484222325;
+                let mut h1 = FNV_BASIS;
                 let mut h2: u64 = 0x9e3779b97f4a7c15;
                 ch_mix_bytes(&mut h1, &mut h2, self.ccver.as_str().ptr(), self.ccver.len());
                 ch_mix_bytes(&mut h1, &mut h2, self.cc_tail.as_str().ptr(), self.cc_tail.len());
@@ -1483,6 +1657,7 @@ extend CcStream {
                     let mut keyname = String::new();
                     hex64(h1, &mut keyname);
                     hex64(h2, &mut keyname);
+                    self.keys.push(keyname.clone());
                     keyname.push_str(".o");
                     cobj = loader::join2(self.cache.as_str(), keyname.as_str());
                     if self.cache_restore(&cobj, opath.as_str(), dpath.as_str(), &fp) {
@@ -1506,32 +1681,33 @@ extend CcStream {
                 },
             );
             self.stale_n = self.stale_n + 1;
+        } else if prev_key.len() == 32 && self.cache.len() != 0 {
+            // Up to date: the key its compile or restore recorded still names its object.
+            self.keys.push(prev_key);
         }
         self.objs.push(opath.clone());
     }
 
-    // A cache hit: the object (and its portable dependency list) copy into place, and the .cmd
-    // records the fingerprint so the next build's staleness check needs no cache at all.
+    // A cache hit: the object and its portable dependency list copy into place, and the .cmd
+    // records the fingerprint so the next build's staleness check needs no cache at all. An entry
+    // without its dependency list is a miss: a restored object without a .d would never see a
+    // header change (a concurrent build can publish the object before its list).
     fn cache_restore(self: &mut Self, cobj: &String, opath: str, dpath: str, fp: &String) bool {
-        let mut co = cobj.clone();
-        if unsafe shim::sc_mtime(co.cstr()) == 0 {
-            return false;
-        }
-        if !copy_file(cobj.as_str(), opath) {
-            return false;
-        }
         let mut cd = cobj.clone();
         cd.truncate(cd.len() - 2);
         cd.push_str(".d");
         let dep = loader::read_file(cd.as_str());
-        if !dep.is_none() {
-            let d = dep.unwrap();
-            let loc = dep_local(d.as_str(), self.gen.as_str());
-            let _ = write_file(dpath, loc.as_str());
+        if dep.is_none() || !copy_file(cobj.as_str(), opath) {
+            return false;
+        }
+        let d = dep.unwrap();
+        let loc = dep_local(d.as_str(), self.gen.as_str());
+        if !write_file(dpath, loc.as_str()) {
+            return false;
         }
         let mut cmdp = String::from_str(opath.slice(0, opath.len() - 2));
         cmdp.push_str(".cmd");
-        let rec = format("{}\n0", fp.as_str());
+        let rec = format("{}\n0\n{}", fp.as_str(), cache_key(cobj.as_str()));
         let _ = write_file_atomic(cmdp.as_str(), rec.as_str());
         return true;
     }
@@ -1665,7 +1841,7 @@ fn stamp_hash_file(path: str, h_out: &mut u64, len_out: &mut u64) bool {
         return false;
     }
     let mut buf = Array::<u8, 65536>::new();
-    let mut h = 1469598103934665603u64;
+    let mut h = FNV_BASIS;
     let mut tot: u64 = 0;
     loop {
         let n = unsafe stdio::fread(&mut buf[0], 1, 65536, f);
@@ -1683,35 +1859,14 @@ fn stamp_hash_file(path: str, h_out: &mut u64, len_out: &mut u64) bool {
     return true;
 }
 
-fn stamp_u64(s: str) u64 {
-    let mut v: u64 = 0;
-    for i in 0..s.len() {
-        let c = s[i];
-        if c < b'0' || c > b'9' {
-            break;
-        }
-        v = v * 10 + (c - b'0') as u64;
-    }
-    return v;
+// Field `idx` of the tab-separated stamp record `line`: the whole field or `stamp_u64` as a decimal
+// number (0 when it is not one: the check then fails and the stamp is rewritten).
+fn stamp_field(line: str, idx: usize) str {
+    return field_of(line, b'\t', idx);
 }
 
-// Field `idx` of a '\t'-separated record; fields past the last separator run to the end.
-fn stamp_field(s: str, idx: usize) str {
-    let mut a: usize = 0;
-    let mut k: usize = 0;
-    for i in 0..s.len() {
-        if s[i] == 9 {
-            if k == idx {
-                return s.slice(a, i);
-            }
-            k += 1;
-            a = i + 1;
-        }
-    }
-    if k == idx {
-        return s.slice(a, s.len());
-    }
-    return s.slice(0, 0);
+fn stamp_u64(line: str, idx: usize) u64 {
+    return stamp_field(line, idx).parse_u64().unwrap_or(0);
 }
 
 fn stamp_exe_line(out: &mut String) bool {
@@ -1732,13 +1887,20 @@ fn stamp_exe_line(out: &mut String) bool {
     return true;
 }
 
+// The number of `.c` files under `gen`. A `.c` or `.h` name is a file: only other names cost a
+// stat (the tree holds one definition header per type).
 fn stamp_gen_c_count(gen: str) u64 {
-    let mut rels = Vector::<String>::new();
-    walk_files(gen, gen.len(), &mut rels);
+    let names = list_dir(gen, false).unwrap_or(Vector::<String>::new());
     let mut n: u64 = 0;
-    for i in 0..rels.len() {
-        if rels.at(i).as_str().ends_with(".c") {
+    for i in 0..names.len() {
+        let nm = names.at(i).as_str();
+        if nm.ends_with(".c") {
             n += 1;
+        } else if !nm.ends_with(".h") {
+            let mut p = loader::join2(gen, nm);
+            if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+                n += stamp_gen_c_count(p.as_str());
+            }
         }
     }
     return n;
@@ -1755,16 +1917,23 @@ fn stamp_push_input(out: &mut String, path: str) bool {
     if !stamp_hash_file(path, &mut h, &mut ln) {
         return false;
     }
-    out.push_str("in\t");
-    out.push_u64(mt as u64);
+    stamp_line(out, "in\t", mt as u64, h, ln, path);
+    return true;
+}
+
+// One stamp record: `kind` (with its tab), then mtime, hash, the length when `kind` is "in\t", and path.
+fn stamp_line(out: &mut String, kind: str, mt: u64, h: u64, ln: u64, path: str) {
+    out.push_str(kind);
+    out.push_u64(mt);
     out.push_str("\t");
     out.push_u64(h);
     out.push_str("\t");
-    out.push_u64(ln);
-    out.push_str("\t");
+    if kind == "in\t" {
+        out.push_u64(ln);
+        out.push_str("\t");
+    }
     out.push_str(path);
     out.push_str("\n");
-    return true;
 }
 
 // Order-independent hash of the `.spc` names in `dir`: the names import resolution and the prelude
@@ -1785,11 +1954,7 @@ fn stamp_dir_hash(dir: str) u64 {
         if !nm.ends_with(".spc") {
             continue;
         }
-        let mut x = 1469598103934665603u64;
-        for i in 0..nm.len() {
-            x = (x ^ nm[i] as u64) * 1099511628211u64;
-        }
-        h = h + x;
+        h = h + nm.hash();
     }
     unsafe shim::sc_closedir(dh);
     return h;
@@ -1797,18 +1962,31 @@ fn stamp_dir_hash(dir: str) u64 {
 
 fn stamp_push_dir(out: &mut String, dir: str) {
     let mut dp = String::from_str(dir);
-    let mt = unsafe shim::sc_mtime(dp.cstr());
-    out.push_str("dir\t");
-    out.push_u64(mt as u64);
-    out.push_str("\t");
-    out.push_u64(stamp_dir_hash(dir));
-    out.push_str("\t");
-    out.push_str(dir);
-    out.push_str("\n");
+    stamp_line(out, "dir\t", (unsafe shim::sc_mtime(dp.cstr())) as u64, stamp_dir_hash(dir), 0, dir);
 }
 
-fn stamp_write_text(path: str, body: &String) {
-    let _ = write_file_atomic(path, body.as_str());
+// The emission options record: target, arch, bootstrap tags, lint, the emitted C unit count, the
+// root directory and the emission-mode environment switches.
+fn stamp_opt_line(out: &mut String, target: i32, arch: i32, bootstrap: bool, lint: bool, ccount: u64, root_dir: str) {
+    out.push_str("opt\t");
+    out.push_u64(target as u64);
+    out.push_str("\t");
+    out.push_u64(arch as u64 & 0xFF);
+    out.push_str("\t");
+    out.push_u64(bootstrap as u64);
+    out.push_str("\t");
+    out.push_u64(lint as u64);
+    out.push_str("\t");
+    out.push_u64(ccount);
+    out.push_str("\t");
+    out.push_str(root_dir);
+    // Emission-mode switches change the emitted C: a stamp written under one mode must not
+    // satisfy a build under another.
+    out.push_str("\t");
+    for i in 0..inl::EMIT_MODE_ENV_N {
+        stamp_push_env(out, inl::emit_mode_env(i));
+    }
+    out.push_str("\n");
 }
 
 fn stamp_push_env(out: &mut String, name: str) {
@@ -1836,35 +2014,7 @@ fn stamp_write(
     if !stamp_exe_line(&mut out) {
         return;
     }
-    out.push_str("opt\t");
-    out.push_u64(target as u64);
-    out.push_str("\t");
-    out.push_u64(arch as u64 & 0xFF);
-    out.push_str("\t");
-    let b9: u64 = if bootstrap {
-        1;
-    } else {
-        0;
-    };
-    out.push_u64(b9);
-    out.push_str("\t");
-    let l9: u64 = if lint {
-        1;
-    } else {
-        0;
-    };
-    out.push_u64(l9);
-    out.push_str("\t");
-    out.push_u64(stamp_gen_c_count(gen));
-    out.push_str("\t");
-    out.push_str(root_dir);
-    // Emission-mode switches change the emitted C: a stamp written under one mode must not
-    // satisfy a build under another.
-    out.push_str("\t");
-    for i in 0..inl::EMIT_MODE_ENV_N {
-        stamp_push_env(&mut out, inl::emit_mode_env(i));
-    }
-    out.push_str("\n");
+    stamp_opt_line(&mut out, target, arch, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
         // flags shape the emitted tree.
@@ -1899,7 +2049,7 @@ fn stamp_write(
         stamp_push_dir(&mut out, std_dir);
     }
     out.push_str("end\n");
-    stamp_write_text(path, &out);
+    let _ = write_file_atomic(path, out.as_str());
 }
 
 // Is the recorded emission still exact for the current inputs? On mtime drift with matching
@@ -1954,33 +2104,16 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             }
             rewritten.push_string(&cur);
         } else if kind == "opt" {
-            let wb9: u64 = if bootstrap {
-                1;
-            } else {
-                0;
-            };
-            let wl9: u64 = if lint {
-                1;
-            } else {
-                0;
-            };
-            let mut wenv = String::new();
-            for i in 0..inl::EMIT_MODE_ENV_N {
-                stamp_push_env(&mut wenv, inl::emit_mode_env(i));
-            }
-            if stamp_u64(stamp_field(line, 1)) != target as u64 || stamp_u64(stamp_field(line, 2)) != (arch as u64 & 0xFF) || stamp_u64(
-                stamp_field(line, 3),
-            ) != wb9 || stamp_u64(stamp_field(line, 4)) != wl9 || stamp_field(line, 6) != root_dir || stamp_field(
-                line,
-                7,
-            ) != wenv.as_str() {
+            // Every field but the unit count must match this build's options.
+            ccount = stamp_u64(line, 5);
+            let mut want = String::new();
+            stamp_opt_line(&mut want, target, arch, bootstrap, lint, ccount, root_dir);
+            if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
-            ccount = stamp_u64(stamp_field(line, 5));
-            rewritten.push_str(line);
-            rewritten.push_str("\n");
+            rewritten.push_string(&want);
         } else if kind == "in" {
-            let mt0 = stamp_u64(stamp_field(line, 1));
+            let mt0 = stamp_u64(line, 1);
             let fp = stamp_field(line, 4);
             let mut pp = String::from_str(fp);
             let mt = unsafe shim::sc_mtime(pp.cstr());
@@ -1997,24 +2130,16 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             if !stamp_hash_file(fp, &mut h, &mut ln) {
                 return false;
             }
-            if h != stamp_u64(stamp_field(line, 2)) || ln != stamp_u64(stamp_field(line, 3)) {
+            if h != stamp_u64(line, 2) || ln != stamp_u64(line, 3) {
                 fresh = false;
                 break;
             }
             if mt as u64 != mt0 {
                 drift = true;
             }
-            rewritten.push_str("in\t");
-            rewritten.push_u64(mt as u64);
-            rewritten.push_str("\t");
-            rewritten.push_u64(h);
-            rewritten.push_str("\t");
-            rewritten.push_u64(ln);
-            rewritten.push_str("\t");
-            rewritten.push_str(fp);
-            rewritten.push_str("\n");
+            stamp_line(&mut rewritten, "in\t", mt as u64, h, ln, fp);
         } else if kind == "dir" {
-            let mt0 = stamp_u64(stamp_field(line, 1));
+            let mt0 = stamp_u64(line, 1);
             let dp = stamp_field(line, 3);
             let mut dpp = String::from_str(dp);
             let mt = unsafe shim::sc_mtime(dpp.cstr());
@@ -2024,20 +2149,14 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
                 continue;
             }
             let h = stamp_dir_hash(dp);
-            if h != stamp_u64(stamp_field(line, 2)) {
+            if h != stamp_u64(line, 2) {
                 fresh = false;
                 break;
             }
             if mt as u64 != mt0 {
                 drift = true;
             }
-            rewritten.push_str("dir\t");
-            rewritten.push_u64(mt as u64);
-            rewritten.push_str("\t");
-            rewritten.push_u64(h);
-            rewritten.push_str("\t");
-            rewritten.push_str(dp);
-            rewritten.push_str("\n");
+            stamp_line(&mut rewritten, "dir\t", mt as u64, h, 0, dp);
         } else if kind == "end" {
             saw_end = true;
             rewritten.push_str("end\n");
@@ -2052,9 +2171,20 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
         return false;
     }
     if drift {
-        stamp_write_text(path, &rewritten);
+        let _ = write_file_atomic(path, rewritten.as_str());
     }
     return true;
+}
+
+/// The options every manifest build passes down to the engine unchanged.
+pub struct BuildCtx<'a> {
+    pub jobs: u32, // --jobs; 0 = the manifest's `jobs`, else one per core
+    pub std_dir: str<'a>,
+    pub ce_steps: u32, // compile-time evaluation budgets; 0 = the engine default
+    pub ce_mem: u64,
+    pub target: i32,
+    pub bootstrap_tags: bool,
+    pub lint: bool,
 }
 
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
@@ -2069,36 +2199,12 @@ fn engine_build(
     sub: str,
     raw: str,
     bin: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
+    cx: &BuildCtx,
     link_kind: i32,
     topts: *const TestOpts,
 ) i32 {
     bst::begin();
-    let rc = engine_build_i(
-        m,
-        prof_name,
-        root,
-        root_dir,
-        alt,
-        sub,
-        raw,
-        bin,
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        lint,
-        link_kind,
-        topts,
-    );
+    let rc = engine_build_i(m, prof_name, root, root_dir, alt, sub, raw, bin, cx, link_kind, topts);
     bst::finish(rc);
     return rc;
 }
@@ -2112,13 +2218,7 @@ fn engine_build_i(
     sub: str,
     raw: str,
     bin: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
+    cx: &BuildCtx,
     link_kind: i32,
     topts: *const TestOpts,
 ) i32 {
@@ -2139,8 +2239,8 @@ fn engine_build_i(
     let obj = loader::join2(pdir.as_str(), "obj");
     mkdir_p(gen.as_str());
     mkdir_p(obj.as_str());
-    let jobs: u32 = if jobs_override != 0 {
-        jobs_override;
+    let jobs: u32 = if cx.jobs != 0 {
+        cx.jobs;
     } else if m.jobs != 0 {
         m.jobs;
     } else {
@@ -2153,18 +2253,18 @@ fn engine_build_i(
         g.bin.push_str(bin);
         g.jobs = jobs;
     }
-    let cc_raw = resolve_cc_raw(m);
+    let cc_raw = resolve_cc(m.cc.as_str(), m.sdk);
     let mut tail = String::new();
     tail.push_byte(b' ');
     tail.push_string(&m.cstd);
-    if m.lib_shared && target != 0 {
+    if m.lib_shared && cx.target != 0 {
         // Shared-library objects need it; harmless for the exe targets.
         tail.push_str(" -fPIC");
     }
     // The cross triple comes first; manifest flags can override.
     push_sdk_flags(&mut tail, m.sdk, m.arch);
     push_all(&mut tail, &m.cflags);
-    push_profile_side(&mut tail, prof, &prof.cflags, false, target, m.sdk);
+    push_profile_side(&mut tail, prof, &prof.cflags, false, cx.target, m.sdk);
     if prof.pgo_use {
         // Clang hard-errors on a missing profile file, so the flag appears only when the file exists.
         let mut pgo = loader::join2(m.out_dir.as_str(), "pgo.profdata");
@@ -2180,7 +2280,7 @@ fn engine_build_i(
     push_sdk_flags(&mut ldbase, m.sdk, m.arch);
     push_sdk_libs(&mut ldbase, m.sdk);
     push_all(&mut ldbase, &m.ldflags);
-    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, target, m.sdk);
+    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
     let mut lto_req = prof.lto;
     let lenv = stdlib::getenv("SC_LTO");
     if lenv != null {
@@ -2234,7 +2334,7 @@ fn engine_build_i(
         cc_raw: cc_raw,
         cc_tail: tail,
         ldbase: ldbase,
-        target: target,
+        target: cx.target,
         lto_req: lto_req,
         lto: lto_req,
         lto_cache: false,
@@ -2257,8 +2357,10 @@ fn engine_build_i(
         pending: pending,
         marked: false,
         ret: 0,
-        cache: object_cache_dir(),
+        cache: obj_cache_ns(object_cache_dir().as_str(), pdir.as_str()),
+        keys: Vector::<String>::new(),
         rewritten: Set::<String>::new(),
+        mtimes: Map::<String, i64>::new(),
         synced: Set::<String>::new(),
         made_dirs: Set::<String>::new(),
         ccdb: Vector::<String>::new(),
@@ -2276,10 +2378,10 @@ fn engine_build_i(
     let skip_emit = cache_on && stamp_fresh(
         stamp_path.as_str(),
         root_dir,
-        target,
+        cx.target,
         m.arch,
-        bootstrap_tags,
-        lint,
+        cx.bootstrap_tags,
+        cx.lint,
         gen.as_str(),
     );
     bst::mark(bst::B_STAMP);
@@ -2291,7 +2393,7 @@ fn engine_build_i(
     if !skip_emit {
         loader::set_load_jobs(jobs);
         let tl0 = unsafe shim::sc_ticks_ms();
-        let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
+        let mut p = loader::package_load_rooted(root, root_dir, alt, cx.std_dir, cx.bootstrap_tags, cx.target);
         bst::mark(bst::B_LOAD);
         if stdlib::getenv("SC_CEMIT_STATS") != null {
             eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
@@ -2321,17 +2423,9 @@ fn engine_build_i(
             prt::shutdown(); // parallel loading may have started the pool
         }
         let pkg = (&mut p) as *mut loader::Package;
-        let mut cirv = iri::interp_new(pkg);
+        let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
         p.cir = &mut cirv;
-        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
-        if ce_steps != 0 {
-            cirv.max_steps = ce_steps;
-        }
-        if ce_mem != 0 {
-            // Bytes -> IVal slots.
-            cirv.max_slots = ce_mem / 32;
-        }
-        let rc = run_package(&mut p, topts, "", target, lint, "", &mut sink);
+        let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", &mut sink);
         if rc != 0 {
             // Reap what is in flight; abandon what has not started.
             stream.drain(true);
@@ -2347,7 +2441,17 @@ fn engine_build_i(
             ret = sync_tree(srcgen.as_str(), gen.as_str(), &stream.synced);
         }
         if ret == 0 && cache_on {
-            stamp_write(stamp_path.as_str(), &p, std_dir, root_dir, target, m.arch, bootstrap_tags, lint, gen.as_str());
+            stamp_write(
+                stamp_path.as_str(),
+                &p,
+                cx.std_dir,
+                root_dir,
+                cx.target,
+                m.arch,
+                cx.bootstrap_tags,
+                cx.lint,
+                gen.as_str(),
+            );
         }
     } else {
         t_transpile = unsafe shim::sc_ticks_ms();
@@ -2363,7 +2467,7 @@ fn engine_build_i(
     if ret == 0 {
         // 3) plan any .c the stream did not see (none expected), then run the pool dry.
         let mut rels = Vector::<String>::new();
-        walk_files(gen.as_str(), gen.len(), &mut rels);
+        walk_gen_files(gen.as_str(), gen.len(), &mut rels);
         let mut planned = Set::<String>::new();
         for i in 0..stream.objs.len() {
             planned.insert(stream.objs.at(i).clone());
@@ -2387,7 +2491,7 @@ fn engine_build_i(
         // Rows sort by their text (a constant directory then the file path): plan order follows the
         // emit stream's notification arrival, which the parallel emit workers may vary.
         {
-            stream.ccdb.sort_by(loader::name_cmp);
+            stream.ccdb.sort();
             let mut db = String::from_str("[\n");
             for ri in 0..stream.ccdb.len() {
                 if ri != 0 {
@@ -2409,7 +2513,7 @@ fn engine_build_i(
         // The link list is sorted so its order never depends on notification arrival order:
         // the link fingerprint embeds the full command.
         let mut objs = replace(&mut stream.objs, Vector::<String>::new());
-        objs.sort_by(loader::name_cmp);
+        objs.sort();
         t_compile = unsafe shim::sc_ticks_ms();
         t_link = t_compile;
         bst::mark(bst::B_COMPILE);
@@ -2446,7 +2550,7 @@ fn engine_build_i(
                 largs = cc_link;
                 if link_kind == 2 {
                     push_arg(&mut largs, "-shared");
-                    if target != 0 {
+                    if cx.target != 0 {
                         push_arg(&mut largs, "-fPIC");
                     }
                 }
@@ -2463,20 +2567,7 @@ fn engine_build_i(
                 }
                 // @c.link flags recorded by the emitter.
                 let lfp = loader::join2(gen.as_str(), "__ldflags");
-                let lf = loader::read_file(lfp.as_str());
-                if !lf.is_none() {
-                    let body = lf.unwrap();
-                    let s = body.as_str();
-                    let mut a: usize = 0;
-                    for b in 0..s.len() {
-                        if s[b] == b'\n' {
-                            if b > a {
-                                split_args(&mut largs, s.slice(a, b));
-                            }
-                            a = b + 1;
-                        }
-                    }
-                }
+                push_ldflags(&mut largs, lfp.as_str());
                 let mut ll = String::new();
                 push_all(&mut ll, &m.ldlibs);
                 split_args(&mut largs, ll.as_str());
@@ -2538,6 +2629,17 @@ fn engine_build_i(
             }
             t_link = unsafe shim::sc_ticks_ms();
         }
+        // Retention runs only after a successful build: a failed one may leave its objects unnamed.
+        if ret == 0 {
+            let now = time::now();
+            if stream.cache.len() != 0 {
+                obj_cache_commit(stream.cache.as_str(), &mut stream.keys, root_dir, now);
+            }
+            let croot = cache_root();
+            if croot.len() != 0 {
+                cache_sweep(croot.as_str(), now);
+            }
+        }
     } else {
         // A failed sync or compile: reap the compiles still in flight and the probes.
         stream.drain(true);
@@ -2571,59 +2673,19 @@ fn engine_build_i(
 
 /// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile
 /// (see `resolve_profile`), linking `bin_override` when non-empty, else the manifest's `bin`.
-pub fn manifest_build(
-    m: &mf::Manifest,
-    profile: str,
-    bin_override: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
-) i32 {
+pub fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     if bin_override.len() != 0 {
         // `-o` names an exact path: link straight there, no profile copy and nothing installed.
-        let ob = exe_name(bin_override, target);
-        return engine_build(
-            m,
-            prof_name,
-            m.root.as_str(),
-            dirname_of(m.root.as_str()),
-            "",
-            prof_name,
-            "raw",
-            ob.as_str(),
-            jobs_override,
-            std_dir,
-            ce_steps,
-            ce_mem,
-            target,
-            bootstrap_tags,
-            lint,
-            0,
-            null,
-        );
+        let ob = exe_name(bin_override, cx.target);
+        return root_build(m, prof_name, ob.as_str(), cx);
     }
     let mut path = String::new();
-    let rc = build_into_profile(
-        m,
-        prof_name,
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        lint,
-        &mut path,
-    );
+    let rc = build_into_profile(m, prof_name, cx, &mut path);
     if rc != 0 {
         return rc;
     }
-    let dest = exe_name(m.bin.as_str(), target);
+    let dest = exe_name(m.bin.as_str(), cx.target);
     return install_bin(path.as_str(), dest.as_str());
 }
 
@@ -2637,13 +2699,7 @@ fn target_build(
     raw: str,
     leaf: str,
     link_kind: i32,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
+    cx: &BuildCtx,
     out: &mut String,
 ) i32 {
     let mut sub = String::from_str(prof_name);
@@ -2654,18 +2710,12 @@ fn target_build(
         m,
         prof_name,
         root,
-        dirname_of(m.root.as_str()),
+        loader::dirname_of(m.root.as_str()),
         "",
         sub.as_str(),
         raw,
         path.as_str(),
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        lint,
+        cx,
         link_kind,
         null,
     );
@@ -2673,54 +2723,40 @@ fn target_build(
     return rc;
 }
 
+// Build the manifest's primary root with `prof_name`'s flags into <out-dir>/<prof_name>, linking `bin`.
+fn root_build(m: &mf::Manifest, prof_name: str, bin: str, cx: &BuildCtx) i32 {
+    let root = m.root.as_str();
+    return engine_build(m, prof_name, root, loader::dirname_of(root), "", prof_name, "raw", bin, cx, 0, null);
+}
+
+// Build the [bin.NAME] target `bt` into <out-dir>/<prof_name>-bin-NAME; `out` receives the executable.
+fn bin_build(m: &mf::Manifest, prof_name: str, bt: &mf::BinTarget, cx: &BuildCtx, out: &mut String) i32 {
+    let mut suffix = String::from_str("-bin-");
+    suffix.push_string(&bt.name);
+    let mut raw = String::from_str("raw-bin-");
+    raw.push_string(&bt.name);
+    let leaf = exe_name(bt.name.as_str(), cx.target);
+    return target_build(m, prof_name, bt.root.as_str(), suffix.as_str(), raw.as_str(), leaf.as_str(), 0, cx, out);
+}
+
 /// `super-c build`/`release` over every manifest target (cargo-style): the [lib] section's static and/or
 /// shared artifacts, the primary `bin` (installed onto the manifest's `bin` path), and each [bin.NAME].
 /// `sel_bin`/`sel_lib` restrict to one target (`--bin=NAME` / `--lib`).
-pub fn manifest_build_all(
-    m: &mf::Manifest,
-    profile: str,
-    sel_bin: str,
-    sel_lib: bool,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
-) i32 {
+pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib: bool, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     let selected = sel_bin.len() != 0 || sel_lib;
     let mut matched = false;
     if m.lib_name.len() != 0 && (!selected || sel_lib) {
         matched = true;
-        if m.lib_static {
-            let leaf = lib_file(m.lib_name.as_str(), false, target);
-            let mut path = String::new();
-            let rc = target_build(
-                m,
-                prof_name,
-                m.lib_root.as_str(),
-                "-lib",
-                "raw-lib",
-                leaf.as_str(),
-                1,
-                jobs_override,
-                std_dir,
-                ce_steps,
-                ce_mem,
-                target,
-                bootstrap_tags,
-                lint,
-                &mut path,
-            );
-            if rc != 0 {
-                return rc;
+        // The static pass lints the closure; the shared pass does not lint it again.
+        let mut nolint = *cx;
+        nolint.lint = false;
+        for kind in 1..3 {
+            let shared = kind == 2;
+            if shared && !m.lib_shared || !shared && !m.lib_static {
+                continue;
             }
-            println("built {}", path.as_str());
-        }
-        if m.lib_shared {
-            let leaf = lib_file(m.lib_name.as_str(), true, target);
+            let leaf = lib_file(m.lib_name.as_str(), shared, cx.target);
             let mut path = String::new();
             let rc = target_build(
                 m,
@@ -2729,14 +2765,12 @@ pub fn manifest_build_all(
                 "-lib",
                 "raw-lib",
                 leaf.as_str(),
-                2,
-                jobs_override,
-                std_dir,
-                ce_steps,
-                ce_mem,
-                target,
-                bootstrap_tags,
-                false, // the static pass already linted this closure
+                kind,
+                if shared {
+                    &nolint;
+                } else {
+                    cx;
+                },
                 &mut path,
             );
             if rc != 0 {
@@ -2747,7 +2781,7 @@ pub fn manifest_build_all(
     }
     if m.bin.len() != 0 && (!selected || sel_bin == m.bin.as_str()) {
         matched = true;
-        let rc = manifest_build(m, profile, "", jobs_override, std_dir, ce_steps, ce_mem, target, bootstrap_tags, lint);
+        let rc = manifest_build(m, profile, "", cx);
         if rc != 0 {
             return rc;
         }
@@ -2758,29 +2792,8 @@ pub fn manifest_build_all(
             continue;
         }
         matched = true;
-        let mut suffix = String::from_str("-bin-");
-        suffix.push_string(&bt.name);
-        let mut raw = String::from_str("raw-bin-");
-        raw.push_string(&bt.name);
-        let leaf = exe_name(bt.name.as_str(), target);
         let mut path = String::new();
-        let rc = target_build(
-            m,
-            prof_name,
-            bt.root.as_str(),
-            suffix.as_str(),
-            raw.as_str(),
-            leaf.as_str(),
-            0,
-            jobs_override,
-            std_dir,
-            ce_steps,
-            ce_mem,
-            target,
-            bootstrap_tags,
-            lint,
-            &mut path,
-        );
+        let rc = bin_build(m, prof_name, bt, cx, &mut path);
         if rc != 0 {
             return rc;
         }
@@ -2900,27 +2913,16 @@ fn copy_file(srcp: str, dstp: str) bool {
 // invisible to (and shadow files from) the repository the project lives in.
 fn copy_tree(srcd: str, dstd: str) bool {
     mkdir_p(dstd);
-    let mut sp = String::from_str(srcd);
-    let dh = unsafe shim::sc_opendir(sp.cstr());
-    if dh == null {
+    let lo = list_dir(srcd, true);
+    if lo.is_none() {
         return false;
     }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        let s = str::from_cstr(nm);
-        if s == "." || s == ".." || s == ".git" {
-            continue;
-        }
-        names.push(String::from_str(s));
-    }
-    unsafe shim::sc_closedir(dh);
+    let names = lo.unwrap();
     let mut ok = true;
     for i in 0..names.len() {
+        if names.at(i).as_str() == ".git" {
+            continue;
+        }
         let s = loader::join2(srcd, names.at(i).as_str());
         let d = loader::join2(dstd, names.at(i).as_str());
         let mut sc = s.clone();
@@ -3118,38 +3120,9 @@ fn scheme_len(s: str) usize {
 // Nothing is installed: the commands whose job is to PRODUCE the project binary (build, release) copy it
 // into place afterwards, and the ones that merely need to run it (test, run) use it where it lies: which
 // is what keeps a `test` run from quietly leaving a dev binary where a release one was.
-fn build_into_profile(
-    m: &mf::Manifest,
-    prof_name: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
-    out: &mut String,
-) i32 {
-    let path = profile_bin(m, prof_name, target);
-    let rc = engine_build(
-        m,
-        prof_name,
-        m.root.as_str(),
-        dirname_of(m.root.as_str()),
-        "",
-        prof_name,
-        "raw",
-        path.as_str(),
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        lint,
-        0,
-        null,
-    );
+fn build_into_profile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, out: &mut String) i32 {
+    let path = profile_bin(m, prof_name, cx.target);
+    let rc = root_build(m, prof_name, path.as_str(), cx);
     *out = path;
     return rc;
 }
@@ -3157,19 +3130,7 @@ fn build_into_profile(
 /// `super-c run`: build the manifest binary (like `manifest_build`), then execute it (cargo run).
 /// Returns the build's failure code, or the binary's exit code. The binary is `bin_override` if
 /// given, else the manifest's `bin`; a bare name is run cwd-relative (`./bin`), never through PATH.
-pub fn manifest_run_bin(
-    m: &mf::Manifest,
-    profile: str,
-    bin_override: str,
-    sel_bin: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
-) i32 {
+pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     let mut built = String::new();
     if sel_bin.len() != 0 && sel_bin != m.bin.as_str() {
@@ -3184,30 +3145,8 @@ pub fn manifest_run_bin(
             eprintln("run: no binary target named '{}'", sel_bin);
             return 1;
         }
-        let bt = m.bins.at(bi as usize);
-        let mut suffix = String::from_str("-bin-");
-        suffix.push_string(&bt.name);
-        let mut raw = String::from_str("raw-bin-");
-        raw.push_string(&bt.name);
-        let leaf = exe_name(bt.name.as_str(), target);
         let mut path = String::new();
-        let trc = target_build(
-            m,
-            prof_name,
-            bt.root.as_str(),
-            suffix.as_str(),
-            raw.as_str(),
-            leaf.as_str(),
-            0,
-            jobs_override,
-            std_dir,
-            ce_steps,
-            ce_mem,
-            target,
-            bootstrap_tags,
-            lint,
-            &mut path,
-        );
+        let trc = bin_build(m, prof_name, m.bins.at(bi as usize), cx, &mut path);
         if trc != 0 {
             return trc;
         }
@@ -3216,40 +3155,11 @@ pub fn manifest_run_bin(
         return exec_args(&mut ra0, null);
     }
     let rc = if bin_override.len() != 0 {
-        built = exe_name(bin_override, target);
-        engine_build(
-            m,
-            prof_name,
-            m.root.as_str(),
-            dirname_of(m.root.as_str()),
-            "",
-            prof_name,
-            "raw",
-            built.as_str(),
-            jobs_override,
-            std_dir,
-            ce_steps,
-            ce_mem,
-            target,
-            bootstrap_tags,
-            lint,
-            0,
-            null,
-        );
+        built = exe_name(bin_override, cx.target);
+        root_build(m, prof_name, built.as_str(), cx);
     } else {
         // Run the profile's own binary where it was linked; `run` builds to run, it does not install.
-        build_into_profile(
-            m,
-            prof_name,
-            jobs_override,
-            std_dir,
-            ce_steps,
-            ce_mem,
-            target,
-            bootstrap_tags,
-            lint,
-            &mut built,
-        );
+        build_into_profile(m, prof_name, cx, &mut built);
     };
     if rc != 0 {
         return rc;
@@ -3267,17 +3177,9 @@ pub fn manifest_run_bin(
 
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
 /// an aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
-pub fn manifest_test(
-    m: &mf::Manifest,
-    profile: str,
-    jobs_override: u32,
-    topts: *const TestOpts,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-) i32 {
+pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
+    let mut nolint = *cx;
+    nolint.lint = false;
     let mut tdir = m.test_dir.clone();
     if unsafe shim::sc_stat_isdir(tdir.cstr()) != 1 {
         eprintln("test: no {}/ directory next to src/", tdir.as_str());
@@ -3287,40 +3189,12 @@ pub fn manifest_test(
     // the suite would replace whatever the manifest's binary currently is (a release artifact, say).
     let prof_name = resolve_profile(m, profile);
     let mut binp = String::new();
-    let rc = build_into_profile(
-        m,
-        prof_name,
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        false,
-        &mut binp,
-    );
+    let rc = build_into_profile(m, prof_name, &nolint, &mut binp);
     if rc != 0 {
         return rc;
     }
-    let mut rels = Vector::<String>::new();
-    walk_files(tdir.as_str(), tdir.len(), &mut rels);
-    rels.sort_by(loader::name_cmp);
     let mut src = String::new();
-    src.push_str("// generated by `super-c test` -- do not edit\n");
-    let mut n = 0;
-    for i in 0..rels.len() {
-        let rel = rels.at(i).as_str();
-        if !rel.ends_with(".spc") {
-            continue;
-        }
-        src.push_str("import ");
-        push_module_path(&mut src, tdir.as_str());
-        src.push_str("::");
-        push_module_path(&mut src, rel.slice(0, rel.len() - 4));
-        src.push_str(";\n");
-        n = n + 1;
-    }
-    if n == 0 {
+    if suite_import_root(tdir.as_str(), "test", &mut src) == 0 {
         eprintln("test: no .spc files under {}/", tdir.as_str());
         return 1;
     }
@@ -3354,23 +3228,17 @@ pub fn manifest_test(
     // link check instead of a serial rebuild of every unit.
     let tsub = "test";
     let tdir_out = loader::join2(m.out_dir.as_str(), tsub);
-    let tbin = loader::join2(tdir_out.as_str(), exe_name("__tests", target).as_str());
+    let tbin = loader::join2(tdir_out.as_str(), exe_name("__tests", cx.target).as_str());
     let brc = engine_build(
         m,
         tsub,
         rootp.as_str(),
         ".",
-        dirname_of(m.root.as_str()),
+        loader::dirname_of(m.root.as_str()),
         tsub,
         "raw-test",
         tbin.as_str(),
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        false,
+        &nolint,
         0,
         topts,
     );
@@ -3380,13 +3248,16 @@ pub fn manifest_test(
     return test_run_runner(topts, tbin.as_str());
 }
 
-// Every .spc under <bench-dir>, as `import <bench-dir>::<path>;` lines. Returns how many were found.
-// This is the same convention `super-c test` uses: a file is part of the suite because of where it lives.
-fn bench_import_root(bdir: str, out: &mut String) usize {
+// Every .spc under the suite directory `bdir` of `super-c <cmd>` (test or bench), as
+// `import <bdir>::<path>;` lines: a file is part of the suite because of where it lives. Returns how
+// many were found.
+fn suite_import_root(bdir: str, cmd: str, out: &mut String) usize {
     let mut rels = Vector::<String>::new();
     walk_files(bdir, bdir.len(), &mut rels);
-    rels.sort_by(loader::name_cmp);
-    out.push_str("// generated by `super-c bench` -- do not edit\n");
+    rels.sort();
+    out.push_str("// generated by `super-c ");
+    out.push_str(cmd);
+    out.push_str("` -- do not edit\n");
     let mut n: usize = 0;
     for i in 0..rels.len() {
         let rel = rels.at(i).as_str();
@@ -3552,18 +3423,9 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
 /// `super-c bench`: discover `@bench` functions under <bench-dir> (default bench/), build a runner
 /// for them under the bench profile (by default) into <out-dir>/bench-bin and run it (skipped when
 /// `no_run`). A non-empty `filter` runs only the benchmarks whose name contains it.
-pub fn manifest_bench(
-    m: &mf::Manifest,
-    profile: str,
-    no_run: bool,
-    filter: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-) i32 {
+pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str, cx: &BuildCtx) i32 {
+    let mut nolint = *cx;
+    nolint.lint = false;
     let mut bdir = m.bench_dir.clone();
     if unsafe shim::sc_stat_isdir(bdir.cstr()) != 1 {
         eprintln("bench: no {}/ directory next to src/", bdir.as_str());
@@ -3578,7 +3440,7 @@ pub fn manifest_bench(
     // root is written with a call to each one. Loading twice is cheap (the first pass only parses) and it
     // is what keeps a bench file from having to be wired into a hand-maintained `main`.
     let mut listing = String::new();
-    let nmods = bench_import_root(bdir.as_str(), &mut listing);
+    let nmods = suite_import_root(bdir.as_str(), "bench", &mut listing);
     if nmods == 0 {
         eprintln("bench: no .spc files under {}/", bdir.as_str());
         return 1;
@@ -3593,10 +3455,10 @@ pub fn manifest_bench(
     if !bench_collect(
         scanp.as_str(),
         bpref.as_str(),
-        dirname_of(m.root.as_str()),
-        std_dir,
-        bootstrap_tags,
-        target,
+        loader::dirname_of(m.root.as_str()),
+        cx.std_dir,
+        cx.bootstrap_tags,
+        cx.target,
         &mut found,
     ) {
         return 1;
@@ -3642,7 +3504,7 @@ pub fn manifest_bench(
     let sub = loader::join2("bench", prof_name);
     // Bound, not inlined: a `str` taken from a TEMPORARY String dangles the moment the statement ends, and
     // a short name lives inside the String itself, so the borrow points at a dead stack slot.
-    let leaf = exe_name("bench-bin", target);
+    let leaf = exe_name("bench-bin", cx.target);
     let bin = loader::join2(m.out_dir.as_str(), leaf.as_str());
     // Rooted at the project root (like tests), so `import bench::x;` works for lint AND build.
     let rc = engine_build(
@@ -3650,17 +3512,11 @@ pub fn manifest_bench(
         prof_name,
         rootp,
         ".",
-        dirname_of(m.root.as_str()),
+        loader::dirname_of(m.root.as_str()),
         sub.as_str(),
         "raw-bench",
         bin.as_str(),
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        false,
+        &nolint,
         0,
         null,
     );
@@ -3680,18 +3536,7 @@ pub fn manifest_bench(
 
 /// `super-c command <name>`: run a manifest command, building first when it asks for it. Lines run in
 /// order; the first nonzero exit stops and is returned.
-pub fn manifest_run(
-    m: &mf::Manifest,
-    name: str,
-    profile: str,
-    jobs_override: u32,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    target: i32,
-    bootstrap_tags: bool,
-    lint: bool,
-) i32 {
+pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i32 {
     let ci = m.command_index(name);
     if ci < 0 {
         eprintln("run: no command '{}' in build.toml", name);
@@ -3699,7 +3544,7 @@ pub fn manifest_run(
     }
     let c = m.commands.at(ci as usize);
     if c.needs_build {
-        let rc = manifest_build(m, profile, "", jobs_override, std_dir, ce_steps, ce_mem, target, bootstrap_tags, lint);
+        let rc = manifest_build(m, profile, "", cx);
         if rc != 0 {
             return rc;
         }
@@ -3729,7 +3574,7 @@ pub fn manifest_run(
 /// when nothing else is in it: it can be the user's own.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
-    let b = loader::join2(dirname_of(m.root.as_str()), "build");
+    let b = loader::join2(loader::dirname_of(m.root.as_str()), "build");
     let raw = loader::join2(b.as_str(), "raw");
     rm_rf(raw.as_str());
     let mut bc = b.clone();

@@ -1,8 +1,7 @@
-// Body-local inference state and the read-only package boundary.
+// Body-local inference state.
 // InferenceContext owns the mutable walk state one body's check may touch plus the solver core:
-// inference variables with a rollback log and the per-call generic-argument session. PackageTypeDb owns the read-only declaration and type
-// lookup a body job is allowed. TypeChecker composes both and keeps the current algorithms behind
-// its existing methods as adapters.
+// inference variables with a rollback log and the per-call generic-argument session. TypeChecker
+// composes it and keeps the current algorithms behind its existing methods as adapters.
 import ast::ast as *;
 import module::loader as loader;
 
@@ -41,10 +40,6 @@ pub const fn it_payload(t: InferTy) u32 {
 /// True for a const variable.
 pub const fn it_is_cvar(t: InferTy) bool {
     return it_tag(t) == IT_TAG_CVAR;
-}
-/// The const-variable id of `t`; `it_is_cvar(t)` must hold.
-pub const fn it_cvar_id(t: InferTy) u32 {
-    return it_payload(t);
 }
 
 // Rollback log cell kinds.
@@ -87,22 +82,16 @@ pub struct SessionMark {
 }
 
 // One recorded piece of directional evidence for a variable: `ty` flowed into the variable's
-// position at `node`. `eq` marks a nested (invariant) position.
+// position. `eq` marks a nested (invariant) position.
 struct BoundRec {
     pub var: u32,
     pub ty: TypeId,
-    pub node: NodeId,
     pub eq: bool,
 }
 
-/// A const-value conflict: two exact uses disagreed. Recorded, not emitted; the adapter turns
-/// these into one diagnostic at the call.
-pub struct CConflict {
-    pub old: TypeId,
-    pub later: TypeId,
-}
-
-/// Two directional uses of one type variable that have no unique safe-conversion join.
+/// Two uses that disagree: two directional uses of one type variable with no unique safe-conversion
+/// join, or two exact uses of one const variable with different values. Recorded, not emitted; the
+/// adapter turns them into one diagnostic at the call.
 pub struct TypeConflict {
     pub first: TypeId,
     pub later: TypeId,
@@ -127,7 +116,6 @@ pub struct InferenceContext {
     /// at what is being passed. Empty outside that window: a bare member access has no arguments.
     pub call_args: NodeList,
     pub addr_ctx: bool,
-    pub place_use: bool,
     pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
     pub coerce_depth: i32,
@@ -150,53 +138,10 @@ extend InferenceContext {
             mret_total: 0,
             call_args: NodeList { start: 0, len: 0 },
             addr_ctx: false,
-            place_use: false,
             proj_obj_ok: false,
             coerce_depth: 0,
             sv: Solver::new(),
         };
-    }
-}
-
-/// Read-only access to published package state: module Asts, sources, and declaration lookup.
-/// A body job reads through this boundary only; it never mutates another module's state. The
-/// pointers borrow the Package (may be null for single-file checks without one).
-pub struct PackageTypeDb<'a> {
-    pub ast: *mut Ast,
-    pub package: *mut loader::Package,
-    pub source: str<'a>,
-}
-
-extend PackageTypeDb {
-    /// The module whose body is being checked.
-    pub const fn cur_module(self: &Self) ModuleId {
-        return unsafe (&*self.ast).module;
-    }
-
-    @c.always_inline
-    /// Module `m`'s live Ast (the current module's when `m` is it or no package is attached).
-    pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
-        if self.package != null && m != self.cur_module() {
-            // Asts live in place in the module table, so the slot IS the live tree.
-            return unsafe &mut (*self.package).modules[m as usize].ast;
-        }
-        return self.ast;
-    }
-
-    /// Module `m`'s source text, for span rendering.
-    pub const fn mod_src(self: &Self, m: ModuleId) str {
-        if self.package != null && m != self.cur_module() {
-            return unsafe (*self.package).modules[m as usize].source.as_str();
-        }
-        return self.source;
-    }
-
-    /// Number of modules in the package; 0 without one.
-    pub const fn pkg_count(self: &Self) usize {
-        if self.package == null {
-            return 0;
-        }
-        return unsafe (*self.package).modules.len();
     }
 }
 
@@ -210,7 +155,7 @@ pub struct Solver {
     c_bound: Vector<bool>,
     log: Vector<LogEnt>,
     bounds: Vector<BoundRec>,
-    pub cconflicts: Vector<CConflict>,
+    pub cconflicts: Vector<TypeConflict>,
     pub type_conflicts: Vector<TypeConflict>,
     s_pd: Vector<DefId>,
     s_slot: Vector<u32>, // it_var(..) or it_cvar(..)
@@ -228,7 +173,7 @@ extend Solver {
             c_bound: Vector::<bool>::new(),
             log: Vector::<LogEnt>::new(),
             bounds: Vector::<BoundRec>::new(),
-            cconflicts: Vector::<CConflict>::new(),
+            cconflicts: Vector::<TypeConflict>::new(),
             type_conflicts: Vector::<TypeConflict>::new(),
             s_pd: Vector::<DefId>::new(),
             s_slot: Vector::<u32>::new(),
@@ -326,7 +271,7 @@ extend Solver {
             if self.c_ty[c as usize] == ty {
                 return true;
             }
-            self.cconflicts.push(CConflict { old: self.c_ty[c as usize], later: ty });
+            self.cconflicts.push(TypeConflict { first: self.c_ty[c as usize], later: ty });
             return false;
         }
         self.log_cbind(c);
@@ -373,10 +318,7 @@ extend Solver {
 
     /// Close the session opened by `session_open` and make `outer` active again.
     pub fn session_close(self: &mut Self, outer: &SessionMark) {
-        self.s_pd.truncate(self.sess.pd as usize);
-        self.s_slot.truncate(self.sess.pd as usize);
-        self.bounds.truncate(self.sess.bounds as usize);
-        self.cconflicts.truncate(self.sess.cconflicts as usize);
+        self.session_begin();
         self.type_conflicts.truncate(self.sess.type_conflicts as usize);
         self.sess = *outer;
     }
@@ -413,7 +355,7 @@ extend Solver {
     fn s_const_ev(self: &mut Self, t: InferTy, ty: TypeId) {
         let k = unsafe (&*self.ast).type_at(ty).kind;
         if k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR || k == TypeKind::TYPE_GENERIC {
-            let _ = self.cbind(it_cvar_id(t), ty);
+            let _ = self.cbind(it_payload(t), ty);
         }
     }
 
@@ -433,14 +375,14 @@ extend Solver {
 
     /// Nested (invariant) evidence: bind-if-unbound. A later disagreeing nested use keeps the first
     /// binding; the argument-compatibility pass reports the mismatch at its own position.
-    pub fn s_eq(self: &mut Self, slot: u32, ty: TypeId, node: NodeId) {
+    pub fn s_eq(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
         if it_is_cvar(t) {
             self.s_const_ev(t, ty);
             return;
         }
         let v = it_payload(t);
-        self.bounds.push(BoundRec { var: v, ty: ty, node: node, eq: true });
+        self.bounds.push(BoundRec { var: v, ty: ty, eq: true });
         if self.v_binding[v as usize] == IT_UNBOUND {
             self.bind(v, ty);
         }
@@ -448,13 +390,13 @@ extend Solver {
 
     /// Top-level directional evidence: the argument value flows into the parameter, so a safe
     /// conversion is allowed. Recorded; joined at resolve time.
-    pub fn s_lb(self: &mut Self, slot: u32, ty: TypeId, node: NodeId) {
+    pub fn s_lb(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
         if it_is_cvar(t) {
             self.s_const_ev(t, ty);
             return;
         }
-        self.bounds.push(BoundRec { var: it_payload(t), ty: ty, node: node, eq: false });
+        self.bounds.push(BoundRec { var: it_payload(t), ty: ty, eq: false });
     }
 
     /// Exact const-value evidence for a slot (the array-length walk counts elements directly).
@@ -462,7 +404,7 @@ extend Solver {
         let t = self.slot_ty(slot);
         if it_is_cvar(t) {
             let cv = unsafe (&mut *self.ast).const_value(v);
-            let _ = self.cbind(it_cvar_id(t), cv);
+            let _ = self.cbind(it_payload(t), cv);
         }
     }
 
@@ -472,7 +414,7 @@ extend Solver {
     pub fn s_resolve(self: &mut Self, slot: u32, conv: fn(*mut Ast, TypeId, TypeId) bool) TypeId {
         let t = self.slot_ty(slot);
         if it_is_cvar(t) {
-            let c = it_cvar_id(t);
+            let c = it_payload(t);
             if !self.c_bound[c as usize] {
                 return TYPE_NONE;
             }

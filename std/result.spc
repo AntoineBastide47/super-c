@@ -1,8 +1,8 @@
 // Result<T, E>: success `Ok(T)` or failure `Err(E)`. A two-parameter payload-bearing generic enum,
 // monomorphized per (T, E). Value-yielding methods CONSUME `self` (matching the owned value moves the
 // payload out); read-only methods take `&self` and bind the payload by reference (`switch` binding modes).
-// `Result<T, E>` is auto-`Free` whenever `T` is `Free` (the `E` arm is freed through the `.free()`
-// Free intrinsic: a no-op when `E` is not `Free`); freeing it deep-frees the live payload.
+// `Result<T, E>` has no `Free` extend: it derives `Free` whenever `T` or `E` is `Free`, and freeing it
+// frees the live payload.
 
 /// A success value `Ok(T)` or a failure `Err(E)`.
 pub enum Result<T, E> {
@@ -145,18 +145,6 @@ extend<T, E> Result<T, E> {
                 Option::<E>::None;
             },
             Err(e) => Option::<E>::Some(e),
-        };
-    }
-}
-
-// Auto-`Free` whenever `T` is `Free`: freeing deep-frees the live payload in place (the `&mut self` match
-// binds it by reference). The `Err` arm's `.free()` is the Free intrinsic: a no-op unless `E` too
-// is `Free`.
-extend<T: Free, E> Result<T, E> as Free {
-    pub fn free(self: &mut Result<T, E>) {
-        switch self {
-            Ok(v) => v.free(),
-            Err(e) => e.free(),
         };
     }
 }

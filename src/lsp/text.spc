@@ -110,7 +110,27 @@ pub fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 
     return i as u32;
 }
 
-const fn hex_val(b: u8) i32 {
+/// `b` with an ASCII upper-case letter made lower-case.
+pub const fn ascii_lower(b: u8) u8 {
+    if b >= b'A' && b <= b'Z' {
+        return b + 32;
+    }
+    return b;
+}
+
+/// True when `needle` occurs at byte `at` of `hay`, ASCII case ignored. Requires
+/// `at + needle.len() <= hay.len()`.
+pub const fn ci_at(hay: str, at: usize, needle: str) bool {
+    for k in 0..needle.len() {
+        if ascii_lower(hay[at + k]) != ascii_lower(needle[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The value of hex digit `b`, or -1.
+pub const fn hex_val(b: u8) i32 {
     if b >= b'0' && b <= b'9' {
         return b - b'0';
     }

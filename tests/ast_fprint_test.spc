@@ -2,7 +2,7 @@
 // ast_fprint, an NDEBUG debug dump). The printer is ported here (its only consumer is this test: a debug
 // tool, kept out of the core ast.spc so the compiler's own build is untouched) and driven over a parsed
 // function, asserting the dump names each node kind, renders identifier text from the source span, prints
-// the operator name for binary nodes, and prints node spans as [start..end].
+// the operator kind for binary nodes, and prints node spans as [start..end].
 import tests::harness as h;
 import ast::ast as ast;
 import lexer::token_type as tt;
@@ -128,9 +128,9 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             unsafe (source + r.start as usize),
         );
     } else if n.kind == ast::NodeKind::NODE_UNARY {
-        unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.unary.op.name().ptr() as *const char);
+        unsafe stdio::fprintf(out, " %u".ptr() as *const char, n.as_data.unary.op as u32);
     } else if n.kind == ast::NodeKind::NODE_BINARY || n.kind == ast::NodeKind::NODE_ASSIGNMENT {
-        unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.binary.op.name().ptr() as *const char);
+        unsafe stdio::fprintf(out, " %u".ptr() as *const char, n.as_data.binary.op as u32);
     }
     unsafe stdio::fprintf(out, " [%u..%u]\n".ptr() as *const char, n.span.start, n.span.end);
     let d = depth + 1;
@@ -364,7 +364,8 @@ fn dump() {
     assert(has(buf, "Identifier `a`"), "parameter identifier rendered");
     assert(has(buf, "Parameter"), "dump names parameters");
     assert(has(buf, "Return"), "dump names the return");
-    assert(has(buf, "Binary Plus"), "operator name printed for binary nodes");
+    let plus = format("Binary {}", tt::TokenType::Plus as u32);
+    assert(has(buf, plus.as_str()), "operator kind printed for binary nodes");
     assert(has(buf, ".."), "node spans printed as [start..end]");
     unsafe stdlib::free(buf);
 }

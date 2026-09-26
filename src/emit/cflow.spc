@@ -80,9 +80,9 @@ fn n_succ(b: &ir::CoreBody, x: u32) u32 {
     return 1;
 }
 
-// A literal switch has one live edge. Removing its dead edges here keeps them out of reachability,
-// dominance, loop discovery, and the final C layout.
-fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
+/// The live edge of switch block `x` when it switches on a literal; NONE otherwise. Removing the dead
+/// edges keeps them out of reachability, dominance, loop discovery, and the final C layout.
+pub fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind != ir::TM_SWITCH {
         return NONE;
@@ -214,10 +214,8 @@ extend CFlow {
         // resolved once: a whole chain collapses to its end in O(chain), amortized O(1) per block.
         self.s_tdone.clear();
         self.s_onpath.clear();
-        for _i in 0..n {
-            self.s_tdone.push(false);
-            self.s_onpath.push(false);
-        }
+        self.s_tdone.resize_default(n as usize);
+        self.s_onpath.resize_default(n as usize);
         self.s_tpath.clear();
         for x in 0..n {
             if *self.s_tdone.at(x as usize) {
@@ -331,9 +329,7 @@ extend CFlow {
         // Reverse-postorder DFS from entry over threaded edges (iterative; children in edge order).
         // 0 unseen, 1 on-stack, 2 done.
         self.s_state.clear();
-        for _i in 0..n {
-            self.s_state.push(0);
-        }
+        self.s_state.resize_default(n as usize);
         self.s_stack.clear();
         // Next child index per stack frame.
         self.s_kidx.clear();
@@ -477,9 +473,7 @@ extend CFlow {
         }
         // reverse-graph DFS from the exit: exit -> sinks, then block -> its forward predecessors
         self.s_state.clear();
-        for _i in 0..self.n + 1 {
-            self.s_state.push(0);
-        }
+        self.s_state.resize_default((self.n + 1) as usize);
         self.s_stack.clear();
         self.s_kidx.clear();
         self.s_post.clear();
@@ -589,9 +583,7 @@ extend CFlow {
     fn compute_domtree(self: &mut Self) {
         // Children CSR from idom.
         self.s_cnt.clear();
-        for _i in 0..self.n {
-            self.s_cnt.push(0);
-        }
+        self.s_cnt.resize_default(self.n as usize);
         for i in 1..self.order.len() {
             let x = *self.order.at(i);
             self.s_cnt.set(
@@ -661,9 +653,7 @@ extend CFlow {
     // so the total cost is the sum of loop sizes, not headers x blocks.
     fn compute_loops(self: &mut Self, b: &ir::CoreBody) {
         self.s_inloop.clear();
-        for _i in 0..self.n {
-            self.s_inloop.push(false);
-        }
+        self.s_inloop.resize_default(self.n as usize);
         self.s_members.clear();
         self.s_work.clear();
         for i in 0..self.order.len() {

@@ -61,3 +61,19 @@ fn long_statement_else_if_chain_builds() {
     assert(p.cc_build("").ok());
     assert_eq(p.run_bin(), 0);
 }
+
+// A constant that is an array of a module's own struct is declared `extern` in that module's
+// prototype header. A module that calls into it includes that header, so the header must include
+// the struct's type header: C rejects an array of an incomplete element type.
+@test
+fn struct_array_const_header_includes_its_element_type() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/a.spc",
+        "struct S {\n    pub x: i32,\n}\nconst T: [S; 2] = [S { x: 1 }, S { x: 2 }];\n@c.noinline\npub fn get(i: usize) i32 {\n    return unsafe T[i].x;\n}\n",
+    );
+    p.mkfile("src/main.spc", "import a;\nfn main(args: Vector<str>) i32 {\n    return a::get(args.len()) - 2;\n}\n");
+    let r = cli::superc_env_in(str::from_cstr(p.rootp()), "SC_NO_EMIT_CACHE", "1", "run");
+    assert_eq(r.exit, 0);
+}

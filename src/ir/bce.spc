@@ -20,14 +20,10 @@ import stdlib;
 // Retained-check reasons (report order).
 pub const BR_UNKNOWN_INDEX: u8 = 0;
 pub const BR_UNKNOWN_LENGTH: u8 = 1;
-pub const BR_DIFFERENT_BASE: u8 = 2;
-pub const BR_VALUE_REDEFINED: u8 = 3;
-pub const BR_MAY_MUTATE_CALL: u8 = 4;
-pub const BR_ALIAS_WRITE: u8 = 5;
-pub const BR_OVERFLOW_UNKNOWN: u8 = 6;
-pub const BR_JOIN_LOST_FACT: u8 = 7;
-pub const BR_RESOURCE_LIMIT: u8 = 8;
-pub const BR_COUNT: usize = 9;
+pub const BR_OVERFLOW_UNKNOWN: u8 = 2;
+pub const BR_JOIN_LOST_FACT: u8 = 3;
+pub const BR_RESOURCE_LIMIT: u8 = 4;
+pub const BR_COUNT: usize = 5;
 
 pub struct BceStats {
     pub total: u32,
@@ -37,7 +33,7 @@ pub struct BceStats {
     pub coalesced: u32,
     pub folded: u32,
     pub sig_kept: u32, // calls crossed without discarding collection facts (signature transparency)
-    pub reasons: [u32; 9],
+    pub reasons: [u32; 5],
 }
 
 extend BceStats {
@@ -165,13 +161,7 @@ pub struct Bce {
     pub total_facts: usize,
     pub limited: bool,
     pub off: bool, // SC_BCE=0
-    pub no_dom: bool, // SC_BCE_DISABLE rule switches
-    pub no_const: bool,
-    pub no_loop: bool,
-    pub no_range: bool,
-    pub no_affine: bool,
-    pub no_coalesce: bool,
-    pub no_fold: bool,
+    pub no_fold: bool, // SC_BCE_DISABLE rule switches
     pub no_sig: bool,
     // Signature transparency state: a call keeps collection facts unless it can reach the
     // collection's header. `escroot`/`esclist` hold roots whose &mut or raw address escaped into
@@ -205,10 +195,17 @@ const fn lenbind_none() LenBind {
     return LenBind { pl: 0, hg: 0, bg: 0, my_v: 0, ok: false };
 }
 
+// `lb` bound to local version `my_v`.
+const fn lenbind_at(lb: LenBind, my_v: u32) LenBind {
+    let mut x = lb;
+    x.my_v = my_v;
+    return x;
+}
+
 extend Bce {
     /// Emission-lifetime state (one per DropCtx): the env switches read once, every per-body
-    /// table kept for capacity. `run` resets what a body needs.
-    pub fn new(pkg: *const loader::Package) Bce {
+    /// table kept for capacity. `run` resets what a body needs, and sets the package.
+    pub fn new() Bce {
         let dis = stdlib::getenv("SC_BCE_DISABLE");
         let mut d = "";
         if dis != null {
@@ -216,7 +213,7 @@ extend Bce {
         }
         let e = stdlib::getenv("SC_BCE");
         return Bce {
-            pkg: pkg,
+            pkg: null,
             lver: Vector::<u32>::new(),
             basegen: Vector::<u32>::new(),
             heapgen: 0,
@@ -237,12 +234,6 @@ extend Bce {
             total_facts: 0,
             limited: false,
             off: e != null && str::from_cstr(e) == "0",
-            no_dom: d.contains("dom"),
-            no_const: d.contains("const"),
-            no_loop: d.contains("loop"),
-            no_range: d.contains("range"),
-            no_affine: d.contains("affine"),
-            no_coalesce: d.contains("coalesce"),
             no_fold: d.contains("fold"),
             no_sig: d.contains("sig"),
             escall: false,
@@ -325,14 +316,12 @@ extend Bce {
                 guard += 1;
                 continue;
             }
-            if !self.no_affine {
-                let ab = *self.affof.at(l as usize);
-                if ab.ok && ab.my_v == self.lver[l as usize] && self.lver[ab.src as usize] == ab.src_v && (!clean || !self.cwritten[ab.src as usize]) {
-                    off = off + ab.c;
-                    l = ab.src;
-                    guard += 1;
-                    continue;
-                }
+            let ab = *self.affof.at(l as usize);
+            if ab.ok && ab.my_v == self.lver[l as usize] && self.lver[ab.src as usize] == ab.src_v && (!clean || !self.cwritten[ab.src as usize]) {
+                off = off + ab.c;
+                l = ab.src;
+                guard += 1;
+                continue;
             }
             break;
         }
@@ -418,6 +407,18 @@ extend Bce {
         return src.slice(ns.start as usize, ns.end as usize) == "len";
     }
 
+    /// The length identity of place `pl` read now (current generations), bound to local version
+    /// `my_v`.
+    const fn len_capture(self: &Self, b: &ir::CoreBody, pl: u32, my_v: u32) LenBind {
+        return LenBind {
+            pl: pl,
+            hg: self.heapgen,
+            bg: self.basegen[b.places.at(pl as usize).base as usize],
+            my_v: my_v,
+            ok: true,
+        };
+    }
+
     /// A length-place identity for a comparison operand: a still-current length local (behind
     /// copies), or a direct `[r, deref, .len]` read of a prelude view whose base resolves through
     /// a current reference binding -- stamped with the CURRENT generations, because the read
@@ -446,13 +447,7 @@ extend Bce {
         let rl = self.copy_root(p.base);
         let rb = *self.refof.at(rl as usize);
         if rb.ok && rb.my_v == self.lver[rl as usize] {
-            return LenBind {
-                pl: rb.pl,
-                hg: self.heapgen,
-                bg: self.basegen[b.places.at(rb.pl as usize).base as usize],
-                my_v: 0,
-                ok: true,
-            };
+            return self.len_capture(b, rb.pl, 0);
         }
         // No reference binding (a &view parameter): the reference VALUE is the collection
         // identity. A synthetic id keys it; `bg` carries the root local's version so a reassign
@@ -462,7 +457,7 @@ extend Bce {
 
     /// Prove `ik OP lk` (OP is < unless `need_le`, then <=) from the standing facts. The length
     /// side matches by value identity or by the captured place identity `l_lp`.
-    fn fold_proved(self: &mut Self, b: &ir::CoreBody, ik: &VKey, lk: &VKey, l_lp: &LenBind, need_le: bool) bool {
+    fn fold_proved(self: &Self, b: &ir::CoreBody, ik: &VKey, lk: &VKey, l_lp: &LenBind, need_le: bool) bool {
         if !ik.is_const && !ik.is_local {
             return false;
         }
@@ -490,14 +485,7 @@ extend Bce {
         if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
             return false;
         }
-        let a = unsafe &*pk.module_ast_const(d.module);
-        for k in 0..a.attrs.len() {
-            let at = a.attrs.at(k);
-            if at.owner == d.node && at.kind == AttrKind::ATTR_NORETURN as u8 {
-                return true;
-            }
-        }
-        return false;
+        return unsafe (*pk.module_ast_const(d.module)).attr_of(d.node, AttrKind::ATTR_NORETURN) != null;
     }
 
     /// The panic-guard shape: from `blk0`, through at most four effect-free goto hops, every path
@@ -623,7 +611,7 @@ extend Bce {
     fn prove_elem(self: &mut Self, b: &ir::CoreBody, iop: u32, lop: u32, reason: &mut u8) bool {
         let ik = self.vkey(b, iop);
         let lk = self.vkey(b, lop);
-        if ik.is_const && lk.is_const && !self.no_const {
+        if ik.is_const && lk.is_const {
             if ik.c >= 0 && lk.c >= 0 && ik.c < lk.c {
                 return true;
             }
@@ -634,15 +622,13 @@ extend Bce {
             *reason = BR_UNKNOWN_INDEX;
             return false;
         }
-        if !self.no_dom {
-            for i in 0..self.facts.len() {
-                let f = *self.facts.at(i);
-                if f.kind != 0 {
-                    continue;
-                }
-                if self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
-                    return true;
-                }
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.kind != 0 {
+                continue;
+            }
+            if self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
+                return true;
             }
         }
         if self.limited {
@@ -662,10 +648,6 @@ extend Bce {
 
     /// Prove `start <= end <= len` for one IN_RANGE_BOUNDS site.
     fn prove_range(self: &mut Self, b: &ir::CoreBody, sop: u32, eop: u32, lop: u32, reason: &mut u8) bool {
-        if self.no_range {
-            *reason = BR_UNKNOWN_INDEX;
-            return false;
-        }
         let sk = self.vkey(b, sop);
         let ek = self.vkey(b, eop);
         let lk = self.vkey(b, lop);
@@ -730,12 +712,10 @@ extend Bce {
             self.bump_local(p.base);
             return;
         }
-        for i in 0..p.proj_len {
-            if b.projections.at((p.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                // a write through a reference can alias any collection
-                self.heapgen += 1;
-                return;
-            }
+        if b.place_has_deref(pl) {
+            // a write through a reference can alias any collection
+            self.heapgen += 1;
+            return;
         }
         // an interior write (field/index) through the base local
         self.basegen.set(p.base as usize, self.basegen[p.base as usize] + 1);
@@ -777,17 +757,6 @@ extend Bce {
             }
             *out = r;
             return true;
-        }
-        return false;
-    }
-
-    /// True when any projection of `pl` is a deref (the place reaches through a reference).
-    fn place_has_deref(self: &Self, b: &ir::CoreBody, pl: u32) bool {
-        let p = *b.places.at(pl as usize);
-        for i in 0..p.proj_len {
-            if b.projections.at((p.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                return true;
-            }
         }
         return false;
     }
@@ -942,7 +911,7 @@ extend Bce {
                     // a projected operand place is an elided autoref of a projected collection
                     // (s.field): kill its base. A deref inside is a loaded &mut: it can alias
                     // only an escaped root (killed below) or state no tracked fact roots.
-                    if !self.place_has_deref(b, op.data) {
+                    if !b.place_has_deref(op.data) {
                         victim = b.places.at(op.data as usize).base;
                     }
                 } else {
@@ -964,7 +933,7 @@ extend Bce {
                 }
             } else if op.kind == ir::OP_MOVE {
                 // ownership leaves the caller: kill the moved-from base
-                if self.place_has_deref(b, op.data) {
+                if b.place_has_deref(op.data) {
                     return false;
                 }
                 victim = b.places.at(op.data as usize).base;
@@ -1028,7 +997,7 @@ extend Bce {
 
     /// The receiver place behind the single `&self` argument of a len call, or IR_NONE. The
     /// argument may sit behind whole-local copies of the autoref temp.
-    const fn len_call_receiver(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) u32 {
+    const fn len_call_receiver(self: &Self, b: &ir::CoreBody, t: &ir::Terminator) u32 {
         let opid = b.oper_pool[t.args_start as usize];
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
@@ -1047,6 +1016,27 @@ extend Bce {
     }
 
     // ---- range-check coalescing ----------------------------------------------------------------
+
+    // The absolute offset from coalescing root `ik` of operand `opid` (whole local `x`, IR_NONE
+    // when it is none): an in-window alias of `x` first, else the operand's own clean chain.
+    fn root_off(self: &mut Self, b: &ir::CoreBody, x: u32, opid: u32, ik: &VKey, off: &mut i64) bool {
+        if x != ir::IR_NONE {
+            let mut q = self.la_dest.len();
+            while q > 0 {
+                q -= 1;
+                if self.la_dest[q] == x {
+                    *off = self.la_off[q];
+                    return true;
+                }
+            }
+        }
+        let k = self.vkey_w(b, opid, true);
+        if k.is_local && k.l == ik.l && k.v == ik.v {
+            *off = k.off;
+            return true;
+        }
+        return false;
+    }
 
     /// Lookahead from the unproven element check at `si` for later checks over the same affine
     /// root and the same length value, separated only by statements that cannot write memory or
@@ -1119,28 +1109,12 @@ extend Bce {
                 let iop2 = b.oper_pool[rv2.a as usize];
                 let lop2 = b.oper_pool[(rv2.a + 1) as usize];
                 let mut off2: i64 = 0;
-                let mut have2 = false;
                 let o2 = *b.operands.at(iop2 as usize);
+                let mut x = ir::IR_NONE;
                 if o2.kind == ir::OP_COPY || o2.kind == ir::OP_MOVE {
-                    let x = self.whole_local(b, o2.data);
-                    if x != ir::IR_NONE {
-                        let mut q = self.la_dest.len();
-                        while q > 0 && !have2 {
-                            q -= 1;
-                            if self.la_dest[q] == x {
-                                off2 = self.la_off[q];
-                                have2 = true;
-                            }
-                        }
-                    }
+                    x = self.whole_local(b, o2.data);
                 }
-                if !have2 {
-                    let k = self.vkey_w(b, iop2, true);
-                    if k.is_local && k.l == ik.l && k.v == ik.v {
-                        off2 = k.off;
-                        have2 = true;
-                    }
-                }
+                let have2 = self.root_off(b, x, iop2, &ik, &mut off2);
                 // length identity: same value key, or an in-window copy of the same length place
                 let mut same_len = false;
                 let k3 = self.vkey_w(b, lop2, true);
@@ -1177,21 +1151,7 @@ extend Bce {
                 if o2.kind == ir::OP_COPY || o2.kind == ir::OP_MOVE {
                     let x = self.whole_local(b, o2.data);
                     if x != ir::IR_NONE {
-                        let mut q = self.la_dest.len();
-                        while q > 0 && !bind_aff {
-                            q -= 1;
-                            if self.la_dest[q] == x {
-                                bind_aff = true;
-                                bind_off = self.la_off[q];
-                            }
-                        }
-                        if !bind_aff {
-                            let k = self.vkey_w(b, rv2.a, true);
-                            if k.is_local && k.l == ik.l && k.v == ik.v {
-                                bind_aff = true;
-                                bind_off = k.off;
-                            }
-                        }
+                        bind_aff = self.root_off(b, x, rv2.a, &ik, &mut bind_off);
                         let mut q3 = self.ll_dest.len();
                         while q3 > 0 && !bind_len {
                             q3 -= 1;
@@ -1223,28 +1183,13 @@ extend Bce {
                     ck = ka.c;
                 }
                 if basex != ir::IR_NONE {
+                    let side = if aside {
+                        rv2.a;
+                    } else {
+                        rv2.b;
+                    };
                     let mut baseoff: i64 = 0;
-                    let mut got = false;
-                    let mut q = self.la_dest.len();
-                    while q > 0 && !got {
-                        q -= 1;
-                        if self.la_dest[q] == basex {
-                            baseoff = self.la_off[q];
-                            got = true;
-                        }
-                    }
-                    if !got {
-                        let opk = if aside {
-                            self.vkey_w(b, rv2.a, true);
-                        } else {
-                            self.vkey_w(b, rv2.b, true);
-                        };
-                        if opk.is_local && opk.l == ik.l && opk.v == ik.v {
-                            baseoff = opk.off;
-                            got = true;
-                        }
-                    }
-                    if got {
+                    if self.root_off(b, basex, side, &ik, &mut baseoff) {
                         bind_aff = true;
                         bind_off = baseoff + ck;
                     }
@@ -1563,7 +1508,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                                     b.rvalues[rid].c = ir::IN_BOUNDS_PROVEN;
                                 } else {
                                     let mut grouped: u32 = 0;
-                                    if !z.no_coalesce && rv.c == ir::IN_BOUNDS {
+                                    if rv.c == ir::IN_BOUNDS {
                                         grouped = z.try_coalesce(b, &bb, si, rid, iop, lop, stm.span);
                                     }
                                     if grouped != 0 {
@@ -1607,20 +1552,11 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         z.fact_from_check(b, 1, ek, lop);
                     } else if rv.kind == ir::RV_LEN && dest != ir::IR_NONE {
                         z.write_place(b, stm.place);
-                        z.lenof.set(
-                            dest as usize,
-                            LenBind {
-                                pl: rv.a,
-                                hg: z.heapgen,
-                                bg: z.basegen[b.places.at(rv.a as usize).base as usize],
-                                my_v: z.lver[dest as usize],
-                                ok: true,
-                            },
-                        );
+                        z.lenof.set(dest as usize, z.len_capture(b, rv.a, z.lver[dest as usize]));
                         continue;
                     } else if rv.kind == ir::RV_BINARY && dest != ir::IR_NONE && (rv.c == tt::TokenType::Plus as u8 || rv.c == tt::TokenType::Minus as u8) && rv.target == Ast::builtin(
                         BuiltinType::BT_USIZE,
-                    ) && !z.no_affine {
+                    ) {
                         // dest = src +- c: an affine alias of src, matched by exact offset only
                         let ka = z.vkey(b, rv.a);
                         let kb = z.vkey(b, rv.b);
@@ -1689,10 +1625,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         let op = *b.operands.at(rv.a as usize);
                         if flp.ok && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && z.whole_local(b, op.data) == ir::IR_NONE {
                             z.write_place(b, stm.place);
-                            z.lenof.set(
-                                dest as usize,
-                                LenBind { pl: flp.pl, hg: flp.hg, bg: flp.bg, my_v: z.lver[dest as usize], ok: true },
-                            );
+                            z.lenof.set(dest as usize, lenbind_at(flp, z.lver[dest as usize]));
                             continue;
                         }
                         if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
@@ -1711,16 +1644,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                                 // a copy of a length keeps its place identity
                                 let slb = z.len_place_of(srcl);
                                 if slb.ok {
-                                    z.lenof.set(
-                                        dest as usize,
-                                        LenBind {
-                                            pl: slb.pl,
-                                            hg: slb.hg,
-                                            bg: slb.bg,
-                                            my_v: z.lver[dest as usize],
-                                            ok: true,
-                                        },
-                                    );
+                                    z.lenof.set(dest as usize, lenbind_at(slb, z.lver[dest as usize]));
                                 }
                                 continue;
                             }
@@ -1768,12 +1692,14 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         // the condition is a canonical `a OP b`; a proof of it (or of its negation)
                         // whose doomed successor is a pure panic shape folds the branch away
                         let mut dir: u32 = 0;
-                        if z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le) {
+                        if check_only || z.collecting || z.no_fold {
+                            // no fold here: skip the proof
+                        } else if z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le) {
                             dir = 1; // always true
                         } else if z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le) {
                             dir = 2; // always false (the negation swaps sides and flips strictness)
                         }
-                        if !check_only && !z.collecting && !z.no_fold && dir != 0 {
+                        if dir != 0 {
                             let doomed = if dir == 1 {
                                 ft9;
                             } else {
@@ -1841,16 +1767,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                 if pure_len && t.dests_len == 1 {
                     let dl = z.whole_local(b, b.dest_pool[t.dests_start as usize]);
                     if dl != ir::IR_NONE {
-                        z.lenof.set(
-                            dl as usize,
-                            LenBind {
-                                pl: recv,
-                                hg: z.heapgen,
-                                bg: z.basegen[b.places.at(recv as usize).base as usize],
-                                my_v: z.lver[dl as usize],
-                                ok: true,
-                            },
-                        );
+                        z.lenof.set(dl as usize, z.len_capture(b, recv, z.lver[dl as usize]));
                     }
                 }
             } else if t.kind == ir::TM_DROP {
@@ -1877,7 +1794,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                 z.in_len.set(succ0 as usize, z.facts.len() as u32);
                 z.in_set.set(succ0 as usize, true);
             }
-            if succ_true != ir::IR_NONE && z.preds[succ_true as usize] == 1 && !z.in_set[succ_true as usize] && !z.no_loop {
+            if succ_true != ir::IR_NONE && z.preds[succ_true as usize] == 1 && !z.in_set[succ_true as usize] {
                 let st0 = z.in_facts.len();
                 for i in 0..z.facts.len() {
                     let f0 = *z.facts.at(i);

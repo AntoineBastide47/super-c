@@ -180,6 +180,17 @@ fn switches() {
     );
 }
 
+// A char literal has one value in every pass: the UTF-8 spelling, the `\u{..}` escape and the `\x..`
+// escape of U+00E9 are all the byte 233, at run time and in constant evaluation.
+@test
+fn non_ascii_char_literals() {
+    run_exit(
+        "non-ASCII char literals",
+        "const K: u8 = '\\u{e9}' as u8;\nfn main() i32 { let c: char = 'é'; let d: char = '\\u{e9}'; let e: char = '\\xe9'; unsafe exit(if c as u8 == K && d as u8 == K && e as u8 == K { K as i32 - 200; } else { 1; }); }\n",
+        33,
+    );
+}
+
 @test
 fn structs_and_methods() {
     run_exit(
@@ -316,6 +327,37 @@ fn closures_nest_to_any_depth() {
         "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n  let want: i64 = 3;\n  let got = apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return want + 39; }); }); }); });\n  unsafe exit(got as i32);\n}\n",
         42,
     );
+}
+
+// A `dyn fn` type written in a function body names its signature node, which is the type's
+// identity; emission read it after the body syntax was released (an out-of-bounds node read).
+// The signature is module syntax now. Covered with a capturing closure, a closure without
+// captures (its thunk calls the function, no env), a closure that owns a `String` (the boxed env
+// frees it once), a `move` closure, and a `dyn fn` whose parameter is another `dyn fn` (its
+// vtable block must follow the parameter's).
+@test
+fn dyn_fn_types_in_bodies() {
+    let r = h::compile_and_run_env(
+        M"(fn run(f: &dyn fn(i32) i32, x: i32) i32 {
+    return f(x);
+}
+fn main() i32 {
+    let k = 7;
+    let b: Box<dyn fn() i32> = || k;
+    let g: &dyn fn(i32) i32 = &|x: i32| x + k;
+    let plain = |x: i32| x * 2;
+    let p: Box<dyn fn(i32) i32> = |x: i32| x + 1;
+    let name = String::from_str("a heap string longer than twenty-three bytes");
+    let c: Box<dyn fn() usize> = move || name.len();
+    let nested: Box<dyn fn(&dyn fn(i32) i32) i32> = |f: &dyn fn(i32) i32| f(2);
+    let total = b() + g(1) + run(&plain, 3) + p(4) + c() as i32 + c() as i32 + nested(&plain);
+    return total - (7 + 8 + 6 + 5 + 88 + 4);
+}
+)",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "dyn fn types in a body build");
+    assert_eq(r.exit, 0);
 }
 
 @test
@@ -768,5 +810,600 @@ fn names_that_c_headers_declare() {
         "C library names",
         "extern \"C\" { fn labs(x: i64) i64; }\nstruct FILE { pub fd: i32 }\nstruct tm { pub h: i32 }\nfn malloc(n: usize) usize { return n + 1; }\nfn abs(x: i32) i32 { if x < 0 { return 0 - x; } return x; }\nfn printf(x: i32) i32 { return x * 2; }\nfn exit(code: i32) i32 { return code + 3; }\nfn free(f: FILE) i32 { return f.fd; }\nfn time() tm { return tm { h: 7 }; }\nfn main() i32 {\n    let f = FILE { fd: 4 };\n    let l = unsafe labs(-5) as i32;\n    return malloc(1) as i32 + abs(-3) + printf(5) + exit(1) + free(f) + time().h + l;\n}\n",
         35,
+    );
+}
+
+// A use that reads an array constant as a slice types the use node as the slice, not the constant:
+// the constant keeps its array storage, so an index into it and a slice view of it both work.
+@test
+fn array_const_read_as_slice_keeps_array_storage() {
+    h::expect_exit(
+        "a slice view and an index of one array constant",
+        "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn main() i32 {\n    let n: []str = NAMES;\n    return (NAMES[2].len() + n.len()) as i32 - 6;\n}\n",
+        0,
+    );
+}
+
+// Runs `src` under the fatal leak gate: it must build and exit with `code`.
+fn run_leak_free(label: str, src: str, code: i32) {
+    let r = h::compile_and_run_env(src, "SC_LEAK_CHECK=fatal");
+    assert(r.built, label);
+    assert_eq(r.exit, code);
+}
+
+// `?` consumes its carrier: the payload moves out (a Free payload too), the error or None path
+// propagates, and every heap block is freed exactly once, including a converted error.
+@test
+fn question_moves_a_free_payload() {
+    run_leak_free(
+        "? on Option and Result with String payloads",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+struct AppErr { pub msg: String }
+extend AppErr as From<String> {
+    fn from(value: String) AppErr { return AppErr { msg: value }; }
+}
+fn mk(ok: bool) Option<String> {
+    if ok { return Option::<String>::Some(heap("o")); }
+    return Option::<String>::None;
+}
+fn mkr(ok: bool) Result<String, String> {
+    if ok { return Result::<String, String>::Ok(heap("ok")); }
+    return Result::<String, String>::Err(heap("err"));
+}
+fn opt(ok: bool) Option<usize> {
+    let s = mk(ok)?;
+    return Option::<usize>::Some(s.len());
+}
+fn res(ok: bool) Result<usize, String> {
+    let s = mkr(ok)?;
+    return Result::<usize, String>::Ok(s.len());
+}
+fn conv(ok: bool) Result<String, AppErr> {
+    let r = mkr(ok);
+    let s = r?;
+    return Result::<String, AppErr>::Ok(s);
+}
+fn main() i32 {
+    let a = opt(true);
+    let b = opt(false);
+    let c = res(true);
+    let d = res(false);
+    let e = conv(true);
+    let f = conv(false);
+    let fl = switch f {
+        Ok(_) => 0,
+        Err(x) => x.msg.len(),
+    };
+    if a.unwrap() != 47 || b.is_some() || c.is_err() || d.is_ok() || e.is_err() || fl != 49 {
+        return 1;
+    }
+    return 0;
+})",
+        0,
+    );
+}
+
+// A `for` over an array literal lowers like one over a bound array. By value, the loop consumes the
+// array: each element moves into the binding and is freed at the end of its iteration, and `break`,
+// `return` and an outer `break` free the elements the loop did not reach.
+@test
+fn for_over_array_literal() {
+    run_leak_free(
+        "for over Copy and Free array literals",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn first_longer(limit: usize) usize {
+    for s in [heap("a"), heap("bb"), heap("ccc")] {
+        if s.len() > limit {
+            return s.len();
+        }
+    }
+    return 0;
+}
+fn main() i32 {
+    let mut t: i32 = 0;
+    for x in [1, 2, 3] {
+        t += x;
+    }
+    let mut n: usize = 0;
+    for s in [heap("a"), heap("bb")] {
+        n += s.len();
+    }
+    let arr = [heap("x"), heap("yy"), heap("zzz")];
+    let mut k: usize = 0;
+    for s in arr {
+        k += 1;
+        if s.len() == 48 {
+            break;
+        }
+    }
+    let mut c: usize = 0;
+    for s in [heap("p"), heap("q"), heap("r")] {
+        c += 1;
+        if c == 1 {
+            continue;
+        }
+        if s.len() == 0 {
+            return 9;
+        }
+    }
+    let mut m: usize = 0;
+    'outer: for i in 0..2usize {
+        for s in [heap("u"), heap("v")] {
+            m += s.len() + i;
+            break 'outer;
+        }
+    }
+    if t != 6 || n != 95 || k != 2 || c != 3 || first_longer(47) != 48 || m != 47 {
+        return 1;
+    }
+    return 0;
+})",
+        0,
+    );
+}
+
+// A generic body consumes an array of `T` when `T` owns: the instance over `String` frees the elements
+// a `break` skips, the one over `i32` frees nothing.
+@test
+fn for_over_generic_array_consumes_owning_elements() {
+    run_leak_free(
+        "for over [T; 3] with String and i32",
+        M"(fn count<T>(xs: [T; 3], stop: usize) usize {
+    let mut n: usize = 0;
+    for x in xs {
+        n += 1;
+        if n == stop {
+            break;
+        }
+    }
+    return n;
+}
+fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn main() i32 {
+    let a = count([heap("1"), heap("2"), heap("3")], 2);
+    let b = count([1, 2, 3], 5);
+    return (a + b) as i32 - 5;
+})",
+        0,
+    );
+}
+
+// An array of Free elements frees each element: as a local, a struct field and an enum payload.
+@test
+fn array_of_free_elements_drops_each() {
+    run_leak_free(
+        "array drops in locals, fields and payloads",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+struct Pair { pub names: [String; 2] }
+enum E { A([String; 2]), B }
+fn main() i32 {
+    let arr = [heap("a"), heap("bb")];
+    let p = Pair { names: [heap("c"), heap("d")] };
+    let e = E::B;
+    let z = switch e {
+        A(_) => 1,
+        B => 0,
+    };
+    if arr[1].len() != 48 || p.names[0].len() != 47 {
+        return 1;
+    }
+    return z;
+})",
+        0,
+    );
+}
+
+// A closure that mutates a capture holds a pointer to the binding (an implicit `&mut`), also through
+// an `F: fn(..)` bound; an owning capture it only reads is borrowed when it meets a plain `fn(..)`
+// bound. The outer bindings see every change and still own (and free) their values.
+@test
+fn closures_mutate_and_borrow_captures_through_bounds() {
+    run_leak_free(
+        "mutated and borrowed captures through fn bounds",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn apply<F: fn(i32)>(f: F) {
+    f(1);
+    f(2);
+}
+fn each<F: fn(i32)>(xs: []i32, f: F) {
+    for x in xs {
+        f(x);
+    }
+}
+fn run<F: fn()>(f: F) {
+    f();
+}
+fn main() i32 {
+    let mut s: i32 = 0;
+    apply(|x: i32| {
+        s += x;
+    });
+    let arr = [1, 2, 3];
+    let mut t: i32 = 0;
+    each(arr, |x| t += x);
+    let mut v = Vector::<String>::new();
+    let tag = heap("t");
+    apply(|x: i32| {
+        v.push(heap("p"));
+        if x == 2 {
+            v.push(tag.clone());
+        }
+    });
+    let mut total: usize = 0;
+    let mut count: i32 = 0;
+    run(|| {
+        for e in v.iter() {
+            total += e.len();
+        }
+        let inner = || {
+            count += 1;
+        };
+        run(inner);
+    });
+    let mut w = heap("w");
+    run(|| w.push_str("x"));
+    let key = String::from_str("keep");
+    let mut names = Vector::<String>::new();
+    names.push(String::from_str("keep"));
+    names.push(String::from_str("drop"));
+    names.retain(|n: &String| n.as_str() == key.as_str());
+    if s != 3 || t != 6 || v.len() != 3 || total != 141 || count != 1 || w.len() != 48 || names.len() != 1 || tag.len() != 47 {
+        return 1;
+    }
+    return 0;
+})",
+        0,
+    );
+}
+
+// A nested array literal stores each inner array into its slot (C cannot initialize an array from
+// a variable), at any depth, with runtime and constant elements, with and without a type
+// annotation, and a designated inner literal zero-fills the rest of its slot.
+@test
+fn nested_array_literals_store_by_slot() {
+    run_leak_free(
+        "nested array literals",
+        M"(fn mk(x: i32) [[i32; 1]; 2] {
+    return [[x], [x + 1]];
+}
+fn main() i32 {
+    let x: i32 = 5;
+    let g: [[i32; 1]; 2] = [[x], [x + 1]];
+    let h = mk(x);
+    let k = [[[x, 1], [2, x]], [[3, 4], [x, 7]]];
+    let mut t: [[i32; 2]; 2] = [[9, 9], [9, 9]];
+    t = [[x, x], [1, 2]];
+    let v: [[i32; 4]; 2] = [[1, 2, 3, 4], [[1] = x]];
+    let mut w: [[i32; 4]; 2] = [[9, 9, 9, 9], [9, 9, 9, 9]];
+    w = [[1, 2, 3, 4], [[2] = x]];
+    let s = [[String::from_str("a heap string longer than twenty-three bytes")], [String::from_str("x")]];
+    let c = k;
+    if g[1][0] != 6 || h[0][0] != 5 || k[1][1][0] != 5 || c[0][1][1] != 5 || t[0][1] != 5 || t[1][1] != 2 {
+        return 1;
+    }
+    if v[1][0] != 0 || v[1][1] != 5 || v[1][3] != 0 || w[1][0] != 0 || w[1][2] != 5 || w[1][3] != 0 {
+        return 2;
+    }
+    return s[0][0].len() as i32 + s[1][0].len() as i32 - 45;
+}
+)",
+        0,
+    );
+}
+
+// Every aggregate that stores a fixed-array value copies it: a variant payload (positional and
+// named), a tuple element, a struct field, a closure capture, an array element and a return value,
+// also when the source is a by-value array parameter (a pointer in C).
+@test
+fn array_values_copy_into_aggregates() {
+    run_leak_free(
+        "array payloads, elements, captures and parameters",
+        M"(enum E { A([i32; 3]), B { tag: i32, v: [i32; 2] }, C }
+struct W { pub a: [i32; 3], pub n: i32 }
+@c.export("sc_arr_param")
+fn from_param(a: [i32; 3]) i32 {
+    let mut b: [i32; 3] = [0, 0, 0];
+    b = a;
+    let w = W { a: a, n: 1 };
+    let e = E::A(a);
+    let g = [a, a];
+    let t = (a, 1);
+    let c = || a[2] * 2;
+    let x = switch e { A(v) => v[2], _ => 0 };
+    return b[2] + w.a[2] + x + g[1][2] + t.0[2] + c();
+}
+fn ret(a: [i32; 2]) [i32; 2] {
+    return a;
+}
+fn main() i32 {
+    let mut arr: [i32; 3] = [1, 2, 3];
+    arr[1] = 7;
+    let mut two: [i32; 2] = [4, 5];
+    two[0] = 8;
+    let e = E::A(arr);
+    let f = E::B { tag: 3, v: two };
+    let o = Option::<[i32; 2]>::Some(two);
+    let c = || two[1] + arr[2];
+    let r = ret(two);
+    two[1] = 100;
+    let s1 = switch e { A(a) => a[1], _ => 0 };
+    let s2 = switch f { B { tag, v } => tag + v[0], _ => 0 };
+    let s3 = switch o { Some(v) => v[1], None => 0 };
+    let names = [String::from_str("a heap string longer than twenty-three bytes"), String::from_str("y")];
+    let n = || names[0].len();
+    if s1 != 7 || s2 != 11 || s3 != 5 || c() != 8 || r[1] != 5 || n() != 44 {
+        return 1;
+    }
+    return from_param(arr) - 21;
+}
+)",
+        0,
+    );
+}
+
+// An explicit conditional `Free` extend covers only the instances whose `Free`-bounded arguments
+// own memory; any other instance still frees its owning members through the derived destructor:
+// at scope exit, inside a container, through a generic `free` and through an explicit `.free()`.
+// The user `free` counts its calls: only the two covered instances reach it.
+@test
+fn uncovered_conditional_free_instances_derive() {
+    run_leak_free(
+        "conditional Free extends and uncovered instances",
+        M"(static mut CALLS: i32 = 0;
+struct P<T> { pub a: T, pub s: String }
+extend<T: Free> P<T> as Free {
+    pub fn free(self: &mut P<T>) {
+        unsafe CALLS += 1;
+        self.a.free();
+        self.s.free();
+    }
+}
+enum X<T, E> { A(T), B(E), C }
+extend<T: Free, E> X<T, E> as Free {
+    pub fn free(self: &mut X<T, E>) {
+        unsafe CALLS += 10;
+        switch self {
+            A(v) => v.free(),
+            B(e) => e.free(),
+            C => {},
+        };
+    }
+}
+fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn take(p: P<i32>) i32 {
+    return p.a;
+}
+fn drop_it<T: Free>(x: T) {
+    x.free();
+}
+fn main() i32 {
+    {
+        let p = P::<i32> { a: 1, s: heap("p") };
+        let q = P::<String> { a: heap("qa"), s: heap("qs") };
+        let x = X::<i32, String>::B(heap("x"));
+        let y = X::<String, i32>::A(heap("y"));
+        let mut v = Vector::<P<i32>>::new();
+        v.push(P::<i32> { a: 2, s: heap("v") });
+        let o = Option::<X<i32, String>>::Some(X::<i32, String>::B(heap("o")));
+        drop_it(X::<i32, String>::B(heap("g")));
+        let z = X::<i32, String>::B(heap("z"));
+        z.free();
+        if take(p) != 1 || q.a.len() != 48 || v.len() != 1 {
+            return 1;
+        }
+    }
+    return unsafe CALLS - 11;
+}
+)",
+        0,
+    );
+}
+
+// A function whose result is a function pointer names it through a `<fn>_ret` typedef (C spells
+// such a result around the declarator), and `&&` in a type or an expression is two references:
+// a shared reference to a `&mut` spells its pointer const (`T *const *`), never its pointee.
+@test
+fn function_pointer_results_and_double_references() {
+    run_leak_free(
+        "function-pointer results and double references",
+        M"(fn one() i32 {
+    return 1;
+}
+fn two() i32 {
+    return 2;
+}
+@c.export("sc_pick_fn")
+fn pick(b: bool) fn() i32 {
+    if b {
+        return one;
+    }
+    return two;
+}
+fn rr(r: &&i32) i32 {
+    return **r;
+}
+fn rm(r: &&mut i32) i32 {
+    return **r;
+}
+fn main() i32 {
+    let a = 3;
+    let mut b = 4;
+    let both = a > 2 && b > 3;
+    let r = &&a;
+    let s: &&mut i32 = &&mut b;
+    return pick(true)() + pick(false)() * 10 + rr(r) * 100 + rm(s) * 1000 + both as i32 * 10000 - 14321;
+}
+)",
+        0,
+    );
+}
+
+// A by-value `switch` (and the `if let`, `while let` and `for` patterns built on it) owns its
+// scrutinee: at the end of the arm that ran, what the arm's bindings did not move out is freed. An
+// enum frees the members of the variant the arm matched; a guard that fails hands its bindings back
+// to the scrutinee, so a later arm sees the whole value.
+@test
+fn switch_frees_unbound_scrutinee_parts() {
+    run_leak_free(
+        "switch arms that bind part of an owned scrutinee",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+enum E { A(String, String), B { x: String, y: String }, N(Option<String>, String), C }
+enum W { V(String, String) }
+struct S { pub a: String, pub b: String, pub n: i32 }
+fn mk(k: i32) E {
+    if k == 0 { return E::A(heap("a0"), heap("a1")); }
+    if k == 1 { return E::B { x: heap("bx"), y: heap("by") }; }
+    if k == 2 { return E::N(Option::<String>::Some(heap("n0")), heap("n1")); }
+    return E::C;
+}
+fn arms(k: i32) usize {
+    return switch mk(k) {
+        A(a, _) => a.len(),
+        B { y, .. } => y.len(),
+        N(Some(s), _) => s.len(),
+        N(None, t) => t.len(),
+        C => 0,
+    };
+}
+fn guarded(k: i32, lim: usize) usize {
+    return switch mk(k) {
+        A(a, _) if a.len() > lim => 1,
+        A(_, b) => b.len(),
+        B { x, .. } if x.len() > lim => 2,
+        _ => 3,
+    };
+}
+fn early(k: i32) usize {
+    switch mk(k) {
+        A(_, b) => {
+            if b.len() > 3 {
+                return b.len();
+            }
+        },
+        _ => {},
+    };
+    return 0;
+}
+fn main() i32 {
+    let o = Option::<String>::Some(heap("o"));
+    let r1 = switch o { Some(_) => 1, None => 0 };
+    let res = Result::<String, String>::Err(heap("e"));
+    let r2 = switch res { Ok(_) => 0, Err(_) => 1 };
+    let t = (heap("t0"), heap("t1"));
+    let r3 = switch t { (a, _) => a.len() };
+    let s = S { a: heap("sa"), b: heap("sb"), n: 4 };
+    let r4 = switch s { S { a, .. } => a.len() };
+    let mut n: usize = 0;
+    for k in 0..4 {
+        n += arms(k) + guarded(k, 100) + guarded(k, 1) + early(k);
+    }
+    let e = mk(0);
+    if let A(x, _) = e {
+        n += x.len();
+    }
+    let mut v = Vector::<Option<(String, String)>>::new();
+    v.push(Option::<(String, String)>::None);
+    v.push(Option::<(String, String)>::Some((heap("p0"), heap("p1"))));
+    while let Some(Some((a, _))) = v.pop() {
+        n += a.len();
+        break;
+    }
+    let ws = [W::V(heap("w0"), heap("w1"))];
+    for V(a, _) in ws {
+        n += a.len();
+    }
+    return r1 + r2 + (r3 + r4 + n) as i32 - 500;
+}
+)",
+        0,
+    );
+}
+
+// An array literal's expected element type reaches the elements that take their type from the
+// context: a generic variant without type arguments, a generic fn named as a value, a closure.
+@test
+fn array_literal_elements_take_the_expected_type() {
+    run_leak_free(
+        "generic variants in annotated array literals and array or slice arguments",
+        M"(fn sum(xs: []Option<i32>) i32 {
+    let mut s = 0;
+    for x in xs { s += x.unwrap_or(0); }
+    return s;
+}
+fn arr(xs: [Option<i32>; 2]) i32 { return xs[0].unwrap_or(0) + xs[1].unwrap_or(0); }
+fn main() i32 {
+    let a: [Option<i32>; 2] = [Option::Some(1), Option::None];
+    let b = arr([Option::Some(2), Option::None]);
+    let c = sum([Option::Some(3), Option::None, Option::Some(4)]);
+    let d: []Option<i32> = [Option::None, Option::Some(5)];
+    return a[0].unwrap() + b + c + sum(d) - 15;
+}
+)",
+        0,
+    );
+    run_leak_free(
+        "function values in an annotated array literal",
+        M"(fn twice(x: i32) i32 { return x * 2; }
+fn id<T>(x: T) T { return x; }
+fn main() i32 {
+    let fs: [fn(i32) i32; 3] = [twice, id, |x| x + 1];
+    let mut s = 0;
+    for f in fs { s += f(3); }
+    return s - 13;
+}
+)",
+        0,
+    );
+}
+
+// A body whose drops need a move flag gets its statement runs rewritten; the emitter reads the
+// statement pool as a whole, so the superseded runs must be gone: an array local copied into a
+// `for` loop keeps its one C name.
+@test
+fn flagged_drop_keeps_array_local_names() {
+    run_leak_free(
+        "for over an array local with a conditionally moved element",
+        M"(fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn eat(s: String) usize { return s.len(); }
+fn main() i32 {
+    let mut n: usize = 0;
+    let ws = [heap("a"), heap("b")];
+    for w in ws { if n == 0 { n += eat(w); } }
+    return n as i32 - 47;
+}
+)",
+        0,
     );
 }

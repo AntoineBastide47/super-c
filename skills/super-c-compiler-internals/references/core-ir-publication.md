@@ -10,7 +10,7 @@ inventory, the tape categories, and the results.
 
 ## Where lowering runs
 
-`run_package_i` (`src/driver/emit.spc`) types every item (the item jobs), discharges
+`run_package` (`src/driver/emit.spc`) types every item (the item jobs), discharges
 the cross-module obligations, publishes the provisional types (checkpoint 1) and then runs the
 borrow jobs. `bc_fn` (`src/borrowck/borrowck.spc`) lowers each function and its closures
 first (`bc_ir_lower`), replays the tape, runs the analyses over the lowered bodies, and hands
@@ -71,7 +71,7 @@ The reachable point is the end of each module's borrow pass: every choice is fin
 reachability is computed at the start of the frontier, the module's bodies are lowered, kept
 and analyzed, and the syntax of the whole module can go. The driver releases it there
 (`borrowck_all` serial loop, `bc_run_one` per task) when `Package.free_bodies` is set, which
-`run_package_i` does for every batch build except the item-index measurement (its final graph
+`run_package` does for every batch build except the item-index measurement (its final graph
 reads the bodies). The lint driver and the test harness keep the old point. The gate for this
 point was the memory the release frees before the checks phase: 58 MiB of body syntax that
 had stayed live through lint, always-panics, the constant flush and emission planning.
@@ -182,7 +182,7 @@ analysis does not replace.
 
 | Category | Entries | Replay consumer |
 |----------|--------:|-----------------|
-| `TP_SCOPE_PUSH` / `POP` | 25,676 each | scope depth, `bc_scope_close` |
+| `TP_SCOPE_PUSH` / `POP` | 25,676 each | scope depth, `tc_scope_exit` |
 | `TP_NLL` | 70,441 | `borrow_nll_drop` over the block's statements |
 | `TP_MARK_PUSH` / `POP`, `TP_CALL_MARK` | 70,724 / 42,001 / 48,244 | borrow marks and releases |
 | `TP_LET`, `TP_LET_TUPLE` | 19,359 / 6 | `bc_let_post`, `bc_let_tuple_post` |

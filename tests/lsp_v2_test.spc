@@ -566,12 +566,8 @@ fn attribute_inventory_is_complete() {
         }
         assert(found, "attribute missing from the inventory");
     }
-    let mut plats = Vector::<String>::new();
-    par::platform_arg_names(&mut plats);
-    assert_eq(plats.len(), 6);
-    let mut archs = Vector::<String>::new();
-    par::arch_arg_names(&mut archs);
-    assert_eq(archs.len(), 3);
+    assert_eq(par::axis_names(false).len(), 6);
+    assert_eq(par::axis_names(true).len(), 3);
 }
 
 // Gap coverage: incremental sync, pull diagnostics, delta tokens, code actions, hierarchies, limits.

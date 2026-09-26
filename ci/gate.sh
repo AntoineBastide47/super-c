@@ -13,9 +13,16 @@
 #   5. every supported target transpiles the compiler and every built-in profile builds it;
 #   6. the self-transpile benchmark runs with a successful compiler, C compiler and linker.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
+# `sh ci/gate.sh --no-check` skips step 1 (CI, after its own build and test steps); `--core` also skips
+# steps 5 and 6: check.sh runs it last, over the compiler its bootstrap step installed.
 set -eu
 cd "$(dirname "$0")/.."
 . ci/contract.sh
+mode=${1:-}
+case "$mode" in
+"" | --no-check | --core) ;;
+*) printf 'usage: sh ci/gate.sh [--no-check | --core]\n' >&2; exit 2 ;;
+esac
 
 step() { printf '\ngate: %s\n' "$1"; }
 fail() { printf 'gate: FAILED: %s\n' "$1" >&2; exit 1; }
@@ -40,8 +47,10 @@ same_set "$CONTRACT_CI_PROGRAMS" 'ci/*.spc' || fail "ci/ does not match CONTRACT
 same_set "$CONTRACT_BENCH_FILES" 'bench/*.spc' || fail "bench/ does not match CONTRACT_BENCH_FILES"
 echo "gate: ok"
 
-step "check.sh (format, lint, tests, sanitizer lanes, release bootstrap)"
-./check.sh
+if [ -z "$mode" ]; then
+    step "check.sh (format, lint, tests, sanitizer lanes, release bootstrap)"
+    SC_GATE_OUTER=1 ./check.sh
+fi
 
 # check.sh leaves ./super-c as the two-stage rebuild of the current source; every step below uses a copy
 # of it inside a clean tree so std/ffi resolve there and no cache of this checkout takes part. The object
@@ -119,6 +128,10 @@ for c in $(find "$raw" -name '*.c' | sort); do
     [ -f "$h" ] || fail "readability: $c has no header beside it"
 done
 echo "gate: $units units clean"
+if [ "$mode" = --core ]; then
+    printf '\ngate: OK (contract v%s, core)\n' "$CONTRACT_VERSION"
+    exit 0
+fi
 
 step "targets ($CONTRACT_TARGETS) and profiles ($CONTRACT_PROFILES)"
 host=$(uname -s)

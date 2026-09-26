@@ -95,6 +95,19 @@ fn is_sliceable(da: &Ast, sv: &SafeViews, ty0: TypeId) bool {
     return same_def(sv.s_array, it.decl, it.module);
 }
 
+// The def-chain mark of operand `opid` when it copies a whole local; 3 (poisoned) otherwise.
+fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
+    let o = *b.operands.at(opid as usize);
+    if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
+        return 3;
+    }
+    let p = *b.places.at(o.data as usize);
+    if p.proj_len != 0 {
+        return 3;
+    }
+    return marks[p.base as usize];
+}
+
 /// First violated rule as a static string, or "" when the body verifies.
 pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) str<'static> {
     if b.blocks.len() == 0 {
@@ -313,16 +326,8 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             let mut cur = b.locals.at(p.base as usize).ty;
             for j in 0..p.proj_len {
                 let pj = *b.projections.at((p.proj_start + j) as usize);
-                if pj.kind == ir::PJ_INDEX_OP && is_checked_view(da, &sv, cur) {
-                    let o = *b.operands.at(pj.data as usize);
-                    let mut ok = false;
-                    if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
-                        let op0 = *b.places.at(o.data as usize);
-                        ok = op0.proj_len == 0 && marks[op0.base as usize] == 1;
-                    }
-                    if !ok {
-                        fail = "index-not-checked";
-                    }
+                if pj.kind == ir::PJ_INDEX_OP && is_checked_view(da, &sv, cur) && op_mark(b, &marks, pj.data) != 1 {
+                    fail = "index-not-checked";
                 }
                 cur = pj.ty;
             }
@@ -335,15 +340,7 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             if !is_sliceable(da, &sv, b.places.at(r.a as usize).ty) {
                 continue;
             }
-            let mut ok = false;
-            if r.item.node != ir::IR_NONE {
-                let o = *b.operands.at(r.item.node as usize);
-                if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
-                    let op0 = *b.places.at(o.data as usize);
-                    ok = op0.proj_len == 0 && marks[op0.base as usize] == 2;
-                }
-            }
-            if !ok {
+            if r.item.node == ir::IR_NONE || op_mark(b, &marks, r.item.node) != 2 {
                 fail = "slice-end-not-validated";
             }
         }

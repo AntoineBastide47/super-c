@@ -118,7 +118,7 @@ instances and 345 anchored aggregates. The compiler's own sources produce 17,311
 (1,246 aggregates) in 2 rounds.
 
 What the graph feeds: only an aggregate record with a concrete pool anchor (`InstRec.aty`)
-enters the planned type headers, and every aggregate a rendered body or a field chain
+enters the planned definition headers, and every aggregate a rendered body or a field chain
 names beyond them is defined by the late replay of the mangler's spellings
 (`Mangler::agg_reqs`, `TuEmit::emit_agg_inst`). The closure's breadth therefore decides
 where a definition lands, never whether it exists; a truncated closure moves definitions

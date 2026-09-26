@@ -164,7 +164,10 @@ runner itself is a separate engine build of the generated test root under the bu
 `test` profile (`-O1`, no sanitizers): parallel per-TU compiles with the object cache and
 emit stamp, linked to `build/test/__tests`, emitted C under `build/raw-test/`. An
 unchanged suite skips straight to the cached link. Override the runner's flags with a
-`[profile.test]` section in `build.toml`.
+`[profile.test]` section in `build.toml`. Every compiler the CLI harnesses
+(`tests/cli_harness.spc`, `tests/harness.spc`) run gets `SC_CACHE_DIR=<scratch dir>/.sccache`
+unless the test sets its own (`cli::cache_env`), so a test never writes into the user's
+global build cache.
 
 ### Fork isolation
 

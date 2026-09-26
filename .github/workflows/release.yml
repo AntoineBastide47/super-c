@@ -265,6 +265,13 @@ jobs:
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
+      # The correctness gate after the suite (ci/gate.sh without its check.sh step, which the steps above
+      # replace): the two-generation fixpoint, the worker-count identity under each task-delay seed, the
+      # strict C warnings, every target and built-in profile, and the benchmark run. One leg per POSIX host.
+      - name: Run the correctness gate
+        if: runner.os != 'Windows' && matrix.cache_shard == 1
+        run: sh ci/gate.sh --no-check
+
       - name: Build the release binary
         if: matrix.artifact
         run: |
@@ -403,7 +410,7 @@ jobs:
           rm -rf src/build
           ./super-c src/main.spc --target=wasm
           "$HOME/wasi-sdk/bin/clang" -O2 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
-            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
             $(find src/build/raw -name '*.c') -lm -o super-c.wasm
           rm -rf src/build
@@ -427,7 +434,7 @@ jobs:
           if grep -m1 -E '^error' /tmp/wasm-err.txt; then head -40 /tmp/wasm-err.txt; exit 1; fi
           mv /tmp/wwasm/src/build /tmp/wasm-gen1
           "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
-            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
             $(find /tmp/wasm-gen1/raw -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
           wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \

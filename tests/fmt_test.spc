@@ -65,6 +65,15 @@ fn golden_brace_in_member_comment() {
 }
 
 @test
+fn golden_struct_lifetimes() {
+    // Every struct form keeps its lifetime parameters: unit, tuple and braced.
+    expect_fmt(
+        "struct U<'a>;\nstruct T<'a>(&'a i32);\nstruct B<'a> {\n    r: &'a i32,\n}\n",
+        "struct U<'a>;\nstruct T<'a>(&'a i32);\nstruct B<'a> {\n    r: &'a i32,\n}\n",
+    );
+}
+
+@test
 fn golden_unsafe_fn() {
     expect_fmt(
         "pub unsafe fn f(p:*const i32)i32{return unsafe *p;}",
@@ -78,6 +87,12 @@ fn golden_unsafe_fn() {
 @test
 fn golden_unsafe_extend() {
     expect_fmt("unsafe extend<T>Box<T>as Sync{}", "unsafe extend<T> Box<T> as Sync {}\n");
+}
+
+// A block `defer` ends its statement: a `;` after the block would not parse.
+@test
+fn golden_defer_block() {
+    expect_fmt("fn f(){defer{g();}defer g();}", "fn f() {\n    defer {\n        g();\n    }\n    defer g();\n}\n");
 }
 
 @test

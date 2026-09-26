@@ -371,8 +371,10 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     let mut code = String::new();
     if !user_only {
         code.push_string(&o.fwd_h);
+        for d in 0..o.defs_h.len() {
+            code.push_string(o.defs_h.at(d));
+        }
         for t in 0..n {
-            code.push_string(o.types_h.at(t));
             code.push_string(o.protos_h.at(t));
         }
     }
@@ -503,7 +505,8 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         dirp,
         cli::binext(),
     );
-    let brc = unsafe shim::sc_run(&cmd.b[0], null, null, null, null);
+    let mut benv = cli::cache_env(str::from_cstr(dirp), "");
+    let brc = unsafe shim::sc_run(&cmd.b[0], null, null, null, benv.cstr());
     if brc != 0 {
         rm_dir(dirp);
         return r;

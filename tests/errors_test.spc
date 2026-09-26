@@ -41,7 +41,7 @@ fn emit_collects() {
     // Records stay raw.
     assert(d.msg.eq_str("count is 7 for x"), "format() rendering");
     assert(d.start == 12 && d.len == 3, "span recorded verbatim");
-    assert(d.severity == diag::SEV_ERROR && d.note_head == diag::NOTE_NONE, "record fields");
+    assert(d.note_head == diag::NOTE_NONE, "record fields");
 }
 
 @test

@@ -39,7 +39,7 @@ super-c build                # build from build.toml (dev profile, incremental)
 super-c build -o out         # override output binary name
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # remove the out-dir and <root dir>/build/raw (--cache also drops the build-record cache); never a user directory
+super-c clean                # remove the out-dir and <root dir>/build/raw (--cache also removes the global build cache); never a user directory
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
@@ -286,9 +286,25 @@ The linker cache lives under the build cache root (`$SC_CACHE_DIR`, else
 `~/.super-c/cache`) at `lto/<namespace>`, one namespace per hash of the record's key and
 linker lines (compiler, linker, target, flags, schema); `SC_NO_LTO_CACHE=1` links
 without it. The linker owns the entries and prunes them itself (entries unused for a
-week, the cache under a tenth of the disk, checked at most hourly); the engine only
-creates the directory. A namespace a toolchain upgrade leaves behind keeps its last
-entries until removed by hand, the same policy as the object cache beside it.
+week, the cache under a tenth of the disk and, with lld or gold, under 1 GiB; checked at
+most hourly); the engine creates the directory. The daily sweep (below) removes a
+namespace with no entry written or used for a week, such as the one a toolchain upgrade
+leaves behind.
+
+The object cache lives under the same root at `o/<namespace>`, one namespace per local
+object tree (hash of the real path of the profile directory, such as `build/dev`); a
+unit's key hashes the compiler version line, the compile flags, and the text of the unit
+and of every quoted include (the emitted headers name the runtime headers by absolute
+path, so a tree at another path gets other keys). Each unit's `.cmd` records its key.
+After a successful build, the engine writes the key set of all units as generation file
+`g<seq>` when the set changed, keeps the newest four generations (the current build and
+three older), and deletes each object and dependency list that no kept generation names
+and that is older than the start of the build. A version inside that window rebuilds
+with no compile; an older one compiles again. An unchanged build reads one directory
+and one file. At most once a day (`o/.sweep`), a successful build also removes the
+namespaces whose owner source directory (`owner`) is gone or that did not change for 30
+days, the idle linker caches, and the flat `<key>.o`/`<key>.d` files that compilers
+before namespaces installed in the root. `super-c clean --cache` removes the whole root.
 
 Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
 under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
@@ -345,7 +361,7 @@ a `thin` profile keeps `auto` there.
 | `SC_TIMINGS` | Print a one-line per-phase timing summary |
 | `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, the instance re-lowering counts by reason (`"relower"`), peak RSS at five boundaries (`src/driver/stats.spc`) |
 | `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
-| `SC_CACHE_DIR` | Override the build cache root (objects, and the linker's ThinLTO caches under `lto/`) |
+| `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
@@ -412,13 +428,14 @@ build/
   raw/
     super_rt.h        # shared runtime (includes + allocation interposition)
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
-    __sc_fwd.h        # forward typedefs, enums and declarations shared by every TU
+    __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
     __sc_registry.c   # ZST sentinels and the reflection registry
     __sc_manifest     # output paths, content hashes, header dependencies, shard counts
     __sc_shards       # the shard counts this build used (read back by the next build)
     __ldflags         # linker flags collected from @c.link (one per line)
     .tu_cache         # per-TU journal/replay cache
-    app.h  app.c      # one .h/.c per module (.h: prototypes; app__types.h: its by-value types)
+    app.h  app.c      # one .h/.c per module (.h: prototypes)
+    __sc_t/           # one definition header per type (app__Point.h: typedef, definition, layout check)
     app__inst.c       # generic instances, glue and constants owned by app
     __std/            # demanded prelude modules only
       core.h core.c

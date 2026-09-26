@@ -76,6 +76,51 @@ fn repeated_generic_params() {
 }
 
 @test
+fn literal_adopts_generic_sibling() {
+    // An unpinned literal argument (decimal, based, or negated) takes the type the other arguments
+    // or the expected result give the parameter; only a suffix pins it.
+    h::expect_exit(
+        "hex literal adopts a typed sibling",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i32 = 5; let v: u32 = pick(x < 3, x as u32, 0xFFFFFFFF); return (v - 0xFFFFFFFE) as i32; }\n",
+        1,
+    );
+    h::expect_exit(
+        "literals adopt the expected result",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let b: u8 = pick(true, 1, 0); static_assert(sizeof(b) == 1, \"u8\"); return b as i32; }\n",
+        1,
+    );
+    h::expect_exit(
+        "negated literal adopts a typed sibling",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i64 = 5; let n = pick(false, x, -1); static_assert(sizeof(n) == 8, \"i64\"); return (n + 2) as i32; }\n",
+        1,
+    );
+    h::expect_err_msg(
+        "adopted literal is range-checked",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i32 = 5; let a = pick(true, x as u8, 300); return a as i32; }\n",
+        "out of range for 'u8'",
+    );
+}
+
+@test
+fn array_literal_adopts_slice_element() {
+    h::expect_exit(
+        "array literal fills a usize slice",
+        "fn sum(s: []usize) usize { let mut t: usize = 0; for x in s { t += x; } return t; }\nfn main() i32 { let s: []usize = [1, 2]; let r: []usize = [4; 2]; return (sum(s) + sum([3, 4]) + sum(r) + sum([1; 3])) as i32 - 21; }\n",
+        0,
+    );
+    h::expect_exit(
+        "array literal argument widens to an array parameter",
+        "fn s2(a: [i64; 2]) i64 { return a[0] + a[1]; }\nfn main() i32 { return s2([3, 4]) as i32 - 7; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "slice element range-checks literals",
+        "fn main() i32 { let s: []u8 = [1, 256]; return s.len() as i32; }\n",
+        "mismatched types",
+    );
+}
+
+@test
 fn const_generic_inference() {
     h::expect_ok(
         "array length from argument",

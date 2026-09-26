@@ -97,6 +97,17 @@ extern "C" {
     fn __sc_panic_str(msg: *const u8, len: usize) void;
 }
 
+// Bit counts over a u64 (bits.h, shipped next to this file): the C compiler's builtins with the zero
+// input defined as 64. The IR interpreter models the three names, so the `trailing_zeros`,
+// `leading_zeros` and `count_ones` methods below evaluate at compile time and a `const fn` may call
+// them. The methods are plain `fn`s: the bootstrap release rejects a `const fn` that calls an extern
+// function it does not model.
+extern "C" "bits.h" {
+    fn sc_ctz64(x: u64) u32;
+    fn sc_clz64(x: u64) u32;
+    fn sc_popcount64(x: u64) u32;
+}
+
 /// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
 /// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
 /// with value-producing siblings (`None => panic("empty")`).
@@ -659,6 +670,18 @@ extend c64 as Free {
 }
 
 extend i8 {
+    /// Zero bits below the lowest set bit of the two's complement pattern (8 for zero).
+    pub fn trailing_zeros(self: i8) usize {
+        return (self as u8).trailing_zeros();
+    }
+    /// Zero bits above the highest set bit of the two's complement pattern (8 for zero).
+    pub fn leading_zeros(self: i8) usize {
+        return (self as u8).leading_zeros();
+    }
+    /// Number of set bits in the two's complement pattern.
+    pub fn count_ones(self: i8) usize {
+        return (self as u8).count_ones();
+    }
     /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i8) i8 {
         if self < 0 {
@@ -711,6 +734,18 @@ extend i8 {
 }
 
 extend i16 {
+    /// Zero bits below the lowest set bit of the two's complement pattern (16 for zero).
+    pub fn trailing_zeros(self: i16) usize {
+        return (self as u16).trailing_zeros();
+    }
+    /// Zero bits above the highest set bit of the two's complement pattern (16 for zero).
+    pub fn leading_zeros(self: i16) usize {
+        return (self as u16).leading_zeros();
+    }
+    /// Number of set bits in the two's complement pattern.
+    pub fn count_ones(self: i16) usize {
+        return (self as u16).count_ones();
+    }
     /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i16) i16 {
         if self < 0 {
@@ -763,6 +798,18 @@ extend i16 {
 }
 
 extend i32 {
+    /// Zero bits below the lowest set bit of the two's complement pattern (32 for zero).
+    pub fn trailing_zeros(self: i32) usize {
+        return (self as u32).trailing_zeros();
+    }
+    /// Zero bits above the highest set bit of the two's complement pattern (32 for zero).
+    pub fn leading_zeros(self: i32) usize {
+        return (self as u32).leading_zeros();
+    }
+    /// Number of set bits in the two's complement pattern.
+    pub fn count_ones(self: i32) usize {
+        return (self as u32).count_ones();
+    }
     /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i32) i32 {
         if self < 0 {
@@ -815,6 +862,18 @@ extend i32 {
 }
 
 extend i64 {
+    /// Zero bits below the lowest set bit of the two's complement pattern (64 for zero).
+    pub fn trailing_zeros(self: i64) usize {
+        return (self as u64).trailing_zeros();
+    }
+    /// Zero bits above the highest set bit of the two's complement pattern (64 for zero).
+    pub fn leading_zeros(self: i64) usize {
+        return (self as u64).leading_zeros();
+    }
+    /// Number of set bits in the two's complement pattern.
+    pub fn count_ones(self: i64) usize {
+        return (self as u64).count_ones();
+    }
     /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i64) i64 {
         if self < 0 {
@@ -867,6 +926,18 @@ extend i64 {
 }
 
 extend isize {
+    /// Zero bits below the lowest set bit of the two's complement pattern (the width for zero).
+    pub fn trailing_zeros(self: isize) usize {
+        return (self as usize).trailing_zeros();
+    }
+    /// Zero bits above the highest set bit of the two's complement pattern (the width for zero).
+    pub fn leading_zeros(self: isize) usize {
+        return (self as usize).leading_zeros();
+    }
+    /// Number of set bits in the two's complement pattern.
+    pub fn count_ones(self: isize) usize {
+        return (self as usize).count_ones();
+    }
     /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: isize) isize {
         if self < 0 {
@@ -919,6 +990,18 @@ extend isize {
 }
 
 extend u8 {
+    /// Zero bits below the lowest set bit (8 for zero).
+    pub fn trailing_zeros(self: u8) usize {
+        return (unsafe sc_ctz64(self as u64 | 1u64 << 8)) as usize; // bit 8 set: a zero counts 8
+    }
+    /// Zero bits above the highest set bit (8 for zero).
+    pub fn leading_zeros(self: u8) usize {
+        return (unsafe sc_clz64(self)) as usize - 56;
+    }
+    /// Number of set bits.
+    pub fn count_ones(self: u8) usize {
+        return (unsafe sc_popcount64(self)) as usize;
+    }
     /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u8) bool {
         return self != 0 && (self & self - 1) == 0;
@@ -950,6 +1033,18 @@ extend u8 {
 }
 
 extend u16 {
+    /// Zero bits below the lowest set bit (16 for zero).
+    pub fn trailing_zeros(self: u16) usize {
+        return (unsafe sc_ctz64(self as u64 | 1u64 << 16)) as usize; // bit 16 set: a zero counts 16
+    }
+    /// Zero bits above the highest set bit (16 for zero).
+    pub fn leading_zeros(self: u16) usize {
+        return (unsafe sc_clz64(self)) as usize - 48;
+    }
+    /// Number of set bits.
+    pub fn count_ones(self: u16) usize {
+        return (unsafe sc_popcount64(self)) as usize;
+    }
     /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u16) bool {
         return self != 0 && (self & self - 1) == 0;
@@ -981,6 +1076,18 @@ extend u16 {
 }
 
 extend u32 {
+    /// Zero bits below the lowest set bit (32 for zero).
+    pub fn trailing_zeros(self: u32) usize {
+        return (unsafe sc_ctz64(self as u64 | 1u64 << 32)) as usize; // bit 32 set: a zero counts 32
+    }
+    /// Zero bits above the highest set bit (32 for zero).
+    pub fn leading_zeros(self: u32) usize {
+        return (unsafe sc_clz64(self)) as usize - 32;
+    }
+    /// Number of set bits.
+    pub fn count_ones(self: u32) usize {
+        return (unsafe sc_popcount64(self)) as usize;
+    }
     /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u32) bool {
         return self != 0 && (self & self - 1) == 0;
@@ -1012,6 +1119,18 @@ extend u32 {
 }
 
 extend u64 {
+    /// Zero bits below the lowest set bit (64 for zero).
+    pub fn trailing_zeros(self: u64) usize {
+        return (unsafe sc_ctz64(self)) as usize;
+    }
+    /// Zero bits above the highest set bit (64 for zero).
+    pub fn leading_zeros(self: u64) usize {
+        return (unsafe sc_clz64(self)) as usize;
+    }
+    /// Number of set bits.
+    pub fn count_ones(self: u64) usize {
+        return (unsafe sc_popcount64(self)) as usize;
+    }
     /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u64) bool {
         return self != 0 && (self & self - 1) == 0;
@@ -1043,6 +1162,19 @@ extend u64 {
 }
 
 extend usize {
+    /// Zero bits below the lowest set bit (the width for zero).
+    pub fn trailing_zeros(self: usize) usize {
+        let n = (unsafe sc_ctz64(self as u64)) as usize;
+        return n.min(sizeof(usize) * 8);
+    }
+    /// Zero bits above the highest set bit (the width for zero).
+    pub fn leading_zeros(self: usize) usize {
+        return (unsafe sc_clz64(self as u64)) as usize - (64 - sizeof(usize) * 8);
+    }
+    /// Number of set bits.
+    pub fn count_ones(self: usize) usize {
+        return (unsafe sc_popcount64(self as u64)) as usize;
+    }
     /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: usize) bool {
         return self != 0 && (self & self - 1) == 0;

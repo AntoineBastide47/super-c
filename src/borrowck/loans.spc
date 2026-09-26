@@ -26,7 +26,6 @@ pub struct BorrowErr {
     pub loan: u32,
     pub point: u32,
     pub span: tok::Span, // the invalidating access (or escape site)
-    pub loan_span: tok::Span,
 }
 
 /// The loan solver's state for one body: the in-scope loan matrix, per-point liveness, and the
@@ -76,78 +75,11 @@ pub struct Solver {
     s_omask: Vector<u64>, // origin_live_points: per local word, the locals owning an inference origin
 }
 
-// Index of the single set bit `b` (de Bruijn multiply; the standard BitScanForward table).
-const TZ64_TAB: [u8; 64] = [
-    0,
-    1,
-    48,
-    2,
-    57,
-    49,
-    28,
-    3,
-    61,
-    58,
-    50,
-    42,
-    38,
-    29,
-    17,
-    4,
-    62,
-    55,
-    59,
-    36,
-    53,
-    51,
-    43,
-    22,
-    45,
-    39,
-    33,
-    30,
-    24,
-    18,
-    12,
-    5,
-    63,
-    47,
-    56,
-    27,
-    60,
-    41,
-    37,
-    16,
-    54,
-    35,
-    52,
-    21,
-    44,
-    32,
-    23,
-    11,
-    46,
-    26,
-    40,
-    15,
-    34,
-    20,
-    31,
-    10,
-    25,
-    14,
-    19,
-    9,
-    13,
-    8,
-    7,
-    6,
-];
-const fn tz64(b: u64) usize {
-    // The de Bruijn multiply deliberately wraps; only the top 6 bits of the product matter.
-    let p = b * 0x03F79D71B4CB0A89u64;
-    let tab: []u8 = TZ64_TAB;
-    return tab[(p >> 58) as usize] as usize;
+/// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
+pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
+    let mut s = Solver::empty();
+    s.build_into(b, f, c, lv);
+    return s;
 }
 
 extend Solver {
@@ -210,10 +142,6 @@ extend Solver {
         self.flow_pushes = 0;
         self.point_block.truncate(0);
         self.sub_by_point.truncate(0);
-        // sub_pt_start keeps its length across bodies: index_points re-sizes and re-zeroes it
-        // through raw stores, and every reader runs after that pass.
-        // live_pts keeps its length across bodies: origin_live_points re-sizes and re-zeroes it
-        // through raw stores, and every reader runs after that pass.
         self.oreach.truncate(0);
         self.cuts.truncate(0);
         self.req_cache.truncate(0);
@@ -228,16 +156,7 @@ extend Solver {
         self.succs.truncate(0);
         self.scope.reset_to(0, 0);
     }
-}
 
-/// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
-pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
-    let mut s = Solver::empty();
-    s.build_into(b, f, c, lv);
-    return s;
-}
-
-extend Solver {
     /// Solve body `b` in place, keeping this solver's heap capacity from earlier bodies.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
         let s = self;
@@ -258,9 +177,7 @@ extend Solver {
         s.conflicts();
         s.escapes();
     }
-}
 
-extend Solver {
     const fn body(self: &Self) &ir::CoreBody {
         return unsafe &*self.b;
     }
@@ -288,18 +205,8 @@ extend Solver {
         }
         // Subsets sorted by point (counting sort: two passes over the fact vector).
         let n = f.subsets.len();
-        // Grows only past the high-water mark, then re-zeroes through raw stores (see MoveFlow).
-        let sneed = (f.npoints + 1) as usize;
-        while self.sub_pt_start.len() < sneed {
-            self.sub_pt_start.push(0);
-        }
-        self.sub_pt_start.truncate(sneed);
-        unsafe {
-            let zs = self.sub_pt_start.as_ptr() as *mut u32;
-            for i in 0..sneed {
-                *(zs + i) = 0;
-            }
-        }
+        self.sub_pt_start.truncate(0);
+        self.sub_pt_start.resize_default((f.npoints + 1) as usize);
         for i in 0..n {
             let p = f.subsets.at(i).point;
             self.sub_pt_start.set(p as usize + 1, self.sub_pt_start[p as usize + 1] + 1);
@@ -311,9 +218,7 @@ extend Solver {
         for p in 0..f.npoints {
             self.s_cur32.push(self.sub_pt_start[p as usize]);
         }
-        for _i in 0..n {
-            self.sub_by_point.push(0);
-        }
+        self.sub_by_point.resize_default(n);
         for i in 0..n {
             let p = f.subsets.at(i).point as usize;
             self.sub_by_point.set(self.s_cur32[p] as usize, i as u32);
@@ -329,10 +234,8 @@ extend Solver {
         let nb = c.nblocks;
         self.s_ic.truncate(0);
         self.s_kc.truncate(0);
-        for _i in 0..nb {
-            self.s_ic.push(0);
-            self.s_kc.push(0);
-        }
+        self.s_ic.resize_default(nb as usize);
+        self.s_kc.resize_default(nb as usize);
         for l in 0..f.loans.len() {
             let blk = self.point_block[f.loans.at(l).issued_at as usize] as usize;
             self.s_ic.set(blk, self.s_ic[blk] + 1);
@@ -353,12 +256,8 @@ extend Solver {
         }
         self.issue_start.push(ia);
         self.kill_start.push(ka);
-        for _i in 0..ia {
-            self.issues_blk.push(0);
-        }
-        for _i in 0..ka {
-            self.kills_blk.push(0u64);
-        }
+        self.issues_blk.resize_default(ia as usize);
+        self.kills_blk.resize_default(ka as usize);
         for l in 0..f.loans.len() {
             let blk = self.point_block[f.loans.at(l).issued_at as usize] as usize;
             self.issues_blk.set((self.issue_start[blk] + self.s_ic[blk]) as usize, l as u32);
@@ -386,27 +285,15 @@ extend Solver {
             self.pwords = 1;
         }
         let ninf = f.norigins - f.nuniversal;
-        // Grows only past the high-water mark, then re-zeroes through raw stores (see MoveFlow).
-        let lneed = (ninf * self.pwords) as usize;
-        while self.live_pts.len() < lneed {
-            self.live_pts.push(0u64);
-        }
-        self.live_pts.truncate(lneed);
-        unsafe {
-            let zl = self.live_pts.as_ptr() as *mut u64;
-            for i in 0..lneed {
-                *(zl + i) = 0u64;
-            }
-        }
+        self.live_pts.truncate(0);
+        self.live_pts.resize_default((ninf * self.pwords) as usize);
         let lw = f.lwords as usize;
         // Invert origin_local into a per-local CSR: each statement pair then touches only the
         // origins whose local is live there (found by scanning the live-word bits), instead of
         // testing every inference origin per pair: the old O(pairs * norigins) hot spot.
         let nl = bd.locals.len();
         self.s_lo_start.truncate(0);
-        for _i in 0..nl + 1 {
-            self.s_lo_start.push(0);
-        }
+        self.s_lo_start.resize_default(nl + 1);
         for o in f.nuniversal..f.norigins {
             let l = f.origin_local[o as usize];
             if l != bf::BF_NONE {
@@ -421,9 +308,7 @@ extend Solver {
             self.s_cur32.push(self.s_lo_start[i]);
         }
         self.s_lo_flat.truncate(0);
-        for _i in 0..self.s_lo_start[nl] {
-            self.s_lo_flat.push(0);
-        }
+        self.s_lo_flat.resize_default(self.s_lo_start[nl] as usize);
         for o in f.nuniversal..f.norigins {
             let l = f.origin_local[o as usize] as usize;
             if l as u32 != bf::BF_NONE {
@@ -432,9 +317,7 @@ extend Solver {
             }
         }
         self.s_omask.truncate(0);
-        for _i in 0..lw {
-            self.s_omask.push(0u64);
-        }
+        self.s_omask.resize_default(lw);
         for l in 0..nl {
             if self.s_lo_start[l] != self.s_lo_start[l + 1] {
                 self.s_omask.set(l / 64, self.s_omask[l / 64] | 1u64 << (l & 63) as u64);
@@ -491,11 +374,9 @@ extend Solver {
         cur.truncate(0);
         dset.truncate(0);
         uset.truncate(0);
-        for _i in 0..lw {
-            cur.push(0u64);
-            dset.push(0u64);
-            uset.push(0u64);
-        }
+        cur.resize_default(lw);
+        dset.resize_default(lw);
+        uset.resize_default(lw);
         let mut ub: usize = 0; // running cursor into `uses` (blocks ascend, so it only moves forward)
         for bi in 0..c.nblocks {
             let base = f.block_base[bi as usize];
@@ -554,7 +435,7 @@ extend Solver {
                 for k in 0..lw {
                     let mut m = (cur[k] | uset[k] | dset[k]) & self.s_omask[k];
                     while m != 0 {
-                        let l = k * 64 + tz64(m & 0u64 - m);
+                        let l = k * 64 + m.trailing_zeros();
                         m = m & m - 1u64;
                         if l >= nl {
                             continue;
@@ -620,9 +501,7 @@ extend Solver {
         // Subset sources grouped by target origin (counting sort).
         let no = f.norigins as usize;
         self.s_lb_start.truncate(0);
-        for _i in 0..no + 1 {
-            self.s_lb_start.push(0);
-        }
+        self.s_lb_start.resize_default(no + 1);
         for i in 0..f.subsets.len() {
             let t = f.subsets.at(i).to as usize;
             self.s_lb_start.set(t + 1, self.s_lb_start[t + 1] + 1);
@@ -633,9 +512,7 @@ extend Solver {
             self.s_ic.push(self.s_lb_start[o]);
         }
         self.s_lb_flat.truncate(0);
-        for _i in 0..f.subsets.len() {
-            self.s_lb_flat.push(0);
-        }
+        self.s_lb_flat.resize_default(f.subsets.len());
         for i in 0..f.subsets.len() {
             let e = *f.subsets.at(i);
             self.s_lb_flat.set(self.s_ic[e.to as usize] as usize, e.from);
@@ -706,9 +583,7 @@ extend Solver {
         // its entry row never changes. Seed so the LIFO pops visit reachable blocks in exact RPO:
         // loans flow forward, so each sees converged predecessors on its first visit (the liveness
         // seed's mirror), with unreachable blocks after them (same converged state as before).
-        for _i in 0..nb {
-            queued.push(false);
-        }
+        queued.resize_default(nb as usize);
         for i in 0..c.rpo.len() {
             queued.set(c.rpo[i] as usize, true);
         }
@@ -805,12 +680,8 @@ extend Solver {
     pub fn required(self: &mut Self, li: u32) usize {
         let f = unsafe &*self.f;
         if self.req_have.len() == 0 {
-            for _i in 0..f.loans.len() {
-                self.req_have.push(false);
-            }
-            for _i in 0..f.loans.len() as u32 * self.pwords {
-                self.req_cache.push(0u64);
-            }
+            self.req_have.resize_default(f.loans.len());
+            self.req_cache.resize_default(f.loans.len() * self.pwords as usize);
         }
         let row = (li * self.pwords) as usize;
         if self.req_have[li as usize] {
@@ -820,9 +691,7 @@ extend Solver {
         let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
         // Keep `visit` sized once per body and clear only the words the previous query set: the flood
         // touches at most `steps` words, so this is O(touched) instead of O(norigins*npoints/64).
-        while self.visit.len() < vwords {
-            self.visit.push(0u64);
-        }
+        self.visit.resize_default(vwords);
         for d in 0..self.visit_dirty.len() {
             self.visit.set(self.visit_dirty[d] as usize, 0u64);
         }
@@ -894,10 +763,6 @@ extend Solver {
 
     // Does access `ac` invalidate loan `li` by kind (two-phase aware)?
     const fn kind_conflicts(self: &Self, lo: &bf::Loan, ac: &bf::Access) bool {
-        if lo.kind == bf::LK_CAP {
-            // Capture loans invalidate only through storage death (established rules).
-            return false;
-        }
         if ac.kind == bf::ACC_READ {
             if lo.kind == bf::LK_SHARED {
                 return false;
@@ -923,29 +788,7 @@ extend Solver {
         // Bucket order is ascending loan id: the exact subsequence the full sweep visited.
         let bucketed = na * nl >= 1024;
         if bucketed {
-            let nlc = self.body().locals.len();
-            self.s_lb_start.truncate(0);
-            self.s_ic.truncate(0);
-            self.s_lb_flat.truncate(0);
-            for _i in 0..nlc + 1 {
-                self.s_lb_start.push(0);
-            }
-            for l in 0..nl {
-                let base = self.body().places.at(f.loans.at(l).place as usize).base as usize;
-                self.s_lb_start.set(base + 1, self.s_lb_start[base + 1] + 1);
-            }
-            for i in 0..nlc {
-                self.s_lb_start.set(i + 1, self.s_lb_start[i + 1] + self.s_lb_start[i]);
-                self.s_ic.push(self.s_lb_start[i]);
-            }
-            for _i in 0..nl {
-                self.s_lb_flat.push(0);
-            }
-            for l in 0..nl {
-                let base = self.body().places.at(f.loans.at(l).place as usize).base as usize;
-                self.s_lb_flat.set(self.s_ic[base] as usize, l as u32);
-                self.s_ic.set(base, self.s_ic[base] + 1);
-            }
+            bf::bucket_loans_by_base(self.body(), &f.loans, &mut self.s_lb_start, &mut self.s_lb_flat, &mut self.s_ic);
         }
         for a in 0..na {
             let ac = *f.accesses.at(a);
@@ -980,17 +823,9 @@ extend Solver {
                         // The pinned container's ownership travelled with a move.
                         continue;
                     }
-                    let pl = *self.body().places.at(lo.place as usize);
-                    if pl.base != ac.local {
-                        continue;
-                    }
-                    let mut through = false;
-                    for i in 0..pl.proj_len {
-                        if self.body().projections.at((pl.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                            through = true;
-                        }
-                    }
-                    if through {
+                    if self.body().places.at(lo.place as usize).base != ac.local || self.body().place_has_deref(
+                        lo.place,
+                    ) {
                         continue;
                     }
                 } else {
@@ -1062,16 +897,7 @@ extend Solver {
                     sp = lo.span;
                     ak = ACC_DEAD;
                 }
-                self.errs.push(
-                    BorrowErr {
-                        kind: BE_CONFLICT,
-                        acc: ak,
-                        loan: li as u32,
-                        point: ac.point,
-                        span: sp,
-                        loan_span: lo.span,
-                    },
-                );
+                self.errs.push(BorrowErr { kind: BE_CONFLICT, acc: ak, loan: li as u32, point: ac.point, span: sp });
             }
         }
         self.s_flow = scratch;
@@ -1097,13 +923,7 @@ extend Solver {
             if st == ir::LS_STATIC_REF {
                 continue;
             }
-            let mut through = false;
-            for i in 0..pl.proj_len {
-                if bd.projections.at((pl.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                    through = true;
-                }
-            }
-            if through {
+            if bd.place_has_deref(lo.place) {
                 // A reborrow's storage belongs to the reference it went through.
                 continue;
             }
@@ -1127,16 +947,7 @@ extend Solver {
                 }
                 let p = f.block_base[bi as usize] + bd.blocks.at(bi as usize).stmt_len * 2;
                 if self.req_at(row, p) || self.req_at(row, p + 1) {
-                    self.errs.push(
-                        BorrowErr {
-                            kind: BE_ESCAPE,
-                            acc: 0,
-                            loan: li as u32,
-                            point: p,
-                            span: lo.span,
-                            loan_span: lo.span,
-                        },
-                    );
+                    self.errs.push(BorrowErr { kind: BE_ESCAPE, acc: 0, loan: li as u32, point: p, span: lo.span });
                     break;
                 }
             }
@@ -1165,13 +976,9 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
         let lo = *f.loans.at(li);
         let mut seen = Vector::<u64>::new();
         let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
-        for _i in 0..vwords {
-            seen.push(0u64);
-        }
+        seen.resize_default(vwords);
         let mut req = Vector::<u64>::new();
-        for _i in 0..pwords {
-            req.push(0u64);
-        }
+        req.resize_default(pwords as usize);
         let mut work = Vector::<u64>::new();
         let self_org = f.local_origin[b.places.at(lo.place as usize).base as usize];
         work.push(lo.origin as u64 << 32 | lo.issued_at as u64);

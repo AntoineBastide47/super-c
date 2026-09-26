@@ -25,8 +25,8 @@ two tag bits above a 30-bit payload, so bit 29 is the last free tag bit.
 `Ast::intern_type` (and `intern_instance`, `intern_dyn`, `intern_const_lin`) looks the
 canonical record up in the package table first: a hit is the final id (`mark_used`
 records it in the module's `used` list). A miss goes to the module pool under a
-provisional id. Every retained per-module table (`types`, `mono`, `method_insts`,
-`dyn_uses`, `coerces`, ...) may hold either kind until the next checkpoint;
+provisional id. Every retained per-module table (`types`, `mono`, `dyn_uses`,
+`coerces`, ...) may hold either kind until the next checkpoint;
 `type_at`, `instance` and `const_lin_at` dispatch on the tag. `Ast.used` / `used_inst`
 are the module's distinct final types in first-touch order (the enumeration the
 liveness and instance scans read; there is no per-module type census any more). A
@@ -61,7 +61,7 @@ borrow-checked). Each checkpoint:
 4. Remaps every module table (`Ast::publish_remap`), the constant engine (`Interp::
    remap_types`: objects, statics, substitutions, returns, lowered bodies; the call and
    item memos are cleared), the kept lowerings (`Keep::remap_types` over every
-   `CoreBody`), and records `pub_map` / `pub_imap` / `pub_cmap` so `Package::map_type`
+   `CoreBody`), and records `pub_map` so `Package::map_type`
    can translate an id recorded before the checkpoint.
 
 Final ids therefore depend only on the source: one worker, every core, a skewed task
@@ -152,7 +152,7 @@ The 92 pools held 32,928 `Ty` and 6,471 `TyInstance` (814 KB, indexes 294 KB) fo
 structural types and 1,046 instance keys: 75% duplicates across pools. The acceptance
 threshold was 5% of round cycles or 10% of allocations or memory; the sampled maximum was
 2.2% of the round, so the interner did not meet it. Two paths were
-optimized under that decision and stay: `Ast::ix_rebuild` sizes the index strictly
+optimized under that decision and stay: `ix_ready` (src/ast/ast.spc) sizes the index strictly
 under the 0.75 trigger (2,481 rebuilds per transpile became 432), and `fdecl_memo`
 memoizes foreign declaration types. The table was built regardless, for its identity
 guarantee; its numbers are in the next section.

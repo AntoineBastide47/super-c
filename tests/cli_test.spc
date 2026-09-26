@@ -96,7 +96,10 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "[2] = 30"), "const designator index folded into the C output");
-    assert(p.gen_has("main.c", "_Static_assert(sizeof(Pt) == 8"), "layout verification assert emitted");
+    assert(
+        p.gen_has("__sc_t/Pt.h", "_Static_assert(sizeof(Pt) == 8"),
+        "layout verification assert in the definition header",
+    );
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 54);
@@ -489,6 +492,19 @@ fn main() i32 { let b = Bad { a: 1, b: NoFmt { p: null } }; let s = b.fmt(); s.f
     assert(br.exit != 0, "unsatisfied derived bound rejects the build");
     assert(br.out_has("does not satisfy a bound required by the interface's default method 'fmt'"));
     assert(br.out_has("field 'b' of 'Bad' is 'NoFmt'"), "the offending field names itself");
+}
+
+// The per-field bound check reads a tuple struct's member types in the struct's own module: a
+// conformance declared in another module still sees the member that lacks the bound.
+@test
+fn derived_bound_checks_foreign_tuple_members() {
+    let p = cli::proj_new();
+    p.mkfile("lib.spc", "pub struct NoFmt {\n    pub p: *const u8,\n}\n\npub struct Pair(i32, NoFmt);\n");
+    p.mkfile("main.spc", "import lib;\n\nextend lib::Pair as Format {}\n\nfn main() i32 {\n    return 0;\n}\n");
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "the unsatisfied bound rejects the build");
+    assert(r.out_has("does not satisfy a bound required by the interface's default method 'fmt'"));
+    assert(r.out_has("field 1 of 'Pair' is 'NoFmt'"), "the offending member names itself");
 }
 
 @test
@@ -1767,8 +1783,8 @@ fn main() i32 {
     let r = p.compile("genbv.spc");
     assert(r.ok());
     assert(
-        p.gen_has("genbv__types.h", "struct opt__Opt__genbv__Bar {"),
-        "instance full-monomorphized in the header of the module owning its by-value argument",
+        p.gen_has("__sc_t/opt__Opt__genbv__Bar.h", "struct opt__Opt__genbv__Bar {"),
+        "instance full-monomorphized in its own definition header",
     );
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -2172,6 +2188,30 @@ fn usize_literal_range_follows_target() {
     assert(r2.exit != 0, "wasm32 rejects 64-bit usize literals");
     assert(r2.out_has("does not fit in its suffixed type"), "the suffixed literal names its diagnostic");
     assert(r2.out_has("out of range"), "the expected-type literal names its diagnostic");
+}
+
+// Compile-time evaluation wraps usize/isize at the SELECTED target's pointer width, as the emitted C
+// does: on wasm32, 0 - 1 is 2^32 - 1 and a zero usize has 32 trailing zeros.
+@test
+fn usize_const_eval_follows_target() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(const fn m1() usize {
+    let z: usize = 0;
+    return z - 1;
+}
+const W: u64 = sizeof(usize) as u64 * 8;
+static_assert(m1() as u64 == (1u64 << W - 1) * 2 - 1, "usize wraps at the target width");
+static_assert(-1 as isize as usize == m1(), "isize converts at the target width");
+static_assert(m1().count_ones() as u64 == W && (0 as usize).trailing_zeros() as u64 == W, "bit counts");
+fn main() i32 {
+    return 0;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok(), "the host target");
+    assert(p.compile_flags("--target=wasm", "main.spc").exit == 0, "wasm32");
 }
 
 // A `@platform`-gated @test exists only for the targets it names: on every other target the item is
@@ -4648,10 +4688,10 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// A parallel body is copied to every worker and run from several at once, so it may neither own a capture nor
-// mutate one. Both are `fn move` closures, which do not satisfy the `fn(..) + Send + Sync` bound, so the
-// classic data race (`|i| values.set(i, ..)`, a `&mut` capture shared across workers) is a compile error
-// rather than a documented hazard.
+// A parallel body is copied to every worker and run from several at once, so it may not mutate a capture. The
+// plain `fn(..)` bound makes the body borrow what it captures; a mutated capture is a `&mut` borrow, and a
+// closure holding one is not `Sync`, so the classic data race (`|i| values.set(i, ..)`, a `&mut` capture
+// shared across workers) is a compile error rather than a documented hazard.
 @test
 fn data_parallel_rejects_mutating_body() {
     let p = cli::proj_new();
@@ -4671,7 +4711,7 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "a body that mutates a capture is rejected");
-    assert(r.out_has("fn(usize)"), "the rejection cites the plain-fn bound");
+    assert(r.out_has("does not satisfy bound 'Sync'"), "the rejection cites the Sync bound");
 }
 
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
@@ -6188,6 +6228,40 @@ fn bindgen_globals_and_cflag() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A C name that is a Super-C keyword binds under its escaped spelling: a function or global keeps
+// its C symbol through `@c.import`, and a field or constant just gains the underscore. The module
+// must parse and link.
+@test
+fn bindgen_escapes_keyword_names() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "struct pair { int select; int n; };\nint select(int a, int b);\nint pair_n(struct pair *p);\nextern int launch;\nextern const int move;\n",
+    );
+    p.mkfile(
+        "lib.c",
+        "#include \"lib.h\"\nint select(int a, int b) { return a + b; }\nint pair_n(struct pair *p) { return p->n; }\nint launch = 5;\nconst int move = 6;\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    let mut gp = String::new();
+    gp.format_into("{}/lib.spc", root);
+    let spc = loader::read_file(gp.as_str()).unwrap();
+    assert(spc.as_str().contains("pub select_: i32,"));
+    assert(spc.as_str().contains("@c.import(\"select\")\n    pub fn select_(a: i32, b: i32) i32;"));
+    assert(spc.as_str().contains("@c.import(\"launch\")\n    pub static mut launch_: i32;"));
+    assert(spc.as_str().contains("@c.import(\"move\")\n    pub const move_: i32;"));
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nfn main() i32 {\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ - 16;\n}\n",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 0);
+}
+
 // The machine-global object cache: content-addressed on (compiler version, flags, TU text, quoted
 // include closure), so a from-scratch build of already-seen units copies objects instead of running
 // the C compiler. The poisoning step is what PROVES the hits: junk in the cache must break a fresh
@@ -6203,9 +6277,10 @@ fn global_object_cache_round_trip() {
     let mut bdir = String::new();
     bdir.format_into("{}/build", root);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok());
-    assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a build installs its objects");
+    let ns = cache_ns(cache.as_str());
+    assert(cli::dir_count_suffix(ns.as_str(), ".o") > 0, "a build installs its objects");
     bsys::rm_rf(bdir.as_str());
-    assert(cli::dir_corrupt_suffix(cache.as_str(), ".o") > 0);
+    assert(cli::dir_corrupt_suffix(ns.as_str(), ".o") > 0);
     assert(
         cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").exit != 0,
         "a fresh build links the cached objects, so junk there must break it",
@@ -6215,9 +6290,232 @@ fn global_object_cache_round_trip() {
     bsys::rm_rf(bdir.as_str());
     bsys::rm_rf(cache.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok());
-    assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a wiped cache repopulates");
+    let ns2 = cache_ns(cache.as_str());
+    assert(cli::dir_count_suffix(ns2.as_str(), ".o") > 0, "a wiped cache repopulates");
     cache.free();
     bdir.free();
+}
+
+// The entry names of `dir`, without `.`-prefixed names.
+fn dir_names(dir: str) Vector<String> {
+    let mut out = Vector::<String>::new();
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        return out;
+    }
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        if !nm.starts_with(".") {
+            out.push(String::from_str(nm));
+        }
+    }
+    unsafe shim::sc_closedir(dh);
+    return out;
+}
+
+// The object cache namespace below cache root `cache` (the first one listed); empty when there is none.
+fn cache_ns(cache: str) String {
+    let mut od = String::new();
+    od.format_into("{}/o", cache);
+    let names = dir_names(od.as_str());
+    let mut out = String::new();
+    if names.len() != 0 {
+        out.format_into("{}/{}", od.as_str(), names.at(0).as_str());
+    }
+    return out;
+}
+
+// Date `path` and everything below it back to 2020 (`find` + `touch -t`, one process).
+fn age_tree(path: str) {
+    let mut cmd = String::from_str("find \"");
+    cmd.push_str(path);
+    cmd.push_str("\" -exec touch -t 202001010000 {} +");
+    assert_eq(cli::run_quiet(cmd.cstr()), 0);
+}
+
+// Namespace `ns` holds generation files `g<seq>` (their count in `gens`) and objects: true when every
+// object and dependency list is named by a generation.
+fn ns_all_named(ns: str, gens: &mut usize) bool {
+    let names = dir_names(ns);
+    let mut live = Set::<String>::new();
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        if n.starts_with("g") {
+            *gens = *gens + 1;
+            let mut gp = String::new();
+            gp.format_into("{}/{}", ns, n);
+            let body = loader::read_file(gp.as_str()).unwrap();
+            let b = body.as_str();
+            let mut a: usize = 0;
+            for k in 0..b.len() {
+                if b[k] == b'\n' {
+                    live.insert(String::from_str(b.slice(a, k)));
+                    a = k + 1;
+                }
+            }
+        }
+    }
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        if n.ends_with(".o") || n.ends_with(".d") {
+            let stem = String::from_str(n.slice(0, n.len() - 2));
+            if !live.contains(&stem) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Version `v` of a small project. The struct name is in the type list every unit includes, so each
+// version gives every unit a new cache key.
+fn cache_version(p: &cli::Proj, v: i32) {
+    let mut src = String::new();
+    src.format_into(
+        "struct Ver{} {{\n    pub n: i32,\n}}\n\nfn main() i32 {{\n    let v = Ver{} {{ n: {} }};\n    println(\"{{}}\", v.n);\n    return 0;\n}}\n",
+        v,
+        v,
+        v,
+    );
+    p.mkfile("src/main.spc", src.as_str());
+}
+
+// Object cache retention: an object tree's namespace keeps the objects its four newest key sets name,
+// whatever the number of versions built. A version inside that window rebuilds with no compile, an
+// older one compiles again.
+@test
+fn object_cache_keeps_four_generations() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    let root = str::from_cstr(p.rootp());
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    let mut env = String::new();
+    env.format_into("- SC_CACHE_DIR={}", cache.as_str());
+    for v in 0..6 {
+        cache_version(&p, v);
+        assert(cli::superc_env_in(root, "SC_BUILD_STATS", env.as_str(), "build").ok(), "each version builds");
+        let ns2 = cache_ns(cache.as_str());
+        let mut gens: usize = 0;
+        assert(ns_all_named(ns2.as_str(), &mut gens), "every object is named by a kept generation");
+        assert(gens == (v + 1) as usize || gens == 4, "the namespace keeps at most four generations");
+        assert(cli::dir_count_suffix(ns2.as_str(), ".o") > 0, "the namespace holds objects");
+    }
+    let mut od = String::new();
+    od.format_into("{}/o", cache.as_str());
+    assert_eq(dir_names(od.as_str()).len(), 1);
+    // Version 2 is in the window (versions 2 to 5): every unit restores.
+    cache_version(&p, 2);
+    let r2 = cli::superc_env_in(root, "SC_BUILD_STATS", env.as_str(), "build");
+    assert(r2.ok() && r2.out_has("\"stale\":0,"), "a kept version rebuilds with no compile");
+    // Version 0 left the window: its units compile again.
+    cache_version(&p, 0);
+    let r0 = cli::superc_env_in(root, "SC_BUILD_STATS", env.as_str(), "build");
+    assert(r0.ok() && !r0.out_has("\"stale\":0,"), "an evicted version compiles");
+    // A build from an empty object tree of an unchanged version restores every unit.
+    let mut bdir = String::new();
+    bdir.format_into("{}/build", root);
+    bsys::rm_rf(bdir.as_str());
+    let rc = cli::superc_env_in(root, "SC_BUILD_STATS", env.as_str(), "build");
+    assert(rc.ok() && rc.out_has("\"stale\":0,"), "an unchanged rebuild restores every unit");
+}
+
+// A header the sync rewrote restales every unit whose dependency list names it, also when the list
+// spells it through the including file's directory (`__std/../__sc_fwd.h`) and the mtimes cannot tell:
+// the objects are dated into the future, so only the rewrite record can find them stale.
+@test
+fn rewritten_header_restales_units() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // `find` and `touch -t` need a POSIX host
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    cache_version(&p, 0);
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the first version builds");
+    let mut objd = String::new();
+    objd.format_into("{}/build/dev/obj", root);
+    let mut cmd = String::from_str("find \"");
+    cmd.push_str(objd.as_str());
+    cmd.push_str("\" -exec touch -t 203001010000 {} +");
+    assert_eq(cli::run_quiet(cmd.cstr()), 0);
+    // The same program plus an extern header block: the forward header every unit includes lists
+    // its header.
+    p.mkfile(
+        "src/main.spc",
+        "extern \"C\" \"stdlib.h\" {\n    fn abs(x: i32) i32;\n}\n\nstruct Ver0 {\n    pub n: i32,\n}\n\nfn main() i32 {\n    let v = Ver0 { n: unsafe abs(0) };\n    println(\"{}\", v.n);\n    return 0;\n}\n",
+    );
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the second version builds");
+    // A std unit: its source is unchanged, only the forward header it includes changed.
+    let mut core = String::new();
+    core.format_into("{}/__std/core.o", objd.as_str());
+    let mt = unsafe shim::sc_mtime(core.cstr());
+    assert(mt != 0 && mt < 1850000000, "the unit compiled again (its object is no longer dated 2030)");
+}
+
+// The daily cache sweep. With the sweep stamp dated back, the next successful build removes the flat
+// objects older compilers installed in the root, a namespace whose owner directory is gone, a namespace
+// idle for 30 days and a linker cache idle for a week; the live namespace and a used linker cache
+// stay. A fresh stamp skips the sweep.
+@test
+fn object_cache_daily_sweep() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // `find` and `touch -t` need a POSIX host
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    cache_version(&p, 0);
+    let root = str::from_cstr(p.rootp());
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first build");
+    let live = cache_ns(cache.as_str());
+    let flat = "ocache/0123456789abcdef0123456789abcdef.o";
+    p.mkfile(flat, "x");
+    p.mkfile("ocache/0123456789abcdef0123456789abcdef.d", "x");
+    let mut gone = String::new();
+    gone.format_into("{}/gone", root);
+    p.mkfile("ocache/o/00000000000000aa/owner", gone.as_str());
+    p.mkfile("ocache/o/00000000000000aa/g1", "");
+    p.mkfile("ocache/o/00000000000000bb/owner", root);
+    p.mkfile("ocache/o/00000000000000bb/g1", "");
+    p.mkfile("ocache/lto/00000000000000cc/llvmcache-1", "x");
+    p.mkfile("ocache/lto/00000000000000dd/llvmcache-1", "x");
+    let mut idle_ns = String::new();
+    idle_ns.format_into("{}/o/00000000000000bb", cache.as_str());
+    age_tree(idle_ns.as_str());
+    let mut idle_lto = String::new();
+    idle_lto.format_into("{}/lto/00000000000000cc", cache.as_str());
+    age_tree(idle_lto.as_str());
+    let mut flat_p = String::new();
+    flat_p.format_into("{}/{}", root, flat);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under a fresh stamp");
+    assert(unsafe shim::sc_mtime(flat_p.cstr()) != 0, "a fresh stamp skips the sweep");
+    let mut stamp = String::new();
+    stamp.format_into("{}/o/.sweep", cache.as_str());
+    age_tree(stamp.as_str());
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under an old stamp");
+    assert(unsafe shim::sc_mtime(flat_p.cstr()) == 0, "the flat objects of older compilers go");
+    let mut ns_names = String::new();
+    let mut od = String::new();
+    od.format_into("{}/o", cache.as_str());
+    let nss = dir_names(od.as_str());
+    for i in 0..nss.len() {
+        ns_names.format_into("{} ", nss.at(i).as_str());
+    }
+    let mut want = String::new();
+    want.format_into("{} ", live.as_str().slice(od.len() + 1, live.len()));
+    assert(ns_names.as_str() == want.as_str(), "only the live namespace stays");
+    let mut ld = String::new();
+    ld.format_into("{}/lto", cache.as_str());
+    let ltos = dir_names(ld.as_str());
+    assert(ltos.len() == 1 && ltos.at(0).as_str() == "00000000000000dd", "only the used linker cache stays");
+    assert(unsafe shim::sc_mtime(stamp.cstr()) > 1600000000, "the sweep renews its stamp");
 }
 
 // Two source trees with byte-identical sources share one object cache. Their emitted headers include the
@@ -6608,7 +6906,7 @@ fn build_paths_with_spaces() {
 }
 
 // Staleness gates, end to end: a no-change build rewrites neither generated C nor objects nor the
-// binary; a header-only change (a struct rename lands in __sc_types.h, not in main.c) recompiles the
+// binary; a header-only change (a struct rename lands in the module's type header, not in main.c) recompiles the
 // dependent object while its unchanged C file keeps its mtime; a manifest cflags change invalidates
 // every object through the command fingerprint, again without touching the generated C.
 @test
@@ -6668,6 +6966,204 @@ fn build_staleness_gates() {
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "flag-change build");
     assert(p13_mtime(genc.as_str()) == g1, "a flag change rewrites no generated C");
     assert(p13_mtime(objo.as_str()) > o2, "a changed C flag invalidates the object cache entries");
+}
+
+// Forward declarations follow use: adding a struct, an enum or renaming a type in one module
+// rewrites that module's own files only. A unit that spells none of its types keeps its C text
+// and its object, and the shared forward header carries no type declaration.
+@test
+fn build_type_edit_stays_local() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "import util;\nimport other;\n\nfn main(argv: Vector<str>) i32 {\n    let n = argv.len() as i32 - 1;\n    return util::v(n) + other::f(n);\n}\n",
+    );
+    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n";
+    p.mkfile("src/util.spc", util0);
+    p.mkfile(
+        "src/other.spc",
+        "pub struct T {\n    pub b: i64,\n}\n\n@c.noinline\npub fn f(x: i32) i32 {\n    let t = T { b: x as i64 };\n    return t.b as i32;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut fwd = String::new();
+    fwd.format_into("{}/build/dev/gen/__sc_fwd.h", root);
+    let fwd_text = loader::read_file(fwd.as_str()).unwrap();
+    assert(fwd_text.as_str().find("util__S") < 0, "the forward header declares no type");
+    let mut paths = Vector::<String>::new();
+    for rel in "gen/__sc_fwd.h gen/other.c obj/other.o gen/main.c obj/main.o".split(" ") {
+        let mut s = String::new();
+        s.format_into("{}/build/dev/{}", root, rel);
+        paths.push(s);
+    }
+    let mut t0 = Vector::<i64>::new();
+    for i in 0..paths.len() {
+        t0.push(p13_mtime(paths[i].as_str()));
+        assert(t0[i] != 0, "the build wrote every recorded file");
+    }
+    let mut edits = Vector::<str>::new();
+    edits.push("pub struct Added {\n    pub z: i64,\n}\n");
+    edits.push("pub struct Added {\n    pub z: i64,\n}\n\npub enum Mode {\n    A,\n    B,\n}\n");
+    edits.push("pub struct Renamed {\n    pub z: i64,\n}\n\npub enum Mode {\n    A,\n    B,\n}\n");
+    for k in 0..edits.len() {
+        p13_tick();
+        let mut src = String::from_str(util0);
+        src.push_str("\n");
+        src.push_str(edits[k]);
+        p.mkfile("src/util.spc", src.as_str());
+        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "type-edit build");
+        for i in 0..paths.len() {
+            assert(
+                p13_mtime(paths[i].as_str()) == t0[i],
+                "a type edit in util leaves units without util types untouched",
+            );
+        }
+    }
+}
+
+// One definition header per type: a new type in a module whose other type every unit spells
+// recompiles no unit (the new type gets its own header, which no unit includes), and removing it
+// again prunes that header and drops it from the manifest.
+@test
+fn build_new_type_recompiles_no_user() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "import util;\nimport other;\n\nfn main(argv: Vector<str>) i32 {\n    let s = util::S { a: argv.len() as i32 - 1 };\n    return util::v(s) + other::f(s);\n}\n",
+    );
+    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
+    p.mkfile("src/util.spc", util0);
+    p.mkfile("src/other.spc", "import util;\n\n@c.noinline\npub fn f(s: util::S) i32 {\n    return s.a * 2;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut paths = Vector::<String>::new();
+    for rel in "gen/main.c obj/main.o gen/other.c obj/other.o gen/util.c obj/util.o gen/util.h".split(" ") {
+        let mut s = String::new();
+        s.format_into("{}/build/dev/{}", root, rel);
+        paths.push(s);
+    }
+    let mut t0 = Vector::<i64>::new();
+    for i in 0..paths.len() {
+        t0.push(p13_mtime(paths[i].as_str()));
+        assert(t0[i] != 0, "the build wrote every recorded file");
+    }
+    let mut hdr = String::new();
+    hdr.format_into("{}/build/dev/gen/__sc_t/util__Added.h", root);
+    let mut man = String::new();
+    man.format_into("{}/build/dev/gen/__sc_manifest", root);
+    p13_tick();
+    let mut src = String::from_str(util0);
+    src.push_str("\npub struct Added {\n    pub z: i64,\n}\n");
+    p.mkfile("src/util.spc", src.as_str());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "added-type build");
+    for i in 0..paths.len() {
+        assert(p13_mtime(paths[i].as_str()) == t0[i], "a new type leaves every unit and object untouched");
+    }
+    assert(p13_mtime(hdr.as_str()) != 0, "the new type has its own definition header");
+    assert(
+        loader::read_file(man.as_str()).unwrap().as_str().find("__sc_t/util__Added.h") >= 0,
+        "the manifest lists the new definition header",
+    );
+    p.mkfile("src/util.spc", util0);
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "removed-type build");
+    assert(p13_mtime(hdr.as_str()) == 0, "the definition header of a removed type is pruned");
+    assert(loader::read_file(man.as_str()).unwrap().as_str().find("util__Added") < 0, "the manifest no longer lists it");
+}
+
+// A field edit recompiles exactly the units that need the type complete: the owner, a unit that
+// uses it by value. A unit that names it only through a pointer (its typedef line) and a unit that
+// uses another type of the same module keep their objects.
+@test
+fn build_field_edit_recompiles_users() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "import util;\nimport other;\nimport third;\n\nfn main(argv: Vector<str>) i32 {\n    let s = util::S { a: argv.len() as i32 - 1, b: 2 };\n    return util::v(s) + s.b - 2 + other::f(util::T { x: 0 }) + third::g(&s);\n}\n",
+    );
+    let util0 = "pub struct S {\n    pub a: i32,\n    pub b: i32,\n}\n\npub struct T {\n    pub x: i64,\n}\n\n@c.noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
+    p.mkfile("src/util.spc", util0);
+    p.mkfile("src/other.spc", "import util;\n\n@c.noinline\npub fn f(t: util::T) i32 {\n    return t.x as i32;\n}\n");
+    p.mkfile(
+        "src/third.spc",
+        "import util;\n\n@c.noinline\npub fn g(s: &util::S) i32 {\n    let q = s as *const util::S;\n    return (q == null) as i32;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut same = Vector::<String>::new();
+    for rel in "obj/other.o obj/third.o".split(" ") {
+        let mut s = String::new();
+        s.format_into("{}/build/dev/{}", root, rel);
+        same.push(s);
+    }
+    let mut users = Vector::<String>::new();
+    for rel in "obj/main.o obj/util.o".split(" ") {
+        let mut s = String::new();
+        s.format_into("{}/build/dev/{}", root, rel);
+        users.push(s);
+    }
+    let mut t0 = Vector::<i64>::new();
+    for i in 0..same.len() {
+        t0.push(p13_mtime(same[i].as_str()));
+        assert(t0[i] != 0, "the build wrote every recorded object");
+    }
+    let mut u0 = Vector::<i64>::new();
+    for i in 0..users.len() {
+        u0.push(p13_mtime(users[i].as_str()));
+        assert(u0[i] != 0, "the build wrote every recorded object");
+    }
+    p13_tick();
+    // The same fields in the other order: a layout change with no source change at any use.
+    let util1 = String::from_str(util0).replace(
+        "    pub a: i32,\n    pub b: i32,\n",
+        "    pub b: i32,\n    pub a: i32,\n",
+    );
+    p.mkfile("src/util.spc", util1.as_str());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "field-edit build");
+    for i in 0..same.len() {
+        assert(p13_mtime(same[i].as_str()) == t0[i], "a unit that does not need the type complete keeps its object");
+    }
+    for i in 0..users.len() {
+        assert(p13_mtime(users[i].as_str()) != u0[i], "a unit that needs the type complete recompiles");
+    }
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").ok(), "the program runs with the new layout");
+}
+
+// A type spelled only inside a symbol name (the `util__K` segment of a generic instance's symbol)
+// is no C use of the type: the unit includes the instance's prototype header, not the type's
+// header, so a type edit in util leaves the unit untouched.
+@test
+fn build_symbol_segment_includes_no_type() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "import util;\nimport gen;\n\nfn main() i32 {\n    return gen::size::<util::K>() - 8;\n}\n",
+    );
+    let util0 = "pub struct K {\n    pub a: i64,\n}\n";
+    p.mkfile("src/util.spc", util0);
+    p.mkfile("src/gen.spc", "@c.noinline\npub fn size<T>() i32 {\n    return sizeof(T) as i32;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut genc = String::new();
+    genc.format_into("{}/build/dev/gen/main.c", root);
+    let text = loader::read_file(genc.as_str()).unwrap();
+    assert(text.as_str().find("gen__size__util__K") >= 0, "main.c spells the type in the instance symbol");
+    assert(text.as_str().find("__sc_t/util__K.h") < 0, "main.c does not include the type's header");
+    let mut objo = String::new();
+    objo.format_into("{}/build/dev/obj/main.o", root);
+    let g0 = p13_mtime(genc.as_str());
+    let o0 = p13_mtime(objo.as_str());
+    assert(g0 != 0 && o0 != 0, "the build wrote main.c and main.o");
+    p13_tick();
+    let mut src = String::from_str(util0);
+    src.push_str("\npub struct Added {}\n");
+    p.mkfile("src/util.spc", src.as_str());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "type-edit build");
+    assert(p13_mtime(genc.as_str()) == g0, "main.c is byte-identical");
+    assert(p13_mtime(objo.as_str()) == o0, "a type edit in util does not rebuild main.o");
 }
 
 // The profile's `lto` mode reaches both the compile and the link lines and their fingerprints. A
@@ -7119,6 +7615,72 @@ fn item_jobs_fold_across_an_import_cycle() {
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1 -o bin");
     assert(r.ok(), "and under one worker");
     assert_eq(p.run_bin(), 0);
+}
+
+// One cache-free build of the project at `root` with `jobs` workers into `<root>/o<tag>`.
+fn jobs_build(root: str, tag: str, jobs: str) {
+    let mut args = String::new();
+    args.format_into("build --jobs={} --out-dir=o{} -o o{}/app", jobs, tag, tag);
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1", args.as_str());
+    assert(r.ok(), "the build succeeds");
+}
+
+// Emitted file `rel` of build `<root>/o<tag>`.
+fn jobs_file(root: str, tag: str, rel: str) String {
+    let mut path = String::new();
+    path.format_into("{}/o{}/raw/{}", root, tag, rel);
+    return cli::read_text(path.as_str());
+}
+
+// The emitted tree does not depend on the worker count. A query that only asks whether a type has
+// a `free` method (the destructor glue's destructibility test) spelled the method's C name and so
+// recorded a use of the type's module: one worker answered it from a memo an earlier module filled,
+// every core asked it again in the instance shard, and the shard included headers it never used.
+@test
+fn worker_count_keeps_instance_shard_includes() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/stats.spc",
+        "pub struct Stats {\n    pub name: String,\n    pub t: Array<u64, 4>,\n}\n\npub fn make() Stats {\n    let mut s = Stats { name: String::from_str(\"s\"), t: Array::<u64, 4>::new() };\n    s.t.set(1, 2);\n    return s;\n}\n",
+    );
+    p.mkfile(
+        "src/early.spc",
+        "pub fn sum() u64 {\n    let mut a = Array::<u64, 4>::new();\n    a.set(0, 5);\n    return a[0];\n}\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "import early;\nimport stats;\n\nfn main() i32 {\n    let s = stats::make();\n    return s.t[1] as i32 + early::sum() as i32 - 7;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    jobs_build(root, "1", "1");
+    jobs_build(root, "4", "4");
+    let files = ["stats__inst.c", "stats.c", "early.c", "main.c", "__sc_manifest"];
+    for f in files {
+        let a = jobs_file(root, "1", f);
+        assert(a.len() > 0, "the build emits the file");
+        let b = jobs_file(root, "4", f);
+        assert(a.equals(&b), "one worker and four workers emit the same file");
+    }
+    let inst = jobs_file(root, "1", "stats__inst.c");
+    assert(inst.as_str().find("String__free") >= 0, "the shard holds the destructor glue");
+    assert(inst.as_str().find("array") < 0, "the glue spells nothing of Array, so the shard includes none of it");
+}
+
+// SC_NO_TU_CACHE=1 leaves no per-TU cache image in the tree, also after a cached build wrote one.
+@test
+fn no_tu_cache_removes_the_image() {
+    // A wasm guest cannot read its own executable's path, so the per-TU cache has no compiler identity
+    // to key on and never writes an image there.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_exists(".tu_cache"), "a cached build writes the image");
+    assert(p.compile_flags_env("", "main.spc", "SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1").ok());
+    assert(!p.gen_exists(".tu_cache"), "a build without the cache removes it");
 }
 
 @platform(!windows)

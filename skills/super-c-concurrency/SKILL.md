@@ -269,9 +269,9 @@ let total = parallel::reduce(v[0..n], fn() i64 { return 0; },
 
 `parallel for` is a sugar keyword lowered to `std::parallel::data::range(...)`; the
 index binder is `usize`. The parser wraps the body in a closure node so the resolver
-fills captures. The body's `fn(..) + Send + Sync` bound prevents data races: a closure
-that owns or mutates a capture is `fn move`, and the classic parallel data race does not
-compile. The functions come from `import std::parallel::data as parallel;`.
+fills captures. The body's `fn(..) + Send + Sync` bound prevents data races: the plain `fn(..)`
+bound makes the body borrow its `Free` captures, a mutated capture is a `&mut` borrow, and a
+closure that holds one is not `Sync`, so the classic parallel data race does not compile. The functions come from `import std::parallel::data as parallel;`.
 
 Also available: `parallel::chunks_mut`, `parallel::sections` (fork-join via a builder
 closure that calls `Sections::add`), and `*_with` variants (`range_with`, `each_with`,

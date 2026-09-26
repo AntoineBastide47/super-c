@@ -9,117 +9,29 @@ import lexer::token_type as tt;
 import module::loader as loader;
 import ir::interp as iri;
 
-// The mangle spelling of a builtin ("void" doubles as the not-a-scalar fallback).
-const fn bt_mangle(b: BuiltinType) str<'static> {
-    if b == BuiltinType::BT_BOOL {
-        return "bool";
-    }
-    if b == BuiltinType::BT_CHAR {
-        return "char";
-    }
-    if b == BuiltinType::BT_I8 {
-        return "i8";
-    }
-    if b == BuiltinType::BT_I16 {
-        return "i16";
-    }
-    if b == BuiltinType::BT_I32 {
-        return "i32";
-    }
-    if b == BuiltinType::BT_I64 {
-        return "i64";
-    }
-    if b == BuiltinType::BT_ISIZE {
-        return "isize";
-    }
-    if b == BuiltinType::BT_U8 {
-        return "u8";
-    }
-    if b == BuiltinType::BT_U16 {
-        return "u16";
-    }
-    if b == BuiltinType::BT_U32 {
-        return "u32";
-    }
-    if b == BuiltinType::BT_U64 {
-        return "u64";
-    }
-    if b == BuiltinType::BT_USIZE {
-        return "usize";
-    }
-    if b == BuiltinType::BT_F32 {
-        return "f32";
-    }
-    if b == BuiltinType::BT_F64 {
-        return "f64";
-    }
-    if b == BuiltinType::BT_C32 {
-        return "c32";
-    }
-    if b == BuiltinType::BT_C64 {
-        return "c64";
-    }
-    if b == BuiltinType::BT_VALIST {
-        return "va_list";
-    }
-    return "void";
-}
-
 // The C spelling of a builtin in declarations (usize is size_t, NOT uintptr_t; c32/c64 are the
 // _Complex pair). "void" doubles as the fallback.
 const fn bt_c_decl(b: BuiltinType) str<'static> {
-    if b == BuiltinType::BT_BOOL {
-        return "bool";
-    }
-    if b == BuiltinType::BT_CHAR {
-        return "char";
-    }
-    if b == BuiltinType::BT_I8 {
-        return "int8_t";
-    }
-    if b == BuiltinType::BT_I16 {
-        return "int16_t";
-    }
-    if b == BuiltinType::BT_I32 {
-        return "int32_t";
-    }
-    if b == BuiltinType::BT_I64 {
-        return "int64_t";
-    }
-    if b == BuiltinType::BT_ISIZE {
-        return "intptr_t";
-    }
-    if b == BuiltinType::BT_U8 {
-        return "uint8_t";
-    }
-    if b == BuiltinType::BT_U16 {
-        return "uint16_t";
-    }
-    if b == BuiltinType::BT_U32 {
-        return "uint32_t";
-    }
-    if b == BuiltinType::BT_U64 {
-        return "uint64_t";
-    }
-    if b == BuiltinType::BT_USIZE {
-        return "size_t";
-    }
-    if b == BuiltinType::BT_F32 {
-        return "float";
-    }
-    if b == BuiltinType::BT_F64 {
-        return "double";
-    }
-    if b == BuiltinType::BT_C32 {
-        return "float _Complex";
-    }
-    if b == BuiltinType::BT_C64 {
-        return "double _Complex";
-    }
-    if b == BuiltinType::BT_VALIST {
-        return "va_list";
-    }
-    return "void";
+    return switch b {
+        BT_BOOL => "bool",
+        BT_CHAR => "char",
+        BT_I8 => "int8_t",
+        BT_I16 => "int16_t",
+        BT_I32 => "int32_t",
+        BT_I64 => "int64_t",
+        BT_ISIZE => "intptr_t",
+        BT_U8 => "uint8_t",
+        BT_U16 => "uint16_t",
+        BT_U32 => "uint32_t",
+        BT_U64 => "uint64_t",
+        BT_USIZE => "size_t",
+        BT_F32 => "float",
+        BT_F64 => "double",
+        BT_C32 => "float _Complex",
+        BT_C64 => "double _Complex",
+        BT_VALIST => "va_list",
+        _ => "void",
+    };
 }
 
 // Names an identifier cannot keep in C: keywords plus the <iso646.h> alternative-token macros
@@ -444,6 +356,8 @@ pub struct Mangler {
     /// Substitution stack for per-instance spelling: generic-param decl -> a CONCRETE pool type
     /// (module + TypeId, usually the instance's anchor pool). Innermost binding wins.
     pub subs: Vector<MSub>,
+    // Bumped on every change of `subs`: a spelling under an unchanged stack is the same text.
+    subs_gen: u64,
     // The frames `hide_from` lifted off `subs` while a binding's payload is read under its own env.
     hidden: Vector<MSub>,
     /// Every TYPE_DYN whose C spelling was rendered: the backend drains this into `SC_DYN_<stem>`
@@ -460,8 +374,26 @@ pub struct Mangler {
     /// lazily on the first edge.
     pub used_types: Vector<u64>,
     pub used_syms: Vector<u64>,
+    /// The aggregates each spelling context's C text uses, one log entry per record:
+    /// `tn_row` is the context's row (as in `used_types`), `tn_key` the FNV of the C type name
+    /// with bit 0 replaced: 1 when the text needs the complete type (a by-value spelling, a
+    /// member access, a dereference, pointer arithmetic), 0 when only a pointer names it (the
+    /// typedef line is enough). Unordered with repeats: the entries of one row form a set.
+    /// Recorded only while `tn_on`.
+    pub tn_key: Vector<u64>,
+    pub tn_row: Vector<u32>,
+    pub tn_on: bool,
+    tn_seen: Vector<u64>, // direct-mapped filter over (row, key): most spellings repeat a recent one
+    tn_pre: Vector<u64>, // direct-mapped filter over (row, concrete pool type, kind): skips the name hash
+    tn_memo: Map<u64, u64>, // (module, decl) or concrete (module, type) -> C name FNV
+    tn_buf: String, // spelling scratch of the name keys
+    ptr_depth: u32, // nesting of pointee spellings: a type spelled below a pointer needs no definition
     /// Nesting of the C type spellers: a module prefix spelled inside one names a type.
     pub type_depth: u32,
+    /// Nesting of the symbol-segment spellers (`type_m`, `inst_name`, `dyn_stem`) outside a C
+    /// type: a module prefix spelled inside one is part of a symbol name, not a C use of the
+    /// type or symbol, so it records no edge (the enclosing symbol records its owner).
+    seg_depth: u32,
     /// Spare declarator buffers for `fn_ptr_ctype` (one taken per nesting level, returned empty).
     fp_bufs: Vector<String>,
     /// The spelling context: a module id (its TU), `CTX_INST | owner` (owner's instance shard)
@@ -490,11 +422,12 @@ pub struct Mangler {
     // method_by_name misses keyed by (receiver decl or builtin, name) hash: callers probe for methods
     // that often do not exist (`free`, `eq`, `cmp`), and a miss scans every module's items.
     miss_memo: Set<u64>,
+    // free_method answers keyed by declaration: every drop asks, and an answer scans the items.
+    free_memo: Map<u64, u64>,
     last_edge: u64, // the spelling edge recorded last: spellings cluster, so most repeat it
-    /// Spelling capture for memoized renders: while on, modpfx logs every module it spells so a
-    /// cache hit can replay the spelling edges exactly (under the hit's own mark_ctx).
-    pub edge_log_on: bool,
-    pub edge_log: Vector<ModuleId>,
+    /// While on, spellings record no edge: the caller reads the text but the output never
+    /// spells it (identifier reservation).
+    pub no_edges: bool,
     /// Per-TU emission journal (driver/tuc): while on, every cross-TU-gated attempt the emitter
     /// makes is logged pre-dedup, so a later build can replay a module's side effects through the
     /// SAME gates without lowering its bodies. Off during replay and outside the seed loop.
@@ -533,9 +466,19 @@ pub const RK_MDYN: u8 = 15; // a = pm, b = t (mangler dyn_reqs entry)
 pub const RK_EDGE: u8 = 16; // xs = spelling row of this module, bit 15 = type edge (driver-recorded)
 pub const RK_MAIN: u8 = 17; // a = main_argv (driver-recorded, module holds `main`)
 pub const RK_ZST: u8 = 18; // a = alignment (ZST sentinel demand)
-pub const RK_HEDGE: u8 = 19; // a = owner module, d = embedded type (a's pool), c = env kind (header edge)
+pub const RK_HEDGE: u8 = 19; // a = owner module, h = definition key of the embedded type (header edge)
+pub const RK_TNEED: u8 = 20; // xs = type-need keys of this module's row as (low, high) word pairs (driver-recorded)
 /// `mark_ctx` of owner module `o`'s instance shard: `CTX_INST | o`.
 pub const CTX_INST: i64 = 0x10000;
+
+// FNV-1a of the bytes hashed into `h` followed by `s` (`fnv_more(x.hash(), s) == (x + s).hash()`).
+const fn fnv_more(h: u64, s: str) u64 {
+    let mut x = h;
+    for k in 0..s.len() {
+        x = (x ^ s.byte_at(k) as u64) * 0x100000001b3u64;
+    }
+    return x;
+}
 
 /// One journaled emission side effect. Fields are kind-specific (see RK_*); unused ones stay zero.
 pub struct RecEv {
@@ -594,6 +537,18 @@ pub struct MSub {
     pub am: ModuleId,
 }
 
+/// A copy of the substitution chain `v`.
+pub fn subs_copy(v: &Vector<MSub>) Vector<MSub> {
+    // `reserve` (not an exact capacity) keeps the 8-slot growth minimum: the binds a snapshot
+    // usually gets next fit without a second allocation.
+    let mut out = Vector::<MSub>::new();
+    out.reserve(v.len());
+    for i in 0..v.len() {
+        out.push(*v.at(i));
+    }
+    return out;
+}
+
 extend Mangler {
     /// A mangler over `pkg` (which must outlive it); prefixing is on iff the package holds more than
     /// one non-prelude module.
@@ -621,6 +576,7 @@ extend Mangler {
             ph_global: p.prelude_lookup("Global", true),
             short_ok: Vector::<u8>::new(),
             subs: Vector::<MSub>::new(),
+            subs_gen: 1,
             clos_sfx: String::new(),
             clos_ids: Vector::<NodeId>::new(),
             dyn_reqs: Vector::<DynReq>::new(),
@@ -628,7 +584,16 @@ extend Mangler {
             macro_on: false,
             used_types: Vector::<u64>::new(),
             used_syms: Vector::<u64>::new(),
+            tn_key: Vector::<u64>::new(),
+            tn_row: Vector::<u32>::new(),
+            tn_on: false,
+            tn_seen: Vector::<u64>::new(),
+            tn_pre: Vector::<u64>::new(),
+            tn_memo: Map::<u64, u64>::new(),
+            tn_buf: String::new(),
+            ptr_depth: 0,
             type_depth: 0,
+            seg_depth: 0,
             fp_bufs: Vector::<String>::new(),
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
@@ -643,9 +608,9 @@ extend Mangler {
             pin_idx: Map::<u64, u64>::new(),
             ovl_memo: Map::<u64, u64>::new(),
             miss_memo: Set::<u64>::new(),
+            free_memo: Map::<u64, u64>::new(),
             last_edge: 0xFFFFFFFFFFFFFFFFu64,
-            edge_log_on: false,
-            edge_log: Vector::<ModuleId>::new(),
+            no_edges: false,
             rec_on: false,
             rec: Vector::<RecEv>::new(),
             rec_dups: Set::<u64>::new(),
@@ -660,9 +625,7 @@ extend Mangler {
     // node in the low half, zero halves = not a member.
     fn owner_of(self: &mut Self, m: ModuleId, fnode: NodeId) u64 {
         if self.own_built.len() == 0 {
-            for _i in 0..self.p().modules.len() {
-                self.own_built.push(false);
-            }
+            self.own_built.resize_default(self.p().modules.len());
         }
         if !self.own_built[m as usize] {
             self.own_built.set(m as usize, true);
@@ -701,14 +664,33 @@ extend Mangler {
     pub fn push_sub(self: &mut Self, pm: ModuleId, pnode: NodeId, am: ModuleId, at: TypeId) {
         let lim = self.subs.len() as u32;
         self.subs.push(MSub { pm: pm, pnode: pnode, am: am, at: at, lim: lim });
+        self.subs_gen += 1;
+    }
+    /// Bind generics `gens` (declared in module `pm`) to the args of `it` (spelled in module `am`), up to
+    /// the shorter of the two lists. Returns the binding count for pop_subs.
+    pub fn push_generics(self: &mut Self, pm: ModuleId, gens: NodeList, am: ModuleId, it: &TyInstance) usize {
+        let a = self.p().module_ast_const(pm);
+        let mut n: u32 = 0;
+        while n < gens.len && n as u8 < it.n {
+            self.push_sub(pm, unsafe (*a).list(gens)[n as usize], am, unsafe it.args[n as usize]);
+            n += 1;
+        }
+        return n as usize;
     }
     /// Re-push a recorded binding, keeping its env boundary (demand chains rebuild from index 0).
     pub fn push_msub(self: &mut Self, sb: MSub) {
         self.subs.push(sb);
+        self.subs_gen += 1;
     }
     /// Pop the `n` most recent bindings. Panics: fewer than `n` bindings are active.
     pub fn pop_subs(self: &mut Self, n: usize) {
         self.subs.truncate(self.subs.len() - n);
+        self.subs_gen += 1;
+    }
+    /// Drop every binding.
+    pub fn clear_subs(self: &mut Self) {
+        self.subs.truncate(0);
+        self.subs_gen += 1;
     }
 
     /// Fold a canonical const-generic expression under the substitution stack: every referenced
@@ -718,11 +700,7 @@ extend Mangler {
     }
     /// Ground any const-valued payload (TYPE_CONST, expression, or bound param) below `lim`.
     pub fn fold_cval_at(self: &Self, am: ModuleId, at: TypeId, out_val: &mut i64, lim: usize) bool {
-        let l = if lim < self.subs.len() {
-            lim;
-        } else {
-            self.subs.len();
-        };
+        let l = lim.min(self.subs.len());
         let y = *unsafe (*self.p().module_ast_const(am)).type_at(at);
         if y.kind == TypeKind::TYPE_CONST {
             *out_val = y.as_data.value;
@@ -750,11 +728,7 @@ extend Mangler {
             if sb.pm != y.module || sb.pnode != y.as_data.decl {
                 continue;
             }
-            let kl = if sb.lim as usize < k {
-                sb.lim as usize;
-            } else {
-                k;
-            };
+            let kl = (sb.lim as usize).min(k);
             let by = *unsafe (*self.p().module_ast_const(sb.am)).type_at(sb.at);
             if by.kind == TypeKind::TYPE_CONST {
                 *out_val = by.as_data.value;
@@ -799,11 +773,7 @@ extend Mangler {
                 if sb.pm != pd.module || sb.pnode != pd.node {
                     continue;
                 }
-                let kl = if sb.lim as usize < k {
-                    sb.lim as usize;
-                } else {
-                    k;
-                };
+                let kl = (sb.lim as usize).min(k);
                 let mut rm = sb.am;
                 let mut rt = sb.at;
                 let mut env: usize = 0;
@@ -866,6 +836,7 @@ extend Mangler {
                 self.hidden.push(*self.subs.at(i));
             }
             self.subs.truncate(env);
+            self.subs_gen += 1;
         }
         return h0;
     }
@@ -874,6 +845,9 @@ extend Mangler {
     pub fn unhide(self: &mut Self, h0: usize) {
         for i in h0..self.hidden.len() {
             self.subs.push(*self.hidden.at(i));
+        }
+        if h0 < self.hidden.len() {
+            self.subs_gen += 1;
         }
         self.hidden.truncate(h0);
     }
@@ -1081,19 +1055,17 @@ extend Mangler {
         if ld.node == NODE_NONE || unsafe (*self.p().module_ast_const(ld.module)).at_const(ld.node).kind != NodeKind::NODE_GENERIC_PARAM {
             return false;
         }
-        let mut k9 = self.subs.len();
-        while k9 > 0 {
-            k9 -= 1;
-            let sb = *self.subs.at(k9);
-            if sb.pm != ld.module || sb.pnode != ld.node {
-                continue;
-            }
-            let kl9 = if sb.lim as usize < k9 {
-                sb.lim as usize;
-            } else {
-                k9;
-            };
-            if self.fold_cval_at(sb.am, sb.at, out, kl9) {
+        return self.fold_param(ld.module, ld.node, out);
+    }
+
+    /// Fold const-generic param `(pm, pnode)` through its bindings, innermost first; false when no
+    /// binding grounds it.
+    pub fn fold_param(self: &Self, pm: ModuleId, pnode: NodeId, out: &mut i64) bool {
+        let mut k = self.subs.len();
+        while k > 0 {
+            k -= 1;
+            let sb = *self.subs.at(k);
+            if sb.pm == pm && sb.pnode == pnode && self.fold_cval_at(sb.am, sb.at, out, (sb.lim as usize).min(k)) {
                 return true;
             }
         }
@@ -1104,12 +1076,7 @@ extend Mangler {
     /// active substitution env; false when the length does not fold.
     pub fn field_arr_len(self: &mut Self, m: ModuleId, fid: NodeId, len_out: &mut u64) bool {
         let da = self.p().module_ast_const(m);
-        let tn = if unsafe (*da).at_const(fid).kind == NodeKind::NODE_FIELD {
-            unsafe (*da).at_const(fid).as_data.field.ty;
-        } else {
-            // Tuple member: the node is already the type annotation.
-            fid;
-        };
+        let tn = unsafe (*da).member_type_node(fid, true);
         if tn == NODE_NONE || unsafe (*da).at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
             return false;
         }
@@ -1200,11 +1167,7 @@ extend Mangler {
             i -= 1;
             let sb = *self.subs.at(i);
             if sb.pm == y.module && sb.pnode == y.as_data.decl {
-                let il = if sb.lim as usize < i {
-                    sb.lim as usize;
-                } else {
-                    i;
-                };
+                let il = (sb.lim as usize).min(i);
                 if self.resolve_from(sb.am, sb.at, rm, rt, guard + 1, il, env) {
                     return true;
                 }
@@ -1217,9 +1180,7 @@ extend Mangler {
     // basename; collisions keep the full form for every involved module.
     fn short_pfx(self: &mut Self, m: ModuleId) bool {
         if self.short_ok.len() == 0 {
-            for _i in 0..self.p().modules.len() {
-                self.short_ok.push(0u8);
-            }
+            self.short_ok.resize_default(self.p().modules.len());
         }
         let cached = self.short_ok[m as usize];
         if cached != 0 {
@@ -1241,7 +1202,7 @@ extend Mangler {
                 }
             }
         }
-        self.short_ok.set(m as usize, if_u8(ok, 2, 1));
+        self.short_ok.set(m as usize, ok as u8 + 1);
         return ok;
     }
 
@@ -1267,7 +1228,7 @@ extend Mangler {
 
     /// The matrix row of spelling context `src`: modules, then the package-level row (65534),
     /// then one row per owner module's instance shard.
-    const fn um_row(self: &Self, src: u64) usize {
+    pub const fn um_row(self: &Self, src: u64) usize {
         let n = self.p().modules.len();
         if src == 65534u64 {
             return n;
@@ -1306,6 +1267,8 @@ extend Mangler {
     /// requests (first module-order claimant wins, matching the serial loop).
     /// The used-mods row is an idempotent OR: absorbed once per shard, outside any demand range.
     pub fn sh_merge_um(self: &mut Self, o: &mut Mangler, m: u64) {
+        let r0 = self.um_row(m) as u32;
+        self.tn_take(o, r0, r0 + 1);
         if o.used_types.len() == 0 {
             return;
         }
@@ -1322,8 +1285,21 @@ extend Mangler {
         }
     }
 
+    // Append shard `o`'s type-need entries of the rows in `[lo, hi)` to this mangler's.
+    fn tn_take(self: &mut Self, o: &Mangler, lo: u32, hi: u32) {
+        for i in 0..o.tn_key.len() {
+            let r = o.tn_row[i];
+            if r >= lo && r < hi {
+                self.tn_key.push(o.tn_key[i]);
+                self.tn_row.push(r);
+            }
+        }
+    }
+
     /// Frontier merge: absorb every package-level and instance-shard row of shard `o`.
     pub fn sh_merge_inst(self: &mut Self, o: &Mangler) {
+        let n0 = self.p().modules.len() as u32;
+        self.tn_take(o, n0, 2 * n0 + 1);
         if o.used_types.len() == 0 {
             return;
         }
@@ -1350,6 +1326,169 @@ extend Mangler {
             return (self.used_types[i] & bit) != 0;
         }
         return (self.used_syms[i] & bit) != 0;
+    }
+
+    /// Record in the current context's row that its C text uses the aggregate whose C name has
+    /// FNV `h`: complete (`def`) or through a pointer only (see `tn_key`).
+    pub fn need_name(self: &mut Self, h: u64, def: bool) {
+        if !self.tn_on || self.no_edges {
+            return;
+        }
+        let src = if self.mark_ctx < 0 {
+            65534u64;
+        } else {
+            self.mark_ctx as u64;
+        };
+        let row = self.um_row(src);
+        let k = h & 0xFFFFFFFFFFFFFFFEu64 | def as u64;
+        let mix = k ^ (row as u64 + 1) * 0x9E3779B97F4A7C15u64;
+        if self.tn_seen.len() == 0 {
+            self.tn_seen.resize_default(1024);
+        }
+        let slot = (mix >> 54) as usize;
+        if self.tn_seen[slot] == mix {
+            return;
+        }
+        self.tn_seen.set(slot, mix);
+        self.tn_key.push(k);
+        self.tn_row.push(row as u32);
+    }
+
+    // True when the current context recently recorded the aggregate `(pm, t)` of the same kind
+    // (`def`) under spelling state `g`: 0 for a concrete type (its name, and so its key, is a
+    // function of the pool type alone), else the substitution generation. Records the query
+    // otherwise. The caller checked `tn_on` and `no_edges`.
+    fn tn_recent(self: &mut Self, pm: ModuleId, t: TypeId, def: bool, g: u64) bool {
+        if self.tn_pre.len() == 0 {
+            self.tn_pre.resize_default(1024);
+        }
+        let row = if self.mark_ctx < 0 {
+            0xFFFFu64;
+        } else {
+            self.mark_ctx as u64;
+        };
+        let mix = ((row << 1 | def as u64) + 1) * 0x9E3779B97F4A7C15u64 ^ (pm as u64 << 32 | t as u64) * 0xC2B2AE3D27D4EB4Fu64 ^ g * 0x165667B19E3779F9u64;
+        let slot = (mix >> 54) as usize;
+        if self.tn_pre[slot] == mix {
+            return true;
+        }
+        self.tn_pre.set(slot, mix);
+        return false;
+    }
+
+    /// Record that the current context needs the complete definition of `(pm, t)`: the text
+    /// uses a value of it without spelling its type (a member access through a pointer, a
+    /// dereference, a call result used in place).
+    pub fn need_ty(self: &mut Self, pm: ModuleId, t: TypeId) {
+        if !self.tn_on || self.no_edges || t == TYPE_NONE {
+            return;
+        }
+        let y = *unsafe (*self.p().module_ast_const(pm)).type_at(t);
+        // An instance's name is a function of the pool type and the substitutions.
+        let fixed = y.concrete && (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM);
+        if (fixed || y.kind == TypeKind::TYPE_INSTANCE) && self.tn_recent(
+            pm,
+            t,
+            true,
+            pick(y.concrete, 0, self.subs_gen),
+        ) {
+            return;
+        }
+        let h = self.def_key(pm, t);
+        if h != 0 {
+            self.need_name(h, true);
+        }
+    }
+
+    /// The FNV of the C name whose definition a by-value use of `(pm, t)` needs under the active
+    /// substitutions (an aggregate, an instance, an array's element, a capturing closure's
+    /// environment), spelled with no side effect; 0 when it has none (a C header defines it,
+    /// or it is no aggregate).
+    pub fn def_key(self: &mut Self, pm: ModuleId, t: TypeId) u64 {
+        let mut rm = pm;
+        let mut rt = t;
+        if !self.resolve(pm, t, &mut rm, &mut rt) {
+            return 0;
+        }
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.def_key(rm, y.as_data.arr.elem);
+        }
+        let mut key: u64 = 0;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return self.decl_key(y.module, y.as_data.decl);
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            if y.concrete {
+                key = 1u64 << 62 | rm as u64 << 32 | rt as u64;
+            }
+        } else if y.kind == TypeKind::TYPE_FUNCTION {
+            let cf = unsafe (*self.p().module_ast_const(y.module)).closure_fact(y.as_data.decl);
+            if cf == null || unsafe (&*cf).ncaps == 0 {
+                return 0;
+            }
+            key = 1u64 << 61 | y.module as u64 << 32 | y.as_data.decl as u64;
+        } else {
+            return 0;
+        }
+        if key != 0 {
+            switch self.tn_memo.get(&key) {
+                Some(h) => {
+                    return *h;
+                },
+                None => {},
+            };
+        }
+        // Spell the name with no side effect: no use edge, no aggregate request.
+        let agg = self.agg_on;
+        let ne = self.no_edges;
+        self.agg_on = false;
+        self.no_edges = true;
+        let mut nm = replace(&mut self.tn_buf, String::new());
+        nm.clear();
+        let mut ok = true;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+            ok = self.inst_name(rm, &it, &mut nm);
+        } else {
+            self.closure_sym(y.module, y.as_data.decl, &mut nm);
+            nm.push_str("_env");
+        }
+        self.no_edges = ne;
+        self.agg_on = agg;
+        let h = if ok {
+            nm.as_str().hash();
+        } else {
+            0u64;
+        };
+        self.tn_buf = nm;
+        if ok && key != 0 {
+            self.tn_memo.insert(key, h);
+        }
+        return h;
+    }
+
+    // `def_key` of the non-generic aggregate `decl` of module `m` (0 for an extern one).
+    fn decl_key(self: &mut Self, m: ModuleId, decl: NodeId) u64 {
+        let dn = *unsafe (*self.p().module_ast_const(m)).at_const(decl);
+        if dn.as_data.aggregate.is_extern {
+            return 0;
+        }
+        let key = 1u64 << 63 | m as u64 << 32 | decl as u64;
+        return switch self.tn_memo.get(&key) {
+            Some(v) => *v,
+            None => {
+                let ne = self.no_edges;
+                self.no_edges = true;
+                let mut nm = replace(&mut self.tn_buf, String::new());
+                nm.clear();
+                self.qualified(m, dn.as_data.aggregate.name, &mut nm);
+                self.no_edges = ne;
+                let h9 = nm.as_str().hash();
+                self.tn_buf = nm;
+                self.tn_memo.insert(key, h9);
+                h9;
+            },
+        };
     }
 
     /// The module whose complete type definitions a by-value use of `t` needs: an aggregate's
@@ -1410,7 +1549,8 @@ extend Mangler {
     }
 
     /// Append module `m`'s symbol prefix (empty for a single-module build) and record the cross-TU
-    /// use edge when a mark context is active.
+    /// use edge when a mark context is active: a type edge inside a C type spelling, none inside
+    /// a symbol segment, else a symbol edge.
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
         let ty = self.type_depth != 0;
         let enc = if ty {
@@ -1418,10 +1558,8 @@ extend Mangler {
         } else {
             m;
         };
-        if self.edge_log_on {
-            self.edge_log.push(enc);
-        }
-        if m as i64 != self.mark_ctx {
+        let rec = !self.no_edges && (ty || self.seg_depth == 0);
+        if m as i64 != self.mark_ctx && rec {
             // A cross-TU symbol spelling: record the (spelling TU -> owner module) edge so the
             // writer can prune TUs no KEPT TU references (65534 = the shared instance TU) and
             // give the TU the owner's type or prototype header.
@@ -1522,12 +1660,20 @@ extend Mangler {
         }
     }
 
-    /// The symbol-alphabet spelling of pool type `(pm, t)`. False when `t` is outside the frozen
-    /// subset (symbolic, or a form not yet frozen); `out` may then hold a partial spelling the
-    /// caller must discard.
+    /// The symbol-alphabet spelling of pool type `(pm, t)`, as a symbol segment (see `seg_depth`;
+    /// `type_name` spells a C type name). False when `t` is outside the frozen subset (symbolic,
+    /// or a form not yet frozen); `out` may then hold a partial spelling the caller must discard.
     pub fn type_m(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
-        self.type_depth += 1;
+        self.seg_depth += 1;
         let r = self.type_m_i(pm, t, out);
+        self.seg_depth -= 1;
+        return r;
+    }
+
+    /// `type_m` for a C type name the output spells: records type edges.
+    pub fn type_name(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
+        self.type_depth += 1;
+        let r = self.type_m(pm, t, out);
         self.type_depth -= 1;
         return r;
     }
@@ -1536,7 +1682,7 @@ extend Mangler {
         let a = self.p().module_ast_const(pm);
         let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            out.push_str(bt_mangle(y.as_data.builtin));
+            out.push_str(bt_name(y.as_data.builtin));
             return true;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -1550,7 +1696,7 @@ extend Mangler {
             if y.kind == TypeKind::TYPE_REFERENCE {
                 is_const = y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
             }
-            out.push_str(if_str(is_const, "ptr_", "ptrm_"));
+            out.push_str(if_s(is_const, "ptr_", "ptrm_"));
             return self.type_m(pm, y.as_data.elem, out);
         }
         if y.kind == TypeKind::TYPE_SLICE {
@@ -1666,6 +1812,13 @@ extend Mangler {
     /// The dyn family's shared stem: the qualified interface (or the structural `dynfn` signature
     /// spelling), then each instance argument, deliberately NOT resolved.
     pub fn dyn_stem(self: &mut Self, pm: ModuleId, dy: &Ty, out: &mut String) bool {
+        self.seg_depth += 1;
+        let r = self.dyn_stem_i(pm, dy, out);
+        self.seg_depth -= 1;
+        return r;
+    }
+
+    fn dyn_stem_i(self: &mut Self, pm: ModuleId, dy: &Ty, out: &mut String) bool {
         let a = self.p().module_ast_const(pm);
         let it = *unsafe (*a).instance(dy.as_data.inst);
         let da = self.p().module_ast_const(it.module);
@@ -1684,18 +1837,19 @@ extend Mangler {
             }
             if ftp.returns.len == 1 {
                 let r0 = unsafe (*da).list(ftp.returns)[0];
-                let rn = unsafe (*da).at_const(r0);
-                let mut tn = r0;
-                if rn.kind == NodeKind::NODE_PARAMETER {
-                    tn = rn.as_data.parameter.ty;
-                }
+                let tn = unsafe (*da).slot_type_node(r0);
                 out.push_str("__r_");
                 if !self.type_m(it.module, unsafe (*da).type_of(tn), out) {
                     return false;
                 }
             }
         }
-        for i in 0..it.n {
+        return self.args_m(pm, &it, it.n, out);
+    }
+
+    /// Append `__<arg>` for the first `n` args of `it`; false when an arg has no spelling.
+    pub fn args_m(self: &mut Self, pm: ModuleId, it: &TyInstance, n: u8, out: &mut String) bool {
+        for i in 0..n {
             out.push_str("__");
             if !self.type_m(pm, unsafe it.args[i as usize], out) {
                 return false;
@@ -1767,9 +1921,7 @@ extend Mangler {
     /// carries neither.
     pub fn sym_override(self: &mut Self, m: ModuleId, owner: NodeId, out: &mut String) bool {
         if self.pin_built.len() == 0 {
-            for _i in 0..self.p().modules.len() {
-                self.pin_built.push(false);
-            }
+            self.pin_built.resize_default(self.p().modules.len());
         }
         let a = self.p().module_ast_const(m);
         if !self.pin_built[m as usize] {
@@ -1801,7 +1953,7 @@ extend Mangler {
     // compromise for overload counting without a package-wide walk. `name` is a span in `nmod`.
     fn overload_count(self: &mut Self, cur: ModuleId, tmod: ModuleId, tdecl: NodeId, nmod: ModuleId, name: tok::Span) i32 {
         let ntxt = self.p().modules.at(nmod as usize).source.as_str().slice(name.start as usize, name.end as usize);
-        let mut key = 1469598103934665603u64;
+        let mut key = 0xcbf29ce484222325u64;
         key = (key ^ cur as u64) * 1099511628211u64;
         key = (key ^ tmod as u64) * 1099511628211u64;
         key = (key ^ tdecl as u64) * 1099511628211u64;
@@ -1909,7 +2061,7 @@ extend Mangler {
 
     /// The C symbol of function `fnode` (module `fm`) with resolved extend target `target`
     /// (`target.node == NODE_NONE` = free function): pin | `[modpfx][Target__]name[suffix]`.
-    pub fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, prefixed: bool, out: &mut String) bool {
+    pub fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
         if self.sym_override(fm, fnode, out) {
             return true;
         }
@@ -1924,14 +2076,14 @@ extend Mangler {
         let ftxt = src.slice(fname.start as usize, fname.end as usize);
         let is_main = target.node == NODE_NONE && ftxt == "main";
         let st = out.len();
-        if prefixed && !is_main {
+        if !is_main {
             self.modpfx(fm, out);
         }
-        let bare = prefixed && !is_main && target.node == NODE_NONE && out.len() == st;
+        let bare = !is_main && target.node == NODE_NONE && out.len() == st;
         if target.node != NODE_NONE {
             let bb = self.p().builtin_of_decl(target.module, target.node);
             if bb >= 0 {
-                out.push_str(bt_mangle(bb as BuiltinType));
+                out.push_str(bt_name(bb as BuiltinType));
             } else {
                 let dn = unsafe (*self.p().module_ast_const(target.module)).at_const(target.node);
                 let mut nm = dn.as_data.aggregate.name;
@@ -2034,7 +2186,7 @@ extend Mangler {
         self.modpfx(em, out);
         let bb = self.p().builtin_of_decl(tgt.module, tgt.node);
         if bb >= 0 {
-            out.push_str(bt_mangle(bb as BuiltinType));
+            out.push_str(bt_name(bb as BuiltinType));
         } else {
             let dn = unsafe (*self.p().module_ast_const(tgt.module)).at_const(tgt.node);
             let mut nm = dn.as_data.aggregate.name;
@@ -2051,7 +2203,32 @@ extend Mangler {
     /// The C symbol of the method named `mname` extending resolved aggregate `(rm, rt)`, when one
     /// exists: instance receivers spell `<InstName>__<m>`, concrete ones the frozen fn symbol.
     pub fn method_by_name(self: &mut Self, rm: ModuleId, rt: TypeId, mname: str, out: &mut String) bool {
-        self.last_method_def = DefId { module: 0, node: NODE_NONE };
+        let mut tg = DefId { module: 0, node: NODE_NONE };
+        let md = self.find_method(rm, rt, mname, &mut tg);
+        self.last_method_def = md;
+        if md.node == NODE_NONE {
+            return false;
+        }
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+            if !self.inst_name(rm, &it, out) {
+                return false;
+            }
+            out.push_str("__");
+            out.push_str(mname);
+            // The instance body's prototype lives in the method's module.
+            self.mark_used(md.module);
+            return true;
+        }
+        return self.fn_sym(md.module, md.node, tg, out);
+    }
+
+    /// The method named `mname` extending resolved aggregate `(rm, rt)` (node NONE when none), and
+    /// in `tg` the declaration its extend targets. Spells nothing, so a query that only asks whether
+    /// the method exists records no use edge and no aggregate request.
+    pub fn find_method(self: &mut Self, rm: ModuleId, rt: TypeId, mname: str, tg: &mut DefId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
         let a = self.p().module_ast_const(rm);
         let y = *unsafe (*a).type_at(rt);
         let mut dm = y.module;
@@ -2064,7 +2241,7 @@ extend Mangler {
             dd = it.decl;
         }
         if dd == NODE_NONE && y.kind != TypeKind::TYPE_BUILTIN {
-            return false;
+            return none;
         }
         let mut miss_key = if dd == NODE_NONE {
             1u64 << 63 | y.as_data.builtin as u64;
@@ -2076,7 +2253,7 @@ extend Mangler {
         }
         miss_key = skey_mix(0, miss_key);
         if self.miss_memo.contains(&miss_key) {
-            return false;
+            return none;
         }
         if dd == NODE_NONE {
             // Builtin receivers: their extends usually live in the prelude, but any module
@@ -2108,14 +2285,14 @@ extend Mangler {
                         }
                         let s3 = unsafe (*pa).at_const(mn2.as_data.function.name).as_data.name.text;
                         if psrc.slice(s3.start as usize, s3.end as usize) == mname {
-                            self.last_method_def = DefId { module: pm2 as ModuleId, node: mid2 };
-                            return self.fn_sym(pm2 as ModuleId, mid2, tg2, true, out);
+                            *tg = tg2;
+                            return DefId { module: pm2 as ModuleId, node: mid2 };
                         }
                     }
                 }
             }
             self.miss_memo.insert(miss_key);
-            return false;
+            return none;
         }
         // Extends may live in ANY module (a downstream module extending a foreign type): the
         // decl's own module first (the overwhelmingly common case), then the rest.
@@ -2143,8 +2320,8 @@ extend Mangler {
                 if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
                     continue;
                 }
-                let tg = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
-                if tg.module != dm || tg.node != dd {
+                let tgi = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
+                if tgi.module != dm || tgi.node != dd {
                     continue;
                 }
                 let ms = itn.as_data.extend_def.items;
@@ -2156,30 +2333,69 @@ extend Mangler {
                     }
                     let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
                     if dsrc.slice(s2.start as usize, s2.end as usize) == mname {
-                        self.last_method_def = DefId { module: em2, node: mid };
-                        if y.kind == TypeKind::TYPE_INSTANCE {
-                            let it2 = *unsafe (*a).instance(y.as_data.inst);
-                            if !self.inst_name(rm, &it2, out) {
-                                return false;
-                            }
-                            out.push_str("__");
-                            out.push_str(mname);
-                            // The instance body's prototype lives in the method's module.
-                            self.mark_used(em2);
-                            return true;
-                        }
-                        return self.fn_sym(em2, mid, DefId { module: dm, node: dd }, true, out);
+                        *tg = DefId { module: dm, node: dd };
+                        return DefId { module: em2, node: mid };
                     }
                 }
             }
         }
         self.miss_memo.insert(miss_key);
-        return false;
+        return none;
+    }
+
+    /// The `free` method the first extend of declaration `(dm, dd)` in its own module that has one
+    /// defines, or NODE_NONE; `ext` receives that extend.
+    pub fn free_method(self: &mut Self, dm: ModuleId, dd: NodeId, ext: &mut NodeId) NodeId {
+        let key = skey_mix(0, dm as u64 << 32 | dd as u64);
+        switch self.free_memo.get(&key) {
+            Some(v) => {
+                *ext = (*v >> 32) as NodeId;
+                return (*v & 0xFFFFFFFFu64) as NodeId;
+            },
+            None => {},
+        };
+        let mid = self.free_method_scan(dm, dd, ext);
+        self.free_memo.insert(key, (*ext) as u64 << 32 | mid as u64);
+        return mid;
+    }
+
+    fn free_method_scan(self: &Self, dm: ModuleId, dd: NodeId, ext: &mut NodeId) NodeId {
+        *ext = NODE_NONE;
+        let da = self.p().module_ast_const(dm);
+        let items = unsafe (*da).at_const((*da).root).as_data.program.items;
+        let dsrc = self.p().modules.at(dm as usize).source.as_str();
+        for i in 0..items.len {
+            let iid = unsafe (*da).list(items)[i as usize];
+            let itn = unsafe (*da).at_const(iid);
+            if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
+                continue;
+            }
+            let tg = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
+            if tg.module != dm || tg.node != dd {
+                continue;
+            }
+            let ms = itn.as_data.extend_def.items;
+            for j in 0..ms.len {
+                let mid = unsafe (*da).list(ms)[j as usize];
+                let mn = unsafe (*da).at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
+                if dsrc.slice(s2.start as usize, s2.end as usize) == "free" {
+                    *ext = iid;
+                    return mid;
+                }
+            }
+        }
+        return NODE_NONE;
     }
 
     /// The destructor call target for resolved aggregate type `(rm, rt)`: the user `free` method
-    /// when one extends the declaration, else the derived per-TU glue `<name>__free__d`.
-    pub fn free_target(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
+    /// when one extends the declaration and `user` is set, else the derived per-TU glue
+    /// `<name>__free__d`. The caller clears `user` for an instance the `free` extend's bounds do
+    /// not cover.
+    pub fn free_target(self: &mut Self, rm: ModuleId, rt: TypeId, user: bool, out: &mut String) bool {
         let a = self.p().module_ast_const(rm);
         let y = *unsafe (*a).type_at(rt);
         if y.kind == TypeKind::TYPE_FUNCTION {
@@ -2208,41 +2424,23 @@ extend Mangler {
         if dd == NODE_NONE {
             return false;
         }
-        // Plan-time scan: a `free` method in any extend of the declaration (its own module).
-        let da = self.p().module_ast_const(dm);
-        let items = unsafe (*da).at_const((*da).root).as_data.program.items;
-        let dsrc = self.p().modules.at(dm as usize).source.as_str();
-        for i in 0..items.len {
-            let iid = unsafe (*da).list(items)[i as usize];
-            let itn = unsafe (*da).at_const(iid);
-            if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
-                continue;
-            }
-            let tg = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
-            if tg.module != dm || tg.node != dd {
-                continue;
-            }
-            let ms = itn.as_data.extend_def.items;
-            for j in 0..ms.len {
-                let mid = unsafe (*da).list(ms)[j as usize];
-                let mn = unsafe (*da).at_const(mid);
-                if mn.kind != NodeKind::NODE_FUNCTION {
-                    continue;
+        let mut ext = NODE_NONE;
+        let mid = if user {
+            self.free_method(dm, dd, &mut ext);
+        } else {
+            NODE_NONE;
+        };
+        if mid != NODE_NONE {
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it2 = *unsafe (*a).instance(y.as_data.inst);
+                if !self.inst_name(rm, &it2, out) {
+                    return false;
                 }
-                let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
-                if dsrc.slice(s2.start as usize, s2.end as usize) == "free" {
-                    if y.kind == TypeKind::TYPE_INSTANCE {
-                        let it2 = *unsafe (*a).instance(y.as_data.inst);
-                        if !self.inst_name(rm, &it2, out) {
-                            return false;
-                        }
-                        out.push_str("__free");
-                        self.mark_used(dm);
-                        return true;
-                    }
-                    return self.fn_sym(dm, mid, DefId { module: dm, node: dd }, true, out);
-                }
+                out.push_str("__free");
+                self.mark_used(dm);
+                return true;
             }
+            return self.fn_sym(dm, mid, DefId { module: dm, node: dd }, out);
         }
         if !self.type_m(rm, rt, out) {
             return false;
@@ -2263,6 +2461,13 @@ extend Mangler {
         if unsafe (*a).at_const(decl).as_data.aggregate.is_extern {
             out.push_str(src.slice(vs.start as usize, vs.end as usize));
             return;
+        }
+        if self.tn_on && unsafe (*a).at_const(decl).as_data.aggregate.generics.len == 0 {
+            // The constant is an enumerator of the enum's definition.
+            let h = self.decl_key(m, decl);
+            if h != 0 {
+                self.need_name(h, true);
+            }
         }
         let start = out.len();
         self.modpfx(m, out);
@@ -2314,67 +2519,19 @@ extend Mangler {
                     );
                 }
             } else {
+                let st = out.len();
                 self.qualified(y.module, dn.as_data.aggregate.name, out);
+                if self.tn_on && !self.no_edges && !self.tn_recent(pm, t, self.ptr_depth == 0, 0) {
+                    self.need_name(out.as_str().slice(st, out.len()).hash(), self.ptr_depth == 0);
+                }
             }
             self.join_decl("", decl, out);
             return true;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
-            let mut elm = pm;
-            let mut elt = y.as_data.elem;
-            if !self.resolve(pm, y.as_data.elem, &mut elm, &mut elt) {
-                elm = pm;
-                // Unbound param: fall through to the void spelling.
-                elt = y.as_data.elem;
-            }
-            let el = *unsafe (*self.p().module_ast_const(elm)).type_at(elt);
-            let mut cp = y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
-            if y.kind == TypeKind::TYPE_REFERENCE {
-                cp = y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
-            }
-            if el.kind == TypeKind::TYPE_ARRAY && self.is_zst(elm, el.as_data.arr.elem) {
-                // C forbids an array declarator over an incomplete element: a pointer to a
-                // zero-sized-element array spells as a bare data pointer (never dereferenced).
-                if cp {
-                    out.push_str("const ");
-                }
-                out.push_str("void *");
-                out.push_str(decl);
-                return true;
-            }
-            if el.kind == TypeKind::TYPE_ARRAY && el.as_data.arr.len != 0 {
-                // Pointer-to-fixed-array spirals: `(*decl)[N]`, const prefixing the element type.
-                let mut inner = String::new();
-                inner.push_str("(*");
-                inner.push_str(decl);
-                inner.push_str(")[");
-                inner.push_u64(el.as_data.arr.len);
-                inner.push_str("]");
-                let st = out.len();
-                let ok = self.ctype(elm, el.as_data.arr.elem, inner.as_str(), out);
-                if cp && !out.as_str().slice(st, out.len()).starts_with("const ") {
-                    out.insert_str(st, "const ");
-                }
-                return ok;
-            }
-            let mut inner = String::new();
-            if cp && el.kind == TypeKind::TYPE_POINTER {
-                // The element is itself a pointer: `const` must qualify the POINTER (east:
-                // `char *const *`), not its pointee (an illegal second-level qualifier).
-                inner.push_str("const *");
-            } else {
-                inner.push_str("*");
-            }
-            inner.push_str(decl);
-            if cp && el.kind != TypeKind::TYPE_POINTER {
-                let st = out.len();
-                let ok = self.ctype(elm, elt, inner.as_str(), out);
-                if !out.as_str().slice(st, out.len()).starts_with("const ") {
-                    out.insert_str(st, "const ");
-                }
-                return ok;
-            }
-            let ok = self.ctype(elm, elt, inner.as_str(), out);
+            self.ptr_depth += 1;
+            let ok = self.ctype_ptr(pm, &y, decl, out);
+            self.ptr_depth -= 1;
             return ok;
         }
         if y.kind == TypeKind::TYPE_SLICE {
@@ -2388,11 +2545,13 @@ extend Mangler {
                 inner.push_str("[");
                 inner.push_u64(y.as_data.arr.len);
                 inner.push_str("]");
-            } else {
-                inner.push_str("*");
-                inner.push_str(decl);
+                return self.ctype(pm, y.as_data.elem, inner.as_str(), out);
             }
+            inner.push_str("*");
+            inner.push_str(decl);
+            self.ptr_depth += 1;
             let ok = self.ctype(pm, y.as_data.elem, inner.as_str(), out);
+            self.ptr_depth -= 1;
             return ok;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
@@ -2401,6 +2560,14 @@ extend Mangler {
             if !self.inst_name(pm, &it, out) {
                 out.truncate(st);
                 return false;
+            }
+            if self.tn_on && !self.no_edges && !self.tn_recent(
+                pm,
+                t,
+                self.ptr_depth == 0,
+                pick(y.concrete, 0, self.subs_gen),
+            ) {
+                self.need_name(out.as_str().slice(st, out.len()).hash(), self.ptr_depth == 0);
             }
             self.join_decl("", decl, out);
             return true;
@@ -2422,15 +2589,90 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_FUNCTION {
             let cf = unsafe (*self.p().module_ast_const(y.module)).closure_fact(y.as_data.decl);
             if cf != null && unsafe (&*cf).ncaps != 0 {
+                let st = out.len();
                 self.closure_sym(y.module, y.as_data.decl, out);
+                if self.tn_on {
+                    self.need_name(fnv_more(out.as_str().slice(st, out.len()).hash(), "_env"), self.ptr_depth == 0);
+                }
                 self.join_decl("_env", decl, out);
                 return true;
             }
-            return self.fn_ptr_ctype(&y, decl, out);
+            // A function pointer's result and parameters need no definition to declare it.
+            self.ptr_depth += 1;
+            let ok = self.fn_ptr_ctype(&y, decl, out);
+            self.ptr_depth -= 1;
+            return ok;
         }
+        return self.ctype_rest(pm, t, &y, decl, out);
+    }
+
+    // The pointer or reference `y` (of pool `pm`) around `decl`: the pointee spelling, east-const
+    // placement, pointer-to-array spirals.
+    fn ctype_ptr(self: &mut Self, pm: ModuleId, y: &Ty, decl: str, out: &mut String) bool {
+        let mut elm = pm;
+        let mut elt = y.as_data.elem;
+        if !self.resolve(pm, y.as_data.elem, &mut elm, &mut elt) {
+            elm = pm;
+            // Unbound param: fall through to the void spelling.
+            elt = y.as_data.elem;
+        }
+        let el = *unsafe (*self.p().module_ast_const(elm)).type_at(elt);
+        let mut cp = y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            cp = y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+        }
+        if el.kind == TypeKind::TYPE_ARRAY && self.is_zst(elm, el.as_data.arr.elem) {
+            // C forbids an array declarator over an incomplete element: a pointer to a
+            // zero-sized-element array spells as a bare data pointer (never dereferenced).
+            if cp {
+                out.push_str("const ");
+            }
+            out.push_str("void *");
+            out.push_str(decl);
+            return true;
+        }
+        if el.kind == TypeKind::TYPE_ARRAY && el.as_data.arr.len != 0 {
+            // Pointer-to-fixed-array spirals: `(*decl)[N]`, const prefixing the element type.
+            let mut inner = String::new();
+            inner.push_str("(*");
+            inner.push_str(decl);
+            inner.push_str(")[");
+            inner.push_u64(el.as_data.arr.len);
+            inner.push_str("]");
+            let st = out.len();
+            let ok = self.ctype(elm, el.as_data.arr.elem, inner.as_str(), out);
+            if cp && !out.as_str().slice(st, out.len()).starts_with("const ") {
+                out.insert_str(st, "const ");
+            }
+            return ok;
+        }
+        let mut inner = String::new();
+        let el_ptr = el.kind == TypeKind::TYPE_POINTER || el.kind == TypeKind::TYPE_REFERENCE;
+        if cp && el_ptr {
+            // The element is itself a pointer: `const` must qualify the POINTER (east:
+            // `char *const *`), not its pointee (an illegal second-level qualifier).
+            inner.push_str("const *");
+        } else {
+            inner.push_str("*");
+        }
+        inner.push_str(decl);
+        if cp && !el_ptr {
+            let st = out.len();
+            let ok = self.ctype(elm, elt, inner.as_str(), out);
+            if !out.as_str().slice(st, out.len()).starts_with("const ") {
+                out.insert_str(st, "const ");
+            }
+            return ok;
+        }
+        let ok = self.ctype(elm, elt, inner.as_str(), out);
+        return ok;
+    }
+
+    // The remaining kinds of `(pm, t)` (`y`): dyn fat values, generic parameters, `void`.
+    fn ctype_rest(self: &mut Self, pm: ModuleId, t: TypeId, y: &Ty, decl: str, out: &mut String) bool {
         if y.kind == TypeKind::TYPE_DYN {
             let st = out.len();
-            let ok = self.dyn_stem(pm, &y, out);
+            let ok = self.dyn_stem(pm, y, out);
             if !ok {
                 out.truncate(st);
             } else {
@@ -2456,7 +2698,7 @@ extend Mangler {
                 return ok;
             }
             if self.macro_on {
-                self.generic_param_name(&y, out);
+                self.generic_param_name(y, out);
                 self.join_decl("", decl, out);
                 return true;
             }
@@ -2467,10 +2709,19 @@ extend Mangler {
     }
 
     /// `<Qualified>[__<arg>...]` with trailing prelude-Global (default allocator) args elided:
-    /// `String<Global>` -> `String`, `Vector<T, Global>` -> `Vector__T`.
+    /// `String<Global>` -> `String`, `Vector<T, Global>` -> `Vector__T`. A symbol segment unless
+    /// inside a C type spelling (`inst_type_name`).
     pub fn inst_name(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
-        self.type_depth += 1;
+        self.seg_depth += 1;
         let r = self.inst_name_i(pm, it, out);
+        self.seg_depth -= 1;
+        return r;
+    }
+
+    /// `inst_name` for a C type name the output spells: records type edges.
+    pub fn inst_type_name(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
+        self.type_depth += 1;
+        let r = self.inst_name(pm, it, out);
         self.type_depth -= 1;
         return r;
     }
@@ -2493,28 +2744,18 @@ extend Mangler {
                 break;
             }
         }
-        for i in 0..ne {
-            out.push_str("__");
-            if !self.type_m(pm, unsafe it.args[i as usize], out) {
-                return false;
-            }
+        if !self.args_m(pm, it, ne, out) {
+            return false;
         }
         if self.agg_on {
-            let s9 = out.as_str();
-            let mut h9 = 1469598103934665603u64;
-            for k9 in base9..s9.len() {
-                h9 = (h9 ^ s9.byte_at(k9) as u64) * 1099511628211u64;
-            }
+            let h9 = out.as_str().slice(base9, out.len()).hash();
             let new9 = switch self.agg_seen.get(&h9) {
                 Some(_v) => false,
                 None => true,
             };
             if new9 {
                 self.agg_seen.insert(h9, 1);
-                let mut sn9 = Vector::<MSub>::new();
-                for k9 in 0..self.subs.len() {
-                    sn9.push(*self.subs.at(k9));
-                }
+                let sn9 = subs_copy(&self.subs);
                 self.agg_reqs.push(AggReq { pm: pm, it: *it, subs: sn9 });
                 if self.sh_on {
                     self.sh_agg_k.push(h9);
@@ -2530,9 +2771,7 @@ extend Mangler {
                 for k9 in 0..it.n {
                     ev.xs.push(unsafe it.args[k9 as usize]);
                 }
-                for k9 in 0..self.subs.len() {
-                    ev.subs.push(*self.subs.at(k9));
-                }
+                ev.subs = subs_copy(&self.subs);
                 self.rec.push(ev);
             }
         }
@@ -2564,10 +2803,7 @@ extend Mangler {
         for k in 0..it.n {
             unsafe it.args[k as usize] = ev.xs[k as usize];
         }
-        let mut sn = Vector::<MSub>::new();
-        for k in 0..ev.subs.len() {
-            sn.push(*ev.subs.at(k));
-        }
+        let sn = subs_copy(&ev.subs);
         self.agg_reqs.push(AggReq { pm: ev.a as ModuleId, it: it, subs: sn });
     }
 }
@@ -2588,18 +2824,13 @@ fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 {
 
 // The declared parameter or return list of function or function type `y`.
 fn sig_list(fa: *const Ast, y: &Ty, ret: bool) NodeList {
-    let fnn = unsafe (*fa).at_const(y.as_data.decl);
-    if fnn.kind == NodeKind::NODE_FUNCTION {
-        return if ret {
-            fnn.as_data.function.returns;
-        } else {
-            fnn.as_data.function.params;
-        };
-    }
+    let mut ps = NodeList { start: 0, len: 0 };
+    let mut rs = NodeList { start: 0, len: 0 };
+    let _ = unsafe (*fa).sig_lists(y.as_data.decl, &mut ps, &mut rs);
     return if ret {
-        fnn.as_data.function_type.returns;
+        rs;
     } else {
-        fnn.as_data.function_type.params;
+        ps;
     };
 }
 
@@ -2622,13 +2853,8 @@ fn sig_ty(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool, i: u32) Typ
     return unsafe (*fa).type_of(id);
 }
 
-const fn if_str(c: bool, a: str<'static>, b: str<'static>) str<'static> {
-    if c {
-        return a;
-    }
-    return b;
-}
-const fn if_u8(c: bool, a: u8, b: u8) u8 {
+/// `a` when `c` holds, else `b`.
+pub const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'static> {
     if c {
         return a;
     }

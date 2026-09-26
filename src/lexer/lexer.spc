@@ -7,8 +7,6 @@ import lexer::token as *;
 import lexer::token_type as *;
 import utils::errors as diag;
 
-/// The NUL byte the scan loops treat as end of input.
-pub const EOF_CH: u8 = 0;
 /// Sentinel for "none" in u32 positions and scalar values.
 pub const UINT32_MAX: u32 = 0xFFFFFFFFu32;
 /// Sentinel for "none" in usize positions.
@@ -271,6 +269,11 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
         _ => {},
     };
     return TokenType::Identifier;
+}
+
+/// True when `s` is a reserved word: the lexer never scans it as an identifier.
+pub fn is_keyword(s: str) bool {
+    return s.len() != 0 && keywords(s.ptr(), s.len()) != TokenType::Identifier;
 }
 
 const fn is_mt_open(b: u8) bool {
@@ -1177,6 +1180,23 @@ extend Lexer {
         }
     }
 
+    // An opening bracket; inside a matchertext literal it may open an interpolation hole.
+    @c.always_inline
+    fn open_bracket(self: &mut Self, kind: TokenType) {
+        if self.mt.len() != 0 {
+            self.mt_hole_open();
+        }
+        self.add_token(kind);
+    }
+
+    // A closing bracket, unless it closes a matchertext interpolation hole.
+    @c.always_inline
+    fn close_bracket(self: &mut Self, kind: TokenType) {
+        if self.mt.len() == 0 || !self.mt_hole_close() {
+            self.add_token(kind);
+        }
+    }
+
     fn scan_token(self: &mut Self) {
         let c = self.at(self.current);
         if c < 0x80u8 {
@@ -1188,45 +1208,27 @@ extend Lexer {
                 return;
             },
             '{' => {
-                if self.mt.len() != 0 {
-                    self.mt_hole_open();
-                }
-                self.add_token(TokenType::LeftBrace);
+                self.open_bracket(TokenType::LeftBrace);
                 return;
             },
             '}' => {
-                if self.mt.len() != 0 && self.mt_hole_close() {
-                    return;
-                }
-                self.add_token(TokenType::RightBrace);
+                self.close_bracket(TokenType::RightBrace);
                 return;
             },
             '(' => {
-                if self.mt.len() != 0 {
-                    self.mt_hole_open();
-                }
-                self.add_token(TokenType::LeftParen);
+                self.open_bracket(TokenType::LeftParen);
                 return;
             },
             ')' => {
-                if self.mt.len() != 0 && self.mt_hole_close() {
-                    return;
-                }
-                self.add_token(TokenType::RightParen);
+                self.close_bracket(TokenType::RightParen);
                 return;
             },
             '[' => {
-                if self.mt.len() != 0 {
-                    self.mt_hole_open();
-                }
-                self.add_token(TokenType::LeftBracket);
+                self.open_bracket(TokenType::LeftBracket);
                 return;
             },
             ']' => {
-                if self.mt.len() != 0 && self.mt_hole_close() {
-                    return;
-                }
-                self.add_token(TokenType::RightBracket);
+                self.close_bracket(TokenType::RightBracket);
                 return;
             },
             ',' => {

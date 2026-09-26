@@ -13,6 +13,7 @@ import ast::ast as *;
 import ast::parser as parser;
 import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
+import graph::items as gitems;
 
 /// The C `SEEK_END` whence value used to size a file before reading it.
 pub const SEEK_END: i32 = 2;
@@ -43,17 +44,13 @@ pub struct ShardRule {
 /// and every semantic write an item publishes lands before its state does (release store),
 /// so a reader that observes a state (acquire load) sees those writes. The batch build's
 /// visibility is the static schedule rule (`graph::items::visible`); the states serve the
-/// language server's module-order passes, the digest and the tests. The two signature states
-/// are reserved for a signature-first scheduler; today an item goes Resolved -> Checking ->
-/// Checked -> IrReady. Failed marks an item whose analysis did not complete.
+/// language server's module-order passes, the digest and the tests. An item goes Resolved ->
+/// Checking -> Checked -> IrReady; values 2 and 3 are unused.
 pub const IS_PARSED: u8 = 0;
 pub const IS_RESOLVED: u8 = 1;
-pub const IS_SIG_CHECKING: u8 = 2;
-pub const IS_SIG_READY: u8 = 3;
 pub const IS_CHECKING: u8 = 4;
 pub const IS_CHECKED: u8 = 5;
 pub const IS_IR_READY: u8 = 6;
-pub const IS_FAILED: u8 = 7;
 
 /// The item schedule index (`graph::items`): one record per `PkgIndex.items` entry, stored as
 /// parallel arrays indexed by ItemId. `key` is the stable item key (module path, top-level
@@ -88,12 +85,10 @@ pub struct ItemSched {
     /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
     pub top_lo: Vector<u32>,
     pub body_hi: Vector<u32>,
-    /// The component graph (`build`): `cdep` the components each component depends on,
-    /// `csucc` the reverse, `citem` each component's items ascending. All CSR by component.
+    /// The component graph (`build`): `cdep` the components each component depends on, `citem`
+    /// each component's items ascending. Both CSR by component.
     pub cdep_off: Vector<u32>,
     pub cdep: Vector<u32>,
-    pub csucc_off: Vector<u32>,
-    pub csucc: Vector<u32>,
     pub citem_off: Vector<u32>,
     pub citem: Vector<u32>,
     /// Per component, `reach_w` words: the bits of every component it depends on, transitively
@@ -111,42 +106,9 @@ pub struct ItemSched {
 }
 
 extend ItemSched {
-    pub fn new() ItemSched {
-        return ItemSched {
-            key: Vector::<u64>::new(),
-            sig_hash: Vector::<u64>::new(),
-            pre_off: Vector::<u32>::new(),
-            pre_edges: Vector::<u32>::new(),
-            fin_off: Vector::<u32>::new(),
-            fin_edges: Vector::<u32>::new(),
-            comp: Vector::<u32>::new(),
-            ncomp: 0,
-            state: Vector::<u8>::new(),
-            ret_attr: Vector::<u8>::new(),
-            dyn_edges: Set::<u64>::new(),
-            by_node: Vector::<u32>::new(),
-            top_lo: Vector::<u32>::new(),
-            body_hi: Vector::<u32>::new(),
-            cdep_off: Vector::<u32>::new(),
-            cdep: Vector::<u32>::new(),
-            csucc_off: Vector::<u32>::new(),
-            csucc: Vector::<u32>::new(),
-            citem_off: Vector::<u32>::new(),
-            citem: Vector::<u32>::new(),
-            reach: Vector::<u64>::new(),
-            reach_w: 0,
-            built: false,
-            final_edges: false,
-            finalized: false,
-            build_ns: 0,
-            final_ns: 0,
-            hash_ns: 0,
-        };
-    }
-
     /// Approximate owned bytes.
     pub const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.csucc_off.capacity() + self.csucc.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.reach.capacity() * 8 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.reach.capacity() * 8 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 
@@ -183,16 +145,6 @@ pub struct Package {
     /// Demand-driven method emission: method_used[module][node] set for every method referenced during
     /// type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
     pub method_used: Vector<Vector<bool>>,
-    /// Caller->callee references fired from inside bodies of methods that are THEMSELVES gated by
-    /// method_used (non-generic methods of plain generic extends): deferred as packed
-    /// ((module<<24|node) caller <<32 | callee) edges and resolved by finalize_method_used once
-    /// every module has typechecked, so a method kept alive only by pruned callers is pruned too.
-    pub method_edges: Vector<u64>,
-    pub edge_seen: Set<u64>,
-    /// The same demand one level finer, for the methods whose signature can name a WIDER instance of
-    /// their own receiver: keyed by inst_method_key, so a pair is emitted for the instances that reach it
-    /// and for no others. Filled by seed_mono_body_instances, read by codegen.
-    pub inst_methods: Set<u64>,
     /// Coroutine-reachability for preemption safepoints: 0 = uncomputed (emit everywhere),
     /// 1 = computed (only bodies inside co_spans need safepoints), 2 = widened (a coroutine entry
     /// could not be tracked: emit everywhere). co_spans[m] holds start<<32|end body spans, in marking order,
@@ -218,11 +170,6 @@ pub struct Package {
     /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
     /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
     pub always_methods: Set<u64>,
-    /// Private, non-generic functions referenced from a GENERIC body of their own module, as
-    /// (module << 32 | node). That generic may be monomorphized into ANOTHER TU, which cannot reach a
-    /// `static` symbol, so its owner emits it with external linkage and declares it in its header.
-    /// Filled once, serially, before codegen forks: every worker must answer this the same way.
-    pub extern_privates: Set<u64>,
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
     /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
     pub cir: *mut void,
@@ -243,25 +190,25 @@ pub struct Package {
     /// Boxed so the module Asts can hold its address while the package moves. `bind_types` puts
     /// the modules under it; until then (the LSP, standalone checks) they keep module-local pools.
     pub tt: Box<TypePool>,
-    /// The maps of the last `publish_types`: per module, provisional pool index to final type id,
-    /// instance record index, and const-expression index. Read through `map_type`.
+    /// The map of the last `publish_types`: per module, provisional pool index to final type id.
+    /// Read through `map_type`.
     pub pub_map: Vector<Vector<TypeId>>,
-    pub pub_imap: Vector<Vector<u32>>,
-    pub pub_cmap: Vector<Vector<u32>>,
     pub publications: u32, // batches published so far
     /// Per final id: the publication class that numbered it (0 signature-reachable, 1 body-only of
     /// the first batch, 2 a later batch, 3 interned by the instance graph between checkpoints); the
     /// seeds carry 0.
     pub tt_class: Vector<u8>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
-    /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
-    /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
-    /// (module_imports falls back to the linear scan if queried before the build).
+    /// has any resolution into module `to`, in either arena. `build_mod_refs` fills it once before the
+    /// borrow frontier, while every body is live and after the last resolution write (type check); from
+    /// then on module_imports is an O(1) query whose answer does not depend on which modules have
+    /// released their bodies. `mod_refs_ready` gates it (module_imports falls back to the linear scan
+    /// on the paths that never build it).
     pub mod_refs: Vector<u64>,
     pub mod_refs_w: usize,
     pub mod_refs_ready: bool,
     /// The package declaration index: symbols, ItemMeta records, per-module name maps,
-    /// import adjacency + SCCs, and the LangItem table. Built once on first use after loading
+    /// import adjacency, and SCCs. Built once on first use after loading
     /// (top-level decl names and imports are parse-final); `ensure_index` rebuilds it when a module
     /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
     /// import-closure cache are adapters over it.
@@ -377,7 +324,6 @@ pub enum ItemKind {
     IK_EXTEND, // associated-item owner; unnamed
     IK_METHOD, // fn inside an extend
     IK_ASSOC_CONST, // const inside an extend
-    IK_COUNT,
 }
 
 /// One record per top-level or associated declaration. `node` is the declaration NodeId:
@@ -417,44 +363,6 @@ pub struct ItemSig {
     pub nr: u16,
     pub generic: bool,
 }
-
-/// Compiler-referenced prelude hooks (`prelude_lookup` with a fixed name), resolved to their decl
-/// once per index build. Append-only.
-pub enum LangItem {
-    LI_STR,
-    LI_STRING,
-    LI_SLICE,
-    LI_SLICEMUT,
-    LI_RANGE,
-    LI_GLOBAL,
-    LI_OPTION,
-    LI_VECTOR,
-    LI_TYPEINFO,
-    LI_TYPETAG,
-    LI_UNSAFECELL,
-    LI_ALLOCATOR,
-    LI_DEFAULT,
-    LI_COUNT,
-}
-
-const LI_COUNT_N: usize = LangItem::LI_COUNT as usize;
-
-// The prelude name each LangItem resolves (all in the type namespace), indexed by the enum value.
-const LI_NAMES: [str<'static>; LI_COUNT_N] = [
-    "str",
-    "String",
-    "Slice",
-    "SliceMut",
-    "Range",
-    "Global",
-    "Option",
-    "Vector",
-    "TypeInfo",
-    "TypeTag",
-    "UnsafeCell",
-    "Allocator",
-    "Default",
-];
 
 /// Runtime shims the sugar lowering (hir::lower) seeds call resolutions to: free FUNCTIONS in fixed
 /// std modules, so they resolve by (module path, name) rather than through the prelude scan. Resolved
@@ -517,7 +425,7 @@ const SI_NAMES: [str<'static>; SI_COUNT_N] = [
 /// The package declaration index: the immutable package interface built once after every module has
 /// parsed (and rebuilt if a module is appended, e.g. the LSP's batch load). Owns the symbol table,
 /// one ItemMeta per declaration (module order, source order), per-module name maps for O(1) lookup,
-/// the resolved direct-import adjacency, its strongly connected components, and the LangItem table.
+/// the resolved direct-import adjacency, and its strongly connected components.
 pub struct PkgIndex {
     pub syms: SymTab,
     pub items: Vector<ItemMeta>,
@@ -526,7 +434,6 @@ pub struct PkgIndex {
     pub imports: Vector<ModuleId>, // resolved direct imports, declaration order, per-module dedup
     pub mod_imports: Vector<u32>, // modules+1 offsets into `imports`
     pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
-    pub lang_items: Vector<LookupHit>, // LangItem -> prelude decl (node == NODE_NONE when absent)
     pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
     pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every public top-level prelude name, the first prelude module wins (prelude_lookup)
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
@@ -546,15 +453,10 @@ pub struct PkgIndex {
 }
 
 extend SymTab {
-    /// An empty interner.
-    pub fn new() SymTab {
-        return SymTab { names: Vector::<String>::new(), index: Map::<u64, u32>::new(), chain: Vector::<u32>::new() };
-    }
-
     /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
     @c.always_inline
     pub fn find(self: &Self, name: str) SymbolId {
-        return switch self.index.get(&fnv_name(name)) {
+        return switch self.index.get(&name.hash()) {
             Some(h) => {
                 let mut s = *h;
                 while s != SYM_NONE && !self.names[s as usize].eq_str(name) {
@@ -568,7 +470,7 @@ extend SymTab {
 
     /// Intern `name`, returning its dense SymbolId (existing entries are found byte-exact).
     pub fn intern(self: &mut Self, name: str) SymbolId {
-        let h = fnv_name(name);
+        let h = name.hash();
         let head = switch self.index.get(&h) {
             Some(v) => *v,
             None => SYM_NONE,
@@ -589,117 +491,23 @@ extend SymTab {
     }
 }
 
-extend PkgIndex {
-    /// An empty index; `ensure_index` on the package builds it.
-    pub fn new() PkgIndex {
-        return PkgIndex {
-            syms: SymTab::new(),
-            items: Vector::<ItemMeta>::new(),
-            mod_items: Vector::<u32>::new(),
-            name_maps: Vector::<Map<u64, u32>>::new(),
-            imports: Vector::<ModuleId>::new(),
-            mod_imports: Vector::<u32>::new(),
-            scc_of: Vector::<u32>::new(),
-            lang_items: Vector::<LookupHit>::new(),
-            sugar_items: Vector::<LookupHit>::new(),
-            pl_map: Map::<u64, u64>::new(),
-            sigs: Vector::<ItemSig>::new(),
-            sig_types: Vector::<TypeId>::new(),
-            sig_of: Map::<u64, u32>::new(),
-            sigs_built: false,
-            built_mods: 0,
-            variants: Map::<u64, u64>::new(),
-            exts: Vector::<NodeId>::new(),
-            mod_exts: Vector::<u32>::new(),
-        };
-    }
-}
-
-// FNV-1a over a name's bytes; the symbol interner and per-module name maps key on it.
-fn fnv_name(name: str) u64 {
-    let p = name.ptr();
-    let mut h: u64 = 1469598103934665603u64;
-    for i in 0..name.len() {
-        h = h ^ (unsafe p[i]) as u64;
-        h = h * 1099511628211u64;
-    }
-    return h;
-}
-
-// Iterative Tarjan over the import adjacency: fills scc_of[m] with a strongly-connected-component id
-// per module (mutually-importing modules share one). Components are numbered in completion order,
-// which is deterministic for a fixed module set. No recursion: the DFS keeps its own frame stack, so
-// an adversarial import chain cannot exhaust the call stack.
-fn scc_build(n: usize, imports: &Vector<ModuleId>, mod_imports: &Vector<u32>, scc_of: &mut Vector<u32>) {
-    scc_of.clear();
-    let mut order = Vector::<i64>::new(); // discovery index per module; -1 = unvisited
-    let mut low = Vector::<i64>::new();
-    let mut on = Vector::<bool>::new();
-    for i in 0..n {
-        scc_of.push(0);
-        order.push(-1);
-        low.push(-1);
-        on.push(false);
-    }
-    let mut stk = Vector::<u32>::new(); // Tarjan's component stack
-    let mut fv = Vector::<u32>::new(); // DFS frames: module
-    let mut fc = Vector::<u32>::new(); // DFS frames: next out-edge cursor
-    let mut next: i64 = 0;
-    let mut comp: u32 = 0;
-    for root in 0..n {
-        if order[root] >= 0 {
-            continue;
-        }
-        order.set(root, next);
-        low.set(root, next);
-        next += 1;
-        stk.push(root as u32);
-        on.set(root, true);
-        fv.push(root as u32);
-        fc.push(0);
-        while fv.len() != 0 {
-            let v = fv[fv.len() - 1] as usize;
-            let c = fc[fc.len() - 1] as usize;
-            let from = mod_imports[v] as usize;
-            let deg = mod_imports[v + 1] as usize - from;
-            if c < deg {
-                fc.set(fc.len() - 1, (c + 1) as u32);
-                let w = imports[from + c] as usize;
-                if order[w] < 0 {
-                    order.set(w, next);
-                    low.set(w, next);
-                    next += 1;
-                    stk.push(w as u32);
-                    on.set(w, true);
-                    fv.push(w as u32);
-                    fc.push(0);
-                } else if on[w] && order[w] < low[v] {
-                    low.set(v, order[w]);
-                }
-            } else {
-                let _ = fv.pop();
-                let _ = fc.pop();
-                if fv.len() != 0 {
-                    let p = fv[fv.len() - 1] as usize;
-                    if low[v] < low[p] {
-                        low.set(p, low[v]);
-                    }
-                }
-                if low[v] == order[v] {
-                    loop {
-                        let w = stk[stk.len() - 1] as usize;
-                        let _ = stk.pop();
-                        on.set(w, false);
-                        scc_of.set(w, comp);
-                        if w == v {
-                            break;
-                        }
-                    }
-                    comp += 1;
-                }
+// The function call `ni` (callee node `callee`) pins to: the checker's call record, else the callee's
+// resolution, else a member callee's; NODE_NONE for a fn value or a dyn dispatch.
+fn pin_callee(a: &Ast, ni: NodeId, callee: NodeId) DefId {
+    switch a.call_info.get(&ni) {
+        Some(v) => {
+            let t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
+            if t.node != NODE_NONE {
+                return t;
             }
-        }
+        },
+        _ => {},
+    };
+    let t = a.resolution_def(callee);
+    if t.node == NODE_NONE && a.at_const(callee).kind == NodeKind::NODE_MEMBER {
+        return a.resolution_def(a.at_const(callee).as_data.member.member);
     }
+    return t;
 }
 
 // Path + string helpers (heap-allocated results; callers own them).
@@ -747,48 +555,28 @@ pub fn read_file(path: str) Option<String> {
     return Option::<String>::Some(out);
 }
 
-// The directory portion of `path` (without trailing slash), or "." when there is none.
-fn dir_of(path: str) String {
-    let n = path.len();
-    let mut slash: i64 = -1;
-    let mut i: usize = 0;
-    while i < n {
-        if path.byte_at(i) == b'/' {
-            slash = i as i64;
-        }
-        i = i + 1;
+/// The directory portion of `path` (a view into it, without the trailing slash), or "." when there is none.
+pub const fn dirname_of(path: str) str {
+    let k = path.len() - basename_of(path).len();
+    if k == 0 {
+        return ".";
     }
-    if slash < 0 {
-        return String::from_str(".");
-    }
-    return String::from_str(path.slice(0, slash as usize));
+    return path.slice(0, k - 1);
 }
 
 // The file stem (basename without extension): "dir/std/string.spc" -> "string".
 fn stem_of(path: str) String {
-    let n = path.len();
-    let mut bstart: usize = 0;
-    let mut i: usize = 0;
-    while i < n {
-        if path.byte_at(i) == b'/' {
-            bstart = i + 1;
-        }
-        i = i + 1;
+    let b = basename_of(path);
+    let mut k = b.len();
+    while k > 0 && b[k - 1] != b'.' {
+        k -= 1;
     }
-    let mut dot: i64 = -1;
-    i = bstart;
-    while i < n {
-        if path.byte_at(i) == b'.' {
-            dot = i as i64;
-        }
-        i = i + 1;
-    }
-    let end = if dot >= 0 {
-        dot as usize;
+    let end = if k == 0 {
+        b.len();
     } else {
-        n;
+        k - 1;
     };
-    return String::from_str(path.slice(bstart, end));
+    return String::from_str(b.slice(0, end));
 }
 
 /// Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
@@ -842,14 +630,6 @@ pub fn join2(a: str, b: str) String {
 }
 
 extend DirCache {
-    /// An empty cache of directory listings.
-    pub fn new() DirCache {
-        return DirCache {
-            dirs: Vector::<String>::new(),
-            entries: Vector::<Vector<String>>::new(),
-            ok: Vector::<bool>::new(),
-        };
-    }
     // Index of `dir` in the cache, scanning (opendir/readdir) it once on first request.
     fn index_of(self: &mut Self, dir: str) usize {
         for i in 0..self.dirs.len() {
@@ -1070,9 +850,7 @@ fn par_parse_one(t: PParse) {
 /// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 /// `std_dir` (empty skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
 pub fn package_load(root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
-    let d = dir_of(root_file);
-    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags, target);
-    return p;
+    return package_load_rooted(root_file, dirname_of(root_file), "", std_dir, bootstrap_tags, target);
 }
 
 /// Like package_load, but imports resolve against an explicit package root instead of the root
@@ -1103,16 +881,8 @@ pub fn package_load_overlaid(
     overlay_files: Vector<String>,
     overlay_texts: Vector<String>,
 ) Package {
-    let mut p = Package::new();
-    p.ok = true;
+    let mut p = package_base(root_dir, alt_dir, std_dir, overlay_files, overlay_texts);
     p.bootstrap = bootstrap_tags;
-    p.overlay_files = overlay_files;
-    p.overlay_texts = overlay_texts;
-    p.root_dir = String::from_str(root_dir);
-    p.alt_root = String::from_str(alt_dir);
-    if std_dir.len() != 0 {
-        p.std_root = dir_of(std_dir);
-    }
     let rp = stem_of(root_file);
     let rf = String::from_str(root_file);
     p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
@@ -1133,18 +903,23 @@ pub fn package_load_prelude(
     overlay_files: Vector<String>,
     overlay_texts: Vector<String>,
 ) Package {
+    let mut p = package_base(root_dir, alt_dir, std_dir, overlay_files, overlay_texts);
+    p.load_prelude(std_dir, target);
+    p.seed_core();
+    p.bind_types();
+    return p;
+}
+
+// An empty package with its import roots and source overlays set.
+fn package_base(root_dir: str, alt_dir: str, std_dir: str, overlay_files: Vector<String>, overlay_texts: Vector<String>) Package {
     let mut p = Package::new();
-    p.ok = true;
     p.overlay_files = overlay_files;
     p.overlay_texts = overlay_texts;
     p.root_dir = String::from_str(root_dir);
     p.alt_root = String::from_str(alt_dir);
     if std_dir.len() != 0 {
-        p.std_root = dir_of(std_dir);
+        p.std_root = String::from_str(dirname_of(std_dir));
     }
-    p.load_prelude(std_dir, target);
-    p.seed_core();
-    p.bind_types();
     return p;
 }
 
@@ -1205,12 +980,7 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 /// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
 /// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
 pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
-    let mut p = Package::new();
-    p.ok = true;
-    p.root_dir = String::from_str(".");
-    if std_dir.len() != 0 {
-        p.std_root = dir_of(std_dir);
-    }
+    let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.load_prelude(std_dir, target);
     let mut source = String::from_str(src);
     let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
@@ -1239,34 +1009,12 @@ struct RealBuf {
 }
 
 /// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
-pub fn basename_of(path: str) str {
-    let n = path.len();
-    let mut b: usize = 0;
-    let mut i: usize = 0;
-    while i < n {
-        if path.byte_at(i) == b'/' {
-            b = i + 1;
-        }
-        i = i + 1;
+pub const fn basename_of(path: str) str {
+    let mut k = path.len();
+    while k > 0 && path[k - 1] != b'/' {
+        k -= 1;
     }
-    return path.slice(b, n);
-}
-
-/// Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views):
-/// deterministic directory walks.
-pub const fn name_cmp(a: &String, b: &String) i32 {
-    let la = a.len();
-    let lb = b.len();
-    let m = if la < lb {
-        la;
-    } else {
-        lb;
-    };
-    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
-    if c != 0 {
-        return c;
-    }
-    return la as i32 - lb as i32;
+    return path.slice(k, path.len());
 }
 
 /// One sortable image of a batch record with its children as final ids: kind, qualifier, module
@@ -1494,9 +1242,7 @@ extend Package {
     pub fn bind_types(self: &mut Self) {
         if self.tt.deref().len() == 0 {
             self.tt.deref_mut().seed();
-            for _ in 0..self.tt.deref().len() {
-                self.tt_class.push(0);
-            }
+            self.tt_class.resize_default(self.tt.deref().len());
         }
         let gp = self.tt.deref_mut() as *mut TypePool;
         for i in 0..self.modules.len() {
@@ -1558,13 +1304,10 @@ extend Package {
         let n = self.modules.len();
         self.ensure_index();
         self.pub_map.clear();
-        self.pub_imap.clear();
-        self.pub_cmap.clear();
         // Pass 1: the batch table, records translated so a provisional child is a batch id (tagged).
-        let mut batch = TypePool::new();
+        let mut batch = TypePool {};
         let mut bmaps = Vector::<Vector<TypeId>>::new();
         let mut bimaps = Vector::<Vector<u32>>::new();
-        let mut cmaps = Vector::<Vector<u32>>::new();
         // The const-expression forms of every module pool take their package index in one
         // canonical order (their content), not in the order the pools interned them: that order
         // follows the item schedule, and the index is the form's publication key.
@@ -1650,7 +1393,6 @@ extend Package {
                 }
                 bmaps.push(map);
                 bimaps.push(imap);
-                cmaps.push(cmap);
             }
         }
         let nb = batch.len();
@@ -1715,9 +1457,7 @@ extend Package {
         // Bucket by (class, depth) in one pass; each bucket is numbered in structural-key order.
         let ngroups = 2 * (maxd as usize + 1);
         let mut groups = Vector::<Vector<u32>>::new();
-        for _ in 0..ngroups {
-            groups.push(Vector::<u32>::new());
-        }
+        groups.resize_default(ngroups);
         for b in 0..nb {
             let cls: usize = if sig[b] {
                 0;
@@ -1780,9 +1520,7 @@ extend Package {
                 self.modules[m].ast.publish_remap(&map, &imap);
             }
             self.pub_map.push(map);
-            self.pub_imap.push(imap);
         }
-        self.pub_cmap = cmaps;
         self.publications += 1;
     }
 
@@ -1855,65 +1593,9 @@ extend Package {
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
-            bootstrap: false,
-            modules: Vector::<Module>::new(),
-            mod_index: Map::<u64, u32>::new(),
-            mod_chain: Vector::<u32>::new(),
-            tt: Box::<TypePool>::new(TypePool::new()),
-            pub_map: Vector::<Vector<TypeId>>::new(),
-            pub_imap: Vector::<Vector<u32>>::new(),
-            pub_cmap: Vector::<Vector<u32>>::new(),
-            publications: 0,
-            tt_class: Vector::<u8>::new(),
-            root_dir: String::new(),
-            gen_root: String::new(),
-            cc: String::new(),
-            std_root: String::new(),
-            alt_root: String::new(),
+            tt: Box::<TypePool>::new(TypePool {}),
             ok: true,
-            ext_inputs: Vector::<String>::new(),
-            core_module: 0,
-            core_seeded: false,
-            method_used: Vector::<Vector<bool>>::new(),
-            inst_methods: Set::<u64>::new(),
-            co_state: 0,
-            co_spans: Vector::<Vector<u64>>::new(),
-            emit_deps: Vector::<Vector<ModuleId>>::new(),
-            cancel_state: 0,
-            cancel_marks: Vector::<Set<u64>>::new(),
-            cancel_used: false,
-            always_methods: Set::<u64>::new(),
-            method_edges: Vector::<u64>::new(),
-            edge_seen: Set::<u64>::new(),
-            extern_privates: Set::<u64>::new(),
-            cir: null,
-            inl_store: null,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
-            sched: ItemSched::new(),
-            shard_rules: Vector::<ShardRule>::new(),
-            mod_refs: Vector::<u64>::new(),
-            mod_refs_w: 0,
-            mod_refs_ready: false,
-            idx: PkgIndex::new(),
-            clo_lists: Vector::<Vector<ModuleId>>::new(),
-            clo_built: Vector::<bool>::new(),
-            tok_scratch: Vector::<tok::Token>::new(),
-            cg_scratch: String::new(),
-            dir_cache: DirCache::new(),
-            lint_set: Vector::<bool>::new(),
-            lint_pub: false,
-            overlay_files: Vector::<String>::new(),
-            overlay_texts: Vector::<String>::new(),
-            body_hold: Vector::<bool>::new(),
-            def_refs: Vector::<Vector<RefEdge>>::new(),
-            icost_on: false,
-            free_bodies: false,
-            icost_tc: Vector::<u64>::new(),
-            icost_rs: Vector::<u64>::new(),
-            icost_bc: Vector::<u64>::new(),
-            icost_lw: Vector::<u64>::new(),
-            icost_mod: Vector::<u64>::new(),
-            ctfe_edges: Vector::<u64>::new(),
         };
     }
 
@@ -1945,9 +1627,7 @@ extend Package {
     pub fn co_compute(self: &mut Self) {
         self.co_state = 1;
         self.co_spans.truncate(0);
-        for _m in 0..self.modules.len() {
-            self.co_spans.push(Vector::<u64>::new());
-        }
+        self.co_spans.resize_default(self.modules.len());
         let rt = self.find("std::parallel::runtime");
         if rt < 0 {
             // No coroutine runtime loaded: nothing can launch.
@@ -2082,23 +1762,7 @@ extend Package {
                 if d == none {
                     continue;
                 }
-                let mut t = DefId { module: 0, node: NODE_NONE };
-                let ni32 = ni;
-                switch a.call_info.get(&ni32) {
-                    Some(v) => {
-                        t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
-                    },
-                    _ => {},
-                };
-                if t.node == NODE_NONE {
-                    t = a.resolution_def(cd.callee);
-                }
-                if t.node == NODE_NONE {
-                    let ck = a.at_const(cd.callee).kind;
-                    if ck == NodeKind::NODE_MEMBER {
-                        t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
-                    }
-                }
+                let t = pin_callee(a, ni, cd.callee);
                 if t.node == NODE_NONE {
                     if a.is_free_call(ni, self.modules.at(m).source.as_str()) {
                         // An explicit drop: no callee body to run.
@@ -2134,9 +1798,7 @@ extend Package {
         // Records by decl (counting sort).
         let nd = d_span.len();
         let mut r_start = Vector::<u32>::new();
-        for _i in 0..nd + 1 {
-            r_start.push(0);
-        }
+        r_start.resize_default(nd + 1);
         for i in 0..r_decl.len() {
             let d = r_decl[i] as usize;
             r_start.set(d + 1, r_start[d + 1] + 1);
@@ -2145,9 +1807,7 @@ extend Package {
             r_start.set(d + 1, r_start[d + 1] + r_start[d]);
         }
         let mut r_flat = Vector::<u32>::new();
-        for _i in 0..r_decl.len() {
-            r_flat.push(0);
-        }
+        r_flat.resize_default(r_decl.len());
         let mut cur = Vector::<u32>::new();
         for d in 0..nd {
             cur.push(r_start[d]);
@@ -2161,10 +1821,8 @@ extend Package {
         // fires its records once, marking each target. Every decl turns on at most once.
         let mut on = Vector::<u8>::new();
         let mut marked = Vector::<u8>::new();
-        for _i in 0..nd {
-            on.push(0);
-            marked.push(0);
-        }
+        on.resize_default(nd);
+        marked.resize_default(nd);
         let mut queue = Vector::<u32>::new();
         let mut m_of = 0 as usize; // the module of the decl being marked, found by d_start
         for si in 0..seeds.len() {
@@ -2247,9 +1905,7 @@ extend Package {
     pub fn cancel_compute(self: &mut Self) {
         self.cancel_state = 1;
         self.cancel_marks.truncate(0);
-        for _m in 0..self.modules.len() {
-            self.cancel_marks.push(Set::<u64>::new());
-        }
+        self.cancel_marks.resize_default(self.modules.len());
         let rt = self.find("std::parallel::runtime");
         if rt < 0 {
             // No coroutine runtime loaded: nothing can accept a cancellation.
@@ -2285,23 +1941,7 @@ extend Package {
                     continue;
                 }
                 let cd = n.as_data.call;
-                let mut t = DefId { module: 0, node: NODE_NONE };
-                let ni32 = ni;
-                switch a.call_info.get(&ni32) {
-                    Some(v) => {
-                        t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
-                    },
-                    _ => {},
-                };
-                if t.node == NODE_NONE {
-                    t = a.resolution_def(cd.callee);
-                }
-                if t.node == NODE_NONE {
-                    let ck = a.at_const(cd.callee).kind;
-                    if ck == NodeKind::NODE_MEMBER {
-                        t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
-                    }
-                }
+                let t = pin_callee(a, ni, cd.callee);
                 if t.node == NODE_NONE {
                     // Fn value or dyn dispatch: cancellation-masked.
                     continue;
@@ -2329,9 +1969,7 @@ extend Package {
         // Fixpoint over the call records. A record fires at most once: firing marks its enclosing
         // decls, and only a fresh mark can make another record's target newly reach acceptance.
         let mut fired = Vector::<u8>::new();
-        for _i in 0..rec_m.len() {
-            fired.push(0);
-        }
+        fired.resize_default(rec_m.len());
         let acck = acc.mid as u64 << 32 | acc.node as u64;
         let mut changed = true;
         while changed {
@@ -2511,20 +2149,17 @@ extend Package {
     /// The enum declaring member `vd` (NODE_NONE when `vd` is no enum member) and `vd`'s position
     /// in it (-1 when none), from the package index.
     pub const fn variant_enum(self: &Self, vd: DefId, pos: &mut i64) NodeId {
-        switch self.idx.variants.get(&skey_mix(0, vd.module as u64 << 32 | vd.node as u64)) {
-            Some(v) => {
-                *pos = (*v & 0xFFFFFFFFu64) as i64;
-                return (*v >> 32) as NodeId;
-            },
-            None => {},
-        };
+        if let Some(v) = self.idx.variants.get(&skey_mix(0, vd.module as u64 << 32 | vd.node as u64)) {
+            *pos = (*v & 0xFFFFFFFFu64) as i64;
+            return (*v >> 32) as NodeId;
+        }
         *pos = -1;
         return NODE_NONE;
     }
 
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
-        let mut m = switch self.mod_index.get(&fnv_name(path)) {
+        let mut m = switch self.mod_index.get(&path.hash()) {
             Some(h) => *h,
             None => SYM_NONE,
         };
@@ -2540,7 +2175,7 @@ extend Package {
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
     fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
-        let h = fnv_name(path.as_str());
+        let h = path.as_str().hash();
         self.mod_chain.push(
             switch self.mod_index.get(&h) {
                 Some(v) => *v,
@@ -2587,7 +2222,7 @@ extend Package {
     // Module `id`'s imports as a frame for the serial loader's stack. Collected before any import loads:
     // loading pushes to self.modules, which may realloc and move this module's by-value Ast.
     fn import_frame(self: &mut Self, id: i32, target: i32) LoadFrame {
-        let mut dc = replace(&mut self.dir_cache, DirCache::new());
+        let mut dc = replace(&mut self.dir_cache, DirCache {});
         let mut f = LoadFrame { paths: Vector::<String>::new(), files: Vector::<String>::new(), next: 0 };
         let ap = (&self.modules.at(id as usize).ast) as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
@@ -2728,7 +2363,7 @@ extend Package {
             return existing;
         }
         // The replay's serial loads use the dir cache again: it is out of `self` until then.
-        let mut dc = replace(&mut self.dir_cache, DirCache::new());
+        let mut dc = replace(&mut self.dir_cache, DirCache {});
         let mut units = Vector::<PUnit>::new();
         units.push(
             PUnit {
@@ -3068,37 +2703,16 @@ extend Package {
         return inner[d.node as usize];
     }
 
-    /// A method reference from inside a gated (demand-emitted) method body: deferred, so the callee
-    /// is only marked used if the caller is ultimately emitted. Ids that do not fit the packed key
-    /// fall back to a direct mark (conservative, never under-marks).
-    pub fn record_method_edge(self: &mut Self, c: DefId, d: DefId) {
-        if d.node == NODE_NONE {
-            return;
-        }
-        if c.node == NODE_NONE || c.module as u32 >= 256 || c.node >= 16777216 || d.module as u32 >= 256 || d.node >= 16777216 {
-            self.mark_method_used(d);
-            return;
-        }
-        if self.method_used_get(d) {
-            return;
-        }
-        let key = (c.module as u64 << 24 | c.node as u64) << 32 | d.module as u64 << 24 | d.node as u64;
-        if !self.edge_seen.contains(&key) {
-            self.edge_seen.insert(key);
-            self.method_edges.push(key);
-        }
-    }
-
     // Cross-module name lookup.
 
-    /// (Re)build the package declaration index: symbols, items, name maps, import adjacency, SCCs,
-    /// and the LangItem table, in deterministic module and source order. Called through ensure_index
+    /// (Re)build the package declaration index: symbols, items, name maps, import adjacency, and
+    /// SCCs, in deterministic module and source order. Called through ensure_index
     /// on first lookup after loading; a module appended later (the LSP's batch load) triggers a full
     /// rebuild. Declaration names, spans, and imports are parse-final, so the result stays valid for
     /// the whole pipeline.
     pub fn build_index(self: &mut Self) {
         let n = self.modules.len();
-        let mut idx = PkgIndex::new();
+        let mut idx = PkgIndex {};
         idx.built_mods = n as u32;
         for m in 0..n {
             idx.mod_items.push(idx.items.len() as u32);
@@ -3112,7 +2726,13 @@ extend Package {
         idx.mod_items.push(idx.items.len() as u32);
         idx.mod_imports.push(idx.imports.len() as u32);
         idx.mod_exts.push(idx.exts.len() as u32);
-        scc_build(n, &idx.imports, &idx.mod_imports, &mut idx.scc_of);
+        // Strongly connected components of the import graph (mutually importing modules share one),
+        // numbered in completion order.
+        let mut tgt = Vector::<u32>::with_capacity(idx.imports.len());
+        for e in 0..idx.imports.len() {
+            tgt.push(idx.imports[e]);
+        }
+        let _ = gitems::condense(n, &idx.mod_imports, &tgt, &mut idx.scc_of);
         // The prelude name map: every public top-level name of every prelude module, keyed by
         // (symbol, namespace), the first prelude module in module order winning (the order a walk
         // over the modules would answer in). prelude_lookup answers from it alone.
@@ -3134,22 +2754,6 @@ extend Package {
                     idx.pl_map.insert(key, im.node as u64 << 32 | m as u64);
                 }
             }
-        }
-        // LangItem table: each fixed prelude hook resolved once. An unresolved hook (no std loaded,
-        // or the name never interned) stays NODE_NONE.
-        for li in 0..LI_COUNT_N {
-            let names: []str = LI_NAMES;
-            let s = idx.syms.find(names[li]);
-            let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
-            if s != SYM_NONE {
-                switch idx.pl_map.get(&(s as u64 * 2u64 + 1u64)) {
-                    Some(v) => {
-                        hit = LookupHit { node: (*v >> 32) as NodeId, mid: (*v & 0xFFFFFFFFu64) as ModuleId };
-                    },
-                    None => {},
-                };
-            }
-            idx.lang_items.push(hit);
         }
         self.idx = idx;
         // Sugar-shim table: (module path, fn name) hooks, resolved through the finished index (find
@@ -3216,12 +2820,9 @@ extend Package {
 
     /// The signature metadata for fn decl (m, node), or null when none is recorded.
     pub const fn item_sig(self: &Self, m: ModuleId, node: NodeId) *const ItemSig {
-        switch self.idx.sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
-            Some(i) => {
-                return self.idx.sigs.at((*i) as usize);
-            },
-            None => {},
-        };
+        if let Some(i) = self.idx.sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
+            return self.idx.sigs.at((*i) as usize);
+        }
         return null;
     }
 
@@ -3239,19 +2840,55 @@ extend Package {
 
     // Record one named declaration: intern the name, append its ItemMeta, and (for top-level names
     // only, owner == ITEM_NONE) claim its (name, namespace, visibility) key first-occurrence-wins.
-    fn index_decl(
-        self: &mut Self,
-        idx: &mut PkgIndex,
-        mid: ModuleId,
-        srcp: *const char,
-        node: NodeId,
-        name_node: NodeId,
-        owner: ItemId,
-        kind: ItemKind,
-        is_public: bool,
-        is_type: bool,
-    ) {
+    // A function or const under an extend (`owner`) is a method or an associated const; a node of
+    // any other kind records nothing.
+    fn index_decl(self: &mut Self, idx: &mut PkgIndex, mid: ModuleId, srcp: *const char, node: NodeId, owner: ItemId) {
         let ast = unsafe &*self.module_ast_const(mid);
+        let n = ast.at_const(node);
+        let mut is_type = true;
+        let mut is_public = false;
+        let mut name_node = NODE_NONE;
+        let mut kind = ItemKind::IK_STRUCT;
+        switch n.kind {
+            NODE_STRUCT | NODE_ENUM => {
+                name_node = n.as_data.aggregate.name;
+                is_public = n.as_data.aggregate.is_public;
+                if n.kind == NodeKind::NODE_ENUM {
+                    kind = ItemKind::IK_ENUM;
+                }
+            },
+            NODE_TYPE_ALIAS => {
+                name_node = n.as_data.type_alias.name;
+                is_public = n.as_data.type_alias.is_public;
+                kind = ItemKind::IK_TYPE_ALIAS;
+            },
+            NODE_INTERFACE => {
+                name_node = n.as_data.interface_def.name;
+                is_public = n.as_data.interface_def.is_public;
+                kind = ItemKind::IK_INTERFACE;
+            },
+            NODE_FUNCTION => {
+                name_node = n.as_data.function.name;
+                is_public = n.as_data.function.is_public();
+                is_type = false;
+                kind = if owner == ITEM_NONE {
+                    ItemKind::IK_FUNCTION;
+                } else {
+                    ItemKind::IK_METHOD;
+                };
+            },
+            NODE_CONST => {
+                name_node = n.as_data.const_def.name;
+                is_public = n.as_data.const_def.is_public;
+                is_type = false;
+                kind = if owner == ITEM_NONE {
+                    ItemKind::IK_CONST;
+                } else {
+                    ItemKind::IK_ASSOC_CONST;
+                };
+            },
+            _ => {},
+        };
         if name_node == NODE_NONE {
             return;
         }
@@ -3320,142 +2957,13 @@ extend Package {
                         idx.imports.push(c as ModuleId);
                     }
                 }
-            } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-                let kd = if n.kind == NodeKind::NODE_STRUCT {
-                    ItemKind::IK_STRUCT;
-                } else {
-                    ItemKind::IK_ENUM;
-                };
-                self.index_decl(
-                    idx,
-                    mid,
-                    srcp,
-                    nid,
-                    n.as_data.aggregate.name,
-                    ITEM_NONE,
-                    kd,
-                    n.as_data.aggregate.is_public,
-                    true,
-                );
-                if n.kind == NodeKind::NODE_ENUM {
-                    let ms = n.as_data.aggregate.members;
-                    for k in 0..ms.len {
-                        let vk = mid as u64 << 32 | (unsafe ast.list(ms)[k as usize]) as u64;
-                        idx.variants.insert(skey_mix(0, vk), nid as u64 << 32 | k as u64);
-                    }
-                }
-            } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
-                self.index_decl(
-                    idx,
-                    mid,
-                    srcp,
-                    nid,
-                    n.as_data.type_alias.name,
-                    ITEM_NONE,
-                    ItemKind::IK_TYPE_ALIAS,
-                    n.as_data.type_alias.is_public,
-                    true,
-                );
-            } else if n.kind == NodeKind::NODE_INTERFACE {
-                self.index_decl(
-                    idx,
-                    mid,
-                    srcp,
-                    nid,
-                    n.as_data.interface_def.name,
-                    ITEM_NONE,
-                    ItemKind::IK_INTERFACE,
-                    n.as_data.interface_def.is_public,
-                    true,
-                );
-            } else if n.kind == NodeKind::NODE_FUNCTION {
-                self.index_decl(
-                    idx,
-                    mid,
-                    srcp,
-                    nid,
-                    n.as_data.function.name,
-                    ITEM_NONE,
-                    ItemKind::IK_FUNCTION,
-                    n.as_data.function.is_public(),
-                    false,
-                );
-            } else if n.kind == NodeKind::NODE_CONST {
-                self.index_decl(
-                    idx,
-                    mid,
-                    srcp,
-                    nid,
-                    n.as_data.const_def.name,
-                    ITEM_NONE,
-                    ItemKind::IK_CONST,
-                    n.as_data.const_def.is_public,
-                    false,
-                );
             } else if n.kind == NodeKind::NODE_EXTERN_BLOCK {
                 // `pub` raw bindings / opaque handles live one level down, inside the extern block;
-                // they name package-level items exactly like top-level decls.
+                // they name package-level items exactly like top-level decls (an extern enum's
+                // variants come from the C header, so they get no variant records).
                 let inner = n.as_data.extern_block.items;
-                let iids = ast.list(inner);
                 for j in 0..inner.len {
-                    let iid = unsafe iids[j as usize];
-                    let it = ast.at_const(iid);
-                    if it.kind == NodeKind::NODE_FUNCTION {
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.function.name,
-                            ITEM_NONE,
-                            ItemKind::IK_FUNCTION,
-                            it.as_data.function.is_public(),
-                            false,
-                        );
-                    } else if it.kind == NodeKind::NODE_TYPE_ALIAS {
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.type_alias.name,
-                            ITEM_NONE,
-                            ItemKind::IK_TYPE_ALIAS,
-                            it.as_data.type_alias.is_public,
-                            true,
-                        );
-                    } else if it.kind == NodeKind::NODE_CONST {
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.const_def.name,
-                            ITEM_NONE,
-                            ItemKind::IK_CONST,
-                            it.as_data.const_def.is_public,
-                            false,
-                        );
-                    } else if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-                        // An extern struct/union/enum names a type across module boundaries exactly
-                        // like a top-level one; only its DEFINITION comes from the C header.
-                        let kd = if it.kind == NodeKind::NODE_STRUCT {
-                            ItemKind::IK_STRUCT;
-                        } else {
-                            ItemKind::IK_ENUM;
-                        };
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.aggregate.name,
-                            ITEM_NONE,
-                            kd,
-                            it.as_data.aggregate.is_public,
-                            true,
-                        );
-                    }
+                    self.index_decl(idx, mid, srcp, unsafe ast.list(inner)[j as usize], ITEM_NONE);
                 }
             } else if n.kind == NodeKind::NODE_EXTEND {
                 // The extend itself anchors its associated items (owner links); it claims no name.
@@ -3475,35 +2983,22 @@ extend Package {
                         len: esp.end - esp.start,
                     },
                 );
+                // Only methods and associated consts: an extend-body type alias is not indexed.
                 let inner = n.as_data.extend_def.items;
-                let iids = ast.list(inner);
                 for j in 0..inner.len {
-                    let iid = unsafe iids[j as usize];
-                    let it = ast.at_const(iid);
-                    if it.kind == NodeKind::NODE_FUNCTION {
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.function.name,
-                            eid,
-                            ItemKind::IK_METHOD,
-                            it.as_data.function.is_public(),
-                            false,
-                        );
-                    } else if it.kind == NodeKind::NODE_CONST {
-                        self.index_decl(
-                            idx,
-                            mid,
-                            srcp,
-                            iid,
-                            it.as_data.const_def.name,
-                            eid,
-                            ItemKind::IK_ASSOC_CONST,
-                            it.as_data.const_def.is_public,
-                            false,
-                        );
+                    let iid = unsafe ast.list(inner)[j as usize];
+                    let ik = ast.at_const(iid).kind;
+                    if ik == NodeKind::NODE_FUNCTION || ik == NodeKind::NODE_CONST {
+                        self.index_decl(idx, mid, srcp, iid, eid);
+                    }
+                }
+            } else {
+                self.index_decl(idx, mid, srcp, nid, ITEM_NONE);
+                if n.kind == NodeKind::NODE_ENUM {
+                    let ms = n.as_data.aggregate.members;
+                    for k in 0..ms.len {
+                        let vk = mid as u64 << 32 | (unsafe ast.list(ms)[k as usize]) as u64;
+                        idx.variants.insert(skey_mix(0, vk), nid as u64 << 32 | k as u64);
                     }
                 }
             }
@@ -3648,6 +3143,33 @@ extend Package {
         return m as usize >= self.modules.len() || !self.modules[m as usize].prelude;
     }
 
+    /// Fill `mod_refs` from every module's resolutions, both arenas. Call once all resolutions are
+    /// final and before any body arena is released; one pass over the package's resolutions.
+    pub fn build_mod_refs(self: &mut Self) {
+        let n = self.modules.len();
+        let w = (n + 63) / 64;
+        self.mod_refs_w = w;
+        self.mod_refs.truncate(0);
+        self.mod_refs.resize_default(n * w);
+        for from in 0..n {
+            if !self.modules[from].has_ast {
+                continue;
+            }
+            let base = from * w;
+            let ra = &self.modules[from].ast;
+            let nb = ra.nodes.len();
+            for i in 0..ra.nnodes() {
+                let d = ra.resolution_def(Ast::nth_id_n(nb, i));
+                let to = d.module as usize;
+                if d.node != NODE_NONE && to < n {
+                    let idx = base + to / 64;
+                    self.mod_refs[idx] = self.mod_refs[idx] | 1u64 << (to % 64) as u64;
+                }
+            }
+        }
+        self.mod_refs_ready = true;
+    }
+
     // Does module `from`'s code reference anything in module `to` (a cross-module use edge)?
     fn module_imports(self: &Self, from: ModuleId, to: ModuleId) bool {
         let n = self.modules.len();
@@ -3742,23 +3264,6 @@ extend Package {
             i = i + 1;
         }
         i = 0;
-        while i < unsafe (*aa).method_insts.len() {
-            let miinst = unsafe (*aa).method_insts[i].instance;
-            let y = *unsafe (*aa).type_at(miinst);
-            if y.kind != TypeKind::TYPE_INSTANCE {
-                i = i + 1;
-                continue;
-            }
-            let bi = (unsafe (*aa).instance(y.as_data.inst).module) as usize;
-            if bi >= n || bi == a || dep[bi] {
-                i = i + 1;
-                continue;
-            }
-            dep[bi] = true;
-            out.push(bi as ModuleId);
-            i = i + 1;
-        }
-        i = 0;
         while i < unsafe (*aa).mono.len() {
             let mnode = unsafe (*aa).mono[i].node;
             if unsafe (*aa).at_const(mnode).kind != NodeKind::NODE_CALL {
@@ -3796,9 +3301,7 @@ extend Package {
     /// Size `emit_deps` for every module (before a parallel borrow frontier records rows).
     pub fn emit_deps_reserve(self: &mut Self) {
         self.emit_deps.truncate(0);
-        for _ in 0..self.modules.len() {
-            self.emit_deps.push(Vector::<ModuleId>::new());
-        }
+        self.emit_deps.resize_default(self.modules.len());
     }
 
     /// Record module `a`'s emission dependency row while its body syntax is live.
@@ -3912,7 +3415,7 @@ extend Package {
         let _ = unsafe shim::sc_closedir(dir);
         // Sort by name (small: the std/ file list), byte-lexicographic with a length tiebreak (equivalent to
         // strcmp over these NUL-free views).
-        names.sort_by(|a: &String, b: &String| name_cmp(a, b));
+        names.sort();
         // Dedup: a std file is already loaded iff some already-loaded module has the SAME basename AND is the
         // same physical file (dev+ino). The basename pre-filter (a plain string compare, no syscall) keeps this
         // O(std files) even for huge projects (user modules almost never share a std/ basename, so we stat-

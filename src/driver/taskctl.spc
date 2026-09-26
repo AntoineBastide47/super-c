@@ -44,6 +44,43 @@ extend Ctl {
     }
 }
 
+/// A count with an optional K, M or G suffix (powers of 1024): "4096", "64K", "16m", "1G". None when
+/// `s` is anything else (empty, a sign, a space, another suffix) or the value exceeds u64.
+pub fn parse_size(s: str) Option<u64> {
+    let mut v: u64 = 0;
+    let mut i: usize = 0;
+    while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {
+        let d = (s.byte_at(i) - b'0') as u64;
+        if v > (0xFFFFFFFFFFFFFFFFu64 - d) / 10 {
+            return Option::<u64>::None;
+        }
+        v = v * 10 + d;
+        i += 1;
+    }
+    let mut scale: u64 = 1;
+    if i == 0 {
+        return Option::<u64>::None;
+    }
+    if i + 1 == s.len() {
+        let c = s.byte_at(i) | 0x20u8;
+        if c == b'k' {
+            scale = 1024;
+        } else if c == b'm' {
+            scale = 1024u64 * 1024;
+        } else if c == b'g' {
+            scale = 1024u64 * 1024 * 1024;
+        } else {
+            return Option::<u64>::None;
+        }
+    } else if i != s.len() {
+        return Option::<u64>::None;
+    }
+    if v > 0xFFFFFFFFFFFFFFFFu64 / scale {
+        return Option::<u64>::None;
+    }
+    return Option::<u64>::Some(v * scale);
+}
+
 /// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; unset or
 /// empty = off (0). Any other spelling, or a value past u64, is a fatal configuration error.
 pub fn budget_from_env() u64 {
@@ -51,39 +88,10 @@ pub fn budget_from_env() u64 {
     if e == null || unsafe *e == 0 as char {
         return 0;
     }
-    let s = str::from_cstr(e);
-    let mut v: u64 = 0;
-    let mut i: usize = 0;
-    let mut ok = true;
-    while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {
-        let d = (s.byte_at(i) - b'0') as u64;
-        if v > (0xFFFFFFFFFFFFFFFFu64 - d) / 10 {
-            ok = false;
-            break;
-        }
-        v = v * 10 + d;
-        i += 1;
-    }
-    let mut scale: u64 = 1;
-    if i == 0 {
-        ok = false;
-    } else if i + 1 == s.len() {
-        let c = s.byte_at(i);
-        if c == b'K' || c == b'k' {
-            scale = 1024;
-        } else if c == b'M' || c == b'm' {
-            scale = 1024u64 * 1024;
-        } else if c == b'G' || c == b'g' {
-            scale = 1024u64 * 1024 * 1024;
-        } else {
-            ok = false;
-        }
-    } else if i != s.len() {
-        ok = false;
-    }
-    if !ok || v > 0xFFFFFFFFFFFFFFFFu64 / scale {
+    let v = parse_size(str::from_cstr(e));
+    if v.is_none() {
         eprintln("error: SC_BUILD_MEM_BUDGET must be a whole byte count with an optional K, M or G suffix");
         unsafe stdlib::exit(1);
     }
-    return v * scale;
+    return v.unwrap();
 }

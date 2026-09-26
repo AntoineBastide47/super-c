@@ -3,7 +3,6 @@
 // and compiles + runs the emitted build tree with $CC. test_build_and_run doubles as the `build`
 // subcommand's link step when `out_bin` is set.
 import stdio;
-import stdlib;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
@@ -60,11 +59,11 @@ pub struct TestPlan {
     pub ok: bool,
 }
 // A test-plan validation error, rendered with the compiler's usual source excerpt.
-fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) {
+fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: str) {
     let src = p.modules[m as usize].source.as_str();
     let file = p.modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
-    errs.emit(sp.start, sp.end - sp.start, String::from_cstr(msg));
+    errs.emit_span(sp, String::from_str(msg));
     errs.finalize(src, file);
     errs.log();
     p.ok = false;
@@ -101,12 +100,7 @@ const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) Node
     if rets.len != 1 {
         return NODE_NONE;
     }
-    let r0 = unsafe (*a).list(rets)[0];
-    let rn = unsafe (*a).at_const(r0);
-    if rn.kind == NodeKind::NODE_PARAMETER {
-        return rn.as_data.parameter.ty;
-    }
-    return r0;
+    return unsafe (*a).slot_type_node(unsafe (*a).list(rets)[0]);
 }
 
 const fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
@@ -141,12 +135,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
         NodeKind::NODE_NONE_KIND;
     };
     if tnode == NODE_NONE || tk != NodeKind::NODE_REFERENCE_TYPE {
-        test_err(
-            p,
-            m,
-            sp,
-            "a '@test' parameter must be a reference to the module fixture or the global env".ptr() as *const char,
-        );
+        test_err(p, m, sp, "a '@test' parameter must be a reference to the module fixture or the global env");
         return 0;
     }
     let it = unsafe (*a).at_const(tnode).as_data.indirect_type;
@@ -156,17 +145,12 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     }
     if genv.node != NODE_NONE && d.module == genv.module && d.node == genv.node {
         if it.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-            test_err(p, m, sp, "the global test env is shared: take it as '&', not '&mut'".ptr() as *const char);
+            test_err(p, m, sp, "the global test env is shared: take it as '&', not '&mut'");
             return 0;
         }
         return 2;
     }
-    test_err(
-        p,
-        m,
-        sp,
-        "this parameter matches neither the module's '@test_init' fixture nor the global env".ptr() as *const char,
-    );
+    test_err(p, m, sp, "this parameter matches neither the module's '@test_init' fixture nor the global env");
     return 0;
 }
 
@@ -209,10 +193,41 @@ fn test_owner(owners: &Map<u64, u64>, m: ModuleId, fnode: NodeId) i64 {
     };
 }
 
-// Whether extend `ext` cannot hold a test suite: a conformance or generic extend.
-fn test_extend_bad(p: &loader::Package, m: ModuleId, ext: NodeId) bool {
+// The suite type of a test item (span `sp`) in extend `ext`; {0, NODE_NONE} with an error emitted when
+// the extend cannot hold a suite (a conformance or generic extend, or a target that is not a plain
+// struct or enum) or when `global` marks a '(global)' fixture item there.
+fn test_suite_type(p: &mut loader::Package, m: ModuleId, ext: NodeId, sp: tok::Span, global: bool) DefId {
+    let none = DefId { module: 0, node: NODE_NONE };
     let ed = unsafe (*p.module_ast_const(m)).at_const(ext).as_data.extend_def;
-    return ed.interface_type != NODE_NONE || ed.generics.len != 0;
+    if ed.interface_type != NODE_NONE || ed.generics.len != 0 {
+        test_err(p, m, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'");
+        return none;
+    }
+    if global {
+        test_err(p, m, sp, "'(global)' is not allowed on a method; declare the global pair at top level");
+        return none;
+    }
+    let d = test_type_decl(p, m, ed.target_type);
+    if d.node == NODE_NONE {
+        test_err(p, m, sp, "a test suite's extend target must be a plain (non-generic) struct or enum");
+    }
+    return d;
+}
+
+// Whether `fnode` has the teardown shape `fn(&mut <want>)` returning nothing.
+fn test_free_sig(p: &loader::Package, m: ModuleId, src: *const char, fnode: NodeId, want: DefId) bool {
+    let a = p.module_ast_const(m);
+    let params = unsafe (*a).at_const(fnode).as_data.function.params;
+    if params.len != 1 || !test_fn_returns_nothing(p, m, src, fnode) {
+        return false;
+    }
+    let pty = unsafe (*a).at_const(unsafe (*a).list(params)[0]).as_data.parameter.ty;
+    if pty == NODE_NONE || unsafe (*a).at_const(pty).kind != NodeKind::NODE_REFERENCE_TYPE {
+        return false;
+    }
+    let it = unsafe (*a).at_const(pty).as_data.indirect_type;
+    let d = test_type_decl(p, m, it.ty);
+    return it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == want.module && d.node == want.node;
 }
 
 /// Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
@@ -237,42 +252,17 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             }
             let ext = own as NodeId;
             let sp = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).span;
-            if ext != NODE_NONE && test_extend_bad(p, m as ModuleId, ext) {
-                test_err(
-                    p,
-                    m as ModuleId,
-                    sp,
-                    "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char,
-                );
-                continue;
-            }
             let mut target = DefId { module: 0, node: NODE_NONE };
             if ext != NODE_NONE {
-                if at.arg != 0 {
-                    test_err(
-                        p,
-                        m as ModuleId,
-                        sp,
-                        "'(global)' is not allowed on a method; declare the global pair at top level".ptr() as *const char,
-                    );
-                    continue;
-                }
-                let tt = unsafe (*p.module_ast_const(m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                target = test_type_decl(p, m as ModuleId, tt);
+                target = test_suite_type(p, m as ModuleId, ext, sp, at.arg != 0);
                 if target.node == NODE_NONE {
-                    test_err(
-                        p,
-                        m as ModuleId,
-                        sp,
-                        "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char,
-                    );
                     continue;
                 }
             }
             if at.kind == AttrKind::ATTR_TEST_INIT as u8 {
                 let plen = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params.len;
                 if plen != 0 {
-                    test_err(p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "'@test_init' takes no parameters");
                     continue;
                 }
                 let ret = test_fn_ret_node(p, m as ModuleId, at.owner);
@@ -282,7 +272,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                         p,
                         m as ModuleId,
                         sp,
-                        "'@test_init' must return a plain (non-generic) struct or enum fixture".ptr() as *const char,
+                        "'@test_init' must return a plain (non-generic) struct or enum fixture",
                     );
                     continue;
                 }
@@ -292,29 +282,19 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                             p,
                             m as ModuleId,
                             sp,
-                            "a suite '@test_init' method must return the extended type itself".ptr() as *const char,
+                            "a suite '@test_init' method must return the extended type itself",
                         );
                         continue;
                     }
                     let si = plan.suite_of(m as ModuleId, target, true);
                     if plan.suites[si as usize].init != NODE_NONE {
-                        test_err(
-                            p,
-                            m as ModuleId,
-                            sp,
-                            "duplicate suite '@test_init' (one per type per module)".ptr() as *const char,
-                        );
+                        test_err(p, m as ModuleId, sp, "duplicate suite '@test_init' (one per type per module)");
                         continue;
                     }
                     plan.suites[si as usize].init = at.owner;
                 } else if at.arg != 0 {
                     if plan.genv_init != NODE_NONE {
-                        test_err(
-                            p,
-                            m as ModuleId,
-                            sp,
-                            "duplicate '@test_init(global)' (one per test tree)".ptr() as *const char,
-                        );
+                        test_err(p, m as ModuleId, sp, "duplicate '@test_init(global)' (one per test tree)");
                         continue;
                     }
                     plan.genv_mod = m as ModuleId;
@@ -322,7 +302,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     plan.genv_type = d;
                 } else {
                     if plan.fx_init[m] != NODE_NONE {
-                        test_err(p, m as ModuleId, sp, "duplicate '@test_init' (one per module)".ptr() as *const char);
+                        test_err(p, m as ModuleId, sp, "duplicate '@test_init' (one per module)");
                         continue;
                     }
                     plan.fx_init[m] = at.owner;
@@ -332,34 +312,18 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 if ext == NODE_NONE {
                     continue;
                 }
-                let mut ok = false;
-                let params = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params;
-                if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
-                    let p0 = unsafe (*p.module_ast_const(m as ModuleId)).list(params)[0];
-                    let pty = unsafe (*p.module_ast_const(m as ModuleId)).at_const(p0).as_data.parameter.ty;
-                    let ptk = if pty != NODE_NONE {
-                        unsafe (*p.module_ast_const(m as ModuleId)).at_const(pty).kind;
-                    } else {
-                        NodeKind::NODE_NONE_KIND;
-                    };
-                    if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                        let it = unsafe (*p.module_ast_const(m as ModuleId)).at_const(pty).as_data.indirect_type;
-                        let d = test_type_decl(p, m as ModuleId, it.ty);
-                        ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == target.module && d.node == target.node;
-                    }
-                }
-                if !ok {
+                if !test_free_sig(p, m as ModuleId, src, at.owner, target) {
                     test_err(
                         p,
                         m as ModuleId,
                         sp,
-                        "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing".ptr() as *const char,
+                        "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing",
                     );
                     continue;
                 }
                 let si = plan.suite_of(m as ModuleId, target, true);
                 if plan.suites[si as usize].fre != NODE_NONE {
-                    test_err(p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate suite '@test_free'");
                     continue;
                 }
                 plan.suites[si as usize].fre = at.owner;
@@ -396,51 +360,35 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     m as ModuleId,
                     sp,
                     if global {
-                        "'@test_free(global)' has no matching '@test_init(global)' in this module".ptr() as *const char;
+                        "'@test_free(global)' has no matching '@test_init(global)' in this module";
                     } else {
-                        "'@test_free' has no matching '@test_init' in this module".ptr() as *const char;
+                        "'@test_free' has no matching '@test_init' in this module";
                     },
                 );
                 continue;
             }
-            let mut ok = false;
-            let params = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params;
-            if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
-                let p0 = unsafe (*p.module_ast_const(m as ModuleId)).list(params)[0];
-                let pty = unsafe (*p.module_ast_const(m as ModuleId)).at_const(p0).as_data.parameter.ty;
-                let ptk = if pty != NODE_NONE {
-                    unsafe (*p.module_ast_const(m as ModuleId)).at_const(pty).kind;
-                } else {
-                    NodeKind::NODE_NONE_KIND;
-                };
-                if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                    let it = unsafe (*p.module_ast_const(m as ModuleId)).at_const(pty).as_data.indirect_type;
-                    let d = test_type_decl(p, m as ModuleId, it.ty);
-                    ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == want.module && d.node == want.node;
-                }
-            }
-            if !ok {
+            if !test_free_sig(p, m as ModuleId, src, at.owner, want) {
                 test_err(
                     p,
                     m as ModuleId,
                     sp,
                     if global {
-                        "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing".ptr() as *const char;
+                        "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing";
                     } else {
-                        "'@test_free' must be 'fn(&mut <fixture>)' returning nothing".ptr() as *const char;
+                        "'@test_free' must be 'fn(&mut <fixture>)' returning nothing";
                     },
                 );
                 continue;
             }
             if global {
                 if plan.genv_free != NODE_NONE {
-                    test_err(p, m as ModuleId, sp, "duplicate '@test_free(global)'".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test_free(global)'");
                     continue;
                 }
                 plan.genv_free = at.owner;
             } else {
                 if plan.fx_free[m] != NODE_NONE {
-                    test_err(p, m as ModuleId, sp, "duplicate '@test_free' (one per module)".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test_free' (one per module)");
                     continue;
                 }
                 plan.fx_free[m] = at.owner;
@@ -456,7 +404,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 p,
                 s.mod,
                 sp,
-                "a suite '@test_free' has no matching '@test_init' method on this type in this module".ptr() as *const char,
+                "a suite '@test_free' has no matching '@test_init' method on this type in this module",
             );
         }
     }
@@ -478,31 +426,15 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             }
             let ext = own as NodeId;
             let sp = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).span;
-            if ext != NODE_NONE && test_extend_bad(p, m as ModuleId, ext) {
-                test_err(
-                    p,
-                    m as ModuleId,
-                    sp,
-                    "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char,
-                );
-                continue;
-            }
             let mut suite = DefId { module: 0, node: NODE_NONE };
             if ext != NODE_NONE {
-                let tt = unsafe (*p.module_ast_const(m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                suite = test_type_decl(p, m as ModuleId, tt);
+                suite = test_suite_type(p, m as ModuleId, ext, sp, false);
                 if suite.node == NODE_NONE {
-                    test_err(
-                        p,
-                        m as ModuleId,
-                        sp,
-                        "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char,
-                    );
                     continue;
                 }
             }
             if !test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
-                test_err(p, m as ModuleId, sp, "a '@test' function returns nothing".ptr() as *const char);
+                test_err(p, m as ModuleId, sp, "a '@test' function returns nothing");
                 continue;
             }
             let nmnode = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.name;
@@ -512,12 +444,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 "main".ptr(),
                 4,
             ) == 0 {
-                test_err(
-                    p,
-                    m as ModuleId,
-                    sp,
-                    "'main' cannot be a '@test' (it is replaced by the test runner)".ptr() as *const char,
-                );
+                test_err(p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)");
                 continue;
             }
             let params = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params;
@@ -526,7 +453,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     p,
                     m as ModuleId,
                     sp,
-                    "a '@test' function takes at most the fixture (or 'self') and the global env".ptr() as *const char,
+                    "a '@test' function takes at most the fixture (or 'self') and the global env",
                 );
                 continue;
             }
@@ -549,15 +476,10 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 if bit == 0 {
                     bad = true;
                 } else if (wants & bit) != 0 {
-                    test_err(p, m as ModuleId, sp, "duplicate '@test' parameter kind".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test' parameter kind");
                     bad = true;
                 } else if bit == 1 && (wants & 2) != 0 {
-                    test_err(
-                        p,
-                        m as ModuleId,
-                        sp,
-                        "the fixture ('self') parameter must come before the global env".ptr() as *const char,
-                    );
+                    test_err(p, m as ModuleId, sp, "the fixture ('self') parameter must come before the global env");
                     bad = true;
                 }
                 wants = wants | bit;
@@ -575,7 +497,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                         p,
                         m as ModuleId,
                         sp,
-                        "no '@test_init' method on this type in this module produces the receiver".ptr() as *const char,
+                        "no '@test_init' method on this type in this module produces the receiver",
                     );
                     continue;
                 }
@@ -618,6 +540,11 @@ void sc_lk_report_now(void);
 #include <process.h>
 #include <stdint.h>
 #include <windows.h>
+#define sc_environ _environ
+#define sc_getcwd _getcwd
+#define sc_chdir _chdir
+#define sc_setenv(n, v) _putenv_s(n, v)
+#define sc_unsetenv(n) _putenv_s(n, "")
 static HANDLE sc_runner_js;
 static int sc_runner_jobserver_active(void) {
   if (sc_runner_js != NULL) return 1;
@@ -637,6 +564,12 @@ static int sc_runner_jobserver_release(void) {
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+extern char **environ;
+#define sc_environ environ
+#define sc_getcwd getcwd
+#define sc_chdir chdir
+#define sc_setenv(n, v) setenv(n, v, 1)
+#define sc_unsetenv(n) unsetenv(n)
 static int sc_runner_js_read = -1;
 static int sc_runner_js_write = -1;
 static int sc_runner_jobserver_active(void) {
@@ -670,13 +603,10 @@ static void sc_runner_give_back(void) {
 )".ptr() as *const char;
 }
 
-// The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
-// pool bounded by the inherited process-tree jobserver, an in-process fallback (--no-fork), substring
-// selection, per-test reporting, and the exit code.
-// Each forked child writes to its own capture file, so a test's output is attributed to that test rather
-// than interleaved with the pool's. The captured text is replayed only for tests that fail, in a
-// `failures:` section after the run; `--quiet` also drops the per-test `ok` lines.
-const fn test_runner_main_posix() *const char {
+// The runner helpers both platforms share: name filter, environment and working-directory
+// snapshots for the in-process leg, capture reading and the failure report. The includes map the
+// sc_environ/sc_getcwd/sc_chdir/sc_setenv/sc_unsetenv names to each platform's C runtime.
+const fn test_runner_common() *const char {
     return M"(static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }
@@ -688,33 +618,32 @@ static char *sc_strdup(const char *s) {
 }
 /* The in-process leg has no per-test process, so it restores the environment itself: tests set
    compiler switches (SC_INLINE, SC_BCE, ...) and rely on the fork for isolation. */
-extern char **environ;
 static char *sc_getcwd_alloc(void) {
-  char *d = getcwd(NULL, 0);
+  char *d = sc_getcwd(NULL, 0);
   if (!d) { perror("getcwd"); exit(101); }
   return d;
 }
-static int sc_chdir_back(const char *d) { return chdir(d); }
+static int sc_chdir_back(const char *d) { return sc_chdir(d); }
 static char **sc_env_snapshot(void) {
   int n = 0;
-  while (environ[n]) n++;
+  while (sc_environ[n]) n++;
   char **snap = malloc(((size_t)n + 1) * sizeof *snap);
   if (!snap) { perror("malloc"); exit(101); }
-  for (int i = 0; i < n; i++) snap[i] = sc_strdup(environ[i]);
+  for (int i = 0; i < n; i++) snap[i] = sc_strdup(sc_environ[i]);
   snap[n] = NULL;
   return snap;
 }
 static void sc_env_restore(char **snap) {
-  /* unsetenv compacts environ, so the index only advances past kept entries */
-  for (int i = 0; environ[i];) {
-    const char *eq = strchr(environ[i], '=');
-    const size_t nl = eq ? (size_t)(eq - environ[i]) : strlen(environ[i]);
+  /* unsetting a variable compacts the environment, so the index only advances past kept entries */
+  for (int i = 0; sc_environ[i];) {
+    const char *eq = strchr(sc_environ[i], '=');
+    const size_t nl = eq ? (size_t)(eq - sc_environ[i]) : strlen(sc_environ[i]);
     int keep = 0;
-    for (int k = 0; snap[k] && !keep; k++) keep = !strncmp(snap[k], environ[i], nl) && snap[k][nl] == '=';
+    for (int k = 0; snap[k] && !keep; k++) keep = !strncmp(snap[k], sc_environ[i], nl) && snap[k][nl] == '=';
     if (keep) { i++; continue; }
-    char *name = sc_strdup(environ[i]);
+    char *name = sc_strdup(sc_environ[i]);
     name[nl] = 0;
-    unsetenv(name);
+    sc_unsetenv(name);
     free(name);
   }
   for (int k = 0; snap[k]; k++) {
@@ -722,7 +651,7 @@ static void sc_env_restore(char **snap) {
     if (eq) {
       *eq = 0;
       const char *cur = getenv(snap[k]);
-      if (!cur || strcmp(cur, eq + 1)) setenv(snap[k], eq + 1, 1);
+      if (!cur || strcmp(cur, eq + 1)) sc_setenv(snap[k], eq + 1);
     }
     free(snap[k]);
   }
@@ -759,7 +688,17 @@ static void sc_report_failures(int nfail, const int *fail_test, char **fail_out,
   for (int k = 0; k < nfail; k++) printf("    %s\n", SC_TESTS[fail_test[k]].name);
   fflush(stdout);
 }
-/* One line on how a failed test's process ended, from its wait status. */
+)".ptr() as *const char;
+}
+
+// The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
+// pool bounded by the inherited process-tree jobserver, an in-process fallback (--no-fork), substring
+// selection, per-test reporting, and the exit code.
+// Each forked child writes to its own capture file, so a test's output is attributed to that test rather
+// than interleaved with the pool's. The captured text is replayed only for tests that fail, in a
+// `failures:` section after the run; `--quiet` also drops the per-test `ok` lines.
+const fn test_runner_main_posix() *const char {
+    return M"(/* One line on how a failed test's process ended, from its wait status. */
 static char *sc_why_posix(int st, int should_panic) {
   char buf[128];
   if (WIFSIGNALED(st)) snprintf(buf, sizeof buf, "terminated by signal %d (%s)", WTERMSIG(st), strsignal(WTERMSIG(st)));
@@ -929,88 +868,7 @@ int main(int argc, char **argv) {
 // The child redirects its own stdout and stderr into the capture file; the parent reads it back for a
 // failed test and deletes it.
 const fn test_runner_main_win() *const char {
-    return M"(static int sc_match(const char *name, const char *filter) {
-  return !filter || strstr(name, filter) != NULL;
-}
-static char *sc_strdup(const char *s) {
-  char *d = malloc(strlen(s) + 1);
-  if (!d) { perror("malloc"); exit(101); }
-  strcpy(d, s);
-  return d;
-}
-/* The in-process leg has no per-test process, so it restores the environment itself: tests set
-   compiler switches (SC_INLINE, SC_BCE, ...) and rely on the fork for isolation. */
-static char *sc_getcwd_alloc(void) {
-  char *d = _getcwd(NULL, 0);
-  if (!d) { perror("getcwd"); exit(101); }
-  return d;
-}
-static int sc_chdir_back(const char *d) { return _chdir(d); }
-static char **sc_env_snapshot(void) {
-  int n = 0;
-  while (_environ[n]) n++;
-  char **snap = malloc(((size_t)n + 1) * sizeof *snap);
-  if (!snap) { perror("malloc"); exit(101); }
-  for (int i = 0; i < n; i++) snap[i] = sc_strdup(_environ[i]);
-  snap[n] = NULL;
-  return snap;
-}
-static void sc_env_restore(char **snap) {
-  /* _putenv_s compacts _environ, so the index only advances past kept entries */
-  for (int i = 0; _environ[i];) {
-    const char *eq = strchr(_environ[i], '=');
-    const size_t nl = eq ? (size_t)(eq - _environ[i]) : strlen(_environ[i]);
-    int keep = 0;
-    for (int k = 0; snap[k] && !keep; k++) keep = !strncmp(snap[k], _environ[i], nl) && snap[k][nl] == '=';
-    if (keep) { i++; continue; }
-    char *name = sc_strdup(_environ[i]);
-    name[nl] = 0;
-    _putenv_s(name, "");
-    free(name);
-  }
-  for (int k = 0; snap[k]; k++) {
-    char *eq = strchr(snap[k], '=');
-    if (eq) {
-      *eq = 0;
-      const char *cur = getenv(snap[k]);
-      if (!cur || strcmp(cur, eq + 1)) _putenv_s(snap[k], eq + 1);
-    }
-    free(snap[k]);
-  }
-  free(snap);
-}
-/* Everything the test wrote, as one owned NUL-terminated buffer (empty when it wrote nothing). */
-static char *sc_slurp(FILE *f) {
-  long n = 0;
-  if (f && fseek(f, 0, SEEK_END) == 0) n = ftell(f);
-  if (n < 0) n = 0;
-  char *buf = malloc((size_t)n + 1);
-  if (!buf) { perror("malloc"); exit(101); }
-  size_t got = 0;
-  if (f) { rewind(f); got = fread(buf, 1, (size_t)n, f); }
-  buf[got] = 0;
-  return buf;
-}
-/* The failures, together, after the run: each test's captured output under its own header, how the
-   process ended, then the bare list of names. */
-static void sc_report_failures(int nfail, const int *fail_test, char **fail_out, char **fail_why) {
-  printf("\nfailures:\n");
-  for (int k = 0; k < nfail; k++) {
-    printf("\n---- %s ----\n", SC_TESTS[fail_test[k]].name);
-    const size_t len = strlen(fail_out[k]);
-    if (len > 0) {
-      fwrite(fail_out[k], 1, len, stdout);
-      if (fail_out[k][len - 1] != '\n') putchar('\n');
-    }
-    printf("%s\n", fail_why[k]);
-    free(fail_out[k]);
-    free(fail_why[k]);
-  }
-  printf("\nfailures:\n");
-  for (int k = 0; k < nfail; k++) printf("    %s\n", SC_TESTS[fail_test[k]].name);
-  fflush(stdout);
-}
-/* One line on how a failed test's process ended, from its exit code. */
+    return M"(/* One line on how a failed test's process ended, from its exit code. */
 static char *sc_why_win(DWORD code, int should_panic) {
   char buf[128];
   if (code != 0) snprintf(buf, sizeof buf, "exited with code %lu (0x%08lX)", (unsigned long)code, (unsigned long)code);
@@ -1281,6 +1139,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
             f,
         );
     }
+    unsafe stdio::fputs(test_runner_common(), f);
     unsafe stdio::fputs("#ifdef _WIN32\n".ptr() as *const char, f);
     unsafe stdio::fputs(test_runner_main_win(), f);
     unsafe stdio::fputs("#else\n".ptr() as *const char, f);
@@ -1288,6 +1147,24 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
     unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
     unsafe stdio::fclose(f);
     return Option::<String>::Some(path);
+}
+
+/// Append the `@c.link` flags of the `__ldflags` file `path` (one flag string per line, split on
+/// whitespace) to `args`; a missing file adds nothing.
+pub fn push_ldflags(args: &mut Vector<String>, path: str) {
+    let lf = loader::read_file(path);
+    if lf.is_none() {
+        return;
+    }
+    let body = lf.unwrap();
+    let s = body.as_str();
+    let mut a: usize = 0;
+    for b in 0..s.len() + 1 {
+        if b == s.len() || s[b] == b'\n' {
+            split_args(args, s.slice(a, b));
+            a = b + 1;
+        }
+    }
 }
 
 /// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
@@ -1304,20 +1181,7 @@ pub fn test_build_and_run(
     // A cross target brings its own compiler: $CC on the host would build a host binary while the front end
     // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
-    let mut ccs = String::new();
-    if p.cc.len() != 0 {
-        ccs.push_string(&p.cc);
-    } else if sdk != 0 {
-        sdk_cc(sdk, &mut ccs);
-    }
-    if ccs.len() == 0 {
-        let env = stdlib::getenv("CC");
-        if env != null && unsafe *env != 0 as char {
-            ccs.push_str(str::from_cstr(env));
-        } else {
-            ccs.push_str("cc");
-        }
-    }
+    let mut ccs = resolve_cc(p.cc.as_str(), sdk);
     let root = p.gen_root.as_str();
     // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
     // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
@@ -1355,22 +1219,8 @@ pub fn test_build_and_run(
             args.push(String::from_str(cf));
         }
     }
-    // @c.link flags, one per line in build/__ldflags.
     let ldpath = build_out_path(root, "__ldflags", "");
-    let lf = stdio::fopen(ldpath.as_str(), "rb");
-    if lf != null {
-        let mut line = PathBuf {};
-        while unsafe stdio::fgets(&mut line[0], 4096, lf) != null {
-            let ll2 = unsafe cstring::strlen(&line[0]);
-            if ll2 > 0 && line[ll2 - 1] == '\n' as char {
-                line[ll2 - 1] = 0 as char;
-            }
-            if line[0] != 0 as char {
-                split_args(&mut args, str::from_cstr(&line[0]));
-            }
-        }
-        unsafe stdio::fclose(lf);
-    }
+    push_ldflags(&mut args, ldpath.as_str());
     let brc = exec_args(&mut args, null);
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;

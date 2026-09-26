@@ -67,7 +67,8 @@ extend Counter {
 }
 ```
 
-Fields are private by default; `pub` exposes them cross-module. One `extend` block per
+Fields are private by default: only the type's own `extend` blocks can name a private field, even
+in the same module; `pub` exposes it everywhere. One `extend` block per
 type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate.
 
 ## Enums and Pattern Matching
@@ -88,7 +89,9 @@ fn area(s: Shape) i32 {
 }
 ```
 
-`switch` is exhaustive and usable as an expression. Arms combine alternatives with `|`.
+`switch` is exhaustive and usable as an expression. Arms combine alternatives with `|`. A pattern
+names a variant bare (`Circle(r)`); a qualified path (`Shape::Circle(r)`) is a parse error. A tuple
+pattern (`(a, _)`, `(Some(x), mut n)`) destructures a tuple in arms, `if let` and `while let`.
 A pattern matched against a reference (`&T` or `&mut T`, at the top or nested, as in
 `Option<&E>`) reads the referent: literal and range sub-patterns test the value, and
 names bound inside bind by `&` (or `&mut` through a `&mut` with no `&` above it), so
@@ -101,7 +104,10 @@ one byte when the enum has at most 256 variants and no explicit discriminant, an
 ## Ownership and RAII
 
 The destructor interface is `Free` with method `.free()`. Ownership is **derived**: a
-struct whose members own memory auto-synthesizes `free`. Owning values move, not copy.
+struct whose members own memory auto-synthesizes `free`. Owning values move, not copy. A
+conditional `extend<T: Free> X<T> as Free` covers only the instances whose `Free`-bounded
+arguments own memory (`X<String>`); any other instance (`X<i32>`) still derives its `free` from
+its owning members, and an explicit `.free()` on it runs that derived destructor.
 
 ```superc
 let a = String::from_str("owned");
@@ -145,6 +151,8 @@ Lifetime annotations are Rust-style and almost always elided.
 
 `unsafe` is **required** for:
 - Raw-pointer dereference, indexing, arithmetic
+- Indexing a fixed array `[T; N]` (also through a reference) with an index that is not a
+  constant within `N`; a constant index is checked at compile time at every nesting level
 - Every call to an `extern "C"` function
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
@@ -176,6 +184,14 @@ drops the old value. A second use is "use of moved value"; copying out of `&T` i
 The instance whose concrete type owns nothing emits no drop code (`f::<i64>` costs nothing).
 Raw-pointer reads (`unsafe *p`, `unsafe p[i]`) hand out an owned bitwise copy and raw-pointer
 writes never drop the old value, so container internals move slots explicitly.
+An array owns what its elements own. `for x in arr` over an owned array consumes it: each element
+moves into `x` and is freed at the end of its iteration, and `break`, `return` or an outer exit
+frees the elements the loop did not reach. A by-value `for` over a slice, a view or `*r` cannot
+move a `Free` element out. A `for` binding is a name or an irrefutable pattern (`for (k, v) in ..`,
+`for ((a, _), mut c) in ..`, `for P { x, .. } in ..`, `for _ in ..`): each element destructures like
+a `let`, parts no name takes are freed with the element, and elements behind a reference bind by
+reference. `for mut i in a..b` makes the induction variable itself mutable: a write to `i` changes
+the next iteration.
 
 ```superc
 fn twice<T: Copy>(x: T) (T, T) { return (x, x); }
@@ -184,11 +200,18 @@ fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out throu
 
 ## Closures
 
-Three capture flavors:
+Capture flavors:
 - **Read** — copy at creation (default)
-- **Mutated** (`FnMut`) — implicit `&mut` capture, writes land on outer variable
-- **Owned** (`FnOnce`) — moves value into env, closure becomes `Free`; a captured reference
-  or pointer never owns what it points at, so `let kp = &v;` keeps a closure a plain `fn(..)`
+- **Mutated** (`FnMut`) — a non-owning capture the body assigns, borrows `&mut` or calls a
+  `&mut self` method on: implicit `&mut` capture, writes land on the outer variable. The
+  capture is an exclusive borrow: until the closure's last use, the outer binding cannot be
+  read, borrowed, assigned or moved
+- **Owned** (`FnOnce`) — a `Free` capture moves into the env, closure becomes `Free`; the body
+  mutates its own copy
+- **Borrowed** — when a closure meets a plain `F: fn(..)` bound, its `Free` captures are borrowed
+  instead of owned (implicit `&`, or `&mut` for the ones the body mutates), so the closure owns
+  nothing; the outer binding stays borrowed while the closure lives. A captured reference or pointer
+  never owns what it points at.
 
 ```superc
 let g = |x: i32| x * 2;                       // compact closure
@@ -197,6 +220,8 @@ let h = fn(x: i32) i32 { return x + 1; };     // anonymous function
 
 Non-capturing closures lower to plain function pointers. Generic bounds use
 `F: fn(..) ..` (or `where F: fn(..) ..`). Ownership-marked bound: `F: fn move(..) ..`.
+Any closure, with or without captures, erases to `&dyn fn(..)` or `Box<dyn fn(..)>` (a boxed env
+frees its owned captures once). `move` before a closure literal is the closure itself.
 
 ## Interfaces
 
@@ -228,7 +253,8 @@ Imports are public and C-style transitive. Cycles are legal. Prelude types (`Str
 ## Visibility
 
 Private by default. `pub` on structs, enums, functions, fields, constants, type aliases.
-Field privacy is enforced cross-module.
+A private field is visible only inside its type's own `extend` blocks (member access, struct
+literals and struct patterns), in the declaring module too.
 
 ## Slices and Arrays
 
@@ -243,7 +269,10 @@ let a: [i32; 4] = [10, 20, 30, 40];
 ```
 
 `[]T` / `[]mut T` lower to prelude `Slice<T>` / `SliceMut<T>`. Arrays coerce to slices.
-`[T; N]` is a distinct type.
+`[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
+element, a closure capture and a return copy it. A nested literal without an annotation takes its
+inner length from its elements (`[[1, 2], [3, 4]]` is `[[i32; 2]; 2]`), and its elements must
+agree on that length.
 
 ## Compile-Time Evaluation
 

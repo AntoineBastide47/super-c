@@ -20,6 +20,7 @@ import build_system::manifest as bman;
 import build_system::build as bsys;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
+import driver::taskctl as tctl;
 
 fn run_file(
     path: str,
@@ -74,45 +75,11 @@ fn run_file(
             // A serial compile hands its slots back.
             unsafe shim::sc_jobserver_release_claim();
         }
-        let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
+        let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
         p.cir = &mut cirv;
-        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
-        if ce_steps != 0 {
-            cirv.max_steps = ce_steps;
-        }
-        if ce_mem != 0 {
-            // Bytes -> IVal slots.
-            cirv.max_slots = ce_mem / 32;
-        }
         rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null);
     }
     return rc;
-}
-
-// "1024", "64K", "16M", "1G" -> bytes; 0 on malformed input.
-fn parse_size(s: *const char) u64 {
-    let mut endp: *mut char = null;
-    let v = unsafe stdlib::strtoul(s, &mut endp, 10);
-    if endp as usize == s as usize || v == 0 {
-        return 0;
-    }
-    let mut mul: u64 = 1;
-    let mut e = endp;
-    let c = unsafe *endp;
-    if c == 'K' as char || c == 'k' as char {
-        mul = 1024;
-        e = unsafe (endp + 1);
-    } else if c == 'M' as char || c == 'm' as char {
-        mul = (1024 * 1024) as u64;
-        e = unsafe (endp + 1);
-    } else if c == 'G' as char || c == 'g' as char {
-        mul = (1024 * 1024 * 1024) as u64;
-        e = unsafe (endp + 1);
-    }
-    if unsafe *e == 0 as char {
-        return v * mul;
-    }
-    return 0;
 }
 
 // Parse the one-based K/N used by --test-shard. Both numbers must consume the full argument.
@@ -200,7 +167,7 @@ fn exe_std_dir(argv0: *const char) String {
     return base;
 }
 
-fn read_stdin() Option<String> {
+fn read_stdin() String {
     let mut s = String::new();
     let cap: usize = 65536;
     let mut buf = Vector::<u8>::new();
@@ -215,31 +182,18 @@ fn read_stdin() Option<String> {
             break;
         }
     }
-    return Option::<String>::Some(s);
+    return s;
 }
 
 // The entries of `dir` in name order, without the dot-entries (".", "..", hidden); None when the
 // directory cannot be read.
 fn dir_entries(dir: str) Option<Vector<String>> {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
-        return Option::<Vector<String>>::None;
+    let lo = list_dir(dir, false);
+    if lo.is_none() {
+        return lo;
     }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        if unsafe nm[0] == '.' as char {
-            continue;
-        }
-        names.push(String::from_cstr(nm));
-    }
-    unsafe shim::sc_closedir(dh);
-    names.sort_by(loader::name_cmp);
+    let mut names = lo.unwrap();
+    names.sort();
     return Option::<Vector<String>>::Some(names);
 }
 
@@ -280,29 +234,14 @@ fn project_paths() Vector<String> {
     return out;
 }
 
-// Recursively format every .spc under `dir` (sorted; dot-entries skipped). Returns 1 if any file
-// failed or (--check) needs formatting, else 0.
+// Format every .spc under `dir` (spc_collect order). Returns 1 if a directory could not be read, a
+// file failed, or (--check) a file needs formatting, else 0.
 fn fmt_dir(dir: str, write: bool, check: bool) i32 {
-    let eo = dir_entries(dir);
-    if eo.is_none() {
-        eprintln("fmt: cannot read directory '{}'", dir);
-        return 1;
-    }
-    let names = eo.unwrap();
-    let mut rc = 0;
-    for i in 0..names.len() {
-        let mut p = String::from_str(dir);
-        p.push_byte(b'/');
-        p.push_string(names.at(i));
-        let isdir = unsafe shim::sc_stat_isdir(p.cstr());
-        if isdir == 1 {
-            if fmt_dir(p.as_str(), write, check) != 0 {
-                rc = 1;
-            }
-        } else if names.at(i).as_str().ends_with(".spc") {
-            if fmt_one(p.as_str(), false, write, check) != 0 {
-                rc = 1;
-            }
+    let mut files = Vector::<String>::new();
+    let mut rc = spc_collect(dir, "fmt", &mut files);
+    for i in 0..files.len() {
+        if fmt_one(files.at(i).as_str(), false, write, check) != 0 {
+            rc = 1;
         }
     }
     return rc;
@@ -361,6 +300,72 @@ fn lint_alt() str<'static> {
     return "";
 }
 
+// One lint pass over the loaded package `p`, reporting as lint_package with `lint_mod`. Without
+// `fix`: the exit code. With `fix` (quiet): 1 on an error or a failed write; else, when `apply`, the
+// machine fixes are written (each fixed file reformatted: canonicalization can unlock paren-guarded
+// fixes) and the result is 2 if any was written; else 0.
+fn lint_pass(
+    p: &mut loader::Package,
+    target: i32,
+    lint_mod: usize,
+    ce_steps: u32,
+    ce_mem: u64,
+    fix: bool,
+    apply: bool,
+    sc: bool,
+) i32 {
+    // Parallel analysis; resolves to 1 on wasm.
+    p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
+    if p.jobs == 1 {
+        prt::shutdown(); // parallel loading may have started the pool
+    }
+    let mut cirv = iri::interp_master(p as *mut loader::Package, ce_steps, ce_mem);
+    p.cir = &mut cirv;
+    let mut rc = 0;
+    let mut fixes = Vector::<diag::LintFix>::new();
+    let mut ftexts = Vector::<String>::new();
+    if !fix {
+        rc = lint_package(p, target, lint_mod, null, null, sc);
+    } else {
+        lint_package(p, target, lint_mod, &mut fixes, &mut ftexts, sc);
+        if !p.ok {
+            rc = 1;
+        }
+    }
+    let mut written = false;
+    let mut werr = false;
+    for m in 0..p.modules.len() {
+        if rc != 0 || !apply {
+            break;
+        }
+        let mut mf = Vector::<diag::LintFix>::new();
+        for k in 0..fixes.len() {
+            if fixes[k].module as usize == m {
+                mf.push(fixes[k]);
+            }
+        }
+        if mf.len() == 0 {
+            continue;
+        }
+        let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
+        if write_source(p.modules[m].file.as_str(), out.as_str()) {
+            fmt_one(p.modules[m].file.as_str(), false, true, false);
+            written = true;
+        } else {
+            eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
+            werr = true;
+        }
+    }
+    p.cir = null; // `cirv` ends here
+    if werr {
+        return 1;
+    }
+    if written {
+        return 2;
+    }
+    return rc;
+}
+
 fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root (the prelude comes along as
@@ -393,59 +398,24 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         if !p.ok {
             return 1;
         }
-        // Parallel analysis; resolves to 1 on wasm.
-        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
-        if p.jobs == 1 {
-            prt::shutdown(); // parallel loading may have started the pool
-        }
-        let pkg = (&mut p) as *mut loader::Package;
-        let mut cirv = iri::interp_new(pkg);
-        p.cir = &mut cirv;
-        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
-        if ce_steps != 0 {
-            cirv.max_steps = ce_steps;
-        }
-        if ce_mem != 0 {
-            // Bytes -> IVal slots.
-            cirv.max_slots = ce_mem / 32;
-        }
-        if !fix {
-            let rc = lint_package(&mut p, target, lint_mod, null, null, sc);
+        let rc = lint_pass(&mut p, target, lint_mod, ce_steps, ce_mem, fix, pass < 8, sc);
+        if rc == 1 || !fix {
             return rc;
         }
-        let mut fixes = Vector::<diag::LintFix>::new();
-        let mut ftexts = Vector::<String>::new();
-        lint_package(&mut p, target, lint_mod, &mut fixes, &mut ftexts, sc);
-        let errors = !p.ok;
-        let mut applied = false;
-        let mut werr = false;
-        if !errors && fixes.len() != 0 && pass < 8 {
-            let out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes, &ftexts);
-            if !write_source(p.modules[lint_mod].file.as_str(), out.as_str()) {
-                eprintln("lint: cannot write '{}'", path);
-                werr = true;
-            } else {
-                applied = true;
-            }
-        }
-        if errors || werr {
-            return 1;
-        }
-        if !applied {
+        if rc == 0 {
             break;
         }
-        // Reformat before re-linting: canonicalization can unlock paren-guarded fixes.
-        fmt_one(path, false, true, false);
         pass = pass + 1;
     }
     return lint_one(path, root, std_dir, ce_steps, ce_mem, target, false, sc);
 }
 
-// Collect every .spc under `dir` recursively (dir_entries order, matching lint_dir's walk).
-fn lint_collect(dir: str, files: &mut Vector<String>) i32 {
+// Collect every .spc under `dir` recursively, in dir_entries order (dot-entries skipped). Returns 1
+// when a directory cannot be read (reported as a `cmd` error), else 0.
+fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
     let eo = dir_entries(dir);
     if eo.is_none() {
-        eprintln("lint: cannot read directory '{}'", dir);
+        eprintln("{}: cannot read directory '{}'", cmd, dir);
         return 1;
     }
     let names = eo.unwrap();
@@ -455,7 +425,7 @@ fn lint_collect(dir: str, files: &mut Vector<String>) i32 {
         p.push_byte(b'/');
         p.push_string(names.at(i));
         if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
-            if lint_collect(p.as_str(), files) != 0 {
+            if spc_collect(p.as_str(), cmd, files) != 0 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
@@ -499,9 +469,7 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
         mids.push(mid);
     }
     let mut set = Vector::<bool>::new();
-    for m in 0..p.modules.len() {
-        set.push(false);
-    }
+    set.resize_default(p.modules.len());
     for k in 0..mids.len() {
         if mids[k] >= 0 {
             set.set(mids[k] as usize, true);
@@ -535,57 +503,11 @@ fn lint_batch(
         if !p.ok {
             return 1;
         }
-        // Parallel analysis; resolves to 1 on wasm.
-        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
-        if p.jobs == 1 {
-            prt::shutdown(); // parallel loading may have started the pool
+        let rc = lint_pass(&mut p, target, 0, ce_steps, ce_mem, fix, pass < 8, sc);
+        if rc == 1 || !fix {
+            return rc;
         }
-        let pkg = (&mut p) as *mut loader::Package;
-        let mut cirv = iri::interp_new(pkg);
-        p.cir = &mut cirv;
-        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
-        if ce_steps != 0 {
-            cirv.max_steps = ce_steps;
-        }
-        if ce_mem != 0 {
-            // Bytes -> IVal slots.
-            cirv.max_slots = ce_mem / 32;
-        }
-        if !fix {
-            return lint_package(&mut p, target, 0, null, null, sc);
-        }
-        let mut fixes = Vector::<diag::LintFix>::new();
-        let mut ftexts = Vector::<String>::new();
-        lint_package(&mut p, target, 0, &mut fixes, &mut ftexts, sc);
-        let errors = !p.ok;
-        let mut applied = false;
-        let mut werr = false;
-        if !errors && fixes.len() != 0 && pass < 8 {
-            for m in 0..p.modules.len() {
-                let mut mf = Vector::<diag::LintFix>::new();
-                for k in 0..fixes.len() {
-                    if fixes[k].module as usize == m {
-                        mf.push(fixes[k]);
-                    }
-                }
-                if mf.len() == 0 {
-                    continue;
-                }
-                let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
-                if !write_source(p.modules[m].file.as_str(), out.as_str()) {
-                    eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
-                    werr = true;
-                } else {
-                    // Reformat before re-linting: canonicalization can unlock paren-guarded fixes.
-                    fmt_one(p.modules[m].file.as_str(), false, true, false);
-                    applied = true;
-                }
-            }
-        }
-        if errors || werr {
-            return 1;
-        }
-        if !applied {
+        if rc == 0 {
             break;
         }
         pass = pass + 1;
@@ -594,19 +516,11 @@ fn lint_batch(
     return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
-/// True when `path` names a directory. A `str` is a view without a terminator, so the C `stat`
-/// reads a terminated copy: a heap string whose allocation is exactly its length has no zero byte
-/// after it (a 28-byte fixture path under wasmtime read as "cannot read").
-fn path_is_dir(path: str) bool {
-    let mut p = String::from_str(path);
-    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
-}
-
 // `super-c lint <path>`: a file loads as its own root (its import closure + prelude) and is linted
 // there; a directory lints every .spc under it in one shared package. Lints files that are not part
 // of any binary's import closure.
 fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
-    if path_is_dir(path) {
+    if is_dir(path) {
         // Every file under the directory resolves imports against the directory itself.
         let droot = if lint_alt().len() != 0 {
             ".";
@@ -614,13 +528,9 @@ fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fi
             path;
         };
         let mut files = Vector::<String>::new();
-        let crc = lint_collect(path, &mut files);
+        let crc = spc_collect(path, "lint", &mut files);
         let brc = lint_batch(&files, droot, std_dir, ce_steps, ce_mem, target, fix, sc, false);
-        return if crc != 0 || brc != 0 {
-            1;
-        } else {
-            0;
-        };
+        return (crc != 0 || brc != 0) as i32;
     }
     let froot = if lint_alt().len() != 0 {
         ".";
@@ -639,7 +549,7 @@ fn run_fmt(path: str, check: bool) i32 {
     if is_stdin {
         return fmt_one(path, true, false, check);
     }
-    if path_is_dir(path) {
+    if is_dir(path) {
         return fmt_dir(path, !check, check);
     }
     return fmt_one(path, false, !check, check);
@@ -651,22 +561,23 @@ fn write_source(path: str, body: str) bool {
     let mut p = String::from_str(path);
     let mut abs = PathBuf {};
     if unsafe shim::sc_realpath(p.cstr(), &mut abs[0]) != null {
-        return bsys::write_file_atomic(str::from_cstr(&abs[0]), body);
+        return write_file_atomic(str::from_cstr(&abs[0]), body);
     }
-    return bsys::write_file_atomic(path, body);
+    return write_file_atomic(path, body);
 }
 
 fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
-    let src_opt = if is_stdin {
-        read_stdin();
+    let mut src = String::new();
+    if is_stdin {
+        src = read_stdin();
     } else {
-        loader::read_file(path);
-    };
-    if src_opt.is_none() {
-        eprintln("fmt: cannot read '{}'", path);
-        return 1;
+        let r = loader::read_file(path);
+        if r.is_none() {
+            eprintln("fmt: cannot read '{}'", path);
+            return 1;
+        }
+        src = r.unwrap();
     }
-    let src = src_opt.unwrap();
 
     let mut out = String::new();
     if !format_source(&src, path, 120, &mut out) {
@@ -696,6 +607,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
 
 // CLI mode: `super-c <subcommand> <flags|args...>`; the subcommand is always the first argument;
 // a non-keyword first argument means MODE_DEFAULT (compile a script).
+// Declaration order is bman::subcommand_index order, shifted by one for MODE_DEFAULT.
 enum Mode {
     MODE_DEFAULT, // `super-c <root.spc>`: compile (emit C; `--test` runs tests instead)
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
@@ -715,23 +627,7 @@ enum Mode {
 }
 
 fn subcommand(arg: str) Mode {
-    return switch arg {
-        "build" => Mode::MODE_BUILD,
-        "release" => Mode::MODE_RELEASE,
-        "fmt" => Mode::MODE_FMT,
-        "lint" => Mode::MODE_LINT,
-        "run" => Mode::MODE_RUN,
-        "command" => Mode::MODE_COMMAND,
-        "clean" => Mode::MODE_CLEAN,
-        "test" => Mode::MODE_TEST,
-        "bench" => Mode::MODE_BENCH,
-        "lsp" => Mode::MODE_LSP,
-        "new" => Mode::MODE_NEW,
-        "init" => Mode::MODE_INIT,
-        "vendor" => Mode::MODE_VENDOR,
-        "bindgen" => Mode::MODE_BINDGEN,
-        _ => Mode::MODE_DEFAULT,
-    };
+    return (bman::subcommand_index(arg) + 1) as Mode;
 }
 
 // Flags accepted by every compiling mode.
@@ -748,14 +644,14 @@ struct CommonOpts {
 extend CommonOpts {
     fn common_flag(self: &mut Self, arg: str) bool {
         if arg.starts_with("--const-eval-steps=") {
-            let v = parse_size((&arg[19]) as *const char);
+            let v = tctl::parse_size(arg[19..]).unwrap_or(0);
             if v == 0 || v > 4294967295u64 {
                 self.bad = true;
             } else {
                 self.ce_steps = v as u32;
             }
         } else if arg.starts_with("--const-eval-memory=") {
-            self.ce_mem = parse_size((&arg[20]) as *const char);
+            self.ce_mem = tctl::parse_size(arg[20..]).unwrap_or(0);
             if self.ce_mem == 0 {
                 self.bad = true;
             }
@@ -1249,14 +1145,6 @@ OPTIONS:
         );
         return 1;
     }
-    let ce_steps = co.ce_steps;
-    let ce_mem = co.ce_mem;
-    let target = co.target;
-    let bootstrap_tags = co.bootstrap_tags;
-    let lint = co.lint;
-    let profile = bo.profile;
-    let out_dir = bo.out_dir;
-    let cstd = bo.cstd;
     // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
     // single-threaded host (wasm) must resolve to the serial path.
     let jobs_wanted = if bo.jobs != 0 {
@@ -1266,8 +1154,7 @@ OPTIONS:
     };
     // Waiting test parents transfer their slots to nested compilers. One process-tree slot per core keeps
     // independent tests parallel while nested compilers run serially instead of competing for the same cores.
-    let tree_jobs = jobs_wanted;
-    unsafe shim::sc_jobserver_init(tree_jobs as i32);
+    unsafe shim::sc_jobserver_init(jobs_wanted as i32);
     let jobs = (unsafe shim::sc_jobserver_claim(jobs_wanted as i32)) as u32;
     // Fmt/lint take any number of paths; with none, the project discovers itself.
     let mut paths = Vector::<String>::new();
@@ -1291,11 +1178,7 @@ OPTIONS:
         while e > 0 && file[e - 1] == b'/' {
             e = e - 1;
         }
-        let mut k = e;
-        while k > 0 && file[k - 1] != b'/' {
-            k = k - 1;
-        }
-        return bsys::scaffold_project(file, file.slice(k, e));
+        return bsys::scaffold_project(file, loader::basename_of(file.slice(0, e)));
     }
     if mode == Mode::MODE_VENDOR {
         return bsys::vendor_dep(vendor_dir, file, vendor_name, vendor_ref, vendor_force);
@@ -1311,12 +1194,7 @@ OPTIONS:
     }
     if mode == Mode::MODE_INIT {
         let cwd = canon_cwd();
-        let name = cwd.as_str();
-        let mut k = name.len();
-        while k > 0 && name[k - 1] != b'/' {
-            k = k - 1;
-        }
-        return bsys::scaffold_project(".", name.slice(k, name.len()));
+        return bsys::scaffold_project(".", loader::basename_of(cwd.as_str()));
     }
     if mode == Mode::MODE_FMT {
         let mut rc = 0;
@@ -1341,8 +1219,8 @@ OPTIONS:
             let mut files = Vector::<String>::new();
             for k in 0..paths.len() {
                 let pa = paths.at(k).as_str();
-                if path_is_dir(pa) {
-                    if lint_collect(pa, &mut files) != 0 {
+                if is_dir(pa) {
+                    if spc_collect(pa, "lint", &mut files) != 0 {
                         rc = 1;
                     }
                 } else {
@@ -1360,9 +1238,9 @@ OPTIONS:
                 &files,
                 ".",
                 std_dir.as_str(),
-                ce_steps,
-                ce_mem,
-                target,
+                co.ce_steps,
+                co.ce_mem,
+                co.target,
                 lint_fix,
                 lint_sc,
                 lpub,
@@ -1371,7 +1249,15 @@ OPTIONS:
             }
         } else {
             for k in 0..paths.len() {
-                if run_lint(paths.at(k).as_str(), std_dir.as_str(), ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+                if run_lint(
+                    paths.at(k).as_str(),
+                    std_dir.as_str(),
+                    co.ce_steps,
+                    co.ce_mem,
+                    co.target,
+                    lint_fix,
+                    lint_sc,
+                ) != 0 {
                     rc = 1;
                 }
             }
@@ -1392,38 +1278,41 @@ OPTIONS:
                 return 0;
             }
         }
-        let rc = lsp_srv::run(std_dir.as_str(), target);
+        let rc = lsp_srv::run(std_dir.as_str(), co.target);
         return rc;
     }
     if manifest_mode {
-        let mo = bman::load("build.toml", bootstrap_tags);
+        let mo = bman::load("build.toml", co.bootstrap_tags);
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
             // --target=ios|android|wasm picks the cross toolchain.
-            man.sdk = target_sdk(target);
-            // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
-            // Capture the CLI values under fresh names: shadowing `ce_steps` with an initializer
-            // that reads `ce_steps` would resolve to the new (uninitialized) binding.
-            let cli_steps = ce_steps;
-            let cli_mem = ce_mem;
-            let ce_steps = if cli_steps != 0 {
-                cli_steps;
-            } else {
-                man.ce_steps;
+            man.sdk = target_sdk(co.target);
+            let cx = bsys::BuildCtx {
+                jobs: jobs,
+                std_dir: std_dir.as_str(),
+                // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
+                ce_steps: if co.ce_steps != 0 {
+                    co.ce_steps;
+                } else {
+                    man.ce_steps;
+                },
+                ce_mem: if co.ce_mem != 0 {
+                    co.ce_mem;
+                } else {
+                    man.ce_mem;
+                },
+                target: co.target,
+                bootstrap_tags: co.bootstrap_tags,
+                lint: co.lint,
             };
-            let ce_mem = if cli_mem != 0 {
-                cli_mem;
-            } else {
-                man.ce_mem;
-            };
-            if out_dir.len() != 0 {
-                man.out_dir = String::from_str(out_dir);
+            if bo.out_dir.len() != 0 {
+                man.out_dir = String::from_str(bo.out_dir);
             }
-            if cstd.len() != 0 {
-                man.cstd = String::from_str(cstd);
+            if bo.cstd.len() != 0 {
+                man.cstd = String::from_str(bo.cstd);
             }
             if bo.cc.len() != 0 {
                 man.cc = String::from_str(bo.cc);
@@ -1439,106 +1328,39 @@ OPTIONS:
                 }
             } else if mode == Mode::MODE_TEST {
                 topts.enabled = true;
-                rc = bsys::manifest_test(
-                    &man,
-                    profile,
-                    jobs,
-                    &topts,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                );
+                rc = bsys::manifest_test(&man, bo.profile, &cx, &topts);
             } else if mode == Mode::MODE_BENCH {
-                rc = bsys::manifest_bench(
-                    &man,
-                    profile,
-                    bench_norun,
-                    bench_filter,
-                    jobs,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                );
+                rc = bsys::manifest_bench(&man, bo.profile, bench_norun, bench_filter, &cx);
             } else if mode == Mode::MODE_COMMAND {
-                rc = bsys::manifest_run(
-                    &man,
-                    file,
-                    profile,
-                    jobs,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                    lint,
-                );
+                rc = bsys::manifest_run(&man, file, bo.profile, &cx);
             } else if mode == Mode::MODE_RUN {
                 // Cargo run: build the manifest binary and exec it.
-                rc = bsys::manifest_run_bin(
-                    &man,
-                    profile,
-                    out_bin,
-                    bo.bin_sel,
-                    jobs,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                    lint,
-                );
+                rc = bsys::manifest_run_bin(&man, bo.profile, out_bin, bo.bin_sel, &cx);
             } else if out_bin.len() != 0 {
-                rc = bsys::manifest_build(
-                    &man,
-                    profile,
-                    out_bin,
-                    jobs,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                    lint,
-                );
+                rc = bsys::manifest_build(&man, bo.profile, out_bin, &cx);
             } else {
-                rc = bsys::manifest_build_all(
-                    &man,
-                    profile,
-                    bo.bin_sel,
-                    bo.lib_sel,
-                    jobs,
-                    std_dir.as_str(),
-                    ce_steps,
-                    ce_mem,
-                    target,
-                    bootstrap_tags,
-                    lint,
-                );
+                rc = bsys::manifest_build_all(&man, bo.profile, bo.bin_sel, bo.lib_sel, &cx);
             }
         }
         return rc;
     }
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
-    let pflags = bsys::profile_flags(profile, target, target_sdk(target));
+    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target));
     let rc = run_file(
         file,
         std_dir.as_str(),
-        ce_steps,
-        ce_mem,
+        co.ce_steps,
+        co.ce_mem,
         &topts,
         out_bin,
-        target,
+        co.target,
         co.arch,
-        bootstrap_tags,
-        lint,
+        co.bootstrap_tags,
+        co.lint,
         pflags.as_str(),
         jobs,
-        out_dir,
+        bo.out_dir,
         bo.cc,
     );
     return rc;

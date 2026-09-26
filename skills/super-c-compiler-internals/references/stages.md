@@ -1,6 +1,6 @@
 # Compiler Stages Reference
 
-Each stage as `run_package_i` (`src/driver/emit.spc`) actually runs it, in execution
+Each stage as `run_package` (`src/driver/emit.spc`) actually runs it, in execution
 order. Env-gated verification passes are marked; they are no-ops in a normal build.
 
 ## 1. Load: Lex + Parse (`src/module/loader.spc`, `src/lexer/`, `src/ast/parser.spc`)
@@ -171,8 +171,8 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 Transitive TU pruning first: keep scan-live modules plus everything a kept TU spells
 symbols from. Then, in emit order:
 
-1. `__sc_fwd.h`, every `<module>__types.h` (one per SCC of the by-value module graph)
-   and every `<module>.h` (prototypes, `_ret` typedefs, constant and descriptor
+1. `__sc_fwd.h`, every definition header `__sc_t/<type>.h` (one per emitted type) and
+   every `<module>.h` (prototypes, `_ret` typedefs, constant and descriptor
    declarations) — before any source file.
 2. Per-module `.c` shards (`<module>.c`, then `<module>__p<k>.c` under the build.toml
    `[shards]` count: a chunk's shard is its stable symbol hash modulo the count). Module

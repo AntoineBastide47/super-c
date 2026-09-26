@@ -154,3 +154,180 @@ fn usefulness_verdicts() {
         "a catch-all row absorbs the wildcard probe",
     );
 }
+
+// A tuple pattern `(p0, p1, ..)` destructures a tuple in switch arms, `if let` and `while let`:
+// nested patterns, `_`, `mut` bindings, literals, variant payloads and reference scrutinees (the
+// bindings then borrow). A `String` element moves out once and is freed once (the fatal leak gate).
+@test
+fn tuple_patterns_destructure_tuples() {
+    let r = h::compile_and_run_env(
+        M"(enum E { A(i32), B }
+fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn peek(p: &(String, i32)) usize {
+    return switch p {
+        (s, 0) => s.len(),
+        (_, n) => *n as usize,
+    };
+}
+fn main() i32 {
+    let t: (i32, (bool, i32)) = (4, (true, 5));
+    let a = switch t {
+        (4, (false, _)) => 1,
+        (x, (true, mut y)) => {
+            y += x;
+            y;
+        },
+        (_, (false, _)) => 3,
+    };
+    let p = (E::A(3), 9);
+    let b = switch p {
+        (A(v), w) => v + w,
+        (B, w) => w,
+    };
+    let q = (heap("q"), 0);
+    let c = peek(&q) as i32;
+    let moved = switch q {
+        (s, 0) => s,
+        (s, _) => s,
+    };
+    let o = Option::<(i32, String)>::Some((7, heap("o")));
+    let mut d = 0;
+    if let Some((n, mut st)) = o {
+        st.push_str("!");
+        d = n + st.len() as i32;
+    }
+    let mut v = Vector::<(i32, String)>::new();
+    v.push((1, heap("one")));
+    v.push((2, heap("two")));
+    let mut e = 0;
+    while let Some((k, s)) = v.pop() {
+        e += k + s.len() as i32;
+    }
+    if a != 9 || b != 12 || c != 47 || moved.len() != 47 || d != 55 || e != 101 {
+        return 1;
+    }
+    return 0;
+}
+)",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "tuple patterns build");
+    assert_eq(r.exit, 0);
+}
+
+// A `for` binding is an irrefutable pattern: a tuple (nested), `_`, `mut name` or a struct
+// pattern. By-value elements move into the names; what no name takes (a `_` member, a member the
+// pattern leaves out) is freed with the element, at the end of its iteration or at `break` (the
+// fatal leak gate). Elements behind a reference bind by reference. `mut i` over a range is the
+// induction variable itself: a write to it moves the loop.
+@test
+fn for_patterns_destructure_elements() {
+    let r = h::compile_and_run_env(
+        M"(struct Q {
+    pub a: String,
+    pub b: String,
+    pub n: i32,
+}
+fn heap(tag: str) String {
+    let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
+    s.push_str(tag);
+    return s;
+}
+fn main() i32 {
+    let ps: [(i32, i32); 3] = [(1, 2), (3, 4), (5, 6)];
+    let mut s = 0;
+    for (a, b) in ps {
+        s += a * b;
+    }
+    let nest: [((i32, i32), i32); 2] = [((1, 2), 3), ((4, 5), 6)];
+    for ((a, _), mut c) in nest {
+        c += 1;
+        s += a + c;
+    }
+    let ts: [(String, String); 2] = [(heap("a"), heap("b")), (heap("c"), heap("d"))];
+    let mut t: usize = 0;
+    for (x, _) in ts {
+        t += x.len();
+    }
+    let qs: [Q; 3] = [Q { a: heap("1"), b: heap("2"), n: 1 }, Q { a: heap("3"), b: heap("4"), n: 2 }, Q { a: heap("5"), b: heap("6"), n: 3 }];
+    for Q { b, n, .. } in qs {
+        if n == 2 {
+            break;
+        }
+        t += b.len();
+    }
+    let mut v = Vector::<(i32, String)>::new();
+    v.push((1, heap("v")));
+    for (k, name) in v.iter() {
+        t += name.len() + *k as usize;
+    }
+    let mut w = 0;
+    for mut i in 0..6 {
+        w += i;
+        i += 1;
+    }
+    for _ in 0..2 {
+        w += 1;
+    }
+    if s != 60 || t != 189 || w != 8 {
+        return 1;
+    }
+    return 0;
+}
+)",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "for patterns build");
+    assert_eq(r.exit, 0);
+}
+
+// A `for` pattern must match every element, and a name it binds without `mut` is not assignable.
+@test
+fn for_pattern_errors() {
+    h::expect_err_msg(
+        "a refutable for pattern",
+        "fn main() i32 {\n    let os = [Option::<i32>::Some(1), Option::<i32>::None];\n    for Some(x) in os {\n        let _ = x;\n    }\n    return 0;\n}\n",
+        "a 'for' pattern must match every element",
+    );
+    h::expect_err_msg(
+        "an assignment to an immutable pattern name",
+        "fn main() i32 {\n    let ps: [(i32, i32); 1] = [(1, 2)];\n    for (a, b) in ps {\n        a = b;\n    }\n    return 0;\n}\n",
+        "cannot assign",
+    );
+}
+
+@test
+fn tuple_pattern_coverage_and_arity() {
+    h::expect_ok(
+        "tuple arms that cover every value",
+        "fn f(t: (bool, bool)) i32 { return switch t { (true, _) => 1, (false, true) => 2, (false, false) => 3 }; }\nfn main() i32 { return f((true, false)) - 1; }\n",
+    );
+    h::expect_err_msg(
+        "a tuple arm split that misses a value",
+        "fn f(t: (bool, bool)) i32 { return switch t { (true, _) => 1, (false, true) => 2 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_err_msg(
+        "a tuple pattern with the wrong element count",
+        "fn f(t: (i32, bool)) i32 { return switch t { (a, b, c) => a, _ => 0 }; }\n",
+        "a tuple pattern with 3 elements cannot match a value of type",
+    );
+    h::expect_err_msg(
+        "a tuple pattern against a value that is not a tuple",
+        "fn f(n: i32) i32 { return switch n { (a, b) => a, _ => 0 }; }\n",
+        "a tuple pattern with 2 elements cannot match a value of type 'i32'",
+    );
+}
+
+@test
+fn tuple_patterns_evaluate_at_compile_time() {
+    h::expect_exit(
+        "tuple patterns in a const fn",
+        "const fn f(a: i32, b: bool) i32 {\n    return switch (a, b) {\n        (0, _) => 1,\n        (x, true) => x * 2,\n        (x, false) => x,\n    };\n}\nstatic_assert(f(4, true) == 8);\nstatic_assert(f(0, false) == 1);\nstatic_assert(f(3, false) == 3);\nfn main() i32 {\n    return f(5, true) - 10;\n}\n",
+        0,
+    );
+}

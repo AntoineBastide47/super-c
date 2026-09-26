@@ -23,7 +23,7 @@ pub enum DocKind {
     DOC_CONCAT, // a: first child index in kids, b: child count
     DOC_INDENT, // a: child
     DOC_GROUP, // a: child
-    DOC_IFBREAK, // a: 1 if a space when flat else 0, b: index in `strs` of the text when the group broke
+    DOC_IFBREAK, // b: index in `strs` of the text when the group broke
 }
 
 /// One immutable layout node; `w` is the memoized flat width (W_INF when it can never be flat).
@@ -166,17 +166,10 @@ extend DocPool {
         return self.push(DocNode { kind: DocKind::DOC_GROUP as u8, a: child, b: 0, w: w });
     }
 
-    /// `s` when the enclosing group broke; when flat: a space if flat_space, else nothing.
-    /// (Trailing comma: ifbreak(",", false). Block-vs-flat separators compose from this + Line.)
-    pub fn ifbreak(self: &mut Self, s: str, flat_space: bool) DocId {
-        let mut fw: u32 = 0;
-        let mut fs: u32 = 0;
-        if flat_space {
-            fw = 1;
-            fs = 1;
-        }
+    /// `s` when the enclosing group broke; nothing when flat (trailing comma: ifbreak(",")).
+    pub fn ifbreak(self: &mut Self, s: str) DocId {
         let i = self.intern(s);
-        return self.push(DocNode { kind: DocKind::DOC_IFBREAK as u8, a: fs, b: i, w: fw });
+        return self.push(DocNode { kind: DocKind::DOC_IFBREAK as u8, a: 0, b: i, w: 0 });
     }
 
     /// Concatenate `parts[from..]` (borrowed; ids are copied out; `from` lets a caller concatenate the tail
@@ -254,12 +247,7 @@ extend DocPool {
                 self.render_doc(r, n.a, indent, f);
             },
             DOC_IFBREAK => {
-                if flat {
-                    if n.a == 1 {
-                        unsafe (*r.out).push_byte(b' ');
-                        r.col = r.col + 1;
-                    }
-                } else {
+                if !flat {
                     let t = self.strs[n.b as usize];
                     unsafe (*r.out).push_str(t);
                     r.col = r.col + t.len() as i32;

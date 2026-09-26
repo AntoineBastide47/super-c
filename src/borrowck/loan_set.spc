@@ -4,7 +4,6 @@
 // states are replayed from block entries.
 /// Bit matrix of in-scope loans, one row per block boundary.
 pub struct LoanMat {
-    pub nloans: u32,
     pub words: u32, // row width in u64 words (max(1, ceil(nloans/64)))
     pub pool: Vector<u64>, // rows * words, zero-initialized
 }
@@ -12,7 +11,7 @@ pub struct LoanMat {
 extend LoanMat {
     /// A matrix of `rows` zeroed rows sized for `nloans` loans; zero loans still get one word per row.
     pub fn new(nloans: u32, rows: u32) LoanMat {
-        let mut m = LoanMat { nloans: 0, words: 1, pool: Vector::<u64>::new() };
+        let mut m = LoanMat { words: 1, pool: Vector::<u64>::new() };
         m.reset_to(nloans, rows);
         return m;
     }
@@ -24,13 +23,9 @@ extend LoanMat {
         if w == 0 {
             w = 1;
         }
-        self.nloans = nloans;
         self.words = w;
         self.pool.truncate(0);
-        self.pool.reserve((rows * w) as usize);
-        for _i in 0..rows * w {
-            self.pool.push(0u64);
-        }
+        self.pool.resize_default((rows * w) as usize);
     }
 
     /// Copy row `row` into `out`, replacing its contents; statement replay works on that scratch row.

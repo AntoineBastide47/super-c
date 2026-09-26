@@ -3,7 +3,7 @@
 
 Usage: python3 ci/fanout_report.py <gen-dir> <obj-dir> <std-dir> [report.md]
 
-Reads the generated C (the forward header, every type and prototype header, every module and
+Reads the generated C (the forward header, every definition and prototype header, every module and
 instance TU), the per-unit compile records under <obj-dir> (`<unit>.cmd`, second line = ms), and the
 std sources (prelude declaration owners). It builds:
 
@@ -91,6 +91,11 @@ class Modules:
             r = self.std_decl[segs[0]]
         self.cache[name] = r
         return r
+
+
+def is_def(h):
+    """A definition header: one per emitted type, under `__sc_t/`."""
+    return h.startswith("__sc_t/")
 
 
 def parse_types(text):
@@ -246,8 +251,9 @@ def main():
     gen, obj, std = sys.argv[1:4]
     out_path = sys.argv[4] if len(sys.argv) > 4 else None
     mods = Modules(gen, std)
-    # Generated headers: the forward header, one type header per by-value SCC, one prototype header
-    # per module. The type graph reads every type header, prototypes every prototype header.
+    # Generated headers: the forward header, one definition header per type (`__sc_t/`), one
+    # prototype header per module. The type graph reads every definition header, prototypes every
+    # prototype header.
     headers = []
     for root, _dirs, files in os.walk(gen):
         for f in sorted(files):
@@ -255,11 +261,18 @@ def main():
                 headers.append(os.path.relpath(os.path.join(root, f), gen))
     headers.sort()
     htext = {h: read(os.path.join(gen, h)) for h in headers}
-    types_text = "".join(htext[h] for h in headers if h.endswith("__types.h") or h == "__sc_fwd.h")
-    protos_text = "".join(htext[h] for h in headers if not h.endswith("__types.h"))
+    types_text = "".join(htext[h] for h in headers if is_def(h) or h == "__sc_fwd.h")
+    protos_text = "".join(htext[h] for h in headers if not is_def(h))
     types, tedges, tsize = parse_types(types_text)
     fns = parse_protos(protos_text)
     type_owner = {t: mods.owner(t) for t in types}
+    # The type each definition header defines (its first `struct|union NAME {` or enum typedef).
+    def_type = {}
+    for h in headers:
+        if is_def(h):
+            m = re.search(r"^(?:struct|union) ([A-Za-z0-9_]+) \{|\} ([A-Za-z0-9_]+);\n#endif", htext[h], re.M)
+            if m:
+                def_type[h] = m.group(1) or m.group(2)
 
     # Translation units: every .c under gen except the runtime, wrapper and registry TUs.
     units = []
@@ -418,10 +431,10 @@ def main():
                 fan_fn[o].add(u)
     n_units = len(units)
     inc_counts = sorted(len(hs) for hs in unit_incs.values())
-    w(f"- `__sc_fwd.h` {len(htext.get('__sc_fwd.h', ''))} bytes, {sum(1 for h in headers if h.endswith('__types.h'))} type headers "
-      f"({sum(len(htext[h]) for h in headers if h.endswith('__types.h'))} bytes), "
-      f"{sum(1 for h in headers if not h.endswith('__types.h') and h != '__sc_fwd.h')} prototype headers "
-      f"({sum(len(htext[h]) for h in headers if not h.endswith('__types.h') and h != '__sc_fwd.h')} bytes); "
+    w(f"- `__sc_fwd.h` {len(htext.get('__sc_fwd.h', ''))} bytes, {sum(1 for h in headers if is_def(h))} definition headers "
+      f"({sum(len(htext[h]) for h in headers if is_def(h))} bytes), "
+      f"{sum(1 for h in headers if not is_def(h) and h != '__sc_fwd.h')} prototype headers "
+      f"({sum(len(htext[h]) for h in headers if not is_def(h) and h != '__sc_fwd.h')} bytes); "
       f"generated headers per TU (transitive): median {inc_counts[len(inc_counts) // 2]}, max {inc_counts[-1]}")
     w("")
     w("| owner module | TUs needing complete types | TUs needing pointer-only | TUs using prototypes |")
@@ -521,11 +534,14 @@ def main():
         sig_rows.append((len(sig), cost(sig), m))
         lay_rows.append((len(lay), cost(lay), m))
         # What the emitted include graph delivers: a signature edit rewrites the module's
-        # prototype header, a layout edit its type header (and the module's own TUs).
+        # prototype header, a layout edit the definition headers of its types (and the module's
+        # own TUs).
         ph = mod_rel(m) + ".h"
-        th = mod_rel(m) + "__types.h"
         rs = set(own) | hdr_fan.get(ph, set())
-        rl = set(own) | hdr_fan.get(th, set())
+        rl = set(own)
+        for h, t in def_type.items():
+            if type_owner.get(t) == m:
+                rl |= hdr_fan.get(h, set())
         real_sig_rows.append((len(rs), cost(rs), m))
         real_lay_rows.append((len(rl), cost(rl), m))
 
