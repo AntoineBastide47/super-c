@@ -5367,6 +5367,20 @@ fn main() i32 { return boom(); }
     assert(p5.run_bin() != 0, "the panic still aborts at runtime");
 }
 
+// Under --bootstrap-tags an unknown attribute has no kind, so its repeat is caught by name: the
+// one-occurrence rule holds for tags this compiler does not know yet.
+@test
+fn duplicate_unknown_attribute_under_bootstrap_tags() {
+    let p = cli::proj_new();
+    p.mkfile("dup.spc", "@zz.newtag\n@zz.newtag(1)\nfn f() i32 { return 1; }\nfn main() i32 { return f() - 1; }\n");
+    let r = p.compile_flags("--bootstrap-tags", "dup.spc");
+    assert(r.exit != 0, "repeated unknown attribute rejected");
+    assert(r.out_has("duplicate attribute '@zz.newtag'"), "duplicate diagnostic");
+    let p2 = cli::proj_new();
+    p2.mkfile("two.spc", "@zz.a\n@zz.b\nfn f() i32 { return 1; }\nfn main() i32 { return f() - 1; }\n");
+    assert(p2.compile_flags("--bootstrap-tags", "two.spc").exit == 0, "distinct unknown attributes accepted");
+}
+
 // const fn: definition-site validation (direct and transitive disqualifiers), the hard use-site
 // guarantee (any failed fold of a const fn call is an error; the same body without `const` falls
 // back to runtime), and legal recursion between const fns.

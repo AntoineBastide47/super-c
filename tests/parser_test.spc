@@ -655,6 +655,52 @@ fn attributes() {
     }
 }
 
+// An attribute appears at most once on one declaration, whatever its arguments: two `@c.align` gave
+// the layout service and the C emitter different answers. Several values go in one occurrence.
+@test
+fn duplicate_attributes() {
+    h::expect_err_msg(
+        "duplicate align",
+        "@c.align(8)\n@c.align(32)\nstruct S { x: i32 }\nconst Z: usize = sizeof(S);\nfn main() i32 { return Z as i32; }\n",
+        "duplicate attribute '@c.align'",
+    );
+    h::expect_err_msg(
+        "duplicate packed",
+        "@c.packed @c.packed\nstruct S { x: i32 }\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@c.packed'",
+    );
+    h::expect_err_msg(
+        "duplicate platform",
+        "@platform(windows)\n@platform(!windows)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@platform'",
+    );
+    h::expect_err_msg(
+        "duplicate derive",
+        "@derive(Format)\n@derive(Hash)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@derive'",
+    );
+    h::expect_err_msg("duplicate test", "@test\n@test(should_panic)\nfn t() {}\n", "duplicate attribute '@test'");
+    h::expect_err_msg(
+        "duplicate link",
+        "@c.link(\"m\")\n@c.link(\"pthread\")\nextern \"C\" { fn sqrt(x: f64) f64; }\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@c.link'",
+    );
+    h::expect_err_msg(
+        "duplicate reflect on a field",
+        "struct S {\n    @reflect(a)\n    @reflect(b)\n    pub x: i32,\n}\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@reflect'",
+    );
+    h::expect_err_msg(
+        "duplicate attribute on a method",
+        "struct S {}\nextend S {\n    @c.cold @c.cold\n    fn f(self: &Self) {}\n}\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@c.cold'",
+    );
+    h::expect_ok(
+        "each attribute once",
+        "@derive(Format, Hash)\n@reflect(a, b = 1)\n@platform(windows | macos | linux | wasm | ios | android)\n@c.align(16)\nstruct S { pub x: i32 }\n@c.cold\n@c.noinline\nfn f() {}\nfn main() i32 { f(); return sizeof(S) as i32 - 16; }\n",
+    );
+}
+
 @test
 fn reflect_attribute() {
     let c = h::parse_ast(
@@ -763,12 +809,10 @@ fn bug_regressions() {
         assert(h::parse_has_error("@c.align(0x1_0000_0000)\nstruct A { x: u8 }\n"), "u32 overflow rejected");
     }
     {
-        let mut s = String::new();
-        for _ in 0..20 {
-            s.push_str("@c.used\n");
-        }
-        s.push_str("fn f() {}\n");
-        let c = h::parse_ast(s.as_str());
+        // More attributes than the first reservation (16), each once: every one is kept.
+        let c = h::parse_ast(
+            "@c.inline @c.always_inline @c.noinline @c.cold @c.noreturn @c.packed @c.used @c.unused @c.align(8)\n@c.export(\"x\") @c.import(\"y\") @c.section(\"s\") @platform(linux) @arch(x86_64) @fmt.skip @blocking\n@test @test_init @test_free @bench\nfn f() {}\n",
+        );
         assert_eq(c.ast.attrs.len(), 20);
     }
 }

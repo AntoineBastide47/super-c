@@ -3546,8 +3546,10 @@ extend Parser {
         return NODE_NONE;
     }
 
-    pub fn parse_attribute(self: &mut Self, out: &mut Attr) bool {
-        let syntax = self.parse_attribute_syntax();
+    // Classify one attribute into `out`; true when it keeps an Attr record. `out.kind` names every
+    // recognized attribute, record or not (`@derive`/`@reflect` take the ATTR_SEEN_* pseudo-kinds), for
+    // the duplicate check in parse_attributes; it stays ATTR_SEEN_NONE otherwise.
+    fn parse_attribute(self: &mut Self, syntax: AttrSyntax, out: &mut Attr) bool {
         if syntax.parts == 0 {
             return false;
         }
@@ -3635,6 +3637,7 @@ extend Parser {
             return true;
         }
         if syntax.parts == 1 && self.text_is(ns, "derive") {
+            out.kind = ATTR_SEEN_DERIVE;
             // Sugar, fully expanded at parse: each listed interface becomes an empty
             // `extend T as I {}` sibling of the next struct/union/enum, which then INHERITS the
             // interface's default bodies. No Attr record survives -- the extends are the record.
@@ -3670,6 +3673,7 @@ extend Parser {
             return false;
         }
         if syntax.parts == 1 && self.text_is(ns, "reflect") {
+            out.kind = ATTR_SEEN_REFLECT;
             // User metadata for the reflection descriptor: `@reflect(hidden)`,
             // `@reflect(label = "Speed", max = 100)`. Keys with no value read as `true`. Stored in
             // the metas side table; no Attr record survives.
@@ -3867,9 +3871,45 @@ extend Parser {
             return attrs;
         }
         attrs.reserve(expected);
+        // One declaration's attributes arrive together here, so a kind bitmask catches every repeat.
+        let mut seen: u64 = 0;
+        // Unknown attributes (accepted under --bootstrap-tags) have no kind: their names, compared as text.
+        let mut unknown = Vector::<Span>::new();
         while self.check(TokenType::At) {
-            let mut attr = Attr { str_span: Span::empty() };
-            if self.parse_attribute(&mut attr) {
+            let at = self.raw_peek().start();
+            let syntax = self.parse_attribute_syntax();
+            let mut attr = Attr { kind: ATTR_SEEN_NONE, str_span: Span::empty() };
+            let keep = self.parse_attribute(syntax, &mut attr);
+            if attr.kind != ATTR_SEEN_NONE {
+                let bit = 1u64 << attr.kind as u64;
+                if (seen & bit) != 0 {
+                    self.errors.emit(
+                        at,
+                        syntax.name.end() - at,
+                        format(
+                            "duplicate attribute '@{}'",
+                            diag::span_str(self.source, syntax.namespace.start(), syntax.name.end()),
+                        ),
+                    );
+                    continue;
+                }
+                seen = seen | bit;
+            } else if self.bootstrap_tags && syntax.name.end() > syntax.namespace.start() {
+                let name = Span::new(syntax.namespace.start(), syntax.name.end());
+                let text = diag::span_str(self.source, name.start, name.end);
+                let mut dup = false;
+                for k in 0..unknown.len() {
+                    if diag::span_str(self.source, unknown[k].start, unknown[k].end) == text {
+                        dup = true;
+                    }
+                }
+                if dup {
+                    self.errors.emit(at, syntax.name.end() - at, format("duplicate attribute '@{}'", text));
+                    continue;
+                }
+                unknown.push(name);
+            }
+            if keep {
                 attrs.push(attr);
             }
         }
@@ -4081,6 +4121,12 @@ const C_ATTR_NAMES: [str<'static>; 14] = [
     "link",
 ];
 const C_ATTR_ALIGN: usize = 8;
+
+// Duplicate-check kinds beyond AttrKind (every kind stays below 64, the width of the seen mask):
+// `@derive` and `@reflect` keep no Attr record, and an unrecognized attribute has no kind.
+const ATTR_SEEN_DERIVE: u8 = 62;
+const ATTR_SEEN_REFLECT: u8 = 63;
+const ATTR_SEEN_NONE: u8 = 255;
 const C_ATTR_KINDS: [AttrKind; 14] = [
     AttrKind::ATTR_INLINE,
     AttrKind::ATTR_ALWAYS_INLINE,

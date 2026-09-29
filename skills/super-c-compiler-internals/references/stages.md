@@ -25,7 +25,7 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
 
 `@platform` / `@arch` gating: items are compacted out of each AST by target mask before
 resolution (`Package::platform_filter` in `src/module/loader.spc`; the driver, the LSP and
-`package_from_source` all apply it). Stacked gates on one item intersect. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
+`package_from_source` all apply it). An item carries at most one of each (the parser rejects a repeated attribute); an item with both needs both to hold. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
 
 ## 3. Resolve + HIR, per module (`src/resolver/`, `src/hir/lower.spc`)
 

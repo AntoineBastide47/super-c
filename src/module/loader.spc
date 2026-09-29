@@ -2327,16 +2327,11 @@ extend Package {
             if n.kind == NodeKind::NODE_IMPORT {
                 // `@platform`-gated OUT for this target: the module is not loaded at all, so its file
                 // need not exist here and nothing in it has to compile for a platform it disclaims.
-                let mut gated_out = false;
-                for k in 0..a.attrs.len() {
-                    let at = a.attrs.at(k);
-                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
-                        gated_out = true;
-                    }
-                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_ARCH as u8 && self.arch >= 0 && (at.arg >> self.arch as u32 & 1u32) == 0 {
-                        gated_out = true;
-                    }
-                }
+                // An owner carries each attribute kind at most once, so one indexed lookup per gate.
+                let id = unsafe ids[i as usize];
+                let pl = a.attr_of(id, AttrKind::ATTR_PLATFORM);
+                let ar = a.attr_of(id, AttrKind::ATTR_ARCH);
+                let gated_out = pl != null && (unsafe (*pl).arg >> target as u32 & 1u32) == 0 || ar != null && self.arch >= 0 && (unsafe (*ar).arg >> self.arch as u32 & 1u32) == 0;
                 if gated_out {
                     continue;
                 }

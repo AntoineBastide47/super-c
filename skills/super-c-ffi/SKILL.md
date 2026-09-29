@@ -87,11 +87,19 @@ source. Relative includes in the backing source continue to resolve correctly.
 
 ```superc
 @c.link("m")                     // -lm
-@c.link("-framework CoreFoundation")  // value starting with - passes through verbatim
 extern "C" {
     fn sqrt(x: f64) f64;
 }
+
+@c.link("-framework CoreFoundation")  // value starting with - passes through verbatim
+extern "C" {
+    fn CFAbsoluteTimeGetCurrent() f64;
+}
 ```
+
+One extern block takes at most one `@c.link` and one `@c.source` (a repeated attribute is a
+parse error). A value starting with `-` may hold several whitespace-separated flags; a second
+library or source otherwise goes on its own extern block.
 
 Link flags are written to `build/__ldflags` (one per line). Libraries declare their flag
 once where the binding lives — importers never repeat it. Flags apply automatically to

@@ -417,6 +417,11 @@ source text, values, and file:line on failure.
 | `@test` / `@test_init` / `@test_free` | Test harness |
 | `@blocking` | Run extern on blocking pool |
 
+An attribute appears at most once on one declaration (item, method, field, variant, extern
+item), whatever its arguments: a second `@c.align`, `@platform`, `@derive`, `@reflect`,
+`@c.link`, or any other is the parse error `duplicate attribute '@NAME'`. Put several values in
+one occurrence (`@derive(Format, Hash)`, `@reflect(a, b = 1)`, `@platform(linux | macos)`).
+
 ## Concurrency
 
 `launch || { .. };` spawns a stackful coroutine on a work-stealing pool. `Arc<T>` for

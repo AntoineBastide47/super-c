@@ -35,12 +35,6 @@ fn errors() {
         "per-platform variants of one item",
         "@platform(windows)\nfn pick() i32 { return 1; }\n@platform(!windows)\nfn pick() i32 { return 2; }\nfn main() i32 { return pick(); }\n",
     );
-    // Stacked gates all apply: no platform is both windows and not windows, so the item is gone.
-    h::expect_resolve_err_msg(
-        "stacked platform gates intersect",
-        "@platform(windows)\n@platform(!windows)\nfn gone() i32 { return 1; }\nfn main() i32 { return gone(); }\n",
-        "cannot find value 'gone'",
-    );
     h::expect_resolve_err_msg("duplicate parameter", "fn f(a: i32, a: i32) {}\n", "duplicate definition of 'a'");
     h::expect_resolve_err_msg(
         "duplicate let",

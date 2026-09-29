@@ -83,7 +83,7 @@ own language.
 fn platform_init() { /* macOS-specific */ }
 ```
 
-`@platform(windows|macos|linux)` gates items via a 3-bit mask. When adding `@platform`
+`@platform(windows|macos|linux|wasm|ios|android)` gates items via a 6-bit mask. When adding `@platform`
 support itself (or any feature that changes the parser), a **mandatory two-generation
 bootstrap** is required:
 
