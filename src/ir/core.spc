@@ -39,7 +39,6 @@ pub struct LocalDecl {
     pub storage: u8,
     pub is_mutable: bool,
     pub dkind: u8, // an LK_* kind
-    pub zero_len: bool, // a `let` spelled with a `[T; 0]` annotation
     pub span: tok::Span,
     pub decl: NodeId, // binding decl node for user locals (diagnostic compatibility); NODE_NONE else
     // The binding's name text as (offset from `span.start`, length); 0/0 for a temporary. Packed
@@ -57,7 +56,6 @@ extend LocalDecl {
             storage: storage,
             is_mutable: true,
             dkind: LK_NONE,
-            zero_len: false,
             span: span,
             decl: NODE_NONE,
             name_off: 0,
@@ -151,6 +149,97 @@ extend Constant {
     /// CK_ITEM: the number of bound generic arguments.
     pub const fn targ_len(self: &Self) u32 {
         return (self.val >> 32) as u32;
+    }
+
+    /// CK_INT: the exact integer behind the spelling in `src`, the source its span indexes: decimal,
+    /// hex, binary, octal, underscores, width suffixes, character literals with escapes, and `null`
+    /// (0). `val` holds only the common decimal case. False past u64::MAX or for a malformed
+    /// character literal.
+    pub fn int_value(self: &Self, src: str, out: &mut i64) bool {
+        let sp = self.raw;
+        if sp.end <= sp.start || sp.end as usize > src.len() {
+            *out = self.val;
+            return true;
+        }
+        let s = src.slice(sp.start as usize, sp.end as usize);
+        let n = s.len();
+        let b0 = s.byte_at(0);
+        if b0 == 39 {
+            // 'c' with escapes -- but ONLY a real character literal (a synthesized constant may
+            // carry a diagnostic span that happens to start at a label's quote)
+            if n < 3 || s.byte_at(n - 1) != 39 {
+                *out = self.val;
+                return true;
+            }
+            let v = tok::char_literal_value(src, sp);
+            if v.is_none() {
+                return false;
+            }
+            *out = v.unwrap();
+            return true;
+        }
+        if !(b0 >= 48 && b0 <= 57) {
+            // `null` and every other non-numeric spelling lower with the value the record carries
+            *out = self.val;
+            return true;
+        }
+        let mut base: u64 = 10;
+        let mut i: usize = 0;
+        if n > 2 && b0 == 48 {
+            let b1 = s.byte_at(1);
+            if b1 == 120 || b1 == 88 {
+                base = 16;
+                i = 2;
+            } else if b1 == 98 || b1 == 66 {
+                base = 2;
+                i = 2;
+            } else if b1 == 111 || b1 == 79 {
+                base = 8;
+                i = 2;
+            }
+        }
+        let mut v: u64 = 0;
+        let mut any = false;
+        while i < n {
+            let ch = s.byte_at(i);
+            if ch == 95 {
+                i += 1;
+                continue;
+            }
+            let mut d: i64 = -1;
+            if base == 16 {
+                d = hex_digit(ch);
+            } else if ch >= 48 && ch as u64 < 48 + base {
+                d = ch - 48;
+            }
+            if d < 0 {
+                break; // suffix
+            }
+            if v > (0xFFFFFFFFFFFFFFFFu64 - d as u64) / base {
+                // Past u64::MAX. The checker reports the literal ("integer literal is too large to fit in a
+                // 64-bit integer"), but a constant initializer that holds it still reaches the evaluator.
+                return false;
+            }
+            v = v * base + d as u64;
+            any = true;
+            i += 1;
+        }
+        if !any {
+            return false;
+        }
+        // the tail must be a width suffix (identifier characters only): anything else means the
+        // span is a synthesized diagnostic span, not this constant's spelling -- trust `val`
+        while i < n {
+            let ch2 = s.byte_at(i);
+            let idc = ch2 == 95 || ch2 >= 48 && ch2 <= 57 || ch2 >= 97 && ch2 <= 122 || ch2 >= 65 && ch2 <= 90;
+            if !idc {
+                *out = self.val;
+                return true;
+            }
+            i += 1;
+        }
+        *out = v as i64;
+        return true;
     }
 }
 
@@ -314,7 +403,7 @@ pub const TM_DROP: u8 = 4; // place; t0 = successor
 pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;
 
-// Field order leaves no interior padding: 60 bytes, the two byte flags next to the tail padding.
+// Field order leaves no interior padding: 68 bytes, the two byte flags next to the tail padding.
 pub struct Terminator {
     pub a: u32, // per kind (see above)
     pub args_start: u32, // TM_CALL: argument operand range
@@ -327,6 +416,12 @@ pub struct Terminator {
     pub targs_start: u32, // TM_CALL: the checker's bound generic arguments (CoreBody.targ_pool)
     pub targs_len: u32,
     pub callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
+    // TM_CALL of a generic interface's method through a bound: `dyn I<args>` naming the conformance
+    // each instance dispatches to (`BoundCall`); TYPE_NONE otherwise.
+    pub iface: TypeId,
+    // TM_CALL of an interface's associated function through a type parameter (`T::count()`,
+    // `Self::make()` in a default body): the implementor, the parameter itself; TYPE_NONE otherwise.
+    pub recv: TypeId,
     pub span: tok::Span,
     pub kind: u8,
     pub is_variadic: bool,
@@ -345,6 +440,8 @@ pub const fn term0(kind: u8, sp: tok::Span) Terminator {
         sw_len: 0,
         t0: IR_NONE,
         callee: DefId { module: 0, node: NODE_NONE },
+        iface: TYPE_NONE,
+        recv: TYPE_NONE,
         targs_start: 0,
         targs_len: 0,
         is_variadic: false,
@@ -469,6 +566,11 @@ extend CoreBody {
         }
         for i in 0..self.targ_pool.len() {
             self.targ_pool[i] = pub_map1(map, self.targ_pool[i]);
+        }
+        for i in 0..self.blocks.len() {
+            let t = &mut self.blocks.index_mut(i).term;
+            t.iface = pub_map1(map, t.iface);
+            t.recv = pub_map1(map, t.recv);
         }
         for i in 0..self.rvalues.len() {
             let rv = self.rvalues.index_mut(i);
@@ -619,4 +721,18 @@ extend CoreBody {
         );
         return self.blocks.len() as BlockId - 1;
     }
+}
+
+// The value of hex digit `c`, or -1.
+const fn hex_digit(c: u8) i64 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return -1;
 }

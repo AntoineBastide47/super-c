@@ -12,6 +12,7 @@ import ir::interp as iri;
 import ir::lower as irl;
 import ir::verify as irv;
 import emit::cemit as cb;
+import driver::util as dutil;
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *const loader::Package;
@@ -82,7 +83,7 @@ fn find_fn(p: &loader::Package, name: str) NodeId {
 // Emit `names` as one TU; assert every body lowers, verifies, and emits.
 fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit) {
     em.out.clear();
-    em.out.push_str("#include <stdint.h>\n#include <stdbool.h>\n#include <stdlib.h>\n");
+    em.out.push_str("#include \"super_rt.h\"\n");
     let u = (p.modules.len() - 1) as ModuleId;
     // Prototypes first so call order never matters.
     let mut bodies = Vector::<irl::Lowerer>::new();
@@ -118,13 +119,23 @@ fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     let mb = main_body;
     let _ = unsafe stdio::fwrite(mb.ptr(), 1, mb.len(), f);
     unsafe stdio::fclose(f);
+    // The runtime the emitted code calls (arithmetic helpers, panics), per probe so parallel tests
+    // never share the files.
+    let mut rt = String::from_str("build/cemit_rt_");
+    rt.push_str(tag);
+    assert(dutil::write_super_rt(rt.as_str()), "runtime written");
     let mut cmd = String::new();
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
-    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -o build/cemit_probe_");
+    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -I");
+    cmd.push_string(&rt);
+    cmd.push_str(" -o build/cemit_probe_");
     cmd.push_str(tag);
     cmd.push_str(" ");
     cmd.push_string(&path);
+    cmd.push_str(" ");
+    cmd.push_string(&rt);
+    cmd.push_str("/super_rt.c");
     let rc = unsafe shim::sc_run(cmd.cstr(), null, null, null, null);
     assert(rc == 0, "strict C11 compile");
     let mut bin = String::new();
@@ -289,5 +300,5 @@ fn far_read_stays_declared() {
     let names: [str; 1] = ["wide"];
     emit_tu(&p, &names[0], 1, &mut em);
     assert(em.out.contains(".f0 = _"), "the far-read field value stays a declared temporary");
-    assert(em.out.contains(".f299 = (y + 299LL)"), "the near-read field value folds");
+    assert(em.out.contains(".f299 = __sc_add_i64(y, 299LL)"), "the near-read field value folds");
 }

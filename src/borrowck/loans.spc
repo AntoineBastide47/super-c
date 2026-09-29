@@ -343,14 +343,14 @@ extend Solver {
             self.issues_blk.set((self.issue_start[blk] + self.s_ic[blk]) as usize, l as u32);
             self.s_ic.set(blk, self.s_ic[blk] + 1);
         }
+        // The facts list call-argument kills during the walk and assignment kills after it, so
+        // it is not point-ordered. Blocks number their points in block order: sorting the records
+        // by point keeps each block's range where `kill_start` puts it and orders it for the
+        // replay (`transfer_block` stops at the first kill past its point).
         for k in 0..f.kills.len() {
-            let blk = self.point_block[f.kills.at(k).point as usize] as usize;
-            self.kills_blk.set(
-                (self.kill_start[blk] + self.s_kc[blk]) as usize,
-                f.kills.at(k).point as u64 << 32 | f.kills.at(k).loan as u64,
-            );
-            self.s_kc.set(blk, self.s_kc[blk] + 1);
+            self.kills_blk.set(k, f.kills.at(k).point as u64 << 32 | f.kills.at(k).loan as u64);
         }
+        self.kills_blk.sort();
         // Sparse rows: kills by loan, sorted once, for the overwrite test and the in-scope query.
         if self.sparse {
             for k in 0..f.kills.len() {
@@ -1083,7 +1083,7 @@ extend Solver {
     // takes. The table stays at most half full.
     const fn vt_find(self: &Self, k: u64) usize {
         let mask = self.vt.len() - 1;
-        let mut i = (k * 0x9E3779B97F4A7C15u64 >> self.vt_shift as u64) as usize;
+        let mut i = (k.wrapping_mul(0x9E3779B97F4A7C15u64) >> self.vt_shift as u64) as usize;
         for _ in 0..self.vt.len() {
             let e = self.vt[i];
             if e == 0 || e >> 2 == k {

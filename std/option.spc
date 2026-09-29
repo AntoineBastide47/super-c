@@ -184,7 +184,7 @@ extend<T: Eq> Option<T> as Eq {
 extend<T: Hash> Option<T> as Hash {
     pub const fn hash(self: &Option<T>) u64 {
         return switch self {
-            Some(v) => v.hash() * 0x100000001b3 + 1,
+            Some(v) => v.hash().wrapping_mul(0x100000001b3).wrapping_add(1),
             None => 0,
         };
     }

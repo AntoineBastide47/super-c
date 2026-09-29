@@ -259,7 +259,7 @@ extend str as Hash {
     pub const fn hash(self: &str) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len {
-            h = (h ^ (unsafe self.ptr[i]) as u64) * 0x100000001b3;
+            h = (h ^ (unsafe self.ptr[i]) as u64).wrapping_mul(0x100000001b3);
         }
         return h;
     }
@@ -382,9 +382,9 @@ extend str {
         }
         return switch __str_digits_u64(self, radix, start) {
             Some(v) => switch neg {
-                // |i64::MIN| = 2^63 is spellable only with the sign; unsigned negate avoids overflow.
+                // |i64::MIN| = 2^63 is spellable only with the sign; a wrapping negate avoids overflow.
                 true => switch v <= 0x8000_0000_0000_0000u64 {
-                    true => Option::<i64>::Some((0 - v) as i64),
+                    true => Option::<i64>::Some(v.wrapping_neg() as i64),
                     false => Option::<i64>::None,
                 },
                 false => switch v <= 0x7FFF_FFFF_FFFF_FFFFu64 {

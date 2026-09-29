@@ -1639,13 +1639,13 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
 #if defined(__x86_64__)
   sc_ctx_save_fpctl(&f[0]);    /* MXCSR + x87 control word */
   f[3] = arg;                  /* r13 */
-  f[4] = (void *)entry;        /* r12 */
-  f[7] = (void *)sc_ctx_entry; /* the return address the trailing `ret` jumps to */
+  f[4] = (void *)(uintptr_t)entry;        /* r12 */
+  f[7] = (void *)(uintptr_t)sc_ctx_entry; /* the return address the trailing `ret` jumps to */
 #else
   sc_ctx_save_fpctl(&f[20]);    /* FPCR */
-  f[0] = (void *)entry;         /* x19 */
+  f[0] = (void *)(uintptr_t)entry;         /* x19 */
   f[1] = arg;                   /* x20 */
-  f[11] = (void *)sc_ctx_entry; /* x30, so the trailing `ret` lands on the trampoline */
+  f[11] = (void *)(uintptr_t)sc_ctx_entry; /* x30, so the trailing `ret` lands on the trampoline */
 #endif
   /* The ONLY reader of this frame is the assembly above, which the compiler cannot see. Under LTO it has
      the whole program and concludes nothing reads these stores, so it deletes them -- the coroutine then

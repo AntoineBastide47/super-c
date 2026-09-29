@@ -367,7 +367,7 @@ extend<A: Allocator> String<A> {
     pub fn push_i64(self: &mut String<A>, value: i64) {
         if value < 0 {
             self.push_byte(45);
-            self.push_u64(0 as u64 - value as u64);
+            self.push_u64((value as u64).wrapping_neg());
         } else {
             self.push_u64(value as u64);
         }
@@ -396,7 +396,7 @@ extend<A: Allocator> String<A> {
     pub fn push_hex_i64(self: &mut String<A>, value: i64, upper: bool) {
         if value < 0 {
             self.push_byte(45);
-            self.push_hex(0 as u64 - value as u64, upper);
+            self.push_hex((value as u64).wrapping_neg(), upper);
         } else {
             self.push_hex(value as u64, upper);
         }
@@ -1090,7 +1090,7 @@ extend<A: Allocator> String<A> as Hash {
         let p = self.as_ptr();
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..n {
-            h = (h ^ (unsafe p[i]) as u64) * 0x100000001b3;
+            h = (h ^ (unsafe p[i]) as u64).wrapping_mul(0x100000001b3);
         }
         return h;
     }

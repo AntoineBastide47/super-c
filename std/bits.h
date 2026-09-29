@@ -5,8 +5,21 @@
    for compile-time evaluation. */
 #ifndef SC_BITS_H
 #define SC_BITS_H
+#include <stdbool.h>
 #include <stdint.h>
 static inline uint32_t sc_ctz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_ctzll(sc_x) : 64u; }
 static inline uint32_t sc_clz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_clzll(sc_x) : 64u; }
 static inline uint32_t sc_popcount64(uint64_t sc_x) { return (uint32_t)__builtin_popcountll(sc_x); }
+/* Wrapping arithmetic for the built-in integer methods in core.spc (`wrapping_*`, `overflowing_*`,
+   `checked_*`, `saturating_*`): C's unsigned operators, modulo 2^64 in every profile; a narrower method
+   truncates the result. A shift count is below 64. `sc_mulo_*` tell whether the full product overflows 64
+   bits. The IR interpreter models these names for compile-time evaluation. */
+static inline uint64_t sc_wadd64(uint64_t sc_a, uint64_t sc_b) { return sc_a + sc_b; }
+static inline uint64_t sc_wsub64(uint64_t sc_a, uint64_t sc_b) { return sc_a - sc_b; }
+static inline uint64_t sc_wmul64(uint64_t sc_a, uint64_t sc_b) { return sc_a * sc_b; }
+static inline uint64_t sc_wshl64(uint64_t sc_a, uint32_t sc_n) { return sc_a << sc_n; }
+static inline uint64_t sc_wshr64(uint64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
+static inline int64_t sc_wsar64(int64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
+static inline bool sc_mulo_u64(uint64_t sc_a, uint64_t sc_b) { uint64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
+static inline bool sc_mulo_i64(int64_t sc_a, int64_t sc_b) { int64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
 #endif

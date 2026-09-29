@@ -95,6 +95,9 @@ const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
     return d.node != NODE_NONE && d.node == decl && d.module == m;
 }
 
+// `Lowerer.err` when lowering met a TYPE_ERROR node or generic argument.
+const ERR_TYPE_SLUG: str<'static> = "error type";
+
 // `Lowerer.chk_let` when the checked root call is an expression statement.
 const CHK_NO_LET: usize = 0xFFFFFFFF;
 
@@ -522,6 +525,12 @@ extend Lowerer {
         self.body.user_moves.set(w, self.body.user_moves[w] | 1u64 << (op & 63) as u64);
     }
 
+    /// Whether lowering stopped at a node the checker rejected (TYPE_ERROR): its diagnostic is
+    /// already reported, so a caller refusing the body reports nothing more.
+    pub fn failed_on_error_type(self: &Self) bool {
+        return self.err == ERR_TYPE_SLUG;
+    }
+
     const fn fail_at(self: &mut Self, why: str<'static>, node: NodeId) {
         if self.err.len() == 0 {
             self.err = why;
@@ -757,29 +766,15 @@ extend Lowerer {
     }
 
     /// A local slot with the declaration facts the emitter reads after the body syntax is
-    /// released: the binding's name text, its declaration kind, and whether a `let` spells a
-    /// `[T; 0]` annotation (the checker interns length 0 for the unsized sentinel too).
+    /// released: the binding's name text and its declaration kind.
     fn local_decl(self: &Self, ty: TypeId, storage: u8, is_mutable: bool, span: tok::Span, decl: NodeId) ir::LocalDecl {
         let mut name = tok::Span::empty();
         let mut dkind = ir::LK_NONE;
-        let mut zero_len = false;
         if decl != NODE_NONE {
             let n = self.f.node(decl);
             name = unsafe (&*self.f.ast).decl_name_span(decl);
             if n.kind == NodeKind::NODE_LET {
                 dkind = ir::LK_LET;
-                let tn = n.as_data.let_stmt.ty;
-                // Only a zero-length array type can be the unsized sentinel: the spelled length
-                // decides, evaluated for those lets alone.
-                let zero_ty = ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_ARRAY && self.f.ty(ty).as_data.arr.len == 0;
-                if zero_ty && tn != NODE_NONE && self.f.node(tn).kind == NodeKind::NODE_ARRAY_TYPE {
-                    let ln = self.f.node(tn).as_data.array_type.length;
-                    if ln != NODE_NONE && unsafe (&*self.pkg).cir != null {
-                        let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-                        let cv = cev.eval(self.module, ln);
-                        zero_len = cv.kind == iri::IV_INT && cv.i == 0;
-                    }
-                }
             } else if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
                 dkind = ir::LK_FOR;
             } else if n.kind == NodeKind::NODE_PATTERN_NAME {
@@ -797,7 +792,6 @@ extend Lowerer {
             storage: storage,
             is_mutable: is_mutable,
             dkind: dkind,
-            zero_len: zero_len,
             span: span,
             decl: decl,
             name_off: off,
@@ -1580,6 +1574,15 @@ extend Lowerer {
             }
             return vt;
         }
+        if y.arr_sym() {
+            let e = self.proj_ty_map(y.as_data.arr.elem, pm, params, args, n);
+            let lt = self.proj_ty_map(y.as_data.arr.len, pm, params, args, n);
+            if e == y.as_data.arr.elem && lt == y.as_data.arr.len {
+                return t;
+            }
+            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            return sa.intern_array(e, lt);
+        }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
             let e = self.proj_ty_map(y.as_data.elem, pm, params, args, n);
             if e == y.as_data.elem {
@@ -1590,19 +1593,22 @@ extend Lowerer {
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
             return sa.intern_type(nt);
         }
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let src = *self.f.instance(y.as_data.inst);
-            let mut na: [TypeId; 8] = [[0] = TYPE_NONE];
+        if y.kind == TypeKind::TYPE_INSTANCE || y.fn_sig() {
+            let src = *self.f.instance(y.rec());
+            let mut na = src;
             let mut changed = false;
             for i in 0..src.n {
-                unsafe na[i as usize] = self.proj_ty_map(unsafe src.args[i as usize], pm, params, args, n);
-                if unsafe na[i as usize] != unsafe src.args[i as usize] {
+                unsafe na.args[i as usize] = self.proj_ty_map(unsafe src.args[i as usize], pm, params, args, n);
+                if unsafe na.args[i as usize] != unsafe src.args[i as usize] {
                     changed = true;
                 }
             }
             if changed {
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-                return sa.intern_instance(src.module, src.decl, &na[0], src.n);
+                if y.fn_sig() {
+                    return sa.intern_sig_rec(&na, y.qualifier);
+                }
+                return sa.intern_instance(src.module, src.decl, &na.args[0], src.n);
             }
             return t;
         }
@@ -1744,6 +1750,10 @@ extend Lowerer {
     // Every node-type read routes through the active-copy substitution.
     fn nty(self: &mut Self, id: NodeId) TypeId {
         let t = self.f.node_type(id);
+        if t == TYPE_ERROR {
+            // The checker rejected this node (and reported it): nothing it means can be lowered.
+            self.fail_at(ERR_TYPE_SLUG, id);
+        }
         return self.proj_subst_ty(t);
     }
 
@@ -1762,9 +1772,8 @@ extend Lowerer {
         return self.proj_member_ty(owner, dm, unsafe da.list(pls)[k as usize]);
     }
 
-    // The C-visible tag value of variant `idx`: the declaration index for payload enums, the
-    // (possibly explicit) enum constant value for bare ones.
-    fn proj_tag_val(self: &Self, owner: TypeId, idx: i64) i64 {
+    // The C-visible tag value of variant `idx`: its (possibly explicit) discriminant.
+    fn proj_tag_val(self: &mut Self, owner: TypeId, idx: i64) i64 {
         let mut dm: ModuleId = 0;
         let dn = self.proj_owner_decl(owner, &mut dm);
         if dn == NODE_NONE {
@@ -1773,14 +1782,11 @@ extend Lowerer {
         return self.tag_of_decl(dm, dn, idx);
     }
 
-    // The C tag value of variant `idx` within enum declaration `dn` of module `dm`: the ordinal
-    // for payload enums (tag = declaration index), the explicit discriminant for bare ones.
-    fn tag_of_decl(self: &Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
+    // The C tag value of variant `idx` within enum declaration `dn` of module `dm`: its explicit
+    // discriminant, else the previous variant's plus one.
+    fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
         let ms = da.at_const(dn).as_data.aggregate.members;
-        if da.enum_has_payload(dn) {
-            return idx;
-        }
         let mut cur: i64 = 0 - 1;
         let mut i: i64 = 0;
         while i <= idx && i < ms.len as i64 {
@@ -1792,34 +1798,55 @@ extend Lowerer {
 
     // The C tag of every variant of enum declaration `dn` of module `dm`, in declaration order and
     // truncated to the 32 bits a switch value carries: one pass instead of one `tag_of_decl` per
-    // switch edge.
-    fn tags_of_decl(self: &Self, dm: ModuleId, dn: NodeId, out: &mut Vector<u32>) {
+    // switch edge. True when a tag is negative: the discriminant then reads as i32, else as u32.
+    fn tags_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, out: &mut Vector<u32>) bool {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
         let ms = da.at_const(dn).as_data.aggregate.members;
-        let pay = da.enum_has_payload(dn);
         let mut cur: i64 = 0 - 1;
+        let mut neg = false;
         for i in 0..ms.len {
-            cur = if pay {
-                i;
-            } else {
-                self.next_tag(dm, unsafe da.list(ms)[i as usize], cur);
-            };
+            cur = self.next_tag(dm, unsafe da.list(ms)[i as usize], cur);
+            neg = neg || cur < 0;
             out.push((cur as u64 & 0xFFFFFFFF) as u32);
         }
+        return neg;
     }
 
-    // A bare enum variant's discriminant: its explicit value, else the previous variant's plus one.
-    fn next_tag(self: &Self, dm: ModuleId, vid: NodeId, prev: i64) i64 {
+    // The type a discriminant of enum declaration `dn` of module `dm` reads as, and in `tag` the
+    // tag of its variant `idx`: i32 when a tag is negative, else u32.
+    fn tag_ty(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64, tag: &mut i64) TypeId {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        let vv = da.at_const(vid).as_data.variant.value;
-        if vv != NODE_NONE && unsafe (&*self.pkg).cir != null {
-            let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-            let cv = cev.eval(dm, vv);
-            if cv.kind == iri::IV_INT {
-                return cv.i;
+        let ms = da.at_const(dn).as_data.aggregate.members;
+        let mut cur: i64 = 0 - 1;
+        let mut neg = false;
+        for i in 0..ms.len {
+            cur = self.next_tag(dm, unsafe da.list(ms)[i as usize], cur);
+            neg = neg || cur < 0;
+            if i as i64 == idx {
+                *tag = cur;
             }
         }
-        return prev + 1;
+        return Ast::builtin(
+            if neg {
+                BuiltinType::BT_I32;
+            } else {
+                BuiltinType::BT_U32;
+            },
+        );
+    }
+
+    // An enum variant's discriminant: its explicit value, else the previous variant's plus one.
+    // An explicit value that does not fold fails the lowering (the type check reports it).
+    fn next_tag(self: &mut Self, dm: ModuleId, vid: NodeId, prev: i64) i64 {
+        if (unsafe &*(&*self.pkg).module_ast_const(dm)).at_const(vid).as_data.variant.value == NODE_NONE {
+            return prev + 1;
+        }
+        let cev = (unsafe (&*self.pkg).cir) as *mut iri::Interp;
+        let mut v: i64 = 0;
+        if cev == null || !unsafe (*cev).discr(dm, vid, prev, &mut v) {
+            self.fail_at("enum-discriminant", vid);
+        }
+        return v;
     }
 
     // A member access on a reflection binder: resolved through the innermost active copy frame.
@@ -3277,7 +3304,7 @@ extend Lowerer {
                         }
                         let start = self.body.oper_pool.len() as u32;
                         self.body.oper_pool.push(op);
-                        let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt2, sp);
+                        let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp);
                         if res == ir::IR_NONE {
                             return ir::IR_NONE;
                         }
@@ -3434,8 +3461,9 @@ extend Lowerer {
                 }
             }
             let op = self.lower_expr(d.expression);
-            if op == ir::IR_NONE {
-                return ir::IR_NONE;
+            if op == ir::IR_NONE || self.f.dyn_conv(d.expression) != null {
+                // A cast to a dyn type is the erasure the operand's lowering already performed.
+                return op;
             }
             // an UNTYPED cast (a const initializer demanded before its module typechecks) still
             // names its builtin in the syntax: resolve it so `E::COUNT as usize` folds
@@ -3670,7 +3698,7 @@ extend Lowerer {
         // other literal operand lowers once and continues below.
         let mut op = ir::IR_NONE;
         if d.op == tt::TokenType::Minus && self.f.node(d.operand).kind == NodeKind::NODE_LITERAL {
-            let mut mag: i64 = 0;
+            let mut mag: u64 = 0;
             let lit_ok = lit_int_value(self.src, self.f.node(d.operand).as_data.literal.raw, &mut mag);
             op = self.lower_expr(d.operand);
             if op == ir::IR_NONE {
@@ -3681,7 +3709,7 @@ extend Lowerer {
                 if o9.kind == ir::OP_CONST {
                     let c9 = *self.body.constants.at(o9.data as usize);
                     if c9.kind == ir::CK_INT {
-                        let v9 = 0 - mag;
+                        let v9 = mag.wrapping_neg() as i64;
                         let mut ty9 = ty;
                         if (v9 < -2147483648 || v9 > 2147483647) && ty9 != TYPE_NONE {
                             let yv = *self.f.ty(ty9);
@@ -3776,7 +3804,7 @@ extend Lowerer {
                     let cty = self.proj_payload_ty(rt, rerr, 0);
                     let cstart = self.body.oper_pool.len() as u32;
                     self.body.oper_pool.push(eop);
-                    eop = self.emit_call(conv, ir::IR_NONE, cstart, 1, 0, 0, cty, sp);
+                    eop = self.emit_call(conv, ir::IR_NONE, cstart, 1, 0, 0, TYPE_NONE, TYPE_NONE, cty, sp);
                     if eop == ir::IR_NONE {
                         return ir::IR_NONE;
                     }
@@ -3964,16 +3992,8 @@ extend Lowerer {
         return self.copy_op(pl);
     }
 
-    // An operator method call (binary/compound/unary overloads): receiver is the left operand.
-    fn lower_op_call(self: &mut Self, id: NodeId, m: ModuleId, decl: NodeId, lhs: NodeId, rhs: NodeId) ir::OperandId {
-        let lop = self.lower_expr(lhs);
-        if lop == ir::IR_NONE {
-            return ir::IR_NONE;
-        }
-        return self.lower_op_call_from(id, m, decl, lop, rhs, self.nty(id));
-    }
-
-    // `lower_op_call` after the receiver: `lop` is the lowered left operand; `ty` is the result type.
+    // An operator method call (binary/compound/unary/index overloads) after the receiver: `lop` is the
+    // lowered left operand; `ty` is the result type.
     fn lower_op_call_from(
         self: &mut Self,
         id: NodeId,
@@ -3987,16 +4007,48 @@ extend Lowerer {
         let mut argv = self.avget();
         argv.push(lop);
         if rhs != NODE_NONE {
-            let rop = self.lower_expr(rhs);
+            let mut rop = self.lower_expr(rhs);
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
+            }
+            // A by-reference parameter (`other: &i32`) borrows the right operand, as `m.add(&n)` does:
+            // the operand's place, or a temporary holding a constant (`m + 5`).
+            let ro = *self.body.operands.at(rop as usize);
+            let by_val = ro.ty == TYPE_NONE || self.f.ty(ro.ty).kind != TypeKind::TYPE_REFERENCE;
+            if by_val && self.param_is_ref(DefId { module: m, node: decl }, 1) {
+                let pl = if ro.kind == ir::OP_CONST {
+                    self.spill(rop, sp);
+                } else {
+                    ro.data;
+                };
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let rty = sa.intern_type(
+                    Ty { kind: TypeKind::TYPE_REFERENCE, as_data: TyAs { elem: self.body.places.at(pl as usize).ty } },
+                );
+                rop = self.copy_op(self.rv_temp(ir::rv(ir::RV_REF, pl, 0, 0, rty), sp));
             }
             argv.push(rop);
         }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
-        return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, ty, sp);
+        // Through a type parameter's bound: the conformance each instance dispatches to.
+        let bc = self.proj_subst_ty(self.f.bound_call(id));
+        return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, bc, TYPE_NONE, ty, sp);
+    }
+
+    // Whether parameter `i` of function `f` is declared a reference.
+    fn param_is_ref(self: &Self, f: DefId, i: u32) bool {
+        let fa = unsafe (&*self.pkg).module_ast_const(f.module);
+        let fnn = unsafe (*fa).at_const(f.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || i >= fnn.as_data.function.params.len {
+            return false;
+        }
+        let pn = unsafe (*fa).at_const(unsafe (*fa).list(fnn.as_data.function.params)[i as usize]);
+        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+            return false;
+        }
+        return unsafe (*fa).at_const(pn.as_data.parameter.ty).kind == NodeKind::NODE_REFERENCE_TYPE;
     }
 
     // Copy the checker's bound generic arguments for `node` into targ_pool; returns the count
@@ -4008,13 +4060,17 @@ extend Lowerer {
         }
         let n = unsafe (*mu).n;
         for i in 0..n {
+            if unsafe (*mu).args[i as usize] == TYPE_ERROR {
+                self.fail_at(ERR_TYPE_SLUG, node);
+            }
             let ta = self.proj_subst_ty(unsafe (*mu).args[i as usize]);
             self.body.targ_pool.push(ta);
         }
         return n;
     }
 
-    // Shared call emission: args already in oper_pool[start, start+n); returns the result operand.
+    // Shared call emission: args already in oper_pool[start, start+n); `iface` is the conformance a
+    // bound call dispatches to (`Terminator.iface`). Returns the result operand.
     fn emit_call(
         self: &mut Self,
         callee: DefId,
@@ -4023,6 +4079,8 @@ extend Lowerer {
         n: u32,
         targs_start: u32,
         targs_len: u32,
+        iface: TypeId,
+        recv: TypeId,
         ty: TypeId,
         sp: tok::Span,
     ) ir::OperandId {
@@ -4039,6 +4097,8 @@ extend Lowerer {
         tm.dests_len = 1;
         tm.targs_start = targs_start;
         tm.targs_len = targs_len;
+        tm.iface = iface;
+        tm.recv = recv;
         let cont = self.open_block();
         tm.t0 = cont;
         self.seal(tm, cont);
@@ -4089,7 +4149,11 @@ extend Lowerer {
         let mut target = DefId { module: 0, node: NODE_NONE };
         switch ci {
             Some(v) => {
-                target = DefId { module: ci_module(v), node: ci_decl(v) };
+                // A field callee (`t.1()`, `w.f()`) whose type names a function item records that
+                // function with no receiver slot: it calls the stored value, like a fn-pointer field.
+                if ck != NodeKind::NODE_MEMBER || self.f.node(d.callee).as_data.member.path || (v & 0xFFu64) != 0 {
+                    target = DefId { module: ci_module(v), node: ci_decl(v) };
+                }
             },
             None => {},
         };
@@ -4368,7 +4432,37 @@ extend Lowerer {
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
-        let res = self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
+        let bc = self.proj_subst_ty(self.f.bound_call(id));
+        // `T::count()` / `Self::make()`: an interface's associated function through a type parameter
+        // names its implementor by the parameter, whatever its result or first argument are; through a
+        // type (`P::twice()`, an inherited default), by that type.
+        let mut impl9 = TYPE_NONE;
+        if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            // `Type::<Args>::f::<U>()`: the qualifying instance names the receiver of a function
+            // whose own arguments are the call's.
+            let in9 = self.f.node(d.callee).as_data.specialization.expression;
+            if self.f.node(in9).kind == NodeKind::NODE_MEMBER && self.f.node(in9).as_data.member.path {
+                let q9 = self.nty(self.f.node(in9).as_data.member.object);
+                if q9 != TYPE_NONE && self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE {
+                    impl9 = q9;
+                }
+            }
+        }
+        if ck == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE && iface_of_member(
+            unsafe &*(&*self.pkg).module_ast_const(target.module),
+            target.node,
+        ) != NODE_NONE {
+            let od9 = self.f.res(self.f.node(d.callee).as_data.member.object);
+            if od9.node != NODE_NONE && (self.decl_kind(od9) == NodeKind::NODE_GENERIC_PARAM || self.decl_kind(od9) == NodeKind::NODE_INTERFACE) {
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                impl9 = sa.intern_type(
+                    Ty { kind: TypeKind::TYPE_GENERIC, module: od9.module, as_data: TyAs { decl: od9.node } },
+                );
+            } else {
+                impl9 = self.nty(self.f.node(d.callee).as_data.member.object);
+            }
+        }
+        let res = self.emit_call(target, callee_op, start, n, ts, tn, bc, impl9, ty, sp);
         self.maybe_cancel_check(id, target, callee_op != ir::IR_NONE, res, ty, sp);
         return res;
     }
@@ -4458,7 +4552,7 @@ extend Lowerer {
         let it = Ast::builtin(BuiltinType::BT_I32);
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let c0 = self.body.oper_pool.len() as u32;
-        let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, it, sp);
+        let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, TYPE_NONE, TYPE_NONE, it, sp);
         let real_b = self.open_block();
         let ladder_b = self.open_block();
         let cont_b = self.open_block();
@@ -4519,11 +4613,33 @@ extend Lowerer {
         let pk = unsafe &*self.pkg;
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let b0 = self.body.oper_pool.len() as u32;
-        let _ = self.emit_call(pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN), ir::IR_NONE, b0, 0, 0, 0, ut, sp);
+        let _ = self.emit_call(
+            pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN),
+            ir::IR_NONE,
+            b0,
+            0,
+            0,
+            0,
+            TYPE_NONE,
+            TYPE_NONE,
+            ut,
+            sp,
+        );
         self.emit_defers_down_to(0);
         self.emit_deads_down_to(0);
         let e0 = self.body.oper_pool.len() as u32;
-        let _ = self.emit_call(pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND), ir::IR_NONE, e0, 0, 0, 0, ut, sp);
+        let _ = self.emit_call(
+            pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND),
+            ir::IR_NONE,
+            e0,
+            0,
+            0,
+            0,
+            TYPE_NONE,
+            TYPE_NONE,
+            ut,
+            sp,
+        );
         let mut rt = ir::term0(ir::TM_RETURN, sp);
         rt.args_len = ir::RET_CANCEL;
         self.seal(rt, next);
@@ -4903,25 +5019,18 @@ extend Lowerer {
         } else {
             ir::AGG_ARRAY;
         };
-        let mut aty = ty;
         if designated && k == NodeKind::NODE_ARRAY_LITERAL && ty != TYPE_NONE {
+            // The checker types a designated literal with at least its extent (the expected
+            // length when it underfills one): the omitted tail zero-fills.
             let y = *self.f.ty(ty);
             if y.kind == TypeKind::TYPE_ARRAY {
-                if y.as_data.arr.len as i64 > argv.len() as i64 {
-                    while argv.len() as i64 < y.as_data.arr.len as i64 {
-                        argv.push(ir::IR_NONE);
-                    }
-                } else if y.as_data.arr.len as i64 < argv.len() as i64 {
-                    // designators reached past the recorded length: the literal's C temp must
-                    // span every written slot
-                    let mut nt = y;
-                    nt.as_data.arr.len = argv.len() as u32;
-                    let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-                    aty = sa.intern_type(nt);
+                while argv.len() as u64 < y.as_data.arr.len as u64 {
+                    argv.push(ir::IR_NONE);
                 }
             }
         }
         // A literal coerced to a slice builds its array; `apply_adjust` views it.
+        let mut aty = ty;
         if self.slice_view(ty) {
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
@@ -5420,7 +5529,10 @@ extend Lowerer {
             }
         }
         let dk = self.decl_kind(d);
-        if dk == NodeKind::NODE_FUNCTION {
+        // A generic extend's constant, or a generic function's local constant that uses its
+        // parameters, is a value per instance: the arguments ride along (the checker records them on
+        // the reference).
+        if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_CONST && self.f.type_args(id) != null {
             let ts = self.body.targ_pool.len() as u32;
             let tn = self.copy_targs(id);
             return self.const_op(
@@ -5434,6 +5546,19 @@ extend Lowerer {
             self.avput(argv);
             return ru9;
         }
+        if dk == NodeKind::NODE_CONST && self.retyped_int_const(d, ty) {
+            // A builtin limit that literal-only arithmetic or a pattern reads as the literal of its
+            // value has the use's type, which its C object does not: it lowers to that literal.
+            let cev = (unsafe (&*self.pkg).cir) as *mut iri::Interp;
+            if cev != null {
+                let cv = unsafe (*cev).eval(d.module, d.node);
+                if cv.kind == iri::IV_INT {
+                    return self.kop(ir::CK_INT, ty, cv.i, sp);
+                }
+            }
+            self.fail_at("limit-value", id);
+            return ir::IR_NONE;
+        }
         let l = self.item_local(d, ty, sp);
         let pl = self.place_of_local(l);
         return self.copy_op(pl);
@@ -5445,6 +5570,20 @@ extend Lowerer {
         }
         let a = unsafe (&*self.pkg).module_ast_const(d.module);
         return unsafe (&*a).at_const(d.node).kind;
+    }
+
+    // Whether constant `d`, read at a use of type `ty`, is an integer constant of another integer
+    // type: a builtin limit the checker retyped as a literal.
+    fn retyped_int_const(self: &mut Self, d: DefId, ty: TypeId) bool {
+        let dt = unsafe (*(&*self.pkg).module_ast_const(d.module)).type_of(d.node);
+        if dt == TYPE_NONE || ty == TYPE_NONE {
+            return false;
+        }
+        let rt = self.reintern_ty(d.module, dt);
+        return rt != ty && self.f.ty(rt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(ty).kind == TypeKind::TYPE_BUILTIN && bt_int_width(
+            self.f.ty(rt).as_data.builtin,
+            false,
+        ) != 0 && bt_int_width(self.f.ty(ty).as_data.builtin, false) != 0;
     }
 
     // ---- places -----------------------------------------------------------------------------------
@@ -5480,7 +5619,10 @@ extend Lowerer {
                 return ir::IR_NONE;
             }
             let dk = self.decl_kind(d);
-            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT {
+            // A constant with type arguments has a value per instance (`item_value`).
+            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT || dk == NodeKind::NODE_CONST && self.f.type_args(
+                id,
+            ) != null {
                 let op = self.item_value(id, d, ty, sp);
                 if op == ir::IR_NONE {
                     return ir::IR_NONE;
@@ -5559,7 +5701,7 @@ extend Lowerer {
                 let rop = self.copy_op(base);
                 let start = self.body.oper_pool.len() as u32;
                 self.body.oper_pool.push(rop);
-                let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt2, sp);
+                let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp);
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
@@ -5611,13 +5753,71 @@ extend Lowerer {
                 continue;
             }
             let gens = fa.at_const(nid).as_data.extend_def.generics;
-            let mut n = gens.len;
-            if n > it.n as u32 {
-                n = it.n;
+            let pat = fa.type_of(fa.at_const(nid).as_data.extend_def.target_type);
+            if ext_is_identity(fa, pat, fa, m.module, nid) {
+                let mut n = gens.len;
+                if n > it.n as u32 {
+                    n = it.n;
+                }
+                return self.proj_ty_map(rr, m.module, gens, &it.args[0], n);
             }
-            return self.proj_ty_map(rr, m.module, gens, &it.args[0], n);
+            // The extend's own arguments, each solved from the target argument that names it.
+            let mut ea = [TYPE_NONE; 8];
+            let pi = *fa.instance(fa.type_at(pat).as_data.inst);
+            let np = ext_arity(fa, nid, pi.n);
+            let mut j: u32 = 0;
+            while j < np && j < it.n as u32 {
+                let x = xarg_of(fa, unsafe pi.args[j as usize], fa, m.module, gens);
+                if x.par < 8 && x.kind == XA_PARAM {
+                    unsafe ea[x.par as usize] = unsafe it.args[j as usize];
+                } else if x.par < 8 && x.kind == XA_FORM {
+                    let bt = (unsafe &*self.pkg).const_param_bt(m.module, unsafe fa.list(gens)[x.par as usize]);
+                    unsafe ea[x.par as usize] = self.ext_form_arg(&x, unsafe it.args[j as usize], bt);
+                }
+                j += 1;
+            }
+            return self.proj_ty_map(rr, m.module, gens, &ea[0], pick(gens.len < 8, gens.len, 8));
         }
         return rr;
+    }
+
+    // The value of FORM argument `x`'s parameter (of type `bt`) at the instance argument `r` (self
+    // pool): a constant for a constant, else the form `(r - k) / c` (`xarg_solve_lin`), bare when it
+    // is one parameter of type `bt`. TYPE_NONE when it does not solve.
+    fn ext_form_arg(self: &mut Self, x: &XArg, r: TypeId, bt: BuiltinType) TypeId {
+        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let y = *self.f.ty(r);
+        if y.kind == TypeKind::TYPE_CONST {
+            let mut q = i128::zero();
+            if !xarg_solve(x, y.cval(), bt, lay::target_for((unsafe &*self.pkg).arch).ptr == 4, &mut q) {
+                return TYPE_NONE;
+            }
+            return sa.const_value(cval_bits(q), bt);
+        }
+        let mut rl = ConstLin::new(bt);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            rl = ConstLin::new((unsafe &*self.pkg).const_param_bt(y.module, y.as_data.decl));
+            let _ = rl.add_term(DefId { module: y.module, node: y.as_data.decl }, i128::one());
+        } else if y.kind == TypeKind::TYPE_CONST_EXPR {
+            rl = *sa.const_lin_at(y.as_data.inst);
+        } else {
+            return TYPE_NONE;
+        }
+        let mut s = ConstLin::new(bt);
+        if !xarg_solve_lin(x, &rl, bt, &mut s) {
+            return TYPE_NONE;
+        }
+        let p0 = s.p[0];
+        let pk = (unsafe &*(&*self.pkg).module_ast_const(p0.module)).at_const(p0.node).kind;
+        if s.n == 1 && s.k.is_zero() && s.c[0] == i128::one() && pk == NodeKind::NODE_GENERIC_PARAM && (unsafe &*self.pkg).const_param_bt(
+            p0.module,
+            p0.node,
+        ) == bt {
+            return sa.intern_type(
+                Ty { kind: TypeKind::TYPE_GENERIC, module: p0.module, as_data: TyAs { decl: p0.node } },
+            );
+        }
+        return sa.intern_const_lin(&s);
     }
 
     fn lower_member_place(self: &mut Self, id: NodeId) ir::PlaceId {
@@ -5628,7 +5828,10 @@ extend Lowerer {
             // Path member (Enum::Variant, Type::CONST): an item, not a projection. A static
             // resolves to its OWN place (writes must reach the global, never a spilled copy).
             let pd = self.path_res(id);
-            if pd.node != NODE_NONE && self.decl_kind(pd) == NodeKind::NODE_CONST {
+            if pd.node != NODE_NONE && self.decl_kind(pd) == NodeKind::NODE_CONST && self.f.type_args(id) == null && !self.retyped_int_const(
+                pd,
+                ty,
+            ) {
                 let l2 = self.item_local(pd, ty, sp);
                 return self.place_of_local(l2);
             }
@@ -5863,17 +6066,37 @@ extend Lowerer {
         switch self.f.op_method(id) {
             Some(m) => {
                 // Index conformance: place = *method(&obj, idx) -- the call yields the element ref.
-                let res = self.lower_op_call(
+                let lop = self.lower_expr(d.object);
+                if lop == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                // `&E` from `index`, `&mut E` from `index_mut`: the method's declared result.
+                let ma = unsafe (&*self.pkg).module_ast_const((m >> 32) as ModuleId);
+                let mf = unsafe (*ma).at_const((m & 0xFFFFFFFFu64) as NodeId).as_data.function;
+                let mut q = TypeQualifier::TYPE_QUAL_NONE as u8;
+                if mf.returns.len == 1 {
+                    let rn = unsafe (*ma).at_const(unsafe (*ma).slot_type_node(unsafe (*ma).list(mf.returns)[0]));
+                    if rn.kind == NodeKind::NODE_REFERENCE_TYPE && rn.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                        q = TypeQualifier::TYPE_QUAL_MUT as u8;
+                    }
+                }
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let rty = sa.intern_type(
+                    Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: ty } },
+                );
+                let res = self.lower_op_call_from(
                     id,
                     (m >> 32) as ModuleId,
                     (m & 0xFFFFFFFFu64) as NodeId,
-                    d.object,
+                    lop,
                     d.index,
+                    rty,
                 );
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
-                return self.spill(res, sp);
+                let rpl = self.spill(res, sp);
+                return self.place_project(rpl, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: ty });
             },
             None => {},
         };
@@ -6156,10 +6379,11 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         let vty = self.body.places.at(v as usize).ty;
-        let ut = Ast::builtin(BuiltinType::BT_U32);
+        // the C tag carries the variant's discriminant, not its ordinal
+        let mut tag: i64 = 0;
+        let ut = self.tag_ty(vd.module, en, ord, &mut tag);
         let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, v, 0, 0, ut), sp);
-        // the C tag carries a bare enum's explicit discriminant, not its ordinal
-        let ord_op = self.kop(ir::CK_INT, ut, self.tag_of_decl(vd.module, en, ord), sp);
+        let ord_op = self.kop(ir::CK_INT, ut, tag, sp);
         let cond = self.eq_test(dp, ord_op, sp);
         *payload = self.place_project(
             v,
@@ -6560,10 +6784,29 @@ extend Lowerer {
         // every test reads the value behind the scrutinee's references
         let pl = self.pat_deref(self.place_of_path(t, n.place, vpl, cache));
         if k0 == pat::PC_VARIANT || k0 == pat::PC_BOOL {
-            // one switch over the discriminant / value; no place is read twice
+            // one switch over the discriminant / value; no place is read twice. The C tag carries
+            // each variant's discriminant, not its ordinal.
+            let own = self.body.places.at(pl as usize).ty;
+            let mut tags = self.avget();
+            let mut tm9: ModuleId = 0;
+            let td9 = if k0 == pat::PC_VARIANT {
+                self.proj_owner_decl(own, &mut tm9);
+            } else {
+                NODE_NONE;
+            };
+            let mut signed = false;
+            if td9 != NODE_NONE {
+                signed = self.tags_of_decl(tm9, td9, &mut tags);
+            }
             let mut sw_op = ir::IR_NONE;
             if k0 == pat::PC_VARIANT {
-                let ut = Ast::builtin(BuiltinType::BT_U32);
+                let ut = Ast::builtin(
+                    if signed {
+                        BuiltinType::BT_I32;
+                    } else {
+                        BuiltinType::BT_U32;
+                    },
+                );
                 let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, pl, 0, 0, ut), sp);
                 sw_op = self.copy_op(dp);
             } else {
@@ -6586,18 +6829,6 @@ extend Lowerer {
             } else {
                 n.edge_len - 1;
             };
-            // the C tag carries a bare enum's explicit discriminant, not its ordinal
-            let own = self.body.places.at(pl as usize).ty;
-            let mut tags = self.avget();
-            let mut tm9: ModuleId = 0;
-            let td9 = if k0 == pat::PC_VARIANT {
-                self.proj_owner_decl(own, &mut tm9);
-            } else {
-                NODE_NONE;
-            };
-            if td9 != NODE_NONE {
-                self.tags_of_decl(tm9, td9, &mut tags);
-            }
             for e in 0..pairs {
                 let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
                 let cv: u64 = if td9 != NODE_NONE {
@@ -6635,9 +6866,33 @@ extend Lowerer {
             let miss = self.open_block();
             let mut cond = ir::IR_NONE;
             if ep.kind == pat::PC_INT {
+                // A value pattern keeps its spelling; a split piece is its value.
                 let ity = self.body.places.at(pl as usize).ty;
-                let cop = self.kop(ir::CK_INT, ity, ep.val, sp);
+                let cop = if ep.node != NODE_NONE {
+                    self.lower_expr(self.f.node(ep.node).as_data.single.value);
+                } else {
+                    self.kop(ir::CK_INT, ity, ep.val, sp);
+                };
+                if cop == ir::IR_NONE {
+                    return;
+                }
                 cond = self.eq_test(pl, cop, sp);
+            } else if ep.kind == pat::PC_RANGE && ep.node == NODE_NONE {
+                // A split piece: its bounds, except one at the type's extreme, which every value meets.
+                let ity = self.body.places.at(pl as usize).ty;
+                if ep.val != pat::dom_min(ep.uns, ep.bits) {
+                    let lop = self.kop(ir::CK_INT, ity, ep.val, sp);
+                    cond = self.cmp_test(pl, lop, tt::TokenType::GreaterThanEqual, sp);
+                }
+                if ep.hi != pat::dom_max(ep.uns, ep.bits) {
+                    let hop = self.kop(ir::CK_INT, ity, ep.hi, sp);
+                    let c2 = self.cmp_test(pl, hop, tt::TokenType::LessThanEqual, sp);
+                    cond = if cond == ir::IR_NONE {
+                        c2;
+                    } else {
+                        self.bool_and(cond, c2, sp);
+                    };
+                }
             } else if ep.kind == pat::PC_RANGE {
                 let rd = self.f.node(ep.node).as_data.pattern_range;
                 let mut ok = true;
@@ -7013,8 +7268,8 @@ const fn compound_base_op(op: tt::TokenType) u32 {
 }
 
 // An integer literal's exact magnitude (dec/hex, `_` separators, [iu]NN suffix stripped);
-// false when the spelling is not a plain integer or overflows i64.
-fn lit_int_value(src: str, sp: tok::Span, out: &mut i64) bool {
+// false when the spelling is not a plain integer or passes 2^63 (the magnitude of i64's minimum).
+fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
     let mut i = sp.start as usize;
     let mut e = sp.end as usize;
     if e > src.len() || e <= i {
@@ -7045,7 +7300,12 @@ fn lit_int_value(src: str, sp: tok::Span, out: &mut i64) bool {
     if hex {
         i += 2;
     }
-    let mut v: i64 = 0;
+    let base: u64 = if hex {
+        16;
+    } else {
+        10;
+    };
+    let mut v: u64 = 0;
     let mut any = false;
     while i < e {
         let b = src[i];
@@ -7059,20 +7319,11 @@ fn lit_int_value(src: str, sp: tok::Span, out: &mut i64) bool {
         } else if hex && (b | 32) >= b'a' && (b | 32) <= b'f' {
             dv = (b | 32) - b'a' + 10;
         }
-        if dv < 0 {
+        // At most 2^63: the magnitude of i64's minimum.
+        if dv < 0 || v > ((1u64 << 63) - dv as u64) / base {
             return false;
         }
-        if hex {
-            if v > 576460752303423487 {
-                return false;
-            }
-            v = v * 16 + dv;
-        } else {
-            if v > 922337203685477579 {
-                return false;
-            }
-            v = v * 10 + dv;
-        }
+        v = v * base + dv as u64;
         any = true;
         i += 1;
     }
@@ -7083,8 +7334,8 @@ fn lit_int_value(src: str, sp: tok::Span, out: &mut i64) bool {
     return true;
 }
 
-// Decimal fast path for integer literal spellings; 0 for hex/underscored/suffixed forms (the span
-// keeps the exact spelling for CTFE).
+// Decimal fast path for integer literal spellings; 0 for hex/underscored/suffixed forms and values
+// past i64 (the span keeps the exact spelling for CTFE).
 fn parse_dec(src: str, sp: tok::Span) i64 {
     let mut v: i64 = 0;
     let mut i = sp.start as usize;
@@ -7093,7 +7344,7 @@ fn parse_dec(src: str, sp: tok::Span) i64 {
         if b < b'0' || b > b'9' {
             return 0;
         }
-        if v > 922337203685477580 {
+        if v > 922337203685477580 || v == 922337203685477580 && b > b'7' {
             return 0;
         }
         v = v * 10 + (b - b'0') as i64;

@@ -35,8 +35,8 @@
 //                                  in the diagnostic.
 //   f.offset / f.size / f.kind     C-layout byte offset, sizeof, and the `TypeTag` of the field's
 //                                  type.
-//   v.tag / v.payload / v.name     The variant's discriminant (the enum CONSTANT's value for a
-//                                  payload-less enum), its payload count, and its name.
+//   v.tag / v.payload / v.name     The variant's discriminant (its C enum constant's value), its
+//                                  payload count, and its name.
 //   v.is_active                    Whether the subject currently holds this variant.
 //   p.value / p.index / p.name     One payload of the active variant, like a field.
 //
@@ -95,7 +95,7 @@ pub fn reflect_hash<T>(v: &T) u64 {
     let mut h: u64 = 1469598103934665603u64;
     inline for f in fields(v) {
         h = h ^ reflect_hash_field(&f.value);
-        h = h * 1099511628211u64;
+        h = h.wrapping_mul(1099511628211u64);
     }
     return h;
 }
@@ -133,10 +133,10 @@ pub fn reflect_variant_hash<T>(e: &T) u64 {
     inline for v in variants(e) {
         if v.is_active {
             h = h ^ v.tag as u64;
-            h = h * 1099511628211u64;
+            h = h.wrapping_mul(1099511628211u64);
             inline for p in payloads(v) {
                 h = h ^ reflect_hash_field(&p.value);
-                h = h * 1099511628211u64;
+                h = h.wrapping_mul(1099511628211u64);
             }
         }
     }

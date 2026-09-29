@@ -236,35 +236,43 @@ pub fn run_io(cmd: *const char, in_path: *const char, out_path: *const char, err
 }
 
 // A temp project root with helpers to write a source tree, compile it, and cc+run the emitted build/ tree.
-/// A scratch project directory (its absolute path, NUL-terminated).
-pub type Proj = Array<char, 256>;
+/// A scratch project directory (its absolute path, NUL-terminated), removed with its files when the
+/// value is dropped.
+pub struct Proj {
+    root: Array<char, 256>,
+}
 
 /// A fresh empty scratch project under the system temp directory, named by pid.
 pub fn proj_new() Proj {
-    // Process-local: one forked process per test, and the name carries the pid, the sequence and
-    // the clock; a directory an aborted test left under a reused pid is cleared before use, so a
-    // fixture never reads another test's files.
-    unsafe C_SEQ = unsafe C_SEQ + 1;
-    let pid = unsafe shim::sc_getpid();
-    let mut p = Proj {};
-    unsafe stdio::snprintf(
-        &mut p[0],
-        256,
-        "%s/sccli_%d_%llu_%llu".ptr() as *const char,
-        unsafe shim::sc_tmpdir(),
-        pid,
-        unsafe C_SEQ,
-        (unsafe shim::sc_ticks_ms()) as u64,
-    );
-    let _ = unsafe shim::sc_rm_rf(&p[0]);
-    let _ = unsafe shim::sc_mkdir_p(&p[0]);
-    return p;
+    return Proj::fresh();
 }
 
 extend Proj {
+    // The scratch directory `proj_new` hands out.
+    fn fresh() Proj {
+        // Process-local: one forked process per test, and the name carries the pid, the sequence and
+        // the clock; a directory an aborted test left under a reused pid is cleared before use, so a
+        // fixture never reads another test's files.
+        unsafe C_SEQ = unsafe C_SEQ + 1;
+        let pid = unsafe shim::sc_getpid();
+        let mut p = Proj { root: Array::<char, 256> {} };
+        unsafe stdio::snprintf(
+            &mut p.root[0],
+            256,
+            "%s/sccli_%d_%llu_%llu".ptr() as *const char,
+            unsafe shim::sc_tmpdir(),
+            pid,
+            unsafe C_SEQ,
+            (unsafe shim::sc_ticks_ms()) as u64,
+        );
+        let _ = unsafe shim::sc_rm_rf(&p.root[0]);
+        let _ = unsafe shim::sc_mkdir_p(&p.root[0]);
+        return p;
+    }
+
     /// The project root as a C string.
     pub const fn rootp(self: &Proj) *const char {
-        return &self[0];
+        return &self.root[0];
     }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
@@ -440,7 +448,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "%s %s%s".ptr() as *const char,
+            "%s %s -funsigned-char%s".ptr() as *const char,
             cc_name(),
             cstd(),
             if strict {
@@ -608,8 +616,13 @@ pub fn cache_env(root: str, env: str) String {
 /// so the directory moves via chdir (the runner restores it after the test) and the
 /// variable rides sc_run's env parameter. superc_path() resolves before the chdir moves ".".
 pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
+    return exe_env_in(superc_path(), dir, key, val, args);
+}
+
+/// `superc_env_in` with the compiler binary `exe` (an absolute path) instead of the one under test.
+pub fn exe_env_in(exe: str, dir: str, key: str, val: str, args: str) CliResult {
     let mut cmd = String::new();
-    cmd.format_into("\"{}\" {}", superc_path(), args);
+    cmd.format_into("\"{}\" {}", exe, args);
     let mut kv = String::new();
     kv.format_into("{}={}", key, val);
     let mut env = cache_env(dir, kv.as_str());

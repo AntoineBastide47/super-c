@@ -55,8 +55,10 @@ fn rollback_restores_every_cell(fx: &mut Fx) {
     // Speculative work: a new bound variable, a const binding and a conflicting one, a bound.
     let v = fx.sv.var_new();
     fx.sv.bind(v, i64t);
-    fx.sv.s_cval(c, 2);
-    fx.sv.s_cval(c, 3);
+    let two = fx.c.ast.const_value(2, BuiltinType::BT_USIZE);
+    let three = fx.c.ast.const_value(3, BuiltinType::BT_USIZE);
+    fx.sv.s_eq(c, two);
+    fx.sv.s_eq(c, three);
     fx.sv.s_lb(t, i64t);
     assert_eq(fx.sv.cconflicts.len(), 1);
     fx.sv.rollback(&snap);
@@ -101,8 +103,8 @@ fn nested_session_keeps_the_outer_one(fx: &mut Fx) {
 
 @test
 fn const_conflicts_are_recorded(fx: &mut Fx) {
-    let two = fx.c.ast.const_value(2);
-    let three = fx.c.ast.const_value(3);
+    let two = fx.c.ast.const_value(2, BuiltinType::BT_USIZE);
+    let three = fx.c.ast.const_value(3, BuiltinType::BT_USIZE);
     let c = fx.sv.cvar_new();
     assert(fx.sv.cbind(c, two), "first const value binds");
     assert(!fx.sv.cbind(c, three), "a later disagreeing value is a conflict");

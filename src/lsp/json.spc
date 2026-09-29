@@ -378,7 +378,7 @@ const SWAR_LO: u64 = 0x0101010101010101;
 const SWAR_HI: u64 = 0x8080808080808080;
 
 const fn has_zero_byte(v: u64) bool {
-    return (v - SWAR_LO & ~v & SWAR_HI) != 0;
+    return (v.wrapping_sub(SWAR_LO) & ~v & SWAR_HI) != 0;
 }
 
 fn find_string_stop(s: str, from: usize, to: usize) usize {
@@ -390,7 +390,7 @@ fn find_string_stop(s: str, from: usize, to: usize) usize {
     while to - p >= 8 {
         let mut chunk: u64 = 0;
         unsafe cstring::memcpy((&mut chunk) as *mut u64, (base + p) as *const void, 8);
-        let has_ctrl = (chunk - ctrl_mask & ~chunk & SWAR_HI) != 0;
+        let has_ctrl = (chunk.wrapping_sub(ctrl_mask) & ~chunk & SWAR_HI) != 0;
         if has_zero_byte(chunk ^ quote_mask) || has_zero_byte(chunk ^ slash_mask) || has_ctrl {
             break;
         }

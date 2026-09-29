@@ -27,6 +27,61 @@ fn compiles_file() {
     assert_eq(p.run_bin(), 7);
 }
 
+// A method a plain extend defines in one module and an overlapping plain extend of the same type
+// defines again in another is a duplicate definition, reported once every module is checked, at the
+// module that extends another module's type (a std definition comes first), naming the other.
+// Disjoint extends in two modules each define the name.
+@test
+fn duplicate_items_across_modules() {
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    p.mkfile(
+        "lib.spc",
+        "pub struct P {\n    pub a: i32,\n}\n\nextend P {\n    pub fn get(self: &P) i32 {\n        return self.a;\n    }\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nextend lib::P {\n    pub fn get(self: &lib::P) i32 {\n        return 2;\n    }\n}\n\nfn main() i32 {\n    let p = lib::P { a: 1 };\n    return p.get();\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "a duplicate across modules fails");
+    assert(
+        r.out_shows(
+            format(
+                "error: duplicate definition of 'get' for 'lib::P': module 'lib' also defines it\n--> {}/main.spc:4:12",
+                root,
+            ).as_str(),
+        ),
+    );
+    assert(r.out_shows(format("= note: the other definition is here\n--> {}/lib.spc:6:12", root).as_str()));
+    p.mkfile(
+        "sdup.spc",
+        "extend String {\n    pub fn len(self: &String) usize {\n        return 7;\n    }\n}\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    let s = p.compile("sdup.spc");
+    assert(s.exit != 0, "a duplicate of a std method fails");
+    assert(
+        s.out_shows(
+            format(
+                "error: duplicate definition of 'len' for 'String': module '__std::string' also defines it\n--> {}/sdup.spc:2:12",
+                root,
+            ).as_str(),
+        ),
+    );
+    p.mkfile(
+        "gen.spc",
+        "pub struct W<T> {\n    pub v: T,\n}\n\nextend W<u8> {\n    pub fn get(self: &Self) i32 {\n        return 1;\n    }\n}\n",
+    );
+    p.mkfile(
+        "use.spc",
+        "import gen;\n\nextend gen::W<i32> {\n    pub fn get(self: &Self) i32 {\n        return 2;\n    }\n}\n\nfn main() i32 {\n    let a = gen::W::<u8> { v: 1 };\n    let b = gen::W::<i32> { v: 1 };\n    return a.get() * 10 + b.get() - 12;\n}\n",
+    );
+    let u = p.compile("use.spc");
+    assert(u.ok());
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 0);
+}
+
 // The readable language tour is also a broad end-to-end emission fixture. It must survive the full
 // frontend, strict pedantic C11 with all warnings as errors, execution, and the native leak checker
 // (ZST storage elision removed the last GNU empty-struct dependency).
@@ -40,6 +95,326 @@ fn language_demo_emits_valid_c() {
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
+}
+
+// Zero-length arrays emit strict ISO C: a local, a member, a pointer to one, a subscript of one, an
+// Array<T, 0> and a loop over one in a const-generic instance compile under -pedantic-errors and
+// -Wtype-limits (no `i < 0` loop header, no unsigned `i >= 0` bounds test) and run leak-free. A
+// zero-length array of an owning element holds nothing: its drop emits no loop over absent storage
+// (tests/zst_test.spc has the semantics).
+@test
+fn zero_length_arrays_emit_valid_c() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct S { pub a: [u32; 0], pub b: u8 }
+struct H { pub a: [String; 0], pub n: i32 }
+fn sum<const N: usize>(a: [i32; N]) i32 { let mut s = 0; for x in a { s += x; } return s; }
+fn count<const N: usize>(_a: [String; N]) usize { return N; }
+fn main() i32 {
+    let e: [i32; 0] = [];
+    let s = S { a: [], b: 1 };
+    let ps: *const [u32; 0] = &s.a;
+    let q = unsafe (ps + 1);
+    let mut a = Array::<u64, 0>::new();
+    a.reverse();
+    let h = H { a: [], n: 2 };
+    let es: [String; 0] = [];
+    let nested: [[String; 0]; 3] = [[], [], []];
+    let mut v = Vector::<H>::new();
+    v.push(H { a: [], n: 5 });
+    let k = count(es) as i32 + count([String::from_str("x")]) as i32 + sizeof(nested) as i32;
+    return sum(e) + s.b as i32 - 1 + (q != ps) as i32 + h.n - 2 + v.len() as i32 - 1 + k - 1;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("-pedantic-errors -Wtype-limits ").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
+// A comparison the range of an operand's C type decides is its constant: range patterns at both
+// extremes of every width, unsigned and const-generic bounds at zero and at the type's maximum in
+// either operand order, hex bounds, widening casts, a folded `~0usize`, the isize and i64 limits and
+// constant C expressions (a shift, a mask, a truncating cast) at a limit. The emitted C compiles
+// under the harness C compiler with -Wall -Wextra -Wtype-limits -pedantic-errors (gcc rejects an
+// always-true `x >= 0` there), compile time and run time agree, and an operand with an effect
+// (a call) still runs.
+const LIMIT_CMPS: str = M"(const LO: i8 = -128;
+static mut CALLS: i32 = 0;
+fn bump() u32 {
+    unsafe CALLS += 1;
+    return 7;
+}
+fn p8(x: i8) i32 { return switch x { -128.. => 1, _ => 3, }; }
+fn p8b(x: i8) i32 { return switch x { -128..=-1 => 1, 0..=127 => 2, _ => 3, }; }
+fn p16(x: i16) i32 { return switch x { -32768..0 => 1, 0..=32767 => 2, _ => 3, }; }
+fn p32(x: i32) i32 { return switch x { -2147483648..0 => 1, 0..=2147483647 => 2, _ => 3, }; }
+fn p64(x: i64) i32 { return switch x { -9223372036854775808..0 => 1, 0..=9223372036854775807 => 2, _ => 3, }; }
+fn pis(x: isize) i32 { return switch x { -9223372036854775808..0 => 1, 0.. => 2, _ => 3, }; }
+fn pu8(x: u8) i32 { return switch x { 0..=9 => 1, 10..=255 => 2, _ => 3, }; }
+fn pu16(x: u16) i32 { return switch x { 0..10 => 1, 10..=65535 => 2, _ => 3, }; }
+fn pu32(x: u32) i32 { return switch x { 0..10 => 1, 10..=4294967295 => 2, _ => 3, }; }
+fn pu64(x: u64) i32 { return switch x { 0..10 => 1, 10..=18446744073709551615 => 2, _ => 3, }; }
+fn pus(x: usize) i32 { return switch x { 0..10 => 1, 10.. => 2, _ => 3, }; }
+fn pch(x: char) i32 { return switch x { '\0'..='a' => 1, 'b'..='\xff' => 2, _ => 3, }; }
+fn pref(x: &u8) i32 {
+    if let 0..=255 = x {
+        return 1;
+    }
+    return 0;
+}
+fn cmps<const N: usize>(i: usize) i32 {
+    return (i < N) as i32 + (i <= N) as i32 * 2 + (i > N) as i32 * 4 + (i >= N) as i32 * 8 + (N > i) as i32 * 16 + (N <= i) as i32 * 32 + (i == N) as i32 * 64 + (N != i) as i32 * 128;
+}
+fn top<const M: u8>(x: u8) i32 {
+    assert(x <= M);
+    return (x > M) as i32 + (M >= x) as i32 * 2 + (x != M) as i32 * 4;
+}
+fn low<const L: i8>(x: i8) i32 {
+    assert(x >= L);
+    return (x < L) as i32 + (L <= x) as i32 * 2;
+}
+fn hex(b: u8) i32 {
+    return (b >= 0xC0) as i32 + (b <= 0xDF) as i32 * 2 + (b < 0x80u8) as i32 * 4;
+}
+fn wide(a: u8, b: u32, c: u64) i32 {
+    return ((a as i32) < 300) as i32 + ((b as u64) <= 4294967295) as i32 * 2 + ((a as u16) >= 0) as i32 * 4 + (c <= usize::MAX as u64) as i32 * 8;
+}
+fn lims(x: isize, y: i64, u: usize, b: u8) i32 {
+    let named = (x <= isize::MAX) as i32 + (x >= isize::MIN) as i32 * 2 + (y >= i64::MIN) as i32 * 4 + (i64::MIN < y) as i32 * 8;
+    let top = (x <= (~0usize >> 1) as isize) as i32 * 16 + ((~0usize >> 1) as isize >= x) as i32 * 32;
+    return named + top + (b <= (~0u32) as u8) as i32 * 64 + (u <= (~0usize | 0)) as i32 * 128 + (b > (0xFFFFu32 & 0xFF) as u8) as i32 * 256;
+}
+fn loops<const N: usize>(a: [i32; N]) i32 {
+    let mut s = 0;
+    for x in a {
+        s += x;
+    }
+    let mut i: usize = 0;
+    while i < N {
+        i += 1;
+    }
+    return s + i as i32;
+}
+static_assert(p8(-128) == 1 && p8b(-128) == 1 && p8b(127) == 2 && p16(-32768) == 1 && p16(32767) == 2);
+static_assert(p32(-2147483648) == 1 && p64(-9223372036854775808) == 1 && p64(9223372036854775807) == 2);
+static_assert(pu8(255) == 2 && pu16(65535) == 2 && pu32(4294967295) == 2 && pu64(18446744073709551615) == 2);
+static_assert(pus(18446744073709551615) == 2 && pch('\xff') == 2 && pref(&255) == 1);
+static_assert(cmps::<0>(0) == 106 && cmps::<0>(5) == 172 && cmps::<18446744073709551615>(5) == 147);
+static_assert(top::<255>(255) == 2 && top::<255>(3) == 6 && low::<LO>(-128) == 2 && low::<LO>(5) == 2);
+static_assert(hex(0xC5) == 3 && hex(0x10) == 6 && wide(200, 9, 1) == 15);
+static_assert(lims(3, -4, 5, 7) == 255 && lims(isize::MIN, i64::MIN, 0, 255) == 247);
+fn main() i32 {
+    let z: [i32; 0] = [];
+    let r = p8(-128) + p8b(-1) + p16(-32768) + p32(-2147483648) + p64(-9223372036854775808) + pis(-3);
+    let u = pu8(255) + pu16(65535) + pu32(4294967295) + pu64(18446744073709551615) + pus(0) + pch('\xff') + pref(&0);
+    let c = cmps::<0>(0) + cmps::<0>(5) + cmps::<18446744073709551615>(5);
+    let t = top::<255>(255) + top::<255>(3) + low::<LO>(-128) + low::<LO>(5);
+    let h = hex(0xC5) + hex(0x10) + wide(200, 9, 1) + loops(z) + loops([1, 2]);
+    let e = (bump() >= 0) as i32 + (0 > bump()) as i32 + unsafe CALLS;
+    let l = lims(3, -4, 5, 7) + lims(isize::MIN, i64::MIN, 0, 255);
+    print("{} {} {} {} {} {} {}\n", r, u, c, t, h, e, l);
+    return 0;
+}
+)";
+
+@test
+fn type_limit_comparisons_emit_valid_c() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", LIMIT_CMPS);
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("-pedantic-errors -Wtype-limits ").ok());
+    let r = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(r.ok() && r.out_shows("6 12 425 12 29 3 502\n"));
+}
+
+// A program whose `@X@` markers long_string_constants_emit_valid_c replaces with long string bodies.
+const LONG_STRS: str = M"(import string as cstring;
+const CP: str = "@P@";
+const CM: str = M"(@M@)";
+const CA: [str; 2] = ["@P@", "y"];
+const CS: [str; 2] = ["\u{e9}\x41\t", M[]"(a<b)"];
+fn rep(unit: str, n: usize) String {
+    let mut s = String::new();
+    for _ in 0..n {
+        s.push_str(unit);
+    }
+    return s;
+}
+fn main() i32 {
+    let p = rep("ab\x41\u{e9}\n\"\\", 600);
+    let m = rep(M"(x(y)"z\n)", 700);
+    let mut fe = rep("{a}", 1400);
+    fe.push_str("7");
+    let s: str = "@P@";
+    let t = M"(@M@)";
+    let bs: []u8 = b"@B@";
+    let cp: *const u8 = "@P@";
+    let n = unsafe cstring::strlen("@P@");
+    let f = format("@F@{}", 7);
+    let e: str = "@A@";
+    let e1: str = "@A@a";
+    let mut okb = bs.len() == 4200;
+    for i in 0..bs.len() {
+        okb = okb && bs[i] == if i % 2 == 0 {
+            b'q';
+        } else {
+            0xff;
+        };
+    }
+    let okp = unsafe cstring::strlen(cp as *const char) == 4800 && unsafe *(cp + 3) == 0xc3;
+    assert(s == "@P@");
+    assert(t == M"(@M@)", "long matchertext");
+    assert_eq(e1.len(), "@A@a".len());
+    print("{} {} {} {} {} ", CP == p.as_str(), CM == m.as_str(), CA[0] == p.as_str(), s == p.as_str(), t == m.as_str());
+    print("{} {} {} {} ", okb, okp, n == 4800, f.as_str() == fe.as_str());
+    print("{} {} ", CS[0] == "\u{e9}\x41\t" && CS[0].len() == 4, CS[1] == "a<b" && M[]"(a<b)" == "a<b");
+    print("{} {} {}\n", s.len() + t.len() + bs.len(), e.len(), e1.len());
+    print("@F@|{}\n", CA[1]);
+    return 0;
+}
+)";
+
+// C11 guarantees string literals of 4095 bytes only (-pedantic-errors rejects a longer one): a string
+// constant past that length spells as a static array of its bytes, with the length and the
+// terminating 0 a literal has. Plain (with escapes), matchertext and byte strings, file-scope
+// constants and a constant array element, `str` views, C-string pointers and format segments of a
+// long string all compile under -pedantic-errors and hold their exact bytes; 4095 bytes stay a
+// literal. An assertion message spells at most 1000 bytes of an expression's source. Short
+// file-scope constants decode their escapes and matchertext delimiter chains like body constants.
+@test
+fn long_string_constants_emit_valid_c() {
+    // Each marker's unit source text, repeated past 4095 decoded bytes.
+    let mut big = String::new();
+    rep(&mut big, M"(ab\x41\u{e9}\n\"\\)", 600);
+    let mut bigm = String::new();
+    rep(&mut bigm, M"(x(y)"z\n)", 700);
+    let mut bytes = String::new();
+    rep(&mut bytes, M"(q\xff)", 2100);
+    let mut bigf = String::new();
+    rep(&mut bigf, "{{a}}", 1400);
+    let mut a4095 = String::new();
+    rep(&mut a4095, "a", 4095);
+    let src = String::from_str(LONG_STRS).replace("@P@", big.as_str()).replace("@M@", bigm.as_str()).replace(
+        "@B@",
+        bytes.as_str(),
+    ).replace("@F@", bigf.as_str()).replace("@A@", a4095.as_str());
+    let p = cli::proj_new();
+    p.mkfile("main.spc", src.as_str());
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "sizeof(\"aaa") && p.gen_has("main.c", "static const uint8_t __sc_lit"));
+    assert(p.cc_build("-pedantic-errors ").ok());
+    let r = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    let mut out = String::from_str("true true true true true true true true true true true 14600 4095 4096\n");
+    rep(&mut out, "{a}", 1400);
+    out.push_str("|y\n");
+    assert(r.ok() && r.out_shows(out.as_str()));
+}
+
+// Append `unit` to `dst` `n` times.
+fn rep(dst: &mut String, unit: str, n: usize) {
+    for _ in 0..n {
+        dst.push_str(unit);
+    }
+}
+
+// C11 has no `0o` or `0b` integer prefix (gcc 13 rejects `0o`, -pedantic both): octal and binary
+// literals reach C in hex with the same value, underscores and u64::MAX included.
+@test
+fn octal_and_binary_literals_emit_c11() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn main() i32 {\n    let a: u32 = 0o1_7;\n    let b: u32 = 0b101;\n    let c: u64 = 0o1777777777777777777777;\n    let d: u64 = 0b1111_1111;\n    return (a + b + (c - 18446744073709551615) as u32 + d as u32 - 275) as i32;\n}\n",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "0xf") && p.gen_has("main.c", "0xffffffffffffffff"), "hex spellings");
+    assert(!p.gen_has("main.c", "0o") && !p.gen_has("main.c", "0b1"), "no C2y prefix survives");
+    assert(p.cc_build("-pedantic-errors ").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
+// A constant shift count or divisor is read by its value, whatever its spelling: a hex count past the
+// width reaches the checked helper (C leaves `x >> 64` undefined) and traps, and a hex divisor stays
+// a C operator.
+@test
+fn hex_shift_counts_reach_the_checked_helper() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "static mut K: u64 = 200;\nfn f(x: u64) u64 {\n    return x / 0x10 + (x >> 0x40);\n}\nfn main() i32 {\n    print(\"{}\\n\", f(unsafe K));\n    return 0;\n}\n",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "__sc_shr_u64(x, 0x40ULL)") && p.gen_has("main.c", "(x / 0x10ULL)"));
+    assert(p.cc_build("-pedantic-errors ").ok());
+    let r = p.run_bin_env("");
+    assert(r.exit != 0 && r.out_shows("attempt to shift right with overflow"));
+}
+
+// A literal pattern and both ends of a range pattern take the matched value's type, read through a
+// reference, at every width: the emitted C spells each in that type (a u64 bound past i64::MAX is no
+// signed literal) and compiles under -Werror, and compile time and run time agree. A literal the type
+// cannot hold is an error.
+const PAT_LITS: str = M"(fn wide(x: u64) i32 {
+    return switch x {
+        9223372036854775808..=18446744073709551613 => 1,
+        18446744073709551614 => 2,
+        18446744073709551615 => 3,
+        _ => 4,
+    };
+}
+fn narrow(a: u8, b: u16, c: u32, d: usize) i32 {
+    return switch (a, b, c, d) {
+        (200..=254, 60000..65535, 4000000000..=4294967294, 18446744073709551615) => 1,
+        (7, 9, 11, 13) => 2,
+        _ => 3,
+    };
+}
+fn signed(a: i8, b: i16, c: i32, d: i64) i32 {
+    return switch (a, b, c, d) {
+        (-127..=-100, -32767..-30000, -2147483647..=-2000000000, -9223372036854775807..=-9000000000000000000) => 1,
+        (-7, 9, -11, 13) => 2,
+        _ => 3,
+    };
+}
+fn by_ref(x: &u64) i32 {
+    if let 9223372036854775809..=18446744073709551615 = x {
+        return 1;
+    }
+    return 0;
+}
+static_assert(wide(9223372036854775808) == 1 && wide(18446744073709551614) == 2 && wide(18446744073709551615) == 3);
+static_assert(wide(5) == 4 && by_ref(&18446744073709551615) == 1 && by_ref(&9223372036854775808) == 0);
+static_assert(narrow(254, 65534, 4294967294, 18446744073709551615) == 1 && narrow(7, 9, 11, 13) == 2);
+static_assert(signed(-127, -32767, -2147483647, -9223372036854775807) == 1 && signed(-7, 9, -11, 13) == 2);
+static_assert(signed(-128, -30000, -2000000000, -9000000000000000000) == 3);
+static mut TOP: u64 = 18446744073709551615;
+fn main() i32 {
+    let t = unsafe TOP;
+    let n: usize = 18446744073709551615;
+    print("{} {} {} {} ", wide(t), wide(t - 1), wide(t / 2 + 1), wide(t / 2));
+    print("{} {} {}\n", by_ref(&t), narrow(254, 65534, 4294967294, n), signed(-100, -30001, -2000000000, -9000000000000000000));
+    return 0;
+}
+)";
+
+@test
+fn pattern_literals_take_the_scrutinee_type() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", PAT_LITS);
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("-pedantic-errors ").ok());
+    let r = p.run_bin_env("");
+    assert(r.ok() && r.out_shows("3 2 1 4 1 1 1"));
+    p.mkfile("u8.spc", "fn f(x: u8) i32 {\n    return switch x {\n        0..=300 => 1,\n        _ => 0,\n    };\n}\n");
+    p.expect_fail("u8.spc", "error: integer literal is out of range for 'u8'");
+    p.mkfile("i8.spc", "fn f(x: &i8) i32 {\n    if let -129 = x {\n        return 1;\n    }\n    return 0;\n}\n");
+    p.expect_fail("i8.spc", "error: integer literal is out of range for 'i8'");
+    p.mkfile("neg.spc", "fn f(x: u32) i32 {\n    return switch x {\n        -1 => 1,\n        _ => 0,\n    };\n}\n");
+    p.expect_fail("neg.spc", "error: cannot apply unary operator '-' to type 'u32'");
+    p.mkfile("text.spc", "fn f(x: i32) i32 {\n    return switch x {\n        \"a\" => 1,\n        _ => 0,\n    };\n}\n");
+    p.expect_fail("text.spc", "error: mismatched types: expected 'i32', found 'str'");
 }
 
 // A second module's enums used across the boundary: value return, payload-less match, payload construction
@@ -165,7 +540,7 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "= 2LL;"), "the inline for physically unrolled");
+    assert(p.gen_has("main.c", "(s, 2LL);"), "the inline for physically unrolled");
     assert(!p.gen_has("main.c", "__sc_inline_for"), "constant bounds folded");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -505,6 +880,47 @@ fn derived_bound_checks_foreign_tuple_members() {
     assert(r.exit != 0, "the unsatisfied bound rejects the build");
     assert(r.out_has("does not satisfy a bound required by the interface's default method 'fmt'"));
     assert(r.out_has("field 1 of 'Pair' is 'NoFmt'"), "the offending member names itself");
+}
+
+// A generic alias of another module expands in the importer's positions, and an importer's alias over
+// it nests one level deeper.
+@test
+fn generic_alias_across_modules() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        M"(pub struct Pair<A, B> { pub a: A, pub b: B }
+pub type Q1<T> = Pair<T, T>;
+pub type Q2<T> = Q1<Q1<T>>;
+pub fn mk(x: i32) Q2<i32> {
+    return Pair::<Q1<i32>, Q1<i32>> { a: Pair::<i32, i32> { a: x, b: 2 }, b: Pair::<i32, i32> { a: 3, b: 4 } };
+}
+pub fn mk2() Q2<Q1<u8>> {
+    let p = Pair::<u8, u8> { a: 1u8, b: 2u8 };
+    let q = Pair::<Q1<u8>, Q1<u8>> { a: p, b: p };
+    return Pair::<Q2<u8>, Q2<u8>> { a: q, b: q };
+}
+)",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import lib;
+extern "C" { fn exit(code: i32) void; }
+type Q3<T> = lib::Q2<lib::Q1<T>>;
+struct W { pub q: lib::Q2<i64> }
+fn get<U: Copy>(q: lib::Q2<U>) U { return q.b.a; }
+fn main() i32 {
+    let q: lib::Q2<i32> = lib::mk(1);
+    let w = W { q: lib::Pair::<lib::Q1<i64>, lib::Q1<i64>> { a: lib::Pair::<i64, i64> { a: 5, b: 6 }, b: lib::Pair::<i64, i64> { a: 7, b: 8 } } };
+    let z: Q3<u8> = lib::mk2();
+    unsafe exit(q.a.a + get(q) + w.q.b.a as i32 + get(w.q) as i32 + z.b.a.b as i32);
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 1 + 3 + 7 + 7 + 2);
 }
 
 @test
@@ -1658,6 +2074,31 @@ fn main() i32 {
     assert_eq(p.run_bin(), 0);
 }
 
+// A constant addressing another module's constant: the owner defines it and its header declares it
+// to the addressing module's constant data.
+@test
+fn cross_module_constant_reference() {
+    let p = cli::proj_new();
+    p.mkfile("tbl.spc", M"(pub const T: [i32; 3] = [4, 5, 6];
+pub const U: i32 = 9;
+)");
+    p.mkfile(
+        "main.spc",
+        M"(import tbl;
+const PT: &i32 = &tbl::T[2];
+const PU: &&i32 = &&tbl::U;
+fn main() i32 {
+  return *PT + **PU - 15;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
+}
+
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
@@ -1881,7 +2322,7 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
         // super_rt.c comes too: the header's panic path references the runtime's thread-local task id, and
         // a C consumer of an emitted module links that TU exactly as a Super-C one does. (clang drops the
         // unused reference at -O0 and gcc keeps it, so leaving it out only ever worked by luck.)
-        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/dev/raw\" \"%s/cuser.c\" \"%s/build/dev/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        "%s -std=c11 -Wall -Wextra -Werror -funsigned-char -I\"%s/build/dev/raw\" \"%s/cuser.c\" \"%s/build/dev/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
         cli::cc_name(),
         p.rootp(),
         p.rootp(),
@@ -2208,7 +2649,7 @@ fn usize_literal_range_follows_target() {
 }
 
 // Compile-time evaluation wraps usize/isize at the SELECTED target's pointer width, as the emitted C
-// does: on wasm32, 0 - 1 is 2^32 - 1 and a zero usize has 32 trailing zeros.
+// does: on wasm32, 0.wrapping_sub(1) is 2^32 - 1 and a zero usize has 32 trailing zeros.
 @test
 fn usize_const_eval_follows_target() {
     let p = cli::proj_new();
@@ -2216,10 +2657,10 @@ fn usize_const_eval_follows_target() {
         "main.spc",
         M"(const fn m1() usize {
     let z: usize = 0;
-    return z - 1;
+    return z.wrapping_sub(1);
 }
 const W: u64 = sizeof(usize) as u64 * 8;
-static_assert(m1() as u64 == (1u64 << W - 1) * 2 - 1, "usize wraps at the target width");
+static_assert(m1() as u64 == (1u64 << W - 1) - 1 + (1u64 << W - 1), "usize wraps at the target width");
 static_assert(-1 as isize as usize == m1(), "isize converts at the target width");
 static_assert(m1().count_ones() as u64 == W && (0 as usize).trailing_zeros() as u64 == W, "bit counts");
 fn main() i32 {
@@ -3273,6 +3714,87 @@ fn main() i32 {
         return;
     }
     assert(p.cc_build("").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
+// A pointer to an array of aggregates names the array's wrapper struct, an array's address converts
+// to it as a value, and a pointer to an array spells its element with no qualifier (C11 rejects
+// `&a` as a pointer to an array of const elements): the emitted C passes a pedantic C11 compile with
+// the most aggressive strict-aliasing diagnostics.
+@test
+fn array_pointers_are_strict_c() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct Node { pub kids: *mut [Node; 2], pub v: i32 }
+struct A { pub bs: *const [B; 2], pub x: i32 }
+struct B { pub a: *mut [A; 3], pub y: i32 }
+struct F { pub f: fn(*mut [F; 2]) i32, pub v: i32 }
+struct P { pub x: i32, pub y: i32 }
+
+fn sum(n: *const Node) i32 {
+    let k = unsafe (*n).kids;
+    if k == null {
+        return unsafe (*n).v;
+    }
+    return unsafe (*n).v + sum(unsafe &(*k)[0]) + sum(unsafe &(*k)[1]);
+}
+
+fn first(p: *mut [F; 2]) i32 {
+    return unsafe (*p)[0].v;
+}
+
+fn cread(q: *const [i32; 2]) i32 {
+    return unsafe (*q)[1];
+}
+
+fn total(s: [][P; 2]) i32 {
+    let mut t = 0;
+    for pr in s {
+        t += pr[0].x + pr[1].y;
+    }
+    return t;
+}
+
+fn main() i32 {
+    let mut leaves: [Node; 2] = [Node { kids: null, v: 1 }, Node { kids: null, v: 2 }];
+    let mut two: [[Node; 2]; 2] = [leaves, leaves];
+    let p0: *mut [Node; 2] = &mut two[0];
+    let root = Node { kids: &mut leaves, v: 100 };
+    let r3 = Node { kids: unsafe (p0 + 1), v: 0 };
+    if sum(&root) != 103 || unsafe (*(r3.kids - 1))[1].v != 2 {
+        return 1;
+    }
+    let mut as3: [A; 3] = [A { bs: null, x: 1 }, A { bs: null, x: 2 }, A { bs: null, x: 3 }];
+    let bs: [B; 2] = [B { a: &mut as3, y: 5 }, B { a: null, y: 6 }];
+    as3[2].bs = &bs;
+    if unsafe (*as3[2].bs)[1].y != 6 {
+        return 2;
+    }
+    let mut fs: [F; 2] = [F { f: first, v: 3 }, F { f: first, v: 4 }];
+    if (fs[1].f)(&mut fs) != 3 {
+        return 3;
+    }
+    let mut xs: [i32; 2] = [7, 8];
+    let cq: *const [i32; 2] = &xs;
+    let mq: *mut [i32; 2] = &mut xs;
+    if cread(cq) + cread(mq) != 16 {
+        return 4;
+    }
+    let mut v = Vector::<[P; 2]>::new();
+    v.push([P { x: 1, y: 2 }, P { x: 3, y: 4 }]);
+    v.push([P { x: 5, y: 6 }, P { x: 7, y: 8 }]);
+    let grid: [[P; 2]; 2] = [[P { x: 1, y: 1 }, P { x: 2, y: 2 }], [P { x: 3, y: 3 }, P { x: 4, y: 4 }]];
+    return total(v[0..2]) + total(grid) - 28;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("__sc_t/Node.h", "Node__a2 *kids;"), "the member points at the wrapper");
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.cc_build("-pedantic-errors -Wstrict-aliasing=1 -fstrict-aliasing -O2 ").ok());
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
 
@@ -4995,6 +5517,87 @@ fn main() i32 {
     assert_eq(p.run_bin(), 13);
 }
 
+// A constant argument past a variadic callee's parameters is read as its promoted C type, so it is
+// spelled with exactly that type: a folded `i32` or a `u8` is cast to its type (promoting to `int`), a
+// `u32` is `unsigned`. The build compiles under -Werror, where a `long long` spelling of an `i32` fails
+// -Wformat, and where the i64 minimum spelled as a negated literal is an unsigned literal.
+@test
+fn variadic_constants_match_their_promoted_type() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\ncflags = [\"-Wformat\", \"-Werror\"]\n");
+    p.mkfile(
+        "src/main.spc",
+        M"(import stdio;
+const fn next(x: i32) i32 { return x + 1; }
+const fn triple(x: u8) u8 { return x * 3; }
+const fn lo() i64 { return -9223372036854775807i64 - 1; }
+fn above(a: i64) i32 { if a > lo() { return 1; } return 0; }
+fn main() i32 {
+    let _ = unsafe stdio::printf("%d %d %u %d %d %d\n", next(1), 7u8, 4000000000u32, 5, triple(2), above(5));
+    return 0;
+}
+)",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "run");
+    assert(r.ok(), "the -Werror build runs");
+    assert(r.out_shows("2 7 4000000000 5 6 1"), "every constant reads back as its value");
+}
+
+// An array length an instance folds out of range is an error at the instance: the length as written, the
+// bindings it folded with, and the site that demanded the instance. A concrete type that holds such a
+// length is reported where it is used. No C is emitted for it and no internal refusal follows. `f` takes
+// a run-time argument: a constant call would evaluate `N - 5` and report its usize overflow first.
+@test
+fn instance_array_length_out_of_range() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct S<const N: usize> { pub d: [u8; N - 5], pub x: i32 }
+struct W<const N: usize> { pub d: [u8; N * 2] }
+fn f<const N: usize>(k: i32) [i32; N - 5] { let r: [i32; N - 5] = [k; N - 5]; return r; }
+fn inner<const N: usize>() usize { return sizeof([u8; N - 5]); }
+fn outer<const M: usize>() usize { return inner::<{M + 1}>(); }
+fn big<const K: usize>() usize { return sizeof(W<K>); }
+fn main(args: Vector<str>) i32 {
+    let a = f::<3>(args.len() as i32);
+    let n = sizeof(S<3>) + sizeof(W<3000000000>) + outer::<1>() + big::<5000000000>();
+    return n as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "the build fails");
+    // The concrete use, then each instance's length and demand site.
+    assert(r.out_shows("error: array length -2 is negative"), "the concrete use");
+    assert(r.out_shows("main.spc:8:5\n"), "at the binding in main");
+    assert(r.out_shows("error: array length N - 5 is negative (-2) for N = 3"), "the field and the binding");
+    assert(r.out_shows("main.spc:1:35\n"), "at the field");
+    assert(r.out_shows("= note: in the instantiation of 'S' demanded here"), "the aggregate's note");
+    assert(r.out_shows("main.spc:9:13\n"), "at its sizeof");
+    assert(
+        r.out_shows(
+            "error: array length 2 * N is 6000000000 for N = 3000000000, past the maximum array length 4294967295",
+        ),
+        "an overflowing length",
+    );
+    assert(r.out_shows("main.spc:3:45\n"), "at the generic binding");
+    assert(r.out_shows("= note: in the instantiation of 'f' demanded here"), "the function's note");
+    assert(r.out_shows("main.spc:8:13\n"), "at its call");
+    assert(r.out_shows("error: array length N - 5 is negative (-3) for N = 2"), "a nested instance");
+    assert(r.out_shows("main.spc:4:43\n"), "at its sizeof");
+    assert(r.out_shows("= note: in the instantiation of 'inner' demanded here"), "the nested note");
+    assert(r.out_shows("main.spc:5:43\n"), "at the call in the generic caller");
+    // A generic caller's argument past 2^32 folds too.
+    assert(
+        r.out_shows(
+            "error: array length 2 * N is 10000000000 for N = 5000000000, past the maximum array length 4294967295",
+        ),
+        "a length past 2^32 through a generic caller",
+    );
+    assert(!r.out_has("internal"), "no internal refusal");
+}
+
 // The POSIX bindings (unistd, fcntl, filesystem) declare a BACKING HEADER, and this is what proves they
 // need to: none of `<unistd.h>`, `<sys/stat.h>` or `<dirent.h>` is among the standard headers the runtime
 // prologue carries, so an unnamed extern block leaves every one of these calls an implicit declaration:
@@ -5131,6 +5734,92 @@ fn external_c_sources() {
     let miss = p.compile("main.spc");
     assert(miss.exit != 0, "missing @c.source errors");
     assert(miss.out_has("cannot find C source"), "and names it");
+}
+
+// Shim prototypes (`sc_` externs) and block-wrapper prototypes live in the forward header, which
+// includes no definition header: one whose array declarator has an aggregate element (`[S; 2]`)
+// goes to `__sc_ext.h` after the definition it needs. By-value `S` parameters and returns stay (a
+// declaration may name an incomplete type), and so does a pointer to an array of `S`, which names
+// the array's wrapper struct. The C side calls the `@c.export` functions back; the tree compiles
+// -Wall -Wextra -Werror.
+@test
+fn extern_prototypes_see_complete_types() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "side.c",
+        M"(#include <stdint.h>
+typedef struct S { int32_t a; int32_t b; } S;
+S sc_twice(S s);
+int32_t sc_arr(S a[2]);
+int32_t sc_parr(const S (*p)[2]);
+int32_t sc_sum2(const S (*p)[2]) { return (*p)[0].a + (*p)[1].b + sc_parr(p); }
+int32_t sc_arrx(S a[2]) { return sc_arr(a) * 10; }
+int32_t sc_val(S s) { return sc_twice(s).b + s.a; }
+S sc_mk(int32_t a) { S s = { a, a + 1 }; return s; }
+S sc_bval(S s) { S r = { s.b, s.a }; return r; }
+int32_t sc_bptr(const S (*p)[2]) { return (*p)[1].b * 100; }
+)",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::blocking as blocking;
+import std::parallel::runtime as rt;
+
+pub struct S { pub a: i32, pub b: i32 }
+
+@c.source("side.c")
+extern "C" {
+    fn sc_sum2(p: *const [S; 2]) i32;
+    fn sc_arrx(a: [S; 2]) i32;
+    fn sc_val(s: S) i32;
+    fn sc_mk(a: i32) S;
+    @blocking
+    fn sc_bval(s: S) S;
+    @blocking
+    fn sc_bptr(p: *const [S; 2]) i32;
+}
+
+@c.export("sc_twice")
+pub fn twice(s: S) S {
+    return S { a: s.a * 2, b: s.b * 2 };
+}
+
+@c.export("sc_arr")
+pub fn arr(a: [S; 2]) i32 {
+    return a[0].a + a[1].b;
+}
+
+@c.export("sc_parr")
+pub fn parr(p: *const [S; 2]) i32 {
+    return unsafe (*p)[1].a;
+}
+
+fn main() i32 {
+    let v: [S; 2] = [S { a: 1, b: 2 }, S { a: 3, b: 4 }];
+    if unsafe sc_sum2(&v) != 8 || unsafe sc_arrx(v) != 50 || unsafe sc_val(v[0]) != 5 {
+        return 1;
+    }
+    if unsafe sc_mk(5).b != 6 || unsafe sc_bval(v[1]).a != 4 || unsafe sc_bptr(&v) != 400 {
+        return 2;
+    }
+    // The block wrappers ran on the pool: release it and the runtime.
+    let _ = blocking::try_shutdown(5000000000);
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("__sc_ext.h", "sc_arrx("), "an array-of-aggregate shim prototype leaves the forward header");
+    assert(
+        p.gen_has("__sc_fwd.h", "__sc_blk_sc_bptr(const main__S__a2 *a0)"),
+        "a block wrapper taking a pointer to an array of S stays",
+    );
+    assert(p.gen_has("__sc_fwd.h", "sc_val("), "a by-value aggregate parameter stays in the forward header");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
 }
 
 // Cross-module interface DEFAULT methods: the interface (with bodied defaults) lives in its own module,
@@ -5283,6 +5972,102 @@ fn module_errors() {
     privf.expect_fail("main.spc", "is private");
 }
 
+// The module every module-qualified path test imports: public and private constants, a type with a
+// public and a private associated constant, an enum, an enum constant and an alias of a builtin.
+const QUAL_MOD: str = M"(pub const B: u64 = 3;
+const P: u64 = 4;
+pub const S8: u8 = 2;
+pub struct Foo { pub a: i32 }
+extend Foo {
+    pub const K: u64 = 5;
+    const Q: u64 = 6;
+}
+pub enum D { X, Y = 7 }
+pub const DK: D = D::Y;
+pub type U = u64;
+)";
+
+// The declarations ahead of `main` in every module-qualified path test.
+const QUAL_PRE: str = M"(import m;
+struct W<const N: u64> { pub x: i32 }
+extend<const N: u64> W<N> { pub fn n(self: &Self) u64 { return N; } }
+struct F<const E: m::D> { pub x: i32 }
+extend<const E: m::D> F<E> { pub fn n(self: &Self) i32 { return E as i32; } }
+fn g<const N: u64>() u64 { return N; }
+fn g8<const N: u8>() u8 { return N; }
+)";
+
+// Compile QUAL_PRE with `main` running `body` (line 9) and expect exactly one error, `want`, at
+// main.spc:`at`.
+fn qual_fails(body: str, want: str, at: str) {
+    let p = cli::proj_new();
+    p.mkfile("m.spc", QUAL_MOD);
+    p.mkfile("main.spc", format("{}fn main() i32 {{\n    {}\n    return 0;\n}}\n", QUAL_PRE, body).as_str());
+    let r = p.compile("main.spc");
+    assert(r.exit != 0 && r.out_shows(format("error: {}\n--> ", want).as_str()), body);
+    assert(r.out_shows(format("main.spc:{}\n", at).as_str()), body);
+    let out = str::from_cstr(r.out);
+    let first = out.find("error: ");
+    assert(first >= 0 && out.slice(first as usize + 1, out.len()).find("error: ") < 0, body);
+}
+
+// A constant a module qualifies is a const argument exactly as its unqualified spelling: a public
+// constant (`W<m::B>`, `W<{m::B}>`), an associated constant (`W<m::Foo::K>`), a builtin limit through
+// an alias (`W<m::U::MAX>`), a variant and an enum constant for an enum parameter, in a type and in a
+// turbofish, typed by the parameter, folded by the constant evaluator, and one instance with its
+// literal spelling. A private constant, a missing or private associated constant and a type past its
+// segment are errors at the segment; a module-qualified path in a type position names a type.
+@test
+fn module_qualified_const_arguments() {
+    let p = cli::proj_new();
+    p.mkfile("m.spc", QUAL_MOD);
+    p.mkfile(
+        "main.spc",
+        format(
+            "{}{}",
+            QUAL_PRE,
+            M"(fn same(a: W<3>, b: W<5>, c: W<18446744073709551615>) u64 { return a.n() + b.n() + c.n() / 1000000000000; }
+static_assert(g::<m::B>() == 3 && g::<m::Foo::K>() == 5 && g::<{m::B + m::Foo::K}>() == 8 && g::<m::U::MAX>() == 18446744073709551615);
+fn main() i32 {
+    let a: W<m::B> = W::<{m::B}> { x: 1 };
+    let b: W<m::Foo::K> = W::<{m::Foo::K}> { x: 2 };
+    let c: W<m::U::MAX> = W::<18446744073709551615> { x: 3 };
+    let f: F<m::D::Y> = F::<{m::D::Y}> { x: 4 };
+    let k: F<m::DK> = f;
+    print("{} {} {} {} {} {}\n", same(a, b, c), k.n(), g8::<m::S8>(), g::<m::Foo::K>() + g::<m::B>(), g::<{m::U::MAX}>(), a.x + b.x + c.x + k.x);
+    return 0;
+}
+)",
+        ).as_str(),
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("-pedantic-errors ").ok());
+    let r = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(r.ok() && r.out_shows("18446752 7 2 8 18446744073709551615 10\n"));
+
+    qual_fails("let w: W<m::P> = W { x: 1 };", "no public type or constant 'P' in the imported module", "9:17");
+    qual_fails("let w = g::<m::P>();", "no public type or constant 'P' in the imported module", "9:20");
+    qual_fails("let w: W<{m::P}> = W { x: 1 };", "no public item 'P' in module 'm'", "9:18");
+    qual_fails("let w: W<m::Foo::Q> = W { x: 1 };", "no associated constant 'Q' on 'm::Foo'", "9:22");
+    qual_fails("let w = g::<m::Foo::Z>();", "no associated constant 'Z' on 'm::Foo'", "9:25");
+    qual_fails("let w = g::<{m::Foo::Q}>();", "no associated constant 'Q' on 'm::Foo'", "9:26");
+    qual_fails("let w = F::<m::D::Q> { x: 1 };", "no variant or associated constant 'Q' on 'm::D'", "9:23");
+    qual_fails("let w = g8::<m::B>();", "mismatched types: expected 'u8', found 'u64'", "9:18");
+    qual_fails(
+        "let w = g8::<m::U::MAX>();",
+        "const generic argument 18446744073709551615 is out of range for 'u8'",
+        "9:18",
+    );
+    qual_fails("let w: W<m::Foo>;", "expected a constant for const parameter 'N', found type 'Foo'", "9:14");
+    qual_fails("let w: *const Vector<m::B>;", "expected a type for generic parameter 'T', found a constant", "9:26");
+    qual_fails("let w: W<m::D::Y>;", "mismatched types: expected 'u64', found 'D'", "9:14");
+    qual_fails("let z: m::Foo::U = m::Foo { a: 1 };", "no type 'U' in 'm::Foo'", "9:20");
+    qual_fails("let z: m::Foo::K = 5;", "expected a type, found constant 'm::Foo::K'", "9:12");
+    qual_fails("let z: m::U::MAX = 5;", "expected a type, found constant 'm::U::MAX'", "9:12");
+    qual_fails("let z: m::D::Y = m::D::Y;", "expected a type, found variant 'm::D::Y'", "9:12");
+    qual_fails("let z = 3 as m::U::MAX;", "expected a type, found constant 'm::U::MAX'", "9:18");
+}
+
 // An extensionless input still produces build/<stem>.c.
 @test
 fn extensionless_appends() {
@@ -5399,6 +6184,89 @@ fn main() i32 { return boom(); }
     let cc5 = p5.cc_build("");
     assert(cc5.ok());
     assert(p5.run_bin() != 0, "the panic still aborts at runtime");
+}
+
+// A cycle and a failing constant at the far end of a 5000-constant chain report their own
+// diagnostics: the evaluation reaches them without nesting per constant.
+@test
+fn deep_constant_chain_failures() {
+    let mut cyc = String::new();
+    for i in 0..5000 {
+        cyc.push_str(format("const C{}: i32 = C{} + 1;\n", i, (i + 1) % 5000).as_str());
+    }
+    cyc.push_str("static_assert(C0 == 0);\nfn main() i32 { return 0; }\n");
+    let p = cli::proj_new();
+    p.mkfile("cyc.spc", cyc.as_str());
+    p.expect_fail("cyc.spc", "cyclic constant dependency");
+
+    let mut ub = String::from_str("const C0: i32 = 1 / 0;\n");
+    for i in 1..5000 {
+        ub.push_str(format("const C{}: i32 = C{} % 7 + 1;\n", i, i - 1).as_str());
+    }
+    ub.push_str("fn main() i32 { return C4999; }\n");
+    let p2 = cli::proj_new();
+    p2.mkfile("ub.spc", ub.as_str());
+    p2.expect_fail("ub.spc", "error: constant 'C0' cannot be evaluated at compile time: division by zero");
+}
+
+// A call-free constant used only by a function body that cannot fold reports at the constant before
+// emission: a cycle at every constant on it, a refusal once the flush finds it still undecided.
+@test
+fn call_free_constant_failures() {
+    let p = cli::proj_new();
+    p.mkfile("cyc.spc", "const A: i32 = B + 1;\nconst B: i32 = A + 1;\nfn main() i32 { return A; }\n");
+    let r = p.compile("cyc.spc");
+    assert(r.exit != 0);
+    assert(r.out_has("error: constant 'A' cannot be evaluated at compile time: cyclic constant dependency"));
+    assert(r.out_has("error: constant 'B' cannot be evaluated at compile time: cyclic constant dependency"));
+    assert(!r.out_has("internal"));
+
+    let p2 = cli::proj_new();
+    p2.mkfile("mut.spc", "static mut S: i32 = 1;\nconst C: i32 = unsafe S;\nfn main() i32 { return C; }\n");
+    let r2 = p2.compile("mut.spc");
+    assert(r2.exit != 0);
+    assert(
+        r2.out_has("error: constant cannot be evaluated at compile time: the initializer does not fold to a constant"),
+    );
+    assert(!r2.out_has("internal"));
+}
+
+// A chain of aggregate constants evaluates each once: a reference thaws the memoized value
+// instead of evaluating the chain behind it again.
+@test
+fn deep_aggregate_constant_chain() {
+    let mut src = String::from_str("struct S { pub x: i64 }\nconst S0: S = S { x: 0 };\n");
+    for i in 1..3000 {
+        src.push_str(format("const S{}: S = S {{ x: S{}.x + 1 }};\n", i, i - 1).as_str());
+    }
+    src.push_str("fn main() i32 { return (S2999.x % 256) as i32; }\n");
+    let p = cli::proj_new();
+    p.mkfile("agg.spc", src.as_str());
+    let r = p.compile("agg.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 2999 % 256);
+}
+
+// A discriminant naming a variant of an enum in another module folds to its value there.
+@test
+fn enum_discriminant_across_modules() {
+    let p = cli::proj_new();
+    p.mkfile("lib/codes.spc", "pub const BASE: i32 = 40;\npub enum Code { Low = BASE, High }\n");
+    p.mkfile(
+        "use.spc",
+        M"(import lib::codes;
+enum Mine { First = lib::codes::Code::High as i32 + 1, Second }
+static_assert(Mine::Second as i32 == 43);
+fn main() i32 { let m = Mine::Second; return m as i32; }
+)",
+    );
+    let r = p.compile("use.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 43);
 }
 
 // Under --bootstrap-tags an unknown attribute has no kind, so its repeat is caught by name: the
@@ -5700,8 +6568,8 @@ fn ctfe_differential() {
     let mut h: u64 = 1469598103934665603u64;
     let mut i: u32 = 0;
     while i < n {
-        h = (h ^ i as u64) * 1099511628211u64;
-        if (h & 1u64) == 0u64 { h = h >> 1; } else { h = h * 3u64 + 1u64; }
+        h = (h ^ i as u64).wrapping_mul(1099511628211u64);
+        if (h & 1u64) == 0u64 { h = h >> 1; } else { h = h.wrapping_mul(3u64).wrapping_add(1u64); }
         i = i + 1;
     }
     return h;
@@ -7196,6 +8064,34 @@ fn build_field_edit_recompiles_users() {
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").ok(), "the program runs with the new layout");
 }
 
+// C needs the element of every array declarator complete, also below a pointer and in a
+// function-pointer parameter: a prototype header, a definition header and a unit that spells a
+// type only there include its definition header. The same modules name struct-payload variants
+// of another module's enums, qualified and through a glob import.
+@test
+fn build_array_elements_include_definitions() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/tk.spc",
+        "pub struct Tk { pub x: i32, pub y: i32 }\npub enum Sh { Pt { pub x: i32, pub y: i32 }, No }\npub enum G<T> { Pt { pub x: T, pub y: T }, No }\n",
+    );
+    p.mkfile(
+        "src/user.spc",
+        "import tk as *;\npub struct Holder<'a> { pub p: &'a [Tk; 2], pub n: i32 }\npub struct Cb { pub f: fn(&[Tk; 2]) i32, pub n: i32 }\npub fn by_val(p: [[Tk; 2]; 1]) i32 { let _ = p; return 3; }\npub fn by_ref(q: &&[Tk; 2]) i32 { let _ = q; return 1; }\n",
+    );
+    p.mkfile(
+        "src/get.spc",
+        "import user as *;\npub fn get(h: &Holder) i32 { return h.n; }\npub fn cbn(c: &Cb) i32 { return c.n; }\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "import tk;\nimport tk as *;\nimport user;\nimport get;\nfn one(p: &[tk::Tk; 2]) i32 { return p[1].y; }\nfn main() i32 {\n    let a = [Tk { x: 1, y: 2 }, Tk { x: 3, y: 4 }];\n    let h = user::Holder { p: &a, n: 6 };\n    let c = user::Cb { f: one, n: 1 };\n    let s = Sh::Pt { x: 1, y: 2 };\n    let g = tk::G::<u8>::Pt { x: 3, y: 4 };\n    let q: G<u16> = tk::G::Pt { x: 5, y: 6 };\n    let mut t = get::get(&h) + get::cbn(&c) + user::by_val([a]) + user::by_ref(&&a);\n    t += switch s { Pt { x, y } => x + y, No => 0 };\n    t += switch g { Pt { x, y } => x + y, No => 0 };\n    t += switch q { Pt { x, y } => x + y, No => 0 };\n    return t - 32;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").ok(), "every header compiles and the program runs");
+}
+
 // A type spelled only inside a symbol name (the `util__K` segment of a generic instance's symbol)
 // is no C use of the type: the unit includes the instance's prototype header, not the type's
 // header, so a type edit in util leaves the unit untouched.
@@ -7992,6 +8888,816 @@ fn build_constant_profile_selects_the_branch() {
     assert(!rc.as_str().contains("7001") && !rc.as_str().contains("7110") && !rc.as_str().contains("7150"));
     // The dev tree is untouched by the release build.
     assert(p.gen_has("main.c", "7001"));
+}
+
+// The run-time arithmetic rules (types.md "Arithmetic Semantics"), with the constant evaluator's answers
+// asserted in the same program: the narrow wrapping methods and `<<` `~` truncate at the width, a widened
+// operand computes at the result's width, a float `%` keeps the dividend's sign, a float-to-integer cast
+// saturates, `char` is unsigned. Signed overflow (cases 1
+// to 8, the last a `+=` loop step) and unsigned overflow (cases 16 to 22: each width, `-=` and a `+=` loop
+// step) trap with overflow checks (a build without a profile) and wrap under `release`; division by zero,
+// MIN / -1 and out-of-range shifts (cases 9 to 15) trap under both.
+const ARITH_RULES: str = M"(import stdlib;
+static mut I32: i32 = i32::MAX;
+static mut I32MIN: i32 = i32::MIN;
+static mut I64MIN: i64 = i64::MIN;
+static mut I8V: i8 = i8::MAX;
+static mut I16V: i16 = i16::MIN;
+static mut ZERO: i32 = 0;
+static mut NEG1: i32 = -1;
+static mut U32V: u32 = 1;
+static mut C40: u32 = 40;
+static mut B0: u8 = 0;
+static mut B1: u8 = 1;
+static mut B2: u8 = 2;
+static mut B3: u8 = 3;
+static mut H0: u16 = 0;
+static mut H2: u16 = 2;
+static mut BIG: f64 = 1e20;
+static mut F: f64 = -7.5;
+static mut C200: i32 = 200;
+static mut P399: f64 = 3.99;
+static mut B255: u8 = 255;
+static mut H1: u16 = 1;
+static mut U32M: u32 = 4294967295;
+static mut U64M: u64 = 18446744073709551615;
+static mut UZ: usize = 0;
+
+// The narrow wrapping methods, `<<` and `~` truncate at the width, at compile time and at run time.
+fn nsub(b: u16) u16 { return b.wrapping_sub(1) / 2; }
+fn nadd(b: u8) u8 { return b.wrapping_add(255) / 2; }
+fn nmul(b: u16) u16 { return b.wrapping_mul(65535) >> 1; }
+fn nshl(b: u8) u8 { return (b << 7) >> 1; }
+fn nneg(b: u8) u8 { return b.wrapping_neg() / 2; }
+fn nnot(b: u8) u8 { return ~b / 2; }
+static_assert(nsub(0) == 32767 && nadd(1) == 0 && nmul(2) == 32767, "narrow wrapping + - * truncate at the width");
+static_assert(nshl(3) == 64 && nneg(2) == 127 && nnot(0) == 127, "narrow << wrapping_neg ~ truncate at the width");
+// A narrower operand widens to the result's type: `u8 + u64` and `u8 | u64` compute at u64.
+fn wadd(b: u8) u64 { return b + 1000u64; }
+fn wor(b: u8) u64 { return b | 1u64 << 8; }
+static_assert(wadd(255) == 1255 && wor(0) == 256, "a widened operand computes at the result's width");
+static_assert(-7.5 % 2.0 == -1.5 && 7.5 % -2.0 == 1.5, "a float remainder has the dividend's sign");
+static_assert(1e20 as i32 == i32::MAX && (0.0 - 1e20) as i64 == i64::MIN, "casts saturate");
+static_assert((0.0 - 1e20) as u32 == 0 && 1e20 as u8 == 255 && (0.0 / 0.0) as i32 == 0, "casts saturate");
+static_assert((1.0 / 0.0) as i16 == 32767 && 3.99 as u8 == 3 && (0.0 - 3.99) as i8 == -3, "casts truncate");
+static_assert(200 as char as i32 == 200 && type_info::<char>().kind == TypeTag::Uint, "char is unsigned");
+
+fn main() i32 {
+    let c = unsafe stdlib::atoi(stdlib::getenv("CASE"));
+    if c == 0 {
+        print("{} {} {} ", nsub(unsafe H0), nadd(unsafe B1), nmul(unsafe H2));
+        print("{} {} {}\n", nshl(unsafe B3), nneg(unsafe B2), nnot(unsafe B0));
+        print("{} {}\n", unsafe F % 2.0, (0.0 - unsafe F) % -2.0);
+        let big = unsafe BIG;
+        print("{} {} {} {}\n", big as i32, (0.0 - big) as i64, (0.0 - big) as u32, big as u8);
+        let p = unsafe P399;
+        print("{} {} {} {}\n", ((big - big) / (big - big)) as i32, (big / 0.0) as i16, p as u8, (0.0 - p) as i8);
+        print("{}\n", unsafe C200 as u8 as char as i32);
+        print("{} {}\n", wadd(unsafe B255), wor(unsafe B0));
+    } else if c == 1 {
+        print("{}\n", unsafe I32 + 1);
+    } else if c == 2 {
+        print("{}\n", unsafe I32MIN - 1);
+    } else if c == 3 {
+        print("{}\n", unsafe I32 * 2);
+    } else if c == 4 {
+        print("{}\n", -unsafe I64MIN);
+    } else if c == 5 {
+        print("{}\n", unsafe I8V + 1);
+    } else if c == 6 {
+        let mut x = unsafe I16V;
+        x -= 1;
+        print("{}\n", x);
+    } else if c == 7 {
+        print("{}\n", (unsafe I32MIN).abs());
+    } else if c == 8 {
+        let mut i = unsafe I32 - 1;
+        while i > 0 {
+            i += 1;
+        }
+        print("{}\n", i);
+    } else if c == 9 {
+        print("{}\n", 7 / unsafe ZERO);
+    } else if c == 10 {
+        print("{}\n", 7 % unsafe ZERO);
+    } else if c == 11 {
+        print("{}\n", unsafe I32MIN / unsafe NEG1);
+    } else if c == 12 {
+        print("{}\n", unsafe I32MIN % unsafe NEG1);
+    } else if c == 13 {
+        print("{}\n", unsafe U32V << unsafe C40);
+    } else if c == 14 {
+        print("{}\n", unsafe U32V >> unsafe C40);
+    } else if c == 15 {
+        print("{}\n", unsafe NEG1 << unsafe NEG1);
+    } else if c == 16 {
+        print("{}\n", unsafe B255 + 1);
+    } else if c == 17 {
+        print("{}\n", unsafe H0 - unsafe H1);
+    } else if c == 18 {
+        print("{}\n", unsafe U32M * 2);
+    } else if c == 19 {
+        print("{}\n", unsafe U64M + 1);
+    } else if c == 20 {
+        let mut z = unsafe UZ;
+        z -= 1;
+        print("{}\n", z);
+    } else if c == 21 {
+        let mut i: u8 = unsafe B255 - 5;
+        while i > 0 {
+            i += 1;
+        }
+        print("{}\n", i);
+    } else if c == 22 {
+        print("{}\n", unsafe B3 * 100);
+    }
+    return 0;
+}
+)";
+
+@test
+fn runtime_arithmetic_follows_the_profile() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ARITH_RULES);
+    assert(p.compile("main.spc").ok());
+    // Negating MIN overflows at compile time too.
+    p.mkfile("neg.spc", "const M: i8 = -128;\nconst N: i8 = -M;\nfn main() i32 {\n    return N as i32;\n}\n");
+    p.expect_fail("neg.spc", "error: constant 'N' cannot be evaluated at compile time: arithmetic overflow");
+    // Unsigned overflow in a constant expression is an error too, at every width.
+    p.mkfile("uadd.spc", "const C: u8 = 255 + 1;\nfn main() i32 {\n    return C as i32;\n}\n");
+    p.expect_fail("uadd.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
+    p.mkfile("usub.spc", "fn main() i32 {\n    let x: u32 = 0 - 231;\n    return x as i32;\n}\n");
+    p.expect_fail("usub.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.mkfile(
+        "umul.spc",
+        "const fn twice(x: u64) u64 {\n    return x * 2;\n}\nconst C: u64 = twice(u64::MAX);\nfn main() i32 {\n    return C as i32;\n}\n",
+    );
+    p.expect_fail("umul.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
+    p.mkfile(
+        "umax.spc",
+        "fn main() i32 {\n    let x: u32 = u32::MAX + 1;\n    let z: usize = 0;\n    return (x + (z - 1) as u32) as i32;\n}\n",
+    );
+    p.expect_fail("umax.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    if cli::on_wasm() {
+        return;
+    }
+    let root = str::from_cstr(p.rootp());
+    let checked: []str = [
+        "",
+        "add",
+        "subtract",
+        "multiply",
+        "negate",
+        "add",
+        "subtract",
+        "negate",
+        "add",
+        "add",
+        "subtract",
+        "multiply",
+        "add",
+        "subtract",
+        "add",
+        "multiply",
+    ];
+    let wrapped: []str = [
+        "",
+        "-2147483648",
+        "2147483647",
+        "-2",
+        "-9223372036854775808",
+        "-128",
+        "32767",
+        "-2147483648",
+        "-2147483648",
+        "0",
+        "65535",
+        "4294967294",
+        "0",
+        "18446744073709551615",
+        "0",
+        "44",
+    ];
+    let always: []str = [
+        "divide by zero",
+        "calculate the remainder with a divisor of zero",
+        "divide with overflow",
+        "calculate the remainder with overflow",
+        "shift left with overflow",
+        "shift right with overflow",
+        "shift left with overflow",
+    ];
+    for release in [false, true] {
+        let mut args = String::new();
+        args.format_into(
+            "build {}\"{}/main.spc\" -o \"{}/bin\"",
+            if release {
+                "--profile=release ";
+            } else {
+                "";
+            },
+            root,
+            root,
+        );
+        assert(p.run_raw(args.as_str()).ok());
+        let r0 = p.run_bin_env("CASE=0 ");
+        assert(r0.ok());
+        assert(r0.out_shows("32767 0 32767 64 127 127") && r0.out_shows("-1.5 1.5"));
+        assert(r0.out_shows("2147483647 -9223372036854775808 0 255") && r0.out_shows("0 32767 3 -3"));
+        assert(r0.out_shows("200") && r0.out_shows("1255 256"));
+        for c in 1usize..23 {
+            let mut env = String::new();
+            env.format_into("CASE={} ", c);
+            let r = p.run_bin_env(env.as_str());
+            let mut want = String::new();
+            // Cases 16 to 22 follow 1 to 8 in the tables.
+            let k = if c >= 16 {
+                c - 7;
+            } else {
+                c;
+            };
+            if (c < 9 || c >= 16) && release {
+                want.push_str(wrapped[k]);
+                assert(r.ok());
+            } else if c < 9 || c >= 16 {
+                want.format_into("attempt to {} with overflow", checked[k]);
+                assert(r.exit != 0);
+            } else {
+                want.format_into("attempt to {}", always[c - 9]);
+                assert(r.exit != 0);
+            }
+            assert(r.out_shows(want.as_str()));
+        }
+    }
+}
+
+// std's library integers follow the profile as the built-in ones do: `Int<N>` and `UInt<N>` overflow in
+// `+ - *` and `pow` (cases 1 to 6 and 11 to 16, the last a `+=` at a width that is not a multiple of 64),
+// and `Int<N>`'s `abs`, traps with overflow checks and wraps under `release`; MIN / -1 and a zero divisor
+// trap under both; the `wrapping_*`, `overflowing_*` and `saturating_*` methods (case 0) never trap; and at
+// compile time the overflow is the built-in operators' "arithmetic overflow" error.
+const INT_RULES: str = M"(import stdlib;
+const PROD: i128 = i128::from_i64(-5) * i128::from_i64(3);
+static_assert(PROD.to_i64() == -15, "i128 arithmetic evaluates at compile time");
+const UDIFF: u128 = u128::max() - u128::one();
+static_assert(UDIFF.limb(0) == 18446744073709551614 && UDIFF.limb(1) == 18446744073709551615, "u128 at compile time");
+
+fn methods() String {
+    let mx = u128::max();
+    let one = u128::one();
+    let two = u128::from_u64(2);
+    let (s, so) = mx.overflowing_add(&two);
+    return format(
+        "{} {} {} {} {} {}",
+        mx.wrapping_add(&one),
+        u128::zero().wrapping_sub(&one),
+        mx.saturating_mul(&two) == mx,
+        two.wrapping_pow(129),
+        s,
+        so,
+    );
+}
+fn methods_hold() bool {
+    let mx = u128::max();
+    let one = u128::one();
+    let two = u128::from_u64(2);
+    let (s, so) = mx.overflowing_add(&two);
+    let (d, dO) = u128::zero().overflowing_sub(&one);
+    return mx.wrapping_add(&one).is_zero() && mx.saturating_mul(&two).eq(&mx) && two.wrapping_pow(129).is_zero() && s.eq(&one) && so && d.eq(&mx) && dO;
+}
+static_assert(methods_hold(), "the methods never trap");
+
+fn main() i32 {
+    let c = unsafe stdlib::atoi(stdlib::getenv("CASE"));
+    let one = i128::one();
+    let uone = u128::one();
+    if c == 0 {
+        print("{} {}\n", methods(), methods_hold());
+    } else if c == 1 {
+        print("{}\n", i128::max() + one);
+    } else if c == 2 {
+        print("{}\n", i128::min() - one);
+    } else if c == 3 {
+        print("{}\n", i128::max() * i128::from_i64(2));
+    } else if c == 4 {
+        print("{}\n", i128::min().abs());
+    } else if c == 5 {
+        print("{}\n", i128::max().pow(2));
+    } else if c == 6 {
+        print("{}\n", i256::max() + i256::one());
+    } else if c == 7 {
+        print("{}\n", i128::min() / i128::from_i64(-1));
+    } else if c == 8 {
+        print("{}\n", i128::min() % i128::from_i64(-1));
+    } else if c == 9 {
+        print("{}\n", i128::one() / i128::zero());
+    } else if c == 10 {
+        print("{}\n", u128::one() % u128::zero());
+    } else if c == 11 {
+        print("{}\n", u128::max() + uone);
+    } else if c == 12 {
+        print("{}\n", u128::zero() - uone);
+    } else if c == 13 {
+        print("{}\n", u128::max() * u128::from_u64(2));
+    } else if c == 14 {
+        print("{}\n", u128::from_u64(2).pow(128));
+    } else if c == 15 {
+        print("{}\n", u256::zero() - u256::one());
+    } else if c == 16 {
+        let mut x = UInt::<100>::max();
+        x += UInt::<100>::one();
+        print("{}\n", x);
+    }
+    return 0;
+}
+)";
+
+@test
+fn library_int_overflow_follows_the_profile() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", INT_RULES);
+    assert(p.compile("main.spc").ok());
+    p.mkfile(
+        "ctfe.spc",
+        "fn f() i128 {\n    return i128::max() + i128::one();\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("ctfe.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
+    p.mkfile(
+        "uctfe.spc",
+        "fn f() u128 {\n    return u128::zero() - u128::one();\n}\n\nconst F: u128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("uctfe.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
+    p.mkfile("upow.spc", "const F: u256 = u256::from_u64(2).pow(256);\n\nfn main() i32 {\n    return 0;\n}\n");
+    p.expect_fail("upow.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
+    // Division traps as the built-in `/` does at compile time: MIN / -1 overflows, a zero divisor
+    // divides by zero.
+    p.mkfile(
+        "div.spc",
+        "fn f() i128 {\n    return i128::min() / i128::from_i64(-1);\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("div.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
+    p.mkfile(
+        "zero.spc",
+        "fn f() i128 {\n    return i128::one() % i128::zero();\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("zero.spc", "error: constant 'F' cannot be evaluated at compile time: division by zero");
+    if cli::on_wasm() {
+        return;
+    }
+    let root = str::from_cstr(p.rootp());
+    // Cases 11 to 16 follow 1 to 6 in the tables.
+    let checked: []str = [
+        "",
+        "add",
+        "subtract",
+        "multiply",
+        "negate",
+        "multiply",
+        "add",
+        "add",
+        "subtract",
+        "multiply",
+        "multiply",
+        "subtract",
+        "add",
+    ];
+    let wrapped: []str = [
+        "",
+        "-170141183460469231731687303715884105728",
+        "170141183460469231731687303715884105727",
+        "-2",
+        "-170141183460469231731687303715884105728",
+        "1",
+        "-57896044618658097711785492504343953926634992332820282019728792003956564819968",
+        "0",
+        "340282366920938463463374607431768211455",
+        "340282366920938463463374607431768211454",
+        "0",
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "0",
+    ];
+    for release in [false, true] {
+        let mut args = String::new();
+        args.format_into(
+            "build {}\"{}/main.spc\" -o \"{}/bin\"",
+            if release {
+                "--profile=release ";
+            } else {
+                "";
+            },
+            root,
+            root,
+        );
+        assert(p.run_raw(args.as_str()).ok());
+        // Division traps in every profile, with the built-in messages.
+        let traps: []str = [
+            "attempt to divide with overflow",
+            "attempt to calculate the remainder with overflow",
+            "attempt to divide by zero",
+            "attempt to calculate the remainder with a divisor of zero",
+        ];
+        let r0 = p.run_bin_env("CASE=0 ");
+        assert(r0.ok() && r0.out_shows("0 340282366920938463463374607431768211455 true 0 1 true true"));
+        for c in 1usize..17 {
+            let mut env = String::new();
+            env.format_into("CASE={} ", c);
+            let r = p.run_bin_env(env.as_str());
+            let mut want = String::new();
+            let k = if c >= 11 {
+                c - 4;
+            } else {
+                c;
+            };
+            if c >= 7 && c < 11 {
+                want.push_str(traps[c - 7]);
+                assert(r.exit != 0);
+            } else if release {
+                want.push_str(wrapped[k]);
+                assert(r.ok());
+            } else {
+                want.format_into("attempt to {} with overflow", checked[k]);
+                assert(r.exit != 0);
+            }
+            assert(r.out_shows(want.as_str()));
+        }
+    }
+}
+
+// Literal-only arithmetic (types.md "Numeric Literals"): with a declared type it is computed in that type;
+// without one, in the first of i32, i64 and u64 where no step overflows (f32, then f64, for a float
+// expression). Compile time and run time agree.
+const LIT_RULES: str = M"(static mut Y64: i64 = 3;
+const DECL: i64 = 2000000000 * 2;
+const MIN64: i64 = -9223372036854775807 - 1;
+const NEG_MIN: i64 = -9223372036854775808;
+const TOP: u64 = 1 << 63;
+const WIDE_F: f64 = 1e30 * 1e10;
+const FLT: f32 = 1.5 * 2.0;
+static_assert(DECL == 4000000000 && MIN64 == NEG_MIN && TOP == 9223372036854775808, "declared types");
+static_assert(2000000000 * 2 == 4000000000 && 2147483647 + 1 == 2147483648, "undeclared widening");
+static_assert(-9223372036854775807 - 1 == MIN64 && FLT == 3.0, "i64 minimum and float operands");
+
+fn main() i32 {
+    let z: i64 = 2000000000 * 2;
+    let w = 2000000000 * 2;
+    let i = 2147483647 + 1;
+    let im = i32::MAX + 1;
+    let u = 9223372036854775807 + 1;
+    let s = 1 << 40;
+    let m = 1 << 31;
+    let n: i64 = -(2000000000 * 2);
+    let b: u8 = 2 + 3;
+    let big = 1e39;
+    let bigx = 1e30 * 1e10;
+    let small = 1.5 * 2.0;
+    let t = 2000000000 * 2 + unsafe Y64;
+    static_assert(sizeof(w) == 8 && sizeof(i) == 8 && sizeof(im) == 8 && sizeof(u) == 8 && sizeof(s) == 8, "widened to 64 bits");
+    static_assert(sizeof(m) == 4 && sizeof(b) == 1, "i32 and the declared u8");
+    static_assert(sizeof(big) == 8 && sizeof(bigx) == 8 && sizeof(small) == 4, "f64 past the f32 range");
+    print("{} {} {} {} {} {} {} {} {}\n", z, w, i, u, s, m, n, b, im);
+    print("{} {} {} {} {} {}\n", big, bigx, small, t, DECL, MIN64);
+    print("{} {} {}\n", TOP, WIDE_F, FLT);
+    return 0;
+}
+)";
+
+@test
+fn literal_arithmetic_is_computed_in_its_type() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", LIT_RULES);
+    assert(p.compile("main.spc").ok());
+    if !cli::on_wasm() {
+        let root = str::from_cstr(p.rootp());
+        let mut args = String::new();
+        args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
+        assert(p.run_raw(args.as_str()).ok());
+        let r = p.run_bin_env("");
+        assert(r.ok());
+        assert(
+            r.out_shows(
+                "4000000000 4000000000 2147483648 9223372036854775808 1099511627776 -2147483648 -4000000000 5 2147483648",
+            ),
+        );
+        assert(r.out_shows("1e+39 1e+40 3 4000000003 4000000000 -9223372036854775808"));
+        assert(r.out_shows("9223372036854775808 1e+40 3"));
+    }
+    // A declared or suffixed type that overflows is an error, at run time and at compile time.
+    p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
+    p.expect_fail("decl.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.mkfile("sfx.spc", "fn main() i32 {\n    let i = 2000000000i32 * 2;\n    return i;\n}\n");
+    p.expect_fail("sfx.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.mkfile("const.spc", "const C: i32 = i32::MAX + 1;\n\nfn main() i32 {\n    return C;\n}\n");
+    p.expect_fail("const.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
+    // A literal past 64 bits that no wide expectation takes is the checker's error, also in a constant
+    // initializer the evaluator runs.
+    p.mkfile(
+        "big.spc",
+        "fn f(x: u256) u256 {\n    return x;\n}\n\nconst C: u256 = f(123456789012345678901234567890123);\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("big.spc", "error: integer literal is too large to fit in a 64-bit integer\n--> ");
+    // An integer literal never becomes a float: mixing the two kinds is a type error, in literal-only
+    // arithmetic, beside a float value and against a declared float type.
+    p.mkfile("mix.spc", "fn main() i32 {\n    let x = (1 / 2) * 2.0;\n    return 0;\n}\n");
+    p.expect_fail("mix.spc", "error: mismatched types: expected 'i32', found 'f32'");
+    p.mkfile("mixf.spc", "const F: f32 = 1.5 * 2;\n\nfn main() i32 {\n    return 0;\n}\n");
+    p.expect_fail("mixf.spc", "error: mismatched types: expected 'f32', found 'i32'");
+    p.mkfile("mixv.spc", "fn main() i32 {\n    let y: f64 = 2.0;\n    let x = y * 2;\n    return 0;\n}\n");
+    p.expect_fail("mixv.spc", "error: mismatched types: expected 'f64', found 'i32'");
+    p.mkfile("mixd.spc", "fn main() i32 {\n    let f: f32 = 1 + 2;\n    let g: f32 = 1;\n    return 0;\n}\n");
+    p.expect_fail("mixd.spc", "error: mismatched types: expected 'f32', found 'i32'");
+}
+
+// The builtin numeric types' MIN and MAX: Rust's values (a float's are the finite extremes), usable in
+// constants, static_assert, const generics and array lengths; isize and usize follow the target's
+// pointer width, at compile time too. In literal-only arithmetic they are literals of their value.
+@test
+fn builtin_numeric_limits() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct B<const N: i64> { pub x: i32 }
+extend<const N: i64> B<N> { fn n(self: &Self) i64 { return N; } }
+const WIDE: i64 = i32::MAX + 1;
+static_assert(i8::MIN == -128 && i8::MAX == 127 && i16::MIN == -32768 && i16::MAX == 32767);
+static_assert(i32::MIN == -2147483648 && i32::MAX == 2147483647 && WIDE == 2147483648);
+static_assert(i64::MIN == -9223372036854775807 - 1 && i64::MAX == 9223372036854775807);
+static_assert(u8::MIN == 0 && u8::MAX == 255 && u16::MAX == 65535 && u32::MAX == 4294967295);
+static_assert(u64::MAX == 18446744073709551615 && usize::MAX == 18446744073709551615);
+static_assert(isize::MIN == -9223372036854775807 - 1 && isize::MAX == 9223372036854775807);
+static_assert(f32::MAX == 3.40282347e38 && f32::MIN == -3.40282347e38);
+static_assert(f64::MAX == 1.7976931348623157e308 && f64::MIN == -1.7976931348623157e308);
+fn main() i32 {
+    let i = i32::MAX + 1;
+    static_assert(sizeof(i) == 8);
+    let a: [u8; u8::MAX as usize] = [0; u8::MAX as usize];
+    let b = B::<{i32::MAX}> { x: 1 };
+    let m = i32::MIN;
+    print("{} {} {} {} {} {}\n", i, sizeof(a), b.n(), m, u64::MAX, i16::MIN);
+    return 0;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok());
+    // wasm32: 32-bit isize and usize, checked by the constant evaluator.
+    p.mkfile(
+        "wasm.spc",
+        "static_assert(usize::MAX == 4294967295 && isize::MIN == -2147483648 && isize::MAX == 2147483647);\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut wargs = String::new();
+    wargs.format_into("\"{}/wasm.spc\" --target=wasm", root);
+    assert(p.run_raw(wargs.as_str()).ok());
+    // A declared type rejects the widened value.
+    p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
+    p.expect_fail("decl.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    if cli::on_wasm() {
+        return;
+    }
+    let mut args = String::new();
+    args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
+    assert(p.run_raw(args.as_str()).ok());
+    let r = p.run_bin_env("");
+    assert(r.ok());
+    assert(r.out_shows("2147483648 255 2147483647 -2147483648 18446744073709551615 -32768"));
+}
+
+// Builtin limits and associated constants as const-generic arguments and as patterns emit strict ISO C:
+// the instances spell their values, a limit a pattern reads in a wider type is that type's literal,
+// integer ranges that cover their type need no catch-all (one after them is an unreachable arm), and
+// overlapping ranges match in arm order. The C compiles under -pedantic-errors and -Wtype-limits.
+@test
+fn qualified_constants_emit_valid_c() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct Lim { pub a: i32 }
+extend Lim {
+    pub const LO: u8 = 10;
+    pub const K: i64 = 7;
+}
+struct U<const N: u64> { pub x: i32 }
+extend<const N: u64> U<N> { pub fn n(self: &Self) u64 { return N; } }
+fn off<const N: isize>(x: isize) isize { return x + N; }
+fn lo<const N: i64>() i64 { return N; }
+fn sign(x: i64) i32 { return switch x { i64::MIN..=-1 => 1, 0 => 2, 1..=i64::MAX => 3 }; }
+fn half(x: u64) i32 { return switch x { 0..=i64::MAX => 1, 9223372036854775808..=u64::MAX => 2 }; }
+fn all(x: u64) i32 { return switch x { 0..=u64::MAX => 1 }; }
+fn byte(x: u8) i32 { return switch x { 0..Lim::LO => 1, Lim::LO..=u8::MAX => 2, _ => 3 }; }
+fn pair(x: i32, b: bool) i32 { return switch (x, b) { (0..=5, true) => 1, (3..=10, _) => 2, _ => 3 }; }
+fn main() i32 {
+    let u = U::<u64::MAX> { x: 0 };
+    let a = off::<isize::MAX>(0);
+    print("{} {} {} {} {} {} {} {} {} {}\n", a, lo::<Lim::K>(), u.n(), sign(i64::MIN), sign(i64::MAX), half(9223372036854775808), all(0), byte(9), byte(255), pair(4, false));
+    return u.x;
+}
+)",
+    );
+    let c = p.compile("main.spc");
+    assert(c.ok());
+    assert(c.out_has("unreachable arm: a previous arm matches every value"));
+    assert(p.cc_build("-pedantic-errors -Wtype-limits ").ok());
+    let r = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(r.ok() && r.out_shows("9223372036854775807 7 18446744073709551615 1 3 2 1 1 2 2\n"));
+}
+
+// A const-generic expression whose value leaves its type under an instantiation is a located error at the
+// expression, naming the bindings, not a backend failure.
+@test
+fn const_generic_overflow_is_an_error() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "call.spc",
+        "fn g<const M: i64>() i64 {\n    return M;\n}\n\nfn f<const N: i64>() i64 {\n    return g::<{N * 2}>();\n}\n\nfn main() i32 {\n    return f::<5000000000000000000>() as i32;\n}\n",
+    );
+    p.expect_fail("call.spc", "error: const expression {2 * N} overflows i64 for N = 5000000000000000000");
+    assert(!p.compile("call.spc").out_has("internal"));
+    p.mkfile(
+        "type.spc",
+        "struct B<const M: i64> {\n    pub x: i32,\n}\n\nfn f<const N: i64>() i32 {\n    let b = B::<{N * 2 + 1}> { x: 1 };\n    return b.x;\n}\n\nfn main() i32 {\n    return f::<5000000000000000000>();\n}\n",
+    );
+    // The written `N * 2` overflows before the `+ 1`: the step is the error, at its own span.
+    p.expect_fail("type.spc", "error: const expression {N * 2} overflows i64 for N = 5000000000000000000");
+    // A form computes exactly: a constant past i64 is legal where written (a negative K brings the
+    // value back into i64) and the instance whose value leaves i64 is the error.
+    p.mkfile(
+        "form.spc",
+        "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{K + 9000000000000000000 + 9000000000000000000}>();\n}\n\nfn main() i32 {\n    return h::<1>() as i32;\n}\n",
+    );
+    p.expect_fail("form.spc", "error: const expression {K + 18000000000000000000} overflows i64 for K = 1");
+    // Division by -1 of a form whose constant is i64::MIN: the negated constant is 2^63.
+    p.mkfile(
+        "neg.spc",
+        "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{(K - 9223372036854775807 - 1) / -1}>();\n}\n\nfn main() i32 {\n    return h::<0>() as i32;\n}\n",
+    );
+    p.expect_fail("neg.spc", "error: const expression {-K + 9223372036854775808} overflows i64 for K = 0");
+    p.mkfile(
+        "negbound.spc",
+        "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{K / -1}>();\n}\n\nfn main() i32 {\n    return h::<{0 - 9223372036854775807 - 1}>() as i32;\n}\n",
+    );
+    p.expect_fail("negbound.spc", "error: const expression {-K} overflows i64 for K = -9223372036854775808");
+    p.mkfile(
+        "sig.spc",
+        "struct B<const M: i64> {\n    pub x: i32,\n}\n\nfn g<const M: i64>() B<{M + 9000000000000000000}> {\n    return B::<{M + 9000000000000000000}> { x: 1 };\n}\n\nfn h<const K: i64>() i32 {\n    let b = g::<{K + 9000000000000000000}>();\n    return b.x;\n}\n\nfn main() i32 {\n    return h::<1>();\n}\n",
+    );
+    p.expect_fail(
+        "sig.spc",
+        "error: const expression {M + 9000000000000000000} overflows i64 for M = 9000000000000000001",
+    );
+    // A form computes in its parameters' type: a u8 form and a u64 one leave theirs, and a u8
+    // parameter that inference binds through a u64 position takes the value only when it fits.
+    p.mkfile(
+        "u8.spc",
+        "fn g<const M: u8>() u8 {\n    return M;\n}\n\nfn f<const N: u8>() u8 {\n    return g::<{N + 1}>();\n}\n\nfn main() i32 {\n    return f::<255>() as i32;\n}\n",
+    );
+    p.expect_fail("u8.spc", "error: const expression {N + 1} overflows u8 for N = 255");
+    p.mkfile(
+        "u64.spc",
+        "fn g<const M: u64>() u64 {\n    return M;\n}\n\nfn f<const N: u64>() u64 {\n    return g::<{N - 1}>();\n}\n\nfn main() i32 {\n    return f::<0>() as i32;\n}\n",
+    );
+    p.expect_fail("u64.spc", "error: const expression {N - 1} overflows u64 for N = 0");
+    p.mkfile(
+        "narrow.spc",
+        "struct B<const M: u64> {\n    pub x: i32,\n}\n\nfn g<const K: u8>(b: B<K>) i32 {\n    return b.x;\n}\n\nfn h<const Q: u64>() i32 {\n    let b = B::<Q> { x: 0 };\n    return g(b);\n}\n\nfn main() i32 {\n    return h::<300>();\n}\n",
+    );
+    p.expect_fail("narrow.spc", "error: const expression {Q} overflows u8 for Q = 300");
+}
+
+// Compiling `file` fails with a diagnostic holding `msg` whose location ends with `at` (file:line:col).
+fn expect_fail_at(p: &cli::Proj, file: str, msg: str, at: str) {
+    let r = p.compile(file);
+    assert(r.exit != 0, "expected nonzero exit on a bad program");
+    assert(r.out_has(format("{}\n--> ", msg).as_str()), "diagnostic missing expected text");
+    assert(r.out_has(at), "diagnostic at the expected location");
+}
+
+// A const-generic expression computes step by step in its type, as the written expression does at
+// run time: an instantiation under which a step overflows is an error at that step, although the
+// canonical form (`{N * 2 - N}` is `N`) would fit. A division the form floors must truncate to the
+// same value, a shift that loses bits overflows, and an alias's steps belong to its user.
+@test
+fn const_generic_steps_follow_the_written_expression() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "steps.spc",
+        "struct F<const N: u64> {\n    pub v: i32,\n}\n\nextend<const N: u64> F<N> {\n    fn n(self: &Self) u64 {\n        return N;\n    }\n}\n\nfn g<const N: u64>() u64 {\n    let x = F::<{N * 2 - N}> { v: 1 };\n    return x.n();\n}\n\nfn main() i32 {\n    return g::<18446744073709551615>() as i32;\n}\n",
+    );
+    let r = p.compile("steps.spc");
+    assert(r.exit != 0, "the step overflows");
+    assert(r.out_has("error: const expression {N * 2} overflows u64 for N = 18446744073709551615\n--> "));
+    assert(r.out_has("steps.spc:12:18"), "at the step");
+    assert(r.out_has("in the instantiation of 'g' demanded here\n--> "));
+    assert(r.out_has("steps.spc:17:12"), "at the demand");
+    p.mkfile(
+        "field.spc",
+        "struct S<const N: u8> {\n    pub a: [u8; N * 2 - N],\n}\n\nfn main() i32 {\n    let s = S::<200> { a: [0; 200] };\n    return s.a[0];\n}\n",
+    );
+    expect_fail_at(&p, "field.spc", "error: const expression {N * 2} overflows u8 for N = 200", "field.spc:2:17");
+    // A method's steps are its own instantiation's: F<u64::MAX> is fine until `bad` is called.
+    const METHODS: str = "struct F<const N: u64> {\n    pub v: i32,\n}\n\nextend<const N: u64> F<N> {\n    fn good(self: &Self) u64 {\n        return N;\n    }\n\n    fn bad(self: &Self) u64 {\n        let y = F::<{N * 2 - N}> { v: 2 };\n        return y.good();\n    }\n}\n\nfn main() i32 {\n    let f = F::<18446744073709551615> { v: 1 };\n    return (f.good() - 18446744073709551615) as i32;\n}\n";
+    p.mkfile("good.spc", METHODS);
+    assert(p.compile("good.spc").ok(), "an instance whose failing method is never called");
+    let mut bad = String::from_str(METHODS);
+    bad.push_str("\nfn use_bad() u64 {\n    let b = F::<18446744073709551615> { v: 1 };\n    return b.bad();\n}\n");
+    bad = bad.replace("return (f.good() - 18446744073709551615)", "return (use_bad() - f.good())");
+    p.mkfile("bad.spc", bad.as_str());
+    expect_fail_at(
+        &p,
+        "bad.spc",
+        "error: const expression {N * 2} overflows u64 for N = 18446744073709551615",
+        "bad.spc:11:22",
+    );
+    p.mkfile(
+        "div.spc",
+        "struct G<const N: i64> {\n    pub v: i32,\n}\n\nfn q<const N: i64>() G<{(N - 10) / 4 + 100}> {\n    return G::<{(N - 10) / 4 + 100}> { v: 3 };\n}\n\nfn main() i32 {\n    return q::<1>().v;\n}\n",
+    );
+    expect_fail_at(
+        &p,
+        "div.spc",
+        "error: const expression {(N - 10) / 4} truncates the negative quotient -9 / 4 for N = 1: a const-generic division needs a dividend that is not negative or a divisor that divides it",
+        "div.spc:5:25",
+    );
+    p.mkfile(
+        "shl.spc",
+        "struct F<const N: u64> {\n    pub v: i32,\n}\n\nfn s<const N: u64>() i32 {\n    let z = F::<{(N << 1) >> 1}> { v: 4 };\n    return z.v;\n}\n\nfn main() i32 {\n    return s::<18446744073709551615>();\n}\n",
+    );
+    expect_fail_at(
+        &p,
+        "shl.spc",
+        "error: const expression {N << 1} overflows u64 for N = 18446744073709551615",
+        "shl.spc:6:19",
+    );
+    p.mkfile(
+        "alias.spc",
+        "struct F<const N: u64> {\n    pub v: i32,\n}\n\ntype A<const M: u64> = F<{M * 2 - M}>;\n\nfn f<const N: u64>() i32 {\n    let x = A::<N> { v: 1 };\n    return x.v;\n}\n\nfn main() i32 {\n    return f::<18446744073709551615>();\n}\n",
+    );
+    expect_fail_at(
+        &p,
+        "alias.spc",
+        "error: const expression {M * 2} overflows u64 for N = 18446744073709551615",
+        "alias.spc:5:27",
+    );
+    p.mkfile(
+        "nested.spc",
+        "struct F<const N: u64> {\n    pub v: i32,\n}\n\ntype A<const M: u64> = F<{M - 5}>;\n\ntype B<const K: u64> = A<{K + 10}>;\n\nfn f<const N: u64>() i32 {\n    let x = B::<N> { v: 1 };\n    return x.v;\n}\n\nfn main() i32 {\n    return f::<18446744073709551610>();\n}\n",
+    );
+    expect_fail_at(
+        &p,
+        "nested.spc",
+        "error: const expression {K + 10} overflows u64 for N = 18446744073709551610",
+        "nested.spc:7:27",
+    );
+    // The constant evaluator runs an instantiation only when its steps hold, and a layout needs the
+    // written member types to compute.
+    p.mkfile(
+        "ctfe.spc",
+        "struct F<const N: u64> {\n    pub v: i32,\n}\n\nextend<const N: u64> F<N> {\n    fn n(self: &Self) u64 {\n        return N;\n    }\n}\n\nfn h<const N: u64>() u64 {\n    let y = F::<{N * 2 - N}> { v: 1 };\n    return y.n();\n}\n\nstatic_assert(h::<9>() == 9);\nstatic_assert(h::<18446744073709551615>() == 18446744073709551615);\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    expect_fail_at(
+        &p,
+        "ctfe.spc",
+        "error: static assertion cannot be evaluated: arithmetic overflow in a const-generic expression",
+        "ctfe.spc:17:15",
+    );
+    assert(!p.compile("ctfe.spc").out_has("ctfe.spc:16:"), "the valid instantiation evaluates");
+    p.mkfile(
+        "layout.spc",
+        "struct T<const N: u8> {\n    pub a: [u8; N + 1],\n}\n\nstatic_assert(sizeof(T<254>) == 255);\nstatic_assert(sizeof(T<255>) == 256);\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    let rl = p.compile("layout.spc");
+    assert(rl.out_has("error: static assertion cannot be evaluated: the condition does not fold to a constant\n--> "));
+    assert(rl.out_has("layout.spc:6:15"), "at the overflowing instance");
+    assert(!rl.out_has("layout.spc:5:"), "the fitting instance lays out");
+}
+
+// Every instance checks what its generic body asserts about it: a constant index into a symbolic
+// length stays below the instance's length, and an interface default body's steps hold under the
+// arguments of the conformance that supplies it, the conformance's own arguments included.
+@test
+fn instances_check_indexes_and_default_bodies() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "idx.spc",
+        "struct S<const N: usize> {\n    pub a: [u8; N],\n}\n\nextend<const N: usize> S<N> {\n    fn third(self: &Self) u8 {\n        return self.a[2];\n    }\n}\n\nfn main() i32 {\n    let s = S::<2> { a: [1, 2] };\n    return s.third() as i32;\n}\n",
+    );
+    p.expect_fail("idx.spc", "error: index 2 is out of bounds for an array of length 2 for N = 2");
+    p.mkfile(
+        "idx_const.spc",
+        "fn g<const N: usize>(a: [u8; N]) u8 {\n    return a[2];\n}\n\nconst C: u8 = g::<2>([1, 2]);\n\nfn main() i32 {\n    return C as i32;\n}\n",
+    );
+    p.expect_fail(
+        "idx_const.spc",
+        "error: constant 'C' cannot be evaluated at compile time: an index past the end of a const-generic array",
+    );
+    p.mkfile(
+        "dflt.spc",
+        "struct U<const M: u64> {\n    pub v: u64,\n}\n\ninterface I<const K: u64> {\n    fn d(self: &Self) u64 {\n        let u = U::<{K - 1}> { v: 3 };\n        return u.v + K;\n    }\n}\n\nstruct F {\n    pub x: u64,\n}\n\nextend F as I<0> {}\n\nfn main() i32 {\n    let f = F { x: 0 };\n    return f.d() as i32;\n}\n",
+    );
+    p.expect_fail("dflt.spc", "error: const expression {K - 1} overflows u64 for K = 0");
+    p.mkfile(
+        "conf.spc",
+        "struct U<const M: u64> {\n    pub v: u64,\n}\n\ninterface I<const K: u64> {\n    fn d(self: &Self) u64 {\n        let u = U::<{K - 1}> { v: 3 };\n        return u.v + K;\n    }\n}\n\nstruct G<const N: u64> {\n    pub x: u64,\n}\n\nextend<const N: u64> G<{N + 1}> as I<{N * 2}> {}\n\nfn main() i32 {\n    let g = G::<18446744073709551615> { x: 0 };\n    return g.d() as i32;\n}\n",
+    );
+    p.expect_fail("conf.spc", "error: const expression {2 * N} overflows u64 for N = 18446744073709551614");
 }
 
 // A variant the build constants do not have is an error even in a removed branch, and so is a

@@ -5,7 +5,6 @@
 import ast::ast as *;
 import ir::layout as lay;
 import lexer::token as tok;
-import lexer::token_type as tt;
 import module::loader as loader;
 import ir::interp as iri;
 
@@ -375,6 +374,14 @@ pub struct Mangler {
     /// Every TYPE_DYN whose C spelling was rendered: the backend drains this into `SC_DYN_<stem>`
     /// typedef blocks (the fat value + vtable types every dyn spelling presumes).
     pub dyn_reqs: Vector<DynReq>,
+    /// Every array wrapper struct a pointer spelling named (`ptr_wraps`), once per mangler: the
+    /// assembly defines each in its element's definition header.
+    pub wrap_reqs: Vector<WrapReq>,
+    wrap_seen: Set<u64>,
+    /// Every result pack a spelling named (`ret_pack`), once per mangler: `elem` is its C name,
+    /// `body` its typedef and definition. The assembly gives each its own definition header.
+    pub pack_reqs: Vector<WrapReq>,
+    pack_seen: Set<u64>,
     /// `@emit_macro` template mode: an UNRESOLVED generic param spells as its own name in C types
     /// and as `<paste>_SCM_<name>` in mangles (byte 1 marks a `##` for the template rewriter).
     pub macro_on: bool,
@@ -436,6 +443,9 @@ pub struct Mangler {
     // method_by_name misses keyed by (receiver decl or builtin, name) hash: callers probe for methods
     // that often do not exist (`free`, `eq`, `cmp`), and a miss scans every module's items.
     miss_memo: Set<u64>,
+    // `conform_ext` answers for extends that apply to every instance: (decl, interface) key ->
+    // module << 32 | extend node.
+    conf_memo: Map<u64, u64>,
     // free_method answers keyed by declaration: every drop asks, and an answer scans the items.
     free_memo: Map<u64, u64>,
     last_edge: u64, // the spelling edge recorded last: spellings cluster, so most repeat it
@@ -472,7 +482,7 @@ pub const RK_GLUE: u8 = 7; // h = gate, a = em, d = ty, s1 = sym, subs = recorde
 pub const RK_STAT: u8 = 8; // h = gate, a = em, b/c = def, d = ty, s1 = sym
 pub const RK_EXT: u8 = 9; // h = gate, s1 = extern prototype line
 pub const RK_DYNREQ: u8 = 10; // a = pm, b = t (cem.dyn_request call)
-pub const RK_DYNTAB: u8 = 11; // a = pm, b = dyn t, c = srm, d = srt, h = own flag (dyn_pair call)
+pub const RK_DYNTAB: u8 = 11; // a = pm, b = dyn t, c = srm, d = srt, h = own flag, subs[0] = allocator (dyn_pair call)
 pub const RK_TI: u8 = 12; // a = rm, b = rt (type_info descriptor request)
 pub const RK_BLK: u8 = 13; // a/b = blocking callee DefId (blk_wrapper call)
 pub const RK_AGG: u8 = 14; // h = gate, a = pm, b/c/d+xs = TyInstance, subs = spelling env
@@ -482,6 +492,8 @@ pub const RK_MAIN: u8 = 17; // a = main_argv (driver-recorded, module holds `mai
 pub const RK_ZST: u8 = 18; // a = alignment (ZST sentinel demand)
 pub const RK_HEDGE: u8 = 19; // a = owner module, h = definition key of the embedded type (header edge)
 pub const RK_TNEED: u8 = 20; // xs = type-need keys of this module's row as (low, high) word pairs (driver-recorded)
+pub const RK_WRAP: u8 = 21; // h = wrapper name hash, s1 = element C name, s2 = wrapper definition
+pub const RK_PACK: u8 = 22; // h = result pack name hash, s1 = its C name, s2 = its definition
 /// `mark_ctx` of owner module `o`'s instance shard: `CTX_INST | o`.
 pub const CTX_INST: i64 = 0x10000;
 
@@ -489,7 +501,7 @@ pub const CTX_INST: i64 = 0x10000;
 const fn fnv_more(h: u64, s: str) u64 {
     let mut x = h;
     for k in 0..s.len() {
-        x = (x ^ s.byte_at(k) as u64) * 0x100000001b3u64;
+        x = (x ^ s.byte_at(k) as u64).wrapping_mul(0x100000001b3u64);
     }
     return x;
 }
@@ -537,6 +549,15 @@ pub struct AggReq {
 pub struct DynReq {
     pub pm: ModuleId,
     pub t: TypeId,
+}
+
+/// The wrapper struct of a pointee array of aggregates (`Mangler::ptr_wraps`): `name` (FNV `h`),
+/// the C name of its innermost element `elem`, and its definition `body` (the struct and its
+/// layout check).
+pub struct WrapReq {
+    pub h: u64,
+    pub elem: String,
+    pub body: String,
 }
 
 /// One substitution binding: param decl `(pm, pnode)` resolves to pool type `(am, at)`. `lim` is
@@ -595,6 +616,10 @@ extend Mangler {
             clos_sfx: String::new(),
             clos_ids: Vector::<NodeId>::new(),
             dyn_reqs: Vector::<DynReq>::new(),
+            wrap_reqs: Vector::<WrapReq>::new(),
+            wrap_seen: Set::<u64>::new(),
+            pack_reqs: Vector::<WrapReq>::new(),
+            pack_seen: Set::<u64>::new(),
             hidden: Vector::<MSub>::new(),
             macro_on: false,
             um_slot: Vector::<u32>::new(),
@@ -624,6 +649,7 @@ extend Mangler {
             pin_idx: Map::<u64, u64>::new(),
             ovl_memo: Map::<u64, u64>::new(),
             miss_memo: Set::<u64>::new(),
+            conf_memo: Map::<u64, u64>::new(),
             free_memo: Map::<u64, u64>::new(),
             last_edge: 0xFFFFFFFFFFFFFFFFu64,
             no_edges: false,
@@ -710,30 +736,33 @@ extend Mangler {
     }
 
     /// Fold a canonical const-generic expression under the substitution stack: every referenced
-    /// parameter must bind to a TYPE_CONST. False when a parameter is unbound or non-const.
-    pub fn fold_cexpr(self: &Self, pm: ModuleId, t: TypeId, out_val: &mut i64) bool {
-        return self.fold_cexpr_d(pm, t, out_val, 0, self.subs.len());
+    /// parameter must bind to a TYPE_CONST. The value's two's complement bits land in `out_val`, its
+    /// integer type in `bt`. False when a parameter is unbound or non-const.
+    pub fn fold_cexpr(self: &Self, pm: ModuleId, t: TypeId, out_val: &mut i64, bt: &mut BuiltinType) bool {
+        return self.fold_cexpr_d(pm, t, out_val, bt, 0, self.subs.len());
     }
-    /// Ground any const-valued payload (TYPE_CONST, expression, or bound param) below `lim`.
-    pub fn fold_cval_at(self: &Self, am: ModuleId, at: TypeId, out_val: &mut i64, lim: usize) bool {
+    /// Ground any const-valued payload (TYPE_CONST, expression, or bound param) below `lim`: its bits
+    /// and integer type, as `fold_cexpr`.
+    pub fn fold_cval_at(self: &Self, am: ModuleId, at: TypeId, out_val: &mut i64, bt: &mut BuiltinType, lim: usize) bool {
         let l = lim.min(self.subs.len());
         let y = *unsafe (*self.p().module_ast_const(am)).type_at(at);
         if y.kind == TypeKind::TYPE_CONST {
             *out_val = y.as_data.value;
+            *bt = y.cbt();
             return true;
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
-            return self.fold_cexpr_d(am, at, out_val, 0, l);
+            return self.fold_cexpr_d(am, at, out_val, bt, 0, l);
         }
         if y.kind == TypeKind::TYPE_GENERIC {
-            return self.fold_generic_d(&y, out_val, 0, l);
+            return self.fold_generic_d(&y, out_val, bt, 0, l);
         }
         return false;
     }
 
-    // Ground a const-bound GENERIC param to its value: frames innermost-first, each matched
-    // frame's payload folding strictly below that frame's env boundary.
-    fn fold_generic_d(self: &Self, y: &Ty, out_val: &mut i64, depth: u32, lim: usize) bool {
+    // Ground a const-bound GENERIC param to its value (bits and integer type): frames innermost-first,
+    // each matched frame's payload folding strictly below that frame's env boundary.
+    fn fold_generic_d(self: &Self, y: &Ty, out_val: &mut i64, bt: &mut BuiltinType, depth: u32, lim: usize) bool {
         if depth > 8 {
             return false;
         }
@@ -748,14 +777,15 @@ extend Mangler {
             let by = *unsafe (*self.p().module_ast_const(sb.am)).type_at(sb.at);
             if by.kind == TypeKind::TYPE_CONST {
                 *out_val = by.as_data.value;
+                *bt = by.cbt();
                 return true;
             }
             if by.kind == TypeKind::TYPE_CONST_EXPR {
-                if self.fold_cexpr_d(sb.am, sb.at, out_val, depth + 1, kl) {
+                if self.fold_cexpr_d(sb.am, sb.at, out_val, bt, depth + 1, kl) {
                     return true;
                 }
             } else if by.kind == TypeKind::TYPE_GENERIC {
-                if self.fold_generic_d(&by, out_val, depth + 1, kl) {
+                if self.fold_generic_d(&by, out_val, bt, depth + 1, kl) {
                     return true;
                 }
             }
@@ -763,7 +793,15 @@ extend Mangler {
         return false;
     }
 
-    fn fold_cexpr_d(self: &Self, pm: ModuleId, t: TypeId, out_val: &mut i64, depth: u32, lim: usize) bool {
+    fn fold_cexpr_d(
+        self: &Self,
+        pm: ModuleId,
+        t: TypeId,
+        out_val: &mut i64,
+        bt: &mut BuiltinType,
+        depth: u32,
+        lim: usize,
+    ) bool {
         if depth > 8 {
             return false;
         }
@@ -773,7 +811,7 @@ extend Mangler {
         let mut v = l.k;
         for i in 0..l.n {
             let c = unsafe l.c[i as usize];
-            if c == 0 {
+            if c.is_zero() {
                 continue;
             }
             let pd = unsafe l.p[i as usize];
@@ -781,6 +819,7 @@ extend Mangler {
             // through frames BELOW it (its env when pushed); a width bound to a derived
             // expression of itself must apply exactly once, grounding in the outer value.
             let mut bv: i64 = 0;
+            let mut bb = BuiltinType::BT_COUNT;
             let mut got = false;
             let mut k = lim;
             while k > 0 && !got {
@@ -799,9 +838,10 @@ extend Mangler {
                 let by = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
                 if by.kind == TypeKind::TYPE_CONST {
                     bv = by.as_data.value;
+                    bb = by.cbt();
                     got = true;
                 } else if by.kind == TypeKind::TYPE_CONST_EXPR {
-                    if self.fold_cexpr_d(rm, rt, &mut bv, depth + 1, kl) {
+                    if self.fold_cexpr_d(rm, rt, &mut bv, &mut bb, depth + 1, kl) {
                         got = true;
                     }
                 }
@@ -812,20 +852,22 @@ extend Mangler {
                 if unsafe (*pa).at_const(pd.node).kind == NodeKind::NODE_CONST && self.p().cir != null {
                     let cev = unsafe &mut *(self.p().cir as *mut iri::Interp);
                     let cv = cev.eval(pd.module, unsafe (*pa).at_const(pd.node).as_data.const_def.value);
-                    if cv.kind == iri::IV_INT {
-                        v += cv.i * c;
+                    if cv.kind == iri::IV_INT && lin_acc(&mut v, c, iri::iv_exact(&cv)) {
                         continue;
                     }
                 }
                 return false;
             }
-            v += bv * c;
+            if !lin_acc(&mut v, c, cval_exact(bv, bb)) {
+                return false;
+            }
         }
-        if l.div_of() != 1 {
-            let folded = ConstLin { k: v, n: 0, div: l.div };
-            v = folded.value();
+        let mut r = i128::zero();
+        if !l.finish(v, lay::target_for(self.p().arch).ptr == 4, &mut r) {
+            return false;
         }
-        *out_val = v;
+        *out_val = cval_bits(r);
+        *bt = l.to;
         return true;
     }
 
@@ -868,6 +910,93 @@ extend Mangler {
         self.hidden.truncate(h0);
     }
 
+    /// `(pm, t)` with every generic parameter substituted through the stack, as a concrete type
+    /// interned into pool `dm`. False when a parameter stays unbound, or for a type shape a value
+    /// never names (a field projection over parameters).
+    pub fn ground(self: &mut Self, pm: ModuleId, t: TypeId, dm: ModuleId, out: &mut TypeId) bool {
+        return self.ground_l(pm, t, dm, self.subs.len(), out, 0);
+    }
+
+    /// `ground` reading only the frames below `lim`. An associated type (`T::Output`) grounds to its
+    /// conformance's type (`Package::assoc_norm`).
+    fn ground_l(self: &Self, pm: ModuleId, t: TypeId, dm: ModuleId, lim: usize, out: &mut TypeId, depth: u32) bool {
+        if depth > 16 {
+            return false;
+        }
+        let pa = self.p().module_ast_const(pm);
+        let da = self.p().module_ast_const(dm) as *mut Ast;
+        let y = *unsafe (*pa).type_at(t);
+        if unsafe (*pa).type_concrete(t) {
+            *out = unsafe (*da).reintern(unsafe &*pa, t);
+            return true;
+        }
+        let mut cv: i64 = 0;
+        let mut bt = BuiltinType::BT_COUNT;
+        if y.kind == TypeKind::TYPE_GENERIC && self.fold_generic_d(&y, &mut cv, &mut bt, 0, lim) || y.kind == TypeKind::TYPE_CONST_EXPR && self.fold_cexpr_d(
+            pm,
+            t,
+            &mut cv,
+            &mut bt,
+            0,
+            lim,
+        ) {
+            *out = unsafe (*da).const_value(cv, bt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_GENERIC {
+            let mut rm: ModuleId = 0;
+            let mut rt = TYPE_NONE;
+            let mut env: usize = 0;
+            if !self.resolve_from(pm, t, &mut rm, &mut rt, 0, lim, &mut env) {
+                return false;
+            }
+            return self.ground_l(rm, rt, dm, env, out, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            let mut e = TYPE_NONE;
+            if !self.ground_l(pm, y.as_data.elem, dm, lim, &mut e, depth + 1) {
+                return false;
+            }
+            if y.arr_sym() {
+                let mut lt = TYPE_NONE;
+                if !self.ground_l(pm, y.as_data.arr.len, dm, lim, &mut lt, depth + 1) {
+                    return false;
+                }
+                *out = unsafe (*da).intern_array(e, lt);
+                return true;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            *out = unsafe (*da).intern_type(nt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_ASSOC || y.kind == TypeKind::TYPE_DYN || y.fn_sig() {
+            let mut it = *unsafe (*pa).instance(y.rec());
+            if y.kind == TypeKind::TYPE_DYN && it.decl == NODE_NONE {
+                return false; // a `dyn fn` over parameters
+            }
+            for i in 0..it.n {
+                let mut g = TYPE_NONE;
+                if !self.ground_l(pm, unsafe it.args[i as usize], dm, lim, &mut g, depth + 1) {
+                    return false;
+                }
+                unsafe it.args[i as usize] = g;
+            }
+            if y.kind == TypeKind::TYPE_ASSOC {
+                return self.p().assoc_norm(dm, &it, out, depth + 1);
+            }
+            *out = if y.fn_sig() {
+                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+            } else if y.kind == TypeKind::TYPE_DYN {
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+            } else {
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+            };
+            return true;
+        }
+        return false;
+    }
+
     /// Substitution-free-memoized classification behind `is_zst`/`erased`: one resolve + one
     /// (cached) layout query per (module, type). Instance emission (subs active) bypasses the memo:
     /// the same pool TypeId legitimately resolves differently per instantiation.
@@ -898,8 +1027,7 @@ extend Mangler {
             v = v | 4;
         } else if bound && y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_FUNCTION && y.kind != TypeKind::TYPE_DYN {
             let lo = self.layout_at(rm, rt, env);
-            // A zero-length array of a sized element keeps its C member (see Layout.zarr).
-            if lo.ok && lo.size == 0 && !lo.zarr {
+            if lo.ok && lo.size == 0 {
                 v = v | 2;
             }
         }
@@ -956,7 +1084,14 @@ extend Mangler {
             }
         }
         let head: *const lay::LayoutEnv = self.zenv.at(env - 1);
-        return self.lay.layout_of(rm, rt, head, 0);
+        let r = self.lay.layout_of(rm, rt, head, 0);
+        // The layout frames bind parameters only: a type naming an associated type (`W<T::Output>`)
+        // lays out grounded.
+        let mut g = TYPE_NONE;
+        if !r.ok && self.ground(rm, rt, rm, &mut g) {
+            return self.lay.layout(rm, g);
+        }
+        return r;
     }
 
     /// Final-layout zero-sized test under the active substitution env (storage elision is a pure
@@ -976,181 +1111,33 @@ extend Mangler {
         return (self.zclass(pm, t) & 2) != 0;
     }
 
-    // Evaluate a symbolic `[T; expr]` length under the instance env: literals, + - * / % << >>
-    // arithmetic, and params folded through the substitution stack (`(BITS + 63) / 64` = 2 at
-    // BITS=128). The checker interns these fields at len 0, so the value only exists HERE.
-    fn eval_len_expr(self: &mut Self, m: ModuleId, id: NodeId, out: &mut i64, depth: u32) bool {
-        if depth > 8 {
-            return false;
-        }
-        let da = self.p().module_ast_const(m);
-        let n = unsafe (*da).at_const(id);
-        if n.kind == NodeKind::NODE_LITERAL {
-            let sp = n.span;
-            let src = self.p().modules.at(m as usize).source.as_str();
-            if sp.end as usize > src.len() || sp.end <= sp.start {
-                return false;
-            }
-            let mut v: i64 = 0;
-            let mut i = sp.start as usize;
-            // Radix prefixes as the lexer accepts them: 0x, 0o, 0b (either case).
-            let mut base: i64 = 10;
-            if sp.end as usize - i > 2 && src.byte_at(i) == 48 {
-                let p = src.byte_at(i + 1) | 32;
-                if p == 120 {
-                    base = 16;
-                } else if p == 111 {
-                    base = 8;
-                } else if p == 98 {
-                    base = 2;
-                }
-                if base != 10 {
-                    i += 2;
-                }
-            }
-            let mut any = false;
-            while i < sp.end as usize {
-                let ch = src.byte_at(i);
-                if ch == 95 {
-                    i += 1;
-                    continue;
-                }
-                let mut d: i64 = 0 - 1;
-                if ch >= 48 && ch <= 57 {
-                    d = ch as i64 - 48;
-                } else if base == 16 && (ch | 32) >= 97 && (ch | 32) <= 102 {
-                    d = (ch | 32) as i64 - 87;
-                }
-                if d < 0 || d >= base {
-                    // A width suffix ends the digits.
-                    break;
-                }
-                v = v * base + d;
-                any = true;
-                i += 1;
-            }
-            if !any {
-                return false;
-            }
-            *out = v;
-            return true;
-        }
-        if n.kind == NodeKind::NODE_BINARY {
-            let mut lv: i64 = 0;
-            let mut rv: i64 = 0;
-            if !self.eval_len_expr(m, n.as_data.binary.left, &mut lv, depth + 1) || !self.eval_len_expr(
-                m,
-                n.as_data.binary.right,
-                &mut rv,
-                depth + 1,
-            ) {
-                return false;
-            }
-            let opn = n.as_data.binary.op;
-            if opn == tt::TokenType::Plus {
-                *out = lv + rv;
-            } else if opn == tt::TokenType::Minus {
-                *out = lv - rv;
-            } else if opn == tt::TokenType::Star {
-                *out = lv * rv;
-            } else if opn == tt::TokenType::Slash && rv != 0 {
-                *out = lv / rv;
-            } else if opn == tt::TokenType::Percent && rv != 0 {
-                *out = lv % rv;
-            } else if opn == tt::TokenType::LeftShift {
-                *out = lv << rv;
-            } else if opn == tt::TokenType::RightShift {
-                *out = lv >> rv;
-            } else {
-                return false;
-            }
-            return true;
-        }
-        // An identifier naming a generic param folds through the env.
-        let ld = unsafe (*da).resolution_def(id);
-        if ld.node == NODE_NONE || unsafe (*self.p().module_ast_const(ld.module)).at_const(ld.node).kind != NodeKind::NODE_GENERIC_PARAM {
-            return false;
-        }
-        return self.fold_param(ld.module, ld.node, out);
-    }
-
-    /// Fold const-generic param `(pm, pnode)` through its bindings, innermost first; false when no
-    /// binding grounds it.
-    pub fn fold_param(self: &Self, pm: ModuleId, pnode: NodeId, out: &mut i64) bool {
+    /// Fold const-generic param `(pm, pnode)` through its bindings, innermost first, to its value's
+    /// bits and integer type; false when no binding grounds it.
+    pub fn fold_param(self: &Self, pm: ModuleId, pnode: NodeId, out: &mut i64, bt: &mut BuiltinType) bool {
         let mut k = self.subs.len();
         while k > 0 {
             k -= 1;
             let sb = *self.subs.at(k);
-            if sb.pm == pm && sb.pnode == pnode && self.fold_cval_at(sb.am, sb.at, out, (sb.lim as usize).min(k)) {
+            if sb.pm == pm && sb.pnode == pnode && self.fold_cval_at(sb.am, sb.at, out, bt, (sb.lim as usize).min(k)) {
                 return true;
             }
         }
         return false;
     }
 
-    /// The element count of array member `fid` (a field, or a tuple member's type node) under the
-    /// active substitution env; false when the length does not fold.
-    pub fn field_arr_len(self: &mut Self, m: ModuleId, fid: NodeId, len_out: &mut u64) bool {
-        let da = self.p().module_ast_const(m);
-        let tn = unsafe (*da).member_type_node(fid, true);
-        if tn == NODE_NONE || unsafe (*da).at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
-            return false;
+    /// The element count of array type `y` (pool `pm`) under the active substitutions: its length,
+    /// or its symbolic length folded through the bound const arguments; -1 when that does not fold.
+    pub fn arr_len(self: &Self, pm: ModuleId, y: &Ty) i64 {
+        if !y.arr_sym() {
+            return y.as_data.arr.len;
         }
-        let ln = unsafe (*da).at_const(tn).as_data.array_type.length;
-        if ln == NODE_NONE {
-            return false;
-        }
-        // The length expression types as its const type (usize); its RESOLUTION names the
-        // param decl, which the instance env binds (innermost first, with backtracking).
-        if unsafe (*da).resolution_def(ln).node != NODE_NONE {
-            let mut pv: i64 = 0;
-            if self.eval_len_expr(m, ln, &mut pv, 0) {
-                if pv < 0 {
-                    return false;
-                }
-                *len_out = pv as u64;
-                return true;
-            }
-        }
-        let lty = unsafe (*da).type_of(ln);
-        if lty == TYPE_NONE || unsafe (*da).type_at(lty).kind == TypeKind::TYPE_BUILTIN {
-            // An arithmetic length expression carries no const record: evaluate it under the env.
-            let mut ev: i64 = 0;
-            if self.eval_len_expr(m, ln, &mut ev, 0) && ev >= 0 {
-                *len_out = ev as u64;
-                return true;
-            }
-            return false;
-        }
-        if unsafe (*da).type_at(lty).kind == TypeKind::TYPE_GENERIC {
-            let mut rm = m;
-            let mut rt = lty;
-            if self.resolve(m, lty, &mut rm, &mut rt) {
-                let ry = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-                if ry.kind == TypeKind::TYPE_CONST && ry.as_data.value >= 0 {
-                    *len_out = ry.as_data.value as u64;
-                    return true;
-                }
-            }
-            return false;
-        }
-        if unsafe (*da).type_at(lty).kind == TypeKind::TYPE_CONST {
-            let cv = unsafe (*da).type_at(lty).as_data.value;
-            if cv >= 0 {
-                *len_out = cv as u64;
-                return true;
-            }
-            return false;
-        }
-        if unsafe (*da).type_at(lty).kind != TypeKind::TYPE_CONST_EXPR {
-            return false;
-        }
+        // A count's bits are its value; anything past u32, negative or above i64::MAX, is no length.
         let mut v: i64 = 0;
-        if self.fold_cexpr(m, lty, &mut v) && v >= 0 {
-            *len_out = v as u64;
-            return true;
+        let mut bt = BuiltinType::BT_COUNT;
+        if !self.fold_cval_at(pm, y.as_data.arr.len, &mut v, &mut bt, self.subs.len()) || v < 0 || v > 0xFFFFFFFFi64 {
+            return -1;
         }
-        return false;
+        return v;
     }
 
     // Innermost-wins WITH BACKTRACKING: merged demand chains can bind one param both to a sibling
@@ -1169,6 +1156,17 @@ extend Mangler {
         env: &mut usize,
     ) bool {
         let y = *unsafe (*self.p().module_ast_const(pm)).type_at(t);
+        if y.kind == TypeKind::TYPE_ASSOC {
+            // `T::Output`: the conformance's type, grounded (`assoc_norm`).
+            let mut g = TYPE_NONE;
+            if !self.ground_l(pm, t, pm, lim, &mut g, 0) {
+                return false;
+            }
+            *rm = pm;
+            *rt = g;
+            *env = lim;
+            return true;
+        }
         if y.kind != TypeKind::TYPE_GENERIC {
             *rm = pm;
             *rt = t;
@@ -1376,7 +1374,7 @@ extend Mangler {
         };
         let row = self.um_row(src);
         let k = h & 0xFFFFFFFFFFFFFFFEu64 | def as u64;
-        let mix = k ^ (row as u64 + 1) * 0x9E3779B97F4A7C15u64;
+        let mix = k ^ (row as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15u64);
         if self.tn_seen.len() == 0 {
             self.tn_seen.resize_default(1024);
         }
@@ -1402,7 +1400,9 @@ extend Mangler {
         } else {
             self.mark_ctx as u64;
         };
-        let mix = ((row << 1 | def as u64) + 1) * 0x9E3779B97F4A7C15u64 ^ (pm as u64 << 32 | t as u64) * 0xC2B2AE3D27D4EB4Fu64 ^ g * 0x165667B19E3779F9u64;
+        let mr = ((row << 1 | def as u64) + 1).wrapping_mul(0x9E3779B97F4A7C15u64);
+        let mt = (pm as u64 << 32 | t as u64).wrapping_mul(0xC2B2AE3D27D4EB4Fu64);
+        let mix = mr ^ mt ^ g.wrapping_mul(0x165667B19E3779F9u64);
         let slot = (mix >> 54) as usize;
         if self.tn_pre[slot] == mix {
             return true;
@@ -1734,18 +1734,47 @@ extend Mangler {
             return self.type_m(pm, y.as_data.elem, out);
         }
         if y.kind == TypeKind::TYPE_ARRAY {
-            if y.as_data.arr.len != 0 {
+            let n = self.arr_len(pm, &y);
+            if n >= 0 {
                 out.push_str("arr");
-                out.push_u64(y.as_data.arr.len);
+                out.push_u64(n as u64);
                 out.push_str("_");
-            } else {
+            } else if self.macro_on {
                 out.push_str("arr_");
+            } else {
+                return false;
             }
             return self.type_m(pm, y.as_data.arr.elem, out);
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*a).instance(y.as_data.inst);
             return self.inst_name(pm, &it, out);
+        }
+        if y.fn_sig() {
+            // `fn[m]<params>[r[<results>]]`, then each result and parameter: a signature's
+            // spelling, whatever wrote it.
+            let nr = unsafe (*a).sig_len(&y, true);
+            let np = unsafe (*a).sig_len(&y, false);
+            out.push_str(if_s((y.qualifier & FN_MOVE) != 0, "fnm", "fn"));
+            out.push_u64(np);
+            if nr != 0 {
+                out.push_str("r");
+                if nr != 1 {
+                    out.push_u64(nr);
+                }
+            }
+            for i in 0..nr + np {
+                out.push_str("_");
+                let st = if i < nr {
+                    unsafe (*a).sig_at(&y, true, i);
+                } else {
+                    unsafe (*a).sig_at(&y, false, i - nr);
+                };
+                if !self.type_m(pm, st, out) {
+                    return false;
+                }
+            }
+            return true;
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
             let cf = unsafe (*self.p().module_ast_const(y.module)).closure_fact(y.as_data.decl);
@@ -1768,7 +1797,7 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_CONST {
-            out.push_i64(y.as_data.value);
+            push_cval(out, y.as_data.value, y.cbt());
             return true;
         }
         if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
@@ -1788,12 +1817,13 @@ extend Mangler {
             }
             return self.dyn_stem(pm, &y, out);
         }
-        if y.kind == TypeKind::TYPE_GENERIC {
+        if y.kind == TypeKind::TYPE_GENERIC || y.kind == TypeKind::TYPE_ASSOC {
             // Const-bound params fold HERE: each frame's payload grounds strictly below its own
             // env boundary (resolve-then-fold would re-apply the frame on its own payload).
             let mut cv: i64 = 0;
-            if self.fold_generic_d(&y, &mut cv, 0, self.subs.len()) {
-                out.push_i64(cv);
+            let mut bt = BuiltinType::BT_COUNT;
+            if y.kind == TypeKind::TYPE_GENERIC && self.fold_generic_d(&y, &mut cv, &mut bt, 0, self.subs.len()) {
+                push_cval(out, cv, bt);
                 return true;
             }
             let mut rm: ModuleId = 0;
@@ -1805,7 +1835,7 @@ extend Mangler {
                 self.unhide(h0);
                 return ok;
             }
-            if self.macro_on {
+            if self.macro_on && y.kind == TypeKind::TYPE_GENERIC {
                 out.push_byte(1);
                 out.push_str("_SCM_");
                 self.generic_param_name(&y, out);
@@ -1816,10 +1846,11 @@ extend Mangler {
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
             let mut v: i64 = 0;
-            if !self.fold_cexpr(pm, t, &mut v) {
+            let mut bt = BuiltinType::BT_COUNT;
+            if !self.fold_cexpr(pm, t, &mut v, &mut bt) {
                 return false;
             }
-            out.push_i64(v);
+            push_cval(out, v, bt);
             return true;
         }
         out.push_str("v");
@@ -1851,29 +1882,13 @@ extend Mangler {
     fn dyn_stem_i(self: &mut Self, pm: ModuleId, dy: &Ty, out: &mut String) bool {
         let a = self.p().module_ast_const(pm);
         let it = *unsafe (*a).instance(dy.as_data.inst);
-        let da = self.p().module_ast_const(it.module);
-        let fn2 = unsafe (*da).at_const(it.decl);
-        if fn2.kind != NodeKind::NODE_FUNCTION_TYPE {
-            self.qualified(it.module, fn2.as_data.interface_def.name, out);
-        } else {
-            let ftp = fn2.as_data.function_type;
-            out.push_str("dynfn");
-            for i in 0..ftp.params.len {
-                let pid = unsafe (*da).list(ftp.params)[i as usize];
-                out.push_str("__");
-                if !self.type_m(it.module, unsafe (*da).type_of(pid), out) {
-                    return false;
-                }
-            }
-            if ftp.returns.len == 1 {
-                let r0 = unsafe (*da).list(ftp.returns)[0];
-                let tn = unsafe (*da).slot_type_node(r0);
-                out.push_str("__r_");
-                if !self.type_m(it.module, unsafe (*da).type_of(tn), out) {
-                    return false;
-                }
-            }
+        if it.decl == NODE_NONE {
+            // A `dyn fn`: its signature's spelling.
+            out.push_str("dyn");
+            return self.type_m(pm, it.args[0], out);
         }
+        let da = self.p().module_ast_const(it.module);
+        self.qualified(it.module, unsafe (*da).at_const(it.decl).as_data.interface_def.name, out);
         return self.args_m(pm, &it, it.n, out);
     }
 
@@ -1890,22 +1905,62 @@ extend Mangler {
     // A non-capturing function value's C declarator: `<ret> (*<decl>)(<params>)`. Reads the
     // declaring pool directly; pool-parametric spelling needs no reintern. A void return spells straight
     // into `out`; any other return wraps the declarator, which is built in a pooled buffer.
-    fn fn_ptr_ctype(self: &mut Self, y: &Ty, decl: str, out: &mut String) bool {
-        let fa = self.p().module_ast_const(y.module);
+    fn fn_ptr_ctype(self: &mut Self, pm: ModuleId, y: &Ty, decl: str, out: &mut String) bool {
+        // A function-pointer type reads its signature record in its own pool `pm`; a function or
+        // closure item its declaration (or recorded facts) in its declaring module.
+        let sm = if y.fn_sig() {
+            pm;
+        } else {
+            y.module;
+        };
+        let fa = self.p().module_ast_const(sm);
         let cf = unsafe (*fa).closure_fact(y.as_data.decl);
         let nr = sig_len(fa, y, cf, true);
         if nr > 1 {
-            // Multi-return function pointers are unsupported everywhere.
-            return false;
+            // Several results return one result pack (`ret_pack`), as the functions do; the
+            // declarator needs only its typedef.
+            let mut tys = Vector::<TypeId>::new();
+            for i in 0..nr {
+                tys.push(sig_ty(fa, y, cf, true, i));
+            }
+            let st = out.len();
+            let pd = replace(&mut self.ptr_depth, 1);
+            let mut ok = self.ret_pack(sm, &tys, out);
+            self.ptr_depth = pd;
+            if ok {
+                out.push_str(" ");
+                ok = self.fn_ptr_decl(sm, fa, y, cf, decl, out);
+            }
+            if !ok {
+                out.truncate(st);
+            }
+            return ok;
         }
         let mut rty = TYPE_NONE;
         if nr == 1 {
             rty = sig_ty(fa, y, cf, true, 0);
         }
-        if rty == TYPE_NONE || self.is_zst(y.module, rty) {
+        if nr == 1 && self.arr_result(sm, rty) {
+            // A fixed array returns in its carrier (`ret_pack`), as the functions return it.
+            let mut tys = Vector::<TypeId>::new();
+            tys.push(rty);
+            let st = out.len();
+            let pd = replace(&mut self.ptr_depth, 1);
+            let mut ok = self.ret_pack(sm, &tys, out);
+            self.ptr_depth = pd;
+            if ok {
+                out.push_str(" ");
+                ok = self.fn_ptr_decl(sm, fa, y, cf, decl, out);
+            }
+            if !ok {
+                out.truncate(st);
+            }
+            return ok;
+        }
+        if rty == TYPE_NONE || self.is_zst(sm, rty) {
             let st = out.len();
             out.push_str("void ");
-            if !self.fn_ptr_decl(fa, y, cf, decl, out) {
+            if !self.fn_ptr_decl(sm, fa, y, cf, decl, out) {
                 out.truncate(st);
                 return false;
             }
@@ -1915,7 +1970,7 @@ extend Mangler {
             Some(b) => b,
             None => String::new(),
         };
-        let ok = self.fn_ptr_decl(fa, y, cf, decl, &mut inner) && self.ctype(y.module, rty, inner.as_str(), out);
+        let ok = self.fn_ptr_decl(sm, fa, y, cf, decl, &mut inner) && self.ctype(sm, rty, inner.as_str(), out);
         inner.truncate(0);
         self.fp_bufs.push(inner);
         return ok;
@@ -1923,20 +1978,28 @@ extend Mangler {
 
     // `(*<decl>)(<params>)` of function value type `y` into `dst`. Zero-sized by-value params take no
     // slot (must match every lowered sig).
-    fn fn_ptr_decl(self: &mut Self, fa: *const Ast, y: &Ty, cf: *const ClosureFact, decl: str, dst: &mut String) bool {
+    fn fn_ptr_decl(
+        self: &mut Self,
+        sm: ModuleId,
+        fa: *const Ast,
+        y: &Ty,
+        cf: *const ClosureFact,
+        decl: str,
+        dst: &mut String,
+    ) bool {
         dst.push_str("(*");
         dst.push_str(decl);
         dst.push_str(")(");
         let st = dst.len();
         for i in 0..sig_len(fa, y, cf, false) {
             let pty = sig_ty(fa, y, cf, false, i);
-            if self.is_zst(y.module, pty) {
+            if self.is_zst(sm, pty) {
                 continue;
             }
             if dst.len() != st {
                 dst.push_str(", ");
             }
-            if !self.ctype(y.module, pty, "", dst) {
+            if !self.ctype(sm, pty, "", dst) {
                 return false;
             }
         }
@@ -1984,11 +2047,11 @@ extend Mangler {
     fn overload_count(self: &mut Self, cur: ModuleId, tmod: ModuleId, tdecl: NodeId, nmod: ModuleId, name: tok::Span) i32 {
         let ntxt = self.p().modules.at(nmod as usize).source.as_str().slice(name.start as usize, name.end as usize);
         let mut key = 0xcbf29ce484222325u64;
-        key = (key ^ cur as u64) * 1099511628211u64;
-        key = (key ^ tmod as u64) * 1099511628211u64;
-        key = (key ^ tdecl as u64) * 1099511628211u64;
+        key = (key ^ cur as u64).wrapping_mul(1099511628211u64);
+        key = (key ^ tmod as u64).wrapping_mul(1099511628211u64);
+        key = (key ^ tdecl as u64).wrapping_mul(1099511628211u64);
         for i in 0..ntxt.len() {
-            key = (key ^ ntxt.byte_at(i) as u64) * 1099511628211u64;
+            key = (key ^ ntxt.byte_at(i) as u64).wrapping_mul(1099511628211u64);
         }
         let hit = switch self.ovl_memo.get(&key) {
             Some(v) => (*v) as i64,
@@ -2114,7 +2177,7 @@ extend Mangler {
             let bb = self.p().builtin_of_decl(target.module, target.node);
             if bb >= 0 {
                 out.push_str(bt_name(bb as BuiltinType));
-            } else {
+            } else if !self.spec_inst_name(fm, fnode, target, out) {
                 let dn = unsafe (*self.p().module_ast_const(target.module)).at_const(target.node);
                 let mut nm = dn.as_data.aggregate.name;
                 if dn.kind == NodeKind::NODE_TYPE_ALIAS {
@@ -2152,6 +2215,28 @@ extend Mangler {
         return true;
     }
 
+    /// Spell into `out` the instance a non-generic extend of method `fnode` (module `fm`) writes as its
+    /// target (`extend P<u8>`), so two such extends of one declaration name distinct functions, as the
+    /// methods of generic extends spell their receiver's instance. False when the extend is generic or
+    /// its target `target` names no instance.
+    fn spec_inst_name(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
+        let ext = (self.owner_of(fm, fnode) >> 32) as NodeId;
+        if ext == NODE_NONE {
+            return false;
+        }
+        let a = self.p().module_ast_const(fm);
+        let ed = unsafe (*a).at_const(ext).as_data.extend_def;
+        let pat = unsafe (*a).type_of(ed.target_type);
+        if ed.generics.len != 0 || pat == TYPE_NONE || unsafe (*a).type_at(pat).kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *unsafe (*a).instance(unsafe (*a).type_at(pat).as_data.inst);
+        if it.module != target.module || it.decl != target.node {
+            return false;
+        }
+        return self.inst_name(fm, &it, out);
+    }
+
     /// The resolved extend target of method `fnode` in module `m`, or `node == NODE_NONE` when the
     /// function is free-standing. Plan-time item scan.
     pub fn method_target(self: &mut Self, m: ModuleId, fnode: NodeId) DefId {
@@ -2166,13 +2251,9 @@ extend Mangler {
         return unsafe (*a).resolution_def(unsafe (*a).at_const(ext).as_data.extend_def.target_type);
     }
 
-    /// The generics list of the extend owning `fnode` (empty when free-standing).
-    pub fn extend_generics(self: &mut Self, m: ModuleId, fnode: NodeId) NodeList {
-        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
-        if ext == NODE_NONE {
-            return NodeList { start: 0, len: 0 };
-        }
-        return unsafe (*self.p().module_ast_const(m)).at_const(ext).as_data.extend_def.generics;
+    /// The extend owning `fnode` (NODE_NONE when free-standing).
+    pub fn extend_of(self: &mut Self, m: ModuleId, fnode: NodeId) NodeId {
+        return (self.owner_of(m, fnode) >> 32) as NodeId;
     }
 
     /// The interface declaring member `fnode` (its default body emits per conforming type), or
@@ -2191,10 +2272,9 @@ extend Mangler {
         return unsafe (*self.p().module_ast_const(m)).at_const(ext).as_data.extend_def.generics.len != 0;
     }
 
-    /// The C symbol of const/static item `cnode` (module `m`) read from a TU of module `em`:
-    /// top-level items spell their qualified name; associated consts are per-TU statics prefixed
-    /// with the EMITTING module (the established reader/emitter agreement).
-    pub fn const_sym(self: &mut Self, em: ModuleId, m: ModuleId, cnode: NodeId, out: &mut String) bool {
+    /// The C symbol of const/static item `cnode` (module `m`): top-level items spell their qualified
+    /// name, associated consts `<m prefix><Target>__<NAME>`; module `m` defines both.
+    pub fn const_sym(self: &mut Self, m: ModuleId, cnode: NodeId, out: &mut String) bool {
         if self.sym_override(m, cnode, out) {
             return true;
         }
@@ -2211,13 +2291,22 @@ extend Mangler {
         let tgt = self.method_target(m, cnode);
         if tgt.node == NODE_NONE {
             self.qualified(m, unsafe (*a).at_const(cnode).as_data.const_def.name, out);
+            if unsafe (*a).at_const(cnode).as_data.const_def.is_local {
+                // Another body may declare a constant of the same name.
+                out.push_str("__l");
+                out.push_u64(cnode);
+            }
             return true;
         }
-        self.modpfx(em, out);
+        // The declaring module prefixes the symbol and owns its definition (the spelling records
+        // the edge to it).
+        self.modpfx(m, out);
         let bb = self.p().builtin_of_decl(tgt.module, tgt.node);
         if bb >= 0 {
             out.push_str(bt_name(bb as BuiltinType));
-        } else {
+        } else if !self.spec_inst_name(m, cnode, tgt, out) {
+            // A specialized extend (`extend P<u8>`) names its instance, as its methods do: disjoint
+            // extends may each define the constant.
             let dn = unsafe (*self.p().module_ast_const(tgt.module)).at_const(tgt.node);
             let mut nm = dn.as_data.aggregate.name;
             if dn.kind == NodeKind::NODE_TYPE_ALIAS {
@@ -2254,6 +2343,53 @@ extend Mangler {
         return self.fn_sym(md.module, md.node, tg, out);
     }
 
+    /// `method_by_name` restricted to the methods extend `ext` of module `em` itself defines: the
+    /// method a chosen conformance provides when several conformances define `mname`.
+    pub fn method_in_ext(
+        self: &mut Self,
+        rm: ModuleId,
+        rt: TypeId,
+        em: ModuleId,
+        ext: NodeId,
+        mname: str,
+        out: &mut String,
+    ) bool {
+        let ea = self.p().module_ast_const(em);
+        let esrc = self.p().modules.at(em as usize).source.as_str();
+        let ms = unsafe (*ea).at_const(ext).as_data.extend_def.items;
+        let mut md = DefId { module: 0, node: NODE_NONE };
+        for j in 0..ms.len {
+            let mid = unsafe (*ea).list(ms)[j as usize];
+            let mn = unsafe (*ea).at_const(mid);
+            if mn.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let s2 = unsafe (*ea).at_const(mn.as_data.function.name).as_data.name.text;
+            if esrc.slice(s2.start as usize, s2.end as usize) == mname {
+                md = DefId { module: em, node: mid };
+                break;
+            }
+        }
+        if md.node == NODE_NONE {
+            return false;
+        }
+        self.last_method_def = md;
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        // A generic extend's method emits per receiver instance; a concrete extend's has its own symbol.
+        if y.kind == TypeKind::TYPE_INSTANCE && unsafe (*ea).at_const(ext).as_data.extend_def.generics.len != 0 {
+            let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+            if !self.inst_name(rm, &it, out) {
+                return false;
+            }
+            out.push_str("__");
+            out.push_str(mname);
+            self.mark_used(md.module);
+            return true;
+        }
+        let tg = unsafe (*ea).resolution_def(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        return self.fn_sym(md.module, md.node, tg, out);
+    }
+
     /// The method named `mname` extending resolved aggregate `(rm, rt)` (node NONE when none), and
     /// in `tg` the declaration its extend targets. Spells nothing, so a query that only asks whether
     /// the method exists records no use edge and no aggregate request.
@@ -2263,10 +2399,11 @@ extend Mangler {
         let y = *unsafe (*a).type_at(rt);
         let mut dm = y.module;
         let mut dd = NODE_NONE;
+        let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             dd = y.as_data.decl;
         } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *unsafe (*a).instance(y.as_data.inst);
+            it = *unsafe (*a).instance(y.as_data.inst);
             dm = it.module;
             dd = it.decl;
         }
@@ -2279,7 +2416,7 @@ extend Mangler {
             dm as u64 << 32 | dd as u64;
         };
         for i in 0..mname.len() {
-            miss_key = (miss_key ^ mname.byte_at(i) as u64) * 1099511628211u64;
+            miss_key = (miss_key ^ mname.byte_at(i) as u64).wrapping_mul(1099511628211u64);
         }
         miss_key = skey_mix(0, miss_key);
         if self.miss_memo.contains(&miss_key) {
@@ -2325,7 +2462,9 @@ extend Mangler {
             return none;
         }
         // Extends may live in ANY module (a downstream module extending a foreign type): the
-        // decl's own module first (the overwhelmingly common case), then the rest.
+        // decl's own module first (the overwhelmingly common case), then the rest. An extend whose
+        // target this instance does not match is skipped, and then a miss is not memoized.
+        let mut skipped = false;
         let mut xm: i64 = 0 - 1;
         while xm < self.p().modules.len() as i64 {
             let em2 = if xm < 0 {
@@ -2362,15 +2501,118 @@ extend Mangler {
                         continue;
                     }
                     let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
-                    if dsrc.slice(s2.start as usize, s2.end as usize) == mname {
-                        *tg = DefId { module: dm, node: dd };
-                        return DefId { module: em2, node: mid };
+                    if dsrc.slice(s2.start as usize, s2.end as usize) != mname {
+                        continue;
                     }
+                    if it.decl != NODE_NONE && !self.ext_applies_inst(em2, iid, rm, &it) {
+                        skipped = true;
+                        continue;
+                    }
+                    *tg = DefId { module: dm, node: dd };
+                    return DefId { module: em2, node: mid };
                 }
             }
         }
-        self.miss_memo.insert(miss_key);
+        if !skipped {
+            self.miss_memo.insert(miss_key);
+        }
         return none;
+    }
+
+    /// The extend conforming resolved aggregate `(rm, rt)` to interface `iface` that applies to it,
+    /// with its module in `em`; NODE_NONE when none does.
+    pub fn conform_ext(self: &mut Self, rm: ModuleId, rt: TypeId, iface: DefId, em: &mut ModuleId) NodeId {
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            it.decl = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+        } else {
+            return NODE_NONE;
+        }
+        let key = skey_mix(
+            skey_mix(0, it.module as u64 << 32 | it.decl as u64),
+            iface.module as u64 << 32 | iface.node as u64,
+        );
+        switch self.conf_memo.get(&key) {
+            Some(v) => {
+                *em = (*v >> 32) as ModuleId;
+                return (*v) as NodeId;
+            },
+            None => {},
+        };
+        for xm in 0..self.p().modules.len() {
+            if !self.p().modules.at(xm).has_ast {
+                continue;
+            }
+            let da = self.p().module_ast_const(xm as ModuleId);
+            let items = unsafe (*da).at_const((*da).root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe (*da).list(items)[i as usize];
+                let ed = unsafe (*da).at_const(iid).as_data.extend_def;
+                if unsafe (*da).at_const(iid).kind != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE {
+                    continue;
+                }
+                let ir = unsafe (*da).resolution_def(ed.interface_type);
+                let tg = unsafe (*da).resolution_def(ed.target_type);
+                if ir.module != iface.module || ir.node != iface.node || tg.module != it.module || tg.node != it.decl {
+                    continue;
+                }
+                let pat = unsafe (*da).type_of(ed.target_type);
+                if ext_is_identity(unsafe &*da, pat, unsafe &*da, xm as ModuleId, iid) {
+                    self.conf_memo.insert(key, xm as u64 << 32 | iid as u64);
+                } else if it.n == 0 || !self.ext_applies_inst(xm as ModuleId, iid, rm, &it) {
+                    continue;
+                }
+                *em = xm as ModuleId;
+                return iid;
+            }
+        }
+        return NODE_NONE;
+    }
+
+    /// Whether extend `ext` of module `em` applies to instance `it` (arguments in pool `rm`, resolved
+    /// through the substitution stack): every argument its target constrains matches (`xarg_of`).
+    pub fn ext_applies_inst(self: &mut Self, em: ModuleId, ext: NodeId, rm: ModuleId, it: &TyInstance) bool {
+        let ea = self.p().module_ast_const(em);
+        let pat = unsafe (*ea).type_of(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
+            return true;
+        }
+        let pi = *unsafe (*ea).instance(unsafe (*ea).type_at(pat).as_data.inst);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let np = ext_arity(unsafe &*ea, ext, pi.n);
+        if np > it.n {
+            return false;
+        }
+        for j in 0..np {
+            let pj = unsafe pi.args[j as usize];
+            let x = xarg_of(unsafe &*ea, pj, unsafe &*ea, em, gens);
+            if x.kind == XA_FIXED {
+                let mut g = TYPE_NONE;
+                if !self.ground(rm, unsafe it.args[j as usize], rm, &mut g) || g != pj {
+                    return false;
+                }
+            } else if x.kind == XA_FORM {
+                let mut v: i64 = 0;
+                let mut vbt = BuiltinType::BT_COUNT;
+                let mut q = i128::zero();
+                let bt = self.p().const_param_bt(em, unsafe (*ea).list(gens)[x.par as usize]);
+                if !self.fold_cval_at(rm, unsafe it.args[j as usize], &mut v, &mut vbt, self.subs.len()) || !xarg_solve(
+                    &x,
+                    cval_exact(v, vbt),
+                    bt,
+                    lay::target_for(self.p().arch).ptr == 4,
+                    &mut q,
+                ) {
+                    return false;
+                }
+            } else if x.kind != XA_PARAM {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// The `free` method the first extend of declaration `(dm, dd)` in its own module that has one
@@ -2569,14 +2811,20 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_ARRAY {
+            let n = self.arr_len(pm, &y);
+            if n < 0 {
+                return false;
+            }
             let mut inner = String::new();
-            if y.as_data.arr.len != 0 {
+            if n != 0 {
                 inner.push_str(decl);
                 inner.push_str("[");
-                inner.push_u64(y.as_data.arr.len);
+                inner.push_u64(n as u64);
                 inner.push_str("]");
-                return self.ctype(pm, y.as_data.elem, inner.as_str(), out);
+                return self.arr_elem_ctype(pm, y.as_data.elem, inner.as_str(), out);
             }
+            // A zero-length array is zero-sized: no value, member or parameter of it is declared.
+            // A macro template, which has no layout to elide by, spells it as a pointer.
             inner.push_str("*");
             inner.push_str(decl);
             self.ptr_depth += 1;
@@ -2629,11 +2877,19 @@ extend Mangler {
             }
             // A function pointer's result and parameters need no definition to declare it.
             self.ptr_depth += 1;
-            let ok = self.fn_ptr_ctype(&y, decl, out);
+            let ok = self.fn_ptr_ctype(pm, &y, decl, out);
             self.ptr_depth -= 1;
             return ok;
         }
         return self.ctype_rest(pm, t, &y, decl, out);
+    }
+
+    // The element `(pm, t)` of an array declarator `decl`: C needs it complete even below a pointer.
+    fn arr_elem_ctype(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
+        let pd = replace(&mut self.ptr_depth, 0);
+        let ok = self.ctype(pm, t, decl, out);
+        self.ptr_depth = pd;
+        return ok;
     }
 
     // The pointer or reference `y` (of pool `pm`) around `decl`: the pointee spelling, east-const
@@ -2651,9 +2907,9 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_REFERENCE {
             cp = y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
         }
-        if el.kind == TypeKind::TYPE_ARRAY && self.is_zst(elm, el.as_data.arr.elem) {
-            // C forbids an array declarator over an incomplete element: a pointer to a
-            // zero-sized-element array spells as a bare data pointer (never dereferenced).
+        if el.kind == TypeKind::TYPE_ARRAY && self.is_zst(elm, elt) {
+            // A zero-sized array (zero length, or zero-sized elements) has no C type: a pointer to
+            // one spells as a bare data pointer (never dereferenced; arithmetic on it is folded).
             if cp {
                 out.push_str("const ");
             }
@@ -2661,23 +2917,36 @@ extend Mangler {
             out.push_str(decl);
             return true;
         }
-        if el.kind == TypeKind::TYPE_ARRAY && el.as_data.arr.len != 0 {
-            // Pointer-to-fixed-array spirals: `(*decl)[N]`, const prefixing the element type.
+        if el.kind == TypeKind::TYPE_ARRAY && self.ptr_wraps(elm, elt) {
+            if cp {
+                out.push_str("const ");
+            }
+            if !self.wrap_name(elm, elt, out) {
+                return false;
+            }
+            out.push_str(" *");
+            out.push_str(decl);
+            return true;
+        }
+        if el.kind == TypeKind::TYPE_ARRAY && self.arr_len(elm, &el) > 0 {
+            // Pointer-to-fixed-array spirals: `(*decl)[N]`. The element takes no qualifier: C11
+            // converts no pointer to an array into one to an array of differently qualified
+            // elements, so `&a` could not initialize a `*const [T; N]`.
             let mut inner = String::new();
             inner.push_str("(*");
             inner.push_str(decl);
             inner.push_str(")[");
-            inner.push_u64(el.as_data.arr.len);
+            inner.push_u64(self.arr_len(elm, &el) as u64);
             inner.push_str("]");
-            let st = out.len();
-            let ok = self.ctype(elm, el.as_data.arr.elem, inner.as_str(), out);
-            if cp && !out.as_str().slice(st, out.len()).starts_with("const ") {
-                out.insert_str(st, "const ");
-            }
-            return ok;
+            return self.arr_elem_ctype(elm, el.as_data.arr.elem, inner.as_str(), out);
         }
         let mut inner = String::new();
-        let el_ptr = el.kind == TypeKind::TYPE_POINTER || el.kind == TypeKind::TYPE_REFERENCE;
+        let mut el_ptr = el.kind == TypeKind::TYPE_POINTER || el.kind == TypeKind::TYPE_REFERENCE;
+        if el.kind == TypeKind::TYPE_FUNCTION {
+            // A function value spells as a function pointer unless it is a closure environment.
+            let cf = unsafe (*self.p().module_ast_const(el.module)).closure_fact(el.as_data.decl);
+            el_ptr = cf == null || unsafe (&*cf).ncaps == 0;
+        }
         if cp && el_ptr {
             // The element is itself a pointer: `const` must qualify the POINTER (east:
             // `char *const *`), not its pointee (an illegal second-level qualifier).
@@ -2696,6 +2965,323 @@ extend Mangler {
         }
         let ok = self.ctype(elm, elt, inner.as_str(), out);
         return ok;
+    }
+
+    /// Whether a pointer to array `(pm, t)` spells as a pointer to its wrapper struct
+    /// (`wrap_name`): the array has a positive length at every level and its innermost element is
+    /// a struct, union, enum with payloads or generic instance the emitter defines. C needs the
+    /// element complete to declare an array of it, even below a pointer, and inside the definition
+    /// of a self or mutually recursive aggregate it is not; a pointer to an incomplete struct is
+    /// legal C. The wrapper has the array's size, alignment and layout, so pointer arithmetic
+    /// and the ABI are the array pointer's, and every access reads the array member `e`.
+    pub fn ptr_wraps(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        let mut rm = pm;
+        let mut rt = t;
+        let mut env: usize = 0;
+        if !self.resolve_env(pm, t, &mut rm, &mut rt, &mut env) {
+            return false;
+        }
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind != TypeKind::TYPE_ARRAY || self.arr_len(rm, &y) <= 0 {
+            return false;
+        }
+        let h0 = self.hide_from(env, rm, rt);
+        let r = !self.is_zst(rm, y.as_data.arr.elem) && self.agg_elem(rm, y.as_data.arr.elem);
+        self.unhide(h0);
+        return r;
+    }
+
+    // Spell the wrapper struct name of pointee array `(pm, t)` (`ptr_wraps`) into `out`:
+    // `<element>__a<N>` with one `_<M>` per inner dimension, and record the use (the typedef
+    // only) and, once per mangler, the definition request.
+    fn wrap_name(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
+        // The array spelled around a marker declarator gives the element name and the dimensions:
+        // `Node @[3][2]`. Neither spelling is text the output uses: no edge, no type need.
+        let ne = replace(&mut self.no_edges, true);
+        let mut arr = String::new();
+        let ok = self.ctype(pm, t, "@", &mut arr);
+        let mut body = String::new();
+        let mut ok2 = ok;
+        let mut at: usize = 0;
+        if ok {
+            let a = arr.as_str();
+            while a.byte_at(at) != b'@' {
+                at += 1;
+            }
+        }
+        let st = out.len();
+        if ok {
+            let a = arr.as_str();
+            let mut e = at;
+            while e > 0 && a.byte_at(e - 1) == b' ' {
+                e -= 1;
+            }
+            out.push_str(a.slice(0, e));
+            out.push_str("__a");
+            for k in at + 2..a.len() {
+                let c = a.byte_at(k);
+                if c == b']' {
+                    continue;
+                }
+                out.push_byte(
+                    if c == b'[' {
+                        b'_';
+                    } else {
+                        c;
+                    },
+                );
+            }
+        }
+        let h = out.as_str().slice(st, out.len()).hash();
+        if ok && !self.wrap_seen.contains(&h) {
+            self.wrap_seen.insert(h);
+            let nm = out.as_str().slice(st, out.len());
+            body.push_str("struct ");
+            body.push_str(nm);
+            body.push_str(" {\n  ");
+            ok2 = self.ctype(pm, t, "e", &mut body);
+            body.push_str(";\n};\n");
+            let lo = self.layout_sub(pm, t);
+            if lo.ok {
+                body.push_str("_Static_assert(sizeof(");
+                body.push_str(nm);
+                body.push_str(") == ");
+                body.push_u64(lo.size);
+                body.push_str(" && _Alignof(");
+                body.push_str(nm);
+                body.push_str(") == ");
+                body.push_u64(lo.align);
+                body.push_str(", \"super-c layout model mismatch: ");
+                body.push_str(nm);
+                body.push_str("\");\n");
+            }
+            let el = arr.as_str().slice(0, at);
+            self.wrap_reqs.push(WrapReq { h: h, elem: String::from_str(el.trim()), body: body });
+        }
+        // Journaled once per module, gate hit or not: the first claimant may vanish.
+        if ok2 && self.rec_on && self.rec_dup_once(h ^ 21) {
+            for k in 0..self.wrap_reqs.len() {
+                if self.wrap_reqs[k].h == h {
+                    let mut ev = RecEv::blank(RK_WRAP);
+                    ev.h = h;
+                    ev.s1 = self.wrap_reqs[k].elem.clone();
+                    ev.s2 = self.wrap_reqs[k].body.clone();
+                    self.rec.push(ev);
+                    break;
+                }
+            }
+        }
+        self.no_edges = ne;
+        if ok2 && self.tn_on && !self.no_edges {
+            self.need_name(h, false);
+        }
+        return ok2;
+    }
+
+    /// The C type results `tys` (pool `pm`) return in when C cannot return them as they are: the
+    /// result pack `__sc_ret<n>` with `__<type>` per result for several results, `__sc_reta__<type>`
+    /// for one fixed array (C returns no array). One C struct per result list, so a function and
+    /// every function pointer with those results share it. Members `_<i>` hold the stored results (a
+    /// zero-sized one has none), `_a` the array; with none stored the spelling is `void`. The
+    /// definition is requested once per mangler (`pack_reqs`) and the spelling records the need of
+    /// the current context (by value at pointer depth 0). False when a result has no spelling.
+    pub fn ret_pack(self: &mut Self, pm: ModuleId, tys: &Vector<TypeId>, out: &mut String) bool {
+        let arr = tys.len() == 1;
+        let mut stored: u32 = 0;
+        for i in 0..tys.len() {
+            if !self.is_zst(pm, tys[i]) {
+                stored += 1;
+            }
+        }
+        if stored == 0 {
+            out.push_str("void");
+            return true;
+        }
+        let st = out.len();
+        let ne = replace(&mut self.no_edges, true);
+        if arr {
+            out.push_str("__sc_reta");
+        } else {
+            out.push_str("__sc_ret");
+            out.push_u64(tys.len() as u64);
+        }
+        let mut ok = true;
+        for i in 0..tys.len() {
+            out.push_str("__");
+            if !self.type_m(pm, tys[i], out) {
+                ok = false;
+                break;
+            }
+        }
+        let h = out.as_str().slice(st, out.len()).hash();
+        if ok && !self.pack_seen.contains(&h) {
+            let nm = String::from_str(out.as_str().slice(st, out.len()));
+            let mut body = String::from_str("typedef struct ");
+            body.push_string(&nm);
+            body.push_str(" ");
+            body.push_string(&nm);
+            body.push_str(";\nstruct ");
+            body.push_string(&nm);
+            body.push_str(" {\n");
+            let pd = replace(&mut self.ptr_depth, 0);
+            for i in 0..tys.len() {
+                if !ok {
+                    break;
+                }
+                if self.is_zst(pm, tys[i]) {
+                    continue;
+                }
+                let mut mn = String::from_str("_");
+                if arr {
+                    mn.push_str("a");
+                } else {
+                    mn.push_u64(i as u64);
+                }
+                body.push_str("  ");
+                ok = self.ctype(pm, tys[i], mn.as_str(), &mut body);
+                body.push_str(";\n");
+            }
+            self.ptr_depth = pd;
+            body.push_str("};\n");
+            if ok {
+                self.pack_seen.insert(h);
+                self.pack_reqs.push(WrapReq { h: h, elem: nm, body: body });
+            }
+        }
+        self.no_edges = ne;
+        if !ok {
+            out.truncate(st);
+            return false;
+        }
+        // Journaled once per module, gate hit or not: the first claimant may vanish.
+        if self.rec_on && self.rec_dup_once(h ^ 22) {
+            for k in 0..self.pack_reqs.len() {
+                if self.pack_reqs[k].h == h {
+                    let mut ev = RecEv::blank(RK_PACK);
+                    ev.h = h;
+                    ev.s1 = self.pack_reqs[k].elem.clone();
+                    ev.s2 = self.pack_reqs[k].body.clone();
+                    self.rec.push(ev);
+                    break;
+                }
+            }
+        }
+        if self.tn_on && !self.no_edges {
+            self.need_name(h, self.ptr_depth == 0);
+        }
+        return true;
+    }
+
+    /// Whether result `(pm, t)` is a fixed array of positive length: C returns it in its carrier
+    /// (`ret_pack`).
+    pub fn arr_result(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        let mut rm = pm;
+        let mut rt = t;
+        if t == TYPE_NONE || !self.resolve(pm, t, &mut rm, &mut rt) {
+            return false;
+        }
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        return y.kind == TypeKind::TYPE_ARRAY && self.arr_len(rm, &y) > 0;
+    }
+
+    /// `ret_pack` of the results of function value type `(pm, t)` (a function pointer, function
+    /// item or closure type, or a `dyn fn`, behind references), spelled by value. False when the
+    /// type is none of those or C returns its results as they are.
+    pub fn fn_ret_pack(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
+        let mut rm = pm;
+        let mut rt = t;
+        for _ in 0..8 {
+            if !self.resolve(rm, rt, &mut rm, &mut rt) {
+                return false;
+            }
+            let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+            if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
+                rt = y.as_data.elem;
+                continue;
+            }
+            if y.kind == TypeKind::TYPE_DYN {
+                let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+                if it.decl != NODE_NONE {
+                    return false;
+                }
+                rt = it.args[0];
+                continue;
+            }
+            if y.kind != TypeKind::TYPE_FUNCTION {
+                return false;
+            }
+            let sm = if y.fn_sig() {
+                rm;
+            } else {
+                y.module;
+            };
+            let fa = self.p().module_ast_const(sm);
+            let cf = unsafe (*fa).closure_fact(y.as_data.decl);
+            let nr = sig_len(fa, &y, cf, true);
+            if nr == 0 || nr == 1 && !self.arr_result(sm, sig_ty(fa, &y, cf, true, 0)) {
+                return false;
+            }
+            let mut tys = Vector::<TypeId>::new();
+            for i in 0..nr {
+                tys.push(sig_ty(fa, &y, cf, true, i));
+            }
+            let pd = replace(&mut self.ptr_depth, 0);
+            let ok = self.ret_pack(sm, &tys, out);
+            self.ptr_depth = pd;
+            return ok;
+        }
+        return false;
+    }
+
+    /// Record result pack request `rq` unless one of its name is recorded (a shard merge, a
+    /// journal replay).
+    pub fn pack_take(self: &mut Self, rq: WrapReq) {
+        if !self.pack_seen.contains(&rq.h) {
+            self.pack_seen.insert(rq.h);
+            self.pack_reqs.push(rq);
+        }
+    }
+
+    /// Record wrapper request `rq` unless one of its name is recorded (a shard merge, a journal
+    /// replay).
+    pub fn wrap_take(self: &mut Self, rq: WrapReq) {
+        if !self.wrap_seen.contains(&rq.h) {
+            self.wrap_seen.insert(rq.h);
+            self.wrap_reqs.push(rq);
+        }
+    }
+
+    // Whether array element `(pm, t)`, through nested arrays of positive length, is a struct,
+    // union, enum with payloads or generic instance the emitter defines.
+    fn agg_elem(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        let mut rm = pm;
+        let mut rt = t;
+        let mut env: usize = 0;
+        if !self.resolve_env(pm, t, &mut rm, &mut rt, &mut env) {
+            return false;
+        }
+        let a = self.p().module_ast_const(rm);
+        let y = *unsafe (*a).type_at(rt);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            if self.arr_len(rm, &y) <= 0 {
+                return false;
+            }
+            let h0 = self.hide_from(env, rm, rt);
+            let r = self.agg_elem(rm, y.as_data.arr.elem);
+            self.unhide(h0);
+            return r;
+        }
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM {
+            return false;
+        }
+        let da = self.p().module_ast_const(y.module);
+        if unsafe (*da).at_const(y.as_data.decl).as_data.aggregate.is_extern {
+            return false;
+        }
+        return y.kind == TypeKind::TYPE_STRUCT || unsafe (*da).enum_has_payload(y.as_data.decl);
     }
 
     // The remaining kinds of `(pm, t)` (`y`): dyn fat values, generic parameters, `void`.
@@ -2717,7 +3303,7 @@ extend Mangler {
             }
             return ok;
         }
-        if y.kind == TypeKind::TYPE_GENERIC {
+        if y.kind == TypeKind::TYPE_GENERIC || y.kind == TypeKind::TYPE_ASSOC {
             let mut rm: ModuleId = 0;
             let mut rt = TYPE_NONE;
             let mut env: usize = 0;
@@ -2727,7 +3313,7 @@ extend Mangler {
                 self.unhide(h0);
                 return ok;
             }
-            if self.macro_on {
+            if self.macro_on && y.kind == TypeKind::TYPE_GENERIC {
                 self.generic_param_name(y, out);
                 self.join_decl("", decl, out);
                 return true;
@@ -2810,7 +3396,7 @@ extend Mangler {
 
     /// One journaled dup attempt per (gate key, current module): true the first time only.
     pub fn rec_dup_once(self: &mut Self, k: u64) bool {
-        let mixed = k * 1099511628211u64 ^ self.mark_ctx as u64;
+        let mixed = k.wrapping_mul(1099511628211u64) ^ self.mark_ctx as u64;
         if self.rec_dups.contains(&mixed) {
             return false;
         }
@@ -2841,6 +3427,9 @@ extend Mangler {
 // The parameter (`ret` false) or return (`ret` true) list length of function value type `y`: a closure's
 // from its recorded facts `cf` (its syntax may be released), anything else's from its declaration.
 fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 {
+    if y.fn_sig() {
+        return unsafe (*fa).sig_len(y, ret);
+    }
     if cf != null {
         let c = unsafe &*cf;
         return if ret {
@@ -2866,6 +3455,9 @@ fn sig_list(fa: *const Ast, y: &Ty, ret: bool) NodeList {
 
 // Type `i` of that list. An unannotated parameter takes the type recorded on the parameter itself.
 fn sig_ty(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool, i: u32) TypeId {
+    if y.fn_sig() {
+        return unsafe (*fa).sig_at(y, ret, i);
+    }
     if cf != null {
         let c = unsafe &*cf;
         let k = if ret {
@@ -2889,4 +3481,16 @@ pub const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'static> {
         return a;
     }
     return b;
+}
+
+// A const-generic argument as a symbol segment: its decimal digits, with `n` for a minus sign (a C
+// identifier has no `-`; a position is const for every instance of its generic, so no type segment
+// shares it).
+fn push_cval(out: &mut String, v: i64, bt: BuiltinType) {
+    if v < 0 && !bt_is_unsigned(bt) {
+        out.push_str("n");
+        out.push_u64((v as u64).wrapping_neg());
+    } else {
+        out.push_u64(v as u64);
+    }
 }

@@ -165,10 +165,11 @@ fn externs() {
         "#include \"./lib.h\"",
     );
 
+    // A variadic argument is read as its promoted C type: an `i32` constant is cast to `int32_t`.
     h::expect_c(
         "variadic call passes all args",
         "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { let f: char = '%'; unsafe printf(&f, 1, 2, 3); return 0; }\n",
-        "1LL, 2LL, 3LL)",
+        "(int32_t)1LL, (int32_t)2LL, (int32_t)3LL)",
     );
 
     h::expect_c(
@@ -274,8 +275,16 @@ fn if_expression() {
 
 @test
 fn array_literals() {
-    h::expect_c("array literal stores each element", "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n", "[0] = 1LL");
-    h::expect_c("array literal stores the last element", "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n", "[2] = 3LL");
+    h::expect_c(
+        "array literal initializes each element",
+        "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n",
+        "[3] = { 1LL, 2LL, 3LL };",
+    );
+    h::expect_c(
+        "a designated literal stored in a loop zero-fills its tail",
+        "fn probe(n: i32) u32 {\n    let mut s: u32 = 0;\n    for i in 0..n {\n        if i == 0 {\n            continue;\n        }\n        let mut fp: [u32; 4] = [[0] = 1];\n        s += fp[3] + fp[2];\n        fp[3] = 50;\n    }\n    return s;\n}\n",
+        "memset(&fp, 0, sizeof(fp));",
+    );
     h::expect_exit(
         "array literal argument reaches the callee by value",
         "extern \"C\" { fn exit(c: i32) void; }\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn f() i32 { return g([1, 2, 3]); }\nfn main() i32 { unsafe exit(f() - 4); }\n",
@@ -394,7 +403,7 @@ fn generics() {
 
 @test
 fn literals() {
-    h::expect_c("binary literal keeps its spelling", "fn f() i32 { let a: i32 = 0b101; return a; }\n", "0b101");
+    h::expect_c("binary literal reaches C11 in hex", "fn f() i32 { let a: i32 = 0b101; return a; }\n", "0x5");
     h::expect_c("digit separators strip", "fn f() i32 { let a: i32 = 1_000; return a; }\n", "1000");
     h::expect_exit(
         "C-keyword identifiers stay legal",

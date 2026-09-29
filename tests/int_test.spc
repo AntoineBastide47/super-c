@@ -156,18 +156,40 @@ fn addition_carries_across_limbs() {
     assert(back == a);
     // And a borrow back across it.
     let z = u128::zero();
-    assert(z - one == u128::max());
+    assert(z.wrapping_sub(&one) == u128::max());
 }
 
 @test
-fn unsigned_wraps_like_the_builtin_types() {
+fn unsigned_overflow_methods_never_trap() {
     let mx = u128::max();
     let one = u128::one();
+    let two = u128::from_u64(2);
     assert(mx.wrapping_add(&one).is_zero());
     assert(mx.checked_add(&one).is_none());
     assert(mx.saturating_add(&one) == mx);
     assert(u128::zero().saturating_sub(&one).is_zero());
     assert(u128::zero().checked_sub(&one).is_none());
+    assert(u128::zero().wrapping_sub(&one) == mx);
+    assert(mx.wrapping_mul(&two) == mx - one);
+    assert(two.wrapping_pow(128).is_zero() && two.checked_pow(128).is_none());
+    let (s, so) = mx.overflowing_add(&two);
+    let (d, dO) = u128::zero().overflowing_sub(&one);
+    let (m, mo) = mx.overflowing_mul(&two);
+    assert(s == one && so && d == mx && dO && m == mx - one && mo);
+    // A width that is not a multiple of 64 wraps at its own width.
+    let one100 = UInt::<100>::one();
+    let (w, wo) = UInt::<100>::max().overflowing_add(&one100);
+    assert(w.is_zero() && wo);
+}
+
+@test(should_panic)
+fn unsigned_overflow_traps() {
+    let _ = u128::max() + u128::one(); // unsigned arithmetic traps, exactly as the built-in unsigned types do
+}
+
+@test(should_panic)
+fn unsigned_pow_overflow_traps() {
+    let _ = u128::from_u64(2).pow(128);
 }
 
 @test
@@ -826,6 +848,804 @@ fn builtin_bit_counts_at_run_time() {
     assert_eq(bits_i32((all as u32) as i32), packed(0, 0, 32));
     assert_eq(bits_i64(all as i64), packed(0, 0, 64));
     assert_eq(bits_isize((all as usize) as isize), packed(0, 0, USIZE_W));
+}
+
+// The built-in integers' wrapping, overflowing, checked and saturating methods at the edges of each width
+// (Rust's semantics). Each `fam_*` returns a bit per failed check; the static_asserts run it at compile time
+// on the type's MAX and 2, and the test runs the same code in the emitted C with inputs from a Vector.
+const fn fam_i8(a: i8, b: i8) u32 {
+    let z = b - b;
+    let one = b / b;
+    let m = -a - one;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == m) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(m.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == -b) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(m.wrapping_neg() == m) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(one.wrapping_neg() == -one) {
+        bad = bad | 1u32 << 4;
+    }
+    if !((-one).wrapping_shl(8 + 1) == -b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(m.wrapping_shr(8 + 1) == m / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == m && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = m.overflowing_sub(one);
+    if !(r8 == a && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == -b && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(-b);
+    if !(r10 == -b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(m.checked_sub(one).is_none() && m.checked_sub(-one).unwrap() == m + one) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && (-b).checked_mul(b).unwrap() == -b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(m.checked_div(-one).is_none() && a.checked_div(z).is_none() && m.checked_div(b).unwrap() == m / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(m.checked_rem(-one).is_none() && a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(m.checked_neg().is_none() && a.checked_neg().unwrap() == -a) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(8).is_none() && one.checked_shl(8 - 1).unwrap() == m) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(m.checked_shr(8).is_none() && (-one).checked_shr(8 - 1).unwrap() == -one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && m.saturating_add(-one) == m && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(m.saturating_sub(one) == m && a.saturating_sub(-one) == a && b.saturating_sub(b) == z) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_i16(a: i16, b: i16) u32 {
+    let z = b - b;
+    let one = b / b;
+    let m = -a - one;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == m) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(m.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == -b) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(m.wrapping_neg() == m) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(one.wrapping_neg() == -one) {
+        bad = bad | 1u32 << 4;
+    }
+    if !((-one).wrapping_shl(16 + 1) == -b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(m.wrapping_shr(16 + 1) == m / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == m && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = m.overflowing_sub(one);
+    if !(r8 == a && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == -b && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(-b);
+    if !(r10 == -b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(m.checked_sub(one).is_none() && m.checked_sub(-one).unwrap() == m + one) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && (-b).checked_mul(b).unwrap() == -b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(m.checked_div(-one).is_none() && a.checked_div(z).is_none() && m.checked_div(b).unwrap() == m / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(m.checked_rem(-one).is_none() && a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(m.checked_neg().is_none() && a.checked_neg().unwrap() == -a) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(16).is_none() && one.checked_shl(16 - 1).unwrap() == m) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(m.checked_shr(16).is_none() && (-one).checked_shr(16 - 1).unwrap() == -one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && m.saturating_add(-one) == m && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(m.saturating_sub(one) == m && a.saturating_sub(-one) == a && b.saturating_sub(b) == z) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_i32(a: i32, b: i32) u32 {
+    let z = b - b;
+    let one = b / b;
+    let m = -a - one;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == m) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(m.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == -b) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(m.wrapping_neg() == m) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(one.wrapping_neg() == -one) {
+        bad = bad | 1u32 << 4;
+    }
+    if !((-one).wrapping_shl(32 + 1) == -b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(m.wrapping_shr(32 + 1) == m / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == m && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = m.overflowing_sub(one);
+    if !(r8 == a && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == -b && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(-b);
+    if !(r10 == -b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(m.checked_sub(one).is_none() && m.checked_sub(-one).unwrap() == m + one) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && (-b).checked_mul(b).unwrap() == -b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(m.checked_div(-one).is_none() && a.checked_div(z).is_none() && m.checked_div(b).unwrap() == m / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(m.checked_rem(-one).is_none() && a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(m.checked_neg().is_none() && a.checked_neg().unwrap() == -a) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(32).is_none() && one.checked_shl(32 - 1).unwrap() == m) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(m.checked_shr(32).is_none() && (-one).checked_shr(32 - 1).unwrap() == -one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && m.saturating_add(-one) == m && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(m.saturating_sub(one) == m && a.saturating_sub(-one) == a && b.saturating_sub(b) == z) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_i64(a: i64, b: i64) u32 {
+    let z = b - b;
+    let one = b / b;
+    let m = -a - one;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == m) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(m.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == -b) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(m.wrapping_neg() == m) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(one.wrapping_neg() == -one) {
+        bad = bad | 1u32 << 4;
+    }
+    if !((-one).wrapping_shl(64 + 1) == -b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(m.wrapping_shr(64 + 1) == m / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == m && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = m.overflowing_sub(one);
+    if !(r8 == a && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == -b && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(-b);
+    if !(r10 == -b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(m.checked_sub(one).is_none() && m.checked_sub(-one).unwrap() == m + one) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && (-b).checked_mul(b).unwrap() == -b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(m.checked_div(-one).is_none() && a.checked_div(z).is_none() && m.checked_div(b).unwrap() == m / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(m.checked_rem(-one).is_none() && a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(m.checked_neg().is_none() && a.checked_neg().unwrap() == -a) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(64).is_none() && one.checked_shl(64 - 1).unwrap() == m) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(m.checked_shr(64).is_none() && (-one).checked_shr(64 - 1).unwrap() == -one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && m.saturating_add(-one) == m && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(m.saturating_sub(one) == m && a.saturating_sub(-one) == a && b.saturating_sub(b) == z) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_isize(a: isize, b: isize) u32 {
+    let z = b - b;
+    let one = b / b;
+    let m = -a - one;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == m) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(m.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == -b) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(m.wrapping_neg() == m) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(one.wrapping_neg() == -one) {
+        bad = bad | 1u32 << 4;
+    }
+    if !((-one).wrapping_shl(sizeof(isize) as u32 * 8 + 1) == -b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(m.wrapping_shr(sizeof(isize) as u32 * 8 + 1) == m / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == m && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = m.overflowing_sub(one);
+    if !(r8 == a && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == -b && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(-b);
+    if !(r10 == -b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(m.checked_sub(one).is_none() && m.checked_sub(-one).unwrap() == m + one) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && (-b).checked_mul(b).unwrap() == -b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(m.checked_div(-one).is_none() && a.checked_div(z).is_none() && m.checked_div(b).unwrap() == m / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(m.checked_rem(-one).is_none() && a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(m.checked_neg().is_none() && a.checked_neg().unwrap() == -a) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(sizeof(isize) as u32 * 8).is_none() && one.checked_shl(sizeof(isize) as u32 * 8 - 1).unwrap() == m) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(m.checked_shr(sizeof(isize) as u32 * 8).is_none() && (-one).checked_shr(sizeof(isize) as u32 * 8 - 1).unwrap() == -one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && m.saturating_add(-one) == m && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(m.saturating_sub(one) == m && a.saturating_sub(-one) == a && b.saturating_sub(b) == z) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_u8(a: u8, b: u8) u32 {
+    let z = b - b;
+    let one = b / b;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == z) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(z.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == a - one) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(one.wrapping_neg() == a) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(z.wrapping_neg() == z) {
+        bad = bad | 1u32 << 4;
+    }
+    if !(one.wrapping_shl(8 + 1) == b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(a.wrapping_shr(8 + 1) == a / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == z && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = b.overflowing_sub(a);
+    if !(r8 == b + one && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == a - one && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(b);
+    if !(r10 == b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(z.checked_sub(one).is_none() && a.checked_sub(a).unwrap() == z) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && b.checked_mul(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(a.checked_div(z).is_none() && a.checked_div(b).unwrap() == a / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(one.checked_neg().is_none() && z.checked_neg().unwrap() == z) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(8).is_none() && one.checked_shl(8 - 1).unwrap() == a / b + one) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(a.checked_shr(8).is_none() && a.checked_shr(8 - 1).unwrap() == one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(z.saturating_sub(one) == z && b.saturating_sub(one) == one) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_u16(a: u16, b: u16) u32 {
+    let z = b - b;
+    let one = b / b;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == z) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(z.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == a - one) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(one.wrapping_neg() == a) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(z.wrapping_neg() == z) {
+        bad = bad | 1u32 << 4;
+    }
+    if !(one.wrapping_shl(16 + 1) == b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(a.wrapping_shr(16 + 1) == a / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == z && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = b.overflowing_sub(a);
+    if !(r8 == b + one && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == a - one && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(b);
+    if !(r10 == b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(z.checked_sub(one).is_none() && a.checked_sub(a).unwrap() == z) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && b.checked_mul(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(a.checked_div(z).is_none() && a.checked_div(b).unwrap() == a / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(one.checked_neg().is_none() && z.checked_neg().unwrap() == z) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(16).is_none() && one.checked_shl(16 - 1).unwrap() == a / b + one) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(a.checked_shr(16).is_none() && a.checked_shr(16 - 1).unwrap() == one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(z.saturating_sub(one) == z && b.saturating_sub(one) == one) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_u32(a: u32, b: u32) u32 {
+    let z = b - b;
+    let one = b / b;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == z) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(z.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == a - one) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(one.wrapping_neg() == a) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(z.wrapping_neg() == z) {
+        bad = bad | 1u32 << 4;
+    }
+    if !(one.wrapping_shl(32 + 1) == b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(a.wrapping_shr(32 + 1) == a / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == z && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = b.overflowing_sub(a);
+    if !(r8 == b + one && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == a - one && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(b);
+    if !(r10 == b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(z.checked_sub(one).is_none() && a.checked_sub(a).unwrap() == z) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && b.checked_mul(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(a.checked_div(z).is_none() && a.checked_div(b).unwrap() == a / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(one.checked_neg().is_none() && z.checked_neg().unwrap() == z) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(32).is_none() && one.checked_shl(32 - 1).unwrap() == a / b + one) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(a.checked_shr(32).is_none() && a.checked_shr(32 - 1).unwrap() == one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(z.saturating_sub(one) == z && b.saturating_sub(one) == one) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_u64(a: u64, b: u64) u32 {
+    let z = b - b;
+    let one = b / b;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == z) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(z.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == a - one) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(one.wrapping_neg() == a) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(z.wrapping_neg() == z) {
+        bad = bad | 1u32 << 4;
+    }
+    if !(one.wrapping_shl(64 + 1) == b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(a.wrapping_shr(64 + 1) == a / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == z && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = b.overflowing_sub(a);
+    if !(r8 == b + one && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == a - one && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(b);
+    if !(r10 == b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(z.checked_sub(one).is_none() && a.checked_sub(a).unwrap() == z) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && b.checked_mul(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(a.checked_div(z).is_none() && a.checked_div(b).unwrap() == a / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(one.checked_neg().is_none() && z.checked_neg().unwrap() == z) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(64).is_none() && one.checked_shl(64 - 1).unwrap() == a / b + one) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(a.checked_shr(64).is_none() && a.checked_shr(64 - 1).unwrap() == one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(z.saturating_sub(one) == z && b.saturating_sub(one) == one) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+const fn fam_usize(a: usize, b: usize) u32 {
+    let z = b - b;
+    let one = b / b;
+    let mut bad: u32 = 0;
+    if !(a.wrapping_add(one) == z) {
+        bad = bad | 1u32 << 0;
+    }
+    if !(z.wrapping_sub(one) == a) {
+        bad = bad | 1u32 << 1;
+    }
+    if !(a.wrapping_mul(b) == a - one) {
+        bad = bad | 1u32 << 2;
+    }
+    if !(one.wrapping_neg() == a) {
+        bad = bad | 1u32 << 3;
+    }
+    if !(z.wrapping_neg() == z) {
+        bad = bad | 1u32 << 4;
+    }
+    if !(one.wrapping_shl(sizeof(usize) as u32 * 8 + 1) == b) {
+        bad = bad | 1u32 << 5;
+    }
+    if !(a.wrapping_shr(sizeof(usize) as u32 * 8 + 1) == a / b) {
+        bad = bad | 1u32 << 6;
+    }
+    let (r7, o7) = a.overflowing_add(one);
+    if !(r7 == z && o7) {
+        bad = bad | 1u32 << 7;
+    }
+    let (r8, o8) = b.overflowing_sub(a);
+    if !(r8 == b + one && o8) {
+        bad = bad | 1u32 << 8;
+    }
+    let (r9, o9) = a.overflowing_mul(b);
+    if !(r9 == a - one && o9) {
+        bad = bad | 1u32 << 9;
+    }
+    let (r10, o10) = b.overflowing_mul(b);
+    if !(r10 == b * b && !o10) {
+        bad = bad | 1u32 << 10;
+    }
+    if !(a.checked_add(one).is_none() && b.checked_add(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 11;
+    }
+    if !(z.checked_sub(one).is_none() && a.checked_sub(a).unwrap() == z) {
+        bad = bad | 1u32 << 12;
+    }
+    if !(a.checked_mul(b).is_none() && b.checked_mul(b).unwrap() == b * b) {
+        bad = bad | 1u32 << 13;
+    }
+    if !(a.checked_div(z).is_none() && a.checked_div(b).unwrap() == a / b) {
+        bad = bad | 1u32 << 14;
+    }
+    if !(a.checked_rem(z).is_none() && a.checked_rem(b).unwrap() == one) {
+        bad = bad | 1u32 << 15;
+    }
+    if !(one.checked_neg().is_none() && z.checked_neg().unwrap() == z) {
+        bad = bad | 1u32 << 16;
+    }
+    if !(one.checked_shl(sizeof(usize) as u32 * 8).is_none() && one.checked_shl(sizeof(usize) as u32 * 8 - 1).unwrap() == a / b + one) {
+        bad = bad | 1u32 << 17;
+    }
+    if !(a.checked_shr(sizeof(usize) as u32 * 8).is_none() && a.checked_shr(sizeof(usize) as u32 * 8 - 1).unwrap() == one) {
+        bad = bad | 1u32 << 18;
+    }
+    if !(a.saturating_add(one) == a && b.saturating_add(b) == b * b) {
+        bad = bad | 1u32 << 19;
+    }
+    if !(z.saturating_sub(one) == z && b.saturating_sub(one) == one) {
+        bad = bad | 1u32 << 20;
+    }
+    if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
+        bad = bad | 1u32 << 21;
+    }
+    return bad;
+}
+static_assert(fam_i8(127, 2) == 0, "i8 methods");
+static_assert(fam_i16(32767, 2) == 0, "i16 methods");
+static_assert(fam_i32(2147483647, 2) == 0, "i32 methods");
+static_assert(fam_i64(9223372036854775807, 2) == 0, "i64 methods");
+static_assert(fam_isize(isize::MAX, 2) == 0, "isize methods");
+static_assert(fam_u8(255, 2) == 0, "u8 methods");
+static_assert(fam_u16(65535, 2) == 0, "u16 methods");
+static_assert(fam_u32(4294967295, 2) == 0, "u32 methods");
+static_assert(fam_u64(18446744073709551615, 2) == 0, "u64 methods");
+static_assert(fam_usize(usize::MAX, 2) == 0, "usize methods");
+
+@test
+fn builtin_overflow_methods_at_run_time() {
+    let mut v: Vector<u64> = Vector::new();
+    v.push(0xFFFFFFFFFFFFFFFF);
+    v.push(2);
+    let all = v[0];
+    let two = v[1];
+    assert_eq(fam_i8((all >> 57) as i8, two as i8), 0);
+    assert_eq(fam_i16((all >> 49) as i16, two as i16), 0);
+    assert_eq(fam_i32((all >> 33) as i32, two as i32), 0);
+    assert_eq(fam_i64((all >> 1) as i64, two as i64), 0);
+    assert_eq(fam_isize((all as usize >> 1) as isize, two as isize), 0);
+    assert_eq(fam_u8(all as u8, two as u8), 0);
+    assert_eq(fam_u16(all as u16, two as u16), 0);
+    assert_eq(fam_u32(all as u32, two as u32), 0);
+    assert_eq(fam_u64(all, two), 0);
+    assert_eq(fam_usize(all as usize, two as usize), 0);
 }
 
 // The wide counts run per limb on the u64 counts: limb boundaries and a partial top limb.

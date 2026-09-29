@@ -154,6 +154,11 @@ fn manifest_validation_messages() {
         "'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\"",
     );
     manifest_err(
+        "overflow-checks bool",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\noverflow-checks = 1\n",
+        "'overflow-checks' expects true or false",
+    );
+    manifest_err(
         "link-args array",
         "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nlink-args = \"-S\"\n",
         "'link-args' expects an array of strings",
@@ -284,6 +289,27 @@ fn manifest_profile_opt_level_and_link_args() {
     assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).opt, 0);
     assert_eq(manifest::opt_flag(manifest::OPT_S), "-Os");
     assert_eq(manifest::opt_flag(manifest::OPT_FLAGS), "");
+}
+
+// Signed overflow traps at opt-level 0 and 1 and wraps at 2 and above; `overflow-checks` overrides the
+// level, and a built-in profile keeps its behavior when a section changes another key.
+@test
+fn manifest_profile_overflow_checks() {
+    let (m, errs) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\noverflow-checks = true\n[profile.fast]\nopt-level = \"s\"\n[profile.plain]\ncflags = [\"-O3\"]\n[profile.dev]\nstrip = true\n[profile.lax]\nopt-level = 0\noverflow-checks = false\n",
+        "",
+        false,
+    );
+    assert_eq(errs.errors.len(), 0);
+    let mm = m.unwrap();
+    let wraps: [str; 4] = ["fast", "bench", "pgogen", "lax"];
+    for name in wraps {
+        assert(mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
+    }
+    let checks: [str; 6] = ["release", "plain", "dev", "debug", "test", "race"];
+    for name in checks {
+        assert(!mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
+    }
 }
 
 // A --bootstrap-tags build reads a manifest written for a newer compiler: sections and keys outside

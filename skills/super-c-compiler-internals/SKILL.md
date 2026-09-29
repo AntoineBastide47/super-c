@@ -252,8 +252,12 @@ lowering and every later consumer reads instead of the Ast side tables):
 
 At type-check completion every semantic **decision** table is final — nodes, children,
 resolutions, per-node types, coercions, instance demands, method_refs, dyn/deref
-selections, wide literals, attributes, lifetime declarations, `call_info`, `op_method`.
-Every later stage reads this data frozen. The ONE sanctioned mutation is **interning**:
+selections, wide literals, attributes, lifetime declarations, `call_info`, `op_method`, bound
+calls (`bound_calls`: the conformance a call through a generic interface's bound, an operator
+through a bound, or an inherited default of a generic interface on a concrete receiver, called as a
+method or through a path, dispatches to; the member resolution picks it in `tc_pick_conf_method`,
+or in `tc_pick_bound_conf` when a type parameter's bounds reach the interface with several arguments),
+integer pattern values (`pat_vals`). Every later stage reads this data frozen. The ONE sanctioned mutation is **interning**:
 the module `pool` (provisional records) and the package table grow append-only when a
 later stage interns a substituted type; a publication checkpoint renumbers provisional
 ids into final ids and remaps every retained table in the same step, and a final id is
@@ -395,7 +399,22 @@ generic body gets moves and `TM_DROP`s for its `T` values once, and every instan
 elaborated body. Emission decides per instance: `CEmit::drop_emits_nothing` resolves the dropped
 place's type under the instance substitution and emits nothing when it owns nothing (a scalar,
 a reference, a plain struct); the fold scans skip such drops too, so a scalar instance compiles
-to the same C as before. `Copy` itself is derived in the checker (`tc_copy_marker`, answered in
+to the same C as before. A zero-length array of an owning element (`[String; 0]`, or a struct
+whose only owning member is one) moves like its element but frees nothing: `is_destructible`
+answers false for it, so its drop and its glue emit no code over storage that does not exist.
+
+The emitter spells an integer comparison that the range of an operand's C type decides against a
+constant (`u < 0`, `i8 >= -128`, `u64 <= u64::MAX`, a const-generic bound, a folded array length,
+seen through inlined copies and value-preserving casts) as its result with the operand still
+evaluated, `((void)(x), false)` (`CEmit::cmp_fold`), and only where C compares exact values.
+gcc's and clang's `-Wtype-limits` (in `-Wextra`) reject the tautology otherwise; every other
+comparison keeps its spelling. A constant is every operand C reads as an integer constant
+expression: a literal, a folded count or parameter, `~c`, a cast of a constant (converted to the
+target width as C converts it) and a plain C operator over two constants (`(intptr_t)(~0ULL >>
+1)`; `c_const_op`), evaluated from the constants' values. A named constant item (`isize::MAX`)
+spells its global symbol, which C does not read as a constant. A literal's exact value comes from
+`Constant::int_value` (`val` holds only the plain decimal case); `arith_fn` reads a constant shift
+count or divisor the same way, so a hex count past the width reaches the checked helper. `Copy` itself is derived in the checker (`tc_copy_marker`, answered in
 `type_satisfies`); an explicit `extend X as Copy {}` is checked against the derivation
 (`check_copy_conformance`).
 
@@ -434,6 +453,27 @@ that still does not fold then is an error; `report_fold_errs` surfaces
 emission-time fold failures. During the type check the engine answers as the item under
 check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
 (`graph::items::visible`) is a refusal, whatever a worker has done with it.
+
+Constant dependencies do not nest on the native stack: an evaluation that reaches
+`IT_ITEM_NEST` (16) nested constants evaluates the requester's remaining constant
+dependencies dependency-first from an explicit work stack (`prefetch_items`), keeping
+scalar results in `item_memo`, aggregates in `item_objs` (cloned per reference) and
+failures in `item_fail` (replayed with the trap they raised). Across evaluations,
+`item_aggs` keeps a frozen copy of each pointer-free aggregate constant (thawed per
+reference) and `item_dead` each constant that failed with a trap no budget caused.
+Nesting the stack cannot see (through function bodies, lowering-time folds) stops at
+`IT_ITEM_MAX_NEST` (64) with "constant evaluation nests too deeply".
+
+Every const initializer evaluates during the type check: a trap is an error at the
+constant (a call-free initializer leaves a trap raised in a referenced constant to that
+constant, except a cycle), and a refusal defers to `flush_consts`. An explicit enum
+discriminant must fold there too; `Interp::discr` is the one discriminant rule the
+lowering, the emitted C enum, constant evaluation, static data and `type_info` share, for
+payload enums as for bare ones. The checker rejects a duplicate value or one outside the
+i32 range in a non-extern enum. A discriminant read has type i32 when a tag of the enum is
+negative, else u32; the emitter sign-extends switch cases on an i32 discriminant. In
+constant evaluation, a payload-less variant of a payload enum is an enum object (tag slot
+only), and a static `SS_ENUM` stores the active variant's ordinal in slot 0.
 
 ## Monomorphization
 
@@ -491,6 +531,13 @@ arms that do not fall through continues in the caller's loop instead of recursin
 a falling chain whose tests need statements first still nests per arm. A body whose
 structured regions pass the bound fails the dry planning pass and takes the flat goto
 layout (`plan_structured`).
+C11 guarantees string literals of 4095 bytes only (`STR_LIT_MAX`; `-pedantic-errors` rejects a
+longer one). A string constant whose bytes (`str_const_bytes`: frame stripped, escapes decoded)
+pass it spells as a block-scope `static const uint8_t __sc_lit<constant id>[]` of its bytes and a
+terminating 0 (`long_lit`, declared once per body in `lit_decls` and inserted ahead of the body's
+statements), read as `sizeof(__sc_lit<id>) - 1` bytes like a literal; a file-scope constant
+(`push_c_str_data`) uses a compound literal array, which has static storage there. An assertion
+message spells at most `ASSERT_SRC_MAX` (1000) bytes of each expression's source.
 A fold chain of inlined temporaries keeps every link past `INLINE_CHAIN_MAX` (64) as a
 declared temporary, so long expressions stay under that depth. A body that still passes it
 is refused and reported as a located error (`CEmit.refused`, merged from the shards by
@@ -525,7 +572,7 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
 
 ```
 <gen_root>/
-  super_rt.h super_rt.c    # shared runtime (allocation interposition, leak tracker)
+  super_rt.h super_rt.c    # shared runtime (arithmetic helpers, allocation interposition, leak tracker)
   __sc_fwd.h               # runtime and extern-block includes, dyn/extern declarations, shared by every TU
   __sc_t/app__Point.h      # one definition header per type: its typedef, definition and layout check
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body

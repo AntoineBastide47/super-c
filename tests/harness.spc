@@ -371,6 +371,7 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     let mut code = String::new();
     if !user_only {
         code.push_string(&o.fwd_h);
+        code.push_string(&o.ext_h);
         for d in 0..o.defs_h.len() {
             code.push_string(o.defs_h.at(d));
         }

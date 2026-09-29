@@ -3069,6 +3069,10 @@ extend Owner {
             }
             return self.param_owns(y.module, y.as_data.decl);
         }
+        if y.kind == TypeKind::TYPE_ASSOC {
+            // `T::Output` is known per instance only: it owns, as an unbounded parameter does.
+            return true;
+        }
         if !self.ast_of(mid).type_concrete(ty) {
             return self.owns_raw(mid, &y, f0, f1, depth);
         }

@@ -32,8 +32,13 @@ fn ok() {
     h::expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; }\n");
     h::expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
     h::expect_ok(
-        "int literal initializes a float",
-        "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n",
+        "float literals initialize floats",
+        "fn main() i32 { let f: f64 = 0.0; let g: f32 = 5.0; let h: f64 = -3.0; }\n",
+    );
+    h::expect_err_msg(
+        "an int literal never initializes a float",
+        "fn main() i32 { let h: f64 = -3; }\n",
+        "mismatched types: expected 'f64', found 'i32'",
     );
     h::expect_ok(
         "builtin marker bound",
@@ -710,6 +715,356 @@ fn type_info_intrinsic() {
     );
 }
 
+// A braced enum variant or named constant is the same argument in a type and in an expression
+// turbofish: the variant's discriminant (an explicit one included), for a parameter of that enum.
+@test
+fn braced_enum_const_arguments() {
+    h::expect_exit(
+        "braced enum arguments in both positions",
+        M"(enum E { A, B }
+enum D { X = 3, Y = 7, Z }
+const KZ: D = D::Z;
+struct F<const N: D> { pub v: i32 }
+extend<const N: D> F<N> { fn n(self: &Self) i32 { return N as i32; } }
+fn g<const N: D>() i32 { return N as i32; }
+fn h<const N: E>() i32 { return N as i32; }
+fn main() i32 {
+    let a: F<{D::Y}> = F::<{D::Y}> { v: 1 };
+    let b: F<{KZ}> = F::<KZ> { v: 2 };
+    let c: F<KZ> = F::<{KZ}> { v: 3 };
+    if a.n() != 7 || b.n() != 8 || c.n() != 8 { return 1; }
+    if g::<{D::X}>() != 3 || g::<{KZ}>() != 8 || g::<KZ>() != 8 || h::<{E::B}>() != 1 { return 2; }
+    return a.v + b.v + c.v - 6;
+}
+)",
+        0,
+    );
+    const ENUMS: str = "enum E { A, B }\nenum D { X = 3, Y = 7, Z }\nconst KE: E = E::B;\nfn g<const N: D>() i32 { return N as i32; }\nfn u<const N: u64>() u64 { return N; }\nfn main() i32 {\n";
+    h::expect_err_msg(
+        "a variant of another enum",
+        format("{}    return g::<{{E::A}}>();\n}}\n", ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:17",
+    );
+    h::expect_err_msg(
+        "a constant of another enum",
+        format("{}    return g::<KE>();\n}}\n", ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:16",
+    );
+    h::expect_err_msg(
+        "an integer for an enum parameter",
+        format("{}    return g::<5>();\n}}\n", ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'i32'\n--> <harness>:7:16",
+    );
+    h::expect_err_msg(
+        "a variant for an integer parameter",
+        format("{}    return u::<{{E::B}}>() as i32;\n}}\n", ENUMS).as_str(),
+        "error: mismatched types: expected 'u64', found 'E'\n--> <harness>:7:17",
+    );
+    h::expect_err_msg(
+        "a variant the enum does not have",
+        format("{}    return g::<{{D::W}}>();\n}}\n", ENUMS).as_str(),
+        "error: no variant 'W' on 'D'\n--> <harness>:7:20",
+    );
+}
+
+// A two-segment path names a constant argument where a named constant does: a builtin limit reads as
+// the literal of its value, so it must fit the parameter's type; an associated constant keeps its own
+// type. A path the type's name qualifies that names no constant, a type for a const parameter and a
+// value for a type parameter are errors.
+@test
+fn qualified_const_arguments() {
+    const PRE: str = "struct Foo { pub a: i32 }\nextend Foo { pub const K: i64 = 7; }\nenum D { X, Y }\nstruct F<const E: D> { pub x: i32 }\nstruct W<const N: u64> { pub x: i32 }\nstruct P<T> { pub x: i32 }\nfn h<const N: i32>() i32 { return N; }\nfn g8<const N: u8>() u8 { return N; }\nfn main() i32 {\n";
+    h::expect_err_msg(
+        "a limit outside the parameter's type",
+        format("{}    return h::<i64::MAX>();\n}}\n", PRE).as_str(),
+        "error: const generic argument 9223372036854775807 is out of range for 'i32'\n--> <harness>:10:16",
+    );
+    h::expect_err_msg(
+        "an associated constant of a wider type",
+        format("{}    return g8::<Foo::K>() as i32;\n}}\n", PRE).as_str(),
+        "error: mismatched types: expected 'u8', found 'i64'\n--> <harness>:10:17",
+    );
+    h::expect_err_msg(
+        "an integer constant for an enum parameter",
+        format("{}    let f = F::<Foo::K> {{ x: 1 }};\n    return f.x;\n}}\n", PRE).as_str(),
+        "error: mismatched types: expected 'D', found 'i64'\n--> <harness>:10:17",
+    );
+    h::expect_err_msg(
+        "a missing associated constant",
+        format("{}    return h::<Foo::Q>();\n}}\n", PRE).as_str(),
+        "error: no associated constant 'Q' on 'Foo'\n--> <harness>:10:21",
+    );
+    h::expect_err_msg(
+        "a missing variant",
+        format("{}    let f = F::<D::Q> {{ x: 1 }};\n    return f.x;\n}}\n", PRE).as_str(),
+        "error: no variant or associated constant 'Q' on 'D'\n--> <harness>:10:20",
+    );
+    h::expect_err_msg(
+        "a missing builtin constant",
+        format("{}    return h::<u64::FOO>();\n}}\n", PRE).as_str(),
+        "error: no associated constant 'FOO' on 'u64'\n--> <harness>:10:21",
+    );
+    h::expect_err_msg(
+        "a type for a const parameter",
+        format("{}    let w: W<u64> = W {{ x: 1 }};\n    return w.x;\n}}\n", PRE).as_str(),
+        "error: expected a constant for const parameter 'N', found type 'u64'\n--> <harness>:10:14",
+    );
+    h::expect_err_msg(
+        "a value for a type parameter",
+        format("{}    let p: P<5> = P {{ x: 1 }};\n    return p.x;\n}}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:10:14",
+    );
+}
+
+// Every segment of a type path in a type position names a type: a path whose segments go past its
+// type (a builtin, a struct, an enum, a generic parameter) is an error in a let, a parameter, a
+// return, a field, a cast, a sizeof and a type argument, and no reading of it as its leading segments
+// remains. A struct literal's target may name an enum's variant after the enum, and nothing else.
+fn expect_one_err(label: str, src: str, needle: str) {
+    let c = h::compile(src, h::STAGE_TYPECHECK);
+    if c.errors != 1 || !c.msg_has(needle) {
+        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cstr(&c.first[0]));
+    }
+    assert(c.errors == 1 && c.msg_has(needle), label);
+}
+
+@test
+fn type_paths_past_their_type() {
+    const PRE: str = "struct S { pub a: i32 }\nextend S { pub const K: i32 = 1; }\nenum E { A { x: i32 }, B }\nstruct W<const N: u64> { pub x: i32 }\n";
+    expect_one_err(
+        "a missing member of a builtin",
+        format("{}fn main() i32 {{ let x: u64::FOO = 1; return 0; }}\n", PRE).as_str(),
+        "error: no type 'FOO' in 'u64'\n--> <harness>:5:29",
+    );
+    expect_one_err(
+        "a builtin limit in a let",
+        format("{}fn main() i32 {{ let x: u64::MAX = 1; return 0; }}\n", PRE).as_str(),
+        "error: expected a type, found constant 'u64::MAX'\n--> <harness>:5:24",
+    );
+    expect_one_err(
+        "a builtin limit as a parameter",
+        format("{}fn p(x: u64::MAX) u64 {{ return x; }}\n", PRE).as_str(),
+        "error: expected a type, found constant 'u64::MAX'\n--> <harness>:5:9",
+    );
+    expect_one_err(
+        "an associated constant as a return type",
+        format("{}fn r() S::K {{ return S {{ a: 1 }}; }}\n", PRE).as_str(),
+        "error: expected a type, found constant 'S::K'\n--> <harness>:5:8",
+    );
+    expect_one_err(
+        "an associated constant as a field",
+        format("{}struct F {{ pub v: S::K }}\n", PRE).as_str(),
+        "error: expected a type, found constant 'S::K'\n--> <harness>:5:19",
+    );
+    expect_one_err(
+        "a builtin limit as a cast target",
+        format("{}fn main() i32 {{ let w = 3 as u8::MAX; return w as i32; }}\n", PRE).as_str(),
+        "error: expected a type, found constant 'u8::MAX'\n--> <harness>:5:30",
+    );
+    expect_one_err(
+        "a missing member in sizeof",
+        format("{}fn main() i32 {{ return sizeof(S::Q) as i32; }}\n", PRE).as_str(),
+        "error: no type 'Q' in 'S'\n--> <harness>:5:34",
+    );
+    expect_one_err(
+        "a variant as a type",
+        format("{}fn main() i32 {{ let e: E::B = E::B; return 0; }}\n", PRE).as_str(),
+        "error: expected a type, found variant 'E::B'\n--> <harness>:5:24",
+    );
+    expect_one_err(
+        "a member of a generic parameter",
+        format("{}fn f<T>(x: T::Item) i32 {{ return 0; }}\n", PRE).as_str(),
+        "error: no type 'Item' in 'T'\n--> <harness>:5:15",
+    );
+    expect_one_err(
+        "a missing member as a type argument",
+        format("{}fn f(v: Vector<S::Q>) usize {{ return v.len(); }}\n", PRE).as_str(),
+        "error: no type 'Q' in 'S'\n--> <harness>:5:19",
+    );
+    expect_one_err(
+        "a constant as a type argument",
+        format("{}fn main() i32 {{ let v = Vector::<S::K>::new(); return 0; }}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:5:34",
+    );
+    expect_one_err(
+        "a member past a constant for a const parameter",
+        format("{}fn main() i32 {{ let w: W<S::K::X> = W {{ x: 1 }}; return w.x; }}\n", PRE).as_str(),
+        "error: no associated constant 'X' on 'S::K'\n--> <harness>:5:32",
+    );
+    expect_one_err(
+        "a limit out of range in a turbofish is one error",
+        format("{}fn g8<const N: u8>() u8 {{ return N; }}\nfn main() i32 {{ return g8::<u64::MAX>() as i32; }}\n", PRE).as_str(),
+        "error: const generic argument 18446744073709551615 is out of range for 'u8'\n--> <harness>:6:29",
+    );
+    expect_one_err(
+        "a struct literal names a member of a struct",
+        format("{}fn main() i32 {{ let s = S::Q {{ a: 1 }}; return s.a; }}\n", PRE).as_str(),
+        "error: no type 'Q' in 'S'\n--> <harness>:5:28",
+    );
+    expect_one_err(
+        "a struct literal names a missing variant",
+        format("{}fn main() i32 {{ let e = E::Z {{ x: 1 }}; return 0; }}\n", PRE).as_str(),
+        "error: no variant 'Z' on 'E'\n--> <harness>:5:28",
+    );
+    expect_one_err(
+        "a struct literal names a member of a variant",
+        format("{}fn main() i32 {{ let e = E::A::Q {{ x: 1 }}; return 0; }}\n", PRE).as_str(),
+        "error: no type 'Q' in 'E::A'\n--> <harness>:5:31",
+    );
+    h::expect_ok(
+        "a struct literal names a variant",
+        format("{}fn main() i32 {{ let e = E::A {{ x: 1 }}; return switch e {{ A {{ x }} => x, B => 0, }}; }}\n", PRE).as_str(),
+    );
+    // A parse error renders without a file name.
+    h::expect_err_msg(
+        "arguments then a segment do not parse as a type",
+        "fn main() i32 { let y: Vector<i32>::Bar = Vector::<i32>::new(); return 0; }\n",
+        "error: expected ';'\n--> 1:35",
+    );
+}
+
+// A type the checker rejects is TYPE_ERROR wherever it is used: in an annotation, a signature, a field,
+// a turbofish or the context of a literal. Compatibility and inference accept it without a diagnostic,
+// so each program reports its one root error and nothing that follows from it.
+@test
+fn rejected_types_report_once() {
+    const PRE: str = "struct P { pub a: i32 }\nenum E { A(i32), B }\nstruct W<const N: u64> { pub x: i32 }\nfn id<T>(x: T) T { return x; }\nfn mk<const N: u64>() W<N> { return W::<N> { x: 1 }; }\n";
+    expect_one_err(
+        "a constant type argument in an annotation",
+        format("{}fn main() i32 {{ let v: Vector<u64::MAX> = Vector::<u8>::new(); return v.len() as i32; }}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:31",
+    );
+    expect_one_err(
+        "an out-of-range const argument in an annotation",
+        format("{}fn main() i32 {{ let w: W<{{1 - 2}}> = mk(); return w.x; }}\n", PRE).as_str(),
+        "error: const generic argument -1 is out of range for 'u64'\n--> <harness>:6:27",
+    );
+    expect_one_err(
+        "a rejected parameter type",
+        format(
+            "{}fn bp(x: Vector<u64::MAX>) i32 {{ let y: i32 = x; return x.len() as i32 + y; }}\nfn main() i32 {{ return bp(1); }}\n",
+            PRE,
+        ).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:17",
+    );
+    expect_one_err(
+        "a rejected return type",
+        format(
+            "{}fn br() Vector<u64::MAX> {{ return Vector::<u8>::new(); }}\nfn main() i32 {{ let x: bool = br(); return br().len() as i32; }}\n",
+            PRE,
+        ).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:16",
+    );
+    expect_one_err(
+        "a rejected field type",
+        format(
+            "{}struct F {{ pub f: Vector<u64::MAX> }}\nfn main() i32 {{ let s = F {{ f: 3 }}; let b: bool = s.f; return s.f.len() as i32; }}\n",
+            PRE,
+        ).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:26",
+    );
+    expect_one_err(
+        "a rejected turbofish argument",
+        format("{}fn main() i32 {{ let a = [1, 2, 3]; let v = id::<u64::MAX>(3); return unsafe a[v]; }}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:49",
+    );
+    expect_one_err(
+        "a rejected type in a unit variant's context",
+        format("{}fn main() i32 {{ let o: Option<Vector<u64::MAX>> = Option::None; return 0; }}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:38",
+    );
+    expect_one_err(
+        "a rejected type in a struct literal's context",
+        format("{}fn main() i32 {{ let w: W<{{0 - 1}}> = W {{ x: 1 }}; return w.x; }}\n", PRE).as_str(),
+        "error: const generic argument -1 is out of range for 'u64'\n--> <harness>:6:27",
+    );
+}
+
+// An expression whose check reports an error has TYPE_ERROR: a generic call it flows into infers
+// silently, and an operator, a condition, a pattern, a loop or a format argument over it reports
+// nothing more.
+@test
+fn rejected_expressions_report_once() {
+    const PRE: str = "struct P { pub a: i32 }\nenum E { A(i32), B }\nstruct W<const N: u64> { pub x: i32 }\nfn id<T>(x: T) T { return x; }\nfn mk<const N: u64>() W<N> { return W::<N> { x: 1 }; }\n";
+    expect_one_err(
+        "an unknown field into a generic call",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; let q = id(p.zz); let r: bool = q; return q.a; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:50",
+    );
+    expect_one_err(
+        "an unknown method's result",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; let z = p.nm(); let q: bool = z; return z + 1; }}\n", PRE).as_str(),
+        "error: no field or method 'nm' on 'P'\n--> <harness>:6:47",
+    );
+    expect_one_err(
+        "an unknown associated function's result",
+        format("{}fn main() i32 {{ let z = P::nope(); let q: bool = z; return -z; }}\n", PRE).as_str(),
+        "error: no associated method or constant 'nope' on this type\n--> <harness>:6:28",
+    );
+    expect_one_err(
+        "a rejected operand",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; if !p.zz && true {{ return 1; }} return 0; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:43",
+    );
+    expect_one_err(
+        "a rejected negation",
+        format("{}fn main() i32 {{ let y = -true; let z: i32 = y; return z; }}\n", PRE).as_str(),
+        "error: unary '-' requires a numeric operand\n--> <harness>:6:25",
+    );
+    expect_one_err(
+        "a rejected scrutinee",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; return switch p.zz {{ A(n) => n, B => 0, }}; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:53",
+    );
+    expect_one_err(
+        "a rejected iterable",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; for i in p.zz {{ let b: bool = i; }} return 0; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:48",
+    );
+    expect_one_err(
+        "a rejected tuple binding",
+        format("{}fn main() i32 {{ let p = P {{ a: 1 }}; let (m, n) = p.zz; return m + n; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:52",
+    );
+    expect_one_err(
+        "a rejected format argument",
+        format("{}fn main() i32 {{ let v: Vector<u64::MAX> = 3; println(\"{{}}\", v); assert(v); return 0; }}\n", PRE).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:6:31",
+    );
+}
+
+// A constant or `const fn` whose body was rejected cannot be evaluated: the evaluation refuses without
+// a diagnostic of its own, so a length, an assertion or a const argument over it reports nothing more.
+@test
+fn rejected_constants_report_once() {
+    const PRE: str = "struct P { pub a: i32 }\nenum E { A(i32), B }\nstruct W<const N: u64> { pub x: i32 }\nfn id<T>(x: T) T { return x; }\nfn mk<const N: u64>() W<N> { return W::<N> { x: 1 }; }\n";
+    expect_one_err(
+        "a rejected constant as an array length",
+        format(
+            "{}const K: usize = P {{ a: 1 }}.zz;\nfn main() i32 {{ let x: [i32; K] = [1]; let y = [0; K]; return 0; }}\n",
+            PRE,
+        ).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:29",
+    );
+    expect_one_err(
+        "a rejected constant in a static assertion",
+        format("{}const K: i32 = P {{ a: 1 }}.zz;\nstatic_assert(K == 1);\nfn main() i32 {{ return 0; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:27",
+    );
+    expect_one_err(
+        "a rejected constant as a const argument",
+        format("{}const K: u64 = P {{ a: 1 }}.zz;\nfn main() i32 {{ let w: W<K> = W {{ x: 1 }}; return w.x; }}\n", PRE).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:27",
+    );
+    expect_one_err(
+        "a rejected const fn body",
+        format(
+            "{}const fn cf() usize {{ return P {{ a: 1 }}.zz; }}\nfn main() i32 {{ let x: [i32; cf()] = [1]; return 0; }}\n",
+            PRE,
+        ).as_str(),
+        "error: no field or method 'zz' on 'P'\n--> <harness>:6:41",
+    );
+}
 @test
 fn bug_regressions() {
     h::expect_err_msg(
@@ -1043,10 +1398,144 @@ fn raw_array_index_gate() {
         "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[1..=3]; return *s.get(0); }\n",
         "range [1, 4) is out of bounds for an array of length 3",
     );
+    h::expect_ok(
+        "an instance's field length is its argument",
+        "struct B<T, const N: usize> { pub b: [T; N], pub c: [T; N * 2] }\nfn main() i32 { let x = B::<i32, 2> { b: [1, 2], c: [3, 4, 5, 6] }; let y: [i32; 4] = x.c; return x.b[1] + y[3] - 8; }\n",
+    );
     h::expect_err_msg(
-        "symbolic const-generic length is never provable",
-        "struct B<T, const N: usize> { pub b: [T; N] }\nfn main() i32 { let x = B::<i32, 4> { b: [1, 2, 3, 4] }; return x.b[0]; }\n",
+        "a constant index past an instance's field length",
+        "struct B<T, const N: usize> { pub b: [T; N] }\nfn main() i32 { let x = B::<i32, 4> { b: [1, 2, 3, 4] }; return x.b[4]; }\n",
+        "index 4 is out of bounds for an array of length 4",
+    );
+    h::expect_err_msg(
+        "an instance's field keeps its length in assignments",
+        "struct B<T, const N: usize> { pub b: [T; N] }\nfn main() i32 { let x = B::<i32, 4> { b: [1, 2, 3, 4] }; let y: [i32; 3] = x.b; return 0; }\n",
+        "mismatched types: expected '[i32; 3]', found '[i32; 4]'",
+    );
+    h::expect_err_msg(
+        "an instance's field length checks the literal",
+        "struct B<T, const N: usize> { pub b: [T; N] }\nfn main() i32 { let x = B::<i32, 4> { b: [1, 2, 3] }; return 0; }\n",
+        "array literal has 3 elements but the expected type has length 4",
+    );
+    // A constant index into a symbolic length is safe: every instance checks it (the instance
+    // graph reports the one that is past the end). A non-constant index needs `unsafe`, as for any
+    // array.
+    h::expect_exit(
+        "a constant index into a symbolic-length array",
+        "fn f<const N: usize>(a: [i32; N]) i32 { return a[2]; }\nfn main() i32 { return f([1, 2, 3]); }\n",
+        3,
+    );
+    h::expect_exit(
+        "a constant index into a symbolic-length field in a method",
+        "struct B<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> B<T, N> { pub fn third(self: &Self) &T { return &self.b[2]; } }\nfn main() i32 { let b = B::<u8, 4> { b: [1, 2, 7, 4] }; return *b.third() as i32; }\n",
+        7,
+    );
+    h::expect_err_msg(
+        "a negative constant index into a symbolic-length array",
+        "fn f<const N: usize>(a: [i32; N]) i32 { return a[-1]; }\n",
+        "index -1 is out of bounds for an array",
+    );
+    h::expect_err_msg(
+        "a non-constant index into a symbolic-length field",
+        "struct S<const N: usize> { pub a: [u8; N] }\nextend<const N: usize> S<N> { fn at(self: &Self, i: usize) u8 { return self.a[i]; } }\n",
         "indexing an array with a non-constant index requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "a constant range over a symbolic-length array",
+        "fn f<const N: usize>(a: [i32; N]) i32 { let s: []i32 = a[0..1]; return *s.get(0); }\n",
+        "slicing an array of unknown length requires an 'unsafe' block",
+    );
+    h::expect_exit(
+        "unsafe covers a constant index into a symbolic-length array",
+        "fn f<const N: usize>(a: [i32; N]) i32 { return unsafe a[2]; }\nfn main() i32 { let x: [i32; 3] = [1, 2, 3]; return f(x); }\n",
+        3,
+    );
+}
+
+// A repeat literal takes the element type its context expects, as a list literal does: a struct
+// field of symbolic length, a return and a binding alike.
+@test
+fn repeat_literals_take_the_expected_element_type() {
+    h::expect_exit(
+        "a repeat literal for a symbolic-length field",
+        "struct S<const N: usize> { pub a: [u8; N] }\nstruct U<const N: usize> { pub a: [u16; N], pub b: u8 }\nfn mk<const N: usize>() S<N> { return S::<N> { a: [250; N] }; }\nfn mk2<const N: usize>() U<N> { return U::<N> { a: [60000; N], b: 1 }; }\nfn ret<const N: usize>() [u8; N] { return [4; N]; }\nfn main() i32 {\n    let s = mk::<3>();\n    let u = mk2::<2>();\n    let r = ret::<2>();\n    static_assert(sizeof(s) == 3);\n    static_assert(sizeof(u) == 6);\n    if s.a[2] != 250 || u.a[1] != 60000 || r[1] != 4 { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a repeat literal whose value the expected element type does not hold",
+        "struct S<const N: usize> { pub a: [u8; N] }\nfn mk<const N: usize>() S<N> { return S::<N> { a: [300; N] }; }\n",
+        "mismatched types: expected '[u8; N]', found '[i32; N]'",
+    );
+}
+
+// A symbolic length is a type of its own: substitution folds it at every nesting level, and a
+// count never matches it (length 0 is a real length, not a wildcard).
+@test
+fn symbolic_array_lengths() {
+    h::expect_exit(
+        "nested symbolic fields fold at every level",
+        "struct G<const N: usize> { pub g: [[i32; N]; 2], pub e: [[u8; 2]; N] }\nextend<const N: usize> G<N> {\n    pub fn corner(self: &Self) i32 { return unsafe self.g[1][N - 1]; }\n}\nfn mk<const N: usize>(g: [[i32; N]; 2], e: [[u8; 2]; N]) G<N> { return G::<N> { g: g, e: e }; }\nfn main() i32 {\n    let x: G<3> = G::<3> { g: [[1, 2, 3], [4, 5, 6]], e: [[7, 8], [9, 10], [11, 12]] };\n    static_assert(sizeof(G<3>) == 32);\n    if x.g[1][2] != 6 || x.e[2][1] != 12 { return 1; }\n    if x.corner() != 6 { return 2; }\n    let y = mk([[1, 2], [3, 4]], [[5, 6], [7, 8]]);\n    static_assert(sizeof(y) == 20);\n    if y.corner() != 4 || y.e[1][0] != 7 { return 3; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "nested array literals against nested array types",
+        "fn main() i32 {\n    let g: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]];\n    let h: [[[i64; 2]; 2]; 2] = [[[1, 2], [3, 4]], [[5, 6], [7, 5000000000]]];\n    let s: [[u8; 4]; 2] = [[[1] = 9], [1, 2, 3, 4]];\n    if g[1][2] != 6 || h[1][1][1] != 5000000000 || s[0][1] != 9 || s[0][3] != 0 { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a nested literal with the wrong inner length",
+        "fn main() i32 { let g: [[u8; 3]; 2] = [[1, 2, 3], [4, 5]]; return g[0][0] as i32; }\n",
+        "array literal has 2 elements but the expected type has length 3",
+    );
+    h::expect_exit(
+        "a symbolic-length array as a generic argument",
+        "struct W<T> { pub t: T }\nfn wrap<const N: usize>(a: [u16; N]) W<[u16; N]> { return W::<[u16; N]> { t: a }; }\nfn total<const N: usize>(a: [u16; N]) u16 { let mut s: u16 = 0; for x in a { s += x; } return s; }\nfn main() i32 {\n    let w = wrap([1, 2, 3]);\n    static_assert(sizeof(w) == 6);\n    let z = W::<[u8; 0]> { t: [] };\n    static_assert(sizeof(z) == 0);\n    if total(w.t) != 6 { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "tuple-struct and variant arguments expect their element types",
+        "struct TC([i64; 2]);\nstruct G2<T>(T, [T; 2]);\nenum E { A([i64; 2]), B }\nfn main() i32 {\n    let t = TC([7, 8]);\n    let e = E::A([1, 2]);\n    let g = G2::<u8>(1, [2, 3]);\n    let o: Option<[u16; 2]> = Option::Some([4, 5]);\n    if t.0[1] != 8 { return 1; }\n    let v = switch e { A(x) => x[1], B => 0 };\n    if v != 2 { return 2; }\n    if g.1[1] != 3 { return 3; }\n    if o.unwrap()[0] != 4 { return 4; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a constant index into a zero-length array",
+        "fn main() i32 { let a: [i32; 0] = []; return a[0]; }\n",
+        "index 0 is out of bounds for an array of length 0",
+    );
+    h::expect_err_msg(
+        "a constant range over a zero-length array",
+        "fn main() i32 { let a: [i32; 0] = []; let s: []i32 = a[0..1]; return *s.get(0); }\n",
+        "range [0, 1) is out of bounds for an array of length 0",
+    );
+    h::expect_err_msg(
+        "a symbolic length is not a count",
+        "fn f<const N: usize>(a: [i32; N]) i32 { let c: [i32; 3] = a; return c[0]; }\n",
+        "mismatched types: expected '[i32; 3]', found '[i32; N]'",
+    );
+    h::expect_err_msg(
+        "a literal does not fill a symbolic length",
+        "fn f<const N: usize>() i32 { let b: [i32; N] = [1, 2]; return 0; }\n",
+        "mismatched types: expected '[i32; N]', found '[i32; 2]'",
+    );
+    h::expect_err_msg(
+        "an empty literal does not fill a symbolic length",
+        "fn f<const N: usize>() i32 { let b: [i32; N] = []; return 0; }\n",
+        "mismatched types: expected '[i32; N]', found '[i32; 0]'",
+    );
+    h::expect_err_msg(
+        "two symbolic lengths differ",
+        "struct B<const N: usize> { pub d: [i32; N] }\nfn f<const N: usize, const M: usize>(x: B<N>) [i32; M] { return x.d; }\n",
+        "mismatched types: expected '[i32; M]', found '[i32; N]'",
+    );
+    h::expect_err_msg(
+        "a non-linear symbolic length",
+        "struct S<const N: usize> { pub d: [i32; N * N] }\nfn main() i32 { return 0; }\n",
+        "array length must be a linear expression over const generic parameters",
+    );
+    h::expect_err_msg(
+        "an empty literal does not fill a count",
+        "fn main() i32 { let b: [i32; 2] = []; return b[0]; }\n",
+        "array literal has 0 elements but the expected type has length 2",
     );
 }
 
@@ -1195,7 +1684,34 @@ fn numeric_suffixes_widening() {
     h::expect_err_msg(
         "negative literal into an unsigned slot",
         "fn main() i32 { let a: u32 = -1; return 0; }\n",
-        "out of range for 'u32'",
+        "cannot apply unary operator '-' to type 'u32'",
+    );
+    // No unsigned value has a negation (Rust's rule): a suffixed literal, a binding, a zero and a
+    // negated literal-only expression are all rejected.
+    h::expect_err_msg(
+        "negated suffixed unsigned literal",
+        "fn main() i32 { let a = -231u32; return 0; }\n",
+        "cannot apply unary operator '-' to type 'u32'",
+    );
+    h::expect_err_msg(
+        "negated unsigned binding",
+        "fn main() i32 { let y: u8 = 3; let a = -y; return 0; }\n",
+        "cannot apply unary operator '-' to type 'u8'",
+    );
+    h::expect_err_msg(
+        "negated zero into an unsigned slot",
+        "fn main() i32 { let a: u64 = -0; return 0; }\n",
+        "cannot apply unary operator '-' to type 'u64'",
+    );
+    h::expect_err_msg(
+        "negated literal adapting to an unsigned operand",
+        "fn main() i32 { let z: usize = 1; let a = z - -1; return 0; }\n",
+        "cannot apply unary operator '-' to type 'usize'",
+    );
+    h::expect_err_msg(
+        "negated literal expression into an unsigned slot",
+        "fn main() i32 { let a: u16 = -(2 - 2); return 0; }\n",
+        "cannot apply unary operator '-' to type 'u16'",
     );
     h::expect_ok(
         "extreme literals fit their signed slots",
@@ -2793,6 +3309,118 @@ fn multi_conformance_overloads() {
     );
 }
 
+// An erasure to a generic interface needs a conformance with the dyn type's own arguments: one with
+// other arguments would run its methods on these argument types. Every coercion site checks it.
+@test
+fn dyn_conformance_needs_the_dyn_arguments() {
+    h::expect_err_msg(
+        "a borrowed erasure",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let f = F { a: 1 }; let d: &dyn I<bool> = &f; return d.put(true); }\n",
+        "cannot erase 'F' to '&dyn I<bool>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "a mutable erasure",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let mut f = F { a: 1 }; let d: &mut dyn I<bool> = &mut f; return 0; }\n",
+        "cannot erase 'F' to '&mut dyn I<bool>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "an owned erasure",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let b: Box<dyn I<bool>> = Box::new(F { a: 1 }); return 0; }\n",
+        "cannot erase 'F' to 'Box<dyn I<bool>>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "an argument",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn take(d: &dyn I<bool>) i32 { return d.put(true); }\nfn main() i32 { let f = F { a: 1 }; return take(&f); }\n",
+        "cannot erase 'F' to '&dyn I<bool>'",
+    );
+    h::expect_err_msg(
+        "a result",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn give(f: &F) &dyn I<bool> { return f; }\nfn main() i32 { return 0; }\n",
+        "cannot erase 'F' to '&dyn I<bool>'",
+    );
+    h::expect_err_msg(
+        "a struct field",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nstruct H<'a> { pub d: &'a dyn I<bool> }\nfn main() i32 { let f = F { a: 1 }; let h = H { d: &f }; return 0; }\n",
+        "cannot erase 'F' to '&dyn I<bool>'",
+    );
+    h::expect_err_msg(
+        "a container element",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let f = F { a: 1 }; let mut v = Vector::<&dyn I<bool>>::new(); v.push(&f); return 0; }\n",
+        "cannot erase 'F' to '&dyn I<bool>'",
+    );
+    h::expect_err_msg(
+        "a const argument",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let f = F { a: 1 }; let d: &dyn C<3> = &f; return 0; }\n",
+        "cannot erase 'F' to '&dyn C<3>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "the note names the other conformance",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nfn main() i32 { let f = F { a: 1 }; let d: &dyn I<bool> = &f; return 0; }\n",
+        "a conformance with other arguments is declared here",
+    );
+    h::expect_err_msg(
+        "a generic function's type parameter",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\ninterface C<const N: usize> { fn n(self: &Self) usize; }\nstruct F { pub a: i32 }\nextend F as I<i32> { pub fn put(self: &F, x: i32) i32 { return x + self.a; } }\nextend F as C<2> { pub fn n(self: &F) usize { return 2; } }\nstruct W<T> { pub v: T }\nextend W<i32> as I<i32> { pub fn put(self: &W<i32>, x: i32) i32 { return x; } }\nfn gen<T>(w: &W<T>) &dyn I<T> { return w; }\nfn main() i32 { return 0; }\n",
+        "mismatched types: expected '&dyn I<T>', found '&W<T>'",
+    );
+}
+
+// A `fn` value and a `dyn fn` compare every result: a function with several results never matches a
+// signature with other results or with none.
+@test
+fn fn_types_compare_every_result() {
+    h::expect_err_msg(
+        "a dyn fn with other results",
+        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let d: &dyn fn(i32) (bool, bool) = two; return 0; }\n",
+        "mismatched types: expected '&dyn fn(i32) (bool, bool)', found 'fn(i32) (i32, i32)'",
+    );
+    h::expect_err_msg(
+        "a dyn fn with no result",
+        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let d: &dyn fn(i32) = two; return 0; }\n",
+        "mismatched types: expected '&dyn fn(i32)', found 'fn(i32) (i32, i32)'",
+    );
+    h::expect_err_msg(
+        "a dyn fn with several results from a function with none",
+        "fn none(x: i32) {}\nfn main() i32 { let d: &dyn fn(i32) (i32, i32) = none; return 0; }\n",
+        "mismatched types: expected '&dyn fn(i32) (i32, i32)', found 'fn(i32)'",
+    );
+    h::expect_err_msg(
+        "a fn pointer with other results",
+        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let f: fn(i32) (bool, bool) = two; return 0; }\n",
+        "mismatched types: expected 'fn(i32) (bool, bool)', found 'fn(i32) (i32, i32)'",
+    );
+    h::expect_err_msg(
+        "a dyn fn with another parameter",
+        "fn inc(x: i32) i32 { return x + 1; }\nfn main() i32 { let d: &dyn fn(bool) i32 = inc; return 0; }\n",
+        "mismatched types: expected '&dyn fn(bool) i32', found 'fn(i32) i32'",
+    );
+    h::expect_err_msg(
+        "a boxed dyn fn with another result",
+        "fn main() i32 { let c = |x: i32| x + 1; let b: Box<dyn fn(i32) bool> = Box::new(c); return 0; }\n",
+        "mismatched types: expected 'Box<dyn fn(i32) bool>'",
+    );
+}
+
+// Overload selection over several conformances checks an argument the peek cannot type before it
+// declares a tie; a tie that survives the argument types stays an ambiguity error.
+@test
+fn conformance_selection_checks_arguments() {
+    h::expect_ok(
+        "a field argument selects the conformance",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\nstruct P { pub a: i32, pub b: bool }\nextend P as I<i32> { pub fn put(self: &P, x: i32) i32 { return x; } }\nextend P as I<bool> { pub fn put(self: &P, x: bool) i32 { return 1; } }\nfn main() i32 { let p = P { a: 1, b: true }; return p.put(p.a) + p.put(p.b) + p.put(true); }\n",
+    );
+    h::expect_err_msg(
+        "a tie the argument's type does not break",
+        "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: i32) i32; }\nstruct V { pub a: i32 }\nextend V as A { pub fn m(self: &V, x: i32) i32 { return x + 1; } }\nextend V as B { pub fn m(self: &V, x: i32) i32 { return x + 2; } }\nfn main() i32 { let v = V { a: 1 }; return v.m(v.a); }\n",
+        "ambiguous call: two candidates for 'm' fit equally well",
+    );
+    h::expect_err_msg(
+        "an argument no candidate takes",
+        "interface I<T> { fn put(self: &Self, x: T) i32; }\nstruct P { pub a: i32, pub s: str }\nextend P as I<i32> { pub fn put(self: &P, x: i32) i32 { return x; } }\nextend P as I<bool> { pub fn put(self: &P, x: bool) i32 { return 1; } }\nfn main() i32 { let p = P { a: 1, s: \"x\" }; return p.put(p.s); }\n",
+        "mismatched types",
+    );
+}
+
 // Higher-ranked bounds and lifetime-parameterised associated types, semantically. An HRTB fn value
 // works for EVERY lifetime, so calls at different scopes are fine while a result borrowing a local
 // still cannot escape: the existing region machinery composes with the ranking. An interface's
@@ -3469,8 +4097,8 @@ fn region_outlives_transitive() {
 // says nothing about this one. The loop-body walk runs twice on purpose (to catch conflicts that only show
 // up across the back edge), and without that reset the second pass saw the first pass's move and rejected
 // the arm's own use: while the identical code outside a loop, or with a `let` binding, was accepted.
-// The repeat count is part of the type, so it has to be constant, and every slot holds its own copy, which
-// a value that owns resources cannot provide.
+// The repeat count is part of the type, so it has to be constant (or a const-generic form each instance
+// folds), and every slot holds its own copy, which only a Copy value can provide.
 @test
 fn array_repeat_requirements() {
     h::expect_ok(
@@ -3486,6 +4114,26 @@ fn array_repeat_requirements() {
         "repeating a value that owns resources is rejected",
         "fn main() i32 {\n    let a = [String::from_str(\"x\"); 2];\n    return a[0].len() as i32;\n}\n",
         "owns resources",
+    );
+    // A const-generic count may exceed one in some instance, so the value must be Copy in every one.
+    h::expect_ok(
+        "a const-generic count over a Copy value is accepted",
+        "fn f<T: Copy, const N: usize>(v: T) [T; N] {\n    return [v; N];\n}\nfn g<const N: usize>() [[u8; N]; 2] {\n    return [[0u8; N]; 2];\n}\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    h::expect_err_msg(
+        "a const-generic count over an owning type parameter is rejected",
+        "fn f<T, const N: usize>(v: T) [T; N] {\n    return [v; N];\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "an array repeat needs a value that can be copied; this one owns resources",
+    );
+    h::expect_err_msg(
+        "a repeated exclusive reference is rejected",
+        "fn main() i32 {\n    let mut x = 1;\n    let a = [&mut x; 2];\n    return 0;\n}\n",
+        "an array repeat needs a value that can be copied; '&mut i32' is not 'Copy'",
+    );
+    h::expect_err_msg(
+        "a runtime count in a generic body is still rejected",
+        "fn f<const N: usize>(n: usize) [u8; N] {\n    return [0u8; n];\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "an array repeat count must be a constant expression",
     );
 }
 
@@ -3668,8 +4316,21 @@ fn generic_fn_as_value() {
     );
     h::expect_err_msg(
         "an inferred binding cannot name a generic fn",
-        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f = id::<i32>;\n    return f(0);\n}\n",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f = id;\n    return f(0);\n}\n",
         "cannot infer the type of a generic function used as a value",
+    );
+    // A generic struct's function-type field substitutes its signature: the mismatch names the
+    // instance's parameter types, not the declaration's `T`.
+    h::expect_err_msg(
+        "a substituted function-type field rejects another signature",
+        "struct W<T> { pub f: fn(T) T }\nfn dbl(x: i64) i64 { return x * 2; }\nfn main() i32 {\n    let w = W::<i32> { f: dbl };\n    return w.f(1);\n}\n",
+        "expected 'fn(i32) i32', found 'fn(i64) i64'",
+    );
+    // Every type argument given: the value is a pointer to that instance, whose type is known.
+    h::expect_exit(
+        "an inferred binding takes a fully turbofished generic fn",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f = id::<i32>;\n    return f(4) - 4;\n}\n",
+        0,
     );
     // The two sides of a fn-type mismatch must be distinguishable, never both a bare "fn".
     h::expect_err_msg(
@@ -3743,11 +4404,17 @@ fn const_generic_array_layout() {
         "struct H { pub a: Array<u64, 4>, pub b: u8 }\nstruct W<const N: usize> { pub d: [u32; N] }\nstatic_assert(sizeof(Array<u64, 4>) == 32);\nstatic_assert(sizeof(H) == 40);\nstatic_assert(sizeof(W<3>) == 12);\nfn main() i32 { return (sizeof(H) + sizeof(W<3>)) as i32 - 52; }\n",
         0,
     );
-    // The model does not fold an arithmetic length (`N * 2`), so this assert stays undecidable.
-    let r = h::compile_and_run(
-        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2] }\nstatic_assert(sizeof(T<3>) == 56);\nfn main() i32 { return 0; }\n",
+    // An arithmetic length (`N * 2`) folds through the instance's arguments, at every nesting level.
+    h::expect_exit(
+        "sizeof folds arithmetic and nested symbolic lengths",
+        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2], pub g: [[u8; N]; 2] }\nstatic_assert(sizeof(T<3>) == 64);\nfn main() i32 { return 0; }\n",
+        0,
     );
-    assert(!r.built, "an undecidable top-level static_assert fails the build");
+    h::expect_err_msg(
+        "a false sizeof assert over an arithmetic length fails",
+        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2] }\nstatic_assert(sizeof(T<3>) == 48, \"no\");\nfn main() i32 { return 0; }\n",
+        "static assertion failed",
+    );
 }
 
 // `tc_type_is_free` peels to the referent, so the split-init rule has to gate on the type kind first:
@@ -4098,6 +4765,31 @@ fn rejection_messages() {
         "type alias is cyclic",
     );
     h::expect_err_msg(
+        "cyclic generic type alias",
+        "struct Pair<A, B> { pub a: A, pub b: B }\ntype C<T> = Pair<T, C<T>>;\nfn f(x: C<i32>) {}\nfn main() i32 { return 0; }\n",
+        "type alias is cyclic",
+    );
+    h::expect_err_msg(
+        "mutually cyclic generic type aliases",
+        "struct Pair<A, B> { pub a: A, pub b: B }\ntype D1<T> = D2<T>;\ntype D2<T> = D1<Pair<T, T>>;\nfn f(x: D1<i32>) {}\nfn main() i32 { return 0; }\n",
+        "type alias is cyclic",
+    );
+    h::expect_err_msg(
+        "generic alias argument count",
+        "struct Pair<A, B> { pub a: A, pub b: B }\ntype Q<T> = Pair<T, T>;\nfn f(x: Q<i32, i32>) {}\nfn main() i32 { return 0; }\n",
+        "this type alias takes 1 generic argument(s) but 2 were supplied",
+    );
+    h::expect_err_msg(
+        "generic alias path base without arguments",
+        "struct Pair<A, B> { pub a: A, pub b: B }\nextend<A, B> Pair<A, B> { pub fn mk(a: A, b: B) Pair<A, B> { return Pair::<A, B> { a: a, b: b }; } }\ntype Q<T> = Pair<T, T>;\nfn main() i32 { let q = Q::mk(1, 2); return q.a - 1; }\n",
+        "this type alias takes 1 generic argument(s) but 0 were supplied",
+    );
+    h::expect_err_msg(
+        "extend of a generic alias",
+        "struct Pair<A, B> { pub a: A, pub b: B }\ntype Q<T> = Pair<T, T>;\nextend Q<i32> { pub fn sum(self: &Self) i32 { return self.a + self.b; } }\nfn main() i32 { return 0; }\n",
+        "a generic type alias cannot be extended; extend the aliased type",
+    );
+    h::expect_err_msg(
         "dyn needs an interface",
         "fn f(x: &dyn i32) {}\nfn main() i32 { return 0; }\n",
         "'dyn' requires an interface",
@@ -4189,6 +4881,45 @@ fn more_rejection_messages() {
         "enum discriminant not integer",
         "enum E { A = true }\nfn main() i32 { return 0; }\n",
         "enum discriminant must be an integer",
+    );
+    h::expect_err_msg(
+        "enum discriminant cycle",
+        "enum E { A = E::B as i32, B }\nfn main() i32 { return 0; }\n",
+        "error: enum discriminant cannot be evaluated at compile time: cyclic constant dependency",
+    );
+    h::expect_err_msg(
+        "enum discriminant trap",
+        "enum E { A = 1 / 0 }\nfn main() i32 { return 0; }\n",
+        "error: enum discriminant cannot be evaluated at compile time: division by zero",
+    );
+    h::expect_err_msg(
+        "enum discriminant not constant",
+        "static mut S: i32 = 1;\nenum E { A = unsafe S, B }\nfn main() i32 { return E::B as i32; }\n",
+        "error: enum discriminant cannot be evaluated at compile time: it does not fold to a constant",
+    );
+    h::expect_err_msg(
+        "duplicate enum discriminant",
+        "enum E { A = 1, B, C = 2 }\nfn main() i32 { return 0; }\n",
+        "error: duplicate enum discriminant 2: variant 'B' already has it",
+    );
+    h::expect_err_msg(
+        "duplicate payload enum discriminant",
+        "enum E { A(i32), B = 0 }\nfn main() i32 { return 0; }\n",
+        "error: duplicate enum discriminant 0: variant 'A' already has it",
+    );
+    h::expect_err_msg(
+        "enum discriminant past i32",
+        "enum E { A = 2147483647, B }\nfn main() i32 { return 0; }\n",
+        "error: enum discriminant 2147483648 is outside the i32 range of a C enum constant",
+    );
+    h::expect_ok(
+        "enum discriminants at the i32 bounds",
+        "enum E { A = -2147483648, B = 2147483647 }\nenum P { X(i32), Y = -1 }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "constant self cycle",
+        "const A: i32 = A;\nfn main() i32 { return 0; }\n",
+        "error: constant 'A' cannot be evaluated at compile time: cyclic constant dependency",
     );
     h::expect_err_msg(
         "non-constant array range needs unsafe",
@@ -4516,5 +5247,902 @@ fn store_through_reference_chain() {
             "{}fn relay<'x>(w: &mut Vector<&'x i32>, e: &'x i32) {{\n    let r = &mut *w;\n    put(r, e);\n}}\nfn main() i32 {{\n    let a = 1;\n    let mut v = Vector::<&i32>::new();\n    relay(&mut v, &a);\n    return **v.at(0) - 1;\n}}\n",
             put,
         ).as_str(),
+    );
+}
+
+// An extend's generic parameters are solved from its target's arguments: a bare parameter takes
+// the instance's argument, a const form `{c * N + k}` the value that inverts it (exact and in N's
+// type), and an argument that names no parameter must equal the instance's. The extend applies to
+// the instances that solve, for methods, conformances, dyn values and defaults alike.
+@test
+fn extend_targets_solve_their_parameters() {
+    h::expect_exit(
+        "form targets bind their parameter to the inverse",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> {\n    fn get(self: &Self) u64 { return N; }\n    fn twice(self: &Self) u64 { return self.get() * 2; }\n    fn make() Self { return F::<{N + 3}> { x: N }; }\n    pub const K: u64 = N * 10;\n}\nstruct H<const M: u64> { pub x: u64 }\nextend<const N: u64> H<{2 * N}> { fn half(self: &Self) u64 { return N; } }\nstruct G<const M: i64> { pub x: i64 }\nextend<const N: i64> G<{10 - N}> { fn neg(self: &Self) i64 { return N; } }\ninterface I { fn v(self: &Self) u64; fn dv(self: &Self) u64 { return self.v() + 100; } }\nextend<const N: u64> F<{N + 3}> as I { fn v(self: &Self) u64 { return N; } }\nfn use_i<T: I>(t: &T) u64 { return t.v() + t.dv(); }\nfn g<const M: u64>(f: F<{M + 3}>) u64 { return f.get(); }\nconst C: u64 = F::<10> { x: 0 }.get();\nstatic_assert(C == 7);\nfn main() i32 {\n    let f = F::<10> { x: 1 };\n    let h = H::<8> { x: 1 };\n    let q = G::<3> { x: 0 };\n    let d: &dyn I = &f;\n    let m = F::<10>::make();\n    let mut r: u64 = 0;\n    if f.get() == 7 { r += 1; }\n    if f.twice() == 14 { r += 2; }\n    if h.half() == 4 { r += 4; }\n    if q.neg() == 7 { r += 8; }\n    if use_i(&f) == 114 { r += 16; }\n    if d.v() == 7 { r += 32; }\n    if g::<5>(F::<8> { x: 0 }) == 5 { r += 64; }\n    if m.x == 7 && F::<10>::K == 70 { r += 128; }\n    return (r - 200) as i32;\n}\n",
+        55,
+    );
+    h::expect_exit(
+        "disjoint specializations each serve their own instances",
+        "struct F<const M: u64> { pub x: u64 }\ninterface I { fn v(self: &Self) u64; }\nextend<const N: u64> F<{2 * N}> as I { fn v(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> as I { fn v(self: &Self) u64 { return N + 1000; } }\nextend<const N: u64> F<{2 * N}> { fn w(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> { fn w(self: &Self) u64 { return N + 1000; } }\nfn use_i<T: I>(t: &T) u64 { return t.v(); }\nstruct P<A> { pub a: A }\nextend P<u8> { fn get(self: &Self) i32 { return 1; } }\nextend P<i32> { fn get(self: &Self) i32 { return 2; } }\nfn main() i32 {\n    let a = F::<8> { x: 0 };\n    let b = F::<9> { x: 0 };\n    let da: &dyn I = &a;\n    let db: &dyn I = &b;\n    let pu = P::<u8> { a: 1 };\n    let pi = P::<i32> { a: 1 };\n    let mut r = 0;\n    if use_i(&a) == 4 && use_i(&b) == 1004 { r += 1; }\n    if da.v() == 4 && db.v() == 1004 { r += 2; }\n    if a.w() == 4 && b.w() == 1004 { r += 4; }\n    if pu.get() == 1 && pi.get() == 2 { r += 8; }\n    return r;\n}\n",
+        15,
+    );
+    h::expect_err_msg(
+        "a form whose inverse leaves the parameter's type does not apply",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> { fn get(self: &Self) u64 { return N; } }\nfn main() i32 { let f = F::<2> { x: 1 }; return f.get() as i32; }\n",
+        "no field or method 'get' on 'F<2>'",
+    );
+    h::expect_err_msg(
+        "a form whose inverse is not an integer does not apply",
+        "struct H<const M: u64> { pub x: u64 }\nextend<const N: u64> H<{2 * N}> { fn half(self: &Self) u64 { return N; } }\nfn main() i32 { let h = H::<7> { x: 1 }; return h.half() as i32; }\n",
+        "no field or method 'half' on 'H<7>'",
+    );
+    h::expect_err_msg(
+        "a form applies to a symbolic argument only when every value solves",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> { fn get(self: &Self) u64 { return N; } }\nfn h<const M: u64>(f: F<M>) u64 { return f.get(); }\n",
+        "no field or method 'get' on 'F<M>'",
+    );
+    h::expect_err_msg(
+        "a conformance applies to the instances its target solves",
+        "struct F<const M: u64> { pub x: u64 }\ninterface I { fn v(self: &Self) u64; }\nextend<const N: u64> F<{N + 3}> as I { fn v(self: &Self) u64 { return N; } }\nfn use_i<T: I>(t: &T) u64 { return t.v(); }\nfn main() i32 { let f = F::<2> { x: 1 }; return use_i(&f) as i32; }\n",
+        "type 'F<2>' does not satisfy bound 'I'",
+    );
+    h::expect_err_msg(
+        "a fixed target argument must match",
+        "struct P<A, B> { pub a: A, pub b: B }\nextend<Z: Copy> P<i64, Z> { fn sec(self: &Self) Z { return self.b; } }\nfn main() i32 { let p = P::<i32, i32> { a: 5, b: 7 }; return p.sec(); }\n",
+        "no field or method 'sec' on 'P<i32, i32>'",
+    );
+    h::expect_err_msg(
+        "an alias target is its instance",
+        "struct W<const N: u64> { pub x: u64 }\ntype W4 = W<4>;\nextend W4 { fn k(self: &Self) u64 { return 44; } }\nfn main() i32 { let b = W::<5> { x: 1 }; return b.k() as i32; }\n",
+        "no field or method 'k' on 'W<5>'",
+    );
+    h::expect_err_msg(
+        "a form of two parameters solves neither",
+        "struct D<const A: u64, const B: u64> { pub x: u64 }\nextend<const N: u64, const K: u64> D<{N + K}, 1> { fn s(self: &Self) u64 { return N; } }\n",
+        "an extend's target argument must be one of its generic parameters, a const form `c * N + k` of one, or a type that names none of them",
+    );
+    h::expect_err_msg(
+        "a divided form does not invert",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N / 2}> { fn h(self: &Self) u64 { return N; } }\n",
+        "an extend's target argument must be one of its generic parameters, a const form `c * N + k` of one, or a type that names none of them",
+    );
+    h::expect_err_msg(
+        "a parameter inside another type argument",
+        "struct W<T> { pub w: T }\nextend<T> W<Vector<T>> { fn q(self: &Self) i32 { return 1; } }\n",
+        "an extend's target argument must be one of its generic parameters, a const form `c * N + k` of one, or a type that names none of them",
+    );
+    h::expect_err_msg(
+        "a parameter no argument names",
+        "struct W<T> { pub w: T }\nextend<T, U> W<T> { fn r(self: &Self) i32 { return 1; } }\n",
+        "the generic parameter 'U' of this extend does not appear in its target",
+    );
+    h::expect_err_msg(
+        "a parameter in two arguments",
+        "struct P<A, B> { pub a: A, pub b: B }\nextend<T> P<T, T> { fn t(self: &Self) i32 { return 1; } }\n",
+        "the generic parameter 'T' appears in two arguments of the extend's target",
+    );
+    h::expect_err_msg(
+        "Free on a specialization",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 1}> as Free { fn free(self: &mut Self) {} }\n",
+        "'Free' is implemented for every instance of a type: write the target with the extend's parameters in order",
+    );
+}
+
+// An interface default body binds the interface's parameters to the arguments of the conformance
+// that supplies it, which may name the implementor's own parameters, for each implementing instance.
+@test
+fn interface_defaults_bind_the_conformance_arguments() {
+    h::expect_exit(
+        "defaults over interface const parameters",
+        "struct U<const M: u64> { pub v: u64 }\ninterface I<const K: u64> {\n    fn get(self: &Self) u64;\n    fn d(self: &Self) u64 { let u = U::<{K - 1}> { v: 3 }; return u.v + K + self.get(); }\n}\nstruct F { pub x: u64 }\nextend F as I<3> { fn get(self: &Self) u64 { return 0; } }\nstruct G<const N: u64> { pub x: u64 }\nextend<const N: u64> G<{N + 1}> as I<{N * 2}> { fn get(self: &Self) u64 { return N; } }\nfn call<T: I<8>>(t: &T) u64 { return t.d(); }\nfn main() i32 {\n    let f = F { x: 0 };\n    let g = G::<5> { x: 0 };\n    let dg: &dyn I<8> = &g;\n    return (f.d() + g.d() + call(&g) + dg.d()) as i32;\n}\n",
+        51,
+    );
+}
+
+// A bound on a generic interface requires a conformance with the bound's own arguments, and a type
+// parameter meets a bound only through its own bounds (`where` clauses and superinterfaces included):
+// a conformance or bound with other arguments would run its methods on these argument types.
+@test
+fn bounds_need_the_interface_arguments() {
+    let I: str = "interface I<A> { fn put(self: &Self, a: A) i32; }\ninterface J<B>: I<B> { fn j(self: &Self) i32; }\nstruct F { pub x: i32 }\nextend F as I<i32> { pub fn put(self: &F, a: i32) i32 { return a; } }\n";
+    h::expect_err_msg(
+        "a function bound",
+        format(
+            "{}fn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn main() i32 {{ let f = F {{ x: 1 }}; return g(&f); }}\n",
+            I,
+        ).as_str(),
+        "type 'F' does not satisfy bound 'I<bool>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "the note names the other conformance",
+        format(
+            "{}fn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn main() i32 {{ let f = F {{ x: 1 }}; return g(&f); }}\n",
+            I,
+        ).as_str(),
+        "a conformance with other arguments is declared here",
+    );
+    h::expect_err_msg(
+        "a where clause",
+        format(
+            "{}fn g<T>(t: &T) i32 where T: I<bool> {{ return t.put(true); }}\nfn main() i32 {{ let f = F {{ x: 1 }}; return g(&f); }}\n",
+            I,
+        ).as_str(),
+        "type 'F' does not satisfy where-clause bound 'I<bool>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "a type parameter bounded with other arguments",
+        format(
+            "{}fn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn h<U: I<i32>>(u: &U) i32 {{ return g(u); }}\n",
+            I,
+        ).as_str(),
+        "type 'U' does not satisfy bound 'I<bool>': 'U' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "the note names the other bound",
+        format(
+            "{}fn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn h<U: I<i32>>(u: &U) i32 {{ return g(u); }}\n",
+            I,
+        ).as_str(),
+        "a bound with other arguments is declared here",
+    );
+    h::expect_err_msg(
+        "an unbounded type parameter",
+        format("{}fn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn h<U>(u: &U) i32 {{ return g(u); }}\n", I).as_str(),
+        "type 'U' does not satisfy bound 'I<bool>'",
+    );
+    h::expect_err_msg(
+        "an unbounded type parameter and a plain interface",
+        "interface K { fn k(self: &Self) i32; }\nfn g<T: K>(t: &T) i32 { return t.k(); }\nfn h<U>(u: &U) i32 { return g(u); }\n",
+        "type 'U' does not satisfy bound 'K'",
+    );
+    h::expect_ok(
+        "a superinterface with the bound's arguments",
+        format(
+            "{}extend F as I<bool> {{ pub fn put(self: &F, a: bool) i32 {{ return 1; }} }}\nextend F as J<bool> {{ pub fn j(self: &F) i32 {{ return 2; }} }}\nfn g<T: I<bool>>(t: &T) i32 {{ return t.put(true); }}\nfn h<U: J<bool>>(u: &U) i32 {{ return g(u) + u.put(false); }}\nfn w<V>(v: &V) i32 where V: J<bool> {{ return h(v); }}\n",
+            I,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "a superinterface conformance with other arguments",
+        format("{}extend F as J<bool> {{ pub fn j(self: &F) i32 {{ return 2; }} }}\n", I).as_str(),
+        "type does not satisfy required superinterface",
+    );
+    h::expect_err_msg(
+        "a bound call types its arguments through a superinterface",
+        format("{}fn h<U: J<bool>>(u: &U) i32 {{ return u.put(5); }}\n", I).as_str(),
+        "mismatched types: expected 'bool', found 'i32'",
+    );
+    h::expect_err_msg(
+        "an extend parameter bound",
+        format(
+            "{}struct W<T> {{ pub t: T }}\nextend<T: I<bool>> W<T> {{ pub fn run(self: &W<T>) i32 {{ return self.t.put(true); }} }}\nfn main() i32 {{ let w = W {{ t: F {{ x: 1 }} }}; return w.run(); }}\n",
+            I,
+        ).as_str(),
+        "cannot call 'W<F>::run': unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "a struct parameter bound in a type",
+        format("{}struct S<T: I<bool>> {{ pub t: T }}\nfn take(s: S<F>) {{}}\n", I).as_str(),
+        "type 'F' does not satisfy bound 'I<bool>': 'F' conforms to this interface only with other arguments",
+    );
+    h::expect_err_msg(
+        "a struct parameter bound in an inferred literal",
+        "interface K { fn k(self: &Self) i32; }\nstruct F { pub x: i32 }\nstruct S<T: K> { pub t: T }\nfn main() i32 { let s = S { t: F { x: 1 } }; return 0; }\n",
+        "type 'F' does not satisfy bound 'K'",
+    );
+    h::expect_err_msg(
+        "a struct parameter bound on a type parameter",
+        "interface K { fn k(self: &Self) i32; }\nstruct S<T: K> { pub t: T }\nfn take<U>(s: &S<U>) {}\n",
+        "type 'U' does not satisfy bound 'K'",
+    );
+}
+
+// Associated types through bounds: `T::Output` names the bound's, a binding (`Output = T`) fixes it,
+// and each misuse is reported where it is written.
+@test
+fn associated_types_through_bounds() {
+    const M: str = "struct M { pub v: i32 }\nextend M as Add<i32> {\n    type Output = i64;\n    pub fn add(self: &Self, other: &i32) i64 { return self.v as i64 + *other as i64; }\n}\n";
+    h::expect_ok(
+        "T::Output is the bound's associated type",
+        format(
+            "{}fn f<T: Add<i32>>(t: T) T::Output {{ return t + 1; }}\nfn main() i32 {{ let x: i64 = f(M {{ v: 1 }}); return 0; }}\n",
+            M,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "compound assignment needs the result to be T",
+        format("{}fn f<T: Add<i32>>(t: T) T {{ let mut x = t; x += 1; return x; }}\n", M).as_str(),
+        "mismatched types: the operator's result 'T::Output' is not 'T'",
+    );
+    h::expect_err_msg(
+        "a name no bound declares",
+        format("{}fn f<T: Add<i32>>(t: T) T::Foo {{ return t; }}\n", M).as_str(),
+        "no type 'Foo' in 'T'",
+    );
+    h::expect_err_msg(
+        "a binding names an associated type of its interface",
+        "fn f<T: Add<i32, Outpt = T>>(t: T) T { return t; }\n",
+        "no associated type 'Outpt' in 'Add'",
+    );
+    h::expect_err_msg(
+        "a binding is written once",
+        "fn f<T: Add<i32, Output = T, Output = T>>(t: T) T { return t; }\n",
+        "associated type 'Output' is bound twice",
+    );
+    h::expect_err_msg(
+        "two bounds declaring the name",
+        "fn f<T: Add<i32> + Add<i64>>(t: T) T::Output { return t + 1; }\n",
+        "ambiguous associated type 'Output': several bounds of 'T' declare it",
+    );
+    h::expect_err_msg(
+        "a binding outside a bound",
+        "fn f(x: &Vector<i32, Output = i32>) {}\n",
+        "an associated type binding is only allowed in a generic bound",
+    );
+    h::expect_err_msg(
+        "a binding the conformance does not meet",
+        format(
+            "{}fn f<T: Add<i32, Output = T>>(t: T) T {{ return t + 1; }}\nfn main() i32 {{ let x = f(M {{ v: 1 }}); return 0; }}\n",
+            M,
+        ).as_str(),
+        "type 'M' does not satisfy bound 'Add<i32, Output = T>': its 'Output' is 'i64'",
+    );
+    h::expect_err_msg(
+        "a type parameter without the binding",
+        format(
+            "{}fn f<T: Add<i32, Output = T>>(t: T) T {{ return t + 1; }}\nfn g<U: Add<i32>>(u: U) U {{ return f(u); }}\n",
+            M,
+        ).as_str(),
+        "type 'U' does not satisfy bound 'Add<i32, Output = T>': its 'Output' is 'U::Output'",
+    );
+    h::expect_err_msg(
+        "a builtin is no bound",
+        "fn f<T: i32>(t: T) {}\n",
+        "'i32' is not an interface: a bound names an interface or a 'fn' type",
+    );
+    h::expect_err_msg(
+        "a struct is no bound",
+        "struct S {}\nfn f<T>(t: T) where T: S {}\n",
+        "'S' is not an interface: a bound names an interface or a 'fn' type",
+    );
+    h::expect_err_msg(
+        "a moved T::Output",
+        "struct N { pub s: String }\nextend N as Add {\n    type Output = String;\n    pub fn add(self: &Self, other: &N) String { return self.s.clone(); }\n}\nfn dup<T: Add>(a: &T, b: &T) T::Output { let s = *a + *b; let t = s; let u = s; return t; }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "an operator no bound provides",
+        "fn f<T>(t: T) T { return t + t; }\n",
+        "type parameter 'T' has no 'add' method for this operator (add a bound that provides it)",
+    );
+    h::expect_err_msg(
+        "indexing without an Index bound",
+        "fn f<T>(t: &T) i32 { return t[0]; }\n",
+        "type parameter 'T' has no 'index' method for '[]' (add a bound that provides it)",
+    );
+    h::expect_err_msg(
+        "writing an element without IndexMut",
+        "fn f<T: Index<i32, []i32>>(t: &mut T) { t[0] = 1; }\n",
+        "cannot assign to this expression",
+    );
+}
+
+// A bound gives evidence for a generic argument only through the one conformance that fits it.
+@test
+fn inference_from_bounds_needs_one_conformance() {
+    const I: str = "interface I<A> { fn get(self: &Self) A; }\nstruct P { pub v: i32 }\nextend P as I<i32> { pub fn get(self: &Self) i32 { return self.v; } }\nextend P as I<bool> { pub fn get(self: &Self) bool { return self.v > 0; } }\nstruct Q { pub v: i32 }\nextend Q as I<u8> { pub fn get(self: &Self) u8 { return self.v as u8; } }\nfn f<A, T: I<A>>(t: T) A { return t.get(); }\n";
+    h::expect_ok(
+        "one conformance infers the argument",
+        format("{}fn main() i32 {{ let q: u8 = f(Q {{ v: 3 }}); return 0; }}\n", I).as_str(),
+    );
+    h::expect_ok(
+        "the expected result picks among several",
+        format("{}fn main() i32 {{ let x: bool = f(P {{ v: 3 }}); return 0; }}\n", I).as_str(),
+    );
+    h::expect_ok(
+        "a bound of a type parameter is its conformance",
+        format("{}fn g<U: I<bool>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
+    );
+    h::expect_err_msg(
+        "several conformances and no other evidence",
+        format("{}fn main() i32 {{ let z = f(P {{ v: 3 }}); return 0; }}\n", I).as_str(),
+        "cannot infer 'A': 'P' conforms to 'I' with several arguments",
+    );
+    h::expect_err_msg(
+        "an inherited default under several fitting conformances",
+        "interface Mk<A> {\n    fn make(self: &Self, a: A) i32;\n    fn make2(self: &Self, a: A, b: A) i32 { return self.make(a) + self.make(b); }\n}\nstruct K { pub base: i32 }\nextend K as Mk<i64> { pub fn make(self: &Self, a: i64) i32 { return self.base; } }\nextend K as Mk<u64> { pub fn make(self: &Self, a: u64) i32 { return 1; } }\nfn main() i32 { let k = K { base: 10 }; return k.make2(1, 2); }\n",
+        "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that fit",
+    );
+    h::expect_err_msg(
+        "several bounds of a type parameter",
+        format("{}fn g<U: I<bool> + I<u8>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
+        "cannot infer 'A': 'U' conforms to 'I' with several arguments",
+    );
+}
+
+// An override in one conformance and a default another inherits are candidates of one call, chosen
+// by the call's arguments; equal fits are an error, for a method call and a path call alike.
+@test
+fn override_and_inherited_default_ambiguity() {
+    const MK: str = "interface Mk<A> {\n    fn make(self: &Self, a: A) i32;\n    fn make2(self: &Self, a: A, b: A) i32 { return self.make(a) + self.make(b); }\n}\nstruct K { pub base: i32 }\n";
+    h::expect_ok(
+        "the arguments choose the inheriting conformance",
+        format(
+            "{}extend K as Mk<i32> {{ pub fn make(self: &Self, a: i32) i32 {{ return 1; }} pub fn make2(self: &Self, a: i32, b: i32) i32 {{ return 3; }} }}\nextend K as Mk<bool> {{ pub fn make(self: &Self, a: bool) i32 {{ return 2; }} }}\nfn main() i32 {{ let k = K {{ base: 1 }}; return k.make2(true, false) + K::make2(&k, false, true) + k.make2(1, 2); }}\n",
+            MK,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "an override and a default that fit equally",
+        format(
+            "{}extend K as Mk<i64> {{ pub fn make(self: &Self, a: i64) i32 {{ return 1; }} pub fn make2(self: &Self, a: i64, b: i64) i32 {{ return 3; }} }}\nextend K as Mk<u64> {{ pub fn make(self: &Self, a: u64) i32 {{ return 2; }} }}\nfn main() i32 {{ let k = K {{ base: 1 }}; return k.make2(1, 2); }}\n",
+            MK,
+        ).as_str(),
+        "ambiguous call: two candidates for 'make2' fit equally well",
+    );
+    h::expect_err_msg(
+        "a path call with several fitting defaults",
+        format(
+            "{}extend K as Mk<i64> {{ pub fn make(self: &Self, a: i64) i32 {{ return 1; }} }}\nextend K as Mk<u64> {{ pub fn make(self: &Self, a: u64) i32 {{ return 2; }} }}\nfn main() i32 {{ let k = K {{ base: 1 }}; return K::make2(&k, 1, 2); }}\n",
+            MK,
+        ).as_str(),
+        "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that fit",
+    );
+    h::expect_err_msg(
+        "an override and a default without arguments",
+        "interface Tag<A> {\n    fn put(self: &Self, a: A);\n    fn tag(self: &Self) i32 { return 0; }\n}\nstruct K { pub base: i32 }\nextend K as Tag<i32> { pub fn put(self: &Self, a: i32) {} pub fn tag(self: &Self) i32 { return 1; } }\nextend K as Tag<bool> { pub fn put(self: &Self, a: bool) {} }\nfn main() i32 { let k = K { base: 1 }; return k.tag(); }\n",
+        "ambiguous call: two candidates for 'tag' fit equally well",
+    );
+}
+
+// A call without arguments among methods several conformances each define takes the one whose result
+// is the expected type; with none or several, it is an ambiguity error, never the first found. Only
+// that error is reported: the rejected call has the error type.
+@test
+fn zero_argument_overload_ambiguity() {
+    const CV: str = "interface Conv<T> { fn conv(self: &Self) T; fn mk() T; }\nstruct X { pub v: i32 }\nextend X as Conv<i32> { pub fn conv(self: &X) i32 { return 1; } pub fn mk() i32 { return 2; } }\nextend X as Conv<bool> { pub fn conv(self: &X) bool { return true; } pub fn mk() bool { return true; } }\nstruct W { pub x: X }\nextend W as Deref<X> { pub fn deref(self: &W) &X { return &self.x; } }\nextend i32 as Conv<i64> { pub fn conv(self: &i32) i64 { return 1; } pub fn mk() i64 { return 3; } }\nextend i32 as Conv<u8> { pub fn conv(self: &i32) u8 { return 1; } pub fn mk() u8 { return 4; } }\n";
+    expect_one_err(
+        "a method call without an expected type",
+        format("{}fn main() i32 {{ let x = X {{ v: 1 }}; let d = x.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:47",
+    );
+    expect_one_err(
+        "an expected type no candidate returns",
+        format("{}fn main() i32 {{ let x = X {{ v: 1 }}; let r: u8 = x.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:51",
+    );
+    expect_one_err(
+        "a call statement",
+        format("{}fn main() i32 {{ let x = X {{ v: 1 }}; x.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:39",
+    );
+    expect_one_err(
+        "a path call with its receiver",
+        format("{}fn main() i32 {{ let x = X {{ v: 1 }}; let m = X::conv(&x); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:48",
+    );
+    expect_one_err(
+        "an associated function",
+        format("{}fn main() i32 {{ let m = X::mk(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'mk' fit equally well\n--> <harness>:9:28",
+    );
+    expect_one_err(
+        "a call through auto-deref",
+        format("{}fn main() i32 {{ let w = W {{ x: X {{ v: 2 }} }}; let r = w.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:56",
+    );
+    expect_one_err(
+        "a builtin receiver",
+        format("{}fn main() i32 {{ let n: i32 = 5; let r = n.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:43",
+    );
+    expect_one_err(
+        "a builtin associated function",
+        format("{}fn main() i32 {{ let r = i32::mk(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'mk' fit equally well\n--> <harness>:9:30",
+    );
+    expect_one_err(
+        "a function value without an expected type",
+        format("{}fn main() i32 {{ let g = X::conv; return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:28",
+    );
+    expect_one_err(
+        "a function value no candidate has",
+        format("{}fn main() i32 {{ let g: fn(&X) u8 = X::conv; return 0; }}\n", CV).as_str(),
+        "error: ambiguous call: two candidates for 'conv' fit equally well\n--> <harness>:9:39",
+    );
+    expect_one_err(
+        "a call through several bounds",
+        format("{}fn g<U: Conv<i32> + Conv<bool>>(u: &U) i32 {{ let r = u.conv(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call to 'conv': 'U' conforms to 'Conv' with several arguments that fit\n--> <harness>:9:56",
+    );
+    expect_one_err(
+        "a path call through several bounds",
+        format("{}fn g<U: Conv<i32> + Conv<bool>>(u: &U) i32 {{ let r: i64 = U::conv(u); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call to 'conv': 'U' conforms to 'Conv' with several arguments that fit\n--> <harness>:9:62",
+    );
+    expect_one_err(
+        "an associated function through several bounds",
+        format("{}fn g<U: Conv<i32> + Conv<bool>>() i32 {{ let r = U::mk(); return 0; }}\n", CV).as_str(),
+        "error: ambiguous call to 'mk': 'U' conforms to 'Conv' with several arguments that fit\n--> <harness>:9:52",
+    );
+    h::expect_ok(
+        "the expected result selects",
+        format(
+            "{}fn g<U: Conv<i32> + Conv<bool>>(u: &U) bool {{ let a: i32 = u.conv(); return U::conv(u); }}\nfn main() i32 {{ let x = X {{ v: 1 }}; let a: i32 = x.conv(); let b: bool = X::mk(); let f: fn(&X) bool = X::conv; let n: u8 = 5.conv(); return a; }}\n",
+            CV,
+        ).as_str(),
+    );
+}
+
+// `Self` in an expression names the implementing type, so it needs one.
+@test
+fn self_path_outside_an_extension() {
+    h::expect_err_msg(
+        "Self outside an interface or extension",
+        "struct P { pub v: i32 }\nextend P { pub const K: i32 = 7; }\nfn f() i32 { return Self::K; }\n",
+        "'Self' is only valid inside an interface or extension",
+    );
+    h::expect_err_msg(
+        "Self as a value",
+        "struct P { pub v: i32 }\nextend P { fn a() i32 { let x = Self; return 0; } }\n",
+        "cannot find value 'Self'",
+    );
+}
+
+// A superinterface with arguments erases through dyn when every interface of the hierarchy is
+// reached with one argument list that names no `Self`; an upcast keeps those arguments.
+@test
+fn dyn_generic_superinterface_rules() {
+    const A: str = "interface A<T> { fn get(self: &Self) T; }\n";
+    h::expect_ok(
+        "a generic superinterface erases",
+        format(
+            "{}interface B: A<i32> {{ fn b(self: &Self) i32; }}\nfn f(x: &dyn B) i32 {{ let up: &dyn A<i32> = x; return x.get() + x.b() + up.get(); }}\n",
+            A,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "one superinterface with two argument lists",
+        format(
+            "{}interface B: A<i32> {{ fn b(self: &Self) i32; }}\ninterface C: A<bool> + B {{ fn c(self: &Self) i32; }}\nfn f(x: &dyn C) i32 {{ return x.c(); }}\n",
+            A,
+        ).as_str(),
+        "interface 'C' is not dyn-compatible: a superinterface is reached with two different argument lists",
+    );
+    h::expect_err_msg(
+        "a superinterface argument naming Self",
+        "interface D<T> { fn d(self: &Self) i32; }\ninterface E: D<Self> { fn e(self: &Self) i32; }\nfn g(x: &dyn E) i32 { return x.e(); }\n",
+        "interface 'E' is not dyn-compatible: a superinterface argument names 'Self'",
+    );
+    h::expect_err_msg(
+        "an upcast to other arguments",
+        format("{}interface F: A<i32> {{ fn f2(self: &Self) i32; }}\nfn h(x: &dyn F) &dyn A<bool> {{ return x; }}\n", A).as_str(),
+        "mismatched types: expected '&dyn A<bool>', found '&dyn F'",
+    );
+    h::expect_err_msg(
+        "a cast to dyn that no coercion allows",
+        "interface N { fn n(self: &Self) i32; }\nstruct T { pub v: i32 }\nfn main() i32 { let t = T { v: 3 }; return (&t as &dyn N).n(); }\n",
+        "invalid cast from '&T' to '&dyn N'",
+    );
+}
+
+// A duplicate definition is one error at the later item that names the earlier one, and the uses of
+// the name report nothing more.
+fn expect_dup(label: str, src: str, at: str, first: str) {
+    let c = h::compile(src, h::STAGE_TYPECHECK);
+    let note = format("= note: the first definition is here\n--> <harness>:{}", first);
+    if c.errors != 1 || !c.msg_has(at) || !c.msg_has(note.as_str()) {
+        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cstr(&c.first[0]));
+    }
+    assert(c.errors == 1 && c.msg_has(at) && c.msg_has(note.as_str()), label);
+}
+
+// A method or constant of a plain extend is defined once for any one instance of its type: a second
+// one of that name in the same extend, or in another plain extend that applies to a common instance
+// (the same type, an alias of it, a generic extend over a specialized one, two const forms that share
+// a value, a form and a constant it solves, partly fixed targets that meet), is a duplicate definition
+// (Rust's E0201/E0592), whatever the signatures. Extends that apply to no common instance and
+// distinct conformances may each define the name, and a path or call on an instance runs its own.
+@test
+fn duplicate_associated_items() {
+    expect_dup(
+        "two methods of one extend",
+        M"(struct X { pub v: i32 }
+extend X {
+    fn f(self: &X) i32 { return self.v; }
+    fn f(self: &X) i32 { return self.v + 1; }
+}
+fn main() i32 { let x = X { v: 1 }; return x.f(); }
+)",
+        "error: duplicate definition of 'f' for 'X'\n--> <harness>:4:8",
+        "3:8",
+    );
+    expect_dup(
+        "two extends with other signatures",
+        M"(struct X { pub v: i32 }
+extend X {
+    fn f(self: &X) i32 { return self.v; }
+}
+extend X {
+    fn f(self: &X, k: i32) i32 { return self.v + k; }
+}
+fn main() i32 { let x = X { v: 1 }; return x.f(2); }
+)",
+        "error: duplicate definition of 'f' for 'X'\n--> <harness>:6:8",
+        "3:8",
+    );
+    expect_dup(
+        "two associated functions",
+        M"(struct X { pub v: i32 }
+extend X { fn mk() X { return X { v: 1 }; } }
+extend X { fn mk() X { return X { v: 2 }; } }
+fn main() i32 { return X::mk().v; }
+)",
+        "error: duplicate definition of 'mk' for 'X'\n--> <harness>:3:15",
+        "2:15",
+    );
+    expect_dup(
+        "two constants",
+        M"(struct X { pub v: i32 }
+extend X {
+    const K: i32 = 1;
+    const K: i32 = 2;
+}
+fn main() i32 { return X::K; }
+)",
+        "error: duplicate definition of 'K' for 'X'\n--> <harness>:4:11",
+        "3:11",
+    );
+    expect_dup(
+        "a function and a constant",
+        M"(struct X { pub v: i32 }
+extend X {
+    fn K() i32 { return 1; }
+}
+extend X {
+    const K: i32 = 2;
+}
+fn main() i32 { return X::K(); }
+)",
+        "error: duplicate definition of 'K' for 'X'\n--> <harness>:6:11",
+        "3:8",
+    );
+    expect_dup(
+        "an alias of the type",
+        M"(struct X { pub v: i32 }
+type A = X;
+extend X { fn f(self: &X) i32 { return 1; } }
+extend A { fn f(self: &A) i32 { return 2; } }
+fn main() i32 { let x = X { v: 1 }; return x.f(); }
+)",
+        "error: duplicate definition of 'f' for 'A'\n--> <harness>:4:15",
+        "3:15",
+    );
+    expect_dup(
+        "a generic extend and a specialized one",
+        M"(struct P<T> { pub a: T }
+extend<T> P<T> { fn get(self: &Self) i32 { return 1; } }
+extend P<u8> { fn get(self: &Self) i32 { return 2; } }
+fn main() i32 { let p = P::<u8> { a: 1 }; return p.get(); }
+)",
+        "error: duplicate definition of 'get' for 'P<u8>'\n--> <harness>:3:19",
+        "2:21",
+    );
+    expect_dup(
+        "two forms with a common value",
+        M"(struct F<const M: u64> { pub x: u64 }
+extend<const N: u64> F<{2 * N}> { fn w(self: &Self) u64 { return N; } }
+extend<const N: u64> F<{3 * N + 1}> { fn w(self: &Self) u64 { return N; } }
+fn main() i32 { let f = F::<4> { x: 0 }; return f.w() as i32; }
+)",
+        "error: duplicate definition of 'w' for 'F<{3 * N + 1}>'\n--> <harness>:3:42",
+        "2:38",
+    );
+    expect_dup(
+        "a form and a constant it solves",
+        M"(struct F<const M: u64> { pub x: u64 }
+extend<const N: u64> F<{N + 3}> { fn v(self: &Self) u64 { return N; } }
+extend F<10> { fn v(self: &Self) u64 { return 1; } }
+)",
+        "error: duplicate definition of 'v' for 'F<10>'\n--> <harness>:3:19",
+        "2:38",
+    );
+    expect_dup(
+        "partly fixed targets that meet",
+        M"(struct Q<A, B> { pub a: A, pub b: B }
+extend<A> Q<A, u8> { fn m(self: &Self) i32 { return 1; } }
+extend<B> Q<i32, B> { fn m(self: &Self) i32 { return 2; } }
+)",
+        "error: duplicate definition of 'm' for 'Q<i32, B>'\n--> <harness>:3:26",
+        "2:25",
+    );
+    h::expect_exit(
+        "disjoint extends and a conformance each define the name",
+        M"(struct P<T> { pub a: T }
+extend P<u8> { fn get(self: &Self) i32 { return 1; } pub const K: i32 = 10; }
+extend P<i32> { fn get(self: &Self) i32 { return 2; } pub const K: i64 = 20; }
+struct F<const M: u64> { pub x: u64 }
+extend<const N: u64> F<{2 * N}> { fn w(self: &Self) u64 { return N; } }
+extend<const N: u64> F<{2 * N + 1}> { fn w(self: &Self) u64 { return N + 100; } }
+extend<const N: u8> F<{2 * N}> { fn z(self: &Self) u64 { return 1; } }
+extend<const N: u64> F<{2 * N + 512}> { fn z(self: &Self) u64 { return 2; } }
+struct Q<A, B> { pub a: A, pub b: B }
+extend<A> Q<A, u8> { fn m(self: &Self) i32 { return 1; } }
+extend<B> Q<B, i32> { fn m(self: &Self) i32 { return 2; } }
+interface I { fn get(self: &Self) i32; }
+extend P<u8> as I { fn get(self: &Self) i32 { return 3; } }
+fn main() i32 {
+    let a = P::<u8> { a: 1 };
+    let b = P::<i32> { a: 1 };
+    let f8 = F::<8> { x: 0 };
+    let f9 = F::<9> { x: 0 };
+    let f600 = F::<600> { x: 0 };
+    let q1 = Q::<i64, u8> { a: 1, b: 2 };
+    let q2 = Q::<i64, i32> { a: 1, b: 2 };
+    let i: &dyn I = &a;
+    let k: i64 = P::K;
+    if b.get() != 2 || i.get() != 3 || P::<u8>::K != 10 || P::<i32>::K != 20 || k != 20 {
+        return 1;
+    }
+    if f8.w() != 4 || f9.w() != 104 || f8.z() != 1 || f600.z() != 2 || q1.m() != 1 || q2.m() != 2 {
+        return 2;
+    }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// A call through a bound or a dyn value runs the conformance's own method, not a same-named method
+// of another extend, at run time and at compile time alike.
+@test
+fn conformance_method_beside_a_plain_one() {
+    h::expect_exit(
+        "the conformance's method",
+        M"(struct P { pub a: i32 }
+extend P { const fn get(self: &Self) i32 { return 1; } }
+interface I { fn get(self: &Self) i32; }
+extend P as I { const fn get(self: &Self) i32 { return 3; } }
+const fn use_i<T: I>(t: &T) i32 { return t.get(); }
+const C: i32 = use_i(&P { a: 1 });
+static_assert(C == 3, "the conformance's method at compile time");
+fn main() i32 {
+    let a = P { a: 1 };
+    let d: &dyn I = &a;
+    return use_i(&a) + d.get() + C;
+}
+)",
+        9,
+    );
+}
+
+// A method call takes a turbofish as a path does (`x.m::<T>(..)`, `X::m::<T>(&x, ..)`): its type-level
+// arguments bind the method's leading generic parameters (lifetimes bind none) for overload selection,
+// inference, bounds, compile-time evaluation and emission, through every receiver form. A turbofish may
+// not name more arguments than the function declares, and a field, a function pointer or a closure
+// takes none.
+@test
+fn method_call_turbofish() {
+    h::expect_exit(
+        "a turbofished method call",
+        M"(struct X { pub v: i32 }
+extend X {
+    fn gen<T>(self: &X, t: T) T { return t; }
+    fn two<A, B>(self: &X, a: A, b: B) B { return b; }
+    fn next(self: &X) X { return X { v: self.v + 1 }; }
+    fn bump<T: Copy>(self: &mut X, t: T) T { self.v += 1; return t; }
+    fn own(self: &X) u16 { return self.gen::<u16>(7); }
+    const fn scale<const K: u32>(self: &X, n: u32) u32 { return n * K; }
+    fn lt<'a, T: Copy>(self: &X, r: &'a T) T { return *r; }
+}
+struct W<T> { pub v: T }
+extend<T: Copy> W<T> { fn pair<U: Copy>(self: &W<T>, u: U) U { return u; } }
+struct K { pub z: i32 }
+extend K { fn pick<T>(self: &K, t: T) i32 { return 1; } }
+interface P { fn pick(self: &Self, b: bool) i32; }
+extend K as P { fn pick(self: &K, b: bool) i32 { return 2; } }
+fn make() X { return X { v: 10 }; }
+fn through<T: Copy>(x: &X, t: T) T { return x.gen::<T>(t); }
+const S: u32 = X { v: 0 }.scale::<3>(5);
+fn main() i32 {
+    let x = X { v: 1 };
+    let bx = Box::new(X { v: 2 });
+    let r = &x;
+    let a = x.gen::<u8>(255);
+    let b: u16 = x.two::<u8>(1, 2);
+    let c = bx.gen::<i64>(40000000000);
+    let d = r.next().next().gen::<i16>(-6);
+    let e = make().gen::<u32>(5);
+    let mut m = X { v: 0 };
+    let f = m.bump::<u64>(11);
+    let w = W::<u8> { v: 9 };
+    let g = w.pair::<i8>(-1);
+    let k = K { z: 0 };
+    let n: i64 = 5;
+    if sizeof(a) != 1 || sizeof(b) != 2 || sizeof(d) != 2 || sizeof(g) != 1 || a != 255 || b != 2 || c != 40000000000 {
+        return 1;
+    }
+    if d != -6 || e != 5 || f != 11 || m.v != 1 || x.own() != 7 || through::<u8>(&x, 9) != 9 || g != -1 {
+        return 2;
+    }
+    if k.pick::<bool>(true) != 1 || S != 15 || x.lt::<'static, i64>(&n) != 5 || X::lt::<'static, i64>(&x, &n) != 5 {
+        return 3;
+    }
+    return 0;
+}
+)",
+        0,
+    );
+    const PRE: str = M"(struct X { pub v: i32, pub f: fn(i32) i32 }
+fn inc(a: i32) i32 { return a + 1; }
+extend X {
+    fn gen<T>(self: &X, t: T) T { return t; }
+    fn plain(self: &X) i32 { return self.v; }
+    fn show<T: Format>(self: &X, t: T) i32 { return 1; }
+}
+fn id<T>(x: T) T { return x; }
+struct NoFmt { pub a: i32 }
+interface I { fn get(self: &Self) i32; }
+)";
+    expect_one_err(
+        "a method turbofish too long",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.gen::<u8, i32>(3) as i32; }}\n", PRE).as_str(),
+        "error: 'gen' takes 1 generic argument but 2 were supplied\n--> <harness>:11:64",
+    );
+    expect_one_err(
+        "a turbofish on a method without generics",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.plain::<u8>(); }}\n", PRE).as_str(),
+        "error: 'plain' takes 0 generic arguments but 1 was supplied\n--> <harness>:11:62",
+    );
+    expect_one_err(
+        "a path turbofish too long",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return X::gen::<u8, i32>(&x, 3) as i32; }}\n", PRE).as_str(),
+        "error: 'gen' takes 1 generic argument but 2 were supplied\n--> <harness>:11:65",
+    );
+    expect_one_err(
+        "a function turbofish too long",
+        format("{}fn main() i32 {{ return id::<u8, u8>(3) as i32; }}\n", PRE).as_str(),
+        "error: 'id' takes 1 generic argument but 2 were supplied\n--> <harness>:11:33",
+    );
+    expect_one_err(
+        "a function value turbofish too long",
+        format("{}fn main() i32 {{ let g = id::<i32, u8>; return 0; }}\n", PRE).as_str(),
+        "error: 'id' takes 1 generic argument but 2 were supplied\n--> <harness>:11:35",
+    );
+    expect_one_err(
+        "a dyn method takes none",
+        format("{}fn f(d: &dyn I) i32 {{ return d.get::<u8>(); }}\n", PRE).as_str(),
+        "error: 'get' takes 0 generic arguments but 1 was supplied\n--> <harness>:11:38",
+    );
+    expect_one_err(
+        "a field",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.v::<u8>; }}\n", PRE).as_str(),
+        "error: field 'v' takes no generic arguments\n--> <harness>:11:58",
+    );
+    expect_one_err(
+        "a function pointer field",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.f::<u8>(2); }}\n", PRE).as_str(),
+        "error: field 'f' takes no generic arguments\n--> <harness>:11:58",
+    );
+    expect_one_err(
+        "a function pointer",
+        format("{}fn main() i32 {{ let g: fn(i32) i32 = inc; return g::<u8>(2); }}\n", PRE).as_str(),
+        "error: a function pointer takes no generic arguments\n--> <harness>:11:54",
+    );
+    expect_one_err(
+        "a closure",
+        format("{}fn main() i32 {{ let c = |a: i32| a + 1; return c::<u8>(2); }}\n", PRE).as_str(),
+        "error: a closure takes no generic arguments\n--> <harness>:11:52",
+    );
+    expect_one_err(
+        "a turbofished argument outside a bound",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.show::<NoFmt>(NoFmt {{ a: 1 }}); }}\n", PRE).as_str(),
+        "error: type 'NoFmt' does not satisfy bound 'Format'\n--> <harness>:11:52",
+    );
+    expect_one_err(
+        "a literal outside the turbofished type",
+        format("{}fn main() i32 {{ let x = X {{ v: 1, f: inc }}; return x.gen::<u8>(300) as i32; }}\n", PRE).as_str(),
+        "error: integer literal is out of range for 'u8'\n--> <harness>:11:64",
+    );
+    expect_one_err(
+        "an extend bound the receiver misses",
+        M"(struct W<T> { pub v: T }
+extend<T: Copy> W<T> { fn g<U>(self: &W<T>, u: U) i32 { return 2; } }
+fn main() i32 { let w = W::<String> { v: String::new() }; return w.g::<u8>(1); }
+)",
+        "error: cannot call 'W<String<Global>>::g': unsatisfied interface bounds\n--> <harness>:3:66",
+    );
+}
+
+// A path through a generic type written without arguments (`W::f()`) chooses among the methods its
+// extends define as a method call does: each candidate's extend parameters take the call's evidence
+// (its arguments, then the expected result), and the chosen method's extend binds from it. Candidates
+// that fit equally are ambiguous, an inherited default names no instance, and a constant several
+// extends define needs the arguments or an expected type that only one has.
+@test
+fn generic_type_path_selection() {
+    h::expect_exit(
+        "the arguments and the expected result choose",
+        M"(struct W<T> { pub v: T }
+extend W<u8> { fn mk() Self { return W { v: 8 }; } fn f(x: u8) i32 { return 1; } }
+extend W<i32> { fn mk() Self { return W { v: 32 }; } fn f(x: i32) i32 { return 2; } }
+struct V<A, B> { pub a: A, pub b: B }
+extend<T> V<T, bool> { fn h(x: T) V<T, bool> { return V { a: x, b: true }; } }
+extend<T> V<T, u16> { fn h(x: T, y: u16) V<T, u16> { return V { a: x, b: y }; } }
+fn main() i32 {
+    let a: W<i32> = W::mk();
+    let b: W<u8> = W::mk();
+    let d = V::h(7i64);
+    let e = V::h(7i64, 9u16);
+    if a.v != 32 || b.v != 8 || W::f(1u8) != 1 || W::f(-1) != 2 || !d.b || e.b != 9 || d.a != 7 {
+        return 1;
+    }
+    return 0;
+}
+)",
+        0,
+    );
+    expect_one_err(
+        "no evidence",
+        M"(struct W<T> { pub v: T }
+extend W<u8> { fn mk() Self { return W { v: 8 }; } }
+extend W<i32> { fn mk() Self { return W { v: 32 }; } }
+fn main() i32 { let w = W::mk(); return 0; }
+)",
+        "error: ambiguous call: two candidates for 'mk' fit equally well\n--> <harness>:4:28",
+    );
+    expect_one_err(
+        "arguments that fit both",
+        M"(struct V<A, B> { pub a: A, pub b: B }
+extend<T> V<T, u8> { fn g(x: T) i32 { return 1; } }
+extend<T> V<T, i32> { fn g(x: T) i32 { return 2; } }
+fn main() i32 { return V::g(5); }
+)",
+        "error: ambiguous call: two candidates for 'g' fit equally well\n--> <harness>:4:27",
+    );
+    expect_one_err(
+        "an inherited default",
+        M"(interface D { fn f() i64 { return 0; } }
+struct W<T> { pub v: T }
+extend W<u8> { fn f() i32 { return 1; } }
+extend W<i32> { fn f() i32 { return 2; } }
+extend W<bool> as D {}
+fn main() i32 { let x: i64 = W::f(); return 0; }
+)",
+        "error: cannot infer the generic argument 'T' for this call; add an explicit argument\n--> <harness>:6:30",
+    );
+    expect_one_err(
+        "a constant of several extends",
+        M"(struct W<T> { pub v: T }
+extend W<u8> { pub const K: i32 = 8; }
+extend W<i32> { pub const K: i32 = 32; }
+fn main() i32 { return W::K; }
+)",
+        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:4:27",
+    );
+}
+
+// `Self` in an extend of an instance of another module's generic type (`extend Option<i32>`) is that
+// instance, as it is for a type of the extend's own module.
+@test
+fn self_of_a_foreign_specialized_extend() {
+    h::expect_exit(
+        "Self is the instance",
+        M"(extend Option<i32> {
+    fn twice(self: &Self) i32 {
+        return switch self {
+            Some(v) => *v * 2,
+            None => 0,
+        };
+    }
+}
+fn main() i32 {
+    let o = Option::<i32>::Some(4);
+    return o.twice();
+}
+)",
+        8,
     );
 }

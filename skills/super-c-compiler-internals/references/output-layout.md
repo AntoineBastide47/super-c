@@ -28,9 +28,10 @@ and every tree comparison compares within one profile.
 
 | File | Content | Included by |
 |------|---------|-------------|
-| `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks, dyn fat types, `@emit_macro` templates, assert helpers, extern and block-wrapper prototypes, dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |
-| `__sc_t/<stem>.h` | one definition header per emitted type (struct, union, payload enum, payload-less enum, generic instance, closure environment): the includes of the definition headers of the types its body embeds by value, the type's `typedef` line, copies of the other declarations the body spells, the definition, then the type's layout checks (`_Static_assert` of size and alignment) | units that need the type complete; definition headers that embed it by value; prototype headers whose `_ret` structs embed it or whose constant arrays have it as element |
-| `<mod>.h` | the definition headers its `_ret` structs and constant arrays need, copies of the type declarations its prototypes spell, `_ret` typedefs, cross-TU prototypes, constant and descriptor declarations the module owns | TUs that spell one of its symbols (and the module's own shards) |
+| `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks, dyn fat types, `@emit_macro` templates, assert helpers, the `__sc_wrap` address conversion, extern and block-wrapper prototypes, dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |
+| `__sc_ext.h` | only when needed: the extern and block-wrapper prototypes with an array declarator of an aggregate (C needs the element complete, and the forward header includes no definition header), after the includes of those definition headers and copies of the declarations they spell | every unit, after `__sc_fwd.h` |
+| `__sc_t/<stem>.h` | one definition header per emitted type (struct, union, payload enum, payload-less enum, generic instance, closure environment, result carrier): the includes of the definition headers of the types its body embeds by value, the type's `typedef` line, copies of the other declarations the body spells, the definition, then the type's layout checks (`_Static_assert` of size and alignment) | units that need the type complete; definition headers that embed it by value or as an array element; prototype headers whose `_ret` typedefs name it or whose array declarators have it as element |
+| `<mod>.h` | the definition headers of the result carriers its `_ret` typedefs name and those of the element types of its array declarators (parameters, constants), copies of the type declarations its prototypes spell, `_ret` typedefs, cross-TU prototypes, constant and descriptor declarations the module owns | TUs that spell one of its symbols (and the module's own shards) |
 | `<mod>.c`, `<mod>__p<k>.c` | the includes (forward header, the definition headers the module's text needs, the prototype headers of the modules it spells symbols of), copies of the typedef lines of the types it names only through pointers, then the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point | the next build |
@@ -54,6 +55,24 @@ the header of the type it collides with.
 - A type definition has one file: its definition header. The owner module recorded in the
   manifest is the declaring module (for a generic instance: the generic's, for a closure
   environment: the closure's); it places no file.
+- A pointer to an array whose innermost element is an aggregate the emitter defines
+  (`Mangler::ptr_wraps`: every length positive) spells as a pointer to the array's wrapper
+  struct `<element>__a<N>` (one `_<M>` per inner dimension; `struct Node__a2 { Node e[2]; }`),
+  everywhere: members, locals, parameters, function-pointer parameters, container storage.
+  C needs an array's element complete even below a pointer, and inside the definition of a
+  self or mutually recursive aggregate it is not; a pointer to an incomplete struct is legal.
+  The wrapper has the array's size, alignment and layout (its layout check says so), so
+  pointer arithmetic and the ABI are the array pointer's. A dereference or a subscript of
+  pointer storage reads the member (`(*p).e[1]`, `v.ptr[i].e`), and an array's address
+  converts as a value through `__sc_wrap` (`(Node__a2 *)__sc_wrap(&a)`; a decayed array
+  through `void *`): no lvalue is ever accessed as another type, and no cast applies to an
+  address, which the strictest strict-aliasing diagnostics flag. Each wrapper is defined in
+  its element's definition header, after the element, and its typedef line leads that
+  header's body (the element's members may point at it); a use through a pointer copies the
+  typedef, and a dereference needs the element complete, which includes the wrapper. The
+  manglers request each wrapper once (`wrap_reqs`, rendered text), the seed shards merge them
+  by range (`CapMark.wrap`), the per-TU cache journals them (`RK_WRAP`), and the assembly
+  orders them by element and name.
 - A forward declaration has one home: an aggregate's typedef line lives in its definition
   header, a payload-less enum (the enum definition itself) likewise. A typedef line that
   no definition header holds (a zero-sized aggregate, a pointee no body needs complete)
@@ -61,15 +80,18 @@ the header of the type it collides with.
   does not include: a header by one identifier scan of its text (`FwdDecls::copy`, and
   `FwdDecls::scan_def` for a definition header, which in the same scan finds the types
   the body embeds by value: a declared name outside parentheses followed by a declarator
-  name), a unit from its spelling row (`FwdDecls::want`, no scan of the unit text). C11
+  name, and the element type of every array declarator, also below a pointer or in a
+  function-pointer parameter: C rejects an array of an incomplete type), a unit from its
+  spelling row (`FwdDecls::want`, no scan of the unit text). C11
   allows a repeated typedef, and an enum copy keeps its `SUPER_ENUM_` include guard. C11
   has no forward-declared enum, and prototypes take enums by value, so a prototype header
   gets the full enum.
 - A unit's definition headers come from its type-need row (`Mangler::tneed`, one row per
   spelling context like the use rows): the FNV of each aggregate C name its text uses, bit
   0 set when the text needs the complete type. The C type speller records every
-  aggregate, instance or closure environment it spells: complete outside a pointer,
-  typedef only below a pointer or inside a function-pointer type (`ptr_depth`). The body
+  aggregate, instance or closure environment it spells: complete outside a pointer and as
+  the element of an array declarator, typedef only below a pointer or inside a
+  function-pointer type otherwise (`ptr_depth`). The body
   emitter records complete needs where the text uses a value without spelling its type
   (`Mangler::need_ty`): a member access through a pointer or on a static, forwarded call
   or captured-environment base, a dereference used as a value, a subscript, pointer
@@ -89,10 +111,22 @@ the header of the type it collides with.
 - The headers of `extern "C" "<header>"` blocks are global (`__sc_fwd.h`): every TU can
   call a header-declared extern function, so the Core IR inliner splices a callee that
   calls one (the `std/bits.h` bit counts behind `u64::trailing_zeros`) into any TU.
-- A `_ret` struct belongs to the function's module and lands in its prototype header
-  (callers need it complete); that header includes the definition headers of its
-  by-value fields (`hdr_k`/`hdr_h`: the field's definition key, spelled under the body's
-  substitutions, so a generic instance's `_ret` resolves to the instance's header).
+- Results C cannot return as they are (several results, one fixed array) return in a
+  carrier struct shared by every function and function value with that result list
+  (`Mangler::ret_pack`: `__sc_ret<n>__<types>`, `__sc_reta__<array>`), defined in its own
+  definition header; a function's `<name>_ret` typedef aliases it in the module's prototype
+  header, which includes that definition header (`hdr_k`/`hdr_h`: the carrier's name key,
+  spelled under the body's substitutions); a function-pointer spelling needs only its typedef.
+  A dyn vtable slot returns the carrier itself (`dyn_ret`), and a call through the vtable
+  declares its destination with it (`untyped_ret_struct`: the declaring interface's result list
+  under its arguments in the dyn type's hierarchy, `dyn_iface_inst`), since no `<name>_ret` alias
+  exists for an erased callee.
+- A dyn vtable (`<stem>__vt`) holds `__free`, `tid`, the interface's methods, then each
+  superinterface's methods (breadth first, `dyn_supers`: the checker records each interface
+  bound's `dyn I<args>` on the bound node, grounded here under the dyn type's arguments), then one
+  `__super_<superstem>` pointer per superinterface. A table's super pointers name the source
+  type's tables for those superinterfaces with the same ownership and allocator; an upcast keeps
+  `.data` and reads `.vt->__super_<stem>`.
 - A function instance body belongs to the generic's declaring module; free glue to the
   destroyed type's owner (the generic's module for instances, matching where the drop
   site's symbol edge points); a constant to its declaring module; a `type_info`
@@ -270,7 +304,8 @@ is rewritten).
   identity, every target and profile.
 - The per-TU cache replays chunk owners, `_ret` typedef owners, header edges (`RK_HEDGE`:
   owner module and definition key), typed spelling rows (`RK_EDGE`) and the module's
-  type-need row (`RK_TNEED`: its sorted distinct keys as word pairs); format version 5.
+  type-need row (`RK_TNEED`: its sorted distinct keys as word pairs), array wrapper
+  requests (`RK_WRAP`) and result carrier requests (`RK_PACK`); format version 8.
   A replayed tree must match a `SC_NO_TU_CACHE=1` tree byte for byte after an edit
   (`tests/cli_test.spc`, `build_staleness_gates` covers the header-change and
   layout-change cases).

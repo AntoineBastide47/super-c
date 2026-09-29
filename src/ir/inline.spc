@@ -183,11 +183,24 @@ fn unify(
     }
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         unify(pkg, km, y.as_data.elem, cm, z.as_data.elem, binds, depth + 1);
+        if y.arr_sym() {
+            let ca = unsafe &mut *(p.module_ast_const(cm) as *mut Ast);
+            // A count binds a bare length parameter as a value of that parameter's type.
+            let ly = *(unsafe &*p.module_ast_const(km)).type_at(y.as_data.arr.len);
+            let zl = if z.arr_sym() {
+                z.as_data.arr.len;
+            } else if ly.kind == TypeKind::TYPE_GENERIC {
+                ca.const_value(z.as_data.arr.len, p.const_param_bt(ly.module, ly.as_data.decl));
+            } else {
+                TYPE_NONE;
+            };
+            unify(pkg, km, y.as_data.arr.len, cm, zl, binds, depth + 1);
+        }
         return;
     }
-    if y.kind == TypeKind::TYPE_INSTANCE {
-        let yi = *(unsafe &*p.module_ast_const(km)).instance(y.as_data.inst);
-        let zi = *(unsafe &*p.module_ast_const(cm)).instance(z.as_data.inst);
+    if y.kind == TypeKind::TYPE_INSTANCE || y.fn_sig() && z.fn_sig() {
+        let yi = *(unsafe &*p.module_ast_const(km)).instance(y.rec());
+        let zi = *(unsafe &*p.module_ast_const(cm)).instance(z.rec());
         if yi.module == zi.module && yi.decl == zi.decl && yi.n == zi.n {
             for i in 0..yi.n {
                 unify(pkg, km, unsafe yi.args[i as usize], cm, unsafe zi.args[i as usize], binds, depth + 1);
@@ -197,8 +210,8 @@ fn unify(
 }
 
 /// Callee type `kt` with the bound generic parameters substituted, interned for the caller
-/// module. TYPE_NONE on failure (unbound parameter, const-generic expression, or a function type
-/// under an active substitution).
+/// module. TYPE_NONE on failure (unbound parameter, const-generic expression, or a function or
+/// closure item's type under an active substitution).
 fn xty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
     if kt == TYPE_NONE || depth > 24 {
         return TYPE_NONE;
@@ -239,10 +252,24 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
         },
         TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ERROR => TYPE_NONE,
         TYPE_FUNCTION => {
+            // A function-pointer type substitutes its signature; a function or closure item is
             // nominal (module, declaration): the package id itself, sound only without a
-            // substitution to apply
+            // substitution to apply.
             let mut r = TYPE_NONE;
-            if binds.len() == 0 {
+            if y.fn_sig() {
+                let mut it = *ka.instance(y.as_data.fnp.sig);
+                let mut ok = true;
+                for i in 0..it.n {
+                    let ai = xty(pkg, km, unsafe it.args[i as usize], cm, binds, depth + 1);
+                    if ai == TYPE_NONE {
+                        ok = false;
+                    }
+                    unsafe it.args[i as usize] = ai;
+                }
+                if ok {
+                    r = ca.intern_sig_rec(&it, y.qualifier);
+                }
+            } else if binds.len() == 0 {
                 r = kt;
             }
             r;
@@ -250,7 +277,12 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
         TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
             let e = xty(pkg, km, y.as_data.elem, cm, binds, depth + 1);
             let mut r = TYPE_NONE;
-            if e != TYPE_NONE || y.as_data.elem == TYPE_NONE {
+            if y.arr_sym() {
+                let lt = xty(pkg, km, y.as_data.arr.len, cm, binds, depth + 1);
+                if e != TYPE_NONE && lt != TYPE_NONE {
+                    r = ca.intern_array(e, lt);
+                }
+            } else if e != TYPE_NONE || y.as_data.elem == TYPE_NONE {
                 let mut nt = y;
                 nt.as_data.elem = e;
                 r = ca.intern_type(nt);
@@ -740,7 +772,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         let mut h9: u64 = 14695981039346656037;
         for i in 0..shape.len() {
-            h9 = (h9 ^ shape[i]) * 1099511628211;
+            h9 = (h9 ^ shape[i]).wrapping_mul(1099511628211);
         }
         let mut cix: i64 = -1;
         let mut collide = false;
@@ -776,6 +808,10 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             }
             for i in 0..k.targ_pool.len() {
                 probe.push(k.targ_pool[i]);
+            }
+            for i in 0..k.blocks.len() {
+                probe.push(k.blocks.at(i).term.iface);
+                probe.push(k.blocks.at(i).term.recv);
             }
             for i in 0..k.rvalues.len() {
                 let rv = k.rvalues.at(i);
@@ -1108,6 +1144,8 @@ fn splice(
                 tm.args_start += op0;
                 tm.dests_start += d0;
                 tm.targs_start += tg0;
+                tm.iface = mty(tymap, tm.iface);
+                tm.recv = mty(tymap, tm.recv);
                 tm.t0 += b0;
             }
         }

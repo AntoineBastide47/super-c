@@ -464,7 +464,7 @@ extend<T: Hash, const N: usize> Array<T, N> as Hash {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..N {
             let e = self.at(i);
-            h = (h ^ e.hash()) * 0x100000001b3;
+            h = (h ^ e.hash()).wrapping_mul(0x100000001b3);
         }
         return h;
     }

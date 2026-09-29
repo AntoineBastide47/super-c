@@ -413,7 +413,7 @@ fn dynamic_uneven_work_from_a_task() {
             |i: usize| {
                 let mut acc: u64 = 1;
                 for k in 0..i % 64 {
-                    acc = acc * 6364136223846793005 + k as u64;
+                    acc = acc.wrapping_mul(6364136223846793005).wrapping_add(k as u64);
                 }
                 let _ = s.fetch_add(i as i64 + (acc & 0) as i64, atomics::MemoryOrder::Relaxed);
             },

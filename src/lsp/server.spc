@@ -385,12 +385,6 @@ pub fn run(std_dir: str, target: i32) i32 {
     };
     let fin = stdio::stdin();
     let fout = stdio::stdout();
-    if !stdio::set_binary(fin) {
-        return 1;
-    }
-    if !stdio::set_binary(fout) {
-        return 1;
-    }
     let mut rd = transport::Reader::new(fin);
     loop {
         let msgo = switch replace(&mut sv.pending, Option::<String>::None) {

@@ -403,7 +403,7 @@ body runs in place, so a saturated pool never waits on itself. Bounds: at most
 create outside it, publish the handle before the thread takes work); at most
 `MAX_PENDING` accepted calls wait for a thread, past which a coroutine parks for
 admission on a node in its own frame and a plain thread blocks. Ordering across workers
-is not FIFO. Idle threads exit after `set_idle_ns` (ten seconds by default), announce
+is not FIFO. Idle threads exit after `set_idle_ns` (ten seconds by default; negative: never), announce
 their handle first, and are joined at the next creation or at shutdown. The queue is a
 spinlock, idle threads park on their own word, and one thread spins for the next job
 with an adaptive budget: a stream of short calls costs no thread wake. A thread counts
@@ -466,6 +466,15 @@ compare after the task's own worker last wrote it is accessed atomically, `done`
 report reads it) and `park_state` on block reuse (a waker that lost the last claim may
 still be finishing its compare) included: `check.sh` runs `ci/*_hunt.spc` under the race
 profile and fails on any report or nonzero exit.
+
+Checking profiles trap on integer overflow, so runtime arithmetic on values that other
+threads write must hold for every order of the reads. A clock value published by another
+worker can be LATER than this thread's own earlier clock read: compare `now < last + interval`,
+never `now - last` (`pool_trim`). A difference of two summed counters reads the one that
+must be smaller FIRST, with a Release store on its side: `live_tasks` reads completions
+before spawns, so while tasks run it can be high but never below the truth. A trap without
+`[task N]` came from a worker's scheduler loop or a plain thread; on macOS the crash report
+in `~/Library/Logs/DiagnosticReports` names the function and line.
 
 ## Cancellation Sources and Groups
 

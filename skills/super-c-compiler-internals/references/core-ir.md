@@ -41,9 +41,9 @@ is reused across bodies.
 
 ## Locals
 
-`LocalDecl { ty, storage, is_mutable, dkind, zero_len, span, decl, name_off, name_len, item }`
+`LocalDecl { ty, storage, is_mutable, dkind, span, decl, name_off, name_len, item }`
 (32 bytes; the analyses copy it by value) with storage classes. `dkind` is an `LK_*`
-declaration kind, `zero_len` marks a `let` spelled `[T; 0]`, and `name()` is the binding's
+declaration kind, and `name()` is the binding's
 name text (an offset and length inside `span`): what the emitter reads of a user local after
 the body syntax is released.
 
@@ -71,6 +71,15 @@ A `Place` is a base local plus a projection **range** into `projections`
 Pattern lowering dereferences a place (`PJ_DEREF` through every reference and pointer
 layer) before a downcast or a value test, and types each sub-place from its member
 declaration. A by-reference binding is `RV_REF` of the matched place.
+
+A guard-free match lowers through the decision tree of the pattern compiler
+(`src/pattern/pattern.spc`). An integer column reads each value and range from the checker's
+record (`TypedFacts::pat_value`, in the matched type) and tests the pieces its bounds split the
+type's domain into: every edge keeps each row that holds its piece, and a piece equal to a written
+pattern keeps that pattern's spelling. A column whose literals may spell one value (a float, an
+escaped string, an integer with no record) keeps the arm-order chain. A builtin limit that
+literal-only arithmetic or a pattern reads in another integer type lowers to that type's literal
+of its value (`Lowerer::retyped_int_const`): the constant's C object has its own type.
 
 Each `Projection` carries the type **after** it applies.
 
@@ -124,13 +133,13 @@ Each `Projection` carries the type **after** it applies.
 ## Terminators and Blocks
 
 `BasicBlock { stmt_start, stmt_len, term, sealed }` — a statement range plus exactly one
-terminator; the verifier rejects unsealed blocks. `Terminator` is 60 bytes:
+terminator; the verifier rejects unsealed blocks. `Terminator` is 64 bytes:
 
 | Kind | Meaning |
 |------|---------|
 | `TM_GOTO` | `t0` = successor |
 | `TM_SWITCH` | `a` = discriminant OperandId; (value, target) pairs in `switch_pool`; `t0` = otherwise |
-| `TM_CALL` | `callee` DefId (node `NODE_NONE` for fn-value calls); args in `oper_pool`, destinations in `dest_pool` (multi-return), bound generic args in `targ_pool`; `t0` = normal continuation |
+| `TM_CALL` | `callee` DefId (node `NODE_NONE` for fn-value calls); args in `oper_pool`, destinations in `dest_pool` (multi-return), bound generic args in `targ_pool`; `iface` = `dyn I<args>` for a call of a generic interface's method through a bound, an operator through a bound, or an inherited default of a generic interface on a concrete receiver (the conformance each instance and the evaluator dispatch to), else `TYPE_NONE`; `recv` = the type parameter an interface's associated function is called through (`T::count()`: the implementor, whatever the result or first argument), else `TYPE_NONE`; `t0` = normal continuation |
 | `TM_RETURN` | Return |
 | `TM_DROP` | Drop a place; `t0` = successor (inserted by drop elaboration) |
 | `TM_ASSERT` | `a` = condition OperandId; `t0` = success |

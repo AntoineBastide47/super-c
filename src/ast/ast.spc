@@ -439,6 +439,7 @@ pub struct ConstData {
     pub is_public: bool,
     pub is_extern: bool,
     pub is_static_mut: bool,
+    pub is_local: bool, // declared in a body: another body may reuse the name
 }
 pub struct ExternBlockData {
     pub abi: NodeId,
@@ -514,6 +515,13 @@ pub const fn bt_of_name(src: str, s: tok::Span) i32 {
 pub struct TypePathData {
     pub parts: NodeList,
     pub args: NodeList,
+    // Associated type bindings after the arguments (`Add<i32, Output = T>`), NODE_TYPE_ALIAS nodes;
+    // only a generic bound's interface may carry them.
+    pub bindings: NodeList,
+    // The index of the segment that names the path's declaration, written by the resolver: the
+    // segments before it are a module path (`m::T`) or `Self` (`Self::Assoc`), the segments after
+    // it name a member of it (`E::V` as a literal's target), which a type position rejects.
+    pub head: u32,
 }
 pub struct IndirectTypeData {
     pub ty: NodeId,
@@ -619,10 +627,13 @@ pub struct IndexData {
     pub object: NodeId,
     pub index: NodeId,
 }
+// `targs`: the turbofish of a method call (`x.m::<T>(..)`), empty otherwise; a path keeps its
+// turbofish in a NODE_GENERIC_SPECIALIZATION around the member.
 pub struct MemberData {
     pub object: NodeId,
     pub member: NodeId,
     pub path: bool,
+    pub targs: NodeList,
 }
 pub struct CastData {
     pub expression: NodeId,
@@ -740,6 +751,22 @@ pub struct Node {
 
 pub type TypeId = u32;
 pub const TYPE_NONE: TypeId = 0;
+/// The type of every construct the checker rejected: seeded right after the builtins, never
+/// equal to TYPE_NONE ("no type yet", "no expectation"). Compatibility and inference accept it
+/// silently, and a type built over it is itself TYPE_ERROR, so one diagnostic stands for one
+/// root error. It exists only in a module whose check reported an error.
+pub const TYPE_ERROR: TypeId = 19;
+
+/// Whether instance-table record `it` holds TYPE_ERROR (an instance, dyn or signature over a
+/// rejected type is itself rejected).
+pub const fn rec_has_error(it: &TyInstance) bool {
+    for j in 0..it.n {
+        if unsafe it.args[j] == TYPE_ERROR {
+            return true;
+        }
+    }
+    return false;
+}
 
 pub enum BuiltinType {
     BT_BOOL,
@@ -778,7 +805,9 @@ pub enum TypeKind {
     TYPE_OPAQUE,
     TYPE_DYN,
     TYPE_NEVER,
-    TYPE_CONST, // a const-generic argument value (as_data.value)
+    /// A const-generic argument value: `as_data.value` of the integer type in `qualifier` (`Ty::cbt`),
+    /// an enum-typed parameter's discriminant as i32.
+    TYPE_CONST,
     /// A const-generic argument written as an EXPRESSION over the enclosing generic's own parameters
     /// (`UInt<{BITS * 2}>`). It cannot be a value yet -- those parameters are unbound where it is written --
     /// so it carries the expression (`module` + `as_data.decl`) until substitution folds it to a TYPE_CONST.
@@ -789,64 +818,102 @@ pub enum TypeKind {
     /// enclosing generic cannot know yet; substitution plus the emitter's current-field state
     /// normalize it to the field's concrete type, one copy at a time. Never concrete.
     TYPE_FIELD_PROJECTION,
+    /// An associated type of a type that is not known yet: `T::Output` for `T: Add<i32>`, or
+    /// `Self::Output` in the interface declaring it. `as_data.inst` names an instance record whose
+    /// `module`/`decl` are the interface's associated type declaration (`type Output;`) and whose
+    /// arguments are the projected type (`Self`) and then the interface's arguments. Substitution
+    /// resolves it to the conformance's `type Output = ..` once `Self` is known (`Package::assoc_of`).
+    /// Never concrete.
+    TYPE_ASSOC,
 }
 
 /// A const-generic expression in canonical form: `k + sum(c_i * P_i)`. Linear is exactly the closed set
 /// for widths -- `+`, `-` and scaling by a constant stay inside it, `N * N` does not -- and comparing
 /// these instead of the expressions as WRITTEN is what makes two spellings of one width the same type.
+/// The constant and the coefficients are exact (i128), so a form over a u64 parameter holds u64
+/// constants (`{u64::MAX - N}`); its value is computed exactly and must fit `ty` and then `to`.
 pub struct ConstLin {
-    pub k: i64,
+    pub k: i128,
     pub n: i32,
     pub p: [DefId; 4],
-    pub c: [i64; 4],
+    pub c: [i128; 4],
     /// Floor divisor applied to the WHOLE form, last: value = (k + sum) / div. 0 or 1 = none. What
     /// admits `{(BITS + 7) / 8}` -- the byte count every serialization API is generic over -- into
     /// canonical form; a divided form composes with nothing further (scaling or adding to it would
     /// need distribution floor division does not grant), so every combinator below refuses one.
-    pub div: i64,
+    pub div: i128,
+    /// The integer type the form computes in: its parameters' and named constants' types joined by
+    /// widening (a literal takes it). Composing a bound form's terms in takes that form's type.
+    pub ty: BuiltinType,
+    /// The type of the value where the form stands: the declared type of the parameter it is an
+    /// argument of (`ty`, a type `ty` widens to, or, where inference binds a parameter through a
+    /// form, a narrower one), `ty` for an array length.
+    pub to: BuiltinType,
 }
 
 extend ConstLin {
-    pub const fn div_of(self: &Self) i64 {
-        if self.div <= 1 {
-            return 1;
+    /// The empty form (the constant 0) computing in `ty`.
+    pub fn new(ty: BuiltinType) ConstLin {
+        return ConstLin { k: i128::zero(), n: 0, div: i128::zero(), ty: ty, to: ty };
+    }
+
+    pub fn div_of(self: &Self) i128 {
+        let one = i128::one();
+        if self.div <= one {
+            return one;
         }
         return self.div;
     }
 
-    pub const fn is_concrete(self: &Self) bool {
+    pub fn is_concrete(self: &Self) bool {
         for i in 0..self.n {
-            if unsafe self.c[i as usize] != 0 {
+            if !unsafe self.c[i as usize].is_zero() {
                 return false;
             }
         }
         return true;
     }
 
-    /// The concrete value of a parameter-free form: the constant term through the floor divisor.
-    pub const fn value(self: &Self) i64 {
-        let d = self.div_of();
-        if d == 1 {
-            return self.k;
-        }
-        let q = self.k / d;
-        if self.k % d != 0 && self.k < 0 {
-            return q - 1;
-        }
-        return q;
+    /// The exact value of a parameter-free form: the constant term through the floor divisor.
+    pub fn value(self: &Self) i128 {
+        return self.floor_of(self.k);
     }
 
-    pub fn add_term(self: &mut Self, d: DefId, coeff: i64) bool {
-        if coeff == 0 {
+    /// `sum` (the constant plus every term at its value) through the floor divisor.
+    pub fn floor_of(self: &Self, sum: i128) i128 {
+        let d = self.div_of();
+        if d == i128::one() {
+            return sum;
+        }
+        return sum.div_euclid(&d);
+    }
+
+    /// The value of the form whose constant and terms sum to `sum`, into `out`: false when it lies
+    /// outside `ty` or `to` (usize and isize are 32-bit under `ptr32`).
+    pub fn finish(self: &Self, sum: i128, ptr32: bool, out: &mut i128) bool {
+        let v = self.floor_of(sum);
+        if !bt_holds(self.ty, v, ptr32) || !bt_holds(self.to, v, ptr32) {
+            return false;
+        }
+        *out = v;
+        return true;
+    }
+
+    pub fn add_term(self: &mut Self, d: DefId, coeff: i128) bool {
+        if coeff.is_zero() {
             return true;
         }
-        if self.div_of() != 1 {
+        if self.div_of() != i128::one() {
             return false; // a term added AFTER the floor divisor would be divided; it was not written so
         }
         for i in 0..self.n {
             if unsafe self.p[i as usize].module == d.module && unsafe self.p[i as usize].node == d.node {
+                let mut sum = unsafe self.c[i as usize];
+                if !lin_acc(&mut sum, i128::one(), coeff) {
+                    return false;
+                }
                 unsafe {
-                    self.c[i as usize] = self.c[i as usize] + coeff;
+                    self.c[i as usize] = sum;
                 }
                 return true;
             }
@@ -864,17 +931,17 @@ extend ConstLin {
         return true;
     }
 
-    pub fn scale(self: &Self, f: i64, out: &mut ConstLin) bool {
-        // Widths are small; a factor this large means the expression is running away, not describing a type.
-        if f > 0x40000000 || f < 0 - 0x40000000 || self.k > 0x40000000 || self.k < 0 - 0x40000000 {
-            return false;
-        }
-        if self.div_of() != 1 || out.div_of() != 1 {
+    /// Add `f` times this form to `out`; false when a coefficient leaves i128 or a divisor is involved.
+    pub fn scale(self: &Self, f: i128, out: &mut ConstLin) bool {
+        if self.div_of() != i128::one() || out.div_of() != i128::one() {
             return false; // scaling does not distribute over the floor divisor
         }
-        out.k = out.k + self.k * f;
+        if !lin_acc(&mut out.k, self.k, f) {
+            return false;
+        }
         for i in 0..self.n {
-            if !out.add_term(unsafe self.p[i as usize], unsafe self.c[i as usize] * f) {
+            let mut cf = i128::zero();
+            if !lin_acc(&mut cf, unsafe self.c[i as usize], f) || !out.add_term(unsafe self.p[i as usize], cf) {
                 return false;
             }
         }
@@ -882,10 +949,449 @@ extend ConstLin {
     }
 }
 
+/// A step a written const-generic expression computes over generic parameters that its canonical
+/// form drops: `{N * 2 - N}` is the form `N`, and its `N * 2` still has to fit the expression's type
+/// under every instantiation, as it does at run time. `div` 0: the value of `lin` must fit `lin.ty`
+/// and `lin.to`. Else `lin` is the dividend of a `/` by `div`, which the form floors: the quotient
+/// the written `/` truncates is that floor only for a dividend that is not negative or that `div`
+/// divides. `root` marks the whole expression (the type that holds it is checked too), `canon` a
+/// step that has no written text of its own (an alias argument), spelled from `lin`. `key` is the
+/// node the step was recorded for, the deduplication key, and `owner` the declaration node of the
+/// item whose instantiations bind its parameters. `idx` marks a constant index into an array whose
+/// length is symbolic: `lin` is the length and `div` the index, which must be below it.
+pub struct ConstStep {
+    pub lin: ConstLin,
+    pub div: i128,
+    pub key: NodeId,
+    pub owner: NodeId,
+    pub module: ModuleId, // the module `span` indexes
+    pub span: tok::Span,
+    pub root: bool,
+    pub canon: bool,
+    pub idx: bool,
+}
+
+extend ConstStep {
+    /// Whether the step holds when its constant and terms sum to `sum` (usize and isize are 32-bit
+    /// under `ptr32`).
+    pub fn holds(self: &Self, sum: i128, ptr32: bool) bool {
+        if self.idx {
+            // A length outside its types is the length's own step.
+            let mut n = i128::zero();
+            return !self.lin.finish(sum, ptr32, &mut n) || self.div < n;
+        }
+        if self.div.is_zero() {
+            let mut v = i128::zero();
+            return self.lin.finish(sum, ptr32, &mut v);
+        }
+        return !sum.is_negative() || sum.rem_euclid(&self.div).is_zero();
+    }
+
+    pub fn same(self: &Self, o: &ConstStep) bool {
+        return self.key == o.key && self.owner == o.owner && self.div == o.div && self.module == o.module && self.span.start == o.span.start && self.span.end == o.span.end && self.root == o.root && self.canon == o.canon && self.idx == o.idx && const_lin_eq(
+            &self.lin,
+            &o.lin,
+        );
+    }
+}
+
+/// `*acc + c * x` into `acc`; false when a step leaves i128 (no 64-bit value is that far out).
+pub fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
+    if let Some(p) = c.checked_mul(&x) {
+        if let Some(s) = acc.checked_add(&p) {
+            *acc = s;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The exact value of two's complement pattern `bits` read as integer type `bt`: zero-extended for an unsigned
+/// type, sign-extended for any other.
+pub fn cval_exact(bits: i64, bt: BuiltinType) i128 {
+    if bt_is_unsigned(bt) {
+        let mut r = i128::zero();
+        r.set_limb(0, bits as u64);
+        return r;
+    }
+    return i128::from_i64(bits);
+}
+
+/// The 64-bit two's complement pattern of `v` (a value some 64-bit integer type holds).
+pub fn cval_bits(v: i128) i64 {
+    return v.limb(0) as i64;
+}
+
+/// Array length `v` as an element count; -1 outside 0..=4294967295.
+pub fn len_count(v: i128) i64 {
+    if v.is_negative() || v.limb(1) != 0 || v.limb(0) > 0xFFFFFFFFu64 {
+        return -1;
+    }
+    return v.limb(0) as i64;
+}
+
+/// Whether `bt` is an unsigned integer type (`u8` to `usize`).
+pub const fn bt_is_unsigned(bt: BuiltinType) bool {
+    return bt as u8 >= BuiltinType::BT_U8 as u8 && bt as u8 <= BuiltinType::BT_USIZE as u8;
+}
+
+/// The width of integer type `bt` in bits (usize and isize 32 under `ptr32`); 0 for any other type.
+pub const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
+    return switch bt {
+        BT_I8 | BT_U8 => 8,
+        BT_I16 | BT_U16 => 16,
+        BT_I32 | BT_U32 => 32,
+        BT_I64 | BT_U64 => 64,
+        BT_ISIZE | BT_USIZE => pick(ptr32, 32u32, 64u32),
+        _ => 0,
+    };
+}
+
+/// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
+/// other type.
+pub fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
+    let w = bt_int_width(bt, ptr32);
+    if w == 0 {
+        return false;
+    }
+    if bt_is_unsigned(bt) {
+        return !v.is_negative() && v.limb(1) == 0 && (w == 64 || v.limb(0) >> w as u64 == 0);
+    }
+    // Signed: the high limb is the low limb's sign extension (the value fits i64), and below 64
+    // bits the low limb sign-extends from bit w - 1.
+    let lo = v.limb(0) as i64;
+    if v.limb(1) != (lo >> 63) as u64 {
+        return false;
+    }
+    let sh = (64 - w) as i64;
+    return lo << sh >> sh == lo;
+}
+
+/// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`).
+pub fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
+    let w = bt_int_width(bt, ptr32) as u64;
+    if bt_is_unsigned(bt) {
+        let mut m = i128::zero();
+        if w == 64 {
+            m.set_limb(0, 0xFFFFFFFFFFFFFFFFu64);
+        } else {
+            m.set_limb(0, (1u64 << w) - 1);
+        }
+        *lo = i128::zero();
+        *hi = m;
+        return;
+    }
+    let top = if w == 64 {
+        0x7FFFFFFFFFFFFFFFi64;
+    } else {
+        (1i64 << (w - 1) as i64) - 1;
+    };
+    *lo = i128::from_i64(-top - 1);
+    *hi = i128::from_i64(top);
+}
+
+/// How one argument that an extend's target writes binds the extend's generic parameters.
+pub const XA_FIXED: u8 = 0; // names none of them: the instance's argument must be this type
+pub const XA_PARAM: u8 = 1; // a bare parameter: it takes the instance's argument
+pub const XA_FORM: u8 = 2; // `{c * N + k}` of one const parameter N: N = (argument - k) / c, exactly
+pub const XA_BAD: u8 = 3; // anything else: a parameter inside another type, or a form of several
+
+/// One argument of an extend's target: `kind` is an XA_* value, `par` the position of the parameter
+/// a PARAM or FORM argument names among the extend's generics, and `c * par + k` a FORM's value.
+pub struct XArg {
+    pub c: i128,
+    pub k: i128,
+    pub par: u32,
+    pub kind: u8,
+}
+
+/// Classify argument type `t` (read through `a`) of the target of an extend whose generic parameters
+/// are the nodes `gens` of module `m` (listed through `ea`).
+pub fn xarg_of(a: &Ast, t: TypeId, ea: &Ast, m: ModuleId, gens: NodeList) XArg {
+    let mut x = XArg { c: i128::one(), k: i128::zero(), par: 0, kind: XA_BAD };
+    if a.type_concrete(t) {
+        x.kind = XA_FIXED;
+        return x;
+    }
+    let y = *a.type_at(t);
+    let mut d = DefId { module: y.module, node: y.as_data.decl };
+    if y.kind == TypeKind::TYPE_CONST_EXPR {
+        let l = a.const_lin_at(y.as_data.inst);
+        if l.div_of() != i128::one() {
+            return x;
+        }
+        let mut hit: i32 = -1;
+        for i in 0..l.n {
+            if !unsafe l.c[i as usize].is_zero() {
+                if hit >= 0 {
+                    return x;
+                }
+                hit = i;
+            }
+        }
+        if hit < 0 {
+            return x;
+        }
+        d = unsafe l.p[hit as usize];
+        x.c = unsafe l.c[hit as usize];
+        x.k = l.k;
+    } else if y.kind != TypeKind::TYPE_GENERIC {
+        return x;
+    }
+    for i in 0..gens.len {
+        if d.module == m && unsafe ea.list(gens)[i as usize] == d.node {
+            x.par = i;
+            x.kind = pick(y.kind == TypeKind::TYPE_GENERIC, XA_PARAM, XA_FORM);
+            return x;
+        }
+    }
+    return x;
+}
+
+/// The value of FORM argument `x`'s parameter that makes the form equal `v`, into `out`: false when
+/// no integer does, or when type `bt` does not hold it (usize and isize are 32-bit under `ptr32`).
+pub fn xarg_solve(x: &XArg, v: i128, bt: BuiltinType, ptr32: bool, out: &mut i128) bool {
+    let mut d = v;
+    if !lin_acc(&mut d, i128::from_i64(-1), x.k) {
+        return false;
+    }
+    let mut r = i128::zero();
+    let q = d.divmod(&x.c, &mut r);
+    if !r.is_zero() || !bt_holds(bt, q, ptr32) {
+        return false;
+    }
+    *out = q;
+    return true;
+}
+
+// `n / d` rounded toward negative infinity (`d` nonzero).
+fn w_floor_div(n: Int<256>, d: Int<256>) Int<256> {
+    let mut r = Int::<256>::zero();
+    let q = n.divmod(&d, &mut r);
+    if !r.is_zero() && r.is_negative() != d.is_negative() {
+        return q - Int::<256>::one();
+    }
+    return q;
+}
+
+// `n / d` rounded toward positive infinity (`d` nonzero).
+fn w_ceil_div(n: Int<256>, d: Int<256>) Int<256> {
+    return w_floor_div(n.wrapping_neg(), d).wrapping_neg();
+}
+
+// `n` modulo positive `m`, in `[0, m)`.
+fn w_mod(n: Int<256>, m: Int<256>) Int<256> {
+    return n - m * w_floor_div(n, m);
+}
+
+// The greatest common divisor of nonnegative `a` and `b`. Euclid's remainders at least halve every two
+// steps, so 512 steps cover every 256-bit pair.
+fn w_gcd(a: Int<256>, b: Int<256>) Int<256> {
+    let mut x = a;
+    let mut y = b;
+    for _ in 0..512 {
+        if y.is_zero() {
+            return x;
+        }
+        let r = w_mod(x, y);
+        x = y;
+        y = r;
+    }
+    panic("w_gcd: Euclid's algorithm did not end");
+}
+
+// The inverse of `a` modulo `m` (`a` and `m` coprime, `m` > 1): extended Euclid, bounded as `w_gcd`.
+fn w_inv(a: Int<256>, m: Int<256>) Int<256> {
+    let mut r0 = m;
+    let mut r1 = w_mod(a, m);
+    let mut t0 = Int::<256>::zero();
+    let mut t1 = Int::<256>::one();
+    for _ in 0..512 {
+        if r1.is_zero() {
+            return w_mod(t0, m);
+        }
+        let q = w_floor_div(r0, r1);
+        let r2 = r0 - q * r1;
+        let t2 = t0 - q * t1;
+        r0 = r1;
+        r1 = r2;
+        t0 = t1;
+        t1 = t2;
+    }
+    panic("w_inv: extended Euclid did not end");
+}
+
+// The least and the greatest value in `[vlo, vhi]` that FORM argument `x` takes over every value of its
+// parameter's type `bt`, into `lo` and `hi`: false when it takes none there.
+fn xarg_image(
+    x: &XArg,
+    bt: BuiltinType,
+    ptr32: bool,
+    vlo: Int<256>,
+    vhi: Int<256>,
+    lo: &mut Int<256>,
+    hi: &mut Int<256>,
+) bool {
+    let mut al = i128::zero();
+    let mut ah = i128::zero();
+    bt_range(bt, ptr32, &mut al, &mut ah);
+    let c = Int::<256>::widen(&x.c);
+    let k = Int::<256>::widen(&x.k);
+    // `c * a + k` in `[vlo, vhi]` bounds `a` by the quotients of the range ends, swapped for a
+    // negative `c`.
+    let neg = c.is_negative();
+    let mut amin = Int::<256>::widen(&al);
+    let mut amax = Int::<256>::widen(&ah);
+    let bmin = w_ceil_div(pick(neg, vhi, vlo) - k, c);
+    let bmax = w_floor_div(pick(neg, vlo, vhi) - k, c);
+    if bmin > amin {
+        amin = bmin;
+    }
+    if bmax < amax {
+        amax = bmax;
+    }
+    if amin > amax {
+        return false;
+    }
+    let e1 = c * amin + k;
+    let e2 = c * amax + k;
+    *lo = pick(neg, e2, e1);
+    *hi = pick(neg, e1, e2);
+    return true;
+}
+
+/// Whether FORM arguments `x1` (its parameter of type `bt1`) and `x2` (`bt2`) of one argument
+/// position take a common value of the position's type `vbt`: `c1 * a + k1 == c2 * b + k2` for an `a`
+/// of `bt1` and a `b` of `bt2`. Each form takes, in the range it covers, exactly the values congruent
+/// to its `k` modulo `|c|`; two such progressions meet in their common range when the Chinese
+/// remainder theorem's least solution there exists.
+pub fn xarg_forms_meet(x1: &XArg, bt1: BuiltinType, x2: &XArg, bt2: BuiltinType, vbt: BuiltinType, ptr32: bool) bool {
+    let mut vl = i128::zero();
+    let mut vh = i128::zero();
+    bt_range(vbt, ptr32, &mut vl, &mut vh);
+    let vlo = Int::<256>::widen(&vl);
+    let vhi = Int::<256>::widen(&vh);
+    let mut l1 = Int::<256>::zero();
+    let mut h1 = Int::<256>::zero();
+    let mut l2 = Int::<256>::zero();
+    let mut h2 = Int::<256>::zero();
+    if !xarg_image(x1, bt1, ptr32, vlo, vhi, &mut l1, &mut h1) {
+        return false;
+    }
+    if !xarg_image(x2, bt2, ptr32, vlo, vhi, &mut l2, &mut h2) {
+        return false;
+    }
+    let lo = pick(l1 > l2, l1, l2);
+    let hi = pick(h1 < h2, h1, h2);
+    if lo > hi {
+        return false;
+    }
+    let s1 = Int::<256>::widen(&x1.c).abs();
+    let s2 = Int::<256>::widen(&x2.c).abs();
+    let k1 = Int::<256>::widen(&x1.k);
+    let d = Int::<256>::widen(&x2.k) - k1;
+    let g = w_gcd(s1, s2);
+    if !w_mod(d, g).is_zero() {
+        return false;
+    }
+    // The common values are `v + l * t`: `v` solves `(s1 / g) * t == d / g` modulo `m2`.
+    let m2 = s2 / g;
+    let mut t = Int::<256>::zero();
+    if m2 > Int::<256>::one() {
+        t = w_mod(w_mod(d / g, m2) * w_inv(s1 / g, m2), m2);
+    }
+    let v = k1 + s1 * t;
+    let l = s1 * m2;
+    return v + l * w_ceil_div(lo - v, l) <= hi;
+}
+
+/// The form of FORM argument `x`'s parameter (of type `bt`) that makes `x` equal the form `r` of
+/// other parameters, `(r - k) / c`, into `out`: false when `r` has a divisor or a coefficient or its
+/// constant does not divide exactly.
+pub fn xarg_solve_lin(x: &XArg, r: &ConstLin, bt: BuiltinType, out: &mut ConstLin) bool {
+    *out = ConstLin::new(bt);
+    let mut k = r.k;
+    if r.div_of() != i128::one() || !lin_acc(&mut k, i128::from_i64(-1), x.k) {
+        return false;
+    }
+    let mut rem = i128::zero();
+    out.k = k.divmod(&x.c, &mut rem);
+    if !rem.is_zero() {
+        return false;
+    }
+    for i in 0..r.n {
+        let q = unsafe r.c[i as usize].divmod(&x.c, &mut rem);
+        if !rem.is_zero() || !out.add_term(unsafe r.p[i as usize], q) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The interface of `a` whose items include `member` (an associated type or a method), or NODE_NONE.
+pub fn iface_of_member(a: &Ast, member: NodeId) NodeId {
+    let items = a.at_const(a.root).as_data.program.items;
+    for i in 0..items.len {
+        let iid = unsafe a.list(items)[i as usize];
+        if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
+            continue;
+        }
+        let ms = a.at_const(iid).as_data.interface_def.items;
+        for j in 0..ms.len {
+            if unsafe a.list(ms)[j as usize] == member {
+                return iid;
+            }
+        }
+    }
+    return NODE_NONE;
+}
+
+/// How many leading arguments of its target's instance type (`n` arguments) extend `ext` constrains
+/// (syntax in `ea`): the ones its target path writes, lifetimes aside, or all `n` when it writes none
+/// (an alias that names an instance).
+pub fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
+    let tt = ea.at_const(ext).as_data.extend_def.target_type;
+    if tt == NODE_NONE || ea.at_const(tt).kind != NodeKind::NODE_TYPE_PATH {
+        return 0;
+    }
+    let targs = ea.at_const(tt).as_data.type_path.args;
+    let mut w: u32 = 0;
+    for j in 0..targs.len {
+        if ea.at_const(unsafe ea.list(targs)[j as usize]).kind != NodeKind::NODE_LIFETIME {
+            w += 1;
+        }
+    }
+    if w == 0 || w > n {
+        return n;
+    }
+    return w;
+}
+
+/// Whether extend `ext` of module `m` (syntax in `ea`) applies to every instance of its target and
+/// binds its generic parameters positionally: its target type `pat` (read through `a`) is not an
+/// instance, or the arguments it constrains are its parameters, bare and in order.
+pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) bool {
+    if pat == TYPE_NONE || a.type_at(pat).kind != TypeKind::TYPE_INSTANCE {
+        return true;
+    }
+    let it = *a.instance(a.type_at(pat).as_data.inst);
+    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    if ext_arity(ea, ext, it.n) != gens.len {
+        return false;
+    }
+    for j in 0..gens.len {
+        let y = *a.type_at(unsafe it.args[j as usize]);
+        if y.kind != TypeKind::TYPE_GENERIC || y.module != m || y.as_data.decl != unsafe ea.list(gens)[j as usize] {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Substitute a const-expression form's parameters and accumulate the result into `out`. `src` holds
 /// form `idx`; `params` are bound to `args`, which are types of `dst`. False when the result leaves the
-/// linear set (a parameter bound to something that is not a width) -- the caller then keeps the form
-/// unfolded rather than inventing a value for it.
+/// linear set (a parameter bound to something that is not a width) or a bound form's value leaves its
+/// types -- the caller then keeps the form unfolded rather than inventing a value for it.
 pub fn lin_subst(
     dst: &Ast,
     src: &Ast,
@@ -894,23 +1400,39 @@ pub fn lin_subst(
     args: *const TypeId,
     n: i32,
     out: &mut ConstLin,
+    ptr32: bool,
+    depth: i32,
+) bool {
+    return lin_subst_form(dst, src.const_lin_at(idx), params, args, n, out, ptr32, depth);
+}
+
+/// `lin_subst` of form value `form`.
+pub fn lin_subst_form(
+    dst: &Ast,
+    form: &ConstLin,
+    params: *const DefId,
+    args: *const TypeId,
+    n: i32,
+    out: &mut ConstLin,
+    ptr32: bool,
     depth: i32,
 ) bool {
     if depth > 12 {
         return false;
     }
-    let form = *src.const_lin_at(idx);
-    if form.div_of() != 1 {
+    if form.div_of() != i128::one() {
         // The divisor covers the WHOLE form, so it transfers only onto an empty accumulator.
-        if out.k != 0 || out.n != 0 || out.div_of() != 1 {
+        if !out.k.is_zero() || out.n != 0 || out.div_of() != i128::one() {
             return false;
         }
         out.div = form.div;
     }
-    out.k = out.k + form.k;
+    if !lin_acc(&mut out.k, i128::one(), form.k) {
+        return false;
+    }
     for i in 0..form.n {
         let coeff = unsafe form.c[i as usize];
-        if coeff == 0 {
+        if coeff.is_zero() {
             continue;
         }
         let d = unsafe form.p[i as usize];
@@ -928,7 +1450,9 @@ pub fn lin_subst(
         }
         let by = *dst.type_at(bound);
         if by.kind == TypeKind::TYPE_CONST {
-            out.k = out.k + by.as_data.value * coeff;
+            if !lin_acc(&mut out.k, coeff, by.cval()) {
+                return false;
+            }
             continue;
         }
         if by.kind == TypeKind::TYPE_CONST_EXPR {
@@ -957,14 +1481,20 @@ pub fn lin_subst(
                     nbind = nbind + 1;
                 }
             }
-            let mut inner = ConstLin { k: 0, n: 0 };
-            if !lin_subst(dst, dst, by.as_data.inst, &fp[0], &fa[0], nbind, &mut inner, depth + 1) {
+            let mut inner = ConstLin::new(pf.ty);
+            inner.to = pf.to;
+            if !lin_subst(dst, dst, by.as_data.inst, &fp[0], &fa[0], nbind, &mut inner, ptr32, depth + 1) {
                 return false;
             }
             if inner.is_concrete() {
-                out.k = out.k + inner.value() * coeff;
+                let mut iv = i128::zero();
+                if !inner.finish(inner.k, ptr32, &mut iv) || !lin_acc(&mut out.k, coeff, iv) {
+                    return false;
+                }
                 continue;
             }
+            // The terms now name the binding's own parameters, which compute in its type.
+            out.ty = inner.ty;
             if !inner.scale(coeff, out) {
                 return false;
             }
@@ -1094,19 +1624,19 @@ fn ts_delta(i: usize) u64 {
 /// The result depends on `h ^ v` only, so `h` must be a running hash: a small tag or bit set passed as
 /// `h` collides with a structured `v` that differs in the same bits. Mix `v` first, then fold the tag in.
 pub const fn skey_mix(h: u64, v: u64) u64 {
-    let mut x = (h ^ v) * 1099511628211u64;
-    x = (x ^ x >> 30) * 0xBF58476D1CE4E5B9u64;
-    x = (x ^ x >> 27) * 0x94D049BB133111EBu64;
+    let mut x = (h ^ v).wrapping_mul(1099511628211u64);
+    x = (x ^ x >> 30).wrapping_mul(0xBF58476D1CE4E5B9u64);
+    x = (x ^ x >> 27).wrapping_mul(0x94D049BB133111EBu64);
     return x ^ x >> 31;
 }
 
 pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
-    if a.k != b.k || a.div_of() != b.div_of() {
+    if a.k != b.k || a.div_of() != b.div_of() || a.ty != b.ty || a.to != b.to {
         return false;
     }
     let mut na: i32 = 0;
     for i in 0..a.n {
-        if unsafe a.c[i as usize] == 0 {
+        if unsafe a.c[i as usize].is_zero() {
             continue;
         }
         na = na + 1;
@@ -1122,7 +1652,7 @@ pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
     }
     let mut nb: i32 = 0;
     for j in 0..b.n {
-        if unsafe b.c[j as usize] != 0 {
+        if !unsafe b.c[j as usize].is_zero() {
             nb = nb + 1;
         }
     }
@@ -1131,11 +1661,31 @@ pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
 
 pub struct TyArr {
     pub elem: TypeId,
+    /// The element count, or with `Ty.qualifier == ARR_SYM` the TypeId (in `elem`'s pool) of a
+    /// symbolic length: a const generic parameter or a const expression over them.
     pub len: u32,
 }
+/// The `Ty.qualifier` of a TYPE_ARRAY whose `arr.len` names a symbolic length type, not a count.
+pub const ARR_SYM: u8 = 1;
 pub struct TyProj {
     pub owner: TypeId, // the reflected type (may be a generic param); Ty.module is the binder's module
     pub binder: NodeId, // the NODE_INLINE_FOR the projection belongs to
+}
+/// The `Ty.qualifier` bits of a TYPE_FUNCTION that is a function-pointer type (`fn(A) R`): its
+/// payload is a signature record (`TyFn.sig`), not a declaration, so two spellings of one signature
+/// are one type and substitution reaches its parameters and result. FN_MOVE marks `move fn(..)`.
+pub const FN_SIG: u8 = 1;
+pub const FN_MOVE: u8 = 2;
+/// No instance-table record (`Ty::rec`).
+pub const NO_REC: u32 = 0xFFFFFFFF;
+/// A function-pointer type's payload. `decl` overlays `TyAs.decl` and is NODE_NONE, so a reader of
+/// a TYPE_FUNCTION's declaration sees no closure and no function. `sig` is an instance-table record
+/// whose `module` is the result count, `decl` the parameter count and `args` the results then the
+/// parameters; when they are more than eight, the record holds the first seven and its last slot is
+/// the function-pointer type of the rest (no results, the remaining count as parameters).
+pub struct TyFn {
+    pub decl: NodeId,
+    pub sig: u32,
 }
 pub union TyAs {
     pub builtin: BuiltinType,
@@ -1143,8 +1693,11 @@ pub union TyAs {
     pub decl: NodeId,
     pub inst: u32,
     pub arr: TyArr,
-    pub value: i64, // TYPE_CONST: a const-generic value
+    /// TYPE_CONST: a const-generic value, the two's complement bits of a value of the integer type
+    /// in `Ty.qualifier` (`cval_exact`): the declared type of the parameter it is an argument of.
+    pub value: i64,
     pub proj: TyProj, // TYPE_FIELD_PROJECTION
+    pub fnp: TyFn, // TYPE_FUNCTION with FN_SIG
 }
 pub struct Ty {
     pub kind: TypeKind,
@@ -1152,6 +1705,49 @@ pub struct Ty {
     pub concrete: bool,
     pub module: ModuleId,
     pub as_data: TyAs,
+}
+
+extend Ty {
+    /// A TYPE_CONST's integer type.
+    pub const fn cbt(self: &Self) BuiltinType {
+        return self.qualifier as BuiltinType;
+    }
+
+    /// A TYPE_CONST's exact value.
+    pub fn cval(self: &Self) i128 {
+        return cval_exact(self.as_data.value, self.cbt());
+    }
+
+    /// A TYPE_ARRAY whose length is symbolic (`[T; N]` inside the generic that declares `N`).
+    pub const fn arr_sym(self: &Self) bool {
+        return self.kind == TypeKind::TYPE_ARRAY && self.qualifier == ARR_SYM;
+    }
+
+    /// A function-pointer type: a signature record, no declaration.
+    pub const fn fn_sig(self: &Self) bool {
+        return self.kind == TypeKind::TYPE_FUNCTION && (self.qualifier & FN_SIG) != 0;
+    }
+
+    /// The instance-table record this type's payload names, whose `args` are its child types: an
+    /// instance's, a dyn's, a function-pointer type's signature. NO_REC for any other type.
+    pub const fn rec(self: &Self) u32 {
+        if self.kind == TypeKind::TYPE_INSTANCE || self.kind == TypeKind::TYPE_DYN || self.kind == TypeKind::TYPE_ASSOC {
+            return self.as_data.inst;
+        }
+        if self.fn_sig() {
+            return self.as_data.fnp.sig;
+        }
+        return NO_REC;
+    }
+
+    /// Point the payload at record `r` (the type must have one: see `rec`).
+    pub fn set_rec(self: &mut Self, r: u32) {
+        if self.fn_sig() {
+            self.as_data.fnp.sig = r;
+        } else {
+            self.as_data.inst = r;
+        }
+    }
 }
 
 extend Ty as Hash {
@@ -1179,6 +1775,17 @@ extend Ty as Eq {
     pub fn eq(self: &Self, other: &Self) bool {
         return unsafe cstring::memcmp(self as *const Ty, other as *const Ty, sizeof(Ty)) == 0;
     }
+}
+
+/// The array record `[elem; lt]`, where `ly` is the length type `lt`.
+pub const fn array_ty(elem: TypeId, lt: TypeId, ly: &Ty) Ty {
+    if ly.kind == TypeKind::TYPE_CONST && ly.as_data.value >= 0 && ly.as_data.value <= 0xFFFFFFFFi64 {
+        return Ty {
+            kind: TypeKind::TYPE_ARRAY,
+            as_data: TyAs { arr: TyArr { elem: elem, len: ly.as_data.value as u32 } },
+        };
+    }
+    return Ty { kind: TypeKind::TYPE_ARRAY, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
 }
 
 pub struct TyInstance {
@@ -1215,6 +1822,14 @@ pub struct CoerceUse {
     pub node: NodeId,
     pub target: TypeId,
     pub method: DefId,
+}
+
+/// A call of a generic interface's method through a generic bound or an interface's `Self`: `iface`
+/// is `dyn I<args>` over the arguments the bound gives the interface, which name the conformance
+/// every instance of the call dispatches to.
+pub struct BoundCall {
+    pub node: NodeId,
+    pub iface: TypeId,
 }
 
 // One deferred field-projection bound: prove `iface` for every field of `owner` once a call binds
@@ -1678,9 +2293,10 @@ extend TypePool {
         self.clins.clear();
     }
 
-    /// The fixed prefix: slot 0 is TYPE_ERROR, then one TYPE_BUILTIN per builtin (`Ast::builtin`).
-    /// Seeds pass through ty_canon like every interned entry, or their union tail bytes would be
-    /// whatever the C compiler left there and byte-identity dedup would miss them.
+    /// The fixed prefix: slot 0 is TYPE_NONE (kind TYPE_ERROR, qualifier 0), then one TYPE_BUILTIN
+    /// per builtin (`Ast::builtin`), then TYPE_ERROR (kind TYPE_ERROR, qualifier 1). Seeds pass
+    /// through ty_canon like every interned entry, or their union tail bytes would be whatever the
+    /// C compiler left there and byte-identity dedup would miss them.
     pub fn seed(self: &mut Self) {
         let _ = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
         for b in 0..BuiltinType::BT_COUNT as u8 {
@@ -1690,6 +2306,8 @@ extend TypePool {
                 ),
             );
         }
+        let e = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, qualifier: 1, concrete: true }));
+        assert(e == TYPE_ERROR, "TYPE_ERROR follows the builtins");
     }
 
     pub const fn len(self: &Self) usize {
@@ -1790,14 +2408,18 @@ extend TypePool {
     // children's recorded answer).
     const fn decide_g(self: &Self, ty: &Ty) bool {
         return switch ty.kind {
-            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION => false,
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.at(ty.as_data.elem as usize).concrete,
-            TYPE_INSTANCE => {
-                let it = self.instance(ty.as_data.inst as usize);
+            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.at(ty.as_data.elem as usize).concrete,
+            TYPE_ARRAY => !ty.arr_sym() && self.at(ty.as_data.arr.elem as usize).concrete,
+            TYPE_INSTANCE | TYPE_FUNCTION | TYPE_DYN => {
+                let r = ty.rec();
                 let mut ok = true;
-                for i in 0..it.n {
-                    if !self.at((unsafe it.args[i as usize]) as usize).concrete {
-                        ok = false;
+                if r != NO_REC {
+                    let it = self.instance(r as usize);
+                    for i in 0..it.n {
+                        if !self.at((unsafe it.args[i as usize]) as usize).concrete {
+                            ok = false;
+                        }
                     }
                 }
                 ok;
@@ -1828,6 +2450,17 @@ extend TypePool {
     }
 
     pub fn intern_dyn_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+        if decl == NODE_NONE {
+            // A `dyn fn` names its signature only: no instance type stands beside it.
+            let mut it = TyInstance { module: module, decl: decl, n: n };
+            for j in 0..n {
+                unsafe it.args[j] = unsafe args[j];
+            }
+            let di = self.insert_inst(&it);
+            return self.intern_g(
+                Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: di } },
+            );
+        }
         let ii = self.intern_instance_g(module, decl, args, n);
         let idx = self.at(ii as usize).as_data.inst;
         return self.intern_g(
@@ -1835,8 +2468,73 @@ extend TypePool {
         );
     }
 
-    pub fn const_value_g(self: &mut Self, v: i64) TypeId {
-        return self.intern_g(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
+    /// `Ast::intern_assoc` for this table.
+    pub fn intern_assoc_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+        let mut it = TyInstance { module: module, decl: decl, n: n };
+        for j in 0..n {
+            unsafe it.args[j] = unsafe args[j];
+        }
+        let idx = self.insert_inst(&it);
+        return self.intern_g(Ty { kind: TypeKind::TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
+    }
+
+    /// The function-pointer type `qual` of signature record `it` (children already this table's),
+    /// canonical as `Ast::intern_sig_rec` makes it.
+    pub fn intern_sig_g(self: &mut Self, it: &TyInstance, qual: u8) TypeId {
+        let r0 = *self.at(it.args[0] as usize);
+        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
+            let mut ps = Vector::<TypeId>::with_capacity(it.decl as usize);
+            for i in 0..it.decl {
+                let mut c = *it;
+                let mut k = i + 1;
+                while k >= 7 && c.module as u32 + c.decl > 8 {
+                    c = *self.instance(self.at(c.args[7] as usize).as_data.fnp.sig as usize);
+                    k = k - 7;
+                }
+                ps.push(unsafe c.args[k as usize]);
+            }
+            return self.intern_sig_slots_g(ps.as_ptr(), 0, it.decl, qual);
+        }
+        let idx = self.insert_inst(it);
+        return self.intern_g(
+            Ty {
+                kind: TypeKind::TYPE_FUNCTION,
+                qualifier: qual,
+                as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } },
+            },
+        );
+    }
+
+    // `Ast::intern_sig_i` for this table.
+    fn intern_sig_slots_g(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8) TypeId {
+        let total = nret + np;
+        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0 };
+        if total <= 8 {
+            it.n = total as u8;
+            for j in 0..total {
+                unsafe it.args[j as usize] = unsafe slots[j as usize];
+            }
+        } else {
+            it.n = 8;
+            for j in 0..7 {
+                unsafe it.args[j as usize] = unsafe slots[j as usize];
+            }
+            it.args[7] = self.intern_sig_slots_g(unsafe (slots + 7), 0, total - 7, FN_SIG);
+        }
+        return self.intern_sig_g(&it, q);
+    }
+
+    /// `Ast::intern_array` for this table.
+    pub fn intern_array_g(self: &mut Self, elem: TypeId, lt: TypeId) TypeId {
+        let ly = *self.at(lt as usize);
+        return self.intern_g(array_ty(elem, lt, &ly));
+    }
+
+    /// `Ast::const_value` for this table.
+    pub fn const_value_g(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
+        return self.intern_g(
+            Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
+        );
     }
 
     pub fn intern_clin_g(self: &mut Self, l: &ConstLin) TypeId {
@@ -1931,6 +2629,8 @@ pub struct Ast {
     pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
     pub coerce_at: Map<u32, u32>,
+    pub bound_calls: Vector<BoundCall>,
+    pub bound_call_at: Map<u32, u32>,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
     pub deref_uses: Vector<DerefUse>,
@@ -1948,6 +2648,10 @@ pub struct Ast {
     /// may provide one operator for different right operands, so the NAME no longer identifies it and
     /// codegen must not resolve it a second time.
     pub op_method: Map<u32, u64>,
+    /// Per integer constant pattern (a literal-pattern value or a range bound): its value in the
+    /// matched type, as two's complement bits. The pattern matrix reads values here, so a named or
+    /// associated constant, a limit and every literal spelling take part in coverage.
+    pub pat_vals: Map<u32, u64>,
     /// Resolutions a later stage seeded on identifiers it synthesized (a desugar names its callee
     /// and locals by resolution, never by text); `init_resolutions` re-applies them so a re-resolve
     /// of the retained arena keeps them.
@@ -1984,10 +2688,15 @@ pub struct Ast {
     /// The sorted distinct `str::hash` of every identifier in the removed source text: the removed
     /// code is never resolved, so the lints that count uses treat these names as used.
     pub bc_names: Vector<u64>,
+    /// The steps of this module's written const-generic expressions over generic parameters
+    /// (`ConstStep`), each item's published by its check before its Checked state, and their
+    /// count: the constant evaluator reads them from other workers (`steps_of`).
+    pub csteps: Vector<ConstStep>,
+    csteps_n: usize,
 }
 
 // Bootstrap constraint: the release compiler skips fields it never typed when it synthesizes a
-// destructor, and leaks `call_info` and `op_method`.
+// destructor, and leaks `call_info`, `op_method` and `pat_vals`.
 extend Ast as Free {
     pub fn free(self: &mut Self) {
         self.nodes.free();
@@ -2008,6 +2717,8 @@ extend Ast as Free {
         self.wide_lits.free();
         self.coerces.free();
         self.coerce_at.free();
+        self.bound_calls.free();
+        self.bound_call_at.free();
         self.dyn_uses.free();
         self.dyn_at.free();
         self.deref_uses.free();
@@ -2021,6 +2732,7 @@ extend Ast as Free {
         self.where_bounds.free();
         self.call_info.free();
         self.op_method.free();
+        self.pat_vals.free();
         self.seeds.free();
         self.closure_facts.free();
         self.cap_facts.free();
@@ -2030,6 +2742,7 @@ extend Ast as Free {
         self.bc_errs.free();
         self.bc_cuts.free();
         self.bc_names.free();
+        self.csteps.free();
     }
 }
 
@@ -2291,6 +3004,8 @@ extend Ast {
             c.as_data.arr = t.as_data.arr;
         } else if t.kind == TypeKind::TYPE_FIELD_PROJECTION {
             c.as_data.proj = t.as_data.proj; // both words are significant: owner AND binder
+        } else if t.fn_sig() {
+            c.as_data.fnp = t.as_data.fnp;
         } else if t.kind != TypeKind::TYPE_ERROR && t.kind != TypeKind::TYPE_NEVER {
             c.as_data.decl = t.as_data.decl; // every 4-byte arm (decl/elem/inst/builtin) overlays these bytes
         }
@@ -2330,6 +3045,37 @@ extend Ast {
             unsafe atomic::store_usize(&mut self.ilock_owner, 0, 0);
             self.ilock_sem.release();
         }
+    }
+
+    /// Publish step `s` (the module's checker only; readers on other workers take the intern lock).
+    pub fn publish_step(self: &mut Self, s: ConstStep) {
+        self.ilock_enter();
+        self.csteps.push(s);
+        unsafe atomic::store_usize(&mut self.csteps_n, self.csteps.len(), 2);
+        self.ilock_leave();
+    }
+
+    /// Drop every published step (a module's check starts over).
+    pub fn clear_steps(self: &mut Self) {
+        self.ilock_enter();
+        self.csteps.clear();
+        unsafe atomic::store_usize(&mut self.csteps_n, 0, 2);
+        self.ilock_leave();
+    }
+
+    /// The published steps of the item declared at `owner`, into `out` (cleared first).
+    pub fn steps_of(self: &mut Self, owner: NodeId, out: &mut Vector<ConstStep>) {
+        out.clear();
+        if unsafe atomic::load_usize(&self.csteps_n, 1) == 0 {
+            return;
+        }
+        self.ilock_enter();
+        for i in 0..self.csteps.len() {
+            if self.csteps.at(i).owner == owner {
+                out.push(*self.csteps.at(i));
+            }
+        }
+        self.ilock_leave();
     }
 
     pub fn intern_type(self: &mut Self, t: Ty) TypeId {
@@ -2388,6 +3134,11 @@ extend Ast {
     // which owes us nothing there. ty_canon rewrites the value through a zeroed union with only the
     // kind's live arm copied, so equal types are equal BYTES no matter how they were built.
     fn intern_type_i(self: &mut Self, t: Ty) TypeId {
+        // A type built over a rejected one is rejected: TYPE_ERROR absorbs its parents.
+        let k = t.kind;
+        if (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE) && t.as_data.elem == TYPE_ERROR || k == TypeKind::TYPE_ARRAY && (t.as_data.arr.elem == TYPE_ERROR || t.arr_sym() && t.as_data.arr.len == TYPE_ERROR) {
+            return TYPE_ERROR;
+        }
         let mut nt = Ast::ty_canon(&t);
         nt.concrete = self.tc_decide(t);
         if unsafe TS_ON {
@@ -2423,12 +3174,13 @@ extend Ast {
     fn intern_const_lin_i(self: &mut Self, l: &ConstLin) TypeId {
         let mut nz: i32 = 0;
         for i in 0..l.n {
-            if unsafe l.c[i as usize] != 0 {
+            if !unsafe l.c[i as usize].is_zero() {
                 nz = nz + 1;
             }
         }
         if nz == 0 {
-            return self.const_value(l.value());
+            // The caller checked that the value fits (`ConstLin::finish`).
+            return self.const_value(cval_bits(l.value()), l.to);
         }
         let mut ci: u32 = 0;
         if self.gt == null {
@@ -2473,38 +3225,184 @@ extend Ast {
         for j in 0..m {
             unsafe it.args[j] = unsafe args[j];
         }
+        if rec_has_error(&it) {
+            return TYPE_ERROR;
+        }
         if unsafe TS_ON {
             ts_add(TS_INST, 1);
         }
-        let mut idx: u32 = 0;
-        if self.gt == null {
-            idx = self.pool.insert_inst(&it);
-        } else {
-            let g = unsafe &mut *self.gt;
-            let hit = g.find_inst(&it);
-            if hit >= 0 {
-                idx = hit as u32;
-            } else if g.open {
-                idx = g.insert_inst(&it);
-            } else {
-                idx = self.pool.insert_inst(&it) | TYPE_PROV;
-            }
-        }
+        let idx = self.intern_rec(&it);
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
+    }
+
+    // The index of instance-table record `it`: the package table's when it holds it (or is open),
+    // else this module's provisional one.
+    fn intern_rec(self: &mut Self, it: &TyInstance) u32 {
+        if self.gt == null {
+            return self.pool.insert_inst(it);
+        }
+        let g = unsafe &mut *self.gt;
+        let hit = g.find_inst(it);
+        if hit >= 0 {
+            return hit as u32;
+        }
+        if g.open {
+            return g.insert_inst(it);
+        }
+        return self.pool.insert_inst(it) | TYPE_PROV;
+    }
+
+    /// The function-pointer type with results `slots[0..nret]` and parameters
+    /// `slots[nret..nret + np]` (`move fn(..)` with `is_move`). Safety: `slots` must point at
+    /// `nret + np` readable TypeIds.
+    pub fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool) TypeId {
+        let q = if is_move {
+            FN_SIG | FN_MOVE;
+        } else {
+            FN_SIG;
+        };
+        self.ilock_enter();
+        let r = self.intern_sig_i(slots, nret, np, q);
+        self.ilock_leave();
+        return r;
+    }
+
+    fn intern_sig_i(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8) TypeId {
+        let total = nret + np;
+        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0 };
+        if total <= 8 {
+            it.n = total as u8;
+            for j in 0..total {
+                unsafe it.args[j as usize] = unsafe slots[j as usize];
+            }
+        } else {
+            it.n = 8;
+            for j in 0..7 {
+                unsafe it.args[j as usize] = unsafe slots[j as usize];
+            }
+            it.args[7] = self.intern_sig_i(unsafe (slots + 7), 0, total - 7, FN_SIG);
+        }
+        return self.intern_sig_rec(&it, q);
+    }
+
+    /// The function-pointer type `q` (FN_SIG, maybe FN_MOVE) of signature record `it`. A single
+    /// `void` result is no result: `fn(..) void` and `fn(..)` are one type.
+    pub fn intern_sig_rec(self: &mut Self, it: &TyInstance, q: u8) TypeId {
+        if rec_has_error(it) {
+            return TYPE_ERROR;
+        }
+        let r0 = *self.type_at(it.args[0]);
+        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
+            let mut ps = Vector::<TypeId>::with_capacity(it.decl as usize);
+            for i in 0..it.decl {
+                ps.push(self.rec_slot(it, i + 1));
+            }
+            self.ilock_enter();
+            let r = self.intern_sig_i(ps.as_ptr(), 0, it.decl, q);
+            self.ilock_leave();
+            return r;
+        }
+        self.ilock_enter();
+        let idx = self.intern_rec(it);
+        let r = self.intern_type(
+            Ty {
+                kind: TypeKind::TYPE_FUNCTION,
+                qualifier: q,
+                as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } },
+            },
+        );
+        self.ilock_leave();
+        return r;
+    }
+
+    /// The `dyn fn` type `qual` of function-pointer type `sig`.
+    pub fn intern_dyn_fn(self: &mut Self, sig: TypeId, qual: u8) TypeId {
+        if sig == TYPE_ERROR {
+            return TYPE_ERROR;
+        }
+        self.ilock_enter();
+        let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 1 };
+        it.args[0] = sig;
+        let idx = self.intern_rec(&it);
+        let r = self.intern_type(Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, as_data: TyAs { inst: idx } });
+        self.ilock_leave();
+        return r;
+    }
+
+    /// The function-pointer type of `dyn fn` type `dy`, TYPE_NONE for an interface's `dyn`.
+    pub const fn dyn_fn_sig(self: &Self, dy: &Ty) TypeId {
+        let it = self.instance(dy.as_data.inst);
+        if it.decl != NODE_NONE {
+            return TYPE_NONE;
+        }
+        return it.args[0];
+    }
+
+    /// The result count (`ret`) or parameter count of function-pointer type `y`.
+    pub const fn sig_len(self: &Self, y: &Ty, ret: bool) u32 {
+        let it = self.instance(y.as_data.fnp.sig);
+        if ret {
+            return it.module;
+        }
+        return it.decl;
+    }
+
+    /// Result `i` (`ret`) or parameter `i` of function-pointer type `y`.
+    pub const fn sig_at(self: &Self, y: &Ty, ret: bool, i: u32) TypeId {
+        let it = self.instance(y.as_data.fnp.sig);
+        if ret {
+            return self.rec_slot(it, i);
+        }
+        return self.rec_slot(it, i + it.module as u32);
+    }
+
+    // Slot `i` of signature record `it` (results first, then parameters).
+    const fn rec_slot(self: &Self, it0: &TyInstance, i: u32) TypeId {
+        let mut it = *it0;
+        let mut k = i;
+        // A record of more than eight slots continues in its last one, seven slots further on.
+        while k >= 7 && it.module as u32 + it.decl > 8 {
+            it = *self.instance(self.type_at(it.args[7]).as_data.fnp.sig);
+            k = k - 7;
+        }
+        return unsafe it.args[k as usize];
     }
 
     /// Intern a `dyn` type: the payload is an instance-table index carrying the interface decl
     /// and its (possibly empty) type arguments; `module` mirrors the interface's module so
     /// existing `dy.module` reads stay valid.
     fn intern_dyn_i(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+        if decl == NODE_NONE {
+            return self.intern_dyn_fn(unsafe args[0], qual);
+        }
         let ii = self.intern_instance(module, decl, args, n);
+        if ii == TYPE_ERROR {
+            return TYPE_ERROR;
+        }
         let idx = self.type_at(ii).as_data.inst;
         return self.intern_type(
             Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } },
         );
     }
 
-    /// The interface (or dyn-fn signature) node behind a TYPE_DYN payload.
+    /// The associated type `decl` (an interface's `type Name;`, module `module`) of `args[0]` under the
+    /// interface arguments `args[1..n]`: a TYPE_ASSOC. Safety: `args` must point at `n` readable TypeIds.
+    pub fn intern_assoc(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+        let mut it = TyInstance { module: module, decl: decl, n: pick(n > 8, 8, n) };
+        for j in 0..it.n {
+            unsafe it.args[j] = unsafe args[j];
+        }
+        if rec_has_error(&it) {
+            return TYPE_ERROR;
+        }
+        self.ilock_enter();
+        let idx = self.intern_rec(&it);
+        let r = self.intern_type(Ty { kind: TypeKind::TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
+        self.ilock_leave();
+        return r;
+    }
+
+    /// The interface behind a TYPE_DYN payload (NODE_NONE for a `dyn fn`, see `dyn_fn_sig`).
     pub const fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
         return self.instance(dy.as_data.inst).decl;
     }
@@ -2551,6 +3449,10 @@ extend Ast {
         for i in 0..self.proj_obs.len() {
             let o = self.proj_obs.index_mut(i);
             o.owner = pub_map1(map, o.owner);
+        }
+        for i in 0..self.bound_calls.len() {
+            let c = self.bound_calls.index_mut(i);
+            c.iface = pub_map1(map, c.iface);
         }
         for i in 0..self.dyn_uses.len() {
             let d = self.dyn_uses.index_mut(i);
@@ -2629,6 +3531,11 @@ extend Ast {
                 return true;
             }
         }
+        for i in 0..self.bound_calls.len() {
+            if (self.bound_calls.at(i).iface & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -2693,9 +3600,19 @@ extend Ast {
         return i as usize < unsafe (&*self.gt).ninst();
     }
 
-    /// A const-generic argument value, interned as a module-independent TYPE_CONST.
-    pub fn const_value(self: &mut Self, v: i64) TypeId {
-        return self.intern_type(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
+    /// A const-generic argument value of integer type `bt` (two's complement `bits`), interned as a
+    /// module-independent TYPE_CONST.
+    pub fn const_value(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
+        return self.intern_type(
+            Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
+        );
+    }
+
+    /// `[elem; lt]` for length type `lt` of this pool: a TYPE_CONST in the u32 range is a count,
+    /// any other length stays symbolic.
+    pub fn intern_array(self: &mut Self, elem: TypeId, lt: TypeId) TypeId {
+        let ly = *self.type_at(lt);
+        return self.intern_type(array_ty(elem, lt, &ly));
     }
 
     /// Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
@@ -2736,13 +3653,17 @@ extend Ast {
     fn tc_decide(self: &Self, ty: Ty) bool {
         return switch ty.kind {
             // Not a value yet: an instance holding one must not be emitted until substitution folds it.
-            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION => false,
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.type_concrete(ty.as_data.elem),
-            TYPE_INSTANCE => {
-                let it = self.instance(ty.as_data.inst);
-                for i in 0..it.n {
-                    if !self.type_concrete(unsafe it.args[i]) {
-                        return false;
+            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.type_concrete(ty.as_data.elem),
+            TYPE_ARRAY => !ty.arr_sym() && self.type_concrete(ty.as_data.arr.elem),
+            TYPE_INSTANCE | TYPE_FUNCTION | TYPE_DYN => {
+                let r = ty.rec();
+                if r != NO_REC {
+                    let it = self.instance(r);
+                    for i in 0..it.n {
+                        if !self.type_concrete(unsafe it.args[i]) {
+                            return false;
+                        }
                     }
                 }
                 true;
@@ -2771,6 +3692,9 @@ extend Ast {
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
                 let mut nt = ty;
                 nt.as_data.elem = self.reintern(src, ty.as_data.elem);
+                if ty.arr_sym() {
+                    nt.as_data.arr.len = self.reintern(src, ty.as_data.arr.len);
+                }
                 self.intern_type(nt);
             },
             TYPE_INSTANCE => {
@@ -2786,6 +3710,14 @@ extend Ast {
                 nt.as_data.proj.owner = self.reintern(src, ty.as_data.proj.owner);
                 self.intern_type(nt);
             },
+            TYPE_ASSOC => {
+                let inst = *src.instance(ty.as_data.inst);
+                let mut na: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+                for i in 0..inst.n {
+                    unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
+                }
+                self.intern_assoc(inst.module, inst.decl, &na[0], inst.n);
+            },
             TYPE_DYN => {
                 // dyn payload is an instance index (interface + optional type args): remap it
                 // into this Ast's instance table, preserving kind/qualifier/module
@@ -2794,10 +3726,30 @@ extend Ast {
                 for i in 0..inst.n {
                     unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
-                let ii = self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
-                let mut nd = ty;
-                nd.as_data.inst = self.type_at(ii).as_data.inst;
-                self.intern_type(nd);
+                let r9 = if inst.decl == NODE_NONE {
+                    self.intern_dyn_fn(na[0], ty.qualifier);
+                } else {
+                    let ii = self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
+                    let mut nd = ty;
+                    nd.as_data.inst = self.type_at(ii).as_data.inst;
+                    self.intern_type(nd);
+                };
+                r9;
+            },
+            TYPE_FUNCTION => {
+                let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
+                if ty.fn_sig() {
+                    it = *src.instance(ty.as_data.fnp.sig);
+                    for i in 0..it.n {
+                        unsafe it.args[i] = self.reintern(src, unsafe it.args[i]);
+                    }
+                }
+                let r9 = if ty.fn_sig() {
+                    self.intern_sig_rec(&it, ty.qualifier);
+                } else {
+                    self.intern_type(ty);
+                };
+                r9;
             },
             _ => self.intern_type(ty),
         };
@@ -2852,6 +3804,20 @@ extend Ast {
     pub fn set_coerce(self: &mut Self, node: NodeId, target: TypeId, method: DefId) {
         self.coerces.push(CoerceUse { node: node, target: target, method: method });
         self.coerce_at.insert(node, self.coerces.len() as u32 - 1);
+    }
+
+    /// Record the conformance bound call `node` dispatches to (`BoundCall`). Last writer wins.
+    pub fn set_bound_call(self: &mut Self, node: NodeId, iface: TypeId) {
+        self.bound_calls.push(BoundCall { node: node, iface: iface });
+        self.bound_call_at.insert(node, self.bound_calls.len() as u32 - 1);
+    }
+
+    /// The `dyn I<args>` recorded for bound call `node`, or TYPE_NONE.
+    pub const fn bound_call_of(self: &Self, node: NodeId) TypeId {
+        if let Some(i) = self.bound_call_at.get(&node) {
+            return self.bound_calls.at((*i) as usize).iface;
+        }
+        return TYPE_NONE;
     }
 
     pub const fn coerce_of(self: &Self, node: NodeId) *const CoerceUse {
@@ -3129,6 +4095,13 @@ extend Ast {
         return true;
     }
 
+    /// Whether generic argument `id` is a braced const expression (`F<{N * 2}>`, `F<{E::A}>`,
+    /// `F<{K}>`). The parser reads every other argument as a type, a lifetime or an integer literal.
+    pub const fn is_const_expr_arg(self: &Self, id: NodeId) bool {
+        let k = self.at_const(id).kind;
+        return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL;
+    }
+
     /// The type node of signature slot `slot`: a parameter's declared type (NODE_NONE when it has none),
     /// or `slot` itself (a bare type in a return list).
     pub const fn slot_type_node(self: &Self, slot: NodeId) NodeId {
@@ -3304,7 +4277,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the

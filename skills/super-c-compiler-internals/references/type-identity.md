@@ -12,10 +12,95 @@ measurement is kept below).
 
 | Range | Meaning |
 |-------|---------|
-| `0` | `TYPE_ERROR` |
+| `0` | `TYPE_NONE`: no type recorded, no expectation |
 | `1 .. 18` | the builtins, in `BuiltinType` order (`TypePool::seed`) |
+| `19` | `TYPE_ERROR`: a type the checker rejected; interning a pointer, reference, slice, array, instance, `dyn` or signature over it gives `TYPE_ERROR` |
 | final `< TYPE_MAX` | a published record of the package table |
 | `TYPE_PROV` set (bit 29) | a provisional record in the interning module's own `Ast.pool`, index `id & TYPE_PROV_MASK` |
+
+A function-pointer type (`fn(A) R`) is structural: a `TYPE_FUNCTION` with qualifier `FN_SIG`
+(`| FN_MOVE` for `move fn`) whose payload `TyFn.sig` is an instance-table record, not a
+declaration: `module` is the result count, `decl` the parameter count, `args` the results then
+the parameters (past eight slots, the first seven and then the function-pointer type of the
+rest). A single `void` result is no result, so two spellings of one signature are one id. A
+`dyn fn(..)` is a `TYPE_DYN` whose record has `decl == NODE_NONE` and holds its function-pointer
+type in `args[0]` (`Ast::dyn_fn_sig`). A closure or a function declaration keeps its nominal
+`TYPE_FUNCTION` (no `FN_SIG`). `Ty::rec` names the record of an instance, a dyn and a signature.
+
+A `TYPE_CONST` is a value and its integer type: the qualifier is the `BuiltinType`
+(`Ty::cbt`), `as_data.value` the value's 64-bit two's complement bits (`Ty::cval` reads it back
+exactly, zero-extended for an unsigned type), and the type is the declared type of the parameter
+it is an argument of (`Package::const_param_bt`; an enum parameter's discriminant is i32). So a
+u64 2^63 and an i64 -2^63 are two types, and every creation site types its value by the
+parameter: an explicit argument (`tc_const_arg`), a default, an inferred binding
+(`tc_slot_const`, which also retypes an array count), a folded form (its `to`), the inliner's
+count binding.
+
+A `TYPE_ASSOC` is an associated type of a type not known yet (`T::Output` for `T: Add<i32>`,
+`Self::Output` in the interface declaring it): its instance record names the interface's
+`type Output;` declaration, with the projected type then the interface's arguments as its
+arguments, and it is never concrete. The checker resolves it as soon as the projected type has
+conformances (`tc_assoc_make`: the conformance with those arguments, its `type Output = ..` under
+the parameters its target solves; a bound's binding `Output = T` for a type parameter).
+Emission (`Mangler::ground`, reached from `resolve`), compile-time evaluation (`Interp::rty`) and
+the instance graph (`subst_intern`) resolve it per instance on grounded arguments through
+`Package::assoc_norm` (the graph mirrors it on final ids), which reads the conformance's argument
+list the checker records on its interface path (`dyn I<args>`, defaults included) and the type of
+the alias's type node.
+
+A `TYPE_CONST_EXPR` names a `ConstLin` form `k + sum(c_i * P_i)` (floored by `div`) whose
+constant and coefficients are exact i128 values. `ty` is the type it computes in (its
+parameters' and named constants' types joined by widening; literals take it) and `to` the type
+of the position it stands for (the parameter it is an argument of; `ty` or a type `ty` widens to
+where written, possibly narrower where inference binds a parameter through a form). A value is
+the exact sum, which must fit `ty` and then `to` (`ConstLin::finish`); the instance graph reports
+one that does not as `const expression {..} overflows <type> for N = ..`. A bare parameter in a
+position of another type is the form `{P}` retyped; a form that is `1 * P` in P's own type is P
+(`tc_intern_form`), so composition keeps one type per value.
+
+The form drops the written steps (`{N * 2 - N}` is `N`), so identity is sound only where every
+step computes. `tc_lin` records each operator's value (`LinStep`), and `tc_lin_top` decides a
+step between constants at once and records each step over parameters as a `ConstStep`: a value
+that must fit `ty` (`div` 0; the whole expression is `root`, which the type walks check
+through the type that holds it), or the dividend of a `/` the form floors (`div` its divisor:
+not negative, or divided exactly). A step is keyed by its written node and belongs to the item
+whose instantiations bind its parameters (`owner`, the item's declaration node; `tc_step_owner`
+gives an extend header's steps to the extend). The module's checker publishes an item's steps
+into `Ast::csteps` before the item's Checked state (`tc_publish_steps`), and readers on other
+workers take them through `Ast::steps_of` (the intern lock, skipped while the module has none):
+no per-item storage. An alias's steps compose into its user's (`tc_alias_use_steps`: the body
+lowers once more past the type memos with `st_capture`, then `lin_subst_form` binds the
+arguments; an argument form is a step of its own). Every place an instantiation binds values
+A constant index into a symbolic-length array is a step too (`idx`: `lin` the length, `div` the
+index, which must be below it). The graph checks the steps of an interface default body per
+implementing instance under the conformance's frame (`walk_defaults`: the extend's parameters
+through `bind_ext_keys`, `Self`, the interface's parameters from the conformance's arguments). An
+extend binds its parameters through `xarg_of` (`src/ast/ast.spc`) wherever a stage maps an instance
+of its target to them (checker `tc_ext_args`, graph `bind_ext_keys`, emitter `bind_recv`, lowering
+`deref_ret_ty`, evaluator `bind_extend_solved`); `ext_is_identity` keeps the positional binding for
+the extends whose target is their parameters in order. Every place an instantiation binds values
+checks them: the instance graph per record (`check_steps`, a failure located at the step; a
+record with a failing step reports no type-walk finding, which the same overflow usually
+causes), the constant evaluator at a generic call (`steps_fail`), and the layout service per
+aggregate instance (`steps_hold`). `lay::Svc::cval_of` and `Interp::arr_count` refuse a form
+value outside `ty` or `to`.
+
+An array record keeps its count in `TyArr.len` with qualifier 0 (`[T; 0]` is a real
+zero-length array). A symbolic length (`[T; N]` inside the generic that declares `N`) has
+`qualifier == ARR_SYM`, and `TyArr.len` is then a child id: the length type (a const
+parameter's `TYPE_GENERIC`, or a `TYPE_CONST_EXPR`), in the same pool as the element.
+`Ast::intern_array` rebuilds the record from a length type, so a length that substitution
+folds to a `TYPE_CONST` becomes a count again. Readers of a length that may be symbolic fold
+it where the substitution lives: `Mangler::arr_len` (emission), `lay::Svc::len_of` (layout
+env), `Interp::arr_count` (evaluation frame).
+
+Every walker that maps child types maps an array's element and symbolic length, and the
+record of every type `Ty::rec` names (an instance's arguments, a dyn's, a signature's results
+and parameters) through `rec()`, rebuilding a signature with `intern_sig_rec` /
+`intern_sig_g`: substitution (the checker's `subst_rec`, the instance graph's
+`subst_intern`, the inliner's `xty`, lowering's `proj_ty_map`), `reintern`, publication
+(`PubKey` payloads, the batch and remap walks) and the TU cache table (`tt_ref`, `tt_id`). A
+walker that maps instance records only leaves a generic struct's `fn(T) T` field unsubstituted.
 
 `Ast.gt` points at the package table (`Package::bind_types`, called by every loader);
 an `Ast` without a package (`gt == null`, the unit tests) keeps module-local ids in its

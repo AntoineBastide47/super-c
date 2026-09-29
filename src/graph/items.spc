@@ -20,7 +20,7 @@ const FNV_OFF: u64 = 0xCBF29CE484222325u64;
 const FNV_PRIME: u64 = 0x100000001B3u64;
 
 const fn mix(h: u64, v: u64) u64 {
-    return (h ^ v) * FNV_PRIME;
+    return (h ^ v).wrapping_mul(FNV_PRIME);
 }
 
 // A node-id range [s, e] of one arena and the item `o` that owns it.
@@ -306,7 +306,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
                 }
             }
             let dkey = d.module as u64 << 32 | d.node as u64;
-            let slot = (dkey * 0x9E3779B97F4A7C15u64 >> 54) as usize;
+            let slot = (dkey.wrapping_mul(0x9E3779B97F4A7C15u64) >> 54) as usize;
             let target = if tk[slot] == dkey {
                 tv[slot];
             } else {
@@ -876,10 +876,22 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
     if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         return ty_hash(p, sps, c, m, ty.as_data.elem, h, depth + 1);
     }
+    if ty.arr_sym() {
+        h = ty_hash(p, sps, c, m, ty.as_data.arr.len, h, depth + 1);
+        return ty_hash(p, sps, c, m, ty.as_data.arr.elem, h, depth + 1);
+    }
     if k == TypeKind::TYPE_ARRAY {
         return ty_hash(p, sps, c, m, ty.as_data.arr.elem, mix(h, ty.as_data.arr.len), depth + 1);
     }
-    if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+    if ty.fn_sig() {
+        let sig = *a.instance(ty.as_data.fnp.sig);
+        h = mix(h, sig.module as u64 << 32 | sig.decl as u64);
+        for i in 0..sig.n {
+            h = ty_hash(p, sps, c, m, unsafe sig.args[i as usize], h, depth + 1);
+        }
+        return h;
+    }
+    if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN || k == TypeKind::TYPE_ASSOC {
         let inst = *a.instance(ty.as_data.inst);
         h = mix(h, decl_key(p, sps, c, inst.module as usize, inst.decl));
         for i in 0..inst.n {

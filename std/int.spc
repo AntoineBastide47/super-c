@@ -15,9 +15,10 @@
 // Signed limbs would put C's undefined signed overflow and implementation-defined signed shifts underneath
 // all of that; unsigned limbs make every step defined and portable.
 //
-// Semantics match the built-in integers. `UInt` arithmetic WRAPS at its width, as the built-in unsigned
-// types do; `Int` arithmetic TRAPS on overflow, as the built-in signed types do. Division by zero panics
-// either way. `wrapping_*`, `checked_*` and `saturating_*` are there when a different answer is wanted.
+// Overflow in `+`, `-`, `*` and `pow` (and `Int`'s `abs`) follows the build profile, as in the built-in
+// integers: it traps with overflow checks and wraps without (`sc_int_overflow` in int128.h decides).
+// Division by zero and MIN / -1 panic either way. `wrapping_*`, `checked_*`, `overflowing_*` and
+// `saturating_*` give the other answers in every profile.
 //
 // The 128-bit width additionally routes addition, subtraction, multiplication and division through the
 // C compiler's native 128-bit integer type where one exists (the `sc_i128_*` helpers in `int128.h`,
@@ -62,6 +63,15 @@ extern "C" "int128.h" {
 
 fn use_i128() bool {
     return unsafe sc_has_i128() != 0;
+}
+
+// Overflow in the `UInt` and `Int` operators (int128.h): the built-in trap with message `msg`, or a
+// return when the build wraps, and the operator then yields the wrapped value. A zero divisor and MIN / -1 trap
+// in every profile, as the built-in `/` and `%` do.
+extern "C" "int128.h" {
+    fn sc_int_overflow(msg: *const u8) void;
+    fn sc_int_div_zero(msg: *const u8) void;
+    fn sc_int_div_overflow(msg: *const u8) void;
 }
 
 // IntBits: the representation both signedness wrappers share.
@@ -181,9 +191,9 @@ extend<const BITS: usize> IntBits<BITS> {
         for i in 0..IntBits::<BITS>::nlimbs() {
             let a = self.get(i);
             let b = other.get(i);
-            let s1 = a + b; // u64 addition wraps at the width, which is the carry test below
+            let s1 = a.wrapping_add(b); // the sum modulo 2^64: the carry test below reads the lost bit
             let c1 = (s1 < a) as u64;
-            let s2 = s1 + carry;
+            let s2 = s1.wrapping_add(carry);
             let c2 = (s2 < s1) as u64;
             r.set(i, s2);
             // For a partial top limb the carry sits INSIDE the u64, one past the width's top bit:
@@ -215,9 +225,9 @@ extend<const BITS: usize> IntBits<BITS> {
         for i in 0..IntBits::<BITS>::nlimbs() {
             let a = self.get(i);
             let b = other.get(i);
-            let d1 = a - b;
+            let d1 = a.wrapping_sub(b);
             let b1 = (a < b) as u64;
-            let d2 = d1 - borrow;
+            let d2 = d1.wrapping_sub(borrow);
             let b2 = (d1 < borrow) as u64;
             r.set(i, d2);
             borrow = b1 | b2;
@@ -270,9 +280,9 @@ extend<const BITS: usize> IntBits<BITS> {
                 let mut hi: u64 = 0;
                 let lo = mul_wide(a, b, &mut hi);
                 let cur = r.get(i + j);
-                let s1 = cur + lo;
+                let s1 = cur.wrapping_add(lo);
                 hi = hi + (s1 < cur) as u64;
-                let s2 = s1 + carry;
+                let s2 = s1.wrapping_add(carry);
                 hi = hi + (s2 < s1) as u64;
                 r.set(i + j, s2);
                 if BITS % 64 != 0 && i + j + 1 == n && s2 >> (BITS % 64) as u64 != 0 {
@@ -325,9 +335,9 @@ extend<const BITS: usize> IntBits<BITS> {
                 let l = mul_wide(a, b, &mut h);
                 let cur = prod.get(i + j);
                 // a*b + cur + carry is at most 2^128 - 1, so neither carry can push `h` past a limb.
-                let s1 = cur + l;
+                let s1 = cur.wrapping_add(l);
                 h = h + (s1 < cur) as u64;
-                let s2 = s1 + carry;
+                let s2 = s1.wrapping_add(carry);
                 h = h + (s2 < s1) as u64;
                 prod.set(i + j, s2);
                 carry = h;
@@ -335,7 +345,7 @@ extend<const BITS: usize> IntBits<BITS> {
             let mut k = i + n;
             while carry != 0 && k < n + n {
                 let cur = prod.get(k);
-                let s = cur + carry;
+                let s = cur.wrapping_add(carry);
                 carry = (s < cur) as u64;
                 prod.set(k, s);
                 k = k + 1;
@@ -480,7 +490,7 @@ extend<const BITS: usize> IntBits<BITS> {
     // to be plainly correct, which is what a division routine most needs to be.
     fn divmod_unsigned(self: &IntBits<BITS>, divisor: &IntBits<BITS>, quot: *mut IntBits<BITS>, rem: *mut IntBits<BITS>) {
         if divisor.is_zero() {
-            panic("integer division by zero");
+            unsafe sc_int_div_zero("attempt to divide by zero".ptr());
         }
         if BITS == 128 && use_i128() {
             let mut ql: u64 = 0;
@@ -565,8 +575,8 @@ extend<const BITS: usize> IntBits<BITS> {
 
 // UInt<BITS>: the unsigned view.
 
-/// An unsigned integer `BITS` wide. Arithmetic WRAPS at the width, exactly as the built-in unsigned types
-/// do; `checked_*` and `saturating_*` give the other answers.
+/// An unsigned integer `BITS` wide. Overflow traps or wraps with the build profile, exactly as in the
+/// built-in unsigned types; `wrapping_*`, `checked_*` and `saturating_*` give the other answers.
 pub struct UInt<const BITS: usize> {
     bits: IntBits<BITS>,
 }
@@ -1028,9 +1038,22 @@ extend<const BITS: usize> UInt<BITS> {
         return r, o;
     }
 
-    /// Exponentiation by squaring, WRAPPING at the width like the operators; `checked_pow` reports
-    /// overflow instead.
+    /// Exponentiation by squaring. Overflow traps or wraps like the operators; `checked_pow` reports it
+    /// instead.
     pub fn pow(self: &UInt<BITS>, exp: u32) UInt<BITS> {
+        switch self.checked_pow(exp) {
+            Some(v) => {
+                return v;
+            },
+            None => {
+                unsafe sc_int_overflow("attempt to multiply with overflow".ptr());
+                return self.wrapping_pow(exp);
+            },
+        };
+    }
+
+    /// Exponentiation by squaring modulo 2^BITS.
+    pub fn wrapping_pow(self: &UInt<BITS>, exp: u32) UInt<BITS> {
         let mut acc = UInt::<BITS>::one();
         let mut base = *self;
         let mut e = exp;
@@ -1300,13 +1323,17 @@ extend<const BITS: usize> UInt<BITS> {
     }
 }
 
-// Operators. `+`, `-` and `*` WRAP, which is what the built-in unsigned types do; `/` and `%` panic on a
-// zero divisor, as they do.
+// Operators. `+`, `-` and `*` trap or wrap on overflow with the build profile, and `/` and `%` panic on a
+// zero divisor, which is what the built-in unsigned types do.
 extend<const BITS: usize> UInt<BITS> as Add {
     type Output = UInt<BITS>;
 
     pub fn add(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return self.wrapping_add(other);
+        let (r, o) = self.overflowing_add(other);
+        if o {
+            unsafe sc_int_overflow("attempt to add with overflow".ptr());
+        }
+        return r;
     }
 }
 
@@ -1314,7 +1341,11 @@ extend<const BITS: usize> UInt<BITS> as Sub {
     type Output = UInt<BITS>;
 
     pub fn sub(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return self.wrapping_sub(other);
+        let (r, o) = self.overflowing_sub(other);
+        if o {
+            unsafe sc_int_overflow("attempt to subtract with overflow".ptr());
+        }
+        return r;
     }
 }
 
@@ -1322,7 +1353,11 @@ extend<const BITS: usize> UInt<BITS> as Mul {
     type Output = UInt<BITS>;
 
     pub fn mul(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return self.wrapping_mul(other);
+        let (r, o) = self.overflowing_mul(other);
+        if o {
+            unsafe sc_int_overflow("attempt to multiply with overflow".ptr());
+        }
+        return r;
     }
 }
 
@@ -1397,6 +1432,9 @@ extend<const BITS: usize> UInt<BITS> as Rem {
     type Output = UInt<BITS>;
 
     pub fn rem(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
+        if other.is_zero() {
+            unsafe sc_int_div_zero("attempt to calculate the remainder with a divisor of zero".ptr());
+        }
         let mut r = UInt::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
         return r;
@@ -1419,7 +1457,7 @@ extend<const BITS: usize> UInt<BITS> as Hash {
     pub fn hash(self: &UInt<BITS>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..UInt::<BITS>::limbs() {
-            h = (h ^ self.bits.get(i)) * 1099511628211u64;
+            h = (h ^ self.bits.get(i)).wrapping_mul(1099511628211u64);
         }
         return h;
     }
@@ -1445,8 +1483,8 @@ extend<const BITS: usize> UInt<BITS> as Format {
 
 // Int<BITS>: the signed view.
 
-/// A two's-complement signed integer `BITS` wide. Arithmetic TRAPS on overflow, exactly as the built-in
-/// signed types do; `wrapping_*`, `checked_*` and `saturating_*` give the other answers.
+/// A two's-complement signed integer `BITS` wide. Overflow traps or wraps with the build profile, exactly
+/// as in the built-in signed types; `wrapping_*`, `checked_*` and `saturating_*` give the other answers.
 pub struct Int<const BITS: usize> {
     bits: IntBits<BITS>,
 }
@@ -1867,15 +1905,18 @@ extend<const BITS: usize> Int<BITS> {
         };
     }
 
-    /// Exponentiation by squaring. TRAPS on overflow like the signed operators; `checked_pow` reports
-    /// it instead.
+    /// Exponentiation by squaring. Overflow traps or wraps like the signed operators; `checked_pow`
+    /// reports it instead.
     pub fn pow(self: &Int<BITS>, exp: u32) Int<BITS> {
         switch self.checked_pow(exp) {
             Some(v) => {
                 return v;
             },
             None => {
-                panic("arithmetic overflow");
+                unsafe sc_int_overflow("attempt to multiply with overflow".ptr());
+                // Two's complement: the unsigned power has the wrapped bits.
+                let u = self.to_unsigned().wrapping_pow(exp);
+                return Int::<BITS>::from_unsigned(&u);
             },
         };
     }
@@ -1913,7 +1954,8 @@ extend<const BITS: usize> Int<BITS> {
         return Option::<Int<BITS>>::Some(acc);
     }
 
-    /// Magnitude. Panics on MIN, whose magnitude is one past the top of the range.
+    /// Magnitude. MIN, whose magnitude is one past the top of the range, overflows as `-MIN` does: a trap
+    /// with overflow checks, MIN itself without.
     pub fn abs(self: &Int<BITS>) Int<BITS> {
         if !self.is_negative() {
             return *self;
@@ -1923,7 +1965,8 @@ extend<const BITS: usize> Int<BITS> {
                 return v;
             },
             None => {
-                panic("Int::abs: no positive counterpart for the minimum value");
+                unsafe sc_int_overflow("attempt to negate with overflow".ptr());
+                return *self;
             },
         };
     }
@@ -1932,12 +1975,10 @@ extend<const BITS: usize> Int<BITS> {
     /// signed types'. Panics on a zero divisor, and on MIN / -1, whose quotient is out of range.
     pub fn divmod(self: &Int<BITS>, other: &Int<BITS>, rem: *mut Int<BITS>) Int<BITS> {
         if other.is_zero() {
-            panic("integer division by zero");
+            unsafe sc_int_div_zero("attempt to divide by zero".ptr());
         }
-        let mn = Int::<BITS>::min();
-        let neg1 = Int::<BITS>::from_i64(-1);
-        if self.eq(&mn) && other.eq(&neg1) {
-            panic("integer overflow: MIN divided by -1");
+        if self.is_min_by_neg1(other) {
+            unsafe sc_int_div_overflow("attempt to divide with overflow".ptr());
         }
         let neg_a = self.is_negative();
         let neg_b = other.is_negative();
@@ -1965,11 +2006,26 @@ extend<const BITS: usize> Int<BITS> {
         return q;
     }
 
-    /// The quotient (toward zero), or None for a zero divisor or MIN / -1.
-    pub fn checked_div(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
+    // MIN / -1 and MIN % -1: the quotient is out of range.
+    fn is_min_by_neg1(self: &Int<BITS>, other: &Int<BITS>) bool {
         let mn = Int::<BITS>::min();
         let neg1 = Int::<BITS>::from_i64(-1);
-        if other.is_zero() || self.eq(&mn) && other.eq(&neg1) {
+        return self.eq(&mn) && other.eq(&neg1);
+    }
+
+    // The traps of the built-in `%`, whose messages differ from `/`'s (divmod's).
+    fn rem_traps(self: &Int<BITS>, other: &Int<BITS>) {
+        if other.is_zero() {
+            unsafe sc_int_div_zero("attempt to calculate the remainder with a divisor of zero".ptr());
+        }
+        if self.is_min_by_neg1(other) {
+            unsafe sc_int_div_overflow("attempt to calculate the remainder with overflow".ptr());
+        }
+    }
+
+    /// The quotient (toward zero), or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
+        if other.is_zero() || self.is_min_by_neg1(other) {
             return Option::<Int<BITS>>::None;
         }
         let mut r = Int::<BITS>::zero();
@@ -1978,9 +2034,7 @@ extend<const BITS: usize> Int<BITS> {
 
     /// The remainder (sign of the dividend), or None for a zero divisor or MIN / -1.
     pub fn checked_rem(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
-        let mn = Int::<BITS>::min();
-        let neg1 = Int::<BITS>::from_i64(-1);
-        if other.is_zero() || self.eq(&mn) && other.eq(&neg1) {
+        if other.is_zero() || self.is_min_by_neg1(other) {
             return Option::<Int<BITS>>::None;
         }
         let mut r = Int::<BITS>::zero();
@@ -2006,8 +2060,9 @@ extend<const BITS: usize> Int<BITS> {
         return q;
     }
 
-    /// The non-negative remainder. Panics: zero divisor.
+    /// The non-negative remainder. Panics: zero divisor, MIN % -1.
     pub fn rem_euclid(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        self.rem_traps(other);
         let mut r = Int::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
         if r.is_negative() {
@@ -2131,7 +2186,8 @@ extend<const BITS: usize> Int<BITS> {
     }
 }
 
-// Operators. `+`, `-`, `*`, `/` and `%` TRAP on overflow, which is what the built-in signed types do.
+// Operators. `+`, `-` and `*` trap or wrap on overflow with the build profile, and `/` and `%` trap on MIN / -1,
+// which is what the built-in signed types do.
 extend<const BITS: usize> Int<BITS> as Add {
     type Output = Int<BITS>;
 
@@ -2141,7 +2197,8 @@ extend<const BITS: usize> Int<BITS> as Add {
                 return v;
             },
             None => {
-                panic("arithmetic overflow");
+                unsafe sc_int_overflow("attempt to add with overflow".ptr());
+                return self.wrapping_add(other);
             },
         };
     }
@@ -2156,7 +2213,8 @@ extend<const BITS: usize> Int<BITS> as Sub {
                 return v;
             },
             None => {
-                panic("arithmetic overflow");
+                unsafe sc_int_overflow("attempt to subtract with overflow".ptr());
+                return self.wrapping_sub(other);
             },
         };
     }
@@ -2171,7 +2229,8 @@ extend<const BITS: usize> Int<BITS> as Mul {
                 return v;
             },
             None => {
-                panic("arithmetic overflow");
+                unsafe sc_int_overflow("attempt to multiply with overflow".ptr());
+                return self.wrapping_mul(other);
             },
         };
     }
@@ -2247,6 +2306,7 @@ extend<const BITS: usize> Int<BITS> as Rem {
     type Output = Int<BITS>;
 
     pub fn rem(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        self.rem_traps(other);
         let mut r = Int::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
         return r;
@@ -2279,7 +2339,7 @@ extend<const BITS: usize> Int<BITS> as Hash {
     pub fn hash(self: &Int<BITS>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..Int::<BITS>::limbs() {
-            h = (h ^ self.bits.get(i)) * 1099511628211u64;
+            h = (h ^ self.bits.get(i)).wrapping_mul(1099511628211u64);
         }
         return h;
     }

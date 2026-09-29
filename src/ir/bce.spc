@@ -348,7 +348,7 @@ extend Bce {
         }
         let pk = unsafe &*self.pkg;
         let y = *(unsafe &*pk.module_ast_const(b.module)).type_at(ty);
-        if y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len != 0 {
+        if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && y.as_data.arr.len != 0 {
             return y.as_data.arr.len;
         }
         return 0 - 1;

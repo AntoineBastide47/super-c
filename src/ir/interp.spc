@@ -3,8 +3,8 @@
 // the established trap taxonomy (UB traps carry messages; a silent refusal stays retryable).
 // Serves every type-check fold, the backend's const/static definitions, the fx `const fn`
 // eligibility scan, and the always-panics probe. The arithmetic mirrors the language's pinned
-// semantics: unsigned wraps at width, signed overflow, division by zero, out-of-range shifts, and
-// MIN / -1 trap.
+// semantics: `+ - *` overflow at the type's width, negation of MIN, division by zero, out-of-range
+// shifts, and MIN / -1 trap.
 import string as cstring;
 import atomic;
 import sc_runtime;
@@ -28,6 +28,8 @@ pub const IV_OBJ: u8 = 5; // aggregate: 1-based id into the object store in `i`
 pub const IV_STR: u8 = 6; // string literal: source span in `i` (start << 32 | end)
 pub const IV_PTR: u8 = 7; // abstract pointer: object id << 32 | slot offset in `i` (id 0 = null)
 pub const IV_FN: u8 = 8; // function value: module << 32 | fn node in `i`
+// The instance arguments an object keeps: every argument of a generic aggregate (`TyInstance.args`).
+const OBJ_ARGS: usize = 8;
 
 // Trap kinds (identical taxonomy and messages to the established evaluator).
 pub const IT_TRAP_NONE: u8 = 0;
@@ -82,8 +84,8 @@ const PLAIN_NONE: u64 = 0xFFFFFFFFFFFFFFFFu64;
 // The body_of key of a binding-free body (a bound one folds its bindings in after).
 const fn plain_key(m: ModuleId, fnode: NodeId) u64 {
     let mut bkey: u64 = 0xcbf29ce484222325u64;
-    bkey = (bkey ^ m as u64) * 1099511628211u64;
-    bkey = (bkey ^ fnode as u64) * 1099511628211u64;
+    bkey = (bkey ^ m as u64).wrapping_mul(1099511628211u64);
+    bkey = (bkey ^ fnode as u64).wrapping_mul(1099511628211u64);
     return bkey;
 }
 
@@ -104,11 +106,29 @@ pub struct FxNo<'a> {
 }
 
 pub const IT_MAX_FRAMES: u32 = 48;
+// Referenced constants evaluated inside each other: the evaluation that reaches IT_ITEM_NEST
+// evaluates its remaining dependencies iteratively (`prefetch_items`). Only a constant it cannot
+// find in a lowered initializer (one a lowering folds) still nests, up to IT_ITEM_MAX_NEST. Each
+// level takes 2 to 4 KiB of native stack in a release build: far below a 1 MiB thread stack.
+const IT_ITEM_NEST: usize = 16;
+const IT_ITEM_MAX_NEST: usize = 64;
 pub const IT_MAX_OBJS: usize = 65536;
 pub const IT_DEFAULT_STEPS: u32 = 2097152; // 1 << 21
 pub const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory
 const IT_RETAIN_SLOTS: u64 = 262144; // 1 << 18 slots (6 MiB) of dead-object storage kept between evaluations
 const CLONE_MAX_DEPTH: i32 = 32;
+
+/// A constant's failed speculative evaluation (`item_speculate`): its trap when it set the first
+/// one (`own`), the steps it ran to it, and the frames it pushed (`item_fail_frames[fstart..]`).
+pub struct ItemFail {
+    pub trap: str<'static>,
+    pub kind: u8,
+    pub own: bool,
+    pub in_constfn: bool,
+    pub steps: u32,
+    pub fstart: u32,
+    pub flen: u32,
+}
 
 pub struct IVal {
     pub kind: u8,
@@ -177,17 +197,19 @@ pub struct StaticObj {
     pub uactive: i32, // union: the only member present; -1 otherwise
     pub dm: ModuleId, // struct/enum decl identity
     pub dn: NodeId,
-    pub am: [ModuleId; 4],
-    pub at: [TypeId; 4],
-    pub etm: ModuleId, // heap/array element type; cell value type
+    pub am: [ModuleId; OBJ_ARGS],
+    pub at: [TypeId; OBJ_ARGS],
+    pub etm: ModuleId, // heap/array element type; cell value type; struct/enum type when known
     pub ety: TypeId,
     pub n: u32, // heap/array element count
     pub parent: u32, // embedding parent (S_NO_PARENT = standalone)
     pub pslot: u32,
     pub owner: u32, // nearest standalone ancestor (self when standalone)
     pub ord: u32, // ordinal among the group's standalones; k > 0 -> "<name>__ct{k-1}"
+    pub im: ModuleId, // an item's cell (inode != NODE_NONE): the emitted item, never defined here
+    pub inode: NodeId,
     pub groupn: u32, // root only: entries in this group
-    pub slots: Vector<SSlot>,
+    pub slots: Vector<SSlot>, // SS_ENUM: slot 0 is the active variant's declaration ordinal
     pub rels: Vector<SRel>,
 }
 
@@ -209,14 +231,14 @@ extend Interp {
                 let v = o.slots.index_mut(s);
                 v.ty = rm_ty(p, v.tm, v.ty);
             }
-            for k in 0..4 {
+            for k in 0..OBJ_ARGS {
                 unsafe o.at[k] = rm_ty(p, unsafe o.am[k], unsafe o.at[k]);
             }
             o.et = rm_ty(p, o.em, o.et);
         }
         for i in 0..self.statics.len() {
             let so = self.statics.index_mut(i);
-            for k in 0..4 {
+            for k in 0..OBJ_ARGS {
                 unsafe so.at[k] = rm_ty(p, unsafe so.am[k], unsafe so.at[k]);
             }
             so.ety = rm_ty(p, so.etm, so.ety);
@@ -242,6 +264,10 @@ extend Interp {
         }
         self.call_memo.clear();
         self.item_memo.clear();
+        self.item_aggs.clear();
+        self.item_frozen.clear();
+        self.item_dead.clear();
+        self.item_dead_frames.clear();
         self.ememo.clear();
         // A binding-free body's key names only its declaration: those slots stay reachable (their
         // syntax may be released before the next evaluation); a bound one hashes type ids and is
@@ -264,36 +290,46 @@ pub struct StaticRes {
 
 /// A virtual object: aggregate slots plus the identity the static capture needs (decl, instance
 /// args, heap-block element typing, union active member).
+// Copy every member of object `src` but its slots onto `dst`.
+const fn obj_meta(dst: &mut IObj, src: &IObj) {
+    dst.dead = src.dead;
+    dst.is_enum = src.is_enum;
+    dst.clos = src.clos;
+    dst.uactive = src.uactive; // a copied union still holds the member it was written through
+    dst.heap = src.heap;
+    dst.dm = src.dm;
+    dst.dn = src.dn;
+    dst.nargs = src.nargs;
+    dst.bytes = src.bytes;
+    dst.em = src.em;
+    dst.et = src.et;
+    dst.esz = src.esz;
+    dst.am = src.am;
+    dst.at = src.at;
+}
+
+// Members ordered by alignment: 88 bytes after the vector (87 of members, one tail byte), and no padding
+// but the vector's round-up to 8 (on a 32-bit target).
 pub struct IObj {
     pub slots: Vector<IVal>,
+    pub bytes: u64, // heap blocks: the byte size malloc gave out
+    pub esz: u64,
+    pub uactive: i32, // union: the member written through; -1 otherwise
+    pub dn: NodeId, // struct/enum decl identity (0/NODE_NONE when shapeless)
+    pub et: TypeId, // heap blocks: element type once adopted
+    pub at: [TypeId; OBJ_ARGS], // instance arguments, `nargs` of them
+    pub dm: ModuleId,
+    pub em: ModuleId,
+    pub am: [ModuleId; OBJ_ARGS],
     pub dead: u8,
     pub is_enum: u8,
     pub heap: u8,
     pub clos: u8, // closure environment: dm/dn name the closure node, slots hold the captures
+    pub item: u8, // item cell (`item_cell`): dm/dn name the item; 1: a constant, slot 0 holds its value; 2: a `static mut`
+    pub frame: u8, // a call frame: slots hold the locals
     pub nargs: u8,
-    pub uactive: i32, // union: the member written through; -1 otherwise
-    pub dm: ModuleId, // struct/enum decl identity (0/NODE_NONE when shapeless)
-    pub dn: NodeId,
-    pub am: [ModuleId; 4],
-    pub at: [TypeId; 4],
-    pub bytes: u64, // heap blocks: the byte size malloc gave out
-    pub em: ModuleId, // heap blocks: element type once adopted
-    pub et: TypeId,
-    pub esz: u64,
 }
-
-const fn hex_digit(c: u8) i64 {
-    if c >= 48 && c <= 57 {
-        return c - 48;
-    }
-    if c >= 97 && c <= 102 {
-        return c - 87;
-    }
-    if c >= 65 && c <= 70 {
-        return c - 55;
-    }
-    return -1;
-}
+static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 7) / 8 * 8 + 88, "IObj keeps its members in alignment order");
 
 const fn none() IVal {
     return IVal { kind: IV_NONE, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 };
@@ -340,34 +376,20 @@ struct OvfRes {
     pub v: i64,
 }
 
-// non-trapping (u64-wrapping) checked signed arithmetic; ovf = the result overflows i64
-const fn add_ovf(a: i64, b: i64) OvfRes {
-    let s = (a as u64 + b as u64) as i64;
-    return OvfRes { ovf: ((a ^ s) & (b ^ s)) < 0, v: s };
+// non-trapping (wrapping) checked signed arithmetic; ovf = the result overflows i64
+fn add_ovf(a: i64, b: i64) OvfRes {
+    let (v, o) = a.overflowing_add(b);
+    return OvfRes { ovf: o, v: v };
 }
 
-const fn sub_ovf(a: i64, b: i64) OvfRes {
-    let d = (a as u64 - b as u64) as i64;
-    return OvfRes { ovf: ((a ^ b) & (a ^ d)) < 0, v: d };
+fn sub_ovf(a: i64, b: i64) OvfRes {
+    let (v, o) = a.overflowing_sub(b);
+    return OvfRes { ovf: o, v: v };
 }
 
-const fn mul_ovf(a: i64, b: i64) OvfRes {
-    let p = (a as u64 * b as u64) as i64;
-    let mut ovf = false;
-    if a > 0 {
-        if b > 0 {
-            ovf = a > I64_MAX / b;
-        } else {
-            ovf = b < I64_MIN / a;
-        }
-    } else if a < 0 {
-        if b > 0 {
-            ovf = a < I64_MIN / b;
-        } else {
-            ovf = a != 0 && b < I64_MAX / a;
-        }
-    }
-    return OvfRes { ovf: ovf, v: p };
+fn mul_ovf(a: i64, b: i64) OvfRes {
+    let (v, o) = a.overflowing_mul(b);
+    return OvfRes { ovf: o, v: v };
 }
 
 const fn bt_signed(b: BuiltinType) bool {
@@ -407,6 +429,13 @@ const fn wrap_to(b: BuiltinType, v: i64, pw: i32) i64 {
 
 const fn fits(b: BuiltinType, v: i64, pw: i32) bool {
     return wrap_to(b, v, pw) == v;
+}
+
+/// The exact value of evaluated integer `v`: a u64 or usize value above i64::MAX is held as negative
+/// bits.
+pub fn iv_exact(v: &IVal) i128 {
+    let big = v.i < 0 && (v.ty == Ast::builtin(BuiltinType::BT_U64) || v.ty == Ast::builtin(BuiltinType::BT_USIZE));
+    return cval_exact(v.i, pick(big, BuiltinType::BT_U64, BuiltinType::BT_I64));
 }
 
 const fn bt_unsigned(b: BuiltinType) bool {
@@ -589,7 +618,7 @@ pub struct MKey {
 
 extend MKey as Hash {
     pub fn hash(self: &Self) u64 {
-        return (self.callee ^ self.recv * 1099511628211u64) * 1099511628211u64;
+        return (self.callee ^ self.recv.wrapping_mul(1099511628211u64)).wrapping_mul(1099511628211u64);
     }
 }
 
@@ -613,11 +642,13 @@ pub struct Interp {
     pub trap: str<'static>,
     pub trap_kind: u8,
     pub trap_steps: u32,
+    pub trap_depth: u32, // the constants being evaluated (`item_active`) when the trap was set
     pub nframes: u32,
     pub fstack: [DefId; 48],
     pub trap_nframes: u8,
     pub trap_stack: [DefId; 48],
     pub lsvc: lay::Svc,
+    pub csteps: Vector<ConstStep>, // `steps_fail` scratch
     pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
     pub body_keys: Vector<u64>, // the body_of key hash of each slot
     pub body_plain: Vector<u64>, // module << 32 | fn node of a binding-free slot, else PLAIN_NONE
@@ -649,6 +680,15 @@ pub struct Interp {
     pub call_memo: CallMemo,
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
+    pub item_seen: Set<u64>, // consts `prefetch_items` queued during this evaluation
+    pub item_fail: Map<u64, ItemFail>, // consts `prefetch_items` saw fail during this evaluation
+    pub item_fail_frames: Vector<DefId>, // the ItemFail frame suffixes
+    pub item_objs: Map<u64, IVal>, // aggregate values `prefetch_items` built during this evaluation
+    pub item_aggs: Map<u64, IVal>, // referenced-const aggregates without pointers, frozen in `item_frozen`
+    pub item_frozen: Vector<IObj>, // the objects of `item_aggs`: an IV_OBJ there is a 0-based index
+    pub item_dead: Map<u64, ItemFail>, // referenced consts that failed with a trap no budget caused
+    pub item_dead_frames: Vector<DefId>, // the item_dead frame suffixes
+    pub item_cells: Map<u64, u32>, // this evaluation's item cells (`item_cell`), keyed module << 32 | node
     pub rets: Vector<IVal>, // the last finished frame's return slots (multi-return call writes)
     pub argpool: Vector<Vector<IVal>>, // argument vectors of finished calls, reused by `call`
     pub ufree: Set<u64>, // (module << 32 | decl) of every type with a user free method (folding such values is refused)
@@ -680,6 +720,7 @@ pub struct Interp {
     pub in_run: u32, // frames currently executing (re-entrant lowering must not re-fold)
     pub ev_depth: u32, // facade eval nesting
     pub fold_errs: Vector<IFoldErr>,
+    pub fold_seen: Set<u64>, // (module << 32 | node) of every `fold_errs` record
     pub ememo: Map<u64, IVal>, // expression fold memo keyed module << 32 | node
     pub dbuf: String, // trap_detail's rendering buffer (the returned str views it)
     pub sref: Map<u64, i64>, // eval_static memo: -1 definite failure, >0 root+1 (retryable absent)
@@ -688,7 +729,7 @@ pub struct Interp {
     pub fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
     pub fx_depth: u32,
     pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
-    pub pending_consts: Vector<u64>, // deferred call-bearing const decls
+    pub pending_consts: Vector<u64>, // deferred const decls
     /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
     /// modules whose bodies this engine needed but refused (released, or not typed yet in the
     /// running pass: `body_missing`), and the refusal count (`body_miss_n`) an analysis pass
@@ -698,6 +739,9 @@ pub struct Interp {
     /// The master engine records dynamic item edges into the package index (`note_dyn_edge`);
     /// a per-task engine leaves it off.
     pub dyn_rec: bool,
+    /// Set when a lowering this engine needed stopped at a node the checker rejected: the
+    /// failure is that error's, already reported. The checker clears it before an evaluation.
+    pub err_refused: bool,
 }
 
 pub fn interp_new(pkg: *const loader::Package) Interp {
@@ -715,9 +759,11 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         trap: "",
         trap_kind: IT_TRAP_NONE,
         trap_steps: 0,
+        trap_depth: 0,
         nframes: 0,
         trap_nframes: 0,
         lsvc: lay::Svc::new(pkg),
+        csteps: Vector::<ConstStep>::new(),
         bodies: Vector::<Box<irl::Lowerer>>::new(),
         body_keys: Vector::<u64>::new(),
         body_plain: Vector::<u64>::new(),
@@ -736,6 +782,15 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         call_memo: CallMemo { ix: Map::<u64, u32>::new(), rows: Vector::<MemoRow>::new(), args: Vector::<IVal>::new() },
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
+        item_seen: Set::<u64>::new(),
+        item_fail: Map::<u64, ItemFail>::new(),
+        item_fail_frames: Vector::<DefId>::new(),
+        item_objs: Map::<u64, IVal>::new(),
+        item_aggs: Map::<u64, IVal>::new(),
+        item_frozen: Vector::<IObj>::new(),
+        item_dead: Map::<u64, ItemFail>::new(),
+        item_dead_frames: Vector::<DefId>::new(),
+        item_cells: Map::<u64, u32>::new(),
         rets: Vector::<IVal>::new(),
         argpool: Vector::<Vector<IVal>>::new(),
         ufree: Set::<u64>::new(),
@@ -760,6 +815,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         in_run: 0,
         ev_depth: 0,
         fold_errs: Vector::<IFoldErr>::new(),
+        fold_seen: Set::<u64>::new(),
         ememo: Map::<u64, IVal>::new(),
         dbuf: String::new(),
         sref: Map::<u64, i64>::new(),
@@ -772,6 +828,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
         dyn_rec: false,
+        err_refused: false,
     };
 }
 
@@ -819,6 +876,23 @@ fn gen_index(a: &Ast, dn: NodeId, nargs: u8, p: NodeId) i32 {
         gi += 1;
     }
     return -1;
+}
+
+// Whether `list` binds every generic parameter `gens` (listed through `xa`) of an extend of module `xm`.
+fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, gens: NodeList) bool {
+    let gids = xa.list(gens);
+    for j in 0..gens.len {
+        let mut bound = false;
+        for k in 0..list.len() {
+            if list.at(k).pmod == xm && list.at(k).pnode == unsafe gids[j as usize] {
+                bound = true;
+            }
+        }
+        if !bound {
+            return false;
+        }
+    }
+    return true;
 }
 
 // "_<k>" into `buf` (32 bytes): the field names a tuple's members answer to.
@@ -881,6 +955,15 @@ extend Interp {
         self.live_slots = 0;
         self.zcell = 0;
         self.item_active.truncate(0);
+        if self.item_cells.len() != 0 {
+            self.item_cells.clear();
+        }
+        if self.item_seen.len() != 0 {
+            self.item_seen = Set::<u64>::new();
+            self.item_fail.clear();
+            self.item_fail_frames.truncate(0);
+            self.item_objs.clear();
+        }
         self.failed = false;
     }
 
@@ -909,6 +992,7 @@ extend Interp {
     fn it_trap(self: &mut Self, kind: u8, msg: str<'static>) {
         if self.trap.len() == 0 {
             self.trap = msg;
+            self.trap_depth = self.item_active.len() as u32;
             self.trap_kind = kind;
             self.trap_steps = self.steps;
             let mut n = self.nframes;
@@ -985,6 +1069,8 @@ extend Interp {
             unsafe (*o).is_enum = 0;
             unsafe (*o).heap = 0;
             unsafe (*o).clos = 0;
+            unsafe (*o).item = 0;
+            unsafe (*o).frame = 0;
             unsafe (*o).nargs = 0;
             unsafe (*o).uactive = -1;
             unsafe (*o).dm = 0;
@@ -1061,26 +1147,7 @@ extend Interp {
         if id == 0 {
             return none();
         }
-        let src = self.obj_ptr(sid);
-        let dst = self.obj_ptr(id);
-        unsafe {
-            (*dst).dead = (*src).dead;
-            (*dst).is_enum = (*src).is_enum;
-            (*dst).clos = (*src).clos;
-            (*dst).uactive = (*src).uactive; // a copied union still holds the member it was written through
-            (*dst).heap = (*src).heap;
-            (*dst).dm = (*src).dm;
-            (*dst).dn = (*src).dn;
-            (*dst).nargs = (*src).nargs;
-            (*dst).bytes = (*src).bytes;
-            (*dst).em = (*src).em;
-            (*dst).et = (*src).et;
-            (*dst).esz = (*src).esz;
-            for j in 0..4 {
-                (*dst).am[j] = (*src).am[j];
-                (*dst).at[j] = (*src).at[j];
-            }
-        }
+        obj_meta(unsafe &mut *self.obj_ptr(id), unsafe &*self.obj_ptr(sid));
         for i in 0..srclen {
             let sv = unsafe (*self.obj_ptr(sid)).slots[i as usize];
             let cloned = self.obj_clone(sv, depth + 1);
@@ -1088,6 +1155,64 @@ extend Interp {
                 return none();
             }
             unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
+        }
+        let mut out = v;
+        out.i = id;
+        return out;
+    }
+
+    // A copy of value `v` in the cross-evaluation store `item_frozen`, where an IV_OBJ is an index;
+    // IV_NONE when `v` holds a pointer into an object (it dies with this evaluation). A failure
+    // leaves the copied members behind for the caller to truncate.
+    fn obj_freeze(self: &mut Self, v: IVal, depth: i32) IVal {
+        if v.kind == IV_PTR && pv_obj(v) != 0 || v.kind == IV_OBJ && depth > CLONE_MAX_DEPTH {
+            return none();
+        }
+        if v.kind != IV_OBJ {
+            return v;
+        }
+        let sid = v.i as u32;
+        if unsafe (*self.obj_ptr(sid)).dead != 0 {
+            return none();
+        }
+        let n = unsafe (*self.obj_ptr(sid)).slots.len();
+        let mut slots = Vector::<IVal>::new();
+        slots.reserve(n);
+        for i in 0..n {
+            let sv = unsafe (*self.obj_ptr(sid)).slots[i];
+            let f = self.obj_freeze(sv, depth + 1);
+            if sv.kind != IV_NONE && f.kind == IV_NONE {
+                return none();
+            }
+            slots.push(f);
+        }
+        let mut o = IObj { slots: slots, uactive: -1, dn: NODE_NONE };
+        obj_meta(&mut o, unsafe &*self.obj_ptr(sid));
+        self.item_frozen.push(o);
+        let mut out = v;
+        out.i = (self.item_frozen.len() - 1) as i64;
+        return out;
+    }
+
+    // A fresh live copy of frozen value `v` (`obj_freeze`).
+    fn obj_thaw(self: &mut Self, v: IVal) IVal {
+        if v.kind != IV_OBJ {
+            return v;
+        }
+        let fi = v.i as usize;
+        let n = self.item_frozen[fi].slots.len();
+        let id = self.obj_new(n as u64);
+        if id == 0 {
+            return none();
+        }
+        obj_meta(unsafe &mut *self.obj_ptr(id), self.item_frozen.at(fi));
+        for i in 0..n {
+            let fv = self.item_frozen[fi].slots[i];
+            let c = self.obj_thaw(fv);
+            if fv.kind != IV_NONE && c.kind == IV_NONE {
+                return none();
+            }
+            unsafe (*self.obj_ptr(id)).slots.set(i, c);
         }
         let mut out = v;
         out.i = id;
@@ -1166,9 +1291,68 @@ extend Interp {
         }
     }
 
+    // `(m, t)` with every parameter substituted through the ACTIVE frame, as a concrete type interned
+    // into pool `dm`; an associated type (`T::Output`) grounds through its conformance
+    // (`Package::assoc_norm`). False when a parameter stays unbound or a symbolic length remains.
+    fn ground_i(self: &Self, m: ModuleId, t: TypeId, dm: ModuleId, out: &mut TypeId, depth: u32) bool {
+        if depth > 16 || t == TYPE_NONE {
+            return false;
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        let da = self.p().module_ast_const(dm) as *mut Ast;
+        if a.type_concrete(t) {
+            *out = unsafe (*da).reintern(a, t);
+            return true;
+        }
+        let y = *a.type_at(t);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            let mut rm: ModuleId = 0;
+            let mut rt = TYPE_NONE;
+            if !self.rty(m, t, &mut rm, &mut rt) || rm == m && rt == t {
+                return false;
+            }
+            return self.ground_i(rm, rt, dm, out, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
+            let mut e = TYPE_NONE;
+            if !self.ground_i(m, y.as_data.elem, dm, &mut e, depth + 1) {
+                return false;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            *out = unsafe (*da).intern_type(nt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_ASSOC || y.kind == TypeKind::TYPE_DYN && a.instance(
+            y.as_data.inst,
+        ).decl != NODE_NONE || y.fn_sig() {
+            let mut it = *a.instance(y.rec());
+            for i in 0..it.n {
+                let mut g = TYPE_NONE;
+                if !self.ground_i(m, unsafe it.args[i as usize], dm, &mut g, depth + 1) {
+                    return false;
+                }
+                unsafe it.args[i as usize] = g;
+            }
+            if y.kind == TypeKind::TYPE_ASSOC {
+                return self.p().assoc_norm(dm, &it, out, depth + 1);
+            }
+            *out = if y.fn_sig() {
+                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+            } else if y.kind == TypeKind::TYPE_DYN {
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+            } else {
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+            };
+            return true;
+        }
+        return false;
+    }
+
     // Resolve `(m, t)` through the ACTIVE frame's substitution window while it names a generic
-    // parameter (one hop per binding, 8 hops max).
-    const fn rty(self: &Self, m0: ModuleId, t0: TypeId, om: &mut ModuleId, ot: &mut TypeId) bool {
+    // parameter (one hop per binding, 8 hops max); an associated type resolves to its conformance's
+    // type (`ground_i`).
+    fn rty(self: &Self, m0: ModuleId, t0: TypeId, om: &mut ModuleId, ot: &mut TypeId) bool {
         let mut m = m0;
         let mut t = t0;
         for _ in 0..8 {
@@ -1187,6 +1371,10 @@ extend Interp {
                 return false; // a foreign-pool id: unanswerable in this pool
             }
             let y = *a.type_at(t);
+            if y.kind == TypeKind::TYPE_ASSOC {
+                *om = m;
+                return self.ground_i(m, t, m, ot, 0);
+            }
             if y.kind != TypeKind::TYPE_GENERIC {
                 *om = m;
                 *ot = t;
@@ -1209,6 +1397,141 @@ extend Interp {
             }
         }
         return false;
+    }
+
+    // Under the active frame's bindings, the first const-generic step of function `fnode` (module
+    // `fm`) or of its extend (`Ast::steps_of`) that fails: 0 none, 1 a value outside its type,
+    // 2 a division whose truncation the form's floor does not equal.
+    fn steps_fail(self: &mut Self, fm: ModuleId, fnode: NodeId) u32 {
+        let r = self.steps_fail_of(fm, fnode);
+        let mut ext = NODE_NONE;
+        if r != 0 || self.container_of(fm, fnode, &mut ext) != 1 {
+            return r;
+        }
+        return self.steps_fail_of(fm, ext);
+    }
+
+    fn steps_fail_of(self: &mut Self, m: ModuleId, owner: NodeId) u32 {
+        let mut ss = replace(&mut self.csteps, Vector::<ConstStep>::new());
+        unsafe (*(self.p().module_ast_const(m) as *mut Ast)).steps_of(owner, &mut ss);
+        let ptr32 = lay::target_for(self.p().arch).ptr == 4;
+        let mut r: u32 = 0;
+        for i in 0..ss.len() {
+            let s = ss.at(i);
+            let mut sum = s.lin.k;
+            let mut bound = true;
+            for t in 0..s.lin.n {
+                let c = unsafe s.lin.c[t as usize];
+                if c.is_zero() {
+                    continue;
+                }
+                let pd = unsafe s.lin.p[t as usize];
+                let mut v = i128::zero();
+                if !self.cparam_val(pd, 0, NODE_NONE, 0, null, null, &mut v) || !lin_acc(&mut sum, c, v) {
+                    bound = false;
+                    break;
+                }
+            }
+            if bound && !s.holds(sum, ptr32) {
+                r = if s.idx {
+                    3u32;
+                } else {
+                    pick(s.div.is_zero(), 1u32, 2u32);
+                };
+                break;
+            }
+        }
+        self.csteps = ss;
+        return r;
+    }
+
+    // The exact value of const parameter `pd`: its argument among the `nargs` instance args of
+    // aggregate `dn` (module `dm`, NODE_NONE for none), else its binding in the active frame.
+    fn cparam_val(
+        self: &Self,
+        pd: DefId,
+        dm: ModuleId,
+        dn: NodeId,
+        nargs: u8,
+        am: *const ModuleId,
+        at: *const TypeId,
+        out: &mut i128,
+    ) bool {
+        let mut m = pd.module;
+        let mut t = TYPE_NONE;
+        if dn != NODE_NONE && pd.module == dm {
+            let gi = gen_index(unsafe &*self.p().module_ast_const(dm), dn, nargs, pd.node);
+            if gi >= 0 {
+                m = unsafe am[gi as usize];
+                t = unsafe at[gi as usize];
+            }
+        }
+        if t == TYPE_NONE {
+            let mut i = self.sub_base;
+            while i < self.subst.len() && t == TYPE_NONE {
+                if self.subst.at(i).pmod == pd.module && self.subst.at(i).pnode == pd.node {
+                    m = self.subst.at(i).am;
+                    t = self.subst.at(i).at;
+                }
+                i += 1;
+            }
+        }
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        if t == TYPE_NONE || !self.rty(m, t, &mut rm, &mut rt) {
+            return false;
+        }
+        let y = *(unsafe &*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind != TypeKind::TYPE_CONST {
+            return false;
+        }
+        *out = y.cval();
+        return true;
+    }
+
+    // The element count of array type `y` (pool `m`): its length, or a symbolic length folded
+    // through `cparam_val`'s bindings; -1 when a parameter stays unbound.
+    fn arr_count(
+        self: &Self,
+        m: ModuleId,
+        y: &Ty,
+        dm: ModuleId,
+        dn: NodeId,
+        nargs: u8,
+        am: *const ModuleId,
+        at: *const TypeId,
+    ) i64 {
+        if !y.arr_sym() {
+            return y.as_data.arr.len;
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        let ly = *a.type_at(y.as_data.arr.len);
+        let mut v = i128::zero();
+        if ly.kind == TypeKind::TYPE_GENERIC {
+            if !self.cparam_val(DefId { module: ly.module, node: ly.as_data.decl }, dm, dn, nargs, am, at, &mut v) {
+                return -1;
+            }
+            return len_count(v);
+        }
+        if ly.kind != TypeKind::TYPE_CONST_EXPR {
+            return -1;
+        }
+        let l = *a.const_lin_at(ly.as_data.inst);
+        let mut sum = l.k;
+        for i in 0..l.n {
+            if !self.cparam_val(unsafe l.p[i as usize], dm, dn, nargs, am, at, &mut v) || !lin_acc(
+                &mut sum,
+                unsafe l.c[i as usize],
+                v,
+            ) {
+                return -1; // no array has a length past i128
+            }
+        }
+        // A value outside the form's types is no length: the instantiation is an error.
+        if !l.finish(sum, lay::target_for(self.p().arch).ptr == 4, &mut v) {
+            return -1;
+        }
+        return len_count(v);
     }
 
     // The builtin behind `(m, t)` (refusal encoded as bool).
@@ -1317,12 +1640,8 @@ extend Interp {
             let it = *(unsafe &*self.p().module_ast_const(m)).instance(y.as_data.inst);
             *dm = it.module;
             *dn = it.decl;
-            let mut na = it.n;
-            if na > 4 {
-                na = 4;
-            }
-            *n = na;
-            for i in 0..na {
+            *n = it.n;
+            for i in 0..it.n {
                 // each argument resolves through the ACTIVE window: a generic frame's receiver
                 // spells its instance with the frame's own parameters
                 let mut gm: ModuleId = 0;
@@ -1355,6 +1674,10 @@ extend Interp {
             return true;
         }
         let target = xa.at_const(extnode).as_data.extend_def.target_type;
+        let pat = xa.type_of(target);
+        if pat != TYPE_NONE && !ext_is_identity(xa, pat, xa, xm, extnode) {
+            return self.bind_extend_solved(list, xm, extnode, pat, rn, ram, rat);
+        }
         if xa.at_const(target).kind != NodeKind::NODE_TYPE_PATH || xa.at_const(target).as_data.type_path.args.len != rn as u32 {
             return false;
         }
@@ -1383,19 +1706,69 @@ extend Interp {
                 }
             }
         }
-        let gids = xa.list(gens);
-        for j in 0..gens.len {
-            let mut bound = false;
-            for k in 0..list.len() {
-                if list.at(k).pmod == xm && list.at(k).pnode == unsafe gids[j as usize] {
-                    bound = true;
+        return ext_all_bound(list, xa, xm, gens);
+    }
+
+    // `bind_extend` for an extend whose target `pat` is not its parameters in order: each argument the
+    // target constrains binds by its kind (`xarg_of`), a form's parameter to the constant that inverts
+    // it against the receiver's argument (interned in that argument's pool).
+    fn bind_extend_solved(
+        self: &mut Self,
+        list: &mut Vector<ISub>,
+        xm: ModuleId,
+        extnode: NodeId,
+        pat: TypeId,
+        rn: u8,
+        ram: *const ModuleId,
+        rat: *const TypeId,
+    ) bool {
+        let xa = unsafe &*self.p().module_ast_const(xm);
+        let gens = xa.at_const(extnode).as_data.extend_def.generics;
+        let pi = *xa.instance(xa.type_at(pat).as_data.inst);
+        let np = ext_arity(xa, extnode, pi.n);
+        if np > rn {
+            return false;
+        }
+        for j in 0..np {
+            let x = xarg_of(xa, unsafe pi.args[j as usize], xa, xm, gens);
+            let ram_j = unsafe ram[j as usize];
+            let rat_j = unsafe rat[j as usize];
+            if x.kind == XA_FIXED {
+                if !self.teq(xm, unsafe pi.args[j as usize], ram_j, rat_j) {
+                    return false;
                 }
+                continue;
             }
-            if !bound {
+            let gid = unsafe xa.list(gens)[x.par as usize];
+            if x.kind == XA_PARAM {
+                if !self.subst_add(list, xm, gid, ram_j, rat_j) {
+                    return false;
+                }
+                continue;
+            }
+            let mut rm: ModuleId = 0;
+            let mut rt = TYPE_NONE;
+            if x.kind != XA_FORM || !self.rty(ram_j, rat_j, &mut rm, &mut rt) {
+                return false;
+            }
+            let y = *(unsafe &*self.p().module_ast_const(rm)).type_at(rt);
+            let bt = self.p().const_param_bt(xm, gid);
+            let mut q = i128::zero();
+            if y.kind != TypeKind::TYPE_CONST || !xarg_solve(
+                &x,
+                y.cval(),
+                bt,
+                lay::target_for(self.p().arch).ptr == 4,
+                &mut q,
+            ) {
+                return false;
+            }
+            let ct = unsafe (*(self.p().module_ast_const(rm) as *mut Ast)).const_value(cval_bits(q), bt);
+            if !self.subst_add(list, xm, gid, rm, ct) {
                 return false;
             }
         }
-        return true;
+        return ext_all_bound(list, xa, xm, gens);
     }
 
     // The zero value of `(m, t)`: builtins, pointers/references/functions (null), arrays and
@@ -1423,10 +1796,11 @@ extend Interp {
             return iv_ptr(m, t, 0, 0);
         }
         if y.kind == TypeKind::TYPE_ARRAY {
-            if y.as_data.arr.len == 0 {
+            let n = self.arr_count(m, &y, 0, NODE_NONE, 0, null, null);
+            if n <= 0 {
                 return none();
             }
-            let id = self.obj_new(y.as_data.arr.len);
+            let id = self.obj_new(n as u64);
             if id == 0 {
                 return none();
             }
@@ -1434,7 +1808,7 @@ extend Interp {
             if ez.kind == IV_NONE {
                 return none();
             }
-            let _ = self.obj_fill(id, 0, y.as_data.arr.len, ez, depth + 1);
+            let _ = self.obj_fill(id, 0, n as u64, ez, depth + 1);
             return IVal { kind: IV_OBJ, tm: m, ty: t, i: id, f: 0.0 };
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
@@ -1461,12 +1835,8 @@ extend Interp {
                 return none();
             }
             if has_inst {
-                let mut na = inst.n;
-                if na > 4 {
-                    na = 4;
-                }
-                unsafe (*self.obj_ptr(id)).nargs = na;
-                for gi in 0..na {
+                unsafe (*self.obj_ptr(id)).nargs = inst.n;
+                for gi in 0..inst.n {
                     let mut gm2: ModuleId = m;
                     let mut gt2 = unsafe inst.args[gi as usize];
                     let _ = self.rty(m, unsafe inst.args[gi as usize], &mut gm2, &mut gt2);
@@ -1474,14 +1844,11 @@ extend Interp {
                     unsafe (*self.obj_ptr(id)).at[gi as usize] = gt2;
                 }
             }
-            let mut zam: [ModuleId; 4] = [0, 0, 0, 0];
-            let mut zat: [TypeId; 4] = [TYPE_NONE, TYPE_NONE, TYPE_NONE, TYPE_NONE];
+            let mut zam: [ModuleId; OBJ_ARGS] = [[0] = 0];
+            let mut zat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
             let mut zn: u8 = 0;
             if has_inst {
                 zn = inst.n;
-                if zn > 4 {
-                    zn = 4;
-                }
                 for gi in 0..zn {
                     unsafe zam[gi as usize] = m;
                     unsafe zat[gi as usize] = unsafe inst.args[gi as usize];
@@ -1512,6 +1879,7 @@ extend Interp {
         if env == 0 {
             return none();
         }
+        unsafe (*self.obj_ptr(env)).frame = 1;
         self.in_run += 1;
         for i in 0..args.len() {
             let li = b.returns as usize + i;
@@ -1630,10 +1998,10 @@ extend Interp {
         let mut bkey = plain_key(m, fnode);
         for i in 0..binds.len() {
             let sb = binds.at(i);
-            bkey = (bkey ^ sb.pmod as u64) * 1099511628211u64;
-            bkey = (bkey ^ sb.pnode as u64) * 1099511628211u64;
-            bkey = (bkey ^ sb.am as u64) * 1099511628211u64;
-            bkey = (bkey ^ sb.at as u64) * 1099511628211u64;
+            bkey = (bkey ^ sb.pmod as u64).wrapping_mul(1099511628211u64);
+            bkey = (bkey ^ sb.pnode as u64).wrapping_mul(1099511628211u64);
+            bkey = (bkey ^ sb.am as u64).wrapping_mul(1099511628211u64);
+            bkey = (bkey ^ sb.at as u64).wrapping_mul(1099511628211u64);
         }
         switch self.body_ix.get(&bkey) {
             Some(v) => {
@@ -1730,6 +2098,7 @@ extend Interp {
             lw.lower_fn(fnode);
         };
         if !ok {
+            self.err_refused = self.err_refused || lw.failed_on_error_type();
             return -1;
         }
         self.st_fresh += 1;
@@ -1857,14 +2226,9 @@ extend Interp {
         // engine ran a job is scheduling, and diagnostics must not depend on it.
         for i in 0..other.fold_errs.len() {
             let r = other.fold_errs.at(i);
-            let mut seen = false;
-            for k in 0..self.fold_errs.len() {
-                if self.fold_errs.at(k).m == r.m && self.fold_errs.at(k).id == r.id {
-                    seen = true;
-                    break;
-                }
-            }
-            if !seen {
+            let key = r.m as u64 << 32 | r.id as u64;
+            if !self.fold_seen.contains(&key) {
+                self.fold_seen.insert(key);
                 let mut d = String::new();
                 d.push_string(&r.detail);
                 self.fold_errs.push(IFoldErr { m: r.m, id: r.id, span: r.span, kind: r.kind, detail: d });
@@ -1930,8 +2294,8 @@ extend Interp {
         let mut rdm: ModuleId = 0;
         let mut rdn = NODE_NONE;
         let mut rn: u8 = 0;
-        let mut ram: [ModuleId; 4] = [0, 0, 0, 0];
-        let mut rat: [TypeId; 4] = [TYPE_NONE, TYPE_NONE, TYPE_NONE, TYPE_NONE];
+        let mut ram: [ModuleId; OBJ_ARGS] = [[0] = 0];
+        let mut rat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
         if !self.recv_of(m, rty, &mut rdm, &mut rdn, &mut rn, &mut ram[0], &mut rat[0]) {
             return false;
         }
@@ -2039,10 +2403,12 @@ extend Interp {
             let mut container = NODE_NONE;
             let ck2 = self.container_of(fm, fnode, &mut container);
             if ck2 == 2 {
-                let mut st_t = TYPE_NONE;
-                if t.args_len != 0 {
+                // The implementor: the type parameter an associated function is called through
+                // (`Terminator.recv`), else the receiver, else the `Self` result.
+                let mut st_t = t.recv;
+                if st_t == TYPE_NONE && t.args_len != 0 {
                     st_t = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
-                } else if t.dests_len >= 1 {
+                } else if st_t == TYPE_NONE && t.dests_len >= 1 {
                     st_t = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
                 }
                 let mut sm2: ModuleId = 0;
@@ -2067,8 +2433,8 @@ extend Interp {
                 let mut rdm: ModuleId = 0;
                 let mut rdn = NODE_NONE;
                 let mut rn: u8 = 0;
-                let mut ram: [ModuleId; 4] = [0, 0, 0, 0];
-                let mut rat: [TypeId; 4] = [TYPE_NONE, TYPE_NONE, TYPE_NONE, TYPE_NONE];
+                let mut ram: [ModuleId; OBJ_ARGS] = [[0] = 0];
+                let mut rat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
                 let mut rb = BuiltinType::BT_COUNT;
                 let yr = *(unsafe &*self.p().module_ast_const(sm2)).type_at(st2);
                 if yr.kind == TypeKind::TYPE_BUILTIN {
@@ -2078,7 +2444,42 @@ extend Interp {
                 }
                 let fa0 = unsafe &*self.p().module_ast_const(fm);
                 let mnm = fa0.at_const(fa0.at_const(fnode).as_data.function.name).as_data.name.text;
-                let md = self.find_method(rdm, rdn, rb, b.module, fm, fnode, mnm);
+                let md = if t.iface != TYPE_NONE {
+                    // A bound call on a generic interface: the conformance with the bound's
+                    // arguments supplies the method, or its default body runs under them.
+                    if rdn == NODE_NONE {
+                        return self.fail();
+                    }
+                    let mut ext = DefId { module: 0, node: NODE_NONE };
+                    if !self.conf_by_args(b, t.iface, rdm, rdn, rn, &ram[0], &rat[0], &mut ext) {
+                        return self.fail();
+                    }
+                    let own = self.ext_own_method(ext, fm, mnm);
+                    if own.node == NODE_NONE {
+                        let di = *(unsafe &*self.p().module_ast_const(b.module)).instance(
+                            (unsafe &*self.p().module_ast_const(b.module)).type_at(t.iface).as_data.inst,
+                        );
+                        let igens = fa0.at_const(container).as_data.interface_def.generics;
+                        let mut gi: u32 = 0;
+                        while gi < igens.len && gi < di.n as u32 {
+                            let mut wm: ModuleId = 0;
+                            let mut wt = TYPE_NONE;
+                            if !self.rty(b.module, unsafe di.args[gi as usize], &mut wm, &mut wt) || !self.subst_add(
+                                &mut binds,
+                                fm,
+                                unsafe fa0.list(igens)[gi as usize],
+                                wm,
+                                wt,
+                            ) {
+                                return self.fail();
+                            }
+                            gi += 1;
+                        }
+                    }
+                    own;
+                } else {
+                    self.iface_method(rdm, rdn, rb, DefId { module: fm, node: container }, b.module, fnode, mnm);
+                };
                 if md.node != NODE_NONE {
                     fm = md.module;
                     fnode = md.node;
@@ -2117,7 +2518,9 @@ extend Interp {
                     // associated call binds them from the leading type arguments, or (like the
                     // emitter's symbol resolution) from the DESTINATION type
                     let mut bound = false;
-                    if t.args_len != 0 {
+                    if t.recv != TYPE_NONE {
+                        bound = self.bind_extend_from(&mut binds, b.module, t.recv, fm, ext);
+                    } else if t.args_len != 0 {
                         let rty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
                         bound = self.bind_extend_from(&mut binds, b.module, rty, fm, ext);
                     }
@@ -2192,9 +2595,29 @@ extend Interp {
         }
         let prev_base = self.sub_base;
         self.sub_base = sb0;
+        if binds.len() != 0 && !closure {
+            // The instantiation must compute every step of the callee's written const-generic
+            // expressions, as its instance in the emitted program does.
+            let bad = self.steps_fail(fm, fnode);
+            if bad != 0 {
+                self.sub_base = prev_base;
+                self.subst.truncate(sb0);
+                if bad == 1 {
+                    self.it_trap(IT_TRAP_UNSUPPORTED, "arithmetic overflow in a const-generic expression");
+                } else if bad == 3 {
+                    self.it_trap(IT_TRAP_UNSUPPORTED, "an index past the end of a const-generic array");
+                } else {
+                    self.it_trap(IT_TRAP_UNSUPPORTED, "a const-generic division truncates a negative quotient");
+                }
+                if is_constfn {
+                    self.constfn_fail();
+                }
+                return false;
+            }
+        }
         unsafe self.fstack[self.nframes as usize] = DefId { module: fm, node: fnode };
         self.nframes += 1;
-        let r = self.run(unsafe &*bb, args);
+        let mut r = self.run(unsafe &*bb, args);
         self.nframes -= 1;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
@@ -2208,6 +2631,18 @@ extend Interp {
                 self.trap_in_constfn = false;
             }
             return false;
+        }
+        if t.dests_len == 1 && self.rets.len() > 1 {
+            // A multi-return call writes one destination whose members are the return values in order.
+            let id = self.obj_decl(self.rets.len() as u32, 0, NODE_NONE);
+            if id == 0 {
+                return false;
+            }
+            for k in 0..self.rets.len() {
+                unsafe (*self.obj_ptr(id)).slots.set(k, *self.rets.at(k));
+            }
+            let dty = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+            r = IVal { kind: IV_OBJ, tm: b.module, ty: self.vty(b, dty), i: id, f: 0.0 };
         }
         if memoable && r.kind != IV_OBJ && r.kind != IV_PTR {
             self.call_memo.put(mkey, fm, fnode, args, r);
@@ -2255,7 +2690,8 @@ extend Interp {
         return true;
     }
 
-    // Intercepted extern calls: the C heap, the trap runtime, the std/bits.h bit counts, and libm.
+    // Intercepted extern calls: the C heap, the trap runtime, std's Int<N> overflow and 128-bit probe, the
+    // std/bits.h bit counts, and libm.
     fn intercept(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -2347,6 +2783,45 @@ extend Interp {
         } else if self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic") {
             self.it_trap(IT_TRAP_PANIC, "panic reached at compile time");
             return false;
+        } else if self.span_is(fm, nm, "sc_int_overflow") || self.span_is(fm, nm, "sc_int_div_overflow") {
+            // std's Int<N> and UInt<N> overflow: the built-in operators' compile-time trap, in every profile.
+            self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+            return false;
+        } else if self.span_is(fm, nm, "sc_int_div_zero") {
+            self.it_trap(IT_TRAP_UB_DIV_ZERO, "division by zero");
+            return false;
+        } else if self.span_is(fm, nm, "sc_has_i128") {
+            // std/int128.h: the limb code gives the native path's results, so compile time runs it.
+            out = iv_int(b.module, rt, 0);
+        } else if self.wrap_name(fm, nm) {
+            // std/bits.h wrapping arithmetic: C's unsigned operators modulo 2^64.
+            if nargs != 2 || args.at(0).kind != IV_INT || args.at(1).kind != IV_INT {
+                return self.fail();
+            }
+            let x = args.at(0).i;
+            let y = args.at(1).i;
+            if self.span_is(fm, nm, "sc_mulo_u64") {
+                let (_, o) = (x as u64).overflowing_mul(y as u64);
+                out = iv_bool(b.module, rt, o);
+            } else if self.span_is(fm, nm, "sc_mulo_i64") {
+                let (_, o) = x.overflowing_mul(y);
+                out = iv_bool(b.module, rt, o);
+            } else {
+                let r = if self.span_is(fm, nm, "sc_wadd64") {
+                    x.wrapping_add(y);
+                } else if self.span_is(fm, nm, "sc_wsub64") {
+                    x.wrapping_sub(y);
+                } else if self.span_is(fm, nm, "sc_wmul64") {
+                    x.wrapping_mul(y);
+                } else if self.span_is(fm, nm, "sc_wshl64") {
+                    x.wrapping_shl(y as u32);
+                } else if self.span_is(fm, nm, "sc_wshr64") {
+                    (x as u64).wrapping_shr(y as u32) as i64;
+                } else {
+                    x.wrapping_shr(y as u32);
+                };
+                out = iv_int(b.module, rt, r);
+            }
         } else if self.bits_name(fm, nm) {
             // std/bits.h: the host runs the same helpers, so the result matches the emitted C.
             if nargs != 1 || args.at(0).kind != IV_INT {
@@ -2719,13 +3194,21 @@ extend Interp {
     }
 
     /// The value of referenced item `(m, cnode)`, lowered and executed on demand. Memoized for
-    /// scalars; a re-entry while active is a cyclic constant dependency. Objects are NOT memoized
-    /// (their ids die with the evaluation that built them). A function item is its value.
+    /// scalars, and for aggregates without pointers as a frozen copy each reference thaws (live
+    /// objects die with the evaluation that built them); a re-entry while active is a cyclic
+    /// constant dependency. A function item is its value.
     fn item_value(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
         let key = m as u64 << 32 | cnode as u64;
         switch self.item_memo.get(&key) {
             Some(v) => {
                 return *v;
+            },
+            None => {},
+        };
+        switch self.item_aggs.get(&key) {
+            Some(v) => {
+                let fz = *v;
+                return self.obj_thaw(fz);
             },
             None => {},
         };
@@ -2744,7 +3227,9 @@ extend Interp {
                     if ya.type_valid(sb2.at) {
                         let yv = *ya.type_at(sb2.at);
                         if yv.kind == TypeKind::TYPE_CONST {
-                            return iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), yv.as_data.value);
+                            // The value in the parameter's integer type: an enum parameter's
+                            // discriminant is i32.
+                            return iv_int(0, Ast::builtin(yv.cbt()), yv.as_data.value);
                         }
                     }
                     break;
@@ -2770,6 +3255,32 @@ extend Interp {
             }
             return iv_int(m, TYPE_NONE, tagv);
         }
+        if self.item_seen.len() != 0 {
+            switch self.item_fail.get(&key) {
+                Some(f) => {
+                    let f2 = *f;
+                    return self.item_replay(f2, false);
+                },
+                None => {},
+            };
+            switch self.item_objs.get(&key) {
+                Some(v) => {
+                    // a fresh copy, as evaluating it again would build
+                    let c = self.obj_clone(*v, 0);
+                    if c.kind != IV_NONE || self.failed {
+                        return c;
+                    }
+                },
+                None => {},
+            };
+        }
+        switch self.item_dead.get(&key) {
+            Some(f) => {
+                let f2 = *f;
+                return self.item_replay(f2, true);
+            },
+            None => {},
+        };
         for i in 0..self.item_active.len() {
             if self.item_active[i] == key {
                 self.it_trap(IT_TRAP_CYCLE, "cyclic constant dependency");
@@ -2783,6 +3294,17 @@ extend Interp {
         if cd.value == NODE_NONE || cd.is_extern || cd.is_static_mut {
             return self.bail();
         }
+        if self.item_active.len() >= IT_ITEM_MAX_NEST {
+            self.it_trap(IT_TRAP_BUDGET_DEPTH, "constant evaluation nests too deeply");
+            return none();
+        }
+        if self.item_active.len() == IT_ITEM_NEST {
+            self.prefetch_items(m, cnode);
+        }
+        let own = self.trap.len() == 0;
+        let steps0 = self.steps;
+        let tcf0 = self.trap_in_constfn;
+        self.trap_in_constfn = false;
         self.item_active.push(key);
         let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
         let mut r = none();
@@ -2790,13 +3312,361 @@ extend Interp {
             let args = Vector::<IVal>::new();
             r = self.run(&lw.body, &args);
         } else {
+            self.err_refused = self.err_refused || lw.failed_on_error_type();
             let _ = self.bail();
         }
         let _ = self.item_active.pop();
+        // a trap of its own that no budget caused fails the constant wherever it is evaluated
+        if self.failed && own && self.trap.len() != 0 && self.trap_kind > IT_TRAP_BUDGET_DEPTH {
+            let f = self.item_fail_of(true, steps0, true);
+            self.item_dead.insert(key, f);
+        }
+        self.trap_in_constfn = self.trap_in_constfn || tcf0;
         if !self.failed && r.kind != IV_OBJ && r.kind != IV_PTR && r.kind != IV_NONE {
             self.item_memo.insert(key, r);
+        } else if !self.failed && r.kind == IV_OBJ {
+            let n0 = self.item_frozen.len();
+            let fz = self.obj_freeze(r, 0);
+            if fz.kind != IV_NONE {
+                self.item_aggs.insert(key, fz);
+            } else {
+                self.item_frozen.truncate(n0);
+            }
         }
         return r;
+    }
+
+    // The value of generic constant `c.item` for the instance `c` names: a generic extend's constant
+    // by its target's arguments, which bind the extend's parameters, a generic function's local
+    // constant by its parameters' own arguments (`tc_local_const_env`); the initializer runs under
+    // them.
+    fn assoc_value(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant) IVal {
+        let n = c.targ_len() as usize;
+        if n > OBJ_ARGS {
+            return self.bail();
+        }
+        let mut rpm: [ModuleId; OBJ_ARGS] = [[0] = 0];
+        let mut rpn: [NodeId; OBJ_ARGS] = [[0] = NODE_NONE];
+        let mut ram: [ModuleId; OBJ_ARGS] = [[0] = 0];
+        let mut rat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
+        for i in 0..n {
+            let t0 = b.targ_pool[c.targ_start() as usize + i];
+            let y0 = *(unsafe &*self.p().module_ast_const(b.module)).type_at(t0);
+            if y0.kind == TypeKind::TYPE_GENERIC {
+                unsafe rpm[i] = y0.module;
+                unsafe rpn[i] = y0.as_data.decl;
+            }
+            let mut gm: ModuleId = 0;
+            let mut gt = TYPE_NONE;
+            if !self.rty(b.module, t0, &mut gm, &mut gt) {
+                return self.bail();
+            }
+            if !(unsafe &*self.p().module_ast_const(gm)).type_concrete(gt) || self.ty_no_const(gm, gt, 0) {
+                return self.bail();
+            }
+            unsafe ram[i] = gm;
+            unsafe rat[i] = gt;
+        }
+        return self.inst_value(c.item.module, c.item.node, &rpm[0], &rpn[0], &ram[0], &rat[0], n);
+    }
+
+    // The value of generic constant `(m, cnode)` for the instance whose `n` concrete arguments are
+    // `(am[i], at[i])`: a generic extend's constant takes its target's arguments, a local constant
+    // its function's parameters `(pm[i], pn[i])` bound to them. Not memoized: the value depends on
+    // the instance. The nesting bound stops a constant that names itself.
+    fn inst_value(
+        self: &mut Self,
+        m: ModuleId,
+        cnode: NodeId,
+        pm: *const ModuleId,
+        pn: *const NodeId,
+        am: *const ModuleId,
+        at: *const TypeId,
+        n: usize,
+    ) IVal {
+        let mut ext = NODE_NONE;
+        let ca = unsafe &*self.p().module_ast_const(m);
+        if ca.at_const(cnode).kind != NodeKind::NODE_CONST {
+            return self.bail();
+        }
+        let mut binds = Vector::<ISub>::new();
+        if self.container_of(m, cnode, &mut ext) == 1 {
+            if !self.bind_extend(&mut binds, m, ext, n as u8, am, at) {
+                return self.bail();
+            }
+        } else if ca.at_const(cnode).as_data.const_def.is_local {
+            for i in 0..n {
+                if unsafe pn[i] == NODE_NONE || !self.subst_add(
+                    &mut binds,
+                    unsafe pm[i],
+                    unsafe pn[i],
+                    unsafe am[i],
+                    unsafe at[i],
+                ) {
+                    return self.bail();
+                }
+            }
+        } else {
+            return self.bail();
+        }
+        if self.item_active.len() >= IT_ITEM_MAX_NEST {
+            self.it_trap(IT_TRAP_BUDGET_DEPTH, "constant evaluation nests too deeply");
+            return none();
+        }
+        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        for i in 0..binds.len() {
+            let sb = *binds.at(i);
+            lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
+        }
+        if !lw.lower_const(cnode) {
+            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            return self.bail();
+        }
+        self.item_active.push(m as u64 << 32 | cnode as u64);
+        let sb0 = self.subst.len();
+        for i in 0..binds.len() {
+            self.subst.push(*binds.at(i));
+        }
+        let prev_base = self.sub_base;
+        self.sub_base = sb0;
+        let args = Vector::<IVal>::new();
+        let r = self.run(&lw.body, &args);
+        self.sub_base = prev_base;
+        self.subst.truncate(sb0);
+        let _ = self.item_active.pop();
+        return r;
+    }
+
+    /// Evaluate generic constant `(m, cnode)` for the instance whose `n` concrete arguments are
+    /// `(am[i], at[i])`, binding parameters `(pm[i], pn[i])` for a local constant (`inst_value`),
+    /// through a reused interpreter (see `eval_const_in`).
+    pub fn eval_const_inst(
+        self: &mut Self,
+        m: ModuleId,
+        cnode: NodeId,
+        pm: *const ModuleId,
+        pn: *const NodeId,
+        am: *const ModuleId,
+        at: *const TypeId,
+        n: usize,
+        max_steps: u32,
+    ) IVal {
+        self.eval_reset();
+        let steps0 = self.max_steps;
+        self.max_steps = max_steps;
+        self.subst.truncate(0);
+        self.sub_base = 0;
+        let r = self.inst_value(m, cnode, pm, pn, am, at, n);
+        self.max_steps = steps0;
+        return r;
+    }
+
+    /// The cell holding the value of referenced item `it`. A constant or static has one per
+    /// evaluation, so every frame's place of it and every address taken of it name the same
+    /// storage, as the emitted item does (`capture` spells an address into its cell as its symbol);
+    /// a `static mut` has no value at compile time, only its address. Any other item (a
+    /// const-generic parameter's binding) has one cell per frame. 0 when the value fails.
+    fn item_cell(self: &mut Self, it: DefId) u32 {
+        let key = it.module as u64 << 32 | it.node as u64;
+        let nd = (unsafe &*self.p().module_ast_const(it.module)).at_const(it.node);
+        let is_const = nd.kind == NodeKind::NODE_CONST;
+        let is_static = is_const && nd.as_data.const_def.is_static_mut;
+        switch self.item_cells.get(&key) {
+            Some(c) => {
+                // a cell a rolled-back speculation created is gone, or its id names another object
+                let op = self.obj_ptr(*c);
+                if op != null && unsafe (*op).item != 0 && unsafe (*op).dm == it.module && unsafe (*op).dn == it.node {
+                    return *c;
+                }
+            },
+            None => {},
+        };
+        let mut v = none();
+        if !is_static {
+            v = self.item_value(it.module, it.node);
+            if self.failed {
+                return 0;
+            }
+        }
+        let cell = self.obj_new(1);
+        if cell == 0 {
+            return 0;
+        }
+        unsafe (*self.obj_ptr(cell)).slots.set(0, v);
+        if is_const {
+            unsafe (*self.obj_ptr(cell)).item = pick(is_static, 2u8, 1u8);
+            unsafe (*self.obj_ptr(cell)).dm = it.module;
+            unsafe (*self.obj_ptr(cell)).dn = it.node;
+            self.item_cells.insert(key, cell);
+        }
+        return cell;
+    }
+
+    // Evaluate the constant dependencies of `(m, cnode)` dependency-first from an explicit work
+    // stack, so each finds its own dependencies already decided (memoized, or failed in
+    // `item_fail`) and a chain of any length never nests on the native stack. A dependency the
+    // requester never reaches is evaluated too, but only its memo, its failure record and its steps
+    // remain. A constant enters the stack at most once per evaluation (`item_seen`).
+    fn prefetch_items(self: &mut Self, m: ModuleId, cnode: NodeId) {
+        let key = m as u64 << 32 | cnode as u64;
+        self.item_seen.insert(key);
+        self.item_active.push(key); // the requester: a dependency reaching it is a cycle
+        let mut work = Vector::<u64>::new();
+        let mut ready = Vector::<bool>::new();
+        self.item_deps(m, cnode, &mut work, &mut ready);
+        // each queued constant is popped twice at most: expanded, then evaluated
+        while work.len() != 0 {
+            let k = work[work.len() - 1];
+            let dm = (k >> 32) as ModuleId;
+            let dn = (k & 0xFFFFFFFF) as NodeId;
+            if ready[ready.len() - 1] {
+                let _ = work.pop();
+                let _ = ready.pop();
+                self.item_speculate(dm, dn);
+            } else {
+                ready.set(ready.len() - 1, true);
+                self.item_deps(dm, dn, &mut work, &mut ready);
+            }
+        }
+        let _ = self.item_active.pop();
+    }
+
+    // Queue every constant `(m, cnode)` references that is neither memoized nor queued already.
+    fn item_deps(self: &mut Self, m: ModuleId, cnode: NodeId, work: &mut Vector<u64>, ready: &mut Vector<bool>) {
+        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        if !lw.lower_const(cnode) {
+            return;
+        }
+        let b = &lw.body;
+        for i in 0..b.locals.len() {
+            let ld = b.locals.at(i);
+            if ld.storage == ir::LS_STATIC_REF {
+                self.item_queue(ld.item, work, ready);
+            }
+        }
+        for i in 0..b.constants.len() {
+            let c = b.constants.at(i);
+            if c.kind == ir::CK_ITEM && c.targ_len() == 0 {
+                self.item_queue(c.item, work, ready);
+            }
+        }
+    }
+
+    fn item_queue(self: &mut Self, d: DefId, work: &mut Vector<u64>, ready: &mut Vector<bool>) {
+        let nd = (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node);
+        if nd.kind != NodeKind::NODE_CONST || nd.as_data.const_def.value == NODE_NONE || nd.as_data.const_def.is_extern || nd.as_data.const_def.is_static_mut {
+            return;
+        }
+        let key = d.module as u64 << 32 | d.node as u64;
+        if self.item_memo.contains_key(&key) || self.item_aggs.contains_key(&key) || self.item_dead.contains_key(&key) || self.item_seen.contains(
+            &key,
+        ) {
+            return;
+        }
+        self.item_seen.insert(key);
+        work.push(key);
+        ready.push(false);
+    }
+
+    // Evaluate `(m, cnode)` ahead of its reference: a scalar value lands in the memo, an aggregate
+    // in `item_objs`, a failure in `item_fail` for `item_replay`; every other effect but the steps
+    // (and the objects an aggregate holds) is undone.
+    fn item_speculate(self: &mut Self, m: ModuleId, cnode: NodeId) {
+        let key = m as u64 << 32 | cnode as u64;
+        let trap0 = self.trap;
+        let kind0 = self.trap_kind;
+        let tsteps0 = self.trap_steps;
+        let tn0 = self.trap_nframes;
+        let tspan0 = self.trap_span;
+        let tcf0 = self.trap_in_constfn;
+        let objs0 = self.objs_live;
+        let slots0 = self.live_slots;
+        let steps0 = self.steps;
+        self.trap_in_constfn = false;
+        let v = self.item_value(m, cnode);
+        // the trap is this constant's own only when none was set before it ran
+        let own = trap0.len() == 0 && self.trap.len() != 0;
+        if self.failed {
+            let f = self.item_fail_of(own, steps0, false);
+            self.item_fail.insert(key, f);
+        } else if v.kind == IV_OBJ {
+            self.item_objs.insert(key, v);
+        }
+        let kept = !self.failed && v.kind == IV_OBJ;
+        self.failed = false;
+        self.trap = trap0;
+        self.trap_kind = kind0;
+        self.trap_steps = tsteps0;
+        self.trap_nframes = tn0;
+        self.trap_span = tspan0;
+        self.trap_in_constfn = tcf0;
+        if kept {
+            return;
+        }
+        self.objs_live = objs0;
+        self.live_slots = slots0;
+        if self.zcell as usize > objs0 {
+            self.zcell = 0;
+        }
+    }
+
+    // The failure record of the constant evaluation that started at `steps0` and just failed, its
+    // frames appended to `item_dead_frames` (`dead`) or `item_fail_frames`.
+    fn item_fail_of(self: &mut Self, own: bool, steps0: u32, dead: bool) ItemFail {
+        let frames = if dead {
+            &mut self.item_dead_frames;
+        } else {
+            &mut self.item_fail_frames;
+        };
+        let fstart = frames.len() as u32;
+        let mut dsteps: u32 = 0;
+        if own {
+            dsteps = self.trap_steps - steps0;
+            for i in self.nframes..self.trap_nframes as u32 {
+                frames.push(unsafe self.trap_stack[i as usize]);
+            }
+        }
+        return ItemFail {
+            trap: self.trap,
+            kind: self.trap_kind,
+            own: own,
+            in_constfn: self.trap_in_constfn,
+            steps: dsteps,
+            fstart: fstart,
+            flen: frames.len() as u32 - fstart,
+        };
+    }
+
+    // Fail as the evaluation `f` of a constant failed, from the current frames: what evaluating it
+    // here again would do. `dead`: `f` is a record of `item_dead`.
+    fn item_replay(self: &mut Self, f: ItemFail, dead: bool) IVal {
+        if f.own && self.trap.len() == 0 {
+            self.trap = f.trap;
+            self.trap_kind = f.kind;
+            self.trap_steps = self.steps + f.steps;
+            self.trap_span = self.top_span;
+            let mut n = self.nframes;
+            for i in 0..n {
+                unsafe self.trap_stack[i as usize] = unsafe self.fstack[i as usize];
+            }
+            let frames = if dead {
+                &self.item_dead_frames;
+            } else {
+                &self.item_fail_frames;
+            };
+            for i in 0..f.flen {
+                if n < IT_MAX_FRAMES {
+                    unsafe self.trap_stack[n as usize] = *frames.at((f.fstart + i) as usize);
+                    n += 1;
+                }
+            }
+            self.trap_nframes = n as u8;
+            self.trap_depth = self.item_active.len() as u32 + 1; // raised inside the constant
+        }
+        if f.in_constfn {
+            self.trap_in_constfn = true;
+        }
+        return self.bail();
     }
 
     // Turn a string-literal value into its object form (byte heap block + the str struct with
@@ -2934,7 +3804,7 @@ extend Interp {
     // A spelled-count designated literal is SHORTER than its destination array: C zero-fills the
     // tail at the destination, so the object grows zeroed slots to the destination extent here.
     fn arr_widen(self: &mut Self, rm: ModuleId, y: Ty, v: IVal) IVal {
-        let want_len = y.as_data.arr.len as i64;
+        let want_len = self.arr_count(rm, &y, 0, NODE_NONE, 0, null, null);
         let op = self.obj_ptr(v.i as u32);
         if op == null || want_len <= 0 {
             return v;
@@ -3131,8 +4001,8 @@ extend Interp {
             return false;
         }
         let top = self.obj_ptr(tid);
-        if top == null {
-            return self.fail();
+        if top == null || unsafe (*top).item == 2 {
+            return self.fail(); // a `static mut` is read and written at run time only
         }
         if unsafe (*top).dead != 0 {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
@@ -3154,18 +4024,24 @@ extend Interp {
         *obj = env;
         *slot = pl.base;
         if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
-            // a referenced item: materialize its value into the local slot on first touch, so
-            // projections read through it like any other local
-            if (unsafe (*self.obj_ptr(env)).slots[pl.base as usize]).kind == IV_NONE {
-                let it = b.locals.at(pl.base as usize).item;
-                let v = self.item_value(it.module, it.node);
-                if self.failed {
+            // a referenced item: its place is its cell, which the local slot points at from the
+            // first touch on, so projections read through it like any other local
+            let mut cref = unsafe (*self.obj_ptr(env)).slots[pl.base as usize];
+            if cref.kind == IV_NONE {
+                let cell = self.item_cell(b.locals.at(pl.base as usize).item);
+                if cell == 0 {
                     return false;
                 }
-                unsafe (*self.obj_ptr(env)).slots.set(pl.base as usize, v);
+                cref = iv_ptr(0, TYPE_NONE, cell, 0);
+                unsafe (*self.obj_ptr(env)).slots.set(pl.base as usize, cref);
+            }
+            *obj = pv_obj(cref);
+            *slot = 0;
+            if unsafe (*self.obj_ptr(*obj)).item == 2 {
+                return self.fail(); // a `static mut` is read and written at run time only
             }
         }
-        let mut cur = unsafe (*self.obj_ptr(env)).slots[pl.base as usize];
+        let mut cur = unsafe (*self.obj_ptr(*obj)).slots[(*slot) as usize];
         for i in 0..pl.proj_len {
             let pj = *b.projections.at((pl.proj_start + i) as usize);
             // a string literal materializes into its object form the moment a projection reads
@@ -3428,7 +4304,7 @@ extend Interp {
                 }
             }
             let mut v: i64 = 0;
-            if !self.lit_value(b.module, &c, &mut v) {
+            if !c.int_value(self.src_of(b.module), &mut v) {
                 return self.bail();
             }
             return iv_int(b.module, c.ty, v);
@@ -3441,7 +4317,7 @@ extend Interp {
         }
         if c.kind == ir::CK_ITEM {
             if c.targ_len() != 0 {
-                return self.bail(); // generic associated consts do not fold yet
+                return self.assoc_value(b, &c);
             }
             return self.item_value(c.item.module, c.item.node);
         }
@@ -3481,99 +4357,6 @@ extend Interp {
         return self.bail();
     }
 
-    // The exact integer behind a CK_INT spelling: decimal, hex, binary, octal, underscores,
-    // width suffixes, character literals with escapes, and `null` (0).
-    fn lit_value(self: &mut Self, m: ModuleId, c: &ir::Constant, out: &mut i64) bool {
-        let sp = c.raw;
-        if sp.end <= sp.start {
-            *out = c.val;
-            return true;
-        }
-        let s0 = self.src_of(m);
-        if sp.end as usize > s0.len() {
-            *out = c.val;
-            return true;
-        }
-        let s = s0.slice(sp.start as usize, sp.end as usize);
-        let n = s.len();
-        if n == 0 {
-            *out = c.val;
-            return true;
-        }
-        let b0 = s.byte_at(0);
-        if b0 == 39 {
-            // 'c' with escapes -- but ONLY a real character literal (a synthesized constant may
-            // carry a diagnostic span that happens to start at a label's quote)
-            if n < 3 || s.byte_at(n - 1) != 39 {
-                *out = c.val;
-                return true;
-            }
-            let v = tok::char_literal_value(s0, sp);
-            if v.is_none() {
-                return false;
-            }
-            *out = v.unwrap();
-            return true;
-        }
-        if !(b0 >= 48 && b0 <= 57) {
-            // `null` and every other non-numeric spelling lower with the value the record carries
-            *out = c.val;
-            return true;
-        }
-        let mut base: u64 = 10;
-        let mut i: usize = 0;
-        if n > 2 && b0 == 48 {
-            let b1 = s.byte_at(1);
-            if b1 == 120 || b1 == 88 {
-                base = 16;
-                i = 2;
-            } else if b1 == 98 || b1 == 66 {
-                base = 2;
-                i = 2;
-            } else if b1 == 111 || b1 == 79 {
-                base = 8;
-                i = 2;
-            }
-        }
-        let mut v: u64 = 0;
-        let mut any = false;
-        while i < n {
-            let ch = s.byte_at(i);
-            if ch == 95 {
-                i += 1;
-                continue;
-            }
-            let mut d: i64 = -1;
-            if base == 16 {
-                d = hex_digit(ch);
-            } else if ch >= 48 && ch as u64 < 48 + base {
-                d = ch - 48;
-            }
-            if d < 0 {
-                break; // suffix
-            }
-            v = v * base + d as u64;
-            any = true;
-            i += 1;
-        }
-        if !any {
-            return false;
-        }
-        // the tail must be a width suffix (identifier characters only): anything else means the
-        // span is a synthesized diagnostic span, not this constant's spelling -- trust `val`
-        while i < n {
-            let ch2 = s.byte_at(i);
-            let idc = ch2 == 95 || ch2 >= 48 && ch2 <= 57 || ch2 >= 97 && ch2 <= 122 || ch2 >= 65 && ch2 <= 90;
-            if !idc {
-                *out = c.val;
-                return true;
-            }
-            i += 1;
-        }
-        *out = v as i64;
-        return true;
-    }
-
     fn rvalue(self: &mut Self, b: &ir::CoreBody, env: u32, rid: ir::RvalueId) IVal {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE {
@@ -3605,6 +4388,18 @@ extend Interp {
             return self.cast(v, b.module, rv.target);
         }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
+            let pl = *b.places.at(rv.a as usize);
+            let it = b.locals.at(pl.base as usize).item;
+            if pl.proj_len == 0 && b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF && (unsafe &*self.p().module_ast_const(
+                it.module,
+            )).at_const(it.node).kind == NodeKind::NODE_CONST {
+                // a constant's or static's address is its cell, a `static mut`'s too
+                let cell = self.item_cell(it);
+                if cell == 0 {
+                    return none();
+                }
+                return iv_ptr(b.module, rv.target, cell, 0);
+            }
             let mut obj: u32 = 0;
             let mut slot: u32 = 0;
             if !self.resolve_place(b, env, rv.a, &mut obj, &mut slot) {
@@ -3635,7 +4430,7 @@ extend Interp {
             if !self.obj_fill(id, 0, n, ev, 0) {
                 return none();
             }
-            return IVal { kind: IV_OBJ, tm: b.module, ty: rv.target, i: id, f: 0.0 };
+            return IVal { kind: IV_OBJ, tm: b.module, ty: self.vty(b, rv.target), i: id, f: 0.0 };
         }
         if rv.kind == ir::RV_CLOSURE {
             let id = self.obj_new(rv.b);
@@ -3910,8 +4705,10 @@ extend Interp {
             if !self.variant_value(rv.item, &mut tagv) {
                 return self.bail();
             }
-            if rv.b == 0 {
-                // a payload-less variant IS its integer value (a bare C enum)
+            let mut vpos0: i32 = 0;
+            let en0 = self.variant_enum(rv.item.module, rv.item.node, &mut vpos0);
+            if !unsafe (*self.p().module_ast_const(rv.item.module)).enum_has_payload(en0) {
+                // a bare enum's variant IS its integer value (a C enum constant)
                 return iv_int(b.module, rv.target, tagv);
             }
             is_enum = true;
@@ -3920,9 +4717,9 @@ extend Interp {
         let mut dm: ModuleId = 0;
         let mut dn = NODE_NONE;
         let mut nargs: u8 = 0;
-        let mut am: [ModuleId; 4] = [0, 0, 0, 0];
-        let mut at: [TypeId; 4] = [TYPE_NONE, TYPE_NONE, TYPE_NONE, TYPE_NONE];
-        if rv.c == ir::AGG_STRUCT || rv.c == ir::AGG_TUPLE {
+        let mut am: [ModuleId; OBJ_ARGS] = [[0] = 0];
+        let mut at: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
+        if rv.c == ir::AGG_STRUCT || rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_VARIANT {
             let mut am0: ModuleId = b.module;
             let mut at0 = rv.target;
             if rv.target != TYPE_NONE && !self.rty(b.module, rv.target, &mut am0, &mut at0) {
@@ -3940,9 +4737,6 @@ extend Interp {
                     dm = it2.module;
                     dn = it2.decl;
                     nargs = it2.n;
-                    if nargs > 4 {
-                        nargs = 4;
-                    }
                     for gi in 0..nargs {
                         // instance args resolve through the window: a generic frame's literal
                         // spells its instance with the frame's own parameters
@@ -3958,18 +4752,22 @@ extend Interp {
                     }
                 }
             }
-            if dn == NODE_NONE && rv.item.node != NODE_NONE {
+            if rv.c == ir::AGG_VARIANT {
+                // the owning enum decl; its instance args when the target names that enum
+                let mut vpos: i32 = 0;
+                let en = self.variant_enum(rv.item.module, rv.item.node, &mut vpos);
+                if dm != rv.item.module || dn != en {
+                    nargs = 0;
+                }
+                dm = rv.item.module;
+                dn = en;
+            } else if dn == NODE_NONE && rv.item.node != NODE_NONE {
                 dm = rv.item.module;
                 dn = rv.item.node;
             }
-        } else if rv.c == ir::AGG_VARIANT {
-            // the owning enum decl
-            let mut vpos: i32 = 0;
-            dm = rv.item.module;
-            dn = self.variant_enum(rv.item.module, rv.item.node, &mut vpos);
         }
-        if dn != NODE_NONE && self.user_free(dm, dn) {
-            return self.bail(); // a user-free type never folds
+        if dn != NODE_NONE && (rv.c != ir::AGG_VARIANT || rv.b != 0) && self.user_free(dm, dn) {
+            return self.bail(); // a user-free value never folds; a payload-less variant owns nothing
         }
         let mut nslots = rv.b;
         if is_enum {
@@ -4041,12 +4839,27 @@ extend Interp {
             }
             si += 1;
         }
-        return IVal { kind: IV_OBJ, tm: b.module, ty: rv.target, i: id, f: 0.0 };
+        return IVal { kind: IV_OBJ, tm: b.module, ty: self.vty(b, rv.target), i: id, f: 0.0 };
+    }
+
+    // The type a value built in the active frame carries: `t` (pool `b.module`) grounded when it names
+    // the frame's parameters (`[T; 2]`, `[T::Output; 2]`), so a captured static spells a concrete type.
+    fn vty(self: &Self, b: &ir::CoreBody, t: TypeId) TypeId {
+        let mut g = t;
+        if t != TYPE_NONE && !(unsafe &*self.p().module_ast_const(b.module)).type_concrete(t) && !self.ground_i(
+            b.module,
+            t,
+            b.module,
+            &mut g,
+            0,
+        ) {
+            return t;
+        }
+        return g;
     }
 
     // The zero value of field `ord` of decl (dm, dn) under instance args: resolves the field
-    // type through the args, and a symbolic `[T; N]` (interned len 0) recovers its length from
-    // the field's TYPE NODE evaluated under the decl's own parameter bindings.
+    // type through the args, a symbolic `[T; N]` length included.
     fn zero_field(
         self: &mut Self,
         dm: ModuleId,
@@ -4064,31 +4877,10 @@ extend Interp {
         let da = unsafe &*self.p().module_ast_const(fm);
         if da.type_valid(ft) {
             let y = *da.type_at(ft);
-            if y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len == 0 {
-                // recover the symbolic length: find the field's type node and evaluate its
-                // length expression with the decl's parameters temporarily bound
+            if y.arr_sym() {
+                // a symbolic length folds through the decl's own parameter bindings
                 let a0 = unsafe &*self.p().module_ast_const(dm);
-                let ftn = field_type_node(a0, dn, ord);
-                if ftn == NODE_NONE || a0.at_const(ftn).kind != NodeKind::NODE_ARRAY_TYPE {
-                    return none();
-                }
-                let lnode = a0.at_const(ftn).as_data.array_type.length;
-                if lnode == NODE_NONE {
-                    return none();
-                }
-                // the length is a literal or a direct reference to one of the decl's const
-                // parameters; anything else stays unfoldable (no eval: the facade memo is
-                // per-node and would poison the length across instances)
-                let mut nlen: i64 = 0;
-                let ld = a0.resolution_def(lnode);
-                let gi = gen_index(a0, dn, nargs, ld.node);
-                if ld.module == dm && gi >= 0 {
-                    let ya = unsafe &*self.p().module_ast_const(unsafe am[gi as usize]);
-                    let yat = unsafe at[gi as usize];
-                    if ya.type_valid(yat) && ya.type_at(yat).kind == TypeKind::TYPE_CONST {
-                        nlen = ya.type_at(yat).as_data.value;
-                    }
-                }
+                let nlen = self.arr_count(fm, &y, dm, dn, nargs, am, at);
                 if nlen <= 0 {
                     return none();
                 }
@@ -4161,8 +4953,8 @@ extend Interp {
         return true;
     }
 
-    // The integer value of enum variant `vd`: explicit literal discriminants set the counter, the
-    // rest follow C rules (previous + 1); payload enums tag by declaration ordinal.
+    // The integer value of enum variant `vd`: explicit discriminants set the counter, the rest
+    // follow C rules (previous + 1).
     fn variant_value(self: &mut Self, vd: DefId, out: &mut i64) bool {
         if vd.node == NODE_NONE {
             return false;
@@ -4174,45 +4966,51 @@ extend Interp {
         }
         let a = unsafe &*self.p().module_ast_const(vd.module);
         let ms = a.at_const(nid).as_data.aggregate.members;
-        let has_pay = a.enum_has_payload(nid);
-        let mut cur: i64 = 0;
-        let mut ord: i64 = 0;
-        let mut found = false;
+        // the C tag is the running discriminant; the ones after `vd` stay unevaluated,
+        // so a discriminant may name an earlier variant of its own enum
+        let mut cur: i64 = 0 - 1;
         for k in 0..ms.len {
             let mid = unsafe a.list(ms)[k as usize];
-            let vexpr = a.at_const(mid).as_data.variant.value;
-            if vexpr != NODE_NONE && !has_pay {
-                let vn = a.at_const(vexpr);
-                if vn.kind != NodeKind::NODE_LITERAL {
-                    return false;
-                }
-                let c = ir::Constant {
-                    kind: ir::CK_INT,
-                    ty: TYPE_NONE,
-                    val: 0,
-                    raw: vn.as_data.literal.raw,
-                    item: DefId { module: 0, node: NODE_NONE },
-                };
-                let mut v: i64 = 0;
-                if !self.lit_value(vd.module, &c, &mut v) {
-                    return false;
-                }
-                cur = v;
+            if !self.discr(vd.module, mid, cur, &mut cur) {
+                return false;
             }
             if mid == vd.node {
-                // the C tag: declaration ordinal for payload enums, the running constant for
-                // bare ones
-                if has_pay {
-                    *out = ord;
-                } else {
-                    *out = cur;
-                }
-                found = true;
+                *out = cur;
+                return true;
             }
-            cur += 1;
-            ord += 1;
         }
-        return found;
+        return false;
+    }
+
+    // The declaration ordinal of the variant of enum `dn` of module `m` whose discriminant is
+    // `tag`; -1 when none has it.
+    fn variant_ordinal(self: &mut Self, m: ModuleId, dn: NodeId, tag: i64) i64 {
+        let a = unsafe &*self.p().module_ast_const(m);
+        let ms = a.at_const(dn).as_data.aggregate.members;
+        let mut cur: i64 = 0 - 1;
+        for k in 0..ms.len {
+            if !self.discr(m, unsafe a.list(ms)[k as usize], cur, &mut cur) {
+                return -1;
+            }
+            if cur == tag {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    /// The discriminant of enum variant `vid` of module `m` after one of value `prev`: its
+    /// explicit value, folded, else `prev + 1`. False when the explicit value does not fold to an
+    /// integer (the trap, if any, stays set).
+    pub fn discr(self: &mut Self, m: ModuleId, vid: NodeId, prev: i64, out: &mut i64) bool {
+        let vv = (unsafe &*self.p().module_ast_const(m)).at_const(vid).as_data.variant.value;
+        if vv == NODE_NONE {
+            *out = prev + 1;
+            return true;
+        }
+        let v = self.eval(m, vv);
+        *out = v.i;
+        return v.kind == IV_INT;
     }
 
     // ---- arithmetic (pinned semantics) ------------------------------------------------------------
@@ -4313,6 +5111,9 @@ extend Interp {
             v = a * c;
         } else if t == TokenType::Slash {
             v = a / c;
+        } else if t == TokenType::Percent {
+            // the sign of the dividend, like C's fmod the emitted `%` calls
+            v = unsafe math::fmod(a, c);
         } else {
             return self.bail();
         }
@@ -4339,8 +5140,15 @@ extend Interp {
         return self.bail();
     }
 
-    fn int_op(self: &mut Self, a: i64, c: i64, tok2: u32, ob: BuiltinType, rb: BuiltinType, m: ModuleId, target: TypeId) IVal {
+    fn int_op(self: &mut Self, a: i64, c: i64, tok2: u32, lb: BuiltinType, rb: BuiltinType, m: ModuleId, target: TypeId) IVal {
         let t = (tok2 as u8) as TokenType;
+        // A shift and a comparison compute at the left operand's type; every other operator at the result's,
+        // which the checker widened a narrower operand to (`u8 + u64`), as the emitted C does.
+        let ob = if t != TokenType::LeftShift && t != TokenType::RightShift && (bt_signed(rb) || bt_unsigned(rb)) {
+            rb;
+        } else {
+            lb;
+        };
         let uns = ob != BuiltinType::BT_COUNT && bt_unsigned(ob);
         let mut bits = 64;
         if ob != BuiltinType::BT_COUNT {
@@ -4375,12 +5183,24 @@ extend Interp {
             let ul = a as u64;
             let ur = c as u64;
             let mut u: u64 = 0;
-            if t == TokenType::Plus {
-                u = ul + ur;
-            } else if t == TokenType::Minus {
-                u = ul - ur;
-            } else if t == TokenType::Star {
-                u = ul * ur;
+            if t == TokenType::Plus || t == TokenType::Minus || t == TokenType::Star {
+                // Unsigned `+ - *` past the type's range overflows, as signed ones do.
+                let mut o = false;
+                if t == TokenType::Plus {
+                    u = ul.wrapping_add(ur);
+                    o = u < ul;
+                } else if t == TokenType::Minus {
+                    u = ul.wrapping_sub(ur);
+                    o = ur > ul;
+                } else {
+                    let (p, po) = ul.overflowing_mul(ur);
+                    u = p;
+                    o = po;
+                }
+                if o || !fits(ob, u as i64, self.pw()) {
+                    self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+                    return none();
+                }
             } else if t == TokenType::Slash || t == TokenType::Percent {
                 if ur == 0 {
                     self.it_trap(IT_TRAP_UB_DIV_ZERO, "division by zero");
@@ -4419,7 +5239,7 @@ extend Interp {
         }
         let mut type_min = I64_MIN;
         if bits != 64 {
-            type_min = (0u64 - (1u64 << (bits - 1) as u64)) as i64;
+            type_min = (1u64 << (bits - 1) as u64).wrapping_neg() as i64;
         }
         let mut v: i64 = 0;
         if t == TokenType::Plus || t == TokenType::Minus || t == TokenType::Star {
@@ -4505,14 +5325,12 @@ extend Interp {
         let mut tb = BuiltinType::BT_COUNT;
         let _ = self.bt_of(m, target, &mut tb);
         if t == TokenType::Minus {
-            if v.i == I64_MIN {
-                return self.bail();
+            // signed negation of MIN overflows (the checker rejects unsigned negation)
+            if v.i == I64_MIN || tb != BuiltinType::BT_COUNT && !fits(tb, -v.i, self.pw()) {
+                self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+                return none();
             }
-            let r = -v.i;
-            if tb != BuiltinType::BT_COUNT && !fits(tb, r, self.pw()) {
-                return self.bail();
-            }
-            return iv_int(m, target, r);
+            return iv_int(m, target, -v.i);
         }
         if t == TokenType::Tilde {
             let mut bb = tb;
@@ -4608,13 +5426,18 @@ extend Interp {
             return a.as_data.builtin == b.as_data.builtin;
         }
         if a.kind == TypeKind::TYPE_CONST {
-            return a.as_data.value == b.as_data.value;
+            return a.as_data.value == b.as_data.value && a.qualifier == b.qualifier;
         }
         if a.kind == TypeKind::TYPE_POINTER || a.kind == TypeKind::TYPE_REFERENCE {
             return a.qualifier == b.qualifier && self.teq(ma, a.as_data.elem, mb, b.as_data.elem);
         }
         if a.kind == TypeKind::TYPE_ARRAY {
-            return a.as_data.arr.len == b.as_data.arr.len && self.teq(ma, a.as_data.arr.elem, mb, b.as_data.arr.elem);
+            let same_len = if a.arr_sym() {
+                self.teq(ma, a.as_data.arr.len, mb, b.as_data.arr.len);
+            } else {
+                a.as_data.arr.len == b.as_data.arr.len;
+            };
+            return a.qualifier == b.qualifier && same_len && self.teq(ma, a.as_data.arr.elem, mb, b.as_data.arr.elem);
         }
         if a.kind == TypeKind::TYPE_STRUCT || a.kind == TypeKind::TYPE_ENUM || a.kind == TypeKind::TYPE_GENERIC || a.kind == TypeKind::TYPE_OPAQUE {
             return a.module == b.module && a.as_data.decl == b.as_data.decl;
@@ -4673,26 +5496,222 @@ extend Interp {
             return iv_float(m, target, fv);
         }
         if v.kind == IV_FLOAT {
-            if !it_isfinite(v.f) {
-                return self.bail();
-            }
+            // saturating: NaN is 0, a value past either end of the target is that end
+            let bits = bt_bits(tb, self.pw());
             let t = unsafe math::trunc(v.f);
-            if t < -9.3e18 || t > 1.8e19 {
-                return self.bail();
+            if v.f != v.f || bt_unsigned(tb) && t <= 0.0 {
+                return iv_int(m, target, 0);
             }
-            let mut iv2: i64 = t as i64;
+            let half = (1u64 << (bits - 1) as u64) as f64;
             if bt_unsigned(tb) {
-                iv2 = (t as u64) as i64;
+                if t >= 2.0 * half {
+                    return iv_int(m, target, wrap_to(tb, -1, self.pw()));
+                }
+                return iv_int(m, target, wrap_to(tb, (t as u64) as i64, self.pw()));
             }
-            if !fits(tb, iv2, self.pw()) && bt_bits(tb, self.pw()) < 64 {
-                return self.bail();
+            if t >= half {
+                return iv_int(m, target, wrap_to(tb, (1u64 << (bits - 1) as u64) as i64 - 1, self.pw()));
             }
-            return iv_int(m, target, wrap_to(tb, iv2, self.pw()));
+            if t <= 0.0 - half {
+                return iv_int(m, target, wrap_to(tb, (1u64 << (bits - 1) as u64).wrapping_neg() as i64, self.pw()));
+            }
+            return iv_int(m, target, t as i64);
         }
         if v.kind == IV_BOOL || v.kind == IV_INT {
             return iv_int(m, target, wrap_to(tb, v.i, self.pw()));
         }
         return self.bail();
+    }
+
+    // The extend conforming receiver `(rdm, rdn)` (instance arguments `rn`/`ram`/`rat`) to the
+    // interface of bound-call type `iface` (a `dyn I<args>` of pool `b.module`) with exactly those
+    // arguments, resolved in the active frame, into `out`. False when none is found or an argument
+    // cannot be decided here (the caller refuses to fold).
+    fn conf_by_args(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        iface: TypeId,
+        rdm: ModuleId,
+        rdn: NodeId,
+        rn: u8,
+        ram: *const ModuleId,
+        rat: *const TypeId,
+        out: &mut DefId,
+    ) bool {
+        let ba = unsafe &*self.p().module_ast_const(b.module);
+        let di = *ba.instance(ba.type_at(iface).as_data.inst);
+        let mut wm: [ModuleId; 8] = [[0] = 0];
+        let mut wt: [TypeId; 8] = [[0] = TYPE_NONE];
+        for k in 0..di.n {
+            if !self.rty(b.module, unsafe di.args[k as usize], unsafe &mut wm[k as usize], unsafe &mut wt[k as usize]) {
+                return false;
+            }
+        }
+        for xm in 0..self.p().modules.len() {
+            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            if xa.nodes.len() == 0 {
+                continue;
+            }
+            let items = xa.at_const(xa.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe xa.list(items)[i as usize];
+                let ed = xa.at_const(iid).as_data.extend_def;
+                if xa.at_const(iid).kind != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
+                    continue;
+                }
+                let ir0 = xa.resolution_def(ed.interface_type);
+                let tg = xa.resolution_def(ed.target_type);
+                if ir0.module != di.module || ir0.node != di.decl || tg.module != rdm || tg.node != rdn {
+                    continue;
+                }
+                let mut list = Vector::<ISub>::new();
+                if !self.bind_extend(&mut list, xm as ModuleId, iid, rn, ram, rat) {
+                    continue; // the extend does not apply to this instance
+                }
+                // The conformance's whole argument list, defaults included, as the checker recorded it
+                // on the interface path (`dyn I<args>`).
+                let dt = xa.type_of(ed.interface_type);
+                if dt == TYPE_NONE {
+                    return false;
+                }
+                let ci = *xa.instance(xa.type_at(dt).as_data.inst);
+                if ci.n != di.n {
+                    continue;
+                }
+                let mut same = true;
+                for k in 0..ci.n {
+                    let mut cm = xm as ModuleId;
+                    let mut ct = unsafe ci.args[k as usize];
+                    let cy = *xa.type_at(ct);
+                    if cy.kind == TypeKind::TYPE_GENERIC {
+                        let mut hit = false;
+                        for q in 0..list.len() {
+                            if list.at(q).pmod == cy.module && list.at(q).pnode == cy.as_data.decl {
+                                cm = list.at(q).am;
+                                ct = list.at(q).at;
+                                hit = true;
+                            }
+                        }
+                        if !hit {
+                            return false;
+                        }
+                    } else if !xa.type_concrete(ct) {
+                        return false;
+                    }
+                    if !self.teq(cm, ct, unsafe wm[k as usize], unsafe wt[k as usize]) {
+                        same = false;
+                    }
+                }
+                if same {
+                    *out = DefId { module: xm as ModuleId, node: iid };
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // The method named like `name` (a span of module `nm`) that extend `ext` itself defines; node
+    // NODE_NONE when it defines none.
+    // The method a call of interface `iface`'s member `callee` named `name` runs on the receiver: the
+    // conformance's own method, never a same-named method of another extend (NODE_NONE: the
+    // conformance runs the default); without a conformance extend, the receiver's method by name.
+    fn iface_method(
+        self: &mut Self,
+        rdm: ModuleId,
+        rdn: NodeId,
+        rb: BuiltinType,
+        iface: DefId,
+        scope: ModuleId,
+        callee: NodeId,
+        name: tok::Span,
+    ) DefId {
+        let ce = self.conf_ext_of(rdm, rdn, rb, iface);
+        if ce.node != NODE_NONE {
+            return self.ext_own_method(ce, iface.module, name);
+        }
+        return self.find_method(rdm, rdn, rb, scope, iface.module, callee, name);
+    }
+
+    // The extend conforming the receiver (aggregate `(rdm, rdn)`, or builtin `rb` for node NODE_NONE)
+    // to interface `iface` with no interface arguments; NODE_NONE when none does.
+    fn conf_ext_of(self: &mut Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId) DefId {
+        // `method_memo` under a key no method lookup uses: bit 63 of `callee`.
+        let mid = if rdn == NODE_NONE {
+            rb as u64;
+        } else {
+            rdm as u64;
+        };
+        let key = MKey {
+            callee: 1u64 << 63 | iface.module as u64 << 32 | iface.node as u64,
+            recv: mid << 32 | rdn as u64,
+        };
+        if self.all_typed {
+            switch self.method_memo.get(&key) {
+                Some(v) => {
+                    return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
+                },
+                None => {},
+            };
+        }
+        let found = self.conf_ext_scan(rdm, rdn, rb, iface);
+        if self.all_typed {
+            self.method_memo.insert(key, found.module as u64 << 32 | found.node as u64);
+        }
+        return found;
+    }
+
+    fn conf_ext_scan(self: &Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId) DefId {
+        for mi in 0..self.p().modules.len() {
+            let mm = mi as ModuleId;
+            let a = unsafe &*self.p().module_ast_const(mm);
+            if a.nodes.len() == 0 {
+                continue;
+            }
+            let items = a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe a.list(items)[i as usize];
+                if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                let ed = a.at_const(iid).as_data.extend_def;
+                if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
+                    continue;
+                }
+                let ir = a.resolution_def(ed.interface_type);
+                if ir.module != iface.module || ir.node != iface.node {
+                    continue;
+                }
+                let mut hit = false;
+                if rdn != NODE_NONE {
+                    let tg = a.resolution_def(ed.target_type);
+                    hit = tg.module == rdm && tg.node == rdn;
+                } else {
+                    let tt = self.tof(mm, a, ed.target_type);
+                    hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && a.type_at(tt).as_data.builtin == rb;
+                }
+                if hit {
+                    return DefId { module: mm, node: iid };
+                }
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    fn ext_own_method(self: &Self, ext: DefId, nm: ModuleId, name: tok::Span) DefId {
+        let xa = unsafe &*self.p().module_ast_const(ext.module);
+        let ms = xa.at_const(ext.node).as_data.extend_def.items;
+        for j in 0..ms.len {
+            let mid = unsafe xa.list(ms)[j as usize];
+            let mn = xa.at_const(mid);
+            let ms2 = xa.at_const(mn.as_data.function.name).as_data.name.text;
+            if mn.kind == NodeKind::NODE_FUNCTION && self.src_of(ext.module).slice(ms2.start as usize, ms2.end as usize) == self.src_of(
+                nm,
+            ).slice(name.start as usize, name.end as usize) {
+                return DefId { module: ext.module, node: mid };
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
     }
 
     // The container item of fn `fnode` in module `fm`: 1 = extend, 2 = interface, 0 = top-level.
@@ -4850,11 +5869,53 @@ extend Interp {
         return self.cap_fail(base, IT_TRAP_UNSUPPORTED, "constant value cannot be materialized as static data");
     }
 
+    /// A one-slot object holding `v`, typed `(tm, ty)`: the root `capture` takes for a pointer.
+    pub fn cell_of(self: &mut Self, v: IVal, tm: ModuleId, ty: TypeId) IVal {
+        let c = self.obj_new(1);
+        if c == 0 {
+            return none();
+        }
+        unsafe (*self.obj_ptr(c)).slots.set(0, v);
+        return IVal { kind: IV_OBJ, tm: tm, ty: ty, i: c, f: 0.0 };
+    }
+
+    // The object a pointer's target names, its slot in `off`. A frame has no storage past the
+    // evaluation, so a temporary it holds gets its own: an aggregate is its object, any other value
+    // moves into a one-slot object (`promo`, one per frame slot). 0 when the budget refuses one.
+    fn cap_target(self: &mut Self, sv: IVal, off: &mut u32, promo: &mut Map<u64, u32>) u32 {
+        let c = pv_obj(sv);
+        *off = pv_off(sv);
+        let op = self.obj_ptr(c);
+        if op == null || unsafe (*op).frame == 0 || (*off) as usize >= unsafe (*op).slots.len() {
+            return c;
+        }
+        let t = unsafe (*op).slots[(*off) as usize];
+        let key = c as u64 << 32 | (*off) as u64;
+        *off = 0;
+        if t.kind == IV_OBJ {
+            return t.i as u32;
+        }
+        switch promo.get(&key) {
+            Some(p) => {
+                return *p;
+            },
+            None => {},
+        };
+        let cell = self.obj_new(1);
+        if cell != 0 {
+            unsafe (*self.obj_ptr(cell)).slots.set(0, t);
+            promo.insert(key, cell);
+        }
+        return cell;
+    }
+
     /// Serialize the object graph behind `rootv` (an IV_OBJ) into `statics`: pass A discovers
     /// pre-order (children pushed in reverse so pop order equals slot order), pass B shapes each
     /// object, pass C serializes slots and relocations. Object identity is preserved, so shared
-    /// and cyclic pointer graphs survive.
-    pub fn capture(self: &mut Self, rootv: IVal) StaticRes {
+    /// and cyclic pointer graphs survive. With `items`, a pointer into a referenced item's cell
+    /// addresses the emitted item: the cell and the objects its value embeds enter the group as
+    /// path anchors only (`StaticObj.inode`), their contents unserialized.
+    pub fn capture(self: &mut Self, rootv: IVal, items: bool) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         let base = self.statics.len() as u32;
         let nobj = self.objs_live;
@@ -4868,6 +5929,8 @@ extend Interp {
         let mut embs = Vector::<u32>::new(); // slot in the embedding parent
         let mut hintm = Vector::<ModuleId>::new(); // value-type hint from the referencing IVal
         let mut hintt = Vector::<TypeId>::new();
+        let mut alias = Vector::<u32>::new(); // the item cell whose value embeds the object; 0 = none
+        let mut promo = Map::<u64, u32>::new(); // frame slot -> the object its temporary moved into
         map.reserve(nobj + 1);
         for _ in 0..nobj + 1 {
             map.push(0);
@@ -4875,6 +5938,29 @@ extend Interp {
             embs.push(0);
             hintm.push(0);
             hintt.push(TYPE_NONE);
+            alias.push(0);
+        }
+        if items {
+            // each object is embedded at most once, so every one enters `walk` at most once
+            let mut walk = Vector::<u32>::new();
+            for cell in 1..nobj + 1 {
+                if unsafe (*self.obj_ptr(cell as u32)).item == 0 {
+                    continue;
+                }
+                alias.set(cell, cell as u32);
+                walk.push(cell as u32);
+                while walk.len() != 0 {
+                    let o = walk[walk.len() - 1];
+                    walk.truncate(walk.len() - 1);
+                    for k in 0..unsafe (*self.obj_ptr(o)).slots.len() {
+                        let sv = unsafe (*self.obj_ptr(o)).slots[k];
+                        if sv.kind == IV_OBJ && sv.i > 0 && sv.i as usize <= nobj && alias[sv.i as usize] == 0 {
+                            alias.set(sv.i as usize, cell as u32);
+                            walk.push(sv.i as u32);
+                        }
+                    }
+                }
+            }
         }
         hintm.set(rid as usize, rootv.tm);
         hintt.set(rid as usize, rootv.ty);
@@ -4896,7 +5982,10 @@ extend Interp {
                 return self.cap_fail(base, IT_TRAP_UB_USE_AFTER_FREE, "constant points at freed compile-time memory");
             }
             let sl = (unsafe (*op).slots.len()) as u32;
-            total += sl;
+            let anchor = alias[oid as usize] != 0;
+            if !anchor {
+                total += sl;
+            }
             if total > IT_STATIC_MAX_SLOTS {
                 return self.cap_fail(base, IT_TRAP_TOO_LARGE, "constant is too large to materialize as static data");
             }
@@ -4906,6 +5995,15 @@ extend Interp {
             while k > 0 {
                 k -= 1;
                 let mut sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                if anchor {
+                    // an anchor's embedded aggregates name its paths; nothing else is emitted
+                    if sv.kind == IV_OBJ {
+                        embp.set(sv.i as usize, oid);
+                        embs.set(sv.i as usize, k);
+                        stack.push(sv.i as u32);
+                    }
+                    continue;
+                }
                 if sv.kind == IV_STR {
                     // a nested string literal materializes into its object form for serialization
                     sv = self.str_materialize(sv.tm, sv);
@@ -4921,6 +6019,7 @@ extend Interp {
                     embs.push(0);
                     hintm.push(0);
                     hintt.push(TYPE_NONE);
+                    alias.push(0);
                 }
                 if sv.kind == IV_OBJ {
                     let c = sv.i as u32;
@@ -4935,9 +6034,18 @@ extend Interp {
                     }
                     stack.push(c);
                 } else if sv.kind == IV_PTR && pv_obj(sv) != 0 {
-                    let c = pv_obj(sv);
-                    if c as usize > self.objs_live {
+                    let mut toff: u32 = 0;
+                    let c = self.cap_target(sv, &mut toff, &mut promo);
+                    if c == 0 || c as usize > self.objs_live || unsafe (*self.obj_ptr(c)).frame != 0 {
                         return self.cap_unsup(base);
+                    }
+                    while map.len() <= self.objs_live {
+                        map.push(0);
+                        embp.push(0);
+                        embs.push(0);
+                        hintm.push(0);
+                        hintt.push(TYPE_NONE);
+                        alias.push(0);
                     }
                     if sv.ty != TYPE_NONE && hintt[c as usize] == TYPE_NONE {
                         let a = unsafe &*self.p().module_ast_const(sv.tm);
@@ -4946,8 +6054,18 @@ extend Interp {
                             hintm.set(c as usize, sv.tm);
                             hintt.set(c as usize, y.as_data.elem);
                         }
+                    } else if sv.ty == TYPE_NONE && hintt[c as usize] == TYPE_NONE {
+                        // A view's untyped `ptr` points at elements of the view's type argument.
+                        let vo = self.obj_ptr(oid);
+                        if unsafe (*vo).dn != NODE_NONE && unsafe (*vo).nargs != 0 && self.decl_view(
+                            unsafe (*vo).dm,
+                            unsafe (*vo).dn,
+                        ).p == k as i32 {
+                            hintm.set(c as usize, unsafe (*vo).am[0]);
+                            hintt.set(c as usize, unsafe (*vo).at[0]);
+                        }
                     }
-                    stack.push(c);
+                    stack.push(pick(alias[c as usize] != 0, alias[c as usize], c));
                 }
             }
         }
@@ -4971,7 +6089,29 @@ extend Interp {
                 g.pslot = embs[oid as usize];
             }
             let op = self.obj_ptr(oid);
-            if unsafe (*op).heap != 0 {
+            if alias[oid as usize] != 0 {
+                if unsafe (*op).item != 0 {
+                    g.im = unsafe (*op).dm;
+                    g.inode = unsafe (*op).dn;
+                } else if unsafe (*op).is_enum != 0 || unsafe (*op).dn != NODE_NONE && unsafe (*op).clos == 0 {
+                    g.shape = pick(unsafe (*op).is_enum != 0, SS_ENUM, SS_STRUCT);
+                    g.dm = unsafe (*op).dm;
+                    g.dn = unsafe (*op).dn;
+                    g.etm = hintm[oid as usize];
+                    g.ety = hintt[oid as usize];
+                } else {
+                    g.shape = SS_ARRAY;
+                    g.n = sl;
+                    let ht = hintt[oid as usize];
+                    if ht != TYPE_NONE {
+                        let y = *(unsafe &*self.p().module_ast_const(hintm[oid as usize])).type_at(ht);
+                        if y.kind == TypeKind::TYPE_ARRAY {
+                            g.etm = hintm[oid as usize];
+                            g.ety = y.as_data.arr.elem;
+                        }
+                    }
+                }
+            } else if unsafe (*op).heap != 0 {
                 g.shape = SS_HEAP;
                 g.etm = unsafe (*op).em;
                 g.ety = unsafe (*op).et;
@@ -4983,27 +6123,20 @@ extend Interp {
                         "constant points at an untyped compile-time heap block",
                     );
                 }
-            } else if unsafe (*op).is_enum != 0 {
-                g.shape = SS_ENUM;
-                g.dm = unsafe (*op).dm;
-                g.dn = unsafe (*op).dn;
-                let ga = unsafe &*self.p().module_ast_const(g.dm);
-                let gens = ga.at_const(g.dn).as_data.aggregate.generics.len;
-                if standalone && gens != 0 {
-                    return self.cap_unsup(base);
-                }
-            } else if unsafe (*op).dn != NODE_NONE && unsafe (*op).clos == 0 {
-                g.shape = SS_STRUCT;
+            } else if unsafe (*op).dn != NODE_NONE && unsafe (*op).clos == 0 && unsafe (*op).item == 0 {
+                g.shape = pick(unsafe (*op).is_enum != 0, SS_ENUM, SS_STRUCT);
                 g.uactive = unsafe (*op).uactive; // a union serializes the one member it holds
                 g.dm = unsafe (*op).dm;
                 g.dn = unsafe (*op).dn;
+                // the aggregate's own type when a reference names it: a zero-sized one has no C object
+                g.etm = hintm[oid as usize];
+                g.ety = hintt[oid as usize];
                 g.nargs = unsafe (*op).nargs;
-                for ci in 0..4 {
-                    unsafe g.am[ci] = unsafe (*op).am[ci];
-                    unsafe g.at[ci] = unsafe (*op).at[ci];
-                }
+                g.am = unsafe (*op).am;
+                g.at = unsafe (*op).at;
                 let ga = unsafe &*self.p().module_ast_const(g.dm);
                 let gens = ga.at_const(g.dn).as_data.aggregate.generics.len;
+                // A standalone object spells its instance's name: every argument must be known.
                 if standalone && gens != 0 && g.nargs == 0 {
                     return self.cap_unsup(base);
                 }
@@ -5023,12 +6156,18 @@ extend Interp {
                     }
                 }
                 if !isarr {
-                    if sl != 1 || ht == TYPE_NONE {
+                    if sl == 0 || ht == TYPE_NONE {
                         return self.cap_unsup(base);
                     }
                     g.shape = SS_CELL;
                     g.etm = hm;
                     g.ety = ht;
+                    if sl != 1 {
+                        // A pointer's pointee type is the hint: the slots are the array a view
+                        // (`Slice` data, `&arr[0]`) points into.
+                        g.shape = SS_ARRAY;
+                        g.n = sl;
+                    }
                 }
             } else {
                 return self.cap_unsup(base);
@@ -5039,7 +6178,7 @@ extend Interp {
         let mut nstand: u32 = 0;
         for idx in 0..count {
             let gi = base as usize + idx;
-            if self.statics[gi].parent == S_NO_PARENT {
+            if self.statics[gi].parent == S_NO_PARENT && self.statics[gi].inode == NODE_NONE {
                 self.statics[gi].ord = nstand;
                 nstand += 1;
             }
@@ -5064,6 +6203,18 @@ extend Interp {
             let mut sslots = Vector::<SSlot>::new();
             let mut srels = Vector::<SRel>::new();
             let uact = self.statics[gi].uactive;
+            if alias[oid as usize] != 0 {
+                // an anchor keeps only the tag st_path spells an enum payload's path by
+                for _ in 0..sl {
+                    sslots.push(SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0 });
+                }
+                if shape == SS_ENUM {
+                    let tag = unsafe (*self.obj_ptr(oid)).slots[0].i;
+                    sslots[0].i = self.variant_ordinal(self.statics[gi].dm, self.statics[gi].dn, tag);
+                }
+                self.statics[gi].slots = sslots;
+                continue;
+            }
             for k in 0..sl {
                 let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
                 let mut sk = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0 };
@@ -5079,6 +6230,15 @@ extend Interp {
                     sk.tm = sv.tm;
                     sk.ty = sv.ty;
                     sk.i = sv.i;
+                    if shape == SS_ENUM && k == 0 {
+                        // the emitter spells the tag by the variant's name
+                        let gdm = self.statics[gi].dm;
+                        let gdn = self.statics[gi].dn;
+                        sk.i = self.variant_ordinal(gdm, gdn, sv.i);
+                        if sk.i < 0 {
+                            return self.cap_unsup(base);
+                        }
+                    }
                 } else if sv.kind == IV_FLOAT {
                     if !it_isfinite(sv.f) {
                         return self.cap_fail(base, IT_TRAP_UNSUPPORTED, "constant contains a non-finite float");
@@ -5095,12 +6255,12 @@ extend Interp {
                     if pv_obj(sv) == 0 {
                         sk.kind = SK_NULL;
                     } else {
-                        let tgt = map[pv_obj(sv) as usize];
+                        let mut toff: u32 = 0;
+                        let tgt = map[self.cap_target(sv, &mut toff, &mut promo) as usize];
                         if tgt == 0 {
                             return self.cap_unsup(base);
                         }
                         let ti = tgt - 1;
-                        let toff = pv_off(sv);
                         let tshape = self.statics[ti as usize].shape;
                         let tlen = (unsafe (*self.obj_ptr(order[(ti - base) as usize])).slots.len()) as u32;
                         let past_end = toff == tlen && (tshape == SS_HEAP || tshape == SS_ARRAY);
@@ -5634,8 +6794,27 @@ extend Interp {
         );
     }
 
-    // Does the intercept model this extern name? Heap/trap/bit-count names, then libm by (suffix-stripped)
-    // name probe.
+    // The wrapping-arithmetic names of std/bits.h (`sc_w*64`, `sc_mulo_*64`).
+    const fn wrap_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
+        for n in [
+            "sc_wadd64",
+            "sc_wsub64",
+            "sc_wmul64",
+            "sc_wshl64",
+            "sc_wshr64",
+            "sc_wsar64",
+            "sc_mulo_u64",
+            "sc_mulo_i64",
+        ] {
+            if self.span_is(fm, nm, n) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Does the intercept model this extern name? Heap/trap/Int<N>/bit-count/wrapping names, then libm by
+    // (suffix-stripped) name probe.
     const fn intercept_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
         if self.span_is(fm, nm, "malloc") || self.span_is(fm, nm, "realloc") || self.span_is(fm, nm, "free") || self.span_is(
             fm,
@@ -5645,7 +6824,14 @@ extend Interp {
             fm,
             nm,
             "__sc_panic_str",
-        ) || self.span_is(fm, nm, "__sc_panic") || self.bits_name(fm, nm) {
+        ) || self.span_is(fm, nm, "__sc_panic") || self.span_is(fm, nm, "sc_int_overflow") || self.span_is(
+            fm,
+            nm,
+            "sc_int_div_zero",
+        ) || self.span_is(fm, nm, "sc_int_div_overflow") || self.span_is(fm, nm, "sc_has_i128") || self.bits_name(
+            fm,
+            nm,
+        ) || self.wrap_name(fm, nm) {
             return true;
         }
         let mut f32suf = false;
@@ -5769,6 +6955,11 @@ extend Interp {
         return self.trap;
     }
 
+    /// Whether the trap was set inside a referenced constant, not the evaluated root itself.
+    pub const fn trap_in_item(self: &Self) bool {
+        return self.trap_depth != 0;
+    }
+
     pub const fn trap_kind_get(self: &Self) u8 {
         return self.trap_kind;
     }
@@ -5793,7 +6984,8 @@ extend Interp {
                 }
                 let fv = unsafe self.trap_stack[i as usize];
                 let a = unsafe &*self.p().module_ast_const(fv.module);
-                if a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
+                // A body-arena frame is a closure, whose syntax may already be released.
+                if !Ast::in_body(fv.node) && a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
                     let nm = a.at_const(a.at_const(fv.node).as_data.function.name).as_data.name.text;
                     let src = self.src_of(fv.module);
                     self.dbuf.push_str(src.slice(nm.start as usize, nm.end as usize));
@@ -5819,12 +7011,11 @@ extend Interp {
 
     fn record_fold_err(self: &mut Self, m: ModuleId, id: NodeId) {
         // dedupe: emission probes the same failing node more than once
-        for i in 0..self.fold_errs.len() {
-            let r = self.fold_errs.at(i);
-            if r.m == m && r.id == id {
-                return;
-            }
+        let key = m as u64 << 32 | id as u64;
+        if self.fold_seen.contains(&key) {
+            return;
         }
+        self.fold_seen.insert(key);
         let detail = self.trap_detail();
         let mut d = String::new();
         d.push_str(detail);
@@ -5934,6 +7125,7 @@ extend Interp {
             lw.lower_expr_root(id);
         };
         if !ok {
+            self.err_refused = self.err_refused || lw.failed_on_error_type();
             return none();
         }
         let args = Vector::<IVal>::new();
@@ -6040,6 +7232,8 @@ extend Interp {
         if lw.lower_expr_root(id) {
             let args = Vector::<IVal>::new();
             v = self.run(&lw.body, &args);
+        } else {
+            self.err_refused = self.err_refused || lw.failed_on_error_type();
         }
         self.ev_depth -= 1;
         self.sub_base = prev_base;
@@ -6076,10 +7270,10 @@ extend Interp {
                 BT_BOOL => {
                     return 1;
                 },
-                BT_CHAR | BT_I8 | BT_I16 | BT_I32 | BT_I64 | BT_ISIZE => {
+                BT_I8 | BT_I16 | BT_I32 | BT_I64 | BT_ISIZE => {
                     return 2;
                 },
-                BT_U8 | BT_U16 | BT_U32 | BT_U64 | BT_USIZE => {
+                BT_CHAR | BT_U8 | BT_U16 | BT_U32 | BT_U64 | BT_USIZE => {
                     return 3;
                 },
                 BT_F32 | BT_F64 => {
@@ -6168,7 +7362,7 @@ extend Interp {
         self.pending.push(m as u64 << 32 | cond as u64);
     }
 
-    /// Queue a call-bearing const initializer undecidable in module order.
+    /// Queue a const initializer undecidable in module order.
     pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId) {
         self.eng_enter();
         self.defer_const_g(m, decl);
@@ -6236,6 +7430,15 @@ extend Interp {
         return false;
     }
 
+    /// Whether expression `id` of module `m` last evaluated to an aggregate (`eval` answers IV_NONE
+    /// for one).
+    pub fn folded_agg(self: &Self, m: ModuleId, id: NodeId) bool {
+        return switch self.ememo.get(&(m as u64 << 32 | id as u64)) {
+            Some(v) => v.kind == EV_AGG_OK,
+            None => false,
+        };
+    }
+
     /// Re-evaluate the deferred const initializers: err() fires with trap detail for a definite
     /// trap, and for a top-level const that still cannot be evaluated.
     pub fn flush_consts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
@@ -6257,7 +7460,7 @@ extend Interp {
             } else if self.const_is_item(m, decl) {
                 // every module is typed now, so a top-level const has no legitimate silent failure
                 // left (only unsubstituted generics do, and those are local)
-                err(ctx, m, decl, "the initializer requires execution but could not be evaluated".ptr() as *const char);
+                err(ctx, m, decl, "the initializer does not fold to a constant".ptr() as *const char);
             }
         }
         self.pending_consts.clear();
@@ -6285,7 +7488,7 @@ extend Interp {
             self.failed = false;
             return bad;
         }
-        let r = self.capture(v);
+        let r = self.capture(v, false);
         self.failed = false;
         return r;
     }
@@ -6341,6 +7544,9 @@ extend Interp {
             } else {
                 self.failed = false;
             }
+        } else if v.kind == IV_PTR && pv_obj(v) != 0 && !self.failed {
+            // a pointer is static data when its target is: capture it as the slot of a cell
+            v = self.cell_of(v, v.tm, v.ty);
         }
         if v.kind != IV_OBJ {
             if self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
@@ -6352,7 +7558,7 @@ extend Interp {
             self.failed = false;
             return bad;
         }
-        let r = self.capture(v);
+        let r = self.capture(v, false);
         self.failed = false;
         if !r.ok {
             self.sref.insert(key, 0 - 1);
@@ -6485,8 +7691,8 @@ extend Interp {
         return false;
     }
 
-    // A FieldInfo (`tag < 0`: name/offset/size/kind, `aux` = the field type's TypeTag index) or
-    // VariantInfo (`tag >= 0`: name/tag/payload, `aux` = the payload value count) object.
+    // A FieldInfo (`ety` has no `tag` member: name/offset/size/kind, `aux` = the field type's
+    // TypeTag index) or VariantInfo (name/tag/payload, `aux` = the payload value count) object.
     fn ti_member(self: &mut Self, cx: &TiCx, ety: TypeId, name: str, off: u64, size: u64, tag: i64, aux: u64) IVal {
         let ye = *(unsafe &*self.p().module_ast_const(cx.tim)).type_at(ety);
         if ye.kind != TypeKind::TYPE_STRUCT {
@@ -6507,10 +7713,10 @@ extend Interp {
             return none();
         }
         unsafe (*self.obj_ptr(o)).slots.set(i_name as usize, nmv);
-        if tag >= 0 {
-            let i_tag = self.ti_findf(em, en, "tag");
+        let i_tag = self.ti_findf(em, en, "tag");
+        if i_tag >= 0 {
             let i_pl = self.ti_findf(em, en, "payload");
-            if i_tag < 0 || i_pl < 0 {
+            if i_pl < 0 {
                 return none();
             }
             unsafe (*self.obj_ptr(o)).slots.set(i_tag as usize, iv_int(0, Ast::builtin(BuiltinType::BT_I32), tag));
@@ -6911,7 +8117,7 @@ extend Interp {
                         ftag = 0;
                     }
                 }
-                let fv = self.ti_member(&cx, fity, fname, off, fl.size, 0 - 1, ftag as u64);
+                let fv = self.ti_member(&cx, fity, fname, off, fl.size, 0, ftag as u64);
                 if fv.kind != IV_OBJ {
                     return none();
                 }
@@ -6936,26 +8142,13 @@ extend Interp {
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
             let vs = da2.at_const(dn2).as_data.aggregate.members;
-            let any_payload = da2.enum_has_payload(dn2);
             let mut vobjs = Vector::<IVal>::new();
-            let mut next: i64 = 0;
+            let mut vtag: i64 = 0 - 1;
             for i in 0..vs.len {
                 let vid = unsafe da2.list(vs)[i as usize];
-                if !any_payload {
-                    let vval = da2.at_const(vid).as_data.variant.value;
-                    if vval != NODE_NONE {
-                        let e = self.eval(dm2, vval);
-                        if e.kind != IV_INT {
-                            return none();
-                        }
-                        next = e.i;
-                    }
+                if !self.discr(dm2, vid, vtag, &mut vtag) {
+                    return none();
                 }
-                let mut vtag = next;
-                if any_payload {
-                    vtag = i;
-                }
-                next += 1;
                 let sp = da2.at_const(da2.at_const(vid).as_data.variant.name).as_data.name.text;
                 let src2 = self.src_of(dm2);
                 let vv = self.ti_member(
@@ -7070,7 +8263,7 @@ extend Interp {
             ety2 = y.as_data.elem;
         } else if y.kind == TypeKind::TYPE_ARRAY {
             ety2 = y.as_data.arr.elem;
-            alen = y.as_data.arr.len;
+            alen = self.arr_count(tm, &y, 0, NODE_NONE, 0, null, null).max(0) as u64;
         } else if tag == 10 && y.kind == TypeKind::TYPE_INSTANCE {
             let it = *(unsafe &*self.p().module_ast_const(tm)).instance(y.as_data.inst);
             if it.n > 0 {
@@ -7147,15 +8340,15 @@ extend Interp {
 // module, type, and bits.
 fn memo_key(fm: ModuleId, fnode: NodeId, args: &Vector<IVal>) u64 {
     let mut k: u64 = 0xcbf29ce484222325u64;
-    k = (k ^ fm as u64) * 1099511628211u64;
-    k = (k ^ fnode as u64) * 1099511628211u64;
+    k = (k ^ fm as u64).wrapping_mul(1099511628211u64);
+    k = (k ^ fnode as u64).wrapping_mul(1099511628211u64);
     for i in 0..args.len() {
         let av = *args.at(i);
-        k = (k ^ av.kind as u64) * 1099511628211u64;
-        k = (k ^ av.tm as u64) * 1099511628211u64;
-        k = (k ^ av.ty as u64) * 1099511628211u64;
-        k = (k ^ av.i as u64) * 1099511628211u64;
-        k = (k ^ f64_bits(av.f)) * 1099511628211u64;
+        k = (k ^ av.kind as u64).wrapping_mul(1099511628211u64);
+        k = (k ^ av.tm as u64).wrapping_mul(1099511628211u64);
+        k = (k ^ av.ty as u64).wrapping_mul(1099511628211u64);
+        k = (k ^ av.i as u64).wrapping_mul(1099511628211u64);
+        k = (k ^ f64_bits(av.f)).wrapping_mul(1099511628211u64);
     }
     return k;
 }

@@ -97,15 +97,24 @@ extern "C" {
     fn __sc_panic_str(msg: *const u8, len: usize) void;
 }
 
-// Bit counts over a u64 (bits.h, shipped next to this file): the C compiler's builtins with the zero
-// input defined as 64. The IR interpreter models the three names, so the `trailing_zeros`,
-// `leading_zeros` and `count_ones` methods below evaluate at compile time and a `const fn` may call
-// them. The methods are plain `fn`s: the bootstrap release rejects a `const fn` that calls an extern
-// function it does not model.
+// Bit counts and wrapping arithmetic over a u64 (bits.h, shipped next to this file): the C compiler's
+// builtins with the zero input defined as 64, and C's unsigned operators, which wrap in every profile.
+// The IR interpreter models these names, so the `trailing_zeros`, `leading_zeros`, `count_ones`,
+// `wrapping_*`, `overflowing_*`, `checked_*` and `saturating_*` methods below evaluate at compile time
+// and a `const fn` may call them. The methods are plain `fn`s: the bootstrap release rejects a `const
+// fn` that calls an extern function it does not model.
 extern "C" "bits.h" {
     fn sc_ctz64(x: u64) u32;
     fn sc_clz64(x: u64) u32;
     fn sc_popcount64(x: u64) u32;
+    fn sc_wadd64(a: u64, b: u64) u64;
+    fn sc_wsub64(a: u64, b: u64) u64;
+    fn sc_wmul64(a: u64, b: u64) u64;
+    fn sc_wshl64(a: u64, n: u32) u64;
+    fn sc_wshr64(a: u64, n: u32) u64;
+    fn sc_wsar64(a: i64, n: u32) i64;
+    fn sc_mulo_u64(a: u64, b: u64) bool;
+    fn sc_mulo_i64(a: i64, b: i64) bool;
 }
 
 /// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
@@ -670,6 +679,10 @@ extend c64 as Free {
 }
 
 extend i8 {
+    /// The smallest value.
+    pub const MIN: i8 = -128;
+    /// The largest value.
+    pub const MAX: i8 = 127;
     /// Zero bits below the lowest set bit of the two's complement pattern (8 for zero).
     pub fn trailing_zeros(self: i8) usize {
         return (self as u8).trailing_zeros();
@@ -682,13 +695,13 @@ extend i8 {
     pub fn count_ones(self: i8) usize {
         return (self as u8).count_ones();
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value; MIN overflows as `-MIN` does (a trap with overflow checks, MIN itself without).
     pub const fn abs(self: i8) i8 {
         if self < 0 {
-            return (0 - self as u8) as i8;
+            return -self;
         }
         return self;
-    } // unsigned negate: no MIN overflow
+    }
     /// -1, 0, or 1 by sign.
     pub const fn signum(self: i8) i8 {
         if self < 0 {
@@ -731,9 +744,145 @@ extend i8 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: i8, rhs: i8) i8 {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as i8;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: i8, rhs: i8) i8 {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as i8;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: i8, rhs: i8) i8 {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as i8;
+    }
+    /// `-self` modulo 2^N (MIN stays MIN).
+    pub fn wrapping_neg(self: i8) i8 {
+        return (unsafe sc_wsub64(0, self as u64)) as i8;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: i8, n: u32) i8 {
+        return (unsafe sc_wshl64(self as u64, n & 7)) as i8;
+    }
+    /// `self >> (n % N)`, arithmetic: the count wraps at the width.
+    pub fn wrapping_shr(self: i8, n: u32) i8 {
+        return (unsafe sc_wsar64(self, n & 7)) as i8;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: i8, rhs: i8) (i8, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, ((self ^ r) & (rhs ^ r)) < 0;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: i8, rhs: i8) (i8, bool) {
+        let r = self.wrapping_sub(rhs);
+        return r, ((self ^ rhs) & (self ^ r)) < 0;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: i8, rhs: i8) (i8, bool) {
+        let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
+        let r = p as i8;
+        return r, r as i64 != p;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: i8, rhs: i8) Option<i8> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: i8, rhs: i8) Option<i8> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: i8, rhs: i8) Option<i8> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: i8, rhs: i8) Option<i8> {
+        if rhs == 0 || self == -128 && rhs == -1 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor or MIN % -1.
+    pub fn checked_rem(self: i8, rhs: i8) Option<i8> {
+        if rhs == 0 || self == -128 && rhs == -1 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self % rhs);
+    }
+    /// `-self`, or None for MIN.
+    pub fn checked_neg(self: i8) Option<i8> {
+        if self == -128 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.wrapping_neg());
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: i8, n: u32) Option<i8> {
+        if n >= 8 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: i8, n: u32) Option<i8> {
+        if n >= 8 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to [MIN, MAX].
+    pub fn saturating_add(self: i8, rhs: i8) i8 {
+        let (r, o) = self.overflowing_add(rhs);
+        if !o {
+            return r;
+        }
+        if rhs < 0 {
+            return -128;
+        }
+        return 127;
+    }
+    /// `self - rhs`, clamped to [MIN, MAX].
+    pub fn saturating_sub(self: i8, rhs: i8) i8 {
+        let (r, o) = self.overflowing_sub(rhs);
+        if !o {
+            return r;
+        }
+        if rhs > 0 {
+            return -128;
+        }
+        return 127;
+    }
+    /// `self * rhs`, clamped to [MIN, MAX].
+    pub fn saturating_mul(self: i8, rhs: i8) i8 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if !o {
+            return r;
+        }
+        if (self ^ rhs) < 0 {
+            return -128;
+        }
+        return 127;
+    }
 }
 
 extend i16 {
+    /// The smallest value.
+    pub const MIN: i16 = -32768;
+    /// The largest value.
+    pub const MAX: i16 = 32767;
     /// Zero bits below the lowest set bit of the two's complement pattern (16 for zero).
     pub fn trailing_zeros(self: i16) usize {
         return (self as u16).trailing_zeros();
@@ -746,13 +895,13 @@ extend i16 {
     pub fn count_ones(self: i16) usize {
         return (self as u16).count_ones();
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value; MIN overflows as `-MIN` does (a trap with overflow checks, MIN itself without).
     pub const fn abs(self: i16) i16 {
         if self < 0 {
-            return (0 - self as u16) as i16;
+            return -self;
         }
         return self;
-    } // unsigned negate: no MIN overflow
+    }
     /// -1, 0, or 1 by sign.
     pub const fn signum(self: i16) i16 {
         if self < 0 {
@@ -795,9 +944,145 @@ extend i16 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: i16, rhs: i16) i16 {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as i16;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: i16, rhs: i16) i16 {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as i16;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: i16, rhs: i16) i16 {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as i16;
+    }
+    /// `-self` modulo 2^N (MIN stays MIN).
+    pub fn wrapping_neg(self: i16) i16 {
+        return (unsafe sc_wsub64(0, self as u64)) as i16;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: i16, n: u32) i16 {
+        return (unsafe sc_wshl64(self as u64, n & 15)) as i16;
+    }
+    /// `self >> (n % N)`, arithmetic: the count wraps at the width.
+    pub fn wrapping_shr(self: i16, n: u32) i16 {
+        return (unsafe sc_wsar64(self, n & 15)) as i16;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: i16, rhs: i16) (i16, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, ((self ^ r) & (rhs ^ r)) < 0;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: i16, rhs: i16) (i16, bool) {
+        let r = self.wrapping_sub(rhs);
+        return r, ((self ^ rhs) & (self ^ r)) < 0;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: i16, rhs: i16) (i16, bool) {
+        let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
+        let r = p as i16;
+        return r, r as i64 != p;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: i16, rhs: i16) Option<i16> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: i16, rhs: i16) Option<i16> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: i16, rhs: i16) Option<i16> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: i16, rhs: i16) Option<i16> {
+        if rhs == 0 || self == -32768 && rhs == -1 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor or MIN % -1.
+    pub fn checked_rem(self: i16, rhs: i16) Option<i16> {
+        if rhs == 0 || self == -32768 && rhs == -1 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self % rhs);
+    }
+    /// `-self`, or None for MIN.
+    pub fn checked_neg(self: i16) Option<i16> {
+        if self == -32768 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.wrapping_neg());
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: i16, n: u32) Option<i16> {
+        if n >= 16 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: i16, n: u32) Option<i16> {
+        if n >= 16 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to [MIN, MAX].
+    pub fn saturating_add(self: i16, rhs: i16) i16 {
+        let (r, o) = self.overflowing_add(rhs);
+        if !o {
+            return r;
+        }
+        if rhs < 0 {
+            return -32768;
+        }
+        return 32767;
+    }
+    /// `self - rhs`, clamped to [MIN, MAX].
+    pub fn saturating_sub(self: i16, rhs: i16) i16 {
+        let (r, o) = self.overflowing_sub(rhs);
+        if !o {
+            return r;
+        }
+        if rhs > 0 {
+            return -32768;
+        }
+        return 32767;
+    }
+    /// `self * rhs`, clamped to [MIN, MAX].
+    pub fn saturating_mul(self: i16, rhs: i16) i16 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if !o {
+            return r;
+        }
+        if (self ^ rhs) < 0 {
+            return -32768;
+        }
+        return 32767;
+    }
 }
 
 extend i32 {
+    /// The smallest value.
+    pub const MIN: i32 = -2147483648;
+    /// The largest value.
+    pub const MAX: i32 = 2147483647;
     /// Zero bits below the lowest set bit of the two's complement pattern (32 for zero).
     pub fn trailing_zeros(self: i32) usize {
         return (self as u32).trailing_zeros();
@@ -810,13 +1095,13 @@ extend i32 {
     pub fn count_ones(self: i32) usize {
         return (self as u32).count_ones();
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value; MIN overflows as `-MIN` does (a trap with overflow checks, MIN itself without).
     pub const fn abs(self: i32) i32 {
         if self < 0 {
-            return (0 - self as u32) as i32;
+            return -self;
         }
         return self;
-    } // unsigned negate: no MIN overflow
+    }
     /// -1, 0, or 1 by sign.
     pub const fn signum(self: i32) i32 {
         if self < 0 {
@@ -859,9 +1144,145 @@ extend i32 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: i32, rhs: i32) i32 {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as i32;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: i32, rhs: i32) i32 {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as i32;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: i32, rhs: i32) i32 {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as i32;
+    }
+    /// `-self` modulo 2^N (MIN stays MIN).
+    pub fn wrapping_neg(self: i32) i32 {
+        return (unsafe sc_wsub64(0, self as u64)) as i32;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: i32, n: u32) i32 {
+        return (unsafe sc_wshl64(self as u64, n & 31)) as i32;
+    }
+    /// `self >> (n % N)`, arithmetic: the count wraps at the width.
+    pub fn wrapping_shr(self: i32, n: u32) i32 {
+        return (unsafe sc_wsar64(self, n & 31)) as i32;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: i32, rhs: i32) (i32, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, ((self ^ r) & (rhs ^ r)) < 0;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: i32, rhs: i32) (i32, bool) {
+        let r = self.wrapping_sub(rhs);
+        return r, ((self ^ rhs) & (self ^ r)) < 0;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: i32, rhs: i32) (i32, bool) {
+        let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
+        let r = p as i32;
+        return r, r as i64 != p;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: i32, rhs: i32) Option<i32> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: i32, rhs: i32) Option<i32> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: i32, rhs: i32) Option<i32> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: i32, rhs: i32) Option<i32> {
+        if rhs == 0 || self == -2147483648 && rhs == -1 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor or MIN % -1.
+    pub fn checked_rem(self: i32, rhs: i32) Option<i32> {
+        if rhs == 0 || self == -2147483648 && rhs == -1 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self % rhs);
+    }
+    /// `-self`, or None for MIN.
+    pub fn checked_neg(self: i32) Option<i32> {
+        if self == -2147483648 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.wrapping_neg());
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: i32, n: u32) Option<i32> {
+        if n >= 32 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: i32, n: u32) Option<i32> {
+        if n >= 32 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to [MIN, MAX].
+    pub fn saturating_add(self: i32, rhs: i32) i32 {
+        let (r, o) = self.overflowing_add(rhs);
+        if !o {
+            return r;
+        }
+        if rhs < 0 {
+            return -2147483648;
+        }
+        return 2147483647;
+    }
+    /// `self - rhs`, clamped to [MIN, MAX].
+    pub fn saturating_sub(self: i32, rhs: i32) i32 {
+        let (r, o) = self.overflowing_sub(rhs);
+        if !o {
+            return r;
+        }
+        if rhs > 0 {
+            return -2147483648;
+        }
+        return 2147483647;
+    }
+    /// `self * rhs`, clamped to [MIN, MAX].
+    pub fn saturating_mul(self: i32, rhs: i32) i32 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if !o {
+            return r;
+        }
+        if (self ^ rhs) < 0 {
+            return -2147483648;
+        }
+        return 2147483647;
+    }
 }
 
 extend i64 {
+    /// The smallest value.
+    pub const MIN: i64 = -9223372036854775808;
+    /// The largest value.
+    pub const MAX: i64 = 9223372036854775807;
     /// Zero bits below the lowest set bit of the two's complement pattern (64 for zero).
     pub fn trailing_zeros(self: i64) usize {
         return (self as u64).trailing_zeros();
@@ -874,13 +1295,13 @@ extend i64 {
     pub fn count_ones(self: i64) usize {
         return (self as u64).count_ones();
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value; MIN overflows as `-MIN` does (a trap with overflow checks, MIN itself without).
     pub const fn abs(self: i64) i64 {
         if self < 0 {
-            return (0 - self as u64) as i64;
+            return -self;
         }
         return self;
-    } // unsigned negate: no MIN overflow
+    }
     /// -1, 0, or 1 by sign.
     pub const fn signum(self: i64) i64 {
         if self < 0 {
@@ -923,9 +1344,143 @@ extend i64 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: i64, rhs: i64) i64 {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as i64;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: i64, rhs: i64) i64 {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as i64;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: i64, rhs: i64) i64 {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as i64;
+    }
+    /// `-self` modulo 2^N (MIN stays MIN).
+    pub fn wrapping_neg(self: i64) i64 {
+        return (unsafe sc_wsub64(0, self as u64)) as i64;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: i64, n: u32) i64 {
+        return (unsafe sc_wshl64(self as u64, n & 63)) as i64;
+    }
+    /// `self >> (n % N)`, arithmetic: the count wraps at the width.
+    pub fn wrapping_shr(self: i64, n: u32) i64 {
+        return unsafe sc_wsar64(self, n & 63);
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: i64, rhs: i64) (i64, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, ((self ^ r) & (rhs ^ r)) < 0;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: i64, rhs: i64) (i64, bool) {
+        let r = self.wrapping_sub(rhs);
+        return r, ((self ^ rhs) & (self ^ r)) < 0;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: i64, rhs: i64) (i64, bool) {
+        return self.wrapping_mul(rhs), unsafe sc_mulo_i64(self, rhs);
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: i64, rhs: i64) Option<i64> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: i64, rhs: i64) Option<i64> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: i64, rhs: i64) Option<i64> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: i64, rhs: i64) Option<i64> {
+        if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor or MIN % -1.
+    pub fn checked_rem(self: i64, rhs: i64) Option<i64> {
+        if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self % rhs);
+    }
+    /// `-self`, or None for MIN.
+    pub fn checked_neg(self: i64) Option<i64> {
+        if self == -9223372036854775807 - 1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.wrapping_neg());
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: i64, n: u32) Option<i64> {
+        if n >= 64 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: i64, n: u32) Option<i64> {
+        if n >= 64 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to [MIN, MAX].
+    pub fn saturating_add(self: i64, rhs: i64) i64 {
+        let (r, o) = self.overflowing_add(rhs);
+        if !o {
+            return r;
+        }
+        if rhs < 0 {
+            return -9223372036854775807 - 1;
+        }
+        return 9223372036854775807;
+    }
+    /// `self - rhs`, clamped to [MIN, MAX].
+    pub fn saturating_sub(self: i64, rhs: i64) i64 {
+        let (r, o) = self.overflowing_sub(rhs);
+        if !o {
+            return r;
+        }
+        if rhs > 0 {
+            return -9223372036854775807 - 1;
+        }
+        return 9223372036854775807;
+    }
+    /// `self * rhs`, clamped to [MIN, MAX].
+    pub fn saturating_mul(self: i64, rhs: i64) i64 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if !o {
+            return r;
+        }
+        if (self ^ rhs) < 0 {
+            return -9223372036854775807 - 1;
+        }
+        return 9223372036854775807;
+    }
 }
 
 extend isize {
+    /// The smallest value (the target's pointer width).
+    pub const MIN: isize = -((~0usize >> 1) as isize) - 1;
+    /// The largest value (the target's pointer width).
+    pub const MAX: isize = (~0usize >> 1) as isize;
     /// Zero bits below the lowest set bit of the two's complement pattern (the width for zero).
     pub fn trailing_zeros(self: isize) usize {
         return (self as usize).trailing_zeros();
@@ -938,13 +1493,13 @@ extend isize {
     pub fn count_ones(self: isize) usize {
         return (self as usize).count_ones();
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value; MIN overflows as `-MIN` does (a trap with overflow checks, MIN itself without).
     pub const fn abs(self: isize) isize {
         if self < 0 {
-            return (0 - self as usize) as isize;
+            return -self;
         }
         return self;
-    } // unsigned negate: no MIN overflow
+    }
     /// -1, 0, or 1 by sign.
     pub const fn signum(self: isize) isize {
         if self < 0 {
@@ -987,9 +1542,145 @@ extend isize {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: isize, rhs: isize) isize {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as isize;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: isize, rhs: isize) isize {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as isize;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: isize, rhs: isize) isize {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as isize;
+    }
+    /// `-self` modulo 2^N (MIN stays MIN).
+    pub fn wrapping_neg(self: isize) isize {
+        return (unsafe sc_wsub64(0, self as u64)) as isize;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: isize, n: u32) isize {
+        return (unsafe sc_wshl64(self as u64, n & sizeof(isize) as u32 * 8 - 1)) as isize;
+    }
+    /// `self >> (n % N)`, arithmetic: the count wraps at the width.
+    pub fn wrapping_shr(self: isize, n: u32) isize {
+        return (unsafe sc_wsar64(self as i64, n & sizeof(isize) as u32 * 8 - 1)) as isize;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: isize, rhs: isize) (isize, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, ((self ^ r) & (rhs ^ r)) < 0;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: isize, rhs: isize) (isize, bool) {
+        let r = self.wrapping_sub(rhs);
+        return r, ((self ^ rhs) & (self ^ r)) < 0;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: isize, rhs: isize) (isize, bool) {
+        let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64;
+        let r = p as isize;
+        return r, unsafe sc_mulo_i64(self as i64, rhs as i64) || r as i64 != p;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: isize, rhs: isize) Option<isize> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: isize, rhs: isize) Option<isize> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: isize, rhs: isize) Option<isize> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor or MIN / -1.
+    pub fn checked_div(self: isize, rhs: isize) Option<isize> {
+        if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor or MIN % -1.
+    pub fn checked_rem(self: isize, rhs: isize) Option<isize> {
+        if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self % rhs);
+    }
+    /// `-self`, or None for MIN.
+    pub fn checked_neg(self: isize) Option<isize> {
+        if self == -((~0usize >> 1) as isize) - 1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.wrapping_neg());
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: isize, n: u32) Option<isize> {
+        if n >= sizeof(isize) as u32 * 8 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: isize, n: u32) Option<isize> {
+        if n >= sizeof(isize) as u32 * 8 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to [MIN, MAX].
+    pub fn saturating_add(self: isize, rhs: isize) isize {
+        let (r, o) = self.overflowing_add(rhs);
+        if !o {
+            return r;
+        }
+        if rhs < 0 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return (~0usize >> 1) as isize;
+    }
+    /// `self - rhs`, clamped to [MIN, MAX].
+    pub fn saturating_sub(self: isize, rhs: isize) isize {
+        let (r, o) = self.overflowing_sub(rhs);
+        if !o {
+            return r;
+        }
+        if rhs > 0 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return (~0usize >> 1) as isize;
+    }
+    /// `self * rhs`, clamped to [MIN, MAX].
+    pub fn saturating_mul(self: isize, rhs: isize) isize {
+        let (r, o) = self.overflowing_mul(rhs);
+        if !o {
+            return r;
+        }
+        if (self ^ rhs) < 0 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return (~0usize >> 1) as isize;
+    }
 }
 
 extend u8 {
+    /// The smallest value.
+    pub const MIN: u8 = 0;
+    /// The largest value.
+    pub const MAX: u8 = 255;
     /// Zero bits below the lowest set bit (8 for zero).
     pub fn trailing_zeros(self: u8) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 8)) as usize; // bit 8 set: a zero counts 8
@@ -1030,9 +1721,133 @@ extend u8 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: u8, rhs: u8) u8 {
+        return (unsafe sc_wadd64(self, rhs)) as u8;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: u8, rhs: u8) u8 {
+        return (unsafe sc_wsub64(self, rhs)) as u8;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: u8, rhs: u8) u8 {
+        return (unsafe sc_wmul64(self, rhs)) as u8;
+    }
+    /// `-self` modulo 2^N (`0 - self`).
+    pub fn wrapping_neg(self: u8) u8 {
+        return (unsafe sc_wsub64(0, self)) as u8;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: u8, n: u32) u8 {
+        return (unsafe sc_wshl64(self, n & 7)) as u8;
+    }
+    /// `self >> (n % N)`: the count wraps at the width.
+    pub fn wrapping_shr(self: u8, n: u32) u8 {
+        return (unsafe sc_wshr64(self, n & 7)) as u8;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: u8, rhs: u8) (u8, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, r < self;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: u8, rhs: u8) (u8, bool) {
+        return self.wrapping_sub(rhs), rhs > self;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: u8, rhs: u8) (u8, bool) {
+        let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
+        return p as u8, p > 255;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: u8, rhs: u8) Option<u8> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: u8, rhs: u8) Option<u8> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: u8, rhs: u8) Option<u8> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub fn checked_div(self: u8, rhs: u8) Option<u8> {
+        if rhs == 0 {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub fn checked_rem(self: u8, rhs: u8) Option<u8> {
+        if rhs == 0 {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(self % rhs);
+    }
+    /// `-self`, or None unless `self` is 0.
+    pub fn checked_neg(self: u8) Option<u8> {
+        if self != 0 {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(0);
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: u8, n: u32) Option<u8> {
+        if n >= 8 {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: u8, n: u32) Option<u8> {
+        if n >= 8 {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to MAX.
+    pub fn saturating_add(self: u8, rhs: u8) u8 {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return 255;
+        }
+        return r;
+    }
+    /// `self - rhs`, clamped to 0.
+    pub fn saturating_sub(self: u8, rhs: u8) u8 {
+        if rhs > self {
+            return 0;
+        }
+        return self.wrapping_sub(rhs);
+    }
+    /// `self * rhs`, clamped to MAX.
+    pub fn saturating_mul(self: u8, rhs: u8) u8 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return 255;
+        }
+        return r;
+    }
 }
 
 extend u16 {
+    /// The smallest value.
+    pub const MIN: u16 = 0;
+    /// The largest value.
+    pub const MAX: u16 = 65535;
     /// Zero bits below the lowest set bit (16 for zero).
     pub fn trailing_zeros(self: u16) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 16)) as usize; // bit 16 set: a zero counts 16
@@ -1073,9 +1888,133 @@ extend u16 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: u16, rhs: u16) u16 {
+        return (unsafe sc_wadd64(self, rhs)) as u16;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: u16, rhs: u16) u16 {
+        return (unsafe sc_wsub64(self, rhs)) as u16;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: u16, rhs: u16) u16 {
+        return (unsafe sc_wmul64(self, rhs)) as u16;
+    }
+    /// `-self` modulo 2^N (`0 - self`).
+    pub fn wrapping_neg(self: u16) u16 {
+        return (unsafe sc_wsub64(0, self)) as u16;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: u16, n: u32) u16 {
+        return (unsafe sc_wshl64(self, n & 15)) as u16;
+    }
+    /// `self >> (n % N)`: the count wraps at the width.
+    pub fn wrapping_shr(self: u16, n: u32) u16 {
+        return (unsafe sc_wshr64(self, n & 15)) as u16;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: u16, rhs: u16) (u16, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, r < self;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: u16, rhs: u16) (u16, bool) {
+        return self.wrapping_sub(rhs), rhs > self;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: u16, rhs: u16) (u16, bool) {
+        let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
+        return p as u16, p > 65535;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: u16, rhs: u16) Option<u16> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: u16, rhs: u16) Option<u16> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: u16, rhs: u16) Option<u16> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub fn checked_div(self: u16, rhs: u16) Option<u16> {
+        if rhs == 0 {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub fn checked_rem(self: u16, rhs: u16) Option<u16> {
+        if rhs == 0 {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(self % rhs);
+    }
+    /// `-self`, or None unless `self` is 0.
+    pub fn checked_neg(self: u16) Option<u16> {
+        if self != 0 {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(0);
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: u16, n: u32) Option<u16> {
+        if n >= 16 {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: u16, n: u32) Option<u16> {
+        if n >= 16 {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to MAX.
+    pub fn saturating_add(self: u16, rhs: u16) u16 {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return 65535;
+        }
+        return r;
+    }
+    /// `self - rhs`, clamped to 0.
+    pub fn saturating_sub(self: u16, rhs: u16) u16 {
+        if rhs > self {
+            return 0;
+        }
+        return self.wrapping_sub(rhs);
+    }
+    /// `self * rhs`, clamped to MAX.
+    pub fn saturating_mul(self: u16, rhs: u16) u16 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return 65535;
+        }
+        return r;
+    }
 }
 
 extend u32 {
+    /// The smallest value.
+    pub const MIN: u32 = 0;
+    /// The largest value.
+    pub const MAX: u32 = 4294967295;
     /// Zero bits below the lowest set bit (32 for zero).
     pub fn trailing_zeros(self: u32) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 32)) as usize; // bit 32 set: a zero counts 32
@@ -1116,9 +2055,133 @@ extend u32 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: u32, rhs: u32) u32 {
+        return (unsafe sc_wadd64(self, rhs)) as u32;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: u32, rhs: u32) u32 {
+        return (unsafe sc_wsub64(self, rhs)) as u32;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: u32, rhs: u32) u32 {
+        return (unsafe sc_wmul64(self, rhs)) as u32;
+    }
+    /// `-self` modulo 2^N (`0 - self`).
+    pub fn wrapping_neg(self: u32) u32 {
+        return (unsafe sc_wsub64(0, self)) as u32;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: u32, n: u32) u32 {
+        return (unsafe sc_wshl64(self, n & 31)) as u32;
+    }
+    /// `self >> (n % N)`: the count wraps at the width.
+    pub fn wrapping_shr(self: u32, n: u32) u32 {
+        return (unsafe sc_wshr64(self, n & 31)) as u32;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: u32, rhs: u32) (u32, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, r < self;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: u32, rhs: u32) (u32, bool) {
+        return self.wrapping_sub(rhs), rhs > self;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: u32, rhs: u32) (u32, bool) {
+        let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
+        return p as u32, p > 4294967295;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: u32, rhs: u32) Option<u32> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: u32, rhs: u32) Option<u32> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: u32, rhs: u32) Option<u32> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub fn checked_div(self: u32, rhs: u32) Option<u32> {
+        if rhs == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub fn checked_rem(self: u32, rhs: u32) Option<u32> {
+        if rhs == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self % rhs);
+    }
+    /// `-self`, or None unless `self` is 0.
+    pub fn checked_neg(self: u32) Option<u32> {
+        if self != 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(0);
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: u32, n: u32) Option<u32> {
+        if n >= 32 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: u32, n: u32) Option<u32> {
+        if n >= 32 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to MAX.
+    pub fn saturating_add(self: u32, rhs: u32) u32 {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return 4294967295;
+        }
+        return r;
+    }
+    /// `self - rhs`, clamped to 0.
+    pub fn saturating_sub(self: u32, rhs: u32) u32 {
+        if rhs > self {
+            return 0;
+        }
+        return self.wrapping_sub(rhs);
+    }
+    /// `self * rhs`, clamped to MAX.
+    pub fn saturating_mul(self: u32, rhs: u32) u32 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return 4294967295;
+        }
+        return r;
+    }
 }
 
 extend u64 {
+    /// The smallest value.
+    pub const MIN: u64 = 0;
+    /// The largest value.
+    pub const MAX: u64 = 18446744073709551615;
     /// Zero bits below the lowest set bit (64 for zero).
     pub fn trailing_zeros(self: u64) usize {
         return (unsafe sc_ctz64(self)) as usize;
@@ -1159,9 +2222,132 @@ extend u64 {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: u64, rhs: u64) u64 {
+        return unsafe sc_wadd64(self, rhs);
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: u64, rhs: u64) u64 {
+        return unsafe sc_wsub64(self, rhs);
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: u64, rhs: u64) u64 {
+        return unsafe sc_wmul64(self, rhs);
+    }
+    /// `-self` modulo 2^N (`0 - self`).
+    pub fn wrapping_neg(self: u64) u64 {
+        return unsafe sc_wsub64(0, self);
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: u64, n: u32) u64 {
+        return unsafe sc_wshl64(self, n & 63);
+    }
+    /// `self >> (n % N)`: the count wraps at the width.
+    pub fn wrapping_shr(self: u64, n: u32) u64 {
+        return unsafe sc_wshr64(self, n & 63);
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: u64, rhs: u64) (u64, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, r < self;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: u64, rhs: u64) (u64, bool) {
+        return self.wrapping_sub(rhs), rhs > self;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: u64, rhs: u64) (u64, bool) {
+        return self.wrapping_mul(rhs), unsafe sc_mulo_u64(self, rhs);
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: u64, rhs: u64) Option<u64> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: u64, rhs: u64) Option<u64> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: u64, rhs: u64) Option<u64> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub fn checked_div(self: u64, rhs: u64) Option<u64> {
+        if rhs == 0 {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub fn checked_rem(self: u64, rhs: u64) Option<u64> {
+        if rhs == 0 {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(self % rhs);
+    }
+    /// `-self`, or None unless `self` is 0.
+    pub fn checked_neg(self: u64) Option<u64> {
+        if self != 0 {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(0);
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: u64, n: u32) Option<u64> {
+        if n >= 64 {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: u64, n: u32) Option<u64> {
+        if n >= 64 {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to MAX.
+    pub fn saturating_add(self: u64, rhs: u64) u64 {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return 18446744073709551615;
+        }
+        return r;
+    }
+    /// `self - rhs`, clamped to 0.
+    pub fn saturating_sub(self: u64, rhs: u64) u64 {
+        if rhs > self {
+            return 0;
+        }
+        return self.wrapping_sub(rhs);
+    }
+    /// `self * rhs`, clamped to MAX.
+    pub fn saturating_mul(self: u64, rhs: u64) u64 {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return 18446744073709551615;
+        }
+        return r;
+    }
 }
 
 extend usize {
+    /// The smallest value (the target's pointer width).
+    pub const MIN: usize = 0;
+    /// The largest value (the target's pointer width).
+    pub const MAX: usize = ~0usize;
     /// Zero bits below the lowest set bit (the width for zero).
     pub fn trailing_zeros(self: usize) usize {
         let n = (unsafe sc_ctz64(self as u64)) as usize;
@@ -1203,9 +2389,133 @@ extend usize {
         }
         return self;
     }
+    /// `self + rhs` modulo 2^N (N the width): never overflows.
+    pub fn wrapping_add(self: usize, rhs: usize) usize {
+        return (unsafe sc_wadd64(self as u64, rhs as u64)) as usize;
+    }
+    /// `self - rhs` modulo 2^N.
+    pub fn wrapping_sub(self: usize, rhs: usize) usize {
+        return (unsafe sc_wsub64(self as u64, rhs as u64)) as usize;
+    }
+    /// `self * rhs` modulo 2^N.
+    pub fn wrapping_mul(self: usize, rhs: usize) usize {
+        return (unsafe sc_wmul64(self as u64, rhs as u64)) as usize;
+    }
+    /// `-self` modulo 2^N (`0 - self`).
+    pub fn wrapping_neg(self: usize) usize {
+        return (unsafe sc_wsub64(0, self as u64)) as usize;
+    }
+    /// `self << (n % N)`: the count wraps at the width.
+    pub fn wrapping_shl(self: usize, n: u32) usize {
+        return (unsafe sc_wshl64(self as u64, n & sizeof(usize) as u32 * 8 - 1)) as usize;
+    }
+    /// `self >> (n % N)`: the count wraps at the width.
+    pub fn wrapping_shr(self: usize, n: u32) usize {
+        return (unsafe sc_wshr64(self as u64, n & sizeof(usize) as u32 * 8 - 1)) as usize;
+    }
+    /// The wrapped sum and whether `self + rhs` overflows.
+    pub fn overflowing_add(self: usize, rhs: usize) (usize, bool) {
+        let r = self.wrapping_add(rhs);
+        return r, r < self;
+    }
+    /// The wrapped difference and whether `self - rhs` overflows.
+    pub fn overflowing_sub(self: usize, rhs: usize) (usize, bool) {
+        return self.wrapping_sub(rhs), rhs > self;
+    }
+    /// The wrapped product and whether `self * rhs` overflows.
+    pub fn overflowing_mul(self: usize, rhs: usize) (usize, bool) {
+        let p = unsafe sc_wmul64(self as u64, rhs as u64);
+        return p as usize, unsafe sc_mulo_u64(self as u64, rhs as u64) || p > (~0usize) as u64;
+    }
+    /// `self + rhs`, or None when it overflows.
+    pub fn checked_add(self: usize, rhs: usize) Option<usize> {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(r);
+    }
+    /// `self - rhs`, or None when it overflows.
+    pub fn checked_sub(self: usize, rhs: usize) Option<usize> {
+        let (r, o) = self.overflowing_sub(rhs);
+        if o {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(r);
+    }
+    /// `self * rhs`, or None when it overflows.
+    pub fn checked_mul(self: usize, rhs: usize) Option<usize> {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(r);
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub fn checked_div(self: usize, rhs: usize) Option<usize> {
+        if rhs == 0 {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(self / rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub fn checked_rem(self: usize, rhs: usize) Option<usize> {
+        if rhs == 0 {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(self % rhs);
+    }
+    /// `-self`, or None unless `self` is 0.
+    pub fn checked_neg(self: usize) Option<usize> {
+        if self != 0 {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(0);
+    }
+    /// `self << n`, or None when `n` is at least the width.
+    pub fn checked_shl(self: usize, n: u32) Option<usize> {
+        if n >= sizeof(usize) as u32 * 8 {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(self.wrapping_shl(n));
+    }
+    /// `self >> n`, or None when `n` is at least the width.
+    pub fn checked_shr(self: usize, n: u32) Option<usize> {
+        if n >= sizeof(usize) as u32 * 8 {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(self.wrapping_shr(n));
+    }
+    /// `self + rhs`, clamped to MAX.
+    pub fn saturating_add(self: usize, rhs: usize) usize {
+        let (r, o) = self.overflowing_add(rhs);
+        if o {
+            return ~0usize;
+        }
+        return r;
+    }
+    /// `self - rhs`, clamped to 0.
+    pub fn saturating_sub(self: usize, rhs: usize) usize {
+        if rhs > self {
+            return 0;
+        }
+        return self.wrapping_sub(rhs);
+    }
+    /// `self * rhs`, clamped to MAX.
+    pub fn saturating_mul(self: usize, rhs: usize) usize {
+        let (r, o) = self.overflowing_mul(rhs);
+        if o {
+            return ~0usize;
+        }
+        return r;
+    }
 }
 
 extend f32 {
+    /// The most negative finite value.
+    pub const MIN: f32 = -3.40282347e38;
+    /// The largest finite value.
+    pub const MAX: f32 = 3.40282347e38;
     /// True for any NaN.
     pub const fn is_nan(self: f32) bool {
         return self != self;
@@ -1410,6 +2720,10 @@ extend f32 {
 }
 
 extend f64 {
+    /// The most negative finite value.
+    pub const MIN: f64 = -1.7976931348623157e308;
+    /// The largest finite value.
+    pub const MAX: f64 = 1.7976931348623157e308;
     /// True for any NaN.
     pub const fn is_nan(self: f64) bool {
         return self != self;

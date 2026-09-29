@@ -5,13 +5,26 @@
 | Type | Size | Description |
 |------|------|-------------|
 | `bool` | 1 byte | `true` / `false` |
-| `char` | 1 byte | C `char` (`'x'` is a `char` literal; `b'x'` is a `u8` byte literal) |
+| `char` | 1 byte | C `char`, unsigned (0 to 255) on every target (`'x'` is a `char` literal; `b'x'` is a `u8` byte literal) |
 | `i8` `i16` `i32` `i64` `isize` | 1/2/4/8/ptr | Signed integers |
 | `u8` `u16` `u32` `u64` `usize` | 1/2/4/8/ptr | Unsigned integers |
 | `f32` `f64` | 4/8 | IEEE-754 floats |
 | `c32` `c64` | 8/16 | C `_Complex` floats |
 | `void` | 0 | Unit type |
 | `never` | 0 | Bottom type (`@c.noreturn` calls) |
+
+Every integer and float type has the associated constants `MIN` and `MAX` (Rust's values; a
+float's are its most negative and largest finite values; `isize`/`usize` follow the target's
+pointer width). They are usable in constants, `static_assert`, const generic arguments (`U<u64::MAX>`
+as `U<{u64::MAX}>`), array lengths and patterns, and literal-only arithmetic and patterns read them as
+the literal of their value: `let i = i32::MAX + 1;` is the `i64` 2147483648, `let i: i32 = i32::MAX +
+1;` is an error, and `0..=i64::MAX` against a `u64` is a `u64` range.
+
+Every segment of a path in a type position (a let, a parameter, a return, a field, a cast, a sizeof,
+a type argument) names a type: `let x: u64::MAX` is "expected a type, found constant 'u64::MAX'",
+`u64::FOO` and `m::Foo::U` are "no type 'FOO' in 'u64'" and "no type 'U' in 'm::Foo'", and a variant
+is "expected a type, found variant 'E::A'". Only a struct literal names a variant after its enum
+(`E::A { x: 1 }`).
 
 Builtin types are **nominal** — `i32` is not an alias for anything. `int` is not a
 builtin; there is no implicit integer type. `str` is a prelude struct (a borrowed
@@ -20,9 +33,9 @@ builtin; there is no implicit integer type. `str` is a prelude struct (a borrowe
 ## Numeric Literals
 
 ```superc
-42              // i32 (default integer)
+42              // i32 (default integer; i64, then u64, when the value does not fit)
 42u8            // u8 suffix
-1.0             // f64 (default float)
+1.0             // f32 (default float; f64 when the value is past the f32 range)
 1.0f32          // f32 suffix
 0xFF            // hex
 0b1010          // binary
@@ -34,11 +47,61 @@ b"hello"        // []u8 (byte string)
 Lossless widening is implicit (`i32 → i64`, `f32 → f64`). Explicit `as` for narrowing or
 cross-kind casts.
 
+Literal-only arithmetic (unsuffixed literals under `+ - * / %`, the integer-only `& | ^ << >>`,
+unary `-` and parentheses) is computed in one type, at compile time and at run time alike:
+
+- With an expected builtin type (a declared binding, a parameter, a return type, the other operand)
+  every operand takes it: `let z: i64 = 2000000000 * 2;` is 4000000000, `let b: u8 = 2 + 3;` is a
+  `u8`. A literal outside that type is an error (`let x: i32 = 0x80000000;`: "integer literal is out
+  of range for 'i32'"); an overflowing step is the error of any integer overflow (`let i: i32 =
+  2147483647 + 1;` and `let x: u32 = 0 - 231;`: "this statement is undefined behavior when executed:
+  arithmetic overflow"), and a negation typed unsigned is rejected (`let x: u32 = -1;`: "cannot apply
+  unary operator '-' to type 'u32'"). A suffix pins its literal the same way (`2000000000i32 * 2` is an
+  error).
+- Without one the type is the first of `i32`, `i64` and `u64` in which no step overflows
+  (`2000000000 * 2` and `2147483647 + 1` are `i64`, `9223372036854775807 + 1` is `u64`, `1 << 40` is
+  `i64`, `1 << 31` stays the `i32` -2147483648); a value none holds is an error ("integer constant
+  expression does not fit in 'i32', 'i64' or 'u64'"). `-9223372036854775807 - 1` and
+  `-9223372036854775808` are the `i64` minimum. Library integers (`Int<N>`, `UInt<N>`) are never
+  selected; a declared one converts the builtin result.
+- A float expression is `f32`, or `f64` when a step passes the f32 range (`1e39`, `1e30 * 1e10`); past
+  the f64 range, or past a declared or suffixed type's, it is an error ("float literal is out of
+  range for 'f32'", "float constant expression is out of range for 'f32'", "float literal does not
+  fit in its suffixed type").
+- An integer literal never becomes a float and a float literal never an integer (Rust's rule):
+  `1 + 2.0`, `(1 / 2) * 2.0`, `1.5 * 2`, `y * 2` with `y: f64`, and `let f: f32 = 1;` are
+  "mismatched types" errors; write `2.0`.
+
 ## Arithmetic Semantics
 
-- Unsigned arithmetic wraps **at width** (a `u8` wrapping around stays in 0–255).
-- Shifts past the bit width and `MIN / -1` for signed types **trap** (undefined behavior
-  in C is a defined compile error or runtime trap here).
+Compile-time evaluation and the compiled program give the same result; where the program
+traps, a constant is an error ("arithmetic overflow", "division by zero", "shift out of
+range").
+
+- Integer overflow (`+ - *` of every built-in integer, signed and unsigned, unary `-` and `abs()`
+  of MIN, `+=` and the other compound forms, a loop step, at the type's own width, `i8`/`u8`/`i16`/
+  `u16` too, `+ - *` and `pow()` of std's `Int<N>` and `UInt<N>`, and `Int<N>`'s `abs()`) **traps**
+  ("attempt to add with overflow", "attempt to subtract with overflow", "attempt to multiply with
+  overflow") in a profile with overflow checks and **wraps** modulo the width without them (Rust's
+  rule). `dev`, `debug`,
+  `test` and `race` check; `release`, `bench` and `pgogen` wrap; a custom profile checks at
+  `opt-level` 0 or 1 (or no `opt-level`) and wraps at 2, 3, `"s"` and `"z"`, and
+  `overflow-checks = true/false` overrides that (super-c-binary, "Built-in profiles"). The
+  `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` methods never trap.
+- Unary `-` on an unsigned type is an error ("cannot apply unary operator '-' to type 'u32'"),
+  `-0` too; `x.wrapping_neg()` is the two's complement negation.
+- An operand the checker widens (`u8 + u64`, `u32 + i64`) computes at the result's type; a shift
+  computes at its left operand's type.
+- Division and remainder by zero, signed `MIN / -1` and `MIN % -1`, and a shift by a
+  negative count or by the width or more **trap** in every profile, with the same messages for
+  std's `Int<N>`/`UInt<N>` ("attempt to divide with overflow") and the same compile-time errors
+  ("arithmetic overflow", "division by zero"). A signed `<<` shifts
+  the two's complement bits (`-1 << 1` is -2; bits shifted out are lost); `>>` is
+  arithmetic on signed types.
+- A float `%` is the C `fmod` remainder: the result has the sign of the dividend
+  (`-7.5 % 2.0` is -1.5).
+- A float-to-integer `as` truncates toward zero and **saturates**: a value past either end
+  of the target is that end, NaN is 0 (`1e20 as i32` is 2147483647).
 - Division uses explicit rounding operations when the rule matters.
 - `usize`/`isize` have the target's pointer width (32 bits on wasm32), in compile-time evaluation
   too.
@@ -47,6 +110,22 @@ Every built-in integer has `trailing_zeros()`, `leading_zeros()` and `count_ones
 `usize` (the `UInt`/`Int` convention); a zero input gives the bit width, and a signed value counts
 its two's complement pattern. They lower to the C compiler's bit-count builtins (`std/bits.h`) and
 evaluate at compile time, also inside a `const fn`.
+
+Every built-in integer (`i8` to `i64`, `isize`, `u8` to `u64`, `usize`) has Rust's explicit
+overflow methods, with the same results in every profile:
+
+| Methods | Result |
+|---------|--------|
+| `wrapping_add/sub/mul(rhs)`, `wrapping_neg()` | modulo 2^N (`u8::MAX.wrapping_add(1)` is 0, `i8::MIN.wrapping_neg()` is MIN) |
+| `wrapping_shl/shr(n: u32)` | the count modulo the width (`1u8.wrapping_shl(9)` is 2); `shr` is arithmetic on signed types |
+| `overflowing_add/sub/mul(rhs)` | the wrapped value and whether it overflowed, a pair: `let (r, o) = a.overflowing_add(b);` |
+| `checked_add/sub/mul/div/rem(rhs)`, `checked_neg()`, `checked_shl/shr(n: u32)` | `Option`: `None` on overflow, a zero divisor, MIN / -1, a count of the width or more, or an unsigned negation of a nonzero value |
+| `saturating_add/sub/mul(rhs)` | clamped to the type's range |
+
+They are plain std source (`std/core.spc`) over the `sc_w*64`/`sc_mulo_*64` helpers of `std/bits.h`
+(C's unsigned operators and `__builtin_mul_overflow`, no trap), and evaluate at compile time, also
+inside a `const fn`. Use them for every intentional wraparound: hashes (FNV, multiplicative mixes),
+random number generators, checksums, and two's complement bit tricks (`x & x.wrapping_neg()`).
 
 ## Struct Layout
 
@@ -82,13 +161,168 @@ struct Pair<A, B> { pub a: A, pub b: B }
 
 // Turbofish for disambiguation
 let p = Pair::<i32, bool> { a: 1, b: true };
+// Inferred from the expected type or the field values (see inference.md)
+let q: Pair<u8, bool> = Pair { a: 1, b: true };
 
 // Const generic
 let a = Array::<u8, 16>::new();
 ```
 
+A symbolic array length is part of the type: `[T; N]` is a generic argument like any type
+(`W<[T; N]>`), and an instance folds `N` (also `{N * 2}` or `(BITS + 63) / 64` forms) wherever
+the array appears.
+
+A const argument has its parameter's type and must fit it (`U::<{0 - 1}>` for `const N: u64` is
+an error), and every integer type keeps its full range (`U<{u64::MAX}>` and
+`U<18446744073709551615>` are one type). A braced expression computes step by step as it is
+written, and every step must fit: a closed one (`{u64::MAX / 2}`) in the parameter's type, a
+form over parameters in their type (literals take it; `{N + 300}` for `N: u8` is "integer
+literal is out of range for 'u8'"), so `{N - 1}` for `N: u64` bound to u64::MAX is
+18446744073709551614 and bound to 0 is the error `const expression {N - 1} overflows u64 for N =
+0`. Spellings of one value are one type (`{N * 2 - N}` is `N`), but the steps still compute:
+`{N * 2 - N}` bound to u64::MAX is `const expression {N * 2} overflows u64 for N = ..`, at the
+step, and so is a closed `{K * 2 - K}` for a `u64::MAX` constant `K`. A shift that loses bits
+overflows. Between constants `/` truncates and `>>` floors, as at run time; a form over
+parameters floors, so an instantiation that divides a negative dividend inexactly is an error
+(`const expression {(N - 10) / 4} truncates the negative quotient -9 / 4 for N = 1: ..`). A type
+alias's steps are its user's: `type A<const M: u64> = F<{M * 2 - M}>` fails where `A<N>` is
+instantiated with `N = u64::MAX`, and at `A<18446744073709551615>` directly. The constant
+evaluator refuses such an instantiation too ("arithmetic overflow in a const-generic
+expression"). An enum-typed const parameter takes a value of its own enum only: a variant
+(`F<{D::Y}>` and `F::<{D::Y}>` alike, its discriminant, an explicit one included), a constant or a
+const parameter of that enum (`F<K>`, `F<{K}>`); an integer or another enum's value is
+"mismatched types", and so is an enum value for an integer parameter. A narrower parameter (or form) passes to
+a wider parameter's position (`U<N>` for `N: u8` is `U<7>` at `N = 7`); a wider one to a narrower
+position is "mismatched types". A local constant of a generic function may use its parameters
+(`const S: usize = sizeof(T);`): each instance has its own value. A qualified constant is an argument
+unbraced as braced, like a named one: a builtin limit (`F<u64::MAX>`, read as the literal of its
+value), an associated constant of a builtin, a struct or an enum from a non-generic extend
+(`F<Foo::K>`, in its own type) and a variant (`F<D::Y>`). A module may qualify each of them
+(`F<m::B>`, `F<{m::B}>`, `F<m::Foo::K>`, `F<m::D::Y>`, `g::<m::B>()`, and a builtin limit through
+an alias, `F<m::U::MAX>`); only a `pub` constant is visible ("no public type or constant 'P' in the
+imported module", "no associated constant 'Q' on 'm::Foo'"). A type for a const parameter is "expected a
+constant for const parameter 'N', found type 'u64'", a value for a type parameter is "expected a
+type for generic parameter 'T', found a constant", and a qualified path naming no constant is "no
+associated constant 'FOO' on 'u64'".
+
+An extend's generic parameters are solved from its target's arguments, as an impl's are in Rust.
+A bare parameter takes the instance's argument; a const form of one parameter without a division
+(`extend<const N: u64> F<{N + 3}>`, `F<{2 * N}>`) gives it the value that inverts the form, which
+must be an integer in the parameter's type; an argument that names no parameter (`extend P<u8>`,
+`extend<T> P<i64, T>`) must equal the instance's. The extend applies only to the instances that
+solve: `F<{N + 3}>` gives `F<10>` its methods with `N = 7`, and `F<2>` has none of them ("no field or
+method 'get' on 'F<2>'"), nor its conformances. An argument that is itself a form or a parameter
+solves when every value it takes does (`F<{M + 3}>` in a generic of `M`, not `F<M>`). A target
+argument that places a parameter inside another type (`W<Vector<T>>`), a form of several parameters
+or with a division, a parameter written in two arguments and a parameter no argument names are
+errors at the extend. Only the arguments the target writes constrain it (an alias constrains all
+of its instance's); `Free` is implemented for every instance, so its extend writes its parameters
+in order.
+
+A method or associated constant is defined once for any one instance. Two items of one name (two
+methods, two constants, or a method and a constant, whatever their signatures) in plain extends of
+one type that apply to a common instance are a duplicate definition, reported at the later one with
+a note at the first: "duplicate definition of 'get' for 'P<u8>'". The later one is the later item of
+the module; across modules, the item of the module that extends another module's type (a std item
+comes first): "duplicate definition of 'len' for 'String': module '__std::string' also defines it".
+Two extends apply to a common instance when every argument position their targets write unifies,
+as the method lookup decides it, bounds aside: a parameter meets anything, two fixed arguments must
+be equal, a form meets a constant it solves and another form whose values it shares (`F<{2 * N}>`
+and `F<{3 * N + 1}>` meet at 4, `F<{2 * N}>` and `F<{2 * N + 1}>` never do); an alias target is its
+type. So disjoint extends define one name each (`extend P<u8>` and `extend P<i32>`, `extend<A> Q<A,
+u8>` and `extend<B> Q<B, i32>`), with symbols of their own for methods and constants alike, and a
+conformance may define a name a plain extend also defines: a call through a bound or a `dyn` value
+runs the conformance's own method (or the default it inherits), never the plain one.
+
+An interface default body sees the interface's parameters bound to the arguments of the
+conformance that supplies it, which may name the implementor's parameters
+(`extend<const N: u64> G<{N + 1}> as I<{N * 2}>`); its written const-generic steps hold for
+each implementing instance, the conformance's arguments included.
+
+An associated constant of a generic extend has a value per instance and is named through one
+(`W::<u8>::K`, `W::<T>::K` inside generic code; bare `W::K` cannot infer the arguments). Its
+initializer may use the extend's parameters (`pub const S: usize = sizeof(T);`); each instance
+is its own static datum. With disjoint extends each defining `K` (`extend W<u8>`, `extend W<i32>`),
+`W::<u8>::K` names the one whose extend applies, and a bare `W::K` the only one whose type is the
+expected type ("cannot infer the generic arguments of associated constant 'K'; give explicit type
+arguments" otherwise).
+
 An unbounded `T` owns: uses move, leftovers drop. `T: Copy` (derived structurally, see the
 ownership section of the skill) makes it copyable.
+
+A bound on a generic interface requires a conformance with the bound's own arguments (written or
+defaulted, `Self` read as the bounded type): `T: I<bool>` rejects a type that conforms only as
+`I<i32>` ("type 'F' does not satisfy bound 'I<bool>': 'F' conforms to this interface only with
+other arguments", with a note at that conformance). A type parameter satisfies a bound only through
+its own bounds, `where` predicates and their superinterfaces, with the same arguments: an unbounded
+`U` passed on to `g<T: K>` is "type 'U' does not satisfy bound 'K'". The same holds for a `where`
+predicate, a superinterface a conformance requires, the bounds of an extend's parameters and those
+of a struct's or enum's parameters, checked where an instance is written (`S<F>`) or inferred (a
+literal). A call through a bound runs the method, or the default it inherits, of the conformance
+with the bound's arguments in every instance and at compile time, and its signature reads the
+interface's parameters as those arguments, also through a superinterface (`T: J<bool>` with
+`J<B>: I<B>` calls `I<bool>`'s methods).
+
+An operator on a type parameter dispatches through its bound the same way: `t + 5` for
+`T: Add<i32>` calls the `Add<i32>` conformance's `add` (with several bounds on the interface, the
+one whose parameter takes the right operand), and so do the other operator interfaces (`-`, `*`,
+`/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `~`), their compound forms and indexing (`t[i]` through
+`Index`, a written element through `IndexMut`). An associated type is read through the bound that
+declares it: `T::Output` (also through a superinterface) is the conformance's `type Output = ..`
+in each instance, and `Self::Output` in an interface signature or default body is the
+implementor's. A bound may fix it: `T: Add<i32, Output = T>` (the binding follows the arguments;
+only a generic parameter's or `where` predicate's bound may carry one), and a type argument must
+then have that `Output` ("type 'M' does not satisfy bound 'Add<i32, Output = T>': its 'Output' is
+'i64'"). A compound assignment through a bound needs the result to be `T` ("mismatched types: the
+operator's result 'T::Output' is not 'T'" without the binding). `T::Output` names nothing no bound
+declares ("no type 'Foo' in 'T'"), and two bounds declaring it differently are "ambiguous associated
+type 'Output': several bounds of 'T' declare it". A value of an unbound `T::Output` owns and moves
+as an unbounded `T` does.
+
+An interface's associated function called through a type parameter (`T::count()` for
+`T: I<bool>`) runs the conformance the parameter names, whatever its result or first argument, in
+every instance and at compile time. A call on a concrete receiver (`k.sum(true, false)`, the path
+form `K::sum(&k, true, false)`, through auto-deref too) chooses among every method of that name
+an extend of the receiver defines and every default a conformance without its own inherits, each
+bound to its conformance, by the overload score of [inference.md](inference.md): with
+`extend K as Make<i32>` overriding `sum` and `extend K as Make<bool>` inheriting it,
+`k.sum(true, false)` runs the default under `Make<bool>` and `k.sum(3, 4)` the override. The chosen
+body runs directly, through a bound, through dyn and at compile time alike. Candidates that fit
+equally are an error: "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that
+fit" when they are one default under several conformances (`k.make2(1, 2)` with `Mk<i64>` and
+`Mk<u64>`), else "ambiguous call: two candidates for 'sum' fit equally well"; an unsuffixed literal
+prefers its default type (`Mk<i32>` over `Mk<i64>`). Without arguments, only the expected result
+chooses: with `Conv<i32>` and `Conv<bool>` each defining `conv`, `let b: bool = x.conv();` runs the
+`Conv<bool>` one and `let d = x.conv();` is ambiguous. A call through a type parameter whose bounds
+reach the interface with several arguments (`u.conv()`, `U::mk()` for `U: Conv<i32> + Conv<bool>`)
+chooses among those conformances the same way ("ambiguous call to 'conv': 'U' conforms to 'Conv'
+with several arguments that fit"), and a method named as a function value (`K::conv`) is the one
+whose function type is the expected type.
+
+A path through a generic type written without its arguments (`W::f()`, `W::f(3u8)`) chooses among
+the methods of that name every extend of the type defines the same way, each candidate's extend
+parameters open and bound by the call's evidence: `W::f(1u8)` runs `extend W<u8>`'s `f` and
+`W::f(-1)` `extend W<i32>`'s, `let a: W<i32> = W::mk();` the one whose result is `W<i32>`, and the
+chosen extend's parameters bind from the arguments and the expected type. Candidates that fit
+equally are "ambiguous call: two candidates for 'mk' fit equally well"; an inherited interface
+default, which names no instance, is "cannot infer the generic argument 'T' for this call; add an
+explicit argument".
+
+A method call takes a turbofish as its path form does: `x.m::<u8>(3)` is `X::m::<u8>(&x, 3)`, through
+autoref, auto-deref and `Box` alike. Its type-level arguments bind the
+method's leading generic parameters in overload selection (a candidate with fewer is not viable),
+inference, bounds and compile-time evaluation; a lifetime argument binds none. More arguments than
+the function declares are "'m' takes 1 generic argument but 2 were supplied" at the first extra one,
+for a call and a function value (`id::<i32, u8>`) alike; a field ("field 'f' takes no generic
+arguments"), a function pointer and a closure take none. A method of a `dyn` value has no generic
+parameters (dyn-compatibility), so its turbofish is always too long.
+
+`Self::` in an expression names the implementing type as its name does: `Self::f()`,
+`Self::f::<T>()`, `Self::K` and `Self { .. }` inside an extend (in a generic extend, its target
+instance `W<T>`), and in an interface default body the implementor (`Self::count()` calls the
+conformance's associated function, as `T::count()` does through a bound). Outside an interface or
+extension it is "'Self' is only valid inside an interface or extension". A path may name both the
+type's and the function's arguments: `W::<u8>::conv::<i64>(6)`.
 
 ## Closures
 
@@ -100,7 +334,15 @@ ownership section of the skill) makes it copyable.
 | `F: fn(i32) i32` | Generic bound (any callable) |
 | `F: fn move(i32) i32` | Ownership-marked bound |
 | `dyn fn(i32) i32` | Structural trait object |
-| `Box<dyn fn(i32) i32>` | Owned dyn closure |
+| `Box<dyn fn(i32) i32>` | Owned dyn closure (from a closure or function value, or `Box::new` of one) |
+
+A function-pointer type is its signature, structurally: two spellings of one signature are
+one type (`fn(i32)` and `fn(i32) void` too, in `Option`, `Vector` and array elements alike),
+and substitution reaches its parameters and result, so a generic struct's `fn(T) T` field is
+`fn(i32) i32` in `W<i32>` and inference takes `W`'s arguments from it. A plain function, a
+non-capturing closure and a turbofished generic function (`let f = id::<i32>;`) are values of
+it. `dyn fn(..)` may name generic parameters (`struct D<T> { pub f: Box<dyn fn(T) T> }`) and
+substitutes the same way.
 
 Capture rules:
 - **Read**: value copied at closure creation (default); a fixed-size array copies whole.
@@ -122,18 +364,54 @@ v.push(Box::<Circle>::new(Circle { r: 1 }));
 ```
 
 A `dyn` value is a 2-word fat pair `{data, vtable}`. Three spellings: `&dyn I` (borrowed),
-`&mut dyn I` (mutable), `Box<dyn I>` (owned, drop glue deep-frees). One `static const`
-vtable per (type, interface) per TU.
+`&mut dyn I` (mutable), `Box<dyn I>` (owned, drop glue deep-frees). One vtable per source
+type, dyn type and erasure kind: a borrowed erasure's table has no `__free`, an owned one's
+frees the payload (per allocator for `Box<T, A>`).
+
+A generic interface erases with its arguments: `&dyn I<bool>` needs a conformance whose
+interface arguments (type and const) are exactly `I<bool>`, at every coercion site; a
+conformance with other arguments is "cannot erase 'F' to '&dyn I<bool>': 'F' conforms to
+this interface only with other arguments". With several conformances (`extend P as I<i32>`,
+`extend P as I<bool>`), the vtable calls the methods of the one with the dyn type's
+arguments, and a default body it inherits is instantiated under those arguments.
 
 A container element dispatches directly: `v.at(i).area()` (a method call on
 `&Box<dyn I>`) goes through the vtable, as does the explicit `(*v.at(i)).area()`.
 
-Dyn-compatibility: every method takes `Self` by reference, no generics on interface or
-methods.
+A superinterface's methods are in the vtable too, under the arguments the hierarchy gives it: for
+`interface B: A<i32>`, `b.get()` on a `&dyn B` runs the `A<i32>` conformance's `get` (or the default
+it inherits) even when the type also conforms as `A<bool>`, and `dyn B<T>` with `B<T>: A<T>` reads
+`A<T>` for the dyn type's `T`. A dyn value upcasts to a superinterface with exactly those arguments,
+borrowed or owned (`&dyn B` to `&dyn A<i32>`, `Box<dyn C>` to `Box<dyn A<bool>>`); other arguments
+are a type mismatch. `e as &dyn I` is the same erasure or upcast as the implicit coercion, and a
+cast no coercion allows is "invalid cast from '&T' to '&dyn N'".
+
+Dyn-compatibility: every method takes `Self` by reference, no generics on methods, and `Self`
+appears only as the receiver; each interface of the hierarchy is reached with one argument list
+("a superinterface is reached with two different argument lists") that names no `Self` ("a
+superinterface argument names 'Self'"), and no two methods of the hierarchy share a name. A method may return several results or a
+fixed array (`fn dims(self: &Self) (i32, String)`, `fn corners(self: &Self) [i32; 2]`): its vtable
+slot returns the shared result carrier, and a call through `&dyn`, `&mut dyn` or `Box<dyn>`
+destructures it as a direct call does, for an inherited default as for an override.
+
+A `dyn fn(..)` erasure and a `fn(..)` value compare the whole signature: every parameter and
+every result, so a function with several results never matches other results or none.
+
+A function pointer or `dyn fn` may have several results (`fn(i32) (i32, String)`) or a fixed-array
+result (`fn(i32) [i32; 2]`): a function, a closure (capturing ones through `dyn fn` or a `F: fn(..)`
+bound) or a turbofished generic function converts to it, fields and containers hold it, and a call
+through it destructures as a direct call does. In C every function and function value with one
+result list returns one carrier struct (`__sc_ret<n>__<types>`, `__sc_reta__<array>`).
 
 ## Enums
 
 Payload-less enums lower to C `enum`. Payload-bearing enums lower to tagged unions.
+A payload-less variant may take an explicit discriminant, a constant expression that may
+name constants and other enums' variants; a variant without one takes the previous
+discriminant plus one. The discriminant is the tag in memory and in the C tag enum, and
+matches, reflection (`VariantInfo.tag`) and the derived `Ord` use it. Two variants of one
+enum with the same discriminant, or a discriminant outside the i32 range, are errors
+(an `extern "C"` enum is C's and is exempt).
 
 ```superc
 enum Result<T, E> {
@@ -177,3 +455,15 @@ type CharClass = Array<u8, 256>;
 
 Alias-extends are **nominal**: `extend CharClass { .. }` adds methods to the alias as a
 distinct type.
+
+A generic alias expands with its arguments substituted, at any nesting depth and across
+modules; defaults, const parameters and lifetimes apply as on a struct:
+
+```superc
+type Q1<T> = Pair<T, T>;
+type Q2<T> = Q1<Q1<T>>;        // Q2<i32> is Pair<Pair<i32, i32>, Pair<i32, i32>>
+type Arr3<T> = Array<T, 3>;
+```
+
+The argument count must match the alias's parameters (after defaults). A generic alias
+cannot be an `extend` target; extend the aliased type. A cyclic alias is an error.

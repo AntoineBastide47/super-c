@@ -140,7 +140,8 @@ Requirements:
 | `assert_ne(a, b)` | Fails when values are equal |
 
 Arguments are only **read** (not moved) — asserting on an owned `String` leaves it
-usable. The source text of the expression is captured at compile time.
+usable. The source text of the expression is captured at compile time; a message spells at
+most 1000 bytes of each expression and ends a longer one with `...`.
 
 ## Running Tests
 

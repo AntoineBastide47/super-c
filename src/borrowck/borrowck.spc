@@ -1752,7 +1752,7 @@ extend tc::TypeChecker {
             return false;
         }
         let k = self.type_at(ty).kind;
-        if k == TypeKind::TYPE_GENERIC {
+        if k == TypeKind::TYPE_GENERIC || k == TypeKind::TYPE_ASSOC {
             return true;
         }
         if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_POINTER {

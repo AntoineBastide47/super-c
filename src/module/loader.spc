@@ -15,6 +15,7 @@ import ast::parser as parser;
 import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
 import graph::items as gitems;
+import ir::layout as lay;
 
 /// The C `SEEK_END` whence value used to size a file before reading it.
 pub const SEEK_END: i32 = 2;
@@ -1022,7 +1023,7 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
     }
     // The index collapse mirrors module_index_path, which only ever probes the PACKAGE root:
     // an alt-rooted `a/a.spc` is imported as `a::a`, so collapsing it would fork a duplicate module.
-    if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
+    if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice((pv + 1) as usize, ls as usize) {
         let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
         sib.push_str(".spc");
         let sf = stdio::fopen(sib.as_str(), "rb");
@@ -1144,11 +1145,14 @@ fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
         d = pub_child_depth(depth, y.as_data.elem);
     } else if k == TypeKind::TYPE_ARRAY {
         d = pub_child_depth(depth, y.as_data.arr.elem);
+        if y.arr_sym() {
+            d = d.max(pub_child_depth(depth, y.as_data.arr.len));
+        }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         d = pub_child_depth(depth, y.as_data.proj.owner);
-    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-        if (y.as_data.inst & TYPE_PROV) != 0 {
-            let it = batch.instance((y.as_data.inst & TYPE_PROV_MASK) as usize);
+    } else if y.rec() != NO_REC {
+        if (y.rec() & TYPE_PROV) != 0 {
+            let it = batch.instance((y.rec() & TYPE_PROV_MASK) as usize);
             for q in 0..it.n {
                 let cd = pub_child_depth(depth, unsafe it.args[q as usize]);
                 if cd > d {
@@ -1175,11 +1179,14 @@ fn pub_children(batch: &TypePool, b: usize, out: &mut Vector<u32>) {
         pub_push_child(y.as_data.elem, out);
     } else if k == TypeKind::TYPE_ARRAY {
         pub_push_child(y.as_data.arr.elem, out);
+        if y.arr_sym() {
+            pub_push_child(y.as_data.arr.len, out);
+        }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         pub_push_child(y.as_data.proj.owner, out);
-    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-        if (y.as_data.inst & TYPE_PROV) != 0 {
-            let it = batch.instance((y.as_data.inst & TYPE_PROV_MASK) as usize);
+    } else if y.rec() != NO_REC {
+        if (y.rec() & TYPE_PROV) != 0 {
+            let it = batch.instance((y.rec() & TYPE_PROV_MASK) as usize);
             for q in 0..it.n {
                 pub_push_child(unsafe it.args[q as usize], out);
             }
@@ -1210,10 +1217,13 @@ fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>,
         y.as_data.elem = pub_fin(fin, y.as_data.elem);
     } else if k == TypeKind::TYPE_ARRAY {
         y.as_data.arr.elem = pub_fin(fin, y.as_data.arr.elem);
+        if y.arr_sym() {
+            y.as_data.arr.len = pub_fin(fin, y.as_data.arr.len);
+        }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         y.as_data.proj.owner = pub_fin(fin, y.as_data.proj.owner);
-    } else if (k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN) && (y.as_data.inst & TYPE_PROV) != 0 {
-        let bi = (y.as_data.inst & TYPE_PROV_MASK) as usize;
+    } else if y.rec() != NO_REC && (y.rec() & TYPE_PROV) != 0 {
+        let bi = (y.rec() & TYPE_PROV_MASK) as usize;
         if ifin[bi] == 0xFFFFFFFFu32 {
             let mut it = *batch.instance(bi);
             for q in 0..it.n {
@@ -1221,7 +1231,7 @@ fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>,
             }
             ifin[bi] = g.insert_inst(&it);
         }
-        y.as_data.inst = ifin[bi];
+        y.set_rec(ifin[bi]);
     }
     return y;
 }
@@ -1239,8 +1249,8 @@ fn pub_key(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &m
     } else if kd == TypeKind::TYPE_FIELD_PROJECTION {
         k.w[1] = y.as_data.proj.owner;
         k.w[2] = y.as_data.proj.binder;
-    } else if kd == TypeKind::TYPE_INSTANCE || kd == TypeKind::TYPE_DYN {
-        let it = g.instance(y.as_data.inst as usize);
+    } else if y.rec() != NO_REC {
+        let it = g.instance(y.rec() as usize);
         k.w[1] = it.module as u64 << 40 | it.decl as u64 << 8 | it.n as u64;
         for q in 0..it.n {
             unsafe k.w[2 + q as usize] = unsafe it.args[q as usize];
@@ -1688,8 +1698,8 @@ extend Package {
     }
 
     /// A total order over two modules' const-expression forms by content (`module << 32 | pool
-    /// index` each): the constant, the term count, the divisor, then each term's parameter and
-    /// coefficient.
+    /// index` each): the constant, the term count, the divisor, the types, then each term's
+    /// parameter and coefficient.
     fn clin_less(self: &Self, x: u64, y: u64) bool {
         let a = self.modules[(x >> 32) as usize].ast.pool.const_lin_at((x & 0xFFFFFFFFu64) as usize);
         let b = self.modules[(y >> 32) as usize].ast.pool.const_lin_at((y & 0xFFFFFFFFu64) as usize);
@@ -1701,6 +1711,12 @@ extend Package {
         }
         if a.div != b.div {
             return a.div < b.div;
+        }
+        if a.ty != b.ty {
+            return a.ty as u8 < b.ty as u8;
+        }
+        if a.to != b.to {
+            return a.to as u8 < b.to as u8;
         }
         for i in 0..a.n {
             let pa = unsafe a.p[i as usize];
@@ -1790,10 +1806,13 @@ extend Package {
                             y.as_data.elem = pub_child(&map, y.as_data.elem, i);
                         } else if k == TypeKind::TYPE_ARRAY {
                             y.as_data.arr.elem = pub_child(&map, y.as_data.arr.elem, i);
+                            if y.arr_sym() {
+                                y.as_data.arr.len = pub_child(&map, y.as_data.arr.len, i);
+                            }
                         } else if k == TypeKind::TYPE_FIELD_PROJECTION {
                             y.as_data.proj.owner = pub_child(&map, y.as_data.proj.owner, i);
-                        } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-                            let ii = y.as_data.inst;
+                        } else if y.rec() != NO_REC {
+                            let ii = y.rec();
                             if (ii & TYPE_PROV) != 0 {
                                 let pi = (ii & TYPE_PROV_MASK) as usize;
                                 if imap[pi] == 0xFFFFFFFFu32 {
@@ -1803,7 +1822,7 @@ extend Package {
                                     }
                                     imap[pi] = batch.insert_inst(&it) | TYPE_PROV;
                                 }
-                                y.as_data.inst = imap[pi];
+                                y.set_rec(imap[pi]);
                             }
                         } else if k == TypeKind::TYPE_CONST_EXPR {
                             let ci = y.as_data.inst;
@@ -1984,8 +2003,8 @@ extend Package {
                 out.push_u64(y.as_data.proj.owner);
                 out.push_byte(b' ');
                 out.push_u64(y.as_data.proj.binder);
-            } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-                let it = g.instance(y.as_data.inst as usize);
+            } else if y.rec() != NO_REC {
+                let it = g.instance(y.rec() as usize);
                 out.push_str("I ");
                 out.push_u64(it.module);
                 out.push_byte(b' ');
@@ -3054,6 +3073,339 @@ extend Package {
         return -1;
     }
 
+    /// The type associated type `ai` (an interface's `type Name;`, arguments concrete types of pool
+    /// `dm`: the projected type, then the interface's arguments) names: the `type Name = ..` of the
+    /// conformance of `ai.args[0]` whose interface arguments are these (as the checker recorded them
+    /// on its interface path), grounded under the parameters its target solves, into `out` (pool
+    /// `dm`). False when no conformance applies. Emission (`Mangler::ground`) and compile-time
+    /// evaluation resolve `T::Output` through it; the instance graph mirrors it on final ids.
+    pub fn assoc_norm(self: &Self, dm: ModuleId, ai: &TyInstance, out: &mut TypeId, depth: u32) bool {
+        if depth > 16 {
+            return false;
+        }
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let y = *unsafe (*da).type_at(ai.args[0]);
+        let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            it.decl = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            it = *unsafe (*da).instance(y.as_data.inst);
+        } else if y.kind == TypeKind::TYPE_BUILTIN {
+            it.module = self.core_module;
+            it.decl = self.builtin_decl(y.as_data.builtin);
+        }
+        let ia = self.module_ast_const(ai.module);
+        let iface = iface_of_member(unsafe &*ia, ai.decl);
+        if it.decl == NODE_NONE || iface == NODE_NONE {
+            return false;
+        }
+        let want = unsafe (*da).intern_dyn(
+            ai.module,
+            iface,
+            unsafe ((&ai.args[0]) as *const TypeId + 1),
+            ai.n - 1,
+            TypeQualifier::TYPE_QUAL_NONE as u8,
+        );
+        let an = unsafe (*ia).at_const(unsafe (*ia).at_const(ai.decl).as_data.type_alias.name).as_data.name.text;
+        let aname = self.modules.at(ai.module as usize).source.as_str().slice(an.start as usize, an.end as usize);
+        for xm in 0..self.modules.len() {
+            if !self.modules.at(xm).has_ast {
+                continue;
+            }
+            let em = xm as ModuleId;
+            let ea = self.module_ast_const(em);
+            let items = unsafe (*ea).at_const((*ea).root).as_data.program.items;
+            for i in 0..items.len {
+                let ext = unsafe (*ea).list(items)[i as usize];
+                if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                if ed.interface_type == NODE_NONE {
+                    continue;
+                }
+                let ir = unsafe (*ea).resolution_def(ed.interface_type);
+                let tg = unsafe (*ea).resolution_def(ed.target_type);
+                let dt = unsafe (*ea).type_of(ed.interface_type);
+                if ir.module != ai.module || ir.node != iface || tg.module != it.module || tg.node != it.decl || dt == TYPE_NONE {
+                    continue;
+                }
+                let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+                let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+                let mut ln: u32 = 0;
+                if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                    continue;
+                }
+                let mut g = TYPE_NONE;
+                if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
+                    continue;
+                }
+                for j in 0..ed.items.len {
+                    let hid = unsafe (*ea).list(ed.items)[j as usize];
+                    let hn = unsafe (*ea).at_const(hid);
+                    if hn.kind != NodeKind::NODE_TYPE_ALIAS || hn.as_data.type_alias.ty == NODE_NONE {
+                        continue;
+                    }
+                    let hs = unsafe (*ea).at_const(hn.as_data.type_alias.name).as_data.name.text;
+                    if self.modules.at(xm).source.as_str().slice(hs.start as usize, hs.end as usize) != aname {
+                        continue;
+                    }
+                    let at = unsafe (*ea).type_of(hn.as_data.type_alias.ty);
+                    return at != TYPE_NONE && self.ground_local(em, at, dm, &lp[0], &la[0], ln, out, depth + 1);
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // The values extend `ext` (module `em`) gives its parameters for instance `it` of its target
+    // (arguments concrete types of pool `dm`), as the bindings `lp[i]` -> `la[i]` (pool `dm`), `ln` of
+    // them. False when the extend does not apply to the instance.
+    fn ext_solve(
+        self: &Self,
+        em: ModuleId,
+        ext: NodeId,
+        dm: ModuleId,
+        it: &TyInstance,
+        lp: *mut DefId,
+        la: *mut TypeId,
+        ln: &mut u32,
+    ) bool {
+        let ea = self.module_ast_const(em);
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        if gens.len > 8 {
+            return false;
+        }
+        *ln = gens.len;
+        for i in 0..gens.len {
+            unsafe lp[i as usize] = DefId { module: em, node: unsafe (*ea).list(gens)[i as usize] };
+            unsafe la[i as usize] = TYPE_NONE;
+        }
+        let pat = unsafe (*ea).type_of(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
+            for i in 0..gens.len {
+                if i >= it.n as u32 {
+                    return false;
+                }
+                unsafe la[i as usize] = unsafe it.args[i as usize];
+            }
+            return true;
+        }
+        let pi = *unsafe (*ea).instance(unsafe (*ea).type_at(pat).as_data.inst);
+        let np = ext_arity(unsafe &*ea, ext, pi.n);
+        if np > it.n {
+            return false;
+        }
+        for j in 0..np {
+            let pj = unsafe pi.args[j as usize];
+            let aj = unsafe it.args[j as usize];
+            let x = xarg_of(unsafe &*ea, pj, unsafe &*ea, em, gens);
+            if x.kind == XA_FIXED {
+                if unsafe (*da).reintern(unsafe &*ea, pj) != aj {
+                    return false;
+                }
+                continue;
+            }
+            let mut v = TYPE_NONE;
+            if x.kind == XA_PARAM {
+                v = aj;
+            } else if x.kind == XA_FORM {
+                let ay = *unsafe (*da).type_at(aj);
+                let bt = self.const_param_bt(em, unsafe (*ea).list(gens)[x.par as usize]);
+                let mut q = i128::zero();
+                if ay.kind != TypeKind::TYPE_CONST || !xarg_solve(
+                    &x,
+                    ay.cval(),
+                    bt,
+                    lay::target_for(self.arch).ptr == 4,
+                    &mut q,
+                ) {
+                    return false;
+                }
+                v = unsafe (*da).const_value(cval_bits(q), bt);
+            } else {
+                return false;
+            }
+            let prev = unsafe la[x.par as usize];
+            if prev != TYPE_NONE && prev != v {
+                return false;
+            }
+            unsafe la[x.par as usize] = v;
+        }
+        for i in 0..gens.len {
+            if unsafe la[i as usize] == TYPE_NONE {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// `(pm, t)` with the parameters `lp[i]` bound to `la[i]` (`ln` of them, concrete types of pool
+    /// `dm`), as a concrete type interned into pool `dm`; an associated type grounds through its
+    /// conformance (`assoc_norm`). False when another parameter remains.
+    pub fn ground_local(
+        self: &Self,
+        pm: ModuleId,
+        t: TypeId,
+        dm: ModuleId,
+        lp: *const DefId,
+        la: *const TypeId,
+        ln: u32,
+        out: &mut TypeId,
+        depth: u32,
+    ) bool {
+        if depth > 16 || t == TYPE_NONE {
+            return false;
+        }
+        let pa = self.module_ast_const(pm);
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let y = *unsafe (*pa).type_at(t);
+        if unsafe (*pa).type_concrete(t) {
+            *out = unsafe (*da).reintern(unsafe &*pa, t);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_GENERIC {
+            for i in 0..ln {
+                if unsafe lp[i as usize].module == y.module && unsafe lp[i as usize].node == y.as_data.decl {
+                    *out = unsafe la[i as usize];
+                    return true;
+                }
+            }
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_CONST_EXPR {
+            let l = *unsafe (*pa).const_lin_at(y.as_data.inst);
+            let mut dl = ConstLin::new(l.ty);
+            dl.to = l.to;
+            let ptr32 = lay::target_for(self.arch).ptr == 4;
+            let mut v = i128::zero();
+            if !lin_subst_form(unsafe &*da, &l, lp, la, ln as i32, &mut dl, ptr32, 0) || !dl.is_concrete() || !dl.finish(
+                dl.k,
+                ptr32,
+                &mut v,
+            ) {
+                return false;
+            }
+            *out = unsafe (*da).const_value(cval_bits(v), dl.to);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            let mut e = TYPE_NONE;
+            if !self.ground_local(pm, y.as_data.elem, dm, lp, la, ln, &mut e, depth + 1) {
+                return false;
+            }
+            if y.arr_sym() {
+                let mut lt = TYPE_NONE;
+                if !self.ground_local(pm, y.as_data.arr.len, dm, lp, la, ln, &mut lt, depth + 1) {
+                    return false;
+                }
+                *out = unsafe (*da).intern_array(e, lt);
+                return true;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            *out = unsafe (*da).intern_type(nt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_ASSOC || y.kind == TypeKind::TYPE_DYN || y.fn_sig() {
+            let mut it = *unsafe (*pa).instance(y.rec());
+            if y.kind == TypeKind::TYPE_DYN && it.decl == NODE_NONE {
+                return false;
+            }
+            for i in 0..it.n {
+                let mut g = TYPE_NONE;
+                if !self.ground_local(pm, unsafe it.args[i as usize], dm, lp, la, ln, &mut g, depth + 1) {
+                    return false;
+                }
+                unsafe it.args[i as usize] = g;
+            }
+            if y.kind == TypeKind::TYPE_ASSOC {
+                return self.assoc_norm(dm, &it, out, depth + 1);
+            }
+            *out = if y.fn_sig() {
+                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+            } else if y.kind == TypeKind::TYPE_DYN {
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+            } else {
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+            };
+            return true;
+        }
+        return false;
+    }
+
+    /// The integer type of const generic parameter `gp` of module `m`, from its declared type: the
+    /// builtin it names (through type aliases), i32 for an enum (a value is its discriminant), and
+    /// BT_COUNT for any other type.
+    pub fn const_param_bt(self: &Self, m: ModuleId, gp: NodeId) BuiltinType {
+        let mut tm = m;
+        let mut a = self.module_ast_const(m);
+        let mut tn = unsafe (*a).at_const(gp).as_data.generic_param.const_type;
+        let mut hops: u32 = 0;
+        while tn != NODE_NONE && hops < 8 {
+            let d = unsafe (*a).resolution_def(tn);
+            if d.node == NODE_NONE {
+                // A builtin type name resolves to nothing: it is known by its spelling.
+                let n = unsafe (*a).at_const(tn);
+                let sp = if n.kind == NodeKind::NODE_TYPE_PATH && n.as_data.type_path.parts.len == 1 {
+                    unsafe (*a).at_const(unsafe (*a).list(n.as_data.type_path.parts)[0]).as_data.name.text;
+                } else if n.kind == NodeKind::NODE_IDENTIFIER {
+                    n.as_data.name.text;
+                } else {
+                    break;
+                };
+                let b = bt_of_name(self.modules[tm as usize].source.as_str(), sp);
+                if b >= 0 {
+                    return b as BuiltinType;
+                }
+                break;
+            }
+            let b = self.builtin_of_decl(d.module, d.node);
+            if b >= 0 {
+                return b as BuiltinType;
+            }
+            tm = d.module;
+            a = self.module_ast_const(d.module);
+            let dn = unsafe (*a).at_const(d.node);
+            if dn.kind == NodeKind::NODE_ENUM {
+                return BuiltinType::BT_I32;
+            }
+            if dn.kind != NodeKind::NODE_TYPE_ALIAS {
+                break;
+            }
+            tn = dn.as_data.type_alias.ty;
+            hops += 1;
+        }
+        return BuiltinType::BT_COUNT;
+    }
+
+    /// The enum type node `tn` of module `m` names, through type aliases; node NODE_NONE for any
+    /// other type.
+    pub fn type_enum(self: &Self, m: ModuleId, tn: NodeId) DefId {
+        let mut a = self.module_ast_const(m);
+        let mut t = tn;
+        let mut hops: u32 = 0;
+        while t != NODE_NONE && hops < 8 {
+            let d = unsafe (*a).resolution_def(t);
+            if d.node == NODE_NONE {
+                break;
+            }
+            a = self.module_ast_const(d.module);
+            let dn = unsafe (*a).at_const(d.node);
+            if dn.kind == NodeKind::NODE_ENUM {
+                return d;
+            }
+            if dn.kind != NodeKind::NODE_TYPE_ALIAS {
+                break;
+            }
+            t = dn.as_data.type_alias.ty;
+            hops += 1;
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
     /// Record a method DefId as referenced, for demand-driven instance-method emission.
     pub fn mark_method_used(self: &mut Self, d: DefId) {
         if d.node == NODE_NONE {
@@ -3596,7 +3948,7 @@ extend Package {
         if y.kind == TypeKind::TYPE_SLICE {
             return 0xFFFF;
         }
-        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig() {
             if self.module_is_user(y.module) {
                 return y.module;
             }

@@ -25,7 +25,7 @@ struct Key {
     pub doc: str<'static>,
 }
 
-const KEYS: [Key; 24] = [
+const KEYS: [Key; 25] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
@@ -43,6 +43,7 @@ const KEYS: [Key; 24] = [
     Key { sec: "profile.", name: "cflags", doc: "C compiler flags for this profile" },
     Key { sec: "profile.", name: "ldflags", doc: "linker flags for this profile" },
     Key { sec: "profile.", name: "strip", doc: "strip the linked binary (bool)" },
+    Key { sec: "profile.", name: "overflow-checks", doc: "trap signed overflow (bool; default: opt-level < 2)" },
     Key { sec: "command.", name: "run", doc: "the command line to run, as an array of strings" },
     Key { sec: "command.", name: "needs-build", doc: "build the project first (bool)" },
     Key { sec: "command.", name: "env", doc: "environment for the command, as an inline table" },

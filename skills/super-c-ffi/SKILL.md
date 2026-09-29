@@ -32,6 +32,12 @@ extern "C" {
   an invented name fails in the C compile).
 - `pub` inside an extern block exports the binding cross-module.
 - Calling any extern binding requires `unsafe` at the call site.
+- `char` is C `char`, and it is unsigned (0 to 255) everywhere: the build engine compiles
+  every generated and `@c.source` TU with `-funsigned-char`, on every target, so
+  `200 as char as i32` is 200 at compile time and at run time. A C file compiled apart
+  from the engine and linked with the generated code needs the flag too (the generated
+  `super_rt.c` has a static assertion on it). The ABI is the same either way; only a
+  `char` value above 127 reads differently on the C side without the flag.
 
 ## Header Bindings
 
@@ -203,6 +209,17 @@ extern "C" "legacy.h" {
 Exported functions get external linkage (non-`static` in the generated C). `@c.import`
 goes on the `fn` declaration **inside** the extern block — placed before the block it
 parses but does not rename the call sites.
+
+## Pointers to Arrays
+
+A pointer to an array whose element is a Super-C aggregate (`*const [S; 2]`) is a pointer to
+the array's wrapper struct in the generated C (`const S__a2 *`, `struct S__a2 { S e[2]; }`): same
+address, size, alignment and layout as C's `const S (*)[2]`. A call to an `extern "C"` function
+converts such an argument and result through `void *`, so a header that declares the C pointer
+type accepts it. An `@c.export` function keeps the wrapper pointer in its definition: C code
+may declare it with `const S (*)[2]`, an ABI-identical but distinct C type (as a pointer
+parameter of a shim prototype, which the generated C declares `const void *`). A pointer to an
+array of scalars (`*const [i32; 2]`) is `int32_t (*)[2]`, with no qualifier on the element.
 
 ## Unsafe Discipline at FFI Boundaries
 

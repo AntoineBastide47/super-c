@@ -71,6 +71,12 @@ Fields are private by default: only the type's own `extend` blocks can name a pr
 in the same module; `pub` exposes it everywhere. One `extend` block per
 type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate.
 
+A method or associated constant is defined once for any one instance of its type: a second item of
+the name (a method or a constant, any signature) in a plain `extend` that applies to a common
+instance, in any module, is "duplicate definition of 'f' for 'X'" at the later one. Disjoint extends
+(`extend P<u8>`, `extend P<i32>`) and distinct conformances may each define the name (see the
+generics section of [types.md](references/types.md)).
+
 ## Enums and Pattern Matching
 
 ```superc
@@ -90,16 +96,27 @@ fn area(s: Shape) i32 {
 ```
 
 `switch` is exhaustive and usable as an expression. Arms combine alternatives with `|`. A pattern
-names a variant bare (`Circle(r)`); a qualified path (`Shape::Circle(r)`) is a parse error. A tuple
+names a variant bare (`Circle(r)`); a qualified variant (`Shape::Circle(r)`, `Shape::Unit`) is an
+error. A qualified path without a payload is a constant pattern: a builtin limit (`i64::MAX`) takes
+the matched type like a literal, and an associated constant (`Lim::HI`) keeps its type, which must be
+the matched type or widen to it; a range bound may name a constant (`0..=LIMIT`). Integer values and
+ranges cover their type: `i64::MIN..=-1` and `0..=i64::MAX` make an `i64` switch exhaustive, and a
+`_` after such a cover is an unreachable arm. A tuple
 pattern (`(a, _)`, `(Some(x), mut n)`) destructures a tuple in arms, `if let` and `while let`.
 A pattern matched against a reference (`&T` or `&mut T`, at the top or nested, as in
 `Option<&E>`) reads the referent: literal and range sub-patterns test the value, and
 names bound inside bind by `&` (or `&mut` through a `&mut` with no `&` above it), so
-nothing is moved out through the reference. A method name without a call (`v.m`) is an
-error; `Type::m` is a function value.
+nothing is moved out through the reference. A literal pattern and each range bound take the
+matched value's type like `let x: T = lit` does: `9223372036854775808..` against a `u64` is a `u64`,
+and `300` against a `u8` is "integer literal is out of range for 'u8'". A method name without a call
+(`v.m`) is an error; `Type::m` is a function value.
 Payload-less enums lower to C `enum`s; payload-bearing ones to tagged unions whose tag is
 one byte when the enum has at most 256 variants and no explicit discriminant, and the
-4-byte C enum otherwise.
+4-byte C enum otherwise. A payload-less variant of either kind may take an explicit
+discriminant (`enum P { A(i32), B = 9, C }`: tags 0, 9, 10); the stored tag, matches,
+`type_info` and the derived `Ord` (discriminant first, then payloads) use it. Discriminants
+of one enum must differ and fit i32; an `extern` enum is exempt. Only a payload-less
+enum casts to an integer.
 
 ## Ownership and RAII
 
@@ -194,7 +211,12 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
 `unsafe` is **required** for:
 - Raw-pointer dereference, indexing, arithmetic
 - Indexing a fixed array `[T; N]` (also through a reference) with an index that is not a
-  constant within `N`; a constant index is checked at compile time at every nesting level
+  constant within `N`; a constant index is checked at compile time at every nesting level.
+  Against a symbolic length a constant index is safe and every instance checks it: `a[2]` for
+  `a: [i32; N]` is "index 2 is out of bounds for an array of length 2 for N = 2" where `N = 2`
+  is instantiated; under `unsafe` the index is unchecked, as a raw pointer's. Slicing a symbolic length with constant bounds still needs `unsafe`
+  ("slicing an array of unknown length"). A field of a concrete instance has the instance's
+  length (`Buf<i32, 4>.d` is `[i32; 4]`)
 - Every call to an `extern "C"` function
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
@@ -210,7 +232,10 @@ bounds-checked container access.
 
 ## Generics
 
-Monomorphized, Rust-style. Turbofish in expression position.
+Monomorphized, Rust-style. Turbofish in expression position, on a method call too
+(`x.m::<u8>(3)`, as `X::m::<u8>(&x, 3)`): its arguments bind the leading generic parameters,
+lifetimes bind none, and more arguments than the function declares are an error ("'m' takes 1
+generic argument but 2 were supplied"); a field, a function pointer and a closure take none.
 
 ```superc
 fn id<T>(x: T) T { return x; }
@@ -262,8 +287,8 @@ let h = fn(x: i32) i32 { return x + 1; };     // anonymous function
 
 Non-capturing closures lower to plain function pointers. Generic bounds use
 `F: fn(..) ..` (or `where F: fn(..) ..`). Ownership-marked bound: `F: fn move(..) ..`.
-Any closure, with or without captures, erases to `&dyn fn(..)` or `Box<dyn fn(..)>` (a boxed env
-frees its owned captures once). `move` before a closure literal is the closure itself.
+Any closure or function, with or without captures, erases to `&dyn fn(..)` or `Box<dyn fn(..)>`
+(`Box::new(closure)` too; a boxed env frees its owned captures once). `move` before a closure literal is the closure itself.
 
 ## Interfaces
 
@@ -278,8 +303,22 @@ extend Circle as Shape {
 }
 ```
 
-Bounds are enforced at instantiation. `where` clauses supported. Dyn dispatch:
-`&dyn I`, `&mut dyn I`, `Box<dyn I>` (2-word fat pair, one vtable per TU per type).
+`Self::f()`, `Self::K` and `Self { .. }` name the implementing type inside an extend or an
+interface default body. A call on a concrete receiver chooses by its arguments among the methods
+its extends define and the defaults its conformances inherit (see the generics section of
+[types.md](references/types.md)).
+
+Bounds are enforced at instantiation, with a generic interface's arguments: `T: I<bool>` needs a
+conformance as `I<bool>`, a type parameter meets a bound only through its own bounds, and a call
+through the bound runs that conformance's methods, operators included (`t + 5` for
+`T: Add<i32>`), with its associated types as `T::Output` and a bound able to fix them
+(`T: Add<Output = T>`; see the generics section of [types.md](references/types.md)). `where` clauses
+supported. Dyn dispatch:
+`&dyn I`, `&mut dyn I`, `Box<dyn I>` (2-word fat pair; `dyn I<T>` erases only through the
+conformance with exactly those arguments, whose methods its vtable calls; a superinterface's
+methods, `B: A<i32>` included, are in the vtable under their arguments, and a dyn value upcasts to
+a superinterface). A
+`Box<T, A>` erases to `Box<dyn I>` when `A: Default`; its table frees through `A::default()`.
 
 ## Imports and Modules
 
@@ -319,9 +358,17 @@ cannot be written, moved or viewed mutably while the view is live. A literal coe
 (`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
 its block, so its view cannot leave the block or be returned.
 `[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
-element, a closure capture and a return copy it. A nested literal without an annotation takes its
-inner length from its elements (`[[1, 2], [3, 4]]` is `[[i32; 2]; 2]`), and its elements must
-agree on that length.
+element, a closure capture and a return copy it. An array literal has its own length; against
+an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
+zero-fills the rest), and a nested literal is checked against the element type at every level. A
+nested literal without an annotation takes its inner length from its elements
+(`[[1, 2], [3, 4]]` is `[[i32; 2]; 2]`), and its elements must agree on that length. A symbolic
+length (`[T; N]`, `[T; N * 2]` in the generic that declares `N`) is a type of its own: it equals
+only the same length, never a count, and an instance folds it at every nesting level
+(`G<3>.g` is `[[i32; 3]; 2]` for `g: [[i32; N]; 2]`). `[T; 0]` is a real length, and a zero-length
+array is zero-sized like any ZST: it has no storage in C, keeps its element's alignment in an
+enclosing struct, and a pointer to one moves by 0 bytes. A zero-length array of an owning element
+moves like its element and frees nothing.
 
 ## Compile-Time Evaluation
 

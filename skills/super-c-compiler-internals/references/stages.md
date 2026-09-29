@@ -60,7 +60,12 @@ One parallel frontier; for each module, `Resolver::resolve()` runs and then
 `hirl::lower_module` runs **immediately after** (`resolve_module`).
 
 - Resolver: name binding and scopes; fills the `Ast.resolutions: SplitVec<DefId>` side
-  table. Resolver-level lints run here (they must see pre-HIR syntax).
+  table. Resolver-level lints run here (they must see pre-HIR syntax). A type path's
+  resolution names the declaration of its head segment, and `TypePathData.head` records that
+  segment's index (the module path or `Self` before it). The checker reads the segments after
+  it: a struct literal's target may name one enum variant there (`E::V { .. }`); in any other
+  position they name no type and are an error (`tc_type_tail`); a generic argument for a const
+  parameter reads them as an associated constant (`tc_value_path`).
 - HIR lowering IS the desugar stage: sugar-keyword markers become core nodes
   (`launch` → the `SI_SUBMIT` shim call via `lower_to_core_call`; `select` via
   `lower_select`, which builds nodes with hand-seeded resolutions). Lowering is by MOVE
@@ -74,9 +79,9 @@ job starts when its last dependency completes, every prelude component before an
 and checks its top-level items under the module's lease (one checker per module, so a
 module's side tables have one writer at a time). The serial path runs the same jobs in
 their stable order. Type inference with expected-type propagation, interface obligations,
-dispatch. Records the typed facts (per-node types, resolutions, `call_info`, `op_method`,
-coercion/deref chains, captures) that `ast::facts` exposes read-only to everything
-downstream; a declaration's slot is written by the item that owns it, every other reader
+dispatch. Records the typed facts (per-node types, resolutions, `call_info`, `op_method`, bound calls,
+coercion/deref chains, captures, integer pattern values) that `ast::facts` exposes read-only to
+everything downstream; a declaration's slot is written by the item that owns it, every other reader
 lowers privately. What a check may read as checked follows the static visibility rule
 (`graph::items::visible`), so one worker and every core see the same facts. A module's last
 job checks its non-item nodes (`static_assert`), closes the module (`close_instances`
@@ -85,6 +90,13 @@ whole-module lints) and records its post-typecheck item edges. Format-string,
 compound-assign and string-switch lowering happen here. Deferred `static_assert`s and
 constants a check could not fold are queued on the interpreter. Diagnostics and method
 marks come out per item and publish in declaration order after the stage.
+
+A rejected type or expression has `TYPE_ERROR` (`src/ast/ast.spc`), never `TYPE_NONE`:
+compatibility, inference and bounds accept it without a diagnostic, and a type built over it is
+itself `TYPE_ERROR`, so one root error reports once. The Core IR lowering refuses a node or a
+generic argument of that type (`Lowerer::failed_on_error_type`), and the checker drops an
+evaluation failure it causes (`Interp.err_refused`). A package the stage accepts holds no
+`TYPE_ERROR` (`assert_no_error_type`, fatal).
 
 Then `discharge_obligations`: cross-module reflection-bound obligations, once every
 module is typed.
@@ -152,7 +164,23 @@ modular return-lifetime check) run alongside.
 ## 8. Runtime + External C (`write_super_rt`, `ext_c_collect`)
 
 `super_rt.h` / `super_rt.c` are written into `gen_root` (default `<root>/build/<profile>/raw`;
-manifest builds point it into their out-dir). `@c.source` files and backing-header `.c`
+manifest builds point it into their out-dir). `super_rt.h` (`src/driver/rt_c.spc`) also holds
+the integer arithmetic helpers the emitter calls where a C operator lacks the language's
+meaning (`CEmit::arith_fn`): `__sc_<op>_<type>` for `+ - *` of every integer type and signed
+negation (checked through `__builtin_*_overflow`, or wrapping under `-DSC_ARITH_WRAP`; a narrow
+unsigned result truncates), signed and narrow unsigned `<<`, narrow unsigned `~`, `/ % << >>`
+whose right operand is not a constant that rules out the trap, and `__sc_f2i_<type>` for the
+saturating float-to-integer cast; a float `%` emits `fmod`/`fmodf`. The checker rejects unsigned
+negation, so no unsigned `__sc_neg_*` exists. std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` (std's `int128.h`, not the
+generated runtime, so a released compiler building this std has it) on overflow: it
+traps, or returns under `-DSC_ARITH_WRAP` and the operator keeps the wrapped value; the IR
+interpreter intercepts it as the built-in "arithmetic overflow" trap, and `sc_has_i128` (std's
+`int128.h` probe) as 0, so 128-bit values evaluate through the limb code at compile time. The
+interpreter also models std's `bits.h` helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
+wrapping `sc_w*64` and `sc_mulo_*64`). An integer loop step renders as `for (..; i++)` (or `i--`)
+only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (`i > e` for `--`)
+with `e` of `i`'s type, and nothing else in the loop writes `i` or takes its address; every other
+step keeps its checked helper and renders as `while`. `@c.source` files and backing-header `.c`
 siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 `@c.link` flags land in `__ldflags`.
 

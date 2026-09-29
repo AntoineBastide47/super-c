@@ -677,7 +677,7 @@ pub fn black_box(v: u64) {
 pub fn burn(rounds: i64) u64 {
     let mut acc: u64 = unsafe sys::sc_bs_sunk() | 1;
     for i in 0..rounds {
-        acc = acc * 6364136223846793005 + i as u64;
+        acc = acc.wrapping_mul(6364136223846793005).wrapping_add(i as u64);
     }
     return acc;
 }

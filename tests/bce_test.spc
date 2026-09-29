@@ -180,7 +180,6 @@ fn check_body(opers: u32) ir::CoreBody {
             name_off: 0,
             name_len: 0,
             dkind: ir::LK_NONE,
-            zero_len: false,
         },
     );
     b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ut });

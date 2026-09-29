@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 15.
+# Super-C compatibility contract, version 16.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=15
+CONTRACT_VERSION=16
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -45,9 +45,10 @@ CONTRACT_DELAY_SEEDS="1 2 3"
 
 # ---- C compilation --------------------------------------------------------------------------------------
 # The manifest's base C flags (build.toml `cstd` default) and the strict set the warnings gate adds when it
-# compiles every emitted translation unit with `-fsyntax-only`.
+# compiles every emitted translation unit with `-fsyntax-only` (with -funsigned-char, which the build
+# engine passes to every compile: the language's char is unsigned).
 CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L"
-CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror"
+CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char"
 
 # ---- readability of the emitted C tree (build/dev/raw) --------------------------------------------------
 # Checked by the gate on the gen1 tree:

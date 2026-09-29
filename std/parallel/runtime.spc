@@ -1171,7 +1171,7 @@ fn claim_idle(s: *mut Scheduler) i64 {
                 // Nobody parked in this word; try the next.
                 break;
             }
-            let bit = cur & 0 - cur; // lowest set bit
+            let bit = cur & cur.wrapping_neg(); // lowest set bit
             if unsafe atomic::cas_u64(word, cur, cur ^ bit, false, 4, 0) {
                 let mut idx: usize = 0;
                 let mut probe = bit;
@@ -1900,7 +1900,9 @@ fn pool_trim(s: *mut Scheduler) {
     }
     let now = platform::now_ns();
     let last = unsafe atomic::load_u64(&mut unsafe (*s).last_trim, 1);
-    if now - last < TRIM_INTERVAL_NS || !unsafe atomic::cas_u64(&mut unsafe (*s).last_trim, last, now, false, 4, 0) {
+    // `last` can be later than `now`: another worker may read the clock after this one and publish its
+    // trim before this load. Such a trim is this interval's too, and the CAS must not move `last` back.
+    if now < last + TRIM_INTERVAL_NS || !unsafe atomic::cas_u64(&mut unsafe (*s).last_trim, last, now, false, 4, 0) {
         return; // too soon, or another parking worker took this interval's batch
     }
     // Take the batch off the warm list under the lock, reclaim OUTSIDE it (a syscall each), then put
@@ -2130,7 +2132,7 @@ fn worker_main(arg: *mut void) *mut void {
             je(env);
             unsafe __sc_set_task_id(0);
             unsafe sc_runtime::sc_rt_tls_set(null);
-            unsafe atomic::store_u64(&mut unsafe (*w).done, unsafe (*w).done + 1, 0);
+            unsafe atomic::store_u64(&mut unsafe (*w).done, unsafe (*w).done + 1, 2); // Release: see `live_tasks`
             continue;
         }
         let co = r as *mut Coroutine;
@@ -2181,7 +2183,7 @@ fn worker_main(arg: *mut void) *mut void {
             }
             unsafe atomic::store_i32(&mut unsafe (*co).tstate, TS_COMPLETED, 2);
             free_coroutine(s, co);
-            unsafe atomic::store_u64(&mut unsafe (*w).done, unsafe (*w).done + 1, 0);
+            unsafe atomic::store_u64(&mut unsafe (*w).done, unsafe (*w).done + 1, 2); // Release: see `live_tasks`
         } else if unsafe (*co).commit_requeue != 0 {
             unsafe (*co).commit_requeue = 0;
             if !yq_push(w, r) {
@@ -2381,7 +2383,7 @@ fn build_scheduler() *mut Scheduler {
     for i in 0..nw {
         let buf = (unsafe g.alloc(DEQUE_CAP * sizeof(*mut Runnable), alignof(*mut Runnable))) as *mut *mut Runnable;
         // Seed each victim-choice generator differently and never with zero, or xorshift stays at zero.
-        let seed = 0x9e3779b97f4a7c15 + (i as u64 + 1) * 0x632be59bd9b4e019;
+        let seed = 0x9e3779b97f4a7c15u64.wrapping_add((i as u64 + 1).wrapping_mul(0x632be59bd9b4e019));
         unsafe deques[i] = Worker {
             buf: buf,
             head: 0,
@@ -3130,12 +3132,7 @@ pub fn cancelled_tasks() usize {
 /// value would be a deadline in the past, and the wait would return at once). Every timed wait's deadline
 /// comes through here or `time::deadline_in`, which applies the same rule.
 pub fn deadline_after(ns: u64) u64 {
-    let now = platform::now_ns();
-    let dl = now + ns;
-    if dl < now {
-        return 18446744073709551615u64;
-    }
-    return dl;
+    return platform::now_ns().saturating_add(ns);
 }
 
 /// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer heap, so its worker keeps
@@ -3254,8 +3251,14 @@ fn stats_fold(w: &mut SchedStats) {
 
 /// Tasks created but not finished: still runnable, running, or parked. Zero after every launched task has
 /// been awaited, which is the precondition `shutdown` documents, and what it checks.
+///
+/// Completions are read FIRST: a task counts its spawn before it can run, and a worker publishes its
+/// completion count with Release, so every completion this read sees has its spawn in the later read.
+/// While tasks run the result can only be high, which keeps `try_shutdown` from destroying the pool
+/// under a live task. The other order could see a completion whose spawn it missed and go below zero.
 pub fn live_tasks() usize {
-    return spawned_tasks() - completed_tasks();
+    let done = completed_tasks();
+    return spawned_tasks() - done;
 }
 
 /// Bytes the task-block cache retains for reuse: every recycled block (a `Coroutine`, its context, its

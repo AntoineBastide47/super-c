@@ -33,6 +33,7 @@ pub struct Builder<'a> {
     // pushes its parts, and `cat(mark)` concatenates and pops them, so one vector serves the whole file.
     pub st: Vector<d::DocId>,
     pub bin_spine: Vector<NodeId>, // `b_expr`'s stack of left-nested binary nodes (shared by nested calls)
+    pub cond_lits: Vector<NodeId>, // struct literals `b_cond` parenthesizes: outside every delimiter of a condition
 }
 
 struct TriviaSeg {
@@ -65,6 +66,7 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
         skipped: skipped,
         st: Vector::<d::DocId>::with_capacity(256),
         bin_spine: Vector::<NodeId>::new(),
+        cond_lits: Vector::<NodeId>::new(),
     };
     let items = b.nd(root).as_data.program.items;
     let mut prev_end = 0u32;
@@ -320,6 +322,43 @@ extend Builder {
         };
     }
 
+    // A paren-free condition (`if`, `while`, `for`, `switch`, `if let`, `while let`): the condition
+    // grammar reads a struct literal's `{` outside every delimiter as the body, so each such literal
+    // prints parenthesized.
+    fn b_cond(self: &mut Self, id: NodeId) d::DocId {
+        let mark = self.cond_lits.len();
+        let mut work = Vector::<NodeId>::new();
+        work.push(id);
+        // each node of the operator spine enters once
+        while let Some(x) = work.pop() {
+            if x == NODE_NONE {
+                continue;
+            }
+            let n = self.nd(x);
+            switch n.kind {
+                NODE_STRUCT_INITIALIZER => self.cond_lits.push(x),
+                NODE_BINARY => {
+                    work.push(n.as_data.binary.left);
+                    work.push(n.as_data.binary.right);
+                },
+                NODE_UNARY => work.push(n.as_data.unary.operand),
+                NODE_RANGE => {
+                    work.push(n.as_data.pattern_range.start);
+                    work.push(n.as_data.pattern_range.end);
+                },
+                NODE_CALL => work.push(n.as_data.call.callee),
+                NODE_INDEX => work.push(n.as_data.index.object),
+                NODE_MEMBER => work.push(n.as_data.member.object),
+                NODE_CAST => work.push(n.as_data.cast.expression),
+                NODE_GENERIC_SPECIALIZATION => work.push(n.as_data.specialization.expression),
+                _ => {},
+            };
+        }
+        let e = self.b_expr(id);
+        self.cond_lits.truncate(mark);
+        return e;
+    }
+
     fn b_expr_prec(self: &mut Self, id: NodeId, min_prec: i32) d::DocId {
         let e = self.b_expr(id);
         if self.expr_prec(id) < min_prec {
@@ -475,6 +514,24 @@ extend Builder {
         self.st.push(self.p.txt(close));
         let body = self.cat(elems);
         return self.p.group(body);
+    }
+
+    // `::<types>`, pushed as two entries: a turbofish after a function path or a method name.
+    fn b_turbofish(self: &mut Self, types: NodeList) {
+        let az = self.st.len();
+        for i in 0..types.len {
+            let a = self.list_at(types, i);
+            if self.nd(a).kind == NodeKind::NODE_LITERAL {
+                self.st.push(self.node_text(a));
+            } else if self.fmt_const_arg(a) {
+                self.st.push(self.b_const_arg(a));
+            } else {
+                self.st.push(self.b_type(a));
+            }
+        }
+        let l = self.b_comma_list("<", az, ">", false);
+        self.st.push(self.p.txt("::"));
+        self.st.push(l);
     }
 
     // group( open indent(softline join(", "-line, elems)) ifbreak(",") softline close ). The elements are the
@@ -971,6 +1028,9 @@ extend Builder {
                     self.st.push(self.p.txt("."));
                 }
                 self.st.push(self.node_text(n.as_data.member.member));
+                if n.as_data.member.targs.len != 0 {
+                    self.b_turbofish(n.as_data.member.targs);
+                }
             },
             NODE_CAST => {
                 // Print the operand at POSTFIX, not CAST: prefix-op and chained-cast operands keep
@@ -983,21 +1043,7 @@ extend Builder {
             },
             NODE_GENERIC_SPECIALIZATION => {
                 self.st.push(self.b_expr_prec(n.as_data.specialization.expression, PREC_POSTFIX));
-                let az = self.st.len();
-                let types = n.as_data.specialization.types;
-                for i in 0..types.len {
-                    let a = self.list_at(types, i);
-                    if self.nd(a).kind == NodeKind::NODE_LITERAL {
-                        self.st.push(self.node_text(a));
-                    } else if self.fmt_const_arg(a) {
-                        self.st.push(self.b_const_arg(a));
-                    } else {
-                        self.st.push(self.b_type(a));
-                    }
-                }
-                let l = self.b_comma_list("<", az, ">", false);
-                self.st.push(self.p.txt("::"));
-                self.st.push(l);
+                self.b_turbofish(n.as_data.specialization.types);
             },
             NODE_CLOSURE => {
                 let c = n.as_data.closure;
@@ -1134,6 +1180,10 @@ extend Builder {
                 self.st.push(self.b_comma_list_tr("(", az, tel, n.span.start + 1, n.span.end, ")", false));
             },
             NODE_STRUCT_INITIALIZER => {
+                let paren = self.cond_lits.contains(&id);
+                if paren {
+                    self.st.push(self.p.txt("("));
+                }
                 self.st.push(self.b_expr_type_path(n.as_data.struct_initializer.ty));
                 self.st.push(self.p.txt(" "));
                 self.st.push(
@@ -1143,6 +1193,9 @@ extend Builder {
                         n.span.end,
                     ),
                 );
+                if paren {
+                    self.st.push(self.p.txt(")"));
+                }
             },
             NODE_FIELD_INITIALIZER => {
                 self.st.push(self.node_text(n.as_data.field_initializer.name));
@@ -1176,17 +1229,33 @@ extend Builder {
     }
 
     // Push type path `tp`: its parts joined by `::`, then its generic arguments, after a `::` when
-    // `turbofish`.
+    // `turbofish`; a turbofish follows the part written before it (`Q::<i16>::V { .. }`).
     fn b_type_path(self: &mut Self, tp: TypePathData, turbofish: bool) {
-        for i in 0..tp.parts.len {
+        let mut split = tp.parts.len;
+        if turbofish && tp.args.len != 0 && tp.parts.len > 1 {
+            let a0 = self.nd(self.list_at(tp.args, 0)).span.start;
+            split = 1;
+            while split < tp.parts.len && self.nd(self.list_at(tp.parts, split)).span.start < a0 {
+                split += 1;
+            }
+        }
+        for i in 0..split {
             if i > 0 {
                 self.st.push(self.p.txt("::"));
             }
             self.st.push(self.node_text(self.list_at(tp.parts, i)));
         }
-        if tp.args.len == 0 {
-            return;
+        if tp.args.len != 0 || tp.bindings.len != 0 {
+            self.b_type_args(tp, turbofish);
         }
+        for i in split..tp.parts.len {
+            self.st.push(self.p.txt("::"));
+            self.st.push(self.node_text(self.list_at(tp.parts, i)));
+        }
+    }
+
+    // Push the generic arguments of `tp` (see `b_type_path`).
+    fn b_type_args(self: &mut Self, tp: TypePathData, turbofish: bool) {
         if turbofish {
             self.st.push(self.p.txt("::"));
         }
@@ -1201,14 +1270,22 @@ extend Builder {
                 self.st.push(self.b_type(a));
             }
         }
+        // Associated type bindings follow the arguments: `Add<i32, Output = T>`.
+        for i in 0..tp.bindings.len {
+            let bn = self.nd(self.list_at(tp.bindings, i)).as_data.type_alias;
+            let v = self.st.len();
+            self.st.push(self.node_text(bn.name));
+            self.st.push(self.p.txt(" = "));
+            self.st.push(self.b_type(bn.ty));
+            self.st.push(self.cat(v));
+        }
         self.st.push(self.b_comma_list("<", az, ">", false));
     }
 
     // A const-generic argument written as an expression. It reaches here as an ordinary expression node
     // (nothing a TYPE position can otherwise hold), and the braces have to come back or it will not re-parse.
     const fn fmt_const_arg(self: &Self, id: NodeId) bool {
-        let k = self.nd(id).kind;
-        return k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL;
+        return unsafe (*self.ast).is_const_expr_arg(id);
     }
 
     fn b_const_arg(self: &mut Self, id: NodeId) d::DocId {
@@ -1437,7 +1514,7 @@ extend Builder {
                     self.st.push(self.b_block(w.body));
                 } else {
                     self.st.push(self.p.txt("while "));
-                    self.st.push(self.b_expr(w.condition));
+                    self.st.push(self.b_cond(w.condition));
                     self.st.push(self.p.txt(" "));
                     self.st.push(self.b_block(w.body));
                 }
@@ -1454,7 +1531,7 @@ extend Builder {
                 self.st.push(self.p.txt("for "));
                 self.st.push(self.node_text(f.binding));
                 self.st.push(self.p.txt(" in "));
-                self.st.push(self.b_expr(f.iterable));
+                self.st.push(self.b_cond(f.iterable));
                 self.st.push(self.p.txt(" "));
                 self.st.push(self.b_block(f.body));
             },
@@ -1464,7 +1541,7 @@ extend Builder {
                 self.st.push(self.p.txt("parallel for "));
                 self.st.push(self.node_text(f.binding));
                 self.st.push(self.p.txt(" in "));
-                self.st.push(self.b_expr(f.iterable));
+                self.st.push(self.b_cond(f.iterable));
                 self.st.push(self.p.txt(" "));
                 self.st.push(self.b_block(self.nd(f.body).as_data.closure.body));
             },
@@ -1505,7 +1582,7 @@ extend Builder {
         let f = n.as_data.if_stmt;
         let v = self.st.len();
         self.st.push(self.p.txt("if "));
-        self.st.push(self.b_expr(f.condition));
+        self.st.push(self.b_cond(f.condition));
         self.st.push(self.p.txt(" "));
         self.st.push(self.b_block(f.then_branch));
         if f.else_branch != NODE_NONE {
@@ -1536,7 +1613,7 @@ extend Builder {
         self.st.push(self.p.txt(kw));
         self.st.push(self.b_pattern(hit.pattern));
         self.st.push(self.p.txt(" = "));
-        self.st.push(self.b_expr(m.value));
+        self.st.push(self.b_cond(m.value));
         self.st.push(self.p.txt(" "));
         self.st.push(self.b_block(hit.body));
         return self.cat(v);
@@ -1568,7 +1645,7 @@ extend Builder {
         } else {
             self.st.push(self.p.txt("switch "));
         }
-        self.st.push(self.b_expr(m.value));
+        self.st.push(self.b_cond(m.value));
         self.st.push(self.p.txt(" {"));
         self.b_vertical(m.arms, n.span, 0);
         self.st.push(self.p.txt("}"));

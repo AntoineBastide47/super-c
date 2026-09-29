@@ -81,10 +81,16 @@ fn abandon_storm(rounds: i64) {
 }
 
 // Creation near the limit: bursts wider than the thread limit, publication delayed, creations failing.
+// The injected failure is the third creation of an armed round, so the two before it are live threads:
+// a failure with no thread live is fatal by design. Those two must not retire before it lands, which
+// the short idle timeout allows on a loaded machine, so an armed round parks without a timeout and
+// disarms at its end.
 fn creation_storm(rounds: i64) {
     blocking::set_publish_delay_ns(100000);
     for r in 0..rounds {
-        if r % 2 == 0 {
+        let armed = r % 2 == 0;
+        if armed {
+            blocking::set_idle_ns(-1);
             unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_THREAD_CREATE, 3);
         }
         let calls: i64 = 128;
@@ -111,9 +117,22 @@ fn creation_storm(rounds: i64) {
         if count(&ok) != calls {
             panic("blocking_hunt: a call was lost in the creation storm");
         }
-        let st = blocking::stats();
-        if st.peak_threads > blocking::MAX_THREADS || st.starting != 0 {
-            panic("blocking_hunt: the thread limit was exceeded or a reservation never settled");
+        if armed {
+            unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_THREAD_CREATE, 0);
+            blocking::set_idle_ns(5000000);
+        }
+        if blocking::stats().peak_threads > blocking::MAX_THREADS {
+            panic("blocking_hunt: the thread limit was exceeded");
+        }
+        // A reservation can outlive every call: another thread took its job while the creation was
+        // still delayed. It settles by itself; poll for that, bounded.
+        let mut polls = 0;
+        while blocking::stats().starting != 0 {
+            polls = polls + 1;
+            if polls > 50000 {
+                panic("blocking_hunt: a reservation never settled");
+            }
+            time::sleep(time::Duration::from_micros(100));
         }
     }
     blocking::set_publish_delay_ns(0);

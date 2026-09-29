@@ -115,6 +115,16 @@ pub struct InferenceContext {
     /// The argument list of the call whose callee is being resolved, so overload selection can look
     /// at what is being passed. Empty outside that window: a bare member access has no arguments.
     pub call_args: NodeList,
+    /// The turbofish of that call's callee (`f::<T>(..)`, `x.m::<T>(..)`), in the same window: its
+    /// arguments bind the leading generic parameters of every candidate overload selection weighs.
+    pub call_targs: NodeList,
+    /// Bit i: argument i of `call_args` was checked while overload selection weighed it, so the
+    /// call's argument pass does not check it again.
+    pub args_pre: u8,
+    /// The callee node of the call being checked: a turbofished generic function there is the
+    /// function called, not a pointer to its instance, and a path there (`K::make()`) chooses among
+    /// overloads even without arguments.
+    pub callee_node: NodeId,
     pub addr_ctx: bool,
     pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
@@ -137,6 +147,9 @@ extend InferenceContext {
             mret_n: 0,
             mret_total: 0,
             call_args: NodeList { start: 0, len: 0 },
+            call_targs: NodeList { start: 0, len: 0 },
+            args_pre: 0,
+            callee_node: NODE_NONE,
             addr_ctx: false,
             proj_obj_ok: false,
             coerce_depth: 0,
@@ -268,7 +281,7 @@ extend Solver {
     /// conflict and keeps the first binding (the adapter reports the conflict once per call).
     pub fn cbind(self: &mut Self, c: u32, ty: TypeId) bool {
         if self.c_bound[c as usize] {
-            if self.c_ty[c as usize] == ty {
+            if self.c_ty[c as usize] == ty || self.c_ty[c as usize] == TYPE_ERROR {
                 return true;
             }
             self.cconflicts.push(TypeConflict { first: self.c_ty[c as usize], later: ty });
@@ -345,9 +358,30 @@ extend Solver {
         return -1;
     }
 
+    /// The generic parameter declaration session slot `slot` maps.
+    pub const fn slot_def(self: &Self, slot: u32) DefId {
+        return self.s_pd[(self.sess.pd + slot) as usize];
+    }
+
     // The slot's solver term.
     const fn slot_ty(self: &Self, slot: u32) InferTy {
         return self.s_slot[(self.sess.pd + slot) as usize];
+    }
+
+    // Bind term `t` to TYPE_ERROR whatever it holds (logged): a rejected type absorbs every other
+    // piece of evidence, so no conflict and no unresolved parameter is reported over it.
+    fn poison(self: &mut Self, t: InferTy) {
+        let v = it_payload(t);
+        if it_is_cvar(t) {
+            if !self.c_bound[v as usize] || self.c_ty[v as usize] != TYPE_ERROR {
+                self.log_cbind(v);
+                self.c_bound.set(v as usize, true);
+                self.c_ty.set(v as usize, TYPE_ERROR);
+            }
+        } else if self.v_binding[v as usize] != it_pub(TYPE_ERROR) {
+            self.log_binding(v);
+            self.v_binding.set(v as usize, it_pub(TYPE_ERROR));
+        }
     }
 
     // Const evidence for const-variable term `t`. TYPE_GENERIC covers a symbolic reference to another
@@ -363,6 +397,10 @@ extend Solver {
     /// argument-compatibility pass reports any later disagreement.
     pub fn s_explicit(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
+        if ty == TYPE_ERROR {
+            self.poison(t);
+            return;
+        }
         if it_is_cvar(t) {
             self.s_const_ev(t, ty);
             return;
@@ -377,6 +415,10 @@ extend Solver {
     /// binding; the argument-compatibility pass reports the mismatch at its own position.
     pub fn s_eq(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
+        if ty == TYPE_ERROR {
+            self.poison(t);
+            return;
+        }
         if it_is_cvar(t) {
             self.s_const_ev(t, ty);
             return;
@@ -392,20 +434,15 @@ extend Solver {
     /// conversion is allowed. Recorded; joined at resolve time.
     pub fn s_lb(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
+        if ty == TYPE_ERROR {
+            self.poison(t);
+            return;
+        }
         if it_is_cvar(t) {
             self.s_const_ev(t, ty);
             return;
         }
         self.bounds.push(BoundRec { var: it_payload(t), ty: ty, eq: false });
-    }
-
-    /// Exact const-value evidence for a slot (the array-length walk counts elements directly).
-    pub fn s_cval(self: &mut Self, slot: u32, v: i64) {
-        let t = self.slot_ty(slot);
-        if it_is_cvar(t) {
-            let cv = unsafe (&mut *self.ast).const_value(v);
-            let _ = self.cbind(it_payload(t), cv);
-        }
     }
 
     /// Resolve one session slot to a published TypeId. An existing exact binding wins. Directional

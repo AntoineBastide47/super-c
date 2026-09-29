@@ -55,6 +55,16 @@ fn golden_derive() {
     expect_fmt("@derive(Format,Hash)\nstruct P{x:i32,}", "@derive(Format,Hash)\nstruct P {\n    x: i32,\n}\n");
 }
 
+// A braced const-generic argument keeps its braces whatever expression it holds: `F<E::A>` and
+// `F<K>` would read as types.
+@test
+fn golden_braced_const_arguments() {
+    expect_fmt(
+        "fn f() F<{E::A}, {K}> { return g::<{E::B}, {K}, {-K}>(); }",
+        "fn f() F<{E::A}, {K}> {\n    return g::<{E::B}, {K}, {-K}>();\n}\n",
+    );
+}
+
 @test
 fn golden_brace_in_member_comment() {
     // A leading member comment containing `{` must survive: the block-opener scan skips comments.
@@ -94,6 +104,39 @@ fn golden_unsafe_extend() {
 @test
 fn golden_extend_lifetimes() {
     expect_fmt("struct L<'a>{s:&'a u8}\nextend<'a>L<'a>{}", "struct L<'a> {\n    s: &'a u8,\n}\nextend<'a> L<'a> {}\n");
+}
+
+// A turbofish struct literal takes postfix operators. In a paren-free condition a struct literal
+// outside every delimiter keeps its parentheses: the condition grammar reads its `{` as the body.
+@test
+fn golden_struct_literal_postfix_and_conditions() {
+    expect_fmt(
+        "fn f()i32{let a=G::<i32>{v:1}.v;let b=m::H{a:[1,2]}.a[1];let c=G::<i32>{v:2}.get();return a+b+c;}",
+        "fn f() i32 {\n    let a = G::<i32> { v: 1 }.v;\n    let b = m::H { a: [1, 2] }.a[1];\n    let c = G::<i32> { v: 2 }.get();\n    return a + b + c;\n}\n",
+    );
+    expect_fmt(
+        "fn f(){if (G::<i32>{v:2}).v==2&&g([S{a:1}][0].a){}while (S{a:1}).a>0{}for i in 0..(S{a:2}).a{}switch (S{a:1}).a{_=>{},};if let Some(x)=(S{a:1}).o{}}",
+        "fn f() {\n    if (G::<i32> { v: 2 }).v == 2 && g([S { a: 1 }][0].a) {}\n    while (S { a: 1 }).a > 0 {}\n    for i in 0..(S { a: 2 }).a {}\n    switch (S { a: 1 }).a {\n        _ => {},\n    };\n    if let Some(x) = (S { a: 1 }).o {}\n}\n",
+    );
+}
+
+// A turbofish keeps its place in a struct literal path: after the enum of a variant, or after the
+// last segment.
+@test
+fn golden_struct_literal_turbofish_place() {
+    expect_fmt(
+        "fn f(){let a=Q::<i16>::V{a:1};let b=m::Q::<i16>::V{a:1};let c=m::P::<u8>{a:1};}",
+        "fn f() {\n    let a = Q::<i16>::V { a: 1 };\n    let b = m::Q::<i16>::V { a: 1 };\n    let c = m::P::<u8> { a: 1 };\n}\n",
+    );
+}
+
+// A method call keeps its turbofish after the method name, as a path keeps it after the function.
+@test
+fn golden_method_call_turbofish() {
+    expect_fmt(
+        "fn f(x:X,w:W)i32{let a=x.gen::<u8,{N+1}>(3);return w.a.b::<'static,Vector<i32>>().c+X::g::<u8>(&x)+a;}",
+        "fn f(x: X, w: W) i32 {\n    let a = x.gen::<u8, {N + 1}>(3);\n    return w.a.b::<'static, Vector<i32>>().c + X::g::<u8>(&x) + a;\n}\n",
+    );
 }
 
 // A block `defer` ends its statement: a `;` after the block would not parse.

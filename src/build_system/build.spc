@@ -867,12 +867,16 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32)
 }
 
 // The profile's `opt-level` flag, then its flag array (`push_profile`), so an explicit `-O` in the
-// array still wins; `wl` renders each `link-args` entry through the driver.
+// array still wins; `wl` renders each `link-args` entry through the driver. The compile side of a
+// profile without overflow checks defines SC_ARITH_WRAP (super_rt.h's arithmetic helpers).
 fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String>, wl: bool, target: i32, sdk: i32) {
     let of = mf::opt_flag(prof.opt);
     if of.len() != 0 {
         cmd.push_byte(b' ');
         cmd.push_str(of);
+    }
+    if !wl && prof.arith_wraps() {
+        cmd.push_str(" -DSC_ARITH_WRAP");
     }
     push_profile(cmd, flags, target, sdk);
     if wl {
@@ -1256,8 +1260,8 @@ fn install_bin(from: str, to: str) i32 {
         return 1;
     }
     let body = cur.unwrap();
-    // Byte-compare first: an unchanged binary keeps its mtime (the emit stamp anchors on the
-    // compiler executable's mtime, and downstream tools get make-friendly timestamps).
+    // Byte-compare first: an unchanged binary keeps its mtime (downstream tools get make-friendly
+    // timestamps).
     if file_eq(to, &body) {
         return 0;
     }
@@ -1871,9 +1875,9 @@ fn stream_notify(ctx: *mut void, path: str, kind: i32) {
 }
 
 // Emit stamp: skip the whole transpile when no input changed since the last successful emission.
-// The stamp records every input the emitted tree is a function of: the compiler executable, the
-// emission-relevant options, every loaded module file, the manifest, and every external C input:
-// as (mtime, fnv64, len). A per-module skip would be UNSOUND here (owner-emitted instances and the
+// The stamp records every input the emitted tree is a function of: the emitting compiler (its content
+// hash, `compiler_id`), the emission-relevant options, and every loaded module file, the manifest and
+// every external C input as (mtime, fnv64, len). A per-module skip would be UNSOUND here (owner-emitted instances and the
 // shared headers make every TU depend on the whole import closure); the whole-package check is
 // exact. mtime is only the fast path: a drifted mtime with matching content still counts as fresh
 // (and refreshes the stamp), so git checkouts do not force rebuilds. SC_NO_EMIT_CACHE disables.
@@ -1893,7 +1897,7 @@ fn stamp_hash_file(path: str, h_out: &mut u64, len_out: &mut u64) bool {
         }
         tot += n as u64;
         for i in 0..n {
-            h = (h ^ buf[i] as u64) * 1099511628211u64;
+            h = (h ^ buf[i] as u64).wrapping_mul(1099511628211u64);
         }
     }
     unsafe stdio::fclose(f);
@@ -1912,22 +1916,11 @@ fn stamp_u64(line: str, idx: usize) u64 {
     return stamp_field(line, idx).parse_u64().unwrap_or(0);
 }
 
-fn stamp_exe_line(out: &mut String) bool {
-    let mut exe = PathBuf {};
-    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
-        return false;
-    }
-    let ep = str::from_cstr(&exe[0]);
-    let mt = unsafe shim::sc_mtime(&mut exe[0]);
-    if mt == 0 {
-        return false;
-    }
+// The emitting compiler's record: its content hash (`compiler_id`), taken once before the emission.
+fn stamp_exe_line(out: &mut String, cid: u64) {
     out.push_str("exe\t");
-    out.push_u64(mt as u64);
-    out.push_str("\t");
-    out.push_str(ep);
+    out.push_u64(cid);
     out.push_str("\n");
-    return true;
 }
 
 // The number of `.c` files under `gen`. A `.c` or `.h` name is a file: only other names cost a
@@ -1997,7 +1990,7 @@ fn stamp_dir_hash(dir: str) u64 {
         if !nm.ends_with(".spc") {
             continue;
         }
-        h = h + nm.hash();
+        h = h.wrapping_add(nm.hash());
     }
     unsafe shim::sc_closedir(dh);
     return h;
@@ -2052,11 +2045,13 @@ fn stamp_write(
     bootstrap: bool,
     lint: bool,
     gen: str,
+    cid: u64,
 ) {
-    let mut out = String::from_str("sc-emit-stamp v2\n");
-    if !stamp_exe_line(&mut out) {
+    if cid == 0 {
         return;
     }
+    let mut out = String::from_str("sc-emit-stamp v3\n");
+    stamp_exe_line(&mut out, cid);
     stamp_opt_line(&mut out, target, arch, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
@@ -2097,7 +2092,10 @@ fn stamp_write(
 
 // Is the recorded emission still exact for the current inputs? On mtime drift with matching
 // content the stamp is refreshed in place so the next check stays on the fast path.
-fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool, lint: bool, gen: str) bool {
+fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool, lint: bool, gen: str, cid: u64) bool {
+    if cid == 0 {
+        return false;
+    }
     let body0 = loader::read_file(path);
     if body0.is_none() {
         return false;
@@ -2125,7 +2123,7 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             continue;
         }
         if lno == 0 {
-            if line != "sc-emit-stamp v2" {
+            if line != "sc-emit-stamp v3" {
                 return false;
             }
             rewritten.push_str(line);
@@ -2136,16 +2134,11 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
         lno += 1;
         let kind = stamp_field(line, 0);
         if kind == "exe" {
-            let mut cur = String::new();
-            if !stamp_exe_line(&mut cur) {
+            if stamp_u64(line, 1) != cid {
                 return false;
             }
-            let mut want = String::from_str(line);
-            want.push_str("\n");
-            if cur.as_str() != want.as_str() {
-                return false;
-            }
-            rewritten.push_string(&cur);
+            rewritten.push_str(line);
+            rewritten.push_str("\n");
         } else if kind == "opt" {
             // Every field but the unit count must match this build's options.
             ccount = stamp_u64(line, 5);
@@ -2298,6 +2291,7 @@ fn engine_build_i(
     let mut tail = String::new();
     tail.push_byte(b' ');
     tail.push_string(&m.cstd);
+    tail.push_str(" -funsigned-char");
     if m.lib_shared && cx.target != 0 {
         // Shared-library objects need it; harmless for the exe targets.
         tail.push_str(" -fPIC");
@@ -2420,6 +2414,12 @@ fn engine_build_i(
     // which case the generated tree is already exact and the pipeline skips straight to cc/link.
     let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
+    // The running compiler's identity, read before the emission: the tree it emits is its function.
+    let cid = if cache_on {
+        compiler_id();
+    } else {
+        0 as u64;
+    };
     let skip_emit = cache_on && stamp_fresh(
         stamp_path.as_str(),
         root_dir,
@@ -2428,6 +2428,7 @@ fn engine_build_i(
         cx.bootstrap_tags,
         cx.lint,
         gen.as_str(),
+        cid,
     );
     bst::mark(bst::B_STAMP);
     if stats != null {
@@ -2501,6 +2502,7 @@ fn engine_build_i(
                 cx.bootstrap_tags,
                 cx.lint,
                 gen.as_str(),
+                cid,
             );
         }
     } else {

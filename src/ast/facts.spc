@@ -1,5 +1,5 @@
-// The typed-facts boundary: every semantic decision the type checker
-// records for a body -- node types, resolutions, call targets, generic arguments, operator methods,
+// The typed-facts boundary: every semantic decision the type checker records for a body -- node
+// types, resolutions, call targets, bound-call conformances, generic arguments, operator methods,
 // coercion/dereference sequences, dynamic conversions, wide literals and captures -- behind ONE
 // read-only interface. Core IR lowering and every later new
 // consumer reads these accessors, never the Ast side tables directly, so the tables can move off
@@ -7,13 +7,13 @@
 //
 // The freeze contract (enforced by the driver's SC_FACTS_CHECK mode after borrow checking AND after
 // codegen): at type-check completion every semantic DECISION table is final -- nodes, children,
-// resolutions, per-node types, coercions, mono/method-instance demands, method_refs, dyn/deref
-// selections, wide literals, attributes, lifetime declarations, call_info, op_method. Every later
-// stage (borrow checking, Core IR lowering, instance planning, const-eval fold discharge, emission)
-// reads this data frozen. The ONE sanctioned mutation is interning: the type pools (the module's
-// `pool` and the package table `gt`, with their instances, const-expression forms and index tables)
-// grow append-only whenever a later stage interns a substituted or replayed type, and an interned
-// entry is never removed or renumbered -- growth changes no existing answer.
+// resolutions, per-node types, coercions, bound calls, mono/method-instance demands, method_refs,
+// dyn/deref selections, wide literals, attributes, lifetime declarations, call_info, op_method,
+// pattern values. Every later stage (borrow checking, Core IR lowering, instance planning, const-eval
+// fold discharge, emission) reads this data frozen. The ONE sanctioned mutation is interning: the type
+// pools (the module's `pool` and the package table `gt`, with their instances, const-expression
+// forms and index tables) grow append-only whenever a later stage interns a substituted or replayed
+// type, and an interned entry is never removed or renumbered -- growth changes no existing answer.
 import ast::ast as *;
 
 /// Read-only view of one module's typed AST. Holds a raw pointer because consumers thread it through
@@ -97,12 +97,32 @@ extend TypedFacts {
         };
     }
 
+    /// The value of integer constant pattern `n` (a literal-pattern value or a range bound) in the
+    /// matched type, as two's complement bits, or None.
+    pub const fn pat_value(self: &Self, n: NodeId) Option<u64> {
+        if self.unchecked_view {
+            return Option::<u64>::None;
+        }
+        return switch self.a().pat_vals.get(&n) {
+            Some(v) => Option::<u64>::Some(*v),
+            None => Option::<u64>::None,
+        };
+    }
+
     /// The conversion recorded at `n` (`target::from(expr)` or a builtin widening), or null.
     pub const fn coercion(self: &Self, n: NodeId) *const CoerceUse {
         if self.unchecked_view {
             return null;
         }
         return self.a().coerce_of(n);
+    }
+
+    /// The `dyn I<args>` naming the conformance bound call `n` dispatches to, or TYPE_NONE.
+    pub const fn bound_call(self: &Self, n: NodeId) TypeId {
+        if self.unchecked_view {
+            return TYPE_NONE;
+        }
+        return self.a().bound_call_of(n);
     }
 
     /// The auto-dereference chain recorded at `n` (receiver adjustments, in order), or null.
@@ -147,7 +167,7 @@ pub struct FactsWatermark {
     pub n: [usize; WM_N],
 }
 
-const WM_N: usize = 20;
+const WM_N: usize = 22;
 // The first WM_BODY entries are module tables; the next four are body-arena tables, checked only
 // while the arena is live (the driver releases it after the constant flush; see
 // `Ast::release_bodies`).
@@ -163,6 +183,7 @@ const WM_NAMES: [str<'static>; WM_N] = [
     "body types",
     "coerces",
     "coerce_at",
+    "bound_calls",
     "mono",
     "method_refs",
     "dyn_uses",
@@ -173,6 +194,7 @@ const WM_NAMES: [str<'static>; WM_N] = [
     "lifetime_decls",
     "call_info",
     "op_method",
+    "pat_vals",
 ];
 
 /// Snapshot module `a`'s semantic-table lengths, in WM_NAMES order.
@@ -189,6 +211,7 @@ pub const fn watermark(a: &Ast) FactsWatermark {
             a.b.types.len(),
             a.coerces.len(),
             a.coerce_at.len(),
+            a.bound_calls.len(),
             a.mono.len(),
             a.method_refs.len(),
             a.dyn_uses.len(),
@@ -199,6 +222,7 @@ pub const fn watermark(a: &Ast) FactsWatermark {
             a.lifetime_decls.len(),
             a.call_info.len(),
             a.op_method.len(),
+            a.pat_vals.len(),
         ],
     };
 }

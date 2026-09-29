@@ -305,6 +305,15 @@ fn always_panics_lint() {
     let u = p.run_raw(uargs.as_str());
     assert(u.exit != 0);
     assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"));
+    // Through a closure: the call stack names the closure frame (its syntax may be released by then).
+    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a / 0;\n    return f(1);\n}\n");
+    let cl = p.compile("clos.spc");
+    assert(cl.exit != 0);
+    assert(
+        cl.out_has(
+            "error: this statement is undefined behavior when executed: division by zero (call stack: <closure>;",
+        ),
+    );
 
     // Silent: an explicit panic helper (intent), a runtime-dependent index, and a guard that folds false.
     p.mkfile(

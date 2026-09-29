@@ -432,7 +432,7 @@ extend TuEmit {
                 body.push_u64(force_align);
                 body.push_str(") ");
             }
-            if !self.member_ctype(it.m, fid, fty, fnm.as_str(), body) {
+            if !self.mg.ctype(it.m, fty, fnm.as_str(), body) {
                 return false;
             }
             body.push_str(";\n");
@@ -548,27 +548,6 @@ extend TuEmit {
         return true;
     }
 
-    // Spell member `fid` of type `fty` as a C declarator. A `[T; N]` member interns len-0 in the
-    // generic pool (the length is symbolic, and a len-0 array's frozen spelling is a POINTER):
-    // recover N from the annotation's length expression under the instance env before the ctype
-    // rules see the type. A length that folds to 0 spells `T name[0]`, which is zero-sized as the
-    // layout service models it. False = no C shape (a len-0 array whose length does not fold).
-    fn member_ctype(self: &mut Self, m: ModuleId, fid: NodeId, fty: TypeId, fnm: str, body: &mut String) bool {
-        let fyv = *unsafe (*self.p().module_ast_const(m)).type_at(fty);
-        if fyv.kind != TypeKind::TYPE_ARRAY || fyv.as_data.arr.len != 0 {
-            return self.mg.ctype(m, fty, fnm, body);
-        }
-        let mut alen: u64 = 0;
-        if !self.mg.field_arr_len(m, fid, &mut alen) {
-            return false;
-        }
-        let mut d2 = String::from_str(fnm);
-        d2.push_str("[");
-        d2.push_u64(alen);
-        d2.push_str("]");
-        return self.mg.ctype(m, fyv.as_data.arr.elem, d2.as_str(), body);
-    }
-
     fn enum_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
         let n = unsafe (*da).at_const(it.decl);
@@ -588,6 +567,7 @@ extend TuEmit {
         body.push_string(&q);
         body.push_str("\ntypedef enum { ");
         let mut first = true;
+        let mut cur: i64 = 0 - 1;
         for i in 0..ms.len {
             let vid = unsafe (*da).list(ms)[i as usize];
             if unsafe (*da).at_const(vid).kind != NodeKind::NODE_VARIANT {
@@ -598,16 +578,18 @@ extend TuEmit {
             }
             first = false;
             self.mg.enum_tag(it.m, it.decl, vid, body);
-            // an explicit discriminant pins the C value (`Code_Bad = 404`): casts observe it.
-            let vv = unsafe (*da).at_const(vid).as_data.variant.value;
-            if vv != NODE_NONE && self.p().cir != null {
-                let cevE = unsafe &mut *(self.p().cir as *mut iri::Interp);
-                let cvE = cevE.eval(it.m, vv);
-                if cvE.kind == iri::IV_INT {
-                    body.push_str(" = ");
-                    body.push_i64(cvE.i);
-                }
+            // an explicit discriminant pins the C value (`Code_Bad = 404`): casts, tag tests and
+            // switches observe it
+            if unsafe (*da).at_const(vid).as_data.variant.value == NODE_NONE {
+                cur += 1;
+                continue;
             }
+            let cev = self.p().cir as *mut iri::Interp;
+            if cev == null || !unsafe (*cev).discr(it.m, vid, cur, &mut cur) {
+                return false;
+            }
+            body.push_str(" = ");
+            body.push_i64(cur);
         }
         body.push_str(" } ");
         body.push_string(&q);
@@ -677,7 +659,7 @@ extend TuEmit {
                     fnm.push_str("_");
                     fnm.push_u64(k);
                 }
-                if !self.member_ctype(it.m, pid, pty, fnm.as_str(), body) {
+                if !self.mg.ctype(it.m, pty, fnm.as_str(), body) {
                     return false;
                 }
                 body.push_str("; ");

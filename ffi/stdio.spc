@@ -164,26 +164,3 @@ pub fn stdout() *mut FILE {
 pub fn stderr() *mut FILE {
     return unsafe __sc_stderr();
 }
-
-// Windows opens the standard streams in text mode, which writes "\n" as "\r\n" and folds "\r\n" to "\n"
-// on read; a byte-counted protocol needs the raw bytes. Returns false when the switch fails. POSIX
-// streams have no text mode, so elsewhere this is a no-op.
-@platform(windows)
-extern "C" "io.h" {
-    fn _setmode(fd: i32, mode: i32) i32;
-    fn _fileno(stream: *mut FILE) i32;
-}
-
-@platform(windows)
-/// Put `stream` in binary mode (no newline translation); true on success. A no-op elsewhere than
-/// Windows.
-pub fn set_binary(stream: *mut FILE) bool {
-    let fd = unsafe _fileno(stream);
-    // _O_BINARY.
-    return unsafe _setmode(fd, 0x8000) != -1;
-}
-
-@platform(!windows)
-pub const fn set_binary(_stream: *mut FILE) bool {
-    return true;
-}

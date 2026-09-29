@@ -43,7 +43,9 @@ super-c clean                # remove the out-dir and every <root dir>/build/<pr
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
-entire transpile when no input changed (~25 ms no-op); it records the loaded module files and
+entire transpile when no input changed (~25 ms no-op); it records the content hash of the compiler
+that emitted the tree (a different compiler at the same path with the same mtime transpiles again,
+as does the per-TU cache, keyed on the same hash), the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
 import also makes the stamp stale. The stamp lives in the target's profile directory, so it
 is per profile. Parallel C compilation uses
@@ -221,6 +223,7 @@ ldflags = ["-static"]        # after the manifest-level ldflags and the -O flag
 link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, after ldflags
 strip = true
 lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
+overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
 
 [profile.release]            # a section naming a built-in profile starts from its values and
 opt-level = 2                # overrides only the keys it sets (an array replaces the whole array)
@@ -257,6 +260,16 @@ edit never moves a chunk between shards.
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
 character of each profile, not the verbatim flags. **Never profile the `dev` build** —
 sanitizer frames dominate the samples.
+
+Integer overflow (signed and unsigned) traps under `dev`, `debug`, `test` and `race` and wraps under
+`release`, `bench` and `pgogen` (language skill, `types.md` "Arithmetic Semantics"). The
+emitted C is the same under every profile: it calls the arithmetic helpers of `super_rt.h`
+(std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` from std's `int128.h`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
+(`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
+`push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
+foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
+gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.c` fails to compile
+without the flag.
 
 ### Link-time optimization
 
@@ -435,7 +448,7 @@ every profile.
 ```
 build/
   dev/raw/
-    super_rt.h        # shared runtime (includes + allocation interposition)
+    super_rt.h        # shared runtime (includes, arithmetic helpers, allocation interposition)
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
     __sc_registry.c   # ZST sentinels and the reflection registry
@@ -472,5 +485,6 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative — `cc build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)` builds the whole
-tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`).
+Includes are relative: `cc -funsigned-char build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)`
+builds the whole tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`;
+add `-DSC_ARITH_WRAP` for wrapping integer overflow).

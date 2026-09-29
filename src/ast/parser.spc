@@ -74,6 +74,9 @@ pub struct Parser<'a> {
     /// Bodies parsed while set stay in the module arena: interface members and the members of a
     /// generic `extend` (see `Ast.b`).
     pub pin_scope: bool,
+    // Associated type bindings (`Output = T`) read by `parse_type_args` and not yet taken by the type
+    // path they belong to (`take_bindings`).
+    pub bind_buf: Vector<NodeId>,
 }
 
 extend Parser {
@@ -87,6 +90,7 @@ extend Parser {
             errors: diag::Errors::new(),
             nrets: Vector::<NodeId>::new(),
             derive_ifaces: Vector::<NodeId>::new(),
+            bind_buf: Vector::<NodeId>::new(),
             expand_derive: true,
             pending_metas: Vector::<MetaAttr>::new(),
         };
@@ -359,7 +363,24 @@ extend Parser {
             } else {
                 self.parse_type();
             };
-            self.ast.push(arg);
+            // `Name = Type` after the arguments: an associated type binding (`Add<i32, Output = T>`),
+            // decided at the `=` a type never continues with.
+            let an = *self.ast.at_const(arg);
+            if an.kind == NodeKind::NODE_TYPE_PATH && an.as_data.type_path.parts.len == 1 && an.as_data.type_path.args.len == 0 && self.check(
+                TokenType::Equal,
+            ) {
+                self.advance();
+                let name = unsafe self.ast.list(an.as_data.type_path.parts)[0];
+                let ty = self.parse_type();
+                let b = self.fin(
+                    NodeKind::NODE_TYPE_ALIAS,
+                    self.node_span(arg).start,
+                    NodeAs { type_alias: TypeAliasData { name: name, ty: ty } },
+                );
+                self.bind_buf.push(b);
+            } else {
+                self.ast.push(arg);
+            }
             if !self.match(TokenType::Comma) {
                 break;
             }
@@ -369,6 +390,16 @@ extend Parser {
         return args;
     }
 
+    // The associated type bindings `parse_type_args` read since `bind_buf` held `b0` of them.
+    fn take_bindings(self: &mut Self, b0: usize) NodeList {
+        let mark = self.ast.mark();
+        for i in b0..self.bind_buf.len() {
+            self.ast.push(self.bind_buf[i]);
+        }
+        self.bind_buf.truncate(b0);
+        return self.ast.commit(mark);
+    }
+
     pub fn parse_type_path_after(self: &mut Self, head: NodeId, start: u32) NodeId {
         let mark = self.ast.mark();
         self.ast.push(head);
@@ -376,15 +407,17 @@ extend Parser {
             self.ast.push(self.identifier());
         }
         let parts = self.ast.commit(mark);
+        let b0 = self.bind_buf.len();
         let args = if self.check(TokenType::LessThan) {
             self.parse_type_args();
         } else {
             NodeList { start: 0, len: 0 };
         };
+        let bindings = self.take_bindings(b0);
         return self.fin(
             NodeKind::NODE_TYPE_PATH,
             start,
-            NodeAs { type_path: TypePathData { parts: parts, args: args } },
+            NodeAs { type_path: TypePathData { parts: parts, args: args, bindings: bindings } },
         );
     }
 
@@ -2048,10 +2081,27 @@ extend Parser {
     // pattern, an `@` binding, or the plain binding.
     fn pattern_after_name(self: &mut Self, start: u32, mut name: NodeId) NodeId {
         if self.check(TokenType::PathSeparator) {
-            name = self.pattern_path_tail(name);
-            if name == NODE_NONE {
+            // A qualified path is a constant (`i64::MAX`, `Foo::K`), the member path an expression
+            // spells; only a variant takes a payload, and a pattern names a variant without its enum.
+            let path = self.pattern_path(name);
+            if path == NODE_NONE {
                 return NODE_NONE;
             }
+            if !self.check(TokenType::LeftParen) && !self.check(TokenType::LeftBrace) && !self.check(TokenType::At) {
+                if self.ast.at_const(name).as_data.name.is_mutable {
+                    self.errors.emit(
+                        start,
+                        self.node_span(path).end - start,
+                        format("a constant pattern cannot be 'mut'"),
+                    );
+                }
+                return self.mk(
+                    NodeKind::NODE_PATTERN_LITERAL,
+                    Span::new(start, self.node_span(path).end),
+                    NodeAs { single: SingleData { value: path } },
+                );
+            }
+            name = self.pattern_path_tail(path);
         }
         if self.match(TokenType::LeftParen) {
             let mark = self.ast.mark();
@@ -2122,18 +2172,30 @@ extend Parser {
         return self.fin(NodeKind::NODE_PATTERN_NAME, start, NodeAs { pattern: PatternData { name: name } });
     }
 
-    // A qualified path at a pattern name (`E::A(..)`). Patterns name a variant without its enum, so
-    // this reports the qualifier and returns the last segment, which the pattern then continues with.
-    @c.cold
-    fn pattern_path_tail(self: &mut Self, name: NodeId) NodeId {
+    // The qualified path `name::..` at a pattern name, as the member path an expression spells.
+    fn pattern_path(self: &mut Self, name: NodeId) NodeId {
         let start = self.node_span(name).start;
-        let mut last = name;
+        let mut path = name;
         while self.match(TokenType::PathSeparator) {
-            last = self.identifier();
-            if last == NODE_NONE {
+            let member = self.identifier();
+            if member == NODE_NONE {
                 return NODE_NONE;
             }
+            path = self.mk(
+                NodeKind::NODE_MEMBER,
+                Span::new(start, self.node_span(member).end),
+                NodeAs { member: MemberData { object: path, member: member, path: true } },
+            );
         }
+        return path;
+    }
+
+    // Qualified path `path` before a variant payload (`E::A(..)`). Patterns name a variant without its
+    // enum, so this reports the qualifier and returns the last segment, which the pattern continues with.
+    @c.cold
+    fn pattern_path_tail(self: &mut Self, path: NodeId) NodeId {
+        let start = self.node_span(path).start;
+        let last = self.ast.at_const(path).as_data.member.member;
         let vs = self.node_span(last);
         self.errors.emit(
             start,
@@ -2268,7 +2330,8 @@ extend Parser {
             self.expect(TokenType::RightParen, "')'");
             return self.fin(NodeKind::NODE_VA_EXPR, start, NodeAs { va_op: VaOpData { op: va, ap: ap, extra: extra } });
         }
-        if Parser::is_identifier_token(kind) {
+        // `Self` names the implementing type in a path (`Self::f()`, `Self::K`), as a type name does.
+        if Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper {
             let value = self.identifier();
             if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                 return self.parse_struct_initializer_after(value, start);
@@ -2402,15 +2465,26 @@ extend Parser {
 
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
         let mark = self.ast.mark();
+        let mut args = NodeList { start: 0, len: 0 };
         let mut cur = chain;
         loop {
             let mb = self.ast.at_const(cur).as_data.member;
             self.ast.push(mb.member);
-            if self.ast.at_const(mb.object).kind != NodeKind::NODE_MEMBER {
-                self.ast.push(mb.object);
+            let mut obj = mb.object;
+            // `Q::<i16>::V { .. }`: the type arguments of an inner segment become the path's.
+            if self.ast.at_const(obj).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                let spec = self.ast.at_const(obj).as_data.specialization;
+                if args.len != 0 {
+                    self.errors.emit_span(self.node_span(obj), format("a path takes type arguments only once"));
+                }
+                args = spec.types;
+                obj = spec.expression;
+            }
+            if self.ast.at_const(obj).kind != NodeKind::NODE_MEMBER {
+                self.ast.push(obj);
                 break;
             }
-            cur = mb.object;
+            cur = obj;
         }
         // The walk visits the rightmost segment first; reverse the run so the path reads left to right.
         let mut i = mark as usize;
@@ -2421,7 +2495,11 @@ extend Parser {
             j = j - 1;
         }
         let parts = self.ast.commit(mark);
-        return self.fin(NodeKind::NODE_TYPE_PATH, start, NodeAs { type_path: TypePathData { parts: parts } });
+        return self.fin(
+            NodeKind::NODE_TYPE_PATH,
+            start,
+            NodeAs { type_path: TypePathData { parts: parts, args: args } },
+        );
     }
 
     fn parse_postfix_after_mode(self: &mut Self, mut expr: NodeId, grammar: ExpressionGrammar) NodeId {
@@ -2457,8 +2535,25 @@ extend Parser {
                 );
             } else if self.match(TokenType::PathSeparator) {
                 if self.check(TokenType::LessThan) {
+                    let b0 = self.bind_buf.len();
                     let types = self.parse_type_args();
+                    if self.bind_buf.len() != b0 {
+                        let bs = self.node_span(self.bind_buf[b0]);
+                        self.errors.emit_span(
+                            bs,
+                            format("an associated type binding is only allowed in a generic bound"),
+                        );
+                        self.bind_buf.truncate(b0);
+                    }
                     let inner = expr;
+                    // A method's turbofish (`x.m::<T>`) stays on its member, so the call keeps the
+                    // member callee a method call has.
+                    let im = *self.ast.at_const(inner);
+                    if im.kind == NodeKind::NODE_MEMBER && !im.as_data.member.path && im.as_data.member.targs.len == 0 {
+                        self.ast.at(inner).as_data.member.targs = types;
+                        self.ast.at(inner).span.end = self.previous_end();
+                        continue;
+                    }
                     expr = self.fin(
                         NodeKind::NODE_GENERIC_SPECIALIZATION,
                         start,
@@ -2477,8 +2572,11 @@ extend Parser {
                                 NodeAs { type_path: TypePathData { parts: self.ast.commit(mark) } },
                             );
                         }
+                        if self.ast.at_const(tp).as_data.type_path.args.len != 0 {
+                            self.errors.emit_span(self.node_span(tp), format("a path takes type arguments only once"));
+                        }
                         self.ast.at(tp).as_data.type_path.args = types;
-                        return self.parse_struct_initializer_after(tp, start);
+                        expr = self.parse_struct_initializer_after(tp, start);
                     }
                 } else {
                     let member = self.callable_name();
@@ -2489,7 +2587,7 @@ extend Parser {
                     );
                     if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                         let tp = self.path_chain_to_type_path(expr, start);
-                        return self.parse_struct_initializer_after(tp, start);
+                        expr = self.parse_struct_initializer_after(tp, start);
                     }
                 }
             } else if self.match(TokenType::Question) {
@@ -2747,7 +2845,7 @@ extend Parser {
         if context == RangeContext::RANGE_PATTERN {
             return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
         }
-        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || t == TokenType::MatchertextBegin || Parser::unary_operator(
+        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::SelfUpper || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || t == TokenType::MatchertextBegin || Parser::unary_operator(
             t,
         );
     }
@@ -2769,12 +2867,31 @@ extend Parser {
         } else {
             NODE_NONE;
         };
-        let kind = if context == RangeContext::RANGE_PATTERN {
-            NodeKind::NODE_PATTERN_RANGE;
-        } else {
-            NodeKind::NODE_RANGE;
-        };
-        return self.finish_range(kind, start_node, op_start, inclusive, end);
+        if context != RangeContext::RANGE_PATTERN {
+            return self.finish_range(NodeKind::NODE_RANGE, start_node, op_start, inclusive, end);
+        }
+        self.pattern_bound(start_node);
+        self.pattern_bound(end);
+        return self.finish_range(NodeKind::NODE_PATTERN_RANGE, start_node, op_start, inclusive, end);
+    }
+
+    // Range pattern bound `b` is a value: a plain name there names a constant, and turns into the
+    // constant pattern of that name; any other pattern is an error.
+    fn pattern_bound(self: &mut Self, b: NodeId) {
+        if b == NODE_NONE {
+            return;
+        }
+        let n = *self.ast.at_const(b);
+        if n.kind == NodeKind::NODE_PATTERN_LITERAL {
+            return;
+        }
+        let pd = n.as_data.pattern;
+        if n.kind == NodeKind::NODE_PATTERN_NAME && pd.children.len == 0 && !self.ast.at_const(pd.name).as_data.name.is_mutable {
+            self.ast.at(b).kind = NodeKind::NODE_PATTERN_LITERAL;
+            self.ast.at(b).as_data = NodeAs { single: SingleData { value: pd.name } };
+            return;
+        }
+        self.errors.emit_span(n.span, format("a range bound must be a constant"));
     }
 
     // The range node from its parts; `op_start` is where the `..` or `..=` starts.
@@ -3096,6 +3213,9 @@ extend Parser {
                 self.ast.sink_body = false;
                 result = self.parse_const();
                 self.ast.sink_body = outer_sink;
+                if result != NODE_NONE && self.ast.at(result).kind == NodeKind::NODE_CONST {
+                    self.ast.at(result).as_data.const_def.is_local = true;
+                }
             },
             Return => {
                 self.advance();

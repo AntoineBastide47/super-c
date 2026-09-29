@@ -22,6 +22,8 @@ pub struct Profile<'a> {
     pub lto: i32,
     /// Compile with `-fprofile-use=<out-dir>/pgo.profdata` when that file exists (the engine checks).
     pub pgo_use: bool,
+    /// `overflow-checks`: 1 traps integer overflow, 0 wraps it (`-DSC_ARITH_WRAP`), -1 follows `opt`.
+    pub overflow_checks: i32,
 }
 
 /// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
@@ -193,7 +195,17 @@ extend Profile {
             opt: OPT_FLAGS,
             lto: LTO_FLAGS,
             pgo_use: false,
+            overflow_checks: -1,
         };
+    }
+
+    /// Whether integer overflow wraps instead of trapping: `overflow-checks = false`, or without the key
+    /// an `opt-level` of 2, 3, "s" or "z".
+    pub const fn arith_wraps(self: &Self) bool {
+        if self.overflow_checks >= 0 {
+            return self.overflow_checks == 0;
+        }
+        return self.opt >= 2;
     }
 }
 
@@ -426,6 +438,10 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 }
             } else if key == "strip" {
                 set_bool(it, &mut errs, &mut p.strip);
+            } else if key == "overflow-checks" {
+                let mut on = false;
+                set_bool(it, &mut errs, &mut on);
+                p.overflow_checks = on as i32;
             } else if key == "lto" {
                 let mode = if it.val.kind == toml::TV_STR {
                     lto_parse(it.val.s.as_str());

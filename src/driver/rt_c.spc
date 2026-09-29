@@ -171,6 +171,60 @@ static __attribute__((unused)) inline size_t __sc_bounds_group(size_t __i, size_
   if (__i > __n || __w > __n - __i) __sc_panic("index out of bounds");
   return __i;
 }
+/* Integer arithmetic the C operators do not give (types.md "Arithmetic Semantics"). + - * and signed
+   negation trap on overflow, or wrap modulo the width when the build defines SC_ARITH_WRAP (a profile
+   without overflow checks). Division and remainder by zero, signed MIN / -1 and MIN % -1, and shifts by a
+   negative count or by the width or more trap in every build. Narrow unsigned results truncate to their
+   width (C computes them in int). U is an unsigned type at least as wide as int and as T. */
+#define SC_AI static __attribute__((unused)) inline
+#ifdef SC_ARITH_WRAP
+#define SC_ARITH_OVF(T, U, S) \
+SC_AI T __sc_add_##S(T __a, T __b) { return (T)(U)((U)__a + (U)__b); } \
+SC_AI T __sc_sub_##S(T __a, T __b) { return (T)(U)((U)__a - (U)__b); } \
+SC_AI T __sc_mul_##S(T __a, T __b) { return (T)(U)((U)__a * (U)__b); }
+#define SC_ARITH_NEG(T, U, S) SC_AI T __sc_neg_##S(T __a) { return (T)(U)(0u - (U)__a); }
+#else
+#define SC_ARITH_OVF(T, U, S) \
+SC_AI T __sc_add_##S(T __a, T __b) { T __r; if (__builtin_add_overflow(__a, __b, &__r)) __sc_panic("attempt to add with overflow"); return __r; } \
+SC_AI T __sc_sub_##S(T __a, T __b) { T __r; if (__builtin_sub_overflow(__a, __b, &__r)) __sc_panic("attempt to subtract with overflow"); return __r; } \
+SC_AI T __sc_mul_##S(T __a, T __b) { T __r; if (__builtin_mul_overflow(__a, __b, &__r)) __sc_panic("attempt to multiply with overflow"); return __r; }
+#define SC_ARITH_NEG(T, U, S) SC_AI T __sc_neg_##S(T __a) { T __r; if (__builtin_sub_overflow((T)0, __a, &__r)) __sc_panic("attempt to negate with overflow"); return __r; }
+#endif
+#define SC_ARITH_SHIFT(T, U, S) \
+SC_AI T __sc_shl_##S(T __a, uint64_t __c) { if (__c >= sizeof(T) * 8) __sc_panic("attempt to shift left with overflow"); return (T)(U)((U)__a << __c); } \
+SC_AI T __sc_shr_##S(T __a, uint64_t __c) { if (__c >= sizeof(T) * 8) __sc_panic("attempt to shift right with overflow"); return (T)(__a >> __c); }
+#define SC_ARITH_SIGNED(T, U, S, MIN) SC_ARITH_OVF(T, U, S) SC_ARITH_NEG(T, U, S) SC_ARITH_SHIFT(T, U, S) \
+SC_AI T __sc_div_##S(T __a, T __b) { if (__b == 0) __sc_panic("attempt to divide by zero"); if (__b == -1 && __a == MIN) __sc_panic("attempt to divide with overflow"); return (T)(__a / __b); } \
+SC_AI T __sc_rem_##S(T __a, T __b) { if (__b == 0) __sc_panic("attempt to calculate the remainder with a divisor of zero"); if (__b == -1 && __a == MIN) __sc_panic("attempt to calculate the remainder with overflow"); return (T)(__a % __b); }
+#define SC_ARITH_UNSIGNED(T, U, S) SC_ARITH_OVF(T, U, S) SC_ARITH_SHIFT(T, U, S) \
+SC_AI T __sc_not_##S(T __a) { return (T)~(U)__a; } \
+SC_AI T __sc_div_##S(T __a, T __b) { if (__b == 0) __sc_panic("attempt to divide by zero"); return (T)(__a / __b); } \
+SC_AI T __sc_rem_##S(T __a, T __b) { if (__b == 0) __sc_panic("attempt to calculate the remainder with a divisor of zero"); return (T)(__a % __b); }
+/* Float to integer `as` saturates: NaN is 0, a value past either end is that end. */
+#define SC_F2I_SIGNED(T, S, MIN, MAX) \
+SC_AI T __sc_f2i_##S(double __x) { return __x != __x ? (T)0 : __x <= (double)MIN ? (T)MIN : __x >= (double)MAX + 1.0 ? (T)MAX : (T)__x; }
+#define SC_F2I_UNSIGNED(T, S, MAX) \
+SC_AI T __sc_f2i_##S(double __x) { return !(__x > 0) ? (T)0 : __x >= (double)MAX + 1.0 ? (T)MAX : (T)__x; }
+SC_ARITH_SIGNED(int8_t, uint32_t, i8, INT8_MIN) SC_ARITH_SIGNED(int16_t, uint32_t, i16, INT16_MIN)
+SC_ARITH_SIGNED(int32_t, uint32_t, i32, INT32_MIN) SC_ARITH_SIGNED(int64_t, uint64_t, i64, INT64_MIN)
+SC_ARITH_SIGNED(intptr_t, uintptr_t, isize, INTPTR_MIN)
+SC_ARITH_UNSIGNED(uint8_t, uint32_t, u8) SC_ARITH_UNSIGNED(uint16_t, uint32_t, u16)
+SC_ARITH_UNSIGNED(uint32_t, uint32_t, u32) SC_ARITH_UNSIGNED(uint64_t, uint64_t, u64)
+SC_ARITH_UNSIGNED(size_t, size_t, usize)
+SC_F2I_SIGNED(int8_t, i8, INT8_MIN, INT8_MAX) SC_F2I_SIGNED(int16_t, i16, INT16_MIN, INT16_MAX)
+SC_F2I_SIGNED(int32_t, i32, INT32_MIN, INT32_MAX) SC_F2I_SIGNED(int64_t, i64, INT64_MIN, INT64_MAX)
+SC_F2I_SIGNED(intptr_t, isize, INTPTR_MIN, INTPTR_MAX)
+SC_F2I_UNSIGNED(uint8_t, u8, UINT8_MAX) SC_F2I_UNSIGNED(uint16_t, u16, UINT16_MAX)
+SC_F2I_UNSIGNED(uint32_t, u32, UINT32_MAX) SC_F2I_UNSIGNED(uint64_t, u64, UINT64_MAX)
+SC_F2I_UNSIGNED(size_t, usize, SIZE_MAX) SC_F2I_UNSIGNED(char, char, UCHAR_MAX)
+#undef SC_AI
+#undef SC_ARITH_OVF
+#undef SC_ARITH_NEG
+#undef SC_ARITH_SHIFT
+#undef SC_ARITH_SIGNED
+#undef SC_ARITH_UNSIGNED
+#undef SC_F2I_SIGNED
+#undef SC_F2I_UNSIGNED
 /* Pointer distance over a zero-sized element type: bytes cannot encode an element count. */
 static _Noreturn __attribute__((unused)) void __sc_zst_ptrdiff(void) {
   __sc_panic("pointer distance on a zero-sized element type");
@@ -239,8 +293,25 @@ pub const fn super_rt_source() *const char {
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <limits.h>
 #if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
 #include <malloc.h>
+#endif
+
+/* The language's char is unsigned; every compile of the generated tree passes -funsigned-char. */
+_Static_assert(CHAR_MIN == 0, "super-c: compile the generated C with -funsigned-char");
+
+#if defined(_WIN32)
+/* Windows opens the standard streams in text mode, which writes "\n" as "\r\n" and folds "\r\n" to
+   "\n" on read. Every program switches them to binary before main: its standard streams carry the
+   same bytes on every host. */
+__attribute__((constructor)) static void __sc_binary_stdio(void) {
+  (void)_setmode(_fileno(stdin), _O_BINARY);
+  (void)_setmode(_fileno(stdout), _O_BINARY);
+  (void)_setmode(_fileno(stderr), _O_BINARY);
+}
 #endif
 
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */

@@ -291,6 +291,25 @@ fn condition_expression_grammar() {
         ),
         "a delimited call argument in a for iterable accepts a struct initializer",
     );
+    // A turbofish or path struct literal takes postfix operators like a plain one.
+    {
+        let c = h::parse_ast(
+            "struct G<T> { v: T }\nfn f() i32 { let a = G::<i32> { v: 4 }.v; let b = m::G { v: [1] }.v[0]; return G::<i32> { v: a }.get(b); }\n",
+        );
+        assert(c.errors == 0, "postfix operators after a turbofish struct literal parse");
+        let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
+        let val_id = c.ast.at_const(let_id).as_data.let_stmt.value;
+        assert(c.ast.at_const(val_id).kind == NodeKind::NODE_MEMBER, "`G::<i32> { .. }.v` is a member access");
+        let obj_id = c.ast.at_const(val_id).as_data.member.object;
+        assert(c.ast.at_const(obj_id).kind == NodeKind::NODE_STRUCT_INITIALIZER, "its object is the struct literal");
+        let let2 = h::nth_kind(&c.ast, NodeKind::NODE_LET, 1);
+        let idx_id = c.ast.at_const(let2).as_data.let_stmt.value;
+        assert(c.ast.at_const(idx_id).kind == NodeKind::NODE_INDEX, "`m::G { .. }.v[0]` is an index");
+    }
+    assert(
+        h::parse_has_error("struct G<T> { v: T }\nfn g() { if G::<i32> { v: 1 }.v == 1 { } }\n"),
+        "a turbofish struct literal is not a condition's value",
+    );
 }
 
 @test
@@ -1128,4 +1147,21 @@ fn tuple_let_mut_elements() {
         "fn f() (i32, i32) { return 1, 2; }\nfn main() i32 { let (a, mut b) = f(); a += 1; b += 1; return a + b; }\n",
         "cannot assign",
     );
+}
+
+// A method's turbofish stays on its member (`x.m::<A, B>`), so the call keeps the member callee of a
+// method call; a path's turbofish wraps the path in a specialization.
+@test
+fn method_turbofish_shape() {
+    let src = "fn f(x: X) { x.m::<'static, u8, i32>(1); X::m::<u8>(&x, 1); }\n";
+    let c = h::parse_ast(src);
+    assert(c.errors == 0, "method turbofish parses");
+    let c0 = h::nth_kind(&c.ast, NodeKind::NODE_CALL, 0);
+    let m0 = c.ast.at_const(c.ast.at_const(c0).as_data.call.callee);
+    assert(m0.kind == NodeKind::NODE_MEMBER && !m0.as_data.member.path, "a method call's callee is its member");
+    assert(m0.as_data.member.targs.len == 3, "the member holds the turbofish, its lifetime included");
+    let c1 = h::nth_kind(&c.ast, NodeKind::NODE_CALL, 1);
+    let s1 = c.ast.at_const(c.ast.at_const(c1).as_data.call.callee);
+    assert(s1.kind == NodeKind::NODE_GENERIC_SPECIALIZATION, "a path's turbofish wraps the path");
+    assert(s1.as_data.specialization.types.len == 1, "the specialization holds the path's turbofish");
 }

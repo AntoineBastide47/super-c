@@ -17,9 +17,65 @@ pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
 pub const fn fnv_cont(h: u64, s: str) u64 {
     let mut x = h;
     for k in 0..s.len() {
-        x = (x ^ s.byte_at(k) as u64) * 0x100000001b3u64;
+        x = (x ^ s.byte_at(k) as u64).wrapping_mul(0x100000001b3u64);
     }
     return x;
+}
+
+/// The identity of the running compiler: a content hash of its executable. The C a compiler emits is a
+/// function of the compiler, so the emit stamp and the per-TU cache key on this, not on the file's
+/// path or mtime: a reinstall, a copy or an extracted archive can keep both while the content changes.
+/// 0 when the executable cannot be read (the caller then keeps no cache). Four independent lanes over
+/// 8-byte words keep the multiply chains parallel: about 1 ms per 10 MB.
+pub fn compiler_id() u64 {
+    let mut exe = PathBuf {};
+    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
+        return 0;
+    }
+    let f = stdio::fopen(str::from_cstr(&exe[0]), "rb");
+    if f == null {
+        return 0;
+    }
+    // Words, so the loads below are aligned.
+    let mut buf = Array::<u64, 8192>::new();
+    let bp = (&mut buf[0]) as *mut u64;
+    let mut l0 = FNV_BASIS;
+    let mut l1: u64 = 0x9e3779b97f4a7c15u64;
+    let mut l2: u64 = 0xBF58476D1CE4E5B9u64;
+    let mut l3: u64 = 0x94D049BB133111EBu64;
+    let mut tot: u64 = 0;
+    loop {
+        let n = unsafe stdio::fread(bp, 1, 65536, f);
+        if n == 0 {
+            break;
+        }
+        tot += n as u64;
+        // Zero the bytes past the data up to a whole group of four words.
+        let e = (n + 31) / 32 * 32;
+        for k in n..e {
+            unsafe (bp as *mut u8)[k] = 0;
+        }
+        let mut i: usize = 0;
+        while i < e / 8 {
+            l0 = (l0 ^ buf[i]).wrapping_mul(0x100000001b3u64);
+            l1 = (l1 ^ buf[i + 1]).wrapping_mul(0x100000001b3u64);
+            l2 = (l2 ^ buf[i + 2]).wrapping_mul(0x100000001b3u64);
+            l3 = (l3 ^ buf[i + 3]).wrapping_mul(0x100000001b3u64);
+            l0 = l0 ^ l0 >> 29;
+            l1 = l1 ^ l1 >> 29;
+            l2 = l2 ^ l2 >> 29;
+            l3 = l3 ^ l3 >> 29;
+            i += 4;
+        }
+    }
+    let bad = unsafe stdio::ferror(f) != 0;
+    unsafe stdio::fclose(f);
+    if bad || tot == 0 {
+        return 0;
+    }
+    let h = skey_mix(skey_mix(skey_mix(skey_mix(skey_mix(FNV_BASIS, l0), l1), l2), l3), tot);
+    // 0 means "no identity"; a real hash never takes it.
+    return h | (h == 0) as u64;
 }
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.

@@ -127,7 +127,96 @@ fn zst_element_array_elides() {
 fn zst_nested_generic_agrees_with_concrete() {
     h::expect_exit(
         "generic body and concrete caller agree on Array<T, N> with T zero-sized",
-        "@derive(Default)\n@c.align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(y: T, z: T) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: [y, z], b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>(M {}, M {}));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
+        "@derive(Default)\n@c.align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(raw: [T; N]) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: raw, b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>([M {}, M {}]));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
         0,
     );
+}
+
+// A constant that addresses a zero-sized object (a constant, a field, an element, an array a slice
+// views, a temporary) holds the aligned sentinel, like a reference at run time: the object has no C
+// storage. Every such address is equal.
+@test
+fn zst_constant_references() {
+    const SRC: str = M"(struct Z {}
+@c.align(8)
+struct Z8 {}
+struct H<'a> { pub z: &'a Z, pub n: i32, pub zs: [Z; 2] }
+const ZC: Z = Z {};
+const Z8C: Z8 = Z8 {};
+const RZ: &Z = &ZC;
+const RR: &&Z = &RZ;
+const R8: &Z8 = &Z8C;
+static mut RS: &Z = &ZC;
+const HH: H<'static> = H { z: &ZC, n: 3, zs: [Z {}, Z {}] };
+const RH: &H<'static> = &HH;
+const ZA: [Z; 3] = [Z {}, Z {}, Z {}];
+const ZS: []Z = ZA;
+const E1: &Z = &ZA[1];
+const OR: Option<&Z> = Option::Some(&ZC);
+const CZ: &[Z; 2] = &[Z {}, Z {}];
+const HZ: &[Z; 2] = &HH.zs;
+fn get() &'static Z { return RZ; }
+fn main() i32 {
+    let a = get() as *const Z as usize;
+    let mut bad = 0;
+    if unsafe RS as *const Z as usize != a || RH.z as *const Z as usize != a || *RR as *const Z as usize != a { bad += 1; }
+    if E1 as *const Z as usize != a || CZ as *const [Z; 2] as usize != a || HZ as *const [Z; 2] as usize != a { bad += 2; }
+    if R8 as *const Z8 as usize % 8 != 0 { bad += 4; }
+    if let Some(r) = OR { if r as *const Z as usize != a { bad += 8; } }
+    if HH.n != 3 || ZS.len() != 3 { bad += 16; }
+    return bad;
+}
+)";
+    h::expect_exit("constants addressing zero-sized objects", SRC, 0);
+    h::expect_c("a field addressing a zero-sized constant", SRC, "H HH = { .z = (void *)&__sc_zst_1, .n = 3 };");
+    h::expect_c("a slice of a zero-sized array", SRC, "Slice__Z ZS = { .ptr = (void *)&__sc_zst_1, .len = 3 };");
+    h::expect_c("an aligned zero-sized constant", SRC, "const Z8 *R8 = (void *)&__sc_zst_8;");
+}
+
+// A zero-length array is zero-sized like any ZST: no local, member or parameter of it is declared
+// (ISO C has no zero-length array), a pointer to one is a bare data pointer whose arithmetic moves
+// nothing, and a subscript of one (never executed: the bounds check fails first) addresses the
+// element type at the sentinel. A zero-length member keeps its alignment in the enclosing struct.
+const ZERO_LEN: str = M"(struct S { pub a: [u32; 0], pub b: u8 }
+struct W<const N: usize> { pub d: [u32; N] }
+struct Z { pub w: W<0>, pub x: u8 }
+static_assert(sizeof(S) == 4 && alignof(S) == 4);
+static_assert(sizeof(W<0>) == 0 && alignof(W<0>) == 4);
+static_assert(sizeof(Z) == 4);
+static_assert(sizeof(Array<u64, 0>) == 0);
+const NONE: [i32; 0] = [];
+fn pick(_: [i32; 0], a: i32) i32 { return a; }
+fn mk() [i32; 0] { return []; }
+fn sum<const N: usize>(a: [i32; N]) i32 { let mut s = 0; for x in a { s += x; } return s; }
+fn main() i32 {
+    let s = S { a: [], b: 1 };
+    let z = Z { w: W::<0> { d: [] }, x: 2 };
+    let mut a = Array::<u64, 0>::new();
+    a.reverse();
+    let m = a.map(|x: &u64| *x + 1);
+    let f: fn([i32; 0], i32) i32 = pick;
+    let e: [i32; 0] = [];
+    let r = mk();
+    let v: []i32 = r;
+    let mut t = 0;
+    for x in e { t += x; }
+    let mut sb = S { a: [], b: 3 };
+    sb.a = [];
+    let ps: *const [u32; 0] = &sb.a;
+    let pz = unsafe (ps + 3);
+    let mut rows: [[i32; 0]; 3] = [[], [], []];
+    let pr: *mut [i32; 0] = &mut rows[1];
+    let d = (unsafe (pr + 1) as usize) - (pr as usize);
+    if s.b != 1 || z.x != 2 || m.len() != 0 || f(e, 4) != 4 || v.len() != 0 || t != 0 { return 1; }
+    if sum(e) + sum(NONE) != 0 || sum([1, 2]) != 3 || sb.b != 3 || pz != ps || d != 0 { return 2; }
+    return 0;
+}
+)";
+
+@test
+fn zero_length_arrays_are_zero_sized() {
+    h::expect_exit("zero-length arrays", ZERO_LEN, 0);
+    h::expect_c_absent("no zero-length local", ZERO_LEN, "int32_t e[0]");
+    h::expect_c_absent("no zero-length member", ZERO_LEN, "uint32_t a[0]");
+    h::expect_c("a pointer to a zero-length array is a data pointer", ZERO_LEN, "const void *ps = ");
 }

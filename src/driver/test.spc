@@ -1193,7 +1193,7 @@ pub fn test_build_and_run(
     };
     let mut args = Vector::<String>::new();
     split_args(&mut args, ccs.as_str());
-    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L");
+    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char");
     // The cross triple comes first so the profile's flags (`cflags`, empty for a bare build) can override it.
     let mut fl = String::new();
     push_sdk_flags(&mut fl, sdk, p.arch);

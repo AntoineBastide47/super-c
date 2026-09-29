@@ -71,10 +71,12 @@ pub struct SymLookup {
     pub decl: NodeId,
     pub idx: u32,
 }
-/// A module-qualified type split: module id (-1 = not qualified) and the final type-name node.
+/// A module-qualified type split: module id (-1 = not qualified), the type-name node and its segment
+/// index (0 when not qualified).
 pub struct ModQual {
     pub mid: i32,
     pub type_node: NodeId,
+    pub head: u32,
 }
 /// A leading-segment-as-module test result.
 pub struct ModName {
@@ -101,7 +103,7 @@ fn name_hash(src: str, s: tok::Span) u32 {
     let mut i = s.start;
     while i < s.end {
         h = h ^ src[i as usize] as u32;
-        h = h * 16777619u32;
+        h = h.wrapping_mul(16777619u32);
         i = i + 1;
     }
     return h;
@@ -402,7 +404,7 @@ extend Resolver {
     // and the final segment node; otherwise mid = -1.
     fn module_qualified_type(self: &Self, parts: NodeList) ModQual {
         if self.package == null || parts.len < 2 {
-            return ModQual { mid: -1, type_node: NODE_NONE };
+            return ModQual { mid: -1, type_node: NODE_NONE, head: 0 };
         }
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
@@ -410,15 +412,30 @@ extend Resolver {
         if parts.len == 2 {
             let nm = self.name_is_module(self.name_span(unsafe ids[0]));
             if nm.found {
-                return ModQual { mid: nm.mid, type_node: unsafe ids[1] };
+                return ModQual { mid: nm.mid, type_node: unsafe ids[1], head: 1 };
             }
         }
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
         let m = pkg.find(str::from_raw(buf.as_str().ptr(), buf.len()));
         if m >= 0 {
-            return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
+            return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize], head: parts.len - 1 };
         }
-        return ModQual { mid: -1, type_node: NODE_NONE };
+        // `module::Enum::Variant`: the type is the segment before the last.
+        if parts.len >= 3 {
+            let at = unsafe ids[(parts.len - 2) as usize];
+            if parts.len == 3 {
+                let nm = self.name_is_module(self.name_span(unsafe ids[0]));
+                if nm.found {
+                    return ModQual { mid: nm.mid, type_node: at, head: 1 };
+                }
+            }
+            let b2 = self.join_segs(ids, parts.len - 2);
+            let m2 = pkg.find(str::from_raw(b2.as_str().ptr(), b2.len()));
+            if m2 >= 0 {
+                return ModQual { mid: m2, type_node: at, head: parts.len - 2 };
+            }
+        }
+        return ModQual { mid: -1, type_node: NODE_NONE, head: 0 };
     }
 
     // Look up `name` among the modules this module glob-imports (via scan_imports' table).
@@ -699,10 +716,9 @@ extend Resolver {
     // const stand where a literal is otherwise required. A name that is neither falls through to
     // `resolve_type`, so the diagnostic still blames a missing type.
     fn resolve_generic_arg(self: &mut Self, a: NodeId) {
-        // A braced argument (`Foo<{N * 2}>`) is an expression, and its names: the enclosing generic's
-        // own parameters: resolve as values, not as types.
-        let k = self.ast.at_const(a).kind;
-        if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL {
+        // A braced argument (`Foo<{N * 2}>`, `Foo<{E::A}>`) is an expression, and its names (the
+        // enclosing generic's own parameters, an enum variant's enum) resolve as in any expression.
+        if self.ast.is_const_expr_arg(a) {
             self.resolve_expr(a);
             return;
         }
@@ -713,6 +729,18 @@ extend Resolver {
                 let nm = self.name_span(first);
                 if !self.name_resolves(nm, Namespace::NS_TYPE) && self.name_resolves(nm, Namespace::NS_VALUE) {
                     self.resolve_ref(a, first, Namespace::NS_VALUE, "value");
+                    return;
+                }
+            }
+            // `m::B`: a module's public constant reads like the unqualified name.
+            let mq = self.module_qualified_type(tp.parts);
+            if tp.args.len == 0 && mq.mid >= 0 && mq.head == tp.parts.len - 1 {
+                let pkg = unsafe &*self.package;
+                let ns = self.name_span(mq.type_node);
+                let nm = self.source.slice(ns.start as usize, ns.end as usize);
+                if pkg.lookup(mq.mid as ModuleId, nm, true) == NODE_NONE {
+                    self.ast.at(a).as_data.type_path.head = mq.head;
+                    self.resolve_module_decl(a, mq.mid as ModuleId, ns, false, "type or constant");
                     return;
                 }
             }
@@ -862,11 +890,15 @@ extend Resolver {
         if kind == NodeKind::NODE_TYPE_PATH {
             let tp = self.ast.at_const(id).as_data.type_path;
             let mq = self.module_qualified_type(tp.parts);
+            self.ast.at(id).as_data.type_path.head = mq.head;
             if mq.mid >= 0 {
                 let tspan = self.name_span(mq.type_node);
                 self.resolve_module_decl(id, mq.mid as ModuleId, tspan, true, "type");
                 for i in 0..tp.args.len {
                     self.resolve_generic_arg(self.child(tp.args, i));
+                }
+                for i in 0..tp.bindings.len {
+                    self.resolve_type(self.ast.at_const(self.child(tp.bindings, i)).as_data.type_alias.ty);
                 }
                 return;
             }
@@ -896,6 +928,7 @@ extend Resolver {
                             }
                         }
                         if found != NODE_NONE {
+                            self.ast.at(id).as_data.type_path.head = 1;
                             self.ast.set_resolution_def(id, DefId { module: self.ast.module, node: found });
                         } else {
                             self.errors.emit_span(assoc, format("no associated type by this name in scope"));
@@ -910,6 +943,9 @@ extend Resolver {
             }
             for i in 0..tp.args.len {
                 self.resolve_generic_arg(self.child(tp.args, i));
+            }
+            for i in 0..tp.bindings.len {
+                self.resolve_type(self.ast.at_const(self.child(tp.bindings, i)).as_data.type_alias.ty);
             }
             return;
         }
@@ -958,11 +994,24 @@ extend Resolver {
         if id == NODE_NONE {
             return;
         }
-        if self.ast.at_const(id).kind == NodeKind::NODE_IDENTIFIER {
+        if self.ast.at_const(id).kind == NodeKind::NODE_IDENTIFIER && span_is(self.source, self.name_span(id), "Self") {
+            self.resolve_self_name(id);
+        } else if self.ast.at_const(id).kind == NodeKind::NODE_IDENTIFIER {
             self.resolve_ref(id, id, Namespace::NS_TYPE, "type");
         } else {
             self.resolve_type(id);
         }
+    }
+
+    // A `Self` in an expression (`Self::f()`, `Self { .. }`) names the implementing type as a `Self`
+    // type does.
+    fn resolve_self_name(self: &mut Self, id: NodeId) {
+        if self.current_self.node == NODE_NONE {
+            self.errors.emit_span(self.name_span(id), format("'Self' is only valid inside an interface or extension"));
+            return;
+        }
+        let cs = self.current_self;
+        self.ast.set_resolution_def(id, cs);
     }
 
     // items ---------------------------------------------------------------------------------------------.
@@ -1170,8 +1219,11 @@ extend Resolver {
                 self.resolve_expr(cd.value);
             },
             NODE_EXTERN_BLOCK => {
+                // Extern items resolve as top-level ones do: a struct's fields name types too.
                 let inner = self.ast.at_const(id).as_data.extern_block.items;
-                self.resolve_associated_items(inner);
+                for i in 0..inner.len {
+                    self.resolve_item(self.child(inner, i));
+                }
             },
             NODE_STATIC_ASSERT => {
                 let left = self.ast.at_const(id).as_data.binary.left;
@@ -1522,12 +1574,17 @@ extend Resolver {
             return;
         }
         let obj_kind = self.ast.at_const(mb.object).kind;
-        if mb.path && obj_kind == NodeKind::NODE_IDENTIFIER {
+        if mb.path && obj_kind == NodeKind::NODE_IDENTIFIER && span_is(self.source, self.name_span(mb.object), "Self") {
+            self.resolve_self_name(mb.object);
+        } else if mb.path && obj_kind == NodeKind::NODE_IDENTIFIER {
             // resolve_qualified_member already tried the identifier as an imported module name.
             self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type");
         } else {
             // Member name needs a type; deferred to the type checker.
             self.resolve_expr(mb.object);
+        }
+        for i in 0..mb.targs.len {
+            self.resolve_generic_arg(self.child(mb.targs, i));
         }
     }
 
@@ -1654,15 +1711,47 @@ extend Resolver {
                 }
             },
             NODE_PATTERN_OR => {
-                // Alternatives bind the same names; declare the first's.
+                // Alternatives bind the same names; declare the first's, and resolve every
+                // alternative's constants.
                 let children = self.ast.at_const(id).as_data.pattern.children;
                 if children.len != 0 {
                     let c0 = self.child(children, 0);
                     self.resolve_pattern(c0);
                 }
+                for i in 1..children.len {
+                    let c = self.child(children, i);
+                    self.resolve_pattern_consts(c);
+                }
             },
-            _ => {}, // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE: nothing to bind
+            NODE_PATTERN_LITERAL | NODE_PATTERN_RANGE => {
+                self.resolve_pattern_consts(id);
+            },
+            _ => {}, // NODE_PATTERN_WILDCARD: nothing to bind
         };
+    }
+
+    // Resolve the constants in pattern `id` (a named or qualified constant resolves as in an
+    // expression) and declare nothing.
+    fn resolve_pattern_consts(self: &mut Self, id: NodeId) {
+        if id == NODE_NONE {
+            return;
+        }
+        let n = *self.ast.at_const(id);
+        if n.kind == NodeKind::NODE_PATTERN_LITERAL {
+            self.resolve_expr(n.as_data.single.value);
+            return;
+        }
+        if n.kind == NodeKind::NODE_PATTERN_RANGE {
+            self.resolve_pattern_consts(n.as_data.pattern_range.start);
+            self.resolve_pattern_consts(n.as_data.pattern_range.end);
+            return;
+        }
+        if n.kind == NodeKind::NODE_PATTERN_NAME || n.kind == NodeKind::NODE_PATTERN_TUPLE || n.kind == NodeKind::NODE_PATTERN_STRUCT || n.kind == NodeKind::NODE_PATTERN_FIELD || n.kind == NodeKind::NODE_PATTERN_OR {
+            let children = n.as_data.pattern.children;
+            for i in 0..children.len {
+                self.resolve_pattern_consts(self.child(children, i));
+            }
+        }
     }
 
     // driver --------------------------------------------------------------------------------------------.

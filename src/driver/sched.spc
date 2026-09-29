@@ -105,7 +105,7 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
         // SC_TASK_DELAY=<seed>: a deterministic per-job stagger (100 to 400 us, a hash of the job
         // and the seed), so the identity gates run under schedules the machine would not
         // produce by itself and a different one per seed.
-        let h = t.j * 0x9E3779B1u32 ^ t.seed * 0x85EBCA6Bu32;
+        let h = t.j.wrapping_mul(0x9E3779B1u32) ^ t.seed.wrapping_mul(0x85EBCA6Bu32);
         prt::sleep_ns(((h >> 24 & 3) as i64 + 1) * 100000);
     }
     let run = t.run;

@@ -128,7 +128,8 @@ fn engine_over(src: str, probe_arm: i64) bool {
 
 @test
 fn usefulness_verdicts() {
-    // Integers stay never-complete: the catch-all is reachable behind any literal set.
+    // The snippets are resolved, not checked, so no integer pattern has a recorded value: a literal
+    // equals only a literal spelled alike, and the catch-all is reachable behind any literal set.
     assert(
         engine_over("fn f(n: i32) i32 { return switch n { 1 => 1, 2 => 2, _ => 0 }; }\n", 2),
         "catch-all reachable behind integer literals",
@@ -148,10 +149,171 @@ fn usefulness_verdicts() {
         !engine_over("enum E { A, B(i32), C }\nfn f(e: E) i32 { return switch e { A => 0, B(x) => x, C => 2 }; }\n", -1),
         "complete variant switch exhaustive",
     );
-    // Range coverage never proves integers complete (established diagnostics).
+    // A catch-all row absorbs the wildcard probe.
     assert(
         engine_over("fn f(n: u8) i32 { return switch n { 0..=255 => 1, _ => 0 }; }\n", -1) == false,
         "a catch-all row absorbs the wildcard probe",
+    );
+}
+
+// A qualified path in a pattern names a constant: a builtin limit reads as the literal of its value in
+// the matched type; an associated constant (of a struct or an enum) and a named constant in a range
+// bound keep their own type, the matched type or one that widens to it. Literal and range patterns,
+// or-patterns, `if let` and tuple elements take them, at compile time too.
+@test
+fn constant_path_patterns() {
+    h::expect_exit(
+        "constant path patterns",
+        M"(struct Lim { pub a: i32 }
+extend Lim {
+    pub const LO: u8 = 10;
+    pub const HI: u8 = 20;
+}
+enum Lvl { Lo, Hi }
+extend Lvl {
+    pub const N: i32 = 3;
+}
+const MID: u8 = 15;
+const fn band(x: u8) i32 {
+    return switch x { 0..Lim::LO => 1, Lim::LO..=MID => 2, 16..=Lim::HI => 3, 21..=u8::MAX => 4 };
+}
+fn sign(x: i64) i32 {
+    return switch x { i64::MIN..=-1 => -1, 0 => 0, 1..=i64::MAX => 1 };
+}
+fn half(x: u64) i32 {
+    return switch x { 0..=i64::MAX => 1, 9223372036854775808..=u64::MAX => 2 };
+}
+fn choose(x: i32) i32 {
+    return switch x { u8::MAX => 1, i32::MIN | i32::MAX => 2, Lvl::N => 3, _ => 4 };
+}
+fn wide(x: u16) i32 {
+    if let Lim::HI = x {
+        return 1;
+    }
+    return switch (x, x > 5) { (Lim::LO, true) => 2, (0..=Lim::HI, _) => 3, _ => 4 };
+}
+static_assert(band(0) == 1 && band(10) == 2 && band(15) == 2 && band(16) == 3 && band(255) == 4);
+fn main() i32 {
+    if sign(i64::MIN) != -1 || sign(0) != 0 || sign(i64::MAX) != 1 {
+        return 1;
+    }
+    if half(9223372036854775807) != 1 || half(9223372036854775808) != 2 || half(u64::MAX) != 2 {
+        return 2;
+    }
+    if choose(255) != 1 || choose(i32::MIN) != 2 || choose(i32::MAX) != 2 || choose(3) != 3 || choose(0) != 4 {
+        return 3;
+    }
+    if wide(20) != 1 || wide(10) != 2 || wide(3) != 3 || wide(300) != 4 {
+        return 4;
+    }
+    return band(12) - 2;
+}
+)",
+        0,
+    );
+}
+
+// Integer values and ranges cover their type's domain: every limit and literal spelling takes part,
+// u64 bounds past i64::MAX included, and the domain is the matched type's, not a narrower constant's.
+@test
+fn integer_patterns_cover_the_domain() {
+    h::expect_ok(
+        "exhaustive integer switches",
+        M"(fn a(x: i64) i32 { return switch x { i64::MIN..=-1 => 1, 0..=i64::MAX => 2 }; }
+fn b(x: u64) i32 { return switch x { 0..=u64::MAX => 1 }; }
+fn c(x: u64) i32 { return switch x { 0..=9223372036854775807 => 1, 9223372036854775808..=18446744073709551615 => 2 }; }
+fn d(x: u8) i32 { return switch x { 0..=0x7F => 1, 128..=255 => 2 }; }
+fn e(x: i8) i32 { return switch x { ..0 => 1, 0.. => 2 }; }
+fn f(x: char) i32 { return switch x { '\0'..='a' => 1, 'b'..='\xff' => 2 }; }
+fn main() i32 { return a(0) + b(0) + c(0) + d(0) + e(0) + f('a') - 8; }
+)",
+    );
+    h::expect_err_msg(
+        "a u64 switch missing its largest value",
+        "fn f(x: u64) i32 { return switch x { 0..=18446744073709551614 => 1 }; }\n",
+        "error: switch is not exhaustive\n--> <harness>:1:34",
+    );
+    h::expect_err_msg(
+        "a constant narrower than the matched type",
+        "struct Lim { pub a: i32 }\nextend Lim { pub const HI: u8 = 255; }\nfn f(x: u16) i32 { return switch x { 0..=Lim::HI => 1 }; }\n",
+        "error: switch is not exhaustive\n--> <harness>:3:34",
+    );
+}
+
+// A decision-tree edge keeps every row its value reaches: overlapping ranges split into pieces, two
+// spellings of one integer (hex, decimal) are one constructor, and so are strings spelled alike;
+// strings whose escapes may spell one value keep the arm-order test.
+@test
+fn overlapping_constructors_match_in_arm_order() {
+    h::expect_exit(
+        "overlapping constructors",
+        M"(fn r(x: i32, b: bool) i32 { return switch (x, b) { (0..=5, true) => 1, (3..=10, _) => 2, _ => 3 }; }
+fn v(x: i32, b: bool) i32 { return switch (x, b) { (4, true) => 1, (3..=10, _) => 2, _ => 3 }; }
+fn hx(x: i32, b: bool) i32 { return switch (x, b) { (0x10, true) => 1, (16, false) => 2, _ => 3 }; }
+fn s(t: str, b: bool) i32 { return switch (t, b) { ("a", true) => 1, ("a", false) => 2, _ => 3 }; }
+fn esc(t: str, b: bool) i32 { return switch (t, b) { ("\x61", true) => 1, ("a", false) => 2, _ => 3 }; }
+fn main() i32 {
+    if r(4, false) != 2 || r(4, true) != 1 || r(11, true) != 3 {
+        return 1;
+    }
+    if v(4, false) != 2 || v(4, true) != 1 {
+        return 2;
+    }
+    if hx(16, false) != 2 || hx(16, true) != 1 {
+        return 3;
+    }
+    if s("a", false) != 2 || s("a", true) != 1 || s("b", true) != 3 {
+        return 4;
+    }
+    if esc("a", false) != 2 || esc("a", true) != 1 {
+        return 5;
+    }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// A pattern value is a constant: a qualified path naming a variant, a local, a limit outside the
+// matched type, a constant of another type and a missing constant are errors, and so are a `mut`
+// constant pattern and a range bound that is no value.
+@test
+fn constant_pattern_errors() {
+    h::expect_err_msg(
+        "a qualified unit variant",
+        "enum E { A, B }\nfn f(e: E) i32 { return switch e { E::A => 1, _ => 2 }; }\n",
+        "error: a pattern names a variant without its enum: write 'A', not 'E::A'\n--> <harness>:2:36",
+    );
+    h::expect_err_msg(
+        "a local as a range bound",
+        "fn f(x: i32, y: i32) i32 { return switch x { 0..=y => 1, _ => 2 }; }\n",
+        "error: a pattern value must be a constant: 'y' is not one\n--> <harness>:1:50",
+    );
+    h::expect_err_msg(
+        "a limit outside the matched type",
+        "fn f(x: u64) i32 { return switch x { i64::MIN..=0 => 1, _ => 2 }; }\n",
+        "error: integer literal is out of range for 'u64'\n--> <harness>:1:38",
+    );
+    h::expect_err_msg(
+        "an associated constant of another type",
+        "struct Foo { pub a: i32 }\nextend Foo { pub const K: i64 = 7; }\nfn f(x: i32) i32 { return switch x { Foo::K => 1, _ => 2 }; }\n",
+        "error: mismatched types: expected 'i32', found 'i64'\n--> <harness>:3:38",
+    );
+    h::expect_err_msg(
+        "a missing associated constant",
+        "struct Foo { pub a: i32 }\nfn f(x: i32) i32 { return switch x { Foo::Q => 1, _ => 2 }; }\n",
+        "error: no associated method or constant 'Q' on this type\n--> <harness>:2:43",
+    );
+    h::expect_err_msg(
+        "a mut constant pattern",
+        "struct Foo { pub a: i32 }\nextend Foo { pub const K: i32 = 7; }\nfn f(x: i32) i32 { return switch x { mut Foo::K => 1, _ => 2 }; }\n",
+        "error: a constant pattern cannot be 'mut'",
+    );
+    h::expect_err_msg(
+        "a wildcard range bound",
+        "fn f(x: i32) i32 { return switch x { _..=5 => 1, _ => 2 }; }\n",
+        "error: a range bound must be a constant",
     );
 }
 

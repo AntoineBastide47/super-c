@@ -294,7 +294,7 @@ jobs:
           wasmtime run --dir=/ --argv0 /tmp/wwasm/super-c.wasm -- \
             /tmp/wwasm/super-c.wasm /tmp/wwasm/src/main.spc --target=wasm
           mv /tmp/wwasm/src/build /tmp/wasm-gen1
-          "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
+          "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L -funsigned-char \
             -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
             $(find /tmp/wasm-gen1 -name '*.c') -lm -o /tmp/wwasm/gen2.wasm

@@ -56,6 +56,19 @@ static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl
   (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_ql; (void)sc_qh; (void)sc_rl; (void)sc_rh; abort();
 }
 #endif
+/* Overflow in std's Int<N> and UInt<N> operators: the built-in trap (`__sc_panic` from super_rt.h), or a
+   return when the build wraps (-DSC_ARITH_WRAP), and the operator then keeps its wrapped value. A zero
+   divisor and MIN / -1 trap in every profile, as the built-in `/` and `%` do. The IR interpreter models
+   these three names for compile-time evaluation. */
+static inline void sc_int_overflow(const uint8_t *sc_m) {
+#ifdef SC_ARITH_WRAP
+  (void)sc_m;
+#else
+  __sc_panic((const char *)sc_m);
+#endif
+}
+static inline void sc_int_div_zero(const uint8_t *sc_m) { __sc_panic((const char *)sc_m); }
+static inline void sc_int_div_overflow(const uint8_t *sc_m) { __sc_panic((const char *)sc_m); }
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif

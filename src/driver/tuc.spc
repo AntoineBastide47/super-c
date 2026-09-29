@@ -20,18 +20,18 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 5;
+const TUC_VER: u32 = 9;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
-    x = (x ^ v & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 8 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 16 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 24 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 32 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 40 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 48 & 0xFF) * 1099511628211u64;
-    x = (x ^ v >> 56 & 0xFF) * 1099511628211u64;
+    x = (x ^ v & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 8 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 16 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 24 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 32 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 40 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 48 & 0xFF).wrapping_mul(1099511628211u64);
+    x = (x ^ v >> 56 & 0xFF).wrapping_mul(1099511628211u64);
     return x;
 }
 
@@ -45,6 +45,11 @@ fn w32(o: &mut String, v: u32) {
 fn w64(o: &mut String, v: u64) {
     w32(o, (v & 0xFFFFFFFF) as u32);
     w32(o, (v >> 32) as u32);
+}
+
+fn w128(o: &mut String, v: i128) {
+    w64(o, v.limb(0));
+    w64(o, v.limb(1));
 }
 
 fn wstr(o: &mut String, s: str) {
@@ -75,19 +80,12 @@ pub struct Tuc {
 }
 
 fn header_hash(p: &loader::Package, target: i32) u64 {
-    let mut exe = PathBuf {};
-    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
+    // The compiler's content hash: a different compiler at the same path, with any mtime, must not match.
+    let cid = compiler_id();
+    if cid == 0 {
         return 0;
     }
-    let ep = str::from_cstr(&exe[0]);
-    // Nanoseconds: a different compiler linked to the same path within one second must not match.
-    let mt = unsafe shim::sc_mtime_ns(&mut exe[0]);
-    if mt == 0 {
-        return 0;
-    }
-    let mut h = FNV_BASIS;
-    h = fnv_cont(h, ep);
-    h = fnv_mix(h, mt as u64);
+    let mut h = fnv_mix(FNV_BASIS, cid);
     h = fnv_mix(h, TUC_VER);
     // Emission-mode switches change the C a body renders to: a record written under one mode
     // must never replay under another.
@@ -385,14 +383,20 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         w32(&mut r.tab, er);
     } else if k == TypeKind::TYPE_ARRAY {
         let er = tt_ref(p, r, am, ty.as_data.arr.elem);
+        // A symbolic length is a type too: its table ref replaces the pool id.
+        let lr = if ty.arr_sym() {
+            tt_ref(p, r, am, ty.as_data.arr.len);
+        } else {
+            ty.as_data.arr.len;
+        };
         r.tab.push_byte(TT_ARR);
         r.tab.push_byte(ty.qualifier);
         r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, er);
-        w32(&mut r.tab, ty.as_data.arr.len);
-    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-        let it = *a.instance(ty.as_data.inst);
+        w32(&mut r.tab, lr);
+    } else if ty.rec() != NO_REC {
+        let it = *a.instance(ty.rec());
         let mut ar = Array::<u32, 8> {};
         for i in 0..it.n {
             ar[i as usize] = tt_ref(p, r, am, unsafe it.args[i as usize]);
@@ -422,13 +426,15 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         r.tab.push_byte(ty.qualifier);
         r.tab.push_byte(ty.concrete as u8);
         w32(&mut r.tab, ty.module);
-        w64(&mut r.tab, l.k as u64);
-        w64(&mut r.tab, l.div_of() as u64);
+        r.tab.push_byte(l.ty as u8);
+        r.tab.push_byte(l.to as u8);
+        w128(&mut r.tab, l.k);
+        w128(&mut r.tab, l.div_of());
         w32(&mut r.tab, l.n as u32);
         for i in 0..l.n {
             w32(&mut r.tab, (unsafe l.p[i as usize]).module);
             w32(&mut r.tab, (unsafe l.p[i as usize]).node);
-            w64(&mut r.tab, (unsafe l.c[i as usize]) as u64);
+            w128(&mut r.tab, unsafe l.c[i as usize]);
         }
     } else {
         // Nominal / leaf payloads carry no pool-relative data: raw bytes round-trip.
@@ -501,13 +507,18 @@ pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>
         );
     } else if e.tag == TT_ARR {
         let el = tt_id(p, tab, cache, e.r0, am);
+        let ln = if e.qual == ARR_SYM {
+            tt_id(p, tab, cache, e.aux, am);
+        } else {
+            e.aux;
+        };
         id = a.intern_type(
             Ty {
                 kind: TypeKind::TYPE_ARRAY,
                 qualifier: e.qual,
                 concrete: e.conc != 0,
                 module: e.module as ModuleId,
-                as_data: TyAs { arr: TyArr { elem: el, len: e.aux } },
+                as_data: TyAs { arr: TyArr { elem: el, len: ln } },
             },
         );
     } else if e.tag == TT_INST {
@@ -517,6 +528,14 @@ pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>
         }
         id = if e.kind as TypeKind == TypeKind::TYPE_DYN {
             a.intern_dyn(e.im as ModuleId, e.idecl, &ar[0], e.n, e.qual);
+        } else if e.kind as TypeKind == TypeKind::TYPE_ASSOC {
+            a.intern_assoc(e.im as ModuleId, e.idecl, &ar[0], e.n);
+        } else if e.kind as TypeKind == TypeKind::TYPE_FUNCTION {
+            let mut it = TyInstance { module: e.im as ModuleId, decl: e.idecl, n: e.n };
+            for i in 0..e.n {
+                unsafe it.args[i as usize] = ar[i as usize];
+            }
+            a.intern_sig_rec(&it, e.qual);
         } else {
             a.intern_instance(e.im as ModuleId, e.idecl, &ar[0], e.n);
         };
@@ -568,7 +587,7 @@ fn ev_tr(
             xs_out.push(ev.xs[i]);
         }
     }
-    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG || ev.kind == mbe::RK_DYNTAB {
         for i in 0..ev.subs.len() {
             subs_out.push(tt_ref(p, r, ev.subs.at(i).am, ev.subs.at(i).at));
         }
@@ -602,7 +621,7 @@ fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
             }
         }
     }
-    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG || ev.kind == mbe::RK_DYNTAB {
         for i in 0..ev.subs.len() {
             if !tt_ref_ok(tab, ev.subs.at(i).at) {
                 return false;
@@ -631,7 +650,7 @@ pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u
             ev.xs.set(i, tt_id(p, tab, cache, ev.xs[i], ev.a as ModuleId));
         }
     }
-    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG || ev.kind == mbe::RK_DYNTAB {
         for i in 0..ev.subs.len() {
             let am = ev.subs.at(i).am;
             let nv = tt_id(p, tab, cache, ev.subs.at(i).at, am);
@@ -736,6 +755,13 @@ extend Rd {
         return lo | hi << 32;
     }
 
+    fn r128(self: &mut Self) i128 {
+        let mut v = i128::zero();
+        v.set_limb(0, self.r64());
+        v.set_limb(1, self.r64());
+        return v;
+    }
+
     fn rstr(self: &mut Self, out: &mut String) {
         let n = self.r32() as usize;
         if !self.ok || self.at + n > self.end {
@@ -765,7 +791,7 @@ extend Rd {
                 n: 0,
                 argr: [0; 8],
                 raw: [0; 16],
-                lin: ConstLin { k: 0, n: 0 },
+                lin: ConstLin::new(BuiltinType::BT_COUNT),
             };
             if e.tag == TT_RAW {
                 for b in 0..sizeof(Ty) {
@@ -807,9 +833,15 @@ extend Rd {
                 e.qual = self.r8();
                 e.conc = self.r8();
                 e.module = self.r32();
-                e.lin.k = self.r64() as i64;
-                let dv = self.r64() as i64;
-                e.lin.div = dv;
+                let lt = self.r8();
+                let lto = self.r8();
+                if lt > BuiltinType::BT_COUNT as u8 || lto > BuiltinType::BT_COUNT as u8 {
+                    return false;
+                }
+                e.lin.ty = lt as BuiltinType;
+                e.lin.to = lto as BuiltinType;
+                e.lin.k = self.r128();
+                e.lin.div = self.r128();
                 let ln = self.r32();
                 if ln > 4 {
                     return false;
@@ -819,7 +851,7 @@ extend Rd {
                     let dm = self.r32() as ModuleId;
                     let dn = self.r32();
                     unsafe e.lin.p[i as usize] = DefId { module: dm, node: dn };
-                    unsafe e.lin.c[i as usize] = self.r64() as i64;
+                    unsafe e.lin.c[i as usize] = self.r128();
                 }
             } else {
                 return false;
@@ -829,7 +861,7 @@ extend Rd {
             }
             let mut refs_ok = true;
             if e.tag == TT_WRAP || e.tag == TT_ARR || e.tag == TT_PROJ {
-                refs_ok = tt_earlier(e.r0, i);
+                refs_ok = tt_earlier(e.r0, i) && (e.tag != TT_ARR || e.qual != ARR_SYM || tt_earlier(e.aux, i));
             } else if e.tag == TT_INST {
                 for k in 0..e.n {
                     refs_ok = refs_ok && tt_earlier(unsafe e.argr[k as usize], i);

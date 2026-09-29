@@ -27,9 +27,6 @@ pub struct Layout {
     /// A failure because a generic parameter had no binding in the env: the query was asked
     /// under an incomplete substitution, as opposed to a type no env can lay out.
     pub unbound: bool,
-    /// The type holds a zero-length array of a sized element. C spells that member `T x[0]`, so
-    /// the type has a C definition even when its size is 0 and is not a storage-elided ZST.
-    pub zarr: bool,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
@@ -52,7 +49,6 @@ struct LayoutAcc {
     pub packed: bool,
     pub is_union: bool,
     pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
-    pub zarr: bool, // see Layout.zarr
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
@@ -98,6 +94,7 @@ pub struct Svc {
     pub pkg: *const loader::Package,
     cache: Map<u64, Layout>, // (module << 32 | type) -> layout (env-free concrete only)
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
+    steps: Vector<ConstStep>, // `steps_hold` scratch
 }
 
 extend Svc {
@@ -105,7 +102,12 @@ extend Svc {
         if unsafe TS_ON {
             ts_add(TS_LAY_SVC, 1);
         }
-        return Svc { pkg: pkg, cache: Map::<u64, Layout>::new(), active: Vector::<u64>::new() };
+        return Svc {
+            pkg: pkg,
+            cache: Map::<u64, Layout>::new(),
+            active: Vector::<u64>::new(),
+            steps: Vector::<ConstStep>::new(),
+        };
     }
 
     /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
@@ -143,101 +145,108 @@ extend Svc {
         return TYPE_NONE;
     }
 
-    // The layout of the member whose type annotation is `tn`. The checker records `[T; N]` with a
-    // symbolic N at length 0, so a zero-length array annotation takes its length from the
-    // annotation: a const parameter reads its argument in `env`, a length that names no generic
-    // parameter is a real 0, and any other symbolic length is not layoutable.
+    // The layout of the member whose type annotation is `tn`.
     fn member_layout(self: &mut Self, m: ModuleId, tn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
-        let ft = self.mtype(m, tn);
-        if ft == TYPE_NONE {
-            return Layout { ok: false };
-        }
-        let y = *self.a(m).type_at(ft);
-        if y.kind != TypeKind::TYPE_ARRAY || y.as_data.arr.len != 0 || self.a(m).at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
-            return self.layout_of(m, ft, env, depth);
-        }
-        let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
-        if !el.ok {
-            return Layout { ok: false, unbound: el.unbound };
-        }
-        if el.size == 0 {
-            // A zero-sized element gives size 0 for every length (see layout_raw).
-            return Layout { ok: true, size: 0, align: el.align, zarr: el.zarr };
-        }
-        let ln = self.a(m).at_const(tn).as_data.array_type.length;
-        let mut n: u64 = 0;
-        let d = self.a(m).resolution_def(ln);
-        if d.node != NODE_NONE && self.a(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
-            // Innermost frame first; an argument that is an outer parameter continues outward.
-            let mut pm = d.module;
-            let mut pd = d.node;
-            let mut e = env;
-            let mut bound = false;
-            while e != null && !bound {
-                let mut hit = false;
-                for i in 0..unsafe (*e).n {
-                    if !hit && unsafe (*e).pmod == pm && unsafe (*e).params[i as usize] == pd {
-                        hit = true;
-                        let ay = *self.a(unsafe (*e).argm).type_at(unsafe (*e).args[i as usize]);
-                        if ay.kind == TypeKind::TYPE_CONST && ay.as_data.value >= 0 {
-                            n = ay.as_data.value as u64;
-                            bound = true;
-                        } else if ay.kind == TypeKind::TYPE_GENERIC {
-                            pm = ay.module;
-                            pd = ay.as_data.decl;
-                        } else {
-                            return Layout { ok: false };
-                        }
-                    }
-                }
-                // A bound argument naming an outer parameter reads under its binding's env.
-                e = if hit {
-                    unsafe (*e).penv;
-                } else {
-                    unsafe (*e).parent;
-                };
-            }
-            if !bound {
-                return Layout { ok: false, unbound: true };
-            }
-        } else if self.len_names_param(m, ln, 0) {
-            return Layout { ok: false };
-        }
-        if el.size != 0 && n > 0xFFFFFFFFFFFFFFFFu64 / el.size {
-            return Layout { ok: false }; // length * element overflow: unrepresentable
-        }
-        return Layout { ok: true, size: el.size * n, align: el.align, zarr: el.zarr || n == 0 && el.size != 0 };
+        return self.layout_of(m, self.mtype(m, tn), env, depth);
     }
 
-    // Whether array length expression `id` may name a generic parameter: true for every form this
-    // walk does not model.
-    fn len_names_param(self: &Self, m: ModuleId, id: NodeId, depth: i32) bool {
-        if id == NODE_NONE || depth > MAX_DEPTH {
-            return true;
+    // The element count of array length type `lt` (pool `m`) under `env`: a count, a const
+    // parameter's bound argument, or a linear form over such arguments; -1 when a parameter is
+    // unbound, the form names a module constant, or the value is no array length.
+    fn len_of(self: &Self, m: ModuleId, lt: TypeId, env: *const LayoutEnv, depth: i32) i64 {
+        let mut v = i128::zero();
+        if !self.cval_of(m, lt, env, depth, &mut v) {
+            return -1;
         }
-        let a = self.a(m);
-        let n = a.at_const(id);
-        if n.kind == NodeKind::NODE_LITERAL {
+        return len_count(v);
+    }
+
+    // The exact value of const type `lt` (pool `m`) under `env` (`len_of`); false when it does not fold.
+    fn cval_of(self: &Self, m: ModuleId, lt: TypeId, env: *const LayoutEnv, depth: i32, out: &mut i128) bool {
+        if depth > MAX_DEPTH {
             return false;
         }
-        if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
-            let d = a.resolution_def(id);
-            return d.node == NODE_NONE || self.a(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
+        let ly = *self.a(m).type_at(lt);
+        if ly.kind == TypeKind::TYPE_CONST {
+            *out = ly.cval();
+            return true;
         }
-        if n.kind == NodeKind::NODE_UNARY {
-            return self.len_names_param(m, n.as_data.unary.operand, depth + 1);
+        if ly.kind == TypeKind::TYPE_GENERIC {
+            return self.param_val(ly.module, ly.as_data.decl, env, depth, out);
         }
-        if n.kind == NodeKind::NODE_CAST {
-            return self.len_names_param(m, n.as_data.cast.expression, depth + 1);
+        if ly.kind != TypeKind::TYPE_CONST_EXPR {
+            return false;
         }
-        if n.kind == NodeKind::NODE_BINARY {
-            return self.len_names_param(m, n.as_data.binary.left, depth + 1) || self.len_names_param(
-                m,
-                n.as_data.binary.right,
-                depth + 1,
-            );
+        let l = *self.a(m).const_lin_at(ly.as_data.inst);
+        let mut sum = l.k;
+        for i in 0..l.n {
+            let pd = unsafe l.p[i as usize];
+            let mut v = i128::zero();
+            if self.a(pd.module).at_const(pd.node).kind != NodeKind::NODE_GENERIC_PARAM || !self.param_val(
+                pd.module,
+                pd.node,
+                env,
+                depth,
+                &mut v,
+            ) || !lin_acc(&mut sum, unsafe l.c[i as usize], v) {
+                return false;
+            }
         }
-        return true;
+        // A value outside the form's types is no value: the instantiation is an error.
+        return l.finish(sum, self.tgt().ptr == 4, out);
+    }
+
+    // Whether the const-generic steps of aggregate `dn` (module `dm`, `Ast::steps_of`) hold under
+    // `env`: the written member types compute each of them.
+    fn steps_hold(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv) bool {
+        let mut ss = replace(&mut self.steps, Vector::<ConstStep>::new());
+        unsafe (*(self.p().module_ast_const(dm) as *mut Ast)).steps_of(dn, &mut ss);
+        let mut ok = true;
+        for i in 0..ss.len() {
+            let s = ss.at(i);
+            let mut sum = s.lin.k;
+            let mut bound = true;
+            for t in 0..s.lin.n {
+                let c = unsafe s.lin.c[t as usize];
+                if c.is_zero() {
+                    continue;
+                }
+                let pd = unsafe s.lin.p[t as usize];
+                let mut v = i128::zero();
+                if !self.param_val(pd.module, pd.node, env, 0, &mut v) || !lin_acc(&mut sum, c, v) {
+                    bound = false;
+                    break;
+                }
+            }
+            if bound && !s.holds(sum, self.tgt().ptr == 4) {
+                ok = false;
+                break;
+            }
+        }
+        self.steps = ss;
+        return ok;
+    }
+
+    // The value of const parameter `pd` (module `pm`) under `env`, innermost frame first; an
+    // argument reads under the env it was written in, and one unbound there falls back to the
+    // next-outer binding of the same parameter (as `layout_of` resolves a type parameter).
+    fn param_val(self: &Self, pm: ModuleId, pd: NodeId, env: *const LayoutEnv, depth: i32, out: &mut i128) bool {
+        let mut e = env;
+        while e != null {
+            for i in 0..unsafe (*e).n {
+                if unsafe (*e).pmod == pm && unsafe (*e).params[i as usize] == pd && self.cval_of(
+                    unsafe (*e).argm,
+                    unsafe (*e).args[i as usize],
+                    unsafe (*e).penv,
+                    depth + 1,
+                    out,
+                ) {
+                    return true;
+                }
+            }
+            e = unsafe (*e).parent;
+        }
+        return false;
     }
 
     /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, unbound
@@ -327,22 +336,22 @@ extend Svc {
             if !el.ok {
                 return Layout { ok: false, unbound: el.unbound };
             }
-            let n = y.as_data.arr.len as u64;
-            if n == 0 {
-                // The pool interns BOTH a true `[T; 0]` and a symbolic generic `[T; N]` with len 0,
-                // so a material element makes the size unknowable from the type alone: refuse
-                // (a member annotation decides, see member_layout). A zero-sized element gives
-                // size 0 for EVERY reading, so that case is layoutable (and keeps the element
+            if el.size == 0 {
+                // A zero-sized element gives size 0 for every length (and keeps the element
                 // alignment for enclosing aggregates).
-                if el.size != 0 {
-                    return Layout { ok: false };
-                }
-                return Layout { ok: true, size: 0, align: el.align, zarr: el.zarr };
+                return Layout { ok: true, size: 0, align: el.align };
             }
-            if el.size != 0 && n > 0xFFFFFFFFFFFFFFFFu64 / el.size {
+            let mut n = y.as_data.arr.len as i64;
+            if y.arr_sym() {
+                n = self.len_of(m, y.as_data.arr.len, env, depth + 1);
+                if n < 0 {
+                    return Layout { ok: false, unbound: true };
+                }
+            }
+            if n as u64 > 0xFFFFFFFFFFFFFFFFu64 / el.size {
                 return Layout { ok: false }; // length * element overflow: unrepresentable
             }
-            return Layout { ok: true, size: el.size * n, align: el.align, zarr: el.zarr };
+            return Layout { ok: true, size: el.size * n as u64, align: el.align };
         }
         if y.kind == TypeKind::TYPE_GENERIC {
             let mut e = env;
@@ -387,7 +396,6 @@ extend Svc {
             unsafe (*acc).unbound = fl.unbound;
             return false;
         }
-        unsafe (*acc).zarr = unsafe (*acc).zarr || fl.zarr;
         let mut fa = fl.align;
         if unsafe (*acc).packed {
             fa = 1;
@@ -430,6 +438,9 @@ extend Svc {
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
         let dkind = ast.at_const(dn).kind;
+        if env != null && !self.steps_hold(dm, dn, env) {
+            return Layout { ok: false };
+        }
         if dkind == NodeKind::NODE_ENUM {
             let e = self.enum_shape(dm, dn, env, depth);
             return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound };
@@ -465,7 +476,7 @@ extend Svc {
         if acc.align == 0 {
             acc.align = 1;
         }
-        return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align, zarr: acc.zarr };
+        return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align };
     }
 
     // A payload enum's shape under `env` (payload-less enums are a bare 4-byte C enum).
@@ -585,6 +596,9 @@ extend Svc {
                 return EnumLayout { ok: false };
             }
             let frame = inst_frame(da, &it, m, null);
+            if !self.steps_hold(it.module, it.decl, &frame) {
+                return EnumLayout { ok: false };
+            }
             return self.enum_shape(it.module, it.decl, &frame, 0);
         }
         return EnumLayout { ok: false };

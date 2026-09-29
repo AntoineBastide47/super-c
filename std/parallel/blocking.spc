@@ -263,7 +263,8 @@ fn exit_release() {
     }
 }
 
-/// Set the idle timeout of pool threads, in nanoseconds. Takes effect for parks that start after it.
+/// Set the idle timeout of pool threads, in nanoseconds. Takes effect for parks that start after it. A
+/// negative value never times out, like a timeout past the clock's range.
 pub fn set_idle_ns(ns: i64) {
     unsafe atomic::store_i64(&mut unsafe G_IDLE_NS, ns, 0);
 }
@@ -511,7 +512,7 @@ fn idle_park(p: *mut Pool, t: *mut PThread) bool {
     unsafe (*p).idle_head = t;
     unsafe (*p).idle = unsafe (*p).idle + 1;
     unlock(p);
-    let deadline = platform::now_ns() + (unsafe atomic::load_i64(&mut unsafe G_IDLE_NS, 0)) as u64;
+    let deadline = runtime::deadline_after((unsafe atomic::load_i64(&mut unsafe G_IDLE_NS, 0)) as u64);
     unsafe sc_runtime::sc_rt_mutex_lock((*t).mtx);
     while unsafe atomic::load_i32(&mut unsafe (*t).park, 1) == 0 {
         let now = platform::now_ns();

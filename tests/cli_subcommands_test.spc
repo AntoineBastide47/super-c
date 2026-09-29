@@ -3,6 +3,8 @@
 // inside scratch directories.
 import tests::cli_harness as cli;
 import build_system::build as bsys;
+import stdio;
+import driver_shim as shim;
 
 const E: str = "SC_NO_EMIT_CACHE";
 
@@ -204,6 +206,55 @@ fn emit_stamp_sees_a_new_shadowing_module() {
     // `src/lib.spc` is probed before `src/lib/lib.spc`, so it now names the module.
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 5;\n}\n");
     assert_eq(cli::superc_env_in(root, "SC_STAMP_TEST", "1", "run").exit, 5);
+}
+
+// The emit stamp keys on the content of the compiler that emitted the tree: the same compiler skips the
+// transpile, and a different one at the same path with the same mtime (a reinstall, an extracted archive)
+// transpiles again. `phase load` prints only when the build transpiles.
+@test
+fn emit_stamp_keys_on_the_compiler_content() {
+    if cli::on_wasm() || cli::on_windows() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    // tc/super-c: a copy of the compiler under test, with std/ and ffi/ beside it; tc/ref keeps its mtime.
+    let mut here = Array::<char, 4096> {};
+    let mut dot = String::from_str(".");
+    assert(unsafe shim::sc_realpath(dot.cstr(), &mut here[0]) != null, "the working directory resolves");
+    let cwd = str::from_cstr(&here[0]);
+    p.mkfile("tc/.keep", "");
+    let mut exe = String::new();
+    exe.format_into("{}/tc/super-c", root);
+    let mut cmds = Vector::<String>::new();
+    cmds.push(format("cp {} {}", cli::superc_path(), exe.as_str()));
+    cmds.push(format("cp -p {} {}/tc/ref", exe.as_str(), root));
+    cmds.push(format("ln -s {}/std {}/tc/std", cwd, root));
+    cmds.push(format("ln -s {}/ffi {}/tc/ffi", cwd, root));
+    for i in 0..cmds.len() {
+        assert_eq(cli::run_quiet(cmds.index_mut(i).cstr()), 0);
+    }
+    let first = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(first.exit, 3);
+    assert(first.out_has("phase load"), "the first build transpiles");
+    let same = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(same.exit, 3);
+    assert(!same.out_has("phase load"), "the same compiler skips the transpile");
+    // Another compiler at the same path and mtime: appended bytes change the content, not the behavior.
+    let f = stdio::fopen(exe.as_str(), "ab");
+    assert(f != null, "the copy opens for append");
+    let _ = unsafe stdio::fwrite("x".ptr(), 1, 1, f);
+    unsafe stdio::fclose(f);
+    let mut touch = format("touch -r {}/tc/ref {}", root, exe.as_str());
+    assert_eq(cli::run_quiet(touch.cstr()), 0);
+    let other = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(other.exit, 3);
+    assert(other.out_has("phase load"), "a different compiler transpiles again");
+    let again = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(again.exit, 3);
+    assert(!again.out_has("phase load"), "the new compiler's own tree is reused");
 }
 
 // A dependency path with a space is escaped as `\ ` in the compiler's .d file; read as written, an
