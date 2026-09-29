@@ -476,7 +476,7 @@ fn scoped_where_copy_keeps_sibling_drops() {
 // type owns nothing emits no code for it.
 @test
 fn scalar_instance_drops_nothing() {
-    let src = "fn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
+    let src = "@c.noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
     h::expect_c("the owning instance frees its parameter", src, "String__free(&x);");
     h::expect_c("the scalar instance is empty", src, "drop_it__i64(int64_t x) {\n  return;\n}");
 }

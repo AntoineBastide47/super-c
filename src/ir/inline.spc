@@ -687,7 +687,14 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         let ki = unsafe (&*cx.store).kept.at(slot as usize);
         let k = &ki.body;
-        if k.args != t.args_len || k.returns != t.dests_len {
+        // A void callee has no return slot, but its call keeps the one void destination the
+        // lowering gives every call; the splice leaves that destination unwritten.
+        let mut void_dest = false;
+        if k.returns == 0 && t.dests_len == 1 {
+            let dpl = lw.body.dest_pool[t.dests_start as usize];
+            void_dest = eff_pty(&lw.body, dpl) == Ast::builtin(BuiltinType::BT_VOID);
+        }
+        if k.args != t.args_len || k.returns != t.dests_len && !void_dest {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
             continue;
         }

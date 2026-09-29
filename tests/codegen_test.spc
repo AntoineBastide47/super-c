@@ -315,7 +315,11 @@ fn slices_and_arrays() {
 
 @test
 fn errors() {
-    h::expect_c("defer lowers to scope-exit call", "fn cleanup() {}\nfn run() { defer cleanup(); }\n", "cleanup()");
+    h::expect_c(
+        "defer lowers to scope-exit call",
+        "@c.noinline\nfn cleanup() {}\nfn run() { defer cleanup(); }\n",
+        "cleanup()",
+    );
     h::expect_c(
         "designated array init",
         "fn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2]; }\n",

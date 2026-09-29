@@ -27,6 +27,22 @@ fn inline_stats_prints_decisions() {
     assert(r.out_has("inline considered"), "the inliner stats line is printed");
 }
 
+// A void callee has no return slot while its call keeps one void destination: the inliner accepts
+// that shape, so `main`'s one call splices in.
+@test
+fn inline_splices_a_void_callee() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "fn bump(p: &mut i32) {\n    *p = *p + 1;\n}\nfn main() i32 {\n    let mut x = 1;\n    bump(&mut x);\n    return x - 2;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_INLINE_STATS", "1", "build");
+    assert(r.ok(), "the build succeeds");
+    assert(r.out_has("inline considered 1 inlined 1 reasons 0 0 0 0 0 0 0 0"), "the void call is inlined");
+}
+
 @test
 fn cemit_stats_prints_stage_timings() {
     let r = built_with("SC_CEMIT_STATS");
