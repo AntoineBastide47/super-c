@@ -39,7 +39,8 @@
 // Shutdown. `try_shutdown(grace_ns)` closes the pool (a later call runs on its caller's own thread),
 // releases admission waiters the same way, drains accepted work and reaps threads until the deadline, and
 // reports what is left. What is left keeps everything it can reach: an expired deadline never means a
-// foreign call stopped. `shutdown()` is the process-exit form: it aborts if the pool is not released.
+// foreign call stopped. `shutdown()` is the process-exit form: it aborts if the pool is not released. A
+// program that never calls either releases the pool at normal exit (`exit_release`, an `atexit` handler).
 // Stop the scheduler (`runtime::shutdown()`) after this pool: a task parked in a call keeps its stack
 // until the call returns, which the scheduler's own bounded shutdown reports rather than frees.
 //
@@ -72,6 +73,7 @@ static mut G_POOL: *mut Pool = null;
 static mut G_EXT: usize = 0; // atomic: plain threads between reading state 2 and leaving the pool's lock
 static mut G_IDLE_NS: i64 = IDLE_NS_DEFAULT;
 static mut G_PUBLISH_DELAY_NS: i64 = 0; // test hook: a pause between creating a thread and publishing it
+static mut G_AT_EXIT: bool = false; // `exit_release` is registered (written by the build winner only)
 
 // The header every job carries: its queue link, the trampoline that runs and settles it, and who waits.
 // A coroutine waits through its park token; a plain thread waits on `done`.
@@ -231,6 +233,10 @@ fn ensure_pool() *mut Pool {
         if unsafe atomic::cas_i32(sp, 0, 1, false, 4, 0) {
             let p = build_pool();
             G_POOL = p;
+            if !G_AT_EXIT {
+                G_AT_EXIT = true;
+                let _ = unsafe stdlib::atexit(exit_release);
+            }
             unsafe atomic::store_i32(sp, 2, 4);
             return p;
         }
@@ -246,6 +252,14 @@ fn ensure_pool() *mut Pool {
             // panics, which ends the process, so the state always moves on.
             sc_runtime::sc_rt_thread_yield();
         }
+    }
+}
+
+// Normal process exit (`atexit`): release the pool as `try_shutdown` does, so a program that returns
+// from main without calling `shutdown` leaves no pool behind. Outstanding work keeps it, as there.
+fn exit_release() {
+    if !on_pool_thread() {
+        let _ = try_shutdown(SHUTDOWN_GRACE_NS);
     }
 }
 

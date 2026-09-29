@@ -3242,6 +3242,40 @@ fn main() i32 {
     assert(run.ok());
 }
 
+// A plain program that calls through the blocking pool and never shuts it down: the pool is
+// released at normal exit, so the leak gate finds nothing (a `@blocking` extern and `call`).
+@test
+fn blocking_pool_released_at_exit() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::blocking as blocking;
+
+@platform(macos | linux)
+extern "C" "unistd.h" {
+    @blocking
+    pub fn sleep(s: u32) u32;
+}
+
+fn main() i32 {
+    let v = blocking::call(fn() i64 {
+        return 4;
+    });
+    if PLATFORM == Platform::MacOS || PLATFORM == Platform::Linux {
+        let _ = unsafe sleep(0);
+    }
+    return (v - 4) as i32;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok());
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.cc_build("").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
 // Guided scheduling: each claim takes a share of what REMAINS rather than a fixed grain, so early claims
 // are large (few trips to the shared cursor) and late ones small (no worker left holding a long tail).
 // Over a deliberately uneven per-index cost, every index must still be visited exactly once.

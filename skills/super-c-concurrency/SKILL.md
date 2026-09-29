@@ -417,7 +417,10 @@ joins announced exits until the deadline, and reports `{queued, running, threads
 released}`. What remains keeps its records, handles and the pool; an expired deadline
 never means a foreign call stopped; a late completion still settles its caller; a later
 attempt finishes the drain. `shutdown()` is `try_shutdown(SHUTDOWN_GRACE_NS)` and aborts
-when the pool is not released. Call it before `runtime::shutdown()`: a task parked in a
+when the pool is not released. The first pool build registers an `atexit` handler that runs
+`try_shutdown(SHUTDOWN_GRACE_NS)` (never from a pool thread): a program that returns from
+`main` without calling `shutdown` releases an idle pool and stays leak-clean; outstanding
+work keeps the pool, and the leak gate reports it. Call it before `runtime::shutdown()`: a task parked in a
 call keeps its stack until the call returns, which the scheduler's own bounded shutdown
 reports rather than frees, and pool threads left running are reported as leaked under
 `SC_LEAK_CHECK`. Two rules keep a closing pool from releasing under a submitter still
