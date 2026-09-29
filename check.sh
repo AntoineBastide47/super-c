@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Run as a git hook, this script inherits the repository-local GIT_* variables (GIT_DIR, GIT_INDEX_FILE, ...).
+# Tests that run git in their own scratch repositories would act on THIS repository through them.
+unset $(git rev-parse --local-env-vars)
+
 # 1) Formatting must already be canonical (no auto-rewrite: the check fails instead).
 printf 'check: formatting (fmt --check)\n'
 if ! files=$(SC_LEAK_CHECK=fatal ./super-c fmt --check); then
