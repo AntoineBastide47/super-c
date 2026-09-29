@@ -9180,7 +9180,7 @@ pub fn run_package(
     let mut gr9 = String::from_str(p.gen_root.as_str());
     let fresh_tree = unsafe shim::sc_stat_isdir(gr9.cstr()) != 1;
     let mut err = !write_super_rt(p.gen_root.as_str());
-    let root = p.gen_root.as_str();
+    let root = gr9.as_str();
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
     keep.push(build_out_path(root, "super_rt", ".c"));
@@ -9423,7 +9423,7 @@ pub fn run_package(
                 } else {
                     "";
                 };
-                if write_shard(&mut co, root, cp.as_str(), t, x as u8, false, tail, &sg, &mut man, &mut err) {
+                if write_shard(&co, root, cp.as_str(), t, x as u8, false, tail, &sg, &mut man, &mut err) {
                     sink_notify(sink, &mut co.pr, cp.as_str(), 1);
                     keep.push(cp);
                 }
@@ -9441,7 +9441,7 @@ pub fn run_package(
                     stem.push_u64(x as u64);
                 }
                 let cp = build_out_path(root, stem.as_str(), ".c");
-                if write_shard(&mut co, root, cp.as_str(), q, x as u8, true, "", &sg, &mut man, &mut err) {
+                if write_shard(&co, root, cp.as_str(), q, x as u8, true, "", &sg, &mut man, &mut err) {
                     sink_notify(sink, &mut co.pr, cp.as_str(), 1);
                     keep.push(cp);
                 }

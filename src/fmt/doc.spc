@@ -88,9 +88,9 @@ extend Renderer {
     }
 }
 
-extend DocPool {
+extend<'a> DocPool<'a> {
     /// An empty pool over `src`, the byte buffer DOC_TEXT_SPAN nodes slice. `src` must outlive the pool.
-    pub fn new<'a>(src: *const u8) DocPool<'a> {
+    pub fn new(src: *const u8) DocPool<'a> {
         let mut p = DocPool {
             docs: Vector::<DocNode>::new(),
             kids: Vector::<DocId>::new(),
@@ -118,13 +118,13 @@ extend DocPool {
     }
 
     // Store a static text and return its `strs` index.
-    fn intern(self: &mut Self, s: str) u32 {
+    fn intern(self: &mut Self, s: str<'a>) u32 {
         self.strs.push(s);
         return (self.strs.len() - 1) as u32;
     }
 
     /// Static text (keywords, punctuation). The str must outlive the pool (string literals do).
-    pub fn txt(self: &mut Self, s: str) DocId {
+    pub fn txt(self: &mut Self, s: str<'a>) DocId {
         let i = self.intern(s);
         return self.push(DocNode { kind: DocKind::DOC_TEXT_STR as u8, a: i, b: 0, w: s.len() as u32 });
     }
@@ -167,7 +167,7 @@ extend DocPool {
     }
 
     /// `s` when the enclosing group broke; nothing when flat (trailing comma: ifbreak(",")).
-    pub fn ifbreak(self: &mut Self, s: str) DocId {
+    pub fn ifbreak(self: &mut Self, s: str<'a>) DocId {
         let i = self.intern(s);
         return self.push(DocNode { kind: DocKind::DOC_IFBREAK as u8, a: 0, b: i, w: 0 });
     }

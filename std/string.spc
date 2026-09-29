@@ -639,7 +639,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Iterator over the pieces between occurrences of `sep`.
-    pub fn split(self: &String<A>, sep: str) Split {
+    pub fn split<'a>(self: &'a String<A>, sep: str<'a>) Split<'a> {
         return self.as_str().split(sep);
     }
 

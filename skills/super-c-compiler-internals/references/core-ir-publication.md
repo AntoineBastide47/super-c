@@ -207,7 +207,7 @@ module's own pass, before its release; it stays authoritative.
 
 `ci/gate.sh` (the corpus, the sanitizer lanes, the bootstrap, the two-generation fixpoint,
 the worker-count identity under `SC_TASK_DELAY` with the type table and item digest, the
-strict C set, every target and profile, the benchmark). The measurement runs again with the
+strict C set, every built-in profile but dev). The measurement runs again with the
 switches above. The read table needs a counting build: a static counter array indexed by
 (phase, accessor, arena) incremented in `Ast::at_const`, `list`, `type_of`, `resolution_def`,
 `type_args`, `coerce_of`, `dyn_use_at`, `deref_use_at`, `wide_lit_of` and the two map reads

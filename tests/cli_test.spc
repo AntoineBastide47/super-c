@@ -1300,6 +1300,23 @@ fn raii_drop_on_field_assign() {
     assert(c3.out_has("cannot move a field out of a value implementing Free"));
 }
 
+// Validation (SC_BC_VALIDATE) verifies the drop elaboration of the bodies the checker accepts: a
+// rejected body has no correct schedule (a field moved out of a `Free` value cannot be released), so
+// its diagnostic is reported and nothing aborts.
+@test
+fn validation_skips_rejected_bodies() {
+    let _ = unsafe p13shim::sc_setenv("SC_BC_VALIDATE".ptr() as *const char, "1".ptr() as *const char);
+    let p = cli::proj_new();
+    p.mkfile(
+        "condfree.spc",
+        "struct G {\n    pub name: String,\n}\n\nextend G as Free {\n    pub fn free(self: &mut G) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let g = G { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let mut n: usize = 0;\n    if g.name.len() > 3 {\n        let a = g.name;\n        n = n + sink(a);\n    }\n    return n as i32 - 32;\n}\n",
+    );
+    let c = p.compile("condfree.spc");
+    assert(c.exit == 1, "the rejected program fails with its diagnostic");
+    assert(c.out_has("cannot move a field out of a value implementing Free"));
+    assert(!c.out_has("SC_BC_VALIDATE"), "no elaborated body fails verification");
+}
+
 // Transpiler-inserted auto-free of untouched fields: a Free impl's body runs, then every owning
 // Free-typed field it never referenced is freed by generated glue (early returns covered by the
 // A tuple struct's untouched owning members get the same wrapper glue, spelled positionally `_i`.

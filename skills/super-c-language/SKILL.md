@@ -145,7 +145,49 @@ fn longer<'a>(a: &'a String, b: &'a String) &'a String {
 }
 ```
 
-Lifetime annotations are Rust-style and almost always elided.
+Lifetime annotations are Rust-style and almost always elided. A result whose lifetime
+the signature ties to an input (a named lifetime, or elision to `self` or to the single
+borrowing input) keeps that input borrowed while the result is live, through a `&mut`
+parameter and for receivers whose type holds borrows too: `let r = a.get(0); a.put(5);
+use(r)` is rejected. An accessor that returns data reached through a raw-pointer field is
+not tied to `self`; it names an unbounded lifetime:
+
+```superc
+fn p<'a>(self: &Self) &'a Package { return unsafe &*self.pkg; }
+```
+
+The `str` sub-view methods (`slice`, `trim`, `split`, `lines`, ...) return `str<'a>` of
+the viewed text, not of the `&str` receiver.
+
+A returned slice (`[]T`, `str`, any lifetime-generic aggregate) elides like `&T`: with no
+`self` receiver and not exactly one input lifetime position, the result must name its
+lifetime (`fn pick<'a>(a: []'a u8, b: []u8) []'a u8`, `fn names() []'static str<'static>`).
+Positions inside tuples and type arguments count (`Option<(i32, &i32)>`); `Self` names its
+extend's lifetimes and is never elided, in the method's own body and at every call: in
+`extend<'a> W<'a>`, `fn new(r: &'a i32) Self` keeps `r`'s referent borrowed by the result,
+and `fn put(self: &mut Self, x: &'a i32)` stores `x` into the receiver. An elided input
+lifetime is its own region: returning `b: &u8` as `&'a u8`, or as a `self` method's elided
+result, is rejected.
+
+A parameter's regions flow through the body like Rust's region constraints, flow-insensitively:
+a local of a struct or tuple type keeps one region set per member, so `let t = (a, b); return
+t.0;` returns `a`'s region, and a struct built or copied member by member is checked member by
+member against a struct result or a struct stored through a parameter (`P { x: b, y: a }` as
+`P<'a, 'b>` is rejected). A member written twice holds both values' regions, as a Rust local's
+type does. A `&'static` parameter keeps its argument borrowed for the whole program, an
+implicit autoref for a `self: &'static Self` receiver included: `s.k()` on a local is rejected,
+on a constant it is accepted.
+
+A field names a lifetime its type declares (or `'static`) at every lifetime position: `&'a T`,
+`[]'a T`, `str<'a>`, `Slice<'a, T>`, inside tuples and type arguments too.
+
+A store through any reference to a container records the stored borrow in the container: a
+`&mut` held in a local, a reborrow of it (`let r2 = &mut *r;`), or a copy of either. After
+`let r = &mut v; put(r, &a);`, `a` stays borrowed while `v` is live. A borrow of a local
+stored into storage a `&mut` parameter reaches is rejected: it outlives the call. A call that
+stores one parameter into another's data follows the callee's signature: the stored parameter's
+lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<&'x i32>, a: &'x i32)
+{ put(w, a); }`; with `a: &i32` it is rejected).
 
 ## Unsafe
 
@@ -268,7 +310,14 @@ fn sum(xs: []i32) i32 {       // []T is a (ptr, len) view
 let a: [i32; 4] = [10, 20, 30, 40];
 ```
 
-`[]T` / `[]mut T` lower to prelude `Slice<T>` / `SliceMut<T>`. Arrays coerce to slices.
+`[]T` / `[]mut T` lower to prelude `Slice<T>` / `SliceMut<T>`; `[]'a T` / `[]'a mut T` name
+the lifetime (`Slice<'a, T>` / `SliceMut<'a, T>`), which binds right after `[]` and before
+`mut`, as after `&`. The compiler's own sources (`src/`, `std/`, `ffi/`) spell the named form
+`Slice<'a, T>` until a release parses the sugar. Arrays coerce to slices; the view borrows the
+array like `&a` (`&mut a` for `[]mut`) and never moves it: the array must outlive the view and
+cannot be written, moved or viewed mutably while the view is live. A literal coerced to a slice
+(`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
+its block, so its view cannot leave the block or be returned.
 `[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. A nested literal without an annotation takes its
 inner length from its elements (`[[1, 2], [3, 4]]` is `[[i32; 2]; 2]`), and its elements must

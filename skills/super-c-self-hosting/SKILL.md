@@ -185,6 +185,25 @@ Extracting a Copy field in a call argument (`self.process(self.type_at(x).name)`
 *not* an error — the immutable borrow ends when the field read completes, before the
 `&mut self` call begins.
 
+### Result tied to `&mut self` held across another `&mut self` call
+
+A method result whose lifetime elides to `self` keeps `*self` borrowed, also when `self`
+is a `&mut` parameter:
+
+```superc
+// WRONG: v borrows self.items; the &mut self call conflicts while v is live
+let v = self.item_at(i);
+self.note(v.span);   // note(self: &mut Self, ..)
+use(v);
+
+// RIGHT: copy what you need first, or end the borrow before the call
+let sp = self.item_at(i).span;
+self.note(sp);
+```
+
+An accessor returning data behind a raw-pointer field names an unbounded lifetime
+(`fn p<'a>(self: &Self) &'a Package`), so its result does not hold `self`.
+
 ### Bare char as C string
 
 A single `char` passed via `&sent` to a `strlen`-based API reads past the byte. Always

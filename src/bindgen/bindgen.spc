@@ -54,14 +54,14 @@ const fn is_digit(c: u8) bool {
     return c >= b'0' && c <= b'9';
 }
 
-extend Lexer<'a> {
+extend<'a> Lexer<'a> {
     fn new(src: str<'a>) Lexer<'a> {
         let mut lx = Lexer::<'a> { src: src, pos: 0, kind: TK_EOF, start: 0, end: 0, file: String::new() };
         lx.advance();
         return lx;
     }
 
-    const fn text(self: &Lexer<'a>) str {
+    const fn text(self: &Lexer<'a>) str<'a> {
         return self.src.slice(self.start, self.end);
     }
 

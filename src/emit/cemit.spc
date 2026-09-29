@@ -602,7 +602,7 @@ extend CEmit {
         return 1 + (lo - s) as u64;
     }
 
-    const fn p(self: &Self) &loader::Package {
+    const fn p<'a>(self: &Self) &'a loader::Package {
         return unsafe &*self.pkg;
     }
 
@@ -670,7 +670,7 @@ extend CEmit {
     }
 
     // The source name of aggregate declaration `decl` in module `m`.
-    const fn agg_name(self: &Self, m: ModuleId, decl: NodeId) str {
+    const fn agg_name<'a>(self: &Self, m: ModuleId, decl: NodeId) str<'a> {
         let da = self.p().module_ast_const(m);
         let sp = unsafe (*da).at_const(unsafe (*da).at_const(decl).as_data.aggregate.name).as_data.name.text;
         return self.p().modules.at(m as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
@@ -872,47 +872,6 @@ extend CEmit {
                 let mut rm0 = b.module;
                 let mut rt0 = aty0;
                 self.rty(b, aty0, &mut rm0, &mut rt0);
-                {
-                    // A fixed array into a slice-view param: wrap `{ arr, N }` (the C array decays).
-                    // The operand's node type may already be the COERCED slice: the PLACE's own
-                    // type still says array.
-                    let ya0 = *unsafe (*self.p().module_ast_const(rm0)).type_at(rt0);
-                    let mut alen0: i64 = 0 - 1;
-                    if ya0.kind == TypeKind::TYPE_ARRAY && ya0.as_data.arr.len != 0 {
-                        alen0 = ya0.as_data.arr.len;
-                    } else {
-                        let opP = *b.operands.at(opid as usize);
-                        if opP.kind == ir::OP_COPY || opP.kind == ir::OP_MOVE {
-                            alen0 = self.place_c_arr_len(b, opP.data);
-                        }
-                    }
-                    if alen0 > 0 {
-                        let ps0 = unsafe (*fa).at_const(callee.node).as_data.function.params;
-                        if i < ps0.len {
-                            let pn0 = unsafe (*fa).at_const(unsafe (*fa).list(ps0)[i as usize]);
-                            if pn0.kind == NodeKind::NODE_PARAMETER && pn0.as_data.parameter.ty != NODE_NONE {
-                                let pty0 = unsafe (*fa).type_of(pn0.as_data.parameter.ty);
-                                if pty0 != TYPE_NONE && unsafe (*fa).type_at(pty0).kind == TypeKind::TYPE_INSTANCE {
-                                    let it0 = *unsafe (*fa).instance(unsafe (*fa).type_at(pty0).as_data.inst);
-                                    let nmi = self.agg_name(it0.module, it0.decl);
-                                    if nmi == "Slice" || nmi == "SliceMut" {
-                                        let mk0 = dst.len();
-                                        dst.push_str("(");
-                                        if self.mg.ctype(callee.module, pty0, "", dst) {
-                                            dst.push_str("){ .ptr = ");
-                                            let okA = self.emit_operand(b, opid, dst);
-                                            dst.push_str(", .len = ");
-                                            dst.push_i64(alen0);
-                                            dst.push_str(" }");
-                                            return okA;
-                                        }
-                                        dst.truncate(mk0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 if unsafe (*self.p().module_ast_const(rm0)).type_at(rt0).kind == TypeKind::TYPE_REFERENCE {
                     dst.push_str("(*");
                     let ok0 = self.emit_operand(b, opid, dst);
@@ -1323,7 +1282,9 @@ extend CEmit {
                     }
                     let mut nm = String::from_str("_");
                     nm.push_u64(r);
-                    let okr = self.ty_c(b.module, b.locals.at(r as usize).ty, nm.as_str(), &mut self.aux);
+                    let mut aux = replace(&mut self.aux, String::new());
+                    let okr = self.ty_c(b.module, b.locals.at(r as usize).ty, nm.as_str(), &mut aux);
+                    self.aux = aux;
                     if !okr {
                         return false;
                     }
@@ -1344,7 +1305,10 @@ extend CEmit {
             }
             if self.arr_ret {
                 self.aux.push_str("typedef struct { ");
-                if !self.ty_c(b.module, rty, "_a", &mut self.aux) {
+                let mut aux = replace(&mut self.aux, String::new());
+                let oka = self.ty_c(b.module, rty, "_a", &mut aux);
+                self.aux = aux;
+                if !oka {
                     return false;
                 }
                 self.aux.push_str("; ");
@@ -1368,7 +1332,9 @@ extend CEmit {
                     rn.push_str(name);
                     rn.push_str("_ret");
                     self.aux.push_str("typedef ");
-                    ok0 = self.ty_c(b.module, rty, rn.as_str(), &mut self.aux);
+                    let mut aux = replace(&mut self.aux, String::new());
+                    ok0 = self.ty_c(b.module, rty, rn.as_str(), &mut aux);
+                    self.aux = aux;
                     self.aux.push_str(";\n");
                     self.hdr_dep(b.module, rty);
                     self.aux_mark(0, b.module);
@@ -1411,7 +1377,9 @@ extend CEmit {
                     arrcp.push(l as u32);
                 }
             }
-            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut self.out);
+            let mut out = replace(&mut self.out, String::new());
+            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut out);
+            self.out = out;
             self.sput(nm);
             if !ok {
                 return false;
@@ -4845,7 +4813,9 @@ extend CEmit {
             np9 += 1;
             let mut nm = self.sget();
             self.lspell(l as u32, &mut nm);
-            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut self.out);
+            let mut out = replace(&mut self.out, String::new());
+            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut out);
+            self.out = out;
             self.sput(nm);
             if !ok {
                 return false;
@@ -6194,7 +6164,7 @@ extend CEmit {
 
     // The source a constant's span indexes: an inlined constant's (item marks it) foreign module, else
     // the body's module.
-    fn const_src(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str {
+    fn const_src<'a>(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str<'a> {
         let m = if c.item.node != NODE_NONE {
             c.item.module;
         } else {

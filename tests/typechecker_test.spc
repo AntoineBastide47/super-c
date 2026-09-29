@@ -2009,7 +2009,7 @@ fn return_region_escapes() {
     // ...and the same with an explicit lifetime param.
     h::expect_err_msg(
         "returning a lifetime-annotated struct holding &local is rejected",
-        "struct R<'a> { pub p: &'a i32 }\nfn f() R<'a> {\n    let x = 1;\n    return R::<'a> { p: &x };\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn f<'a>() R<'a> {\n    let x = 1;\n    return R::<'a> { p: &x };\n}\n",
         "returning a value borrowing from a local",
     );
     // Borrows of PARAMETERS still return fine: the caller owns the referent.
@@ -2141,6 +2141,275 @@ fn two_phase_borrows() {
     h::expect_err_msg(
         "a borrow held across a later mutation still conflicts",
         "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let r = v.at(0);\n    v.push(2);\n    return *r;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
+// Two-phase borrows through field paths: a Copy value read out of a shared borrow of the receiver's
+// place ends that borrow before the call's `&mut` autoref claims the place. A borrow the callee
+// receives, or one used after the call, still conflicts.
+@test
+fn two_phase_field_receivers() {
+    let decl = "struct In { pub v: u32 }\nstruct A { pub xs: Vector<In>, pub n: u32 }\nextend A {\n    fn get(self: &A, i: usize) &In { return self.xs.at(i); }\n    fn put(self: &mut A, v: u32) { self.n = v; }\n    fn put2(self: &mut A, r: &In) { self.n = r.v; }\n}\nstruct M { pub a: A }\nstruct X { pub y: A }\nstruct N { pub x: X }\nfn main() i32 { return 0; }\n";
+    h::expect_ok(
+        "m.a.put(m.a.get(0).v) is accepted",
+        format("{}fn f(m: &mut M) {{ m.a.put(m.a.get(0).v); }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "n.x.y.put(n.x.y.get(0).v) is accepted",
+        format("{}fn f(n: &mut N) {{ n.x.y.put(n.x.y.get(0).v); }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "a local receiver takes the same form",
+        format("{}fn f(a: A) u32 {{ let mut b = a; b.put(b.get(0).v); return b.n; }}\n", decl).as_str(),
+    );
+    h::expect_err_msg(
+        "a shared borrow passed to the &mut call still conflicts",
+        format("{}fn f(m: &mut M) {{ m.a.put2(m.a.get(0)); }}\n", decl).as_str(),
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "a shared borrow used after the call still conflicts",
+        format("{}fn f(m: &mut M) u32 {{ let r = m.a.get(0); m.a.put(r.v); return r.v; }}\n", decl).as_str(),
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
+// A `&mut` handed to a reference parameter reborrows its pointee: a result the signature ties to it
+// holds a loan on `*a`, so a later `&mut` claim of `*a` or a write through `a` conflicts while that
+// result is live. An explicit two-phase `&mut` argument claims its place at the call, so a shared
+// borrow the call also receives conflicts. Copy reads, reborrows passed onward, and results the
+// signature does not tie stay legal.
+@test
+fn reborrows_through_reference_arguments() {
+    let decl = "struct In { pub v: u32 }\nstruct A { pub xs: Vector<In>, pub n: u32 }\nextend A {\n    fn get(self: &A, i: usize) &In { return self.xs.at(i); }\n    fn put(self: &mut A, v: u32) { self.xs.clear(); self.n = v; }\n    fn put2(self: &mut A, r: &In) { self.n = r.v; }\n    fn root<'p>(self: &A, p: &'p In) &'p In { return p; }\n}\nstruct M { pub a: A }\nfn h(a: &mut A) { a.n = 1; }\nfn main() i32 { return 0; }\n";
+    let mutb = "cannot borrow this value as mutable while it is already borrowed as immutable";
+    h::expect_err_msg(
+        "a result borrowed through a &mut parameter conflicts with a later &mut call",
+        format("{}fn f(a: &mut A) u32 {{ let r = a.get(0); a.put(5); return r.v; }}\n", decl).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "a shared reborrow passed to a &mut call on the same reference conflicts",
+        format("{}fn f(a: &mut A) {{ a.put2(a.get(0)); }}\n", decl).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "a write through the reference conflicts with a live reborrow",
+        format("{}fn f(a: &mut A) u32 {{ let r = a.get(0); a.n = 5; return r.v; }}\n", decl).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a &mut local holding a reference behaves the same",
+        format("{}fn f(x: A) u32 {{ let mut y = x; let b = &mut y; let r = b.get(0); b.put(5); return r.v; }}\n", decl).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "passing the reference onward as &mut conflicts with a live reborrow",
+        format("{}fn f(a: &mut A) u32 {{ let r = a.get(0); h(a); return r.v; }}\n", decl).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "an explicit two-phase &mut argument conflicts with a shared borrow the call receives",
+        format("{}fn f(m: M) u32 {{ let mut k = m; (&mut k.a).put2(k.a.get(0)); return k.a.n; }}\n", decl).as_str(),
+        mutb,
+    );
+    h::expect_ok(
+        "a Copy value read before the &mut call ends the reborrow",
+        format("{}fn f(a: &mut A) {{ let r = a.get(0); let v = r.v; a.put(v); a.put(a.get(0).v); }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "reborrows passed onward and returned stay legal",
+        format("{}fn f(a: &mut A) &In {{ h(a); a.put(1); return a.get(0); }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "v.push(v.len()) through a &mut parameter is accepted",
+        "fn f(v: &mut Vector<i32>) { v.push(v.len() as i32); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "an explicit two-phase &mut argument with a Copy read is accepted",
+        format("{}fn f(m: M) u32 {{ let mut k = m; (&mut k.a).put(k.a.get(0).v); return k.a.n; }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "a result the signature ties to another argument does not borrow the receiver",
+        format("{}fn f(a: &mut A, p: &In) u32 {{ let r = a.root(p); a.put(5); return r.v; }}\n", decl).as_str(),
+    );
+    h::expect_ok(
+        "overwriting the reference ends its reborrow",
+        format(
+            "{}fn f(a: &mut A, b: &mut A) u32 {{ let mut p = a; let r = p.get(0); p = b; p.put(1); return r.v; }}\n",
+            decl,
+        ).as_str(),
+    );
+}
+
+// A method returning a reference with an elided lifetime borrows its receiver, whatever other
+// borrows the receiver's type holds: the result pins the autoref'd place (a local, a field reached
+// through `&mut self`, or the pointee of a `&mut` argument). A value copied out of the result keeps
+// only what lies behind the reference, so it survives a later mutation of the receiver, and a
+// result the signature ties to the receiver's own lifetime (`str<'a>`) pins nothing.
+@test
+fn carrying_receiver_results_pin_the_receiver() {
+    let decl = "struct B<'a> { pub xs: Vector<i32>, pub name: str<'a> }\nextend<'a> B<'a> {\n    fn get(self: &Self, i: usize) &i32 { return self.xs.at(i); }\n    fn put(self: &mut Self, v: i32) { self.xs.clear(); self.xs.push(v); }\n    fn nm(self: &B<'a>) str<'a> { return self.name; }\n}\nstruct S<'a> { pub b: B<'a>, pub n: i32 }\n";
+    let mutb = "cannot borrow this value as mutable while it is already borrowed as immutable";
+    h::expect_err_msg(
+        "a result held across a mutation of a local carrying receiver is rejected",
+        format(
+            "{}fn main() i32 {{ let mut b = B {{ xs: Vector::<i32>::new(), name: \"n\" }}; b.xs.push(7); let r = b.get(0); b.put(5); return *r; }}\n",
+            decl,
+        ).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "the same through a &mut parameter is rejected",
+        format(
+            "{}fn f(b: &mut B) i32 {{ let r = b.get(0); b.put(5); return *r; }}\nfn main() i32 {{ return 0; }}\n",
+            decl,
+        ).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "the same on a field reached through &mut self is rejected",
+        format(
+            "{}extend<'a> S<'a> {{ fn go(self: &mut Self) i32 {{ let r = self.b.get(0); self.b.put(5); return *r; }} }}\nfn main() i32 {{ return 0; }}\n",
+            decl,
+        ).as_str(),
+        mutb,
+    );
+    h::expect_err_msg(
+        "an element reference of a Vector<str> held across a push is rejected",
+        "fn main() i32 { let mut v = Vector::<str>::new(); v.push(\"a\"); let r = v.at(0); v.push(\"x\"); return r.len() as i32; }\n",
+        mutb,
+    );
+    h::expect_err_msg(
+        "an Option<&str> from a Map held across an insert is rejected",
+        "fn main() i32 { let mut m = Map::<i32, str>::new(); m.insert(1, \"a\"); let o = m.get(&1); m.insert(2, \"q\"); return switch o { Some(s) => s.len() as i32, None => 0, }; }\n",
+        mutb,
+    );
+    h::expect_ok(
+        "a result dead before the mutation is accepted",
+        format(
+            "{}fn f(b: &mut B, s: &mut S) i32 {{ let r = b.get(0); let v = *r; b.put(v); b.put(*b.get(0)); let w = *s.b.get(0); s.b.put(w); return *b.get(0); }}\nfn main() i32 {{ return 0; }}\n",
+            decl,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "a result tied to the receiver's own lifetime does not pin it",
+        format(
+            "{}fn f(b: &mut B) usize {{ let n = b.nm(); b.put(1); return n.len(); }}\nfn main() i32 {{ return 0; }}\n",
+            decl,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "values copied out of pinned element references survive later pushes",
+        "fn main() i32 { let mut v = Vector::<str>::new(); v.push(\"abc\"); let x = *v.at(0); v.push(\"b\"); let y = v[0]; v.push(\"c\"); let old = replace(v.index_mut(0), \"d\"); v.push(\"e\"); let p = v.pop().unwrap(); v.push(\"f\"); let mut m = Map::<i32, str>::new(); m.insert(1, \"abc\"); let z = *m.get(&1).unwrap(); m.insert(2, \"q\"); return (x.len() + y.len() + old.len() + p.len() + z.len()) as i32 - 13; }\n",
+    );
+}
+
+// Elision rule 2 counts every input lifetime position: a lone view parameter (`s: str`) feeds an
+// elided return, so the result borrows what the argument borrows.
+@test
+fn single_view_input_feeds_an_elided_return() {
+    let decl = "fn trim2(s: str) str { return s.trim(); }\n";
+    h::expect_err_msg(
+        "the result held across a mutation of the viewed String is rejected",
+        format(
+            "{}fn main() i32 {{ let mut o = String::from_str(\"  a long enough string to live on the heap  \"); let t = trim2(o.as_str()); o.push_byte(b'z'); return t.len() as i32; }}\n",
+            decl,
+        ).as_str(),
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_ok(
+        "the result dead before the mutation is accepted",
+        format(
+            "{}fn main() i32 {{ let mut o = String::from_str(\"  ab  \"); let n = trim2(o.as_str()).len(); o.push_byte(b'z'); return n as i32 - 2; }}\n",
+            decl,
+        ).as_str(),
+    );
+}
+
+// What a value read from behind a reference holds is what the referent holds: the reference's own
+// loans stay behind, the referent's borrows travel with the copy. A `&mut` claim of a whole local
+// (an autoref or `&mut x`) keeps what the local stores alive; only a store replaces it.
+@test
+fn copies_through_references_keep_the_referent_borrows() {
+    let asg = "cannot assign to this value while it is borrowed";
+    h::expect_err_msg(
+        "a reference copied out of a Vector<&i32> element keeps the loan",
+        "fn main() i32 { let mut a = 1; let mut v = Vector::<&i32>::new(); v.push(&a); let x = *v.at(0); a = 2; return *x; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a reference copied out of a &&i32 keeps the loan",
+        "fn main() i32 { let mut a = 1; let ra = &a; let t = &ra; let x = *t; a = 2; return *x; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a reference returned by a generic accessor keeps the loan",
+        "fn first<T>(v: &Vector<T>) &T { return v.at(0); }\nfn main() i32 { let mut a = 1; let mut v = Vector::<&i32>::new(); v.push(&a); let x = *first(&v); a = 2; return *x; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "an element replaced out of a Vector<&i32> keeps the loan",
+        "fn main() i32 { let mut a = 1; let b = 3; let mut v = Vector::<&i32>::new(); v.push(&a); let old = replace(v.index_mut(0), &b); a = 2; return *old; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "an element popped out of a Vector<&i32> keeps the loan",
+        "fn main() i32 { let mut a = 1; let mut v = Vector::<&i32>::new(); v.push(&a); let p = v.pop().unwrap(); a = 2; return *p; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a later push keeps the earlier stored borrow",
+        "fn main() i32 { let mut a = 1; let b = 5; let mut v = Vector::<&i32>::new(); v.push(&a); v.push(&b); a = 2; return **v.at(0); }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a &mut of the container keeps the earlier stored borrow",
+        "fn main() i32 { let mut a = 1; let b = 5; let mut v = Vector::<&i32>::new(); v.push(&a); let r = &mut v; r.push(&b); a = 2; return **v.at(0); }\n",
+        asg,
+    );
+}
+
+// Destroying a value reads its borrows only through an explicit `Free`: a derived destructor frees
+// owned members and never reads a reference, so a borrow held by such a value ends at its last use.
+@test
+fn only_explicit_free_observes_stored_borrows() {
+    h::expect_ok(
+        "a derived destructor does not keep a &mut String alive",
+        "struct M<'a> { pub out: &'a mut String, pub v: Vector<i32> }\nfn main() i32 { let mut s = String::new(); let mut m = M { out: &mut s, v: Vector::<i32>::new() }; m.v.push(1); m.out.push_byte(b'a'); let n = s.len(); return n as i32 - 1; }\n",
+    );
+    h::expect_err_msg(
+        "an explicit Free keeps it alive to the scope end",
+        "struct L<'a> { pub out: &'a mut String }\nextend<'a> L<'a> as Free { fn free(self: &mut Self) { self.out.push_byte(b'x'); } }\nfn main() i32 { let mut s = String::new(); let l = L { out: &mut s }; let n = s.len(); return n as i32; }\n",
+        "cannot use this value while it is mutably borrowed",
+    );
+    h::expect_err_msg(
+        "so does a member with an explicit Free",
+        "struct L<'a> { pub out: &'a mut String }\nextend<'a> L<'a> as Free { fn free(self: &mut Self) { self.out.push_byte(b'x'); } }\nstruct W<'a> { pub l: L<'a>, pub k: i32 }\nfn main() i32 { let mut s = String::new(); let w = W { l: L { out: &mut s }, k: 1 }; let n = s.len(); return n as i32 + w.k; }\n",
+        "cannot use this value while it is mutably borrowed",
+    );
+}
+
+// A borrow bound in a switch arm ends at its last use: a `&mut` claim later in the arm is legal
+// once the binding is dead, even when blocks after the arm are numbered past the claim.
+@test
+fn switch_arm_borrows_end_at_last_use() {
+    let decl = "struct V { pub k: i32 }\nextend V as Copy {}\nstruct H { pub m: Map<u64, V>, pub n: i32 }\nextend H {\n    fn use_v(self: &mut Self, v: V) i32 { self.n = v.k; return self.n; }\n    fn go(self: &mut Self) i32 {\n        switch self.m.get(&1u64) {\n            Some(v) => {\n                let c = self.use_v(*v);\n                if c != 0 || self.n == 1 {\n                    return c;\n                }\n            },\n            None => {},\n        };\n        return 0;\n    }\n}\n";
+    h::expect_ok("through &mut self", format("{}fn main() i32 {{ return 0; }}\n", decl).as_str());
+    h::expect_ok(
+        "on a local owner",
+        format(
+            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != 0 || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }};\n    return 1;\n}}\n",
+            decl,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "a binding used after the claim is rejected",
+        format(
+            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != v.k || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }};\n    return 1;\n}}\n",
+            decl,
+        ).as_str(),
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
 }
@@ -2599,6 +2868,58 @@ fn lifetime_elision() {
     );
 }
 
+// A returned slice borrows like `&T`: the same elision rules, with `[]'a T` naming its lifetime.
+@test
+fn slice_lifetime_elision() {
+    let msg = "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:";
+    h::expect_err_msg(
+        "two borrowing inputs cannot determine a slice output",
+        "struct V { pub b: Vector<u8> }\nfn pick(a: &V, b: &V) []u8 { let _ = b; return a.b[0..1]; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:23", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "two slice inputs cannot determine a slice output",
+        "fn pick(a: []u8, b: []u8) []u8 { let _ = b; return a; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:27", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "a slice output with no input lifetime must be named",
+        "const A: [u8; 2] = [1, 2];\nfn all() []u8 { return A; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:10", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "a slice inside a returned aggregate elides like a reference",
+        "fn pick(a: &i32, b: &i32) Option<[]u8> { let _ = a; let _ = b; return Option::<[]u8>::None; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:27", msg).as_str(),
+    );
+    h::expect_ok(
+        "rule 2: a single input lifetime is given to the slice output",
+        "fn tail(a: []u8) []u8 { return a[1..]; }\nfn main() i32 {\n    let v: [u8; 2] = [1, 2];\n    return tail(v)[0] as i32 - 2;\n}\n",
+    );
+    h::expect_ok(
+        "rule 3: a self receiver gives the slice output its lifetime",
+        "struct V { pub b: Vector<u8> }\nextend V { pub fn head(self: &Self, k: &i32) []u8 { let _ = k; return self.b[0..0]; } }\nfn main() i32 {\n    let v = V { b: Vector::<u8>::new() };\n    let k = 1;\n    return v.head(&k).len() as i32;\n}\n",
+    );
+    h::expect_ok(
+        "naming the slice lifetime resolves the ambiguity",
+        "fn pick<'a>(a: []'a u8, b: []u8) []'a u8 { let _ = b; return a; }\nfn main() i32 {\n    let x: [u8; 1] = [3];\n    let y: [u8; 1] = [4];\n    return pick(x, y)[0] as i32 - 3;\n}\n",
+    );
+    h::expect_ok(
+        "a 'static slice needs no input",
+        "const A: [str<'static>; 2] = [\"a\", \"b\"];\nfn all() []'static str<'static> { return A; }\nfn main() i32 {\n    return all().len() as i32 - 2;\n}\n",
+    );
+    h::expect_err_msg(
+        "a named slice output does not borrow from an unrelated input",
+        "fn pick<'a, 'b>(a: []'a u8, b: []'b u8) []'a u8 { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
+        "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime",
+    );
+    h::expect_err_msg(
+        "the result keeps only the named input borrowed",
+        "fn pick<'a>(a: []'a u8, b: []u8) []'a u8 { let _ = b; return a; }\nfn main() i32 {\n    let mut x = Vector::<u8>::new();\n    let mut y = Vector::<u8>::new();\n    x.push(1);\n    y.push(2);\n    let t = pick(x[0..1], y[0..1]);\n    y.push(3);\n    x.push(4);\n    return t[0] as i32;\n}\n",
+        "error: cannot borrow this value as mutable while it is already borrowed as immutable\n--> <harness>:9:5",
+    );
+}
+
 // `'static` is the universal region: it outlives every other, needs no signature entry, and nothing
 // else outlives it. Rust's rule, and the prerequisite for `T: 'static` bounds meaning anything.
 @test
@@ -2669,6 +2990,452 @@ fn field_lifetime_required() {
     h::expect_ok(
         "naming the view's lifetime is accepted",
         "struct Holder<'a> { pub s: str<'a> }\nfn main() i32 {\n    return 0;\n}\n",
+    );
+}
+
+// Every lifetime position of a field names a lifetime its type declares (or `'static`): a slice like
+// a reference, positions inside tuples, and the lifetime arguments of a borrowing aggregate.
+@test
+fn field_lifetime_positions() {
+    h::expect_err_msg(
+        "a slice field with no lifetime is rejected",
+        "struct A { pub s: []u8 }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: missing lifetime specifier: a slice stored in a type must name a lifetime the type declares\n--> <harness>:1:19",
+    );
+    h::expect_err_msg(
+        "a reference inside a tuple field needs a lifetime",
+        "struct A { pub t: (i32, &u8) }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: missing lifetime specifier: a reference stored in a type must name a lifetime the type declares\n--> <harness>:1:25",
+    );
+    h::expect_err_msg(
+        "a borrowing aggregate field cannot name an undeclared lifetime",
+        "struct A { pub s: Slice<'b, u8> }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'b`\n--> <harness>:1:25",
+    );
+    h::expect_exit(
+        "declared and 'static lifetimes in slice, tuple and aggregate fields are accepted",
+        "const G: [u8; 2] = [1u8, 2u8];\nstruct A<'a> { pub s: []'a u8, pub t: (i32, &'a u8), pub u: Slice<'static, u8> }\nfn main() i32 {\n    let x: [u8; 1] = [7u8];\n    let a = A { s: x[0..1], t: (1, &x[0]), u: G[0..2] };\n    return (a.s[0] + *a.t.1) as i32 - 14 + a.u.len() as i32 - 2;\n}\n",
+        0,
+    );
+}
+
+// A lifetime name must be declared by an enclosing item (the function, its extend or interface, the
+// type or alias) or by a `for<..>` bound; `'static` and `'_` always resolve.
+@test
+fn undeclared_lifetime_rejected() {
+    h::expect_err_msg(
+        "a function parameter and result",
+        "fn f(a: &'b u8) &'b u8 { return a; }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'b`\n--> <harness>:1:10",
+    );
+    h::expect_err_msg(
+        "a method naming neither its own nor its extend's lifetimes",
+        "struct S<'a> { pub r: &'a u8 }\nextend<'a> S<'a> {\n    fn f(self: &Self, x: &'d u8) &'a u8 { let _ = x; return self.r; }\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'d`\n--> <harness>:3:27",
+    );
+    h::expect_err_msg(
+        "an extend header",
+        "struct S<'a> { pub r: &'a u8 }\nextend S<'e> {}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'e`\n--> <harness>:2:10",
+    );
+    h::expect_err_msg(
+        "a type alias",
+        "type T = &'g u8;\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'g`\n--> <harness>:1:11",
+    );
+    h::expect_err_msg(
+        "a where clause bound",
+        "fn w<U>(u: U) where U: 'h { let _ = u; }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'h`\n--> <harness>:1:24",
+    );
+    h::expect_err_msg(
+        "a lifetime param's outlives bound",
+        "fn f<'x: 'z>(a: &'x u8) { let _ = a; }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'z`\n--> <harness>:1:10",
+    );
+    h::expect_err_msg(
+        "a closure parameter annotation",
+        "fn main() i32 {\n    let c = |p: &'k u8| *p;\n    let _ = c;\n    return 0;\n}\n",
+        "error: use of undeclared lifetime name `'k`\n--> <harness>:2:18",
+    );
+    h::expect_ok(
+        "declared, extend, `for<..>`, 'static and '_ lifetimes resolve",
+        "struct S<'a> { pub r: &'a u8 }\nextend<'a> S<'a> {\n    fn get(self: &Self) &'a u8 { return self.r; }\n    fn m<'c>(self: &Self, x: &'c u8) &'c u8 { let _ = self; return x; }\n}\nfn st(x: &'static u8) &'static u8 { return x; }\nfn un(x: &'_ u8) &'_ u8 { return x; }\nfn hr<F>(f: F) where F: for<'q> fn(&'q u8) &'q u8 { let _ = f; }\nfn lb<'x, 'y: 'x>(a: &'x u8, b: &'y u8) { let _ = a; let _ = b; }\nfn main() i32 {\n    let v: u8 = 1;\n    let s = S { r: &v };\n    let _ = s.get();\n    let _ = s.m(&v);\n    let _ = st;\n    let _ = un(&v);\n    return 0;\n}\n",
+    );
+}
+
+// Elision walks every aggregate argument position, tuples included, on both sides of a signature;
+// `Self` names the lifetimes its extend declares, so it is never an elided position.
+@test
+fn tuple_lifetime_elision() {
+    h::expect_err_msg(
+        "a reference inside a returned tuple elides like a bare one",
+        "fn f(a: &i32, b: &i32) Option<(i32, &i32)> { let _ = a; let _ = b; return Option::None; }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:1:24",
+    );
+    h::expect_exit(
+        "a named tuple output and a tuple input's single position are accepted",
+        "fn f<'a>(a: &'a i32, b: &i32) Option<(i32, &'a i32)> { let _ = b; return Option::Some((1, a)); }\nfn second(p: (i32, &i32)) &i32 { return p.1; }\nfn main() i32 {\n    let x = 3;\n    let y = 4;\n    let t = f(&x, &y).unwrap();\n    return *second(t) - 3;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a Self return names the extend's lifetimes",
+        "struct V<'a> { pub r: &'a i32 }\nextend<'a> V<'a> { pub fn pick(a: &'a i32, b: &i32) Self { let _ = b; return V { r: a }; } }\nfn main() i32 {\n    let x = 1;\n    let y = 2;\n    return *V::pick(&x, &y).r - 1;\n}\n",
+        0,
+    );
+}
+
+// `'_` is an elided lifetime at every occurrence: a fresh region in an input, the elided output in the
+// result (the elision rules decide it), and nothing ties two `'_` positions together.
+@test
+fn anonymous_lifetime_is_elided() {
+    let missing = "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:";
+    h::expect_err_msg(
+        "two '_ inputs cannot determine a '_ output",
+        "fn pick(a: &'_ u8, b: &'_ u8) &'_ u8 { let _ = b; return a; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:31", missing).as_str(),
+    );
+    h::expect_err_msg(
+        "two elided inputs cannot determine an aggregate's '_ argument",
+        "struct R<'a> { pub r: &'a i32 }\nfn mk(x: &i32, y: &i32) R<'_> { let _ = y; return R { r: x }; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:25", missing).as_str(),
+    );
+    h::expect_err_msg(
+        "a '_ output of a self method is the receiver's region, not another '_ input's",
+        "struct S { pub v: u8 }\nextend S { fn bad(self: &'_ S, b: &'_ u8) &'_ u8 { let _ = self; return b; } }\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:2:73",
+    );
+    h::expect_err_msg(
+        "a '_ output borrows its single input at the call site",
+        "fn one(a: &'_ mut u8) &'_ u8 { return a; }\nfn main() i32 {\n    let mut x = 1u8;\n    let r = one(&mut x);\n    x = 2;\n    return *r as i32;\n}\n",
+        "error: cannot assign to this value while it is borrowed\n--> <harness>:5:5",
+    );
+    h::expect_exit(
+        "'_ in single-input signatures and in an extend header is accepted",
+        "struct R<'a> { pub r: &'a i32 }\nextend R<'_> { pub fn peek(self: &Self) &'_ i32 { return self.r; } }\nfn one(a: &'_ i32) &'_ i32 { return a; }\nfn mk(x: &'_ i32) R<'_> { return R { r: x }; }\nfn main() i32 {\n    let x = 7;\n    let r = mk(&x);\n    return *one(&x) + *r.peek() - 14;\n}\n",
+        0,
+    );
+}
+
+// An elided input lifetime is its own anonymous region: only `'static` outlives it, and it outlives no
+// named lifetime and no other input's region. An elided output is the elision source's region.
+@test
+fn return_lifetime_elided_inputs() {
+    let msg = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
+    h::expect_err_msg(
+        "an elided reference input is not the named output lifetime",
+        "fn bad<'a>(a: &'a u8, b: &u8) &'a u8 { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:58", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "an elided slice input is not the named output lifetime",
+        "fn bad<'a>(a: []'a u8, b: []u8) []'a u8 { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:61", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "an elided lifetime argument is not the named output lifetime",
+        "fn bad<'a>(a: str<'a>, b: str) str<'a> { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}1:60", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "an elided output takes the receiver's lifetime, not another input's",
+        "struct S { pub v: u8 }\nextend S { pub fn get(self: &Self, b: &u8) &u8 { return b; } }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:57", msg).as_str(),
+    );
+    h::expect_exit(
+        "'static outlives a named and an elided output",
+        "const G: u8 = 1;\nfn st<'a>(a: &'a u8, b: &'static u8) &'a u8 { let _ = a; return b; }\nstruct S { pub v: u8 }\nextend S { pub fn get(self: &Self, b: &'static u8) &u8 { return b; } }\nfn main() i32 {\n    let x = 1u8;\n    let s = S { v: 0u8 };\n    return (*st(&x, &G) + *s.get(&G)) as i32 - 2;\n}\n",
+        0,
+    );
+}
+
+// A call relates the caller's own parameter lifetimes (universal regions) through the callee's
+// signature: a lifetime the callee's `&mut` storage pointee names is exactly the caller's lifetime at
+// that position, and every argument stored under it must outlive that lifetime.
+@test
+fn call_universal_regions() {
+    let msg = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
+    h::expect_err_msg(
+        "an elided argument lifetime does not outlive the storage's",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x>(w: &mut Vector<&'x i32>, a: &i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:56", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "an unrelated named argument lifetime does not outlive the storage's",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, a: &'z i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:63", msg).as_str(),
+    );
+    h::expect_err_msg(
+        "the stored lifetime is matched by position, not by the argument's outer reference",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &&'y i32) { v.push(*e); }\nfn fill<'x>(w: &mut Vector<&'x i32>, a: &&i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}2:57", msg).as_str(),
+    );
+    h::expect_exit(
+        "the same, a declared outlives edge and 'static are accepted",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn f1<'x>(w: &mut Vector<&'x i32>, a: &'x i32) { put(w, a); }\nfn f2<'x, 'z: 'x>(w: &mut Vector<&'x i32>, a: &'z i32) { put(w, a); }\nfn f3<'x>(w: &mut Vector<&'x i32>, a: &'static i32) { put(w, a); }\nfn main() i32 {\n    let x = 1;\n    let mut v = Vector::<&i32>::new();\n    f1(&mut v, &x);\n    return *v[0] - 1;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "an outer reference with its own lifetime is accepted",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &&'y i32) { v.push(*e); }\nfn fill<'x, 'q>(w: &mut Vector<&'x i32>, a: &'q &'x i32) { put(w, a); }\nfn main() i32 {\n    let x = 1;\n    let r = &x;\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, &r);\n    return *v[0] - 1;\n}\n",
+        0,
+    );
+}
+
+// A parameter's regions flow through the body like NLL's outlives constraints (through local copies,
+// field reads, reborrows and reassignments) into the return slots and the storage the parameters
+// reach. Each arrival must outlive the slot's region by the declared bounds, the bounds the
+// signature's references imply, or `'static`. A field read takes the regions the field's declared
+// type names, so a two-lifetime aggregate keeps its lifetimes apart.
+@test
+fn universal_region_flow() {
+    let store = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
+    let ret = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
+    h::expect_err_msg(
+        "a parameter's field stored under an unrelated lifetime",
+        "struct H<'z> { pub r: &'z i32 }\nfn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, s: &H<'z>) {\n    put(w, s.r);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", store).as_str(),
+    );
+    h::expect_err_msg(
+        "a local copy of a parameter stored under an unrelated lifetime",
+        "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, a: &'z i32) {\n    let b = a;\n    put(w, b);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", store).as_str(),
+    );
+    h::expect_err_msg(
+        "a local copy of a parameter returned under an unrelated lifetime",
+        "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let _ = a;\n    let c = b;\n    return c;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", ret).as_str(),
+    );
+    h::expect_err_msg(
+        "a parameter's field returned under an unrelated lifetime",
+        "struct H<'z> { pub r: &'z i32 }\nfn f<'a, 'z>(a: &'a i32, s: &H<'z>) &'a i32 {\n    let _ = a;\n    return s.r;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", ret).as_str(),
+    );
+    h::expect_err_msg(
+        "a reassigned local holds both values' regions",
+        "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let mut r = a;\n    r = b;\n    return r;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", ret).as_str(),
+    );
+    h::expect_err_msg(
+        "an assignment through a reborrow of a parameter",
+        "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'c>(s: &mut Slot<'c>, x: &'a i32) {\n    let t = &mut *s;\n    t.r = x;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}4:5", store).as_str(),
+    );
+    h::expect_err_msg(
+        "the other field of a two-lifetime parameter",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn second<'a, 'b>(p: P<'a, 'b>) &'a i32 {\n    return p.y;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}3:5", ret).as_str(),
+    );
+    h::expect_err_msg(
+        "an assignment into the other field of a two-lifetime parameter",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn put<'a, 'b>(p: &mut P<'a, 'b>, v: &'b i32) {\n    p.x = v;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        format("{}3:5", store).as_str(),
+    );
+    h::expect_exit(
+        "fields, copies, reborrows, implied and declared bounds and 'static that honour the signature",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nstruct Q<'a, 'b> { pub p: P<'a, 'b>, pub z: &'b i32 }\nstruct H<'z> { pub r: &'z i32 }\nstruct Slot<'c> { pub r: &'c i32 }\nconst G: i32 = 3;\nfn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn first<'a, 'b>(p: P<'a, 'b>) &'a i32 { return p.x; }\nfn nested<'a, 'b>(q: &Q<'a, 'b>) &'a i32 {\n    let r = q.p.x;\n    return r;\n}\nfn inner<'a, 'b>(x: &'a &'b i32) &'b i32 { return *x; }\nfn outl<'a, 'b: 'a>(a: &'a i32, b: &'b i32) &'a i32 {\n    let _ = a;\n    let c = b;\n    return c;\n}\nfn field<'z>(s: &H<'z>) &'z i32 { return s.r; }\nfn fill<'x>(w: &mut Vector<&'x i32>, s: &H<'x>) {\n    let b = s.r;\n    put(w, b);\n    w.push(b);\n}\nfn set<'c>(s: &mut Slot<'c>, x: &'c i32) {\n    let y = x;\n    let t = &mut *s;\n    t.r = y;\n    s.r = &G;\n}\nextend<'a, 'b> P<'a, 'b> {\n    pub fn gy(self: &Self) &'b i32 { return self.y; }\n    pub fn sx(self: &mut Self, v: &'a i32) { self.x = v; }\n}\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut p = P { x: &a, y: &b };\n    p.sx(&b);\n    let q = Q { p: P { x: &a, y: &b }, z: &b };\n    let h = H { r: &a };\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, &h);\n    let mut s = Slot { r: &a };\n    set(&mut s, &b);\n    let rb = &b;\n    return *first(p) + *nested(&q) + *inner(&rb) + *outl(&a, &b) + *field(&h) + *v[1] + *s.r + *p.gy() - 14;\n}\n",
+        0,
+    );
+}
+
+// A parameter naming `'static` keeps its argument's borrows for the whole program: a borrow of frame
+// storage, or a region the caller does not declare `'static`, is rejected; a constant's or a static's
+// borrow is accepted.
+@test
+fn static_parameter_borrows() {
+    h::expect_err_msg(
+        "a local's borrow passed as `&'static`",
+        "fn keep(r: &'static u8) { let _ = r; }\nfn main() i32 {\n    let x = 1u8;\n    keep(&x);\n    return 0;\n}\n",
+        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:4:10",
+    );
+    h::expect_err_msg(
+        "a parameter's region passed as `&'static`",
+        "fn keep(r: &'static u8) { let _ = r; }\nfn pass<'a>(r: &'a u8) {\n    keep(r);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: this argument's lifetime is not declared to outlive 'static\n--> <harness>:3:5",
+    );
+    h::expect_err_msg(
+        "a local's borrow behind a `'static` position",
+        "fn keep(v: &Vector<&'static u8>) { let _ = v; }\nfn main() i32 {\n    let a = 1u8;\n    let mut v = Vector::<&u8>::new();\n    v.push(&a);\n    keep(&v);\n    return 0;\n}\n",
+        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:5:12",
+    );
+    h::expect_exit(
+        "a constant's and a static's borrows are 'static",
+        "fn keep(r: &'static u8) { let _ = r; }\nconst G: u8 = 1;\nstatic mut S: u8 = 2;\nfn pass(r: &'static u8) {\n    let c = r;\n    keep(c);\n}\nfn main() i32 {\n    keep(&G);\n    unsafe keep(&S);\n    pass(&G);\n    return 0;\n}\n",
+        0,
+    );
+}
+
+// A loan is in scope at a block's first point only through the block's entry row: a write there
+// conflicts with the previous iteration's loan when it is still wanted, not when the body re-points
+// the reference first, and a loan the entry block issues later is not in scope before its issue.
+@test
+fn loan_scope_at_block_entry() {
+    h::expect_err_msg(
+        "a write at the loop body's first point under the previous iteration's loan",
+        "fn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    let mut r = &mut y;\n    let mut i = 0;\n    while i < 3 {\n        x += 1;\n        *r += 1;\n        r = &mut x;\n        i += 1;\n    }\n    return x;\n}\n",
+        "error: cannot assign to this value while it is borrowed\n--> <harness>:7:9",
+    );
+    h::expect_exit(
+        "the body re-points the reference before the write",
+        "fn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    let mut r = &mut y;\n    let mut i = 0;\n    while i < 3 {\n        r = &mut y;\n        x += 1;\n        *r += 1;\n        r = &mut x;\n        *r += 1;\n        i += 1;\n    }\n    return x + y - 12;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a write before the entry block's loan",
+        "fn f(p: &mut i32) i32 {\n    *p = 1;\n    let r = &*p;\n    return *r;\n}\nfn main() i32 {\n    let mut x = 0;\n    return f(&mut x) - 1;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a write after the entry block's loan",
+        "fn f(p: &mut i32) i32 {\n    let r = &*p;\n    *p = 1;\n    return *r;\n}\nfn main() i32 {\n    let mut x = 0;\n    return f(&mut x) - 1;\n}\n",
+        "error: cannot assign to this value while it is borrowed\n--> <harness>:3:5",
+    );
+}
+
+// An array coerced to a slice view is borrowed by the view like `&a` (`&mut a` for `[]mut`): the array
+// must outlive the view and may not be written, moved or viewed mutably while the view lives. A
+// literal's array lives to the end of its block. A view never moves the array.
+@test
+fn array_slice_view_borrows() {
+    h::expect_err_msg(
+        "a view of an array that dies before the view",
+        "fn main() i32 {\n    let s: []u8;\n    {\n        let x = [7u8, 9];\n        s = x;\n    }\n    return s[0] as i32;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:5:13",
+    );
+    h::expect_err_msg(
+        "a write to a viewed array",
+        "fn main() i32 {\n    let mut a = [1u8, 2];\n    let s: []u8 = a;\n    a[0] = 5;\n    return s[0] as i32;\n}\n",
+        "error: cannot assign to this value while it is borrowed\n--> <harness>:4:5",
+    );
+    h::expect_err_msg(
+        "a move of a viewed array",
+        "fn main() i32 {\n    let v = [String::from(\"a\")];\n    let s: []String = v;\n    let w = v;\n    return (s.len() + w[0].len()) as i32;\n}\n",
+        "error: cannot move this value while it is borrowed\n--> <harness>:4:5",
+    );
+    h::expect_err_msg(
+        "a view of a literal that dies with its block",
+        "fn main() i32 {\n    let s: []u8;\n    {\n        let a = 5u8;\n        s = [a, 9u8];\n    }\n    return s[0] as i32;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:5:13",
+    );
+    h::expect_err_msg(
+        "a returned view of a local literal",
+        "fn f() []'static u8 {\n    return [1u8, 2];\n}\nfn main() i32 {\n    return f()[0] as i32;\n}\n",
+        "error: returning a value borrowing from a local, which does not outlive the call\n--> <harness>:2:12",
+    );
+    h::expect_err_msg(
+        "a shared view while a mutable view lives",
+        "fn main() i32 {\n    let mut a = [1u8, 2];\n    let m: []mut u8 = a;\n    let s: []u8 = a;\n    m[0] = 3;\n    return s[0] as i32;\n}\n",
+        "error: cannot borrow this value as immutable while it is already borrowed as mutable\n--> <harness>:4:19",
+    );
+    h::expect_err_msg(
+        "a view stored in a struct that outlives the array",
+        "struct W<'a> { pub d: []'a u8 }\nfn main() i32 {\n    let w: W;\n    {\n        let a = [4u8];\n        w = W { d: a };\n    }\n    return w.d[0] as i32;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:6:20",
+    );
+    h::expect_exit(
+        "views as arguments, literal views and nested literals",
+        "fn take(s: []u8) u8 { return s[0]; }\nfn main() i32 {\n    let a = [1u8, 2];\n    let s: []u8 = [a[1], 3u8];\n    return (take(a) + take([a[0]]) + s[0]) as i32 - 4;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a mutable view that ends, a view's last use before a write, an owning array viewed and dropped",
+        "fn main() i32 {\n    let mut a = [1u8, 2];\n    {\n        let m: []mut u8 = a;\n        m[0] = 7;\n    }\n    let s: []u8 = a;\n    let x = s[1];\n    a[1] = 5;\n    let v = [String::from(\"ab\")];\n    let t: []String = v;\n    return (a[0] + x + a[1]) as i32 + (t[0].len() + v[0].len()) as i32 - 18;\n}\n",
+        0,
+    );
+}
+
+// A `&'static` receiver taken by implicit autoref borrows the receiver for the whole program: a local
+// is rejected, a constant or a `&'static` reference is accepted.
+@test
+fn static_receiver_autoref() {
+    h::expect_err_msg(
+        "a local's implicit autoref for a `&'static` receiver",
+        "struct S { pub v: i32 }\nextend S {\n    pub fn k(self: &'static Self) i32 { return self.v; }\n}\nfn main() i32 {\n    let s = S { v: 3 };\n    return s.k();\n}\n",
+        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:7:12",
+    );
+    h::expect_exit(
+        "a constant receiver and a `&'static` reference",
+        "struct S { pub v: i32 }\nextend S {\n    pub fn k(self: &'static Self) i32 { return self.v; }\n}\nconst G: S = S { v: 3 };\nfn h(r: &'static S) i32 {\n    return r.k();\n}\nfn main() i32 {\n    return G.k() + h(&G) - 6;\n}\n",
+        0,
+    );
+}
+
+// A body local of a struct or tuple type keeps its members' regions apart, and a value built or copied
+// member by member reaches a struct slot member by member. A member written twice holds both values'
+// regions (a local's type has one region per position, as in Rust).
+@test
+fn local_member_regions() {
+    h::expect_err_msg(
+        "the other member of a local tuple",
+        "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let t = (a, b);\n    return t.1;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:3:5",
+    );
+    h::expect_err_msg(
+        "the other binding of a destructured tuple",
+        "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let (_x, y) = (a, b);\n    return y;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:3:5",
+    );
+    h::expect_err_msg(
+        "a local struct with swapped members returned",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f<'a, 'b>(a: &'a i32, b: &'b i32) P<'a, 'b> {\n    let p = P { x: b, y: a };\n    return p;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:4:5",
+    );
+    h::expect_err_msg(
+        "a local struct with swapped members stored through a parameter",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f<'a, 'b>(p: &mut P<'a, 'b>, a: &'a i32, b: &'b i32) {\n    let q = P { x: b, y: a };\n    *p = q;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:4:5",
+    );
+    h::expect_err_msg(
+        "a member written with another region",
+        "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let mut t = (a, a);\n    t.0 = b;\n    return t.0;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:4:5",
+    );
+    h::expect_err_msg(
+        "the other member of a copied local struct",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f<'a, 'b>(a: &'a i32, b: &'b i32) &'b i32 {\n    let p = P { x: a, y: b };\n    let q = p;\n    return q.x;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:5:5",
+    );
+    h::expect_exit(
+        "members, copies, destructuring and member-wise stores that honour the signature",
+        "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f1<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let t = (a, b);\n    return t.0;\n}\nfn f2<'a, 'b>(a: &'a i32, b: &'b i32) P<'a, 'b> {\n    let p = P { x: a, y: b };\n    return p;\n}\nfn f3<'a, 'b>(p: &mut P<'a, 'b>, a: &'a i32, b: &'b i32) {\n    *p = P { x: a, y: b };\n}\nfn f4<'a, 'b>(a: &'a i32, b: &'b i32) &'b i32 {\n    let p = P { x: a, y: b };\n    let q = p;\n    let (_x, y) = (q.x, q.y);\n    return y;\n}\nfn main() i32 {\n    let x = 1;\n    let y = 2;\n    let mut p = f2(&x, &y);\n    f3(&mut p, &y, &x);\n    return *f1(&x, &y) + *p.x + *f4(&x, &y) - 5;\n}\n",
+        0,
+    );
+}
+
+// A call reads `Self` in the callee's signature as its extend's target type, lifetimes included: a
+// `Self` result, a `&mut Self` store target and a `Self` argument tie to the extend's lifetimes. An
+// element read from a slice parameter has the element type's lifetimes.
+@test
+fn self_in_callee_signature() {
+    h::expect_err_msg(
+        "a `Self` result borrowing a dead local",
+        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let w: W;\n    {\n        let x = 5;\n        w = W::new(&x);\n    }\n    return *w.r;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:12:20",
+    );
+    h::expect_err_msg(
+        "a store through `&mut Self` of a dead local's borrow",
+        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let mut w = W::new(&y);\n    {\n        let x = 5;\n        w.put(&x);\n    }\n    return *w.get();\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:13:15",
+    );
+    h::expect_err_msg(
+        "a `Self` argument returned as `Self`",
+        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let w = W::new(&y);\n    let v: W;\n    {\n        let x = 5;\n        v = w.same(W::new(&x));\n    }\n    return *v.r;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:14:27",
+    );
+    h::expect_exit(
+        "the same calls with borrows that outlive their uses",
+        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let x = 5;\n    let mut w = W::new(&y);\n    let r: &i32;\n    {\n        let u = W::new(&x);\n        w.put(&x);\n        r = u.get();\n    }\n    let v = w.same(W::new(&y));\n    return *w.r + *r + *v.r - 11;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a slice element whose lifetime is elided stored through `&mut Self`",
+        "struct Pool<'a> { pub v: Vector<str<'a>> }\nextend<'a> Pool<'a> {\n    pub fn txt(self: &mut Self, s: str<'a>) { self.v.push(s); }\n}\nfn f<'a>(p: &mut Pool<'a>, args: []str) {\n    p.txt(args[0]);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:6:5",
+    );
+    h::expect_exit(
+        "a slice element takes the element type's lifetime",
+        "struct Pool<'a> { pub v: Vector<str<'a>> }\nextend<'a> Pool<'a> {\n    pub fn txt(self: &mut Self, s: str<'a>) { self.v.push(s); }\n}\nfn f<'a>(p: &mut Pool<'a>, args: []str<'a>) {\n    p.txt(args[0]);\n}\nfn main() i32 {\n    let mut p = Pool { v: Vector::<str>::new() };\n    f(&mut p, [\"x\"]);\n    return p.v.len() as i32 - 1;\n}\n",
+        0,
     );
 }
 
@@ -3682,5 +4449,72 @@ fn mutable_captures_are_exclusive_borrows() {
     h::expect_ok(
         "the variable is usable after the closure's last call",
         "fn run<F: fn()>(f: F) { f(); }\nfn main() i32 {\n    let mut n: i32 = 0;\n    let c = || n += 1;\n    c();\n    c();\n    let m = n;\n    let mut s = String::from_str(\"a\");\n    run(|| s.push_str(\"b\"));\n    s.push_str(\"c\");\n    let t = s;\n    return m + t.len() as i32 - 5;\n}\n",
+    );
+}
+
+// A store through any reference to a container records the stored borrow in the container: the
+// `&mut` argument may be a local holding the reference, a reborrow of one, or reach caller storage
+// through a parameter.
+@test
+fn store_through_reference_chain() {
+    let put = "fn put<'x>(v: &mut Vector<&'x i32>, e: &'x i32) { v.push(e); }\n";
+    let asg = "error: cannot assign to this value while it is borrowed\n--> <harness>:";
+    let esc = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
+    h::expect_err_msg(
+        "a store through a local `&mut` borrows the argument",
+        format(
+            "{}fn main() i32 {{\n    let mut v = Vector::<&i32>::new();\n    let mut a = 1;\n    let r = &mut v;\n    put(r, &a);\n    a = 2;\n    return **v.at(0);\n}}\n",
+            put,
+        ).as_str(),
+        format("{}7:5", asg).as_str(),
+    );
+    h::expect_err_msg(
+        "a store through a reborrow chain borrows the argument",
+        format(
+            "{}fn main() i32 {{\n    let mut v = Vector::<&i32>::new();\n    let mut a = 1;\n    let r = &mut v;\n    let r2 = &mut *r;\n    put(r2, &a);\n    a = 2;\n    return **v.at(0);\n}}\n",
+            put,
+        ).as_str(),
+        format("{}8:5", asg).as_str(),
+    );
+    h::expect_err_msg(
+        "a method store through a local `&mut` borrows the argument",
+        "fn main() i32 {\n    let mut v = Vector::<&i32>::new();\n    let mut a = 1;\n    let r = &mut v;\n    r.push(&a);\n    a = 2;\n    return **v.at(0);\n}\n",
+        format("{}6:5", asg).as_str(),
+    );
+    h::expect_err_msg(
+        "a local borrow stored through a `&mut` parameter escapes",
+        format(
+            "{}fn fill<'x>(w: &mut Vector<&'x i32>, n: i32) {{\n    let a = n;\n    put(w, &a);\n}}\nfn main() i32 {{\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, 3);\n    return 0;\n}}\n",
+            put,
+        ).as_str(),
+        format("{}4:12", esc).as_str(),
+    );
+    h::expect_err_msg(
+        "a local borrow stored through a reborrowed parameter escapes",
+        "fn fill<'x>(w: &mut Vector<&'x i32>, n: i32) {\n    let a = n;\n    let r = &mut *w;\n    r.push(&a);\n}\nfn main() i32 {\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, 3);\n    return 0;\n}\n",
+        format("{}4:12", esc).as_str(),
+    );
+    h::expect_ok(
+        "the argument written before the store is not borrowed",
+        format(
+            "{}fn main() i32 {{\n    let mut a = 1;\n    let mut v = Vector::<&i32>::new();\n    a = 2;\n    let r = &mut v;\n    put(r, &a);\n    return **v.at(0);\n}}\n",
+            put,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "the borrow ends at the container's last use",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn set<'x>(s: &mut Slot<'x>, e: &'x i32) { s.r = e; }\nfn main() i32 {\n    let b = 0;\n    let mut a = 1;\n    let mut s = Slot { r: &b };\n    let r = &mut s;\n    set(r, &a);\n    let n = *s.r;\n    a = 2;\n    return n + a - 3;\n}\n",
+    );
+    h::expect_err_msg(
+        "the borrow lasts while the container is used",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn set<'x>(s: &mut Slot<'x>, e: &'x i32) { s.r = e; }\nfn main() i32 {\n    let b = 0;\n    let mut a = 1;\n    let mut s = Slot { r: &b };\n    let r = &mut s;\n    set(r, &a);\n    a = 2;\n    return *s.r;\n}\n",
+        format("{}9:5", asg).as_str(),
+    );
+    h::expect_ok(
+        "a store of a parameter's borrow through a reborrowed parameter",
+        format(
+            "{}fn relay<'x>(w: &mut Vector<&'x i32>, e: &'x i32) {{\n    let r = &mut *w;\n    put(r, e);\n}}\nfn main() i32 {{\n    let a = 1;\n    let mut v = Vector::<&i32>::new();\n    relay(&mut v, &a);\n    return **v.at(0) - 1;\n}}\n",
+            put,
+        ).as_str(),
     );
 }

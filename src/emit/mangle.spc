@@ -672,7 +672,7 @@ extend Mangler {
         return rec;
     }
 
-    const fn p(self: &Self) &loader::Package {
+    const fn p<'a>(self: &Self) &'a loader::Package {
         return unsafe &*self.pkg;
     }
 

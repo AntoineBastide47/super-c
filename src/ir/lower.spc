@@ -3151,7 +3151,26 @@ extend Lowerer {
                 }
             }
         }
-        let co = self.f.coercion(id);
+        // An array the checker coerced to a slice view: the node records the view and the operand
+        // keeps the array. The view temp is the one place the emitter builds `{ arr, N }`; it
+        // borrows the array (`b` = the view kind), so an array temporary lives to the scope's end.
+        // A call records the view as a conversion and keeps its array type.
+        let mut co = self.f.coercion(id);
+        {
+            let ot = self.body.operands.at(op as usize).ty;
+            if ot != TYPE_NONE && self.f.ty(ot).kind == TypeKind::TYPE_ARRAY {
+                let mut vt = self.nty(id);
+                if co != null && self.view_kind(unsafe (*co).target) != 0 {
+                    vt = unsafe (*co).target;
+                    co = null;
+                }
+                let vk = self.view_kind(vt);
+                if vk != 0 {
+                    let _ = self.own_temp(op, id);
+                    op = self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, op, vk, 0, vt), sp));
+                }
+            }
+        }
         if co != null && self.f.wide_lit(id) != null {
             // a wide literal already CARRIES the target-width limbs: the widening `from` shim
             // would truncate through its scalar parameter, so the constant retypes instead
@@ -3207,10 +3226,11 @@ extend Lowerer {
                 loop {
                     let inn = self.f.node(inner0);
                     if inn.kind == NodeKind::NODE_UNARY && (inn.as_data.unary.op == tt::TokenType::Unsafe || inn.as_data.unary.op == tt::TokenType::Move) {
-                        if inn.as_data.unary.op == tt::TokenType::Unsafe {
-                            self.note_unsafe(inner0);
-                        }
+                        let outer = inner0;
                         inner0 = inn.as_data.unary.operand;
+                        if inn.as_data.unary.op == tt::TokenType::Unsafe {
+                            self.note_unsafe(outer);
+                        }
                         continue;
                     }
                     break;
@@ -3249,10 +3269,11 @@ extend Lowerer {
                 loop {
                     let en = self.f.node(e);
                     if en.kind == NodeKind::NODE_UNARY && (en.as_data.unary.op == tt::TokenType::Move || en.as_data.unary.op == tt::TokenType::Unsafe) {
-                        if en.as_data.unary.op == tt::TokenType::Unsafe {
-                            self.note_unsafe(e);
-                        }
+                        let outer = e;
                         e = en.as_data.unary.operand;
+                        if en.as_data.unary.op == tt::TokenType::Unsafe {
+                            self.note_unsafe(outer);
+                        }
                     } else {
                         break;
                     }
@@ -4686,8 +4707,8 @@ extend Lowerer {
             if ty == TYPE_NONE || self.f.ty(ty).kind == TypeKind::TYPE_ARRAY {
                 return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, ty), sp));
             }
-            // A repeat coerced to a slice: fill an array temp of the checked count, then view it
-            // (the emitter wraps an array flowing into a slice destination).
+            // A repeat coerced to a slice: fill an array temp of the checked count; `apply_adjust`
+            // views it.
             let mut n: i64 = -1;
             if unsafe (&*self.pkg).cir != null {
                 let cv = unsafe (&mut *((&*self.pkg).cir as *mut iri::Interp)).eval(self.module, c);
@@ -4704,8 +4725,7 @@ extend Lowerer {
             let aty = sa.intern_type(
                 Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: n as u32 } } },
             );
-            let apl = self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, aty), sp);
-            return self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, self.copy_op(apl), 0, 0, ty), sp));
+            return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, aty), sp));
         }
         let mut argv = self.avget();
         let mut cur: i64 = 0;
@@ -4765,6 +4785,14 @@ extend Lowerer {
                     aty = sa.intern_type(nt);
                 }
             }
+        }
+        // A literal coerced to a slice builds its array; `apply_adjust` views it.
+        if self.slice_view(ty) {
+            let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
+            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            aty = sa.intern_type(
+                Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: argv.len() as u32 } } },
+            );
         }
         let ra9 = self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp);
         self.avput(argv);
@@ -5352,7 +5380,14 @@ extend Lowerer {
                     return ir::IR_NONE;
                 }
             }
-            return self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: ty });
+            let mut pty = ty;
+            if du == null && self.slice_view(ty) {
+                let by = *self.f.ty(self.body.places.at(base as usize).ty);
+                if by.kind == TypeKind::TYPE_REFERENCE || by.kind == TypeKind::TYPE_POINTER {
+                    pty = self.storage_ty(ty, by.as_data.elem);
+                }
+            }
+            return self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: pty });
         }
         // Any other expression used as a place: evaluate and spill.
         let op = self.lower_expr(id);
@@ -5517,7 +5552,11 @@ extend Lowerer {
                 }
             }
         }
-        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fsub, ty: ty });
+        let mut pty = ty;
+        if self.slice_view(ty) {
+            pty = self.storage_ty(ty, self.proj_member_ty(self.body.places.at(base as usize).ty, fd.module, fd.node));
+        }
+        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fsub, ty: pty });
     }
 
     // ---- bounds-check normalization -------------------------------------------------------------
@@ -5582,6 +5621,40 @@ extend Lowerer {
             it.decl,
             it.module,
         ) || vd_is(v.v_string, it.decl, it.module);
+    }
+
+    /// True for the prelude `Slice<T>` / `SliceMut<T>` instances: the views an array coerces to.
+    fn slice_view(self: &mut Self, ty: TypeId) bool {
+        return self.view_kind(ty) != 0;
+    }
+
+    /// 1 for a prelude `Slice<T>` instance, 2 for `SliceMut<T>`, else 0.
+    fn view_kind(self: &mut Self, ty: TypeId) u32 {
+        if ty == TYPE_NONE {
+            return 0;
+        }
+        let y = *self.f.ty(ty);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return 0;
+        }
+        let it = *self.f.instance(y.as_data.inst);
+        let v = self.view_decls();
+        if vd_is(v.v_slice, it.decl, it.module) {
+            return 1;
+        }
+        if vd_is(v.v_slice_mut, it.decl, it.module) {
+            return 2;
+        }
+        return 0;
+    }
+
+    /// The type of a place whose node the checker coerced to slice view `ty`: `natural`, the
+    /// storage's own type, when it is an array (the view is built from the place's value).
+    fn storage_ty(self: &Self, ty: TypeId, natural: TypeId) TypeId {
+        if natural != TYPE_NONE && self.f.ty(natural).kind == TypeKind::TYPE_ARRAY {
+            return natural;
+        }
+        return ty;
     }
 
     /// True for the prelude `Array<T, N>` instance (fixed length; range-validated like a view).
@@ -5742,6 +5815,15 @@ extend Lowerer {
         // outlives the slot holding the reference (a call-result temporary dies at the end of its
         // block; `v.get()[i].lock()` borrows the vector, not that temporary).
         base = self.deref_refs(base);
+        let mut ety = ty;
+        if self.slice_view(ty) {
+            let by = *self.f.ty(self.body.places.at(base as usize).ty);
+            if by.kind == TypeKind::TYPE_ARRAY {
+                ety = self.storage_ty(ty, by.as_data.arr.elem);
+            } else if by.kind == TypeKind::TYPE_INSTANCE {
+                ety = self.storage_ty(ty, self.f.instance(by.as_data.inst).args[0]);
+            }
+        }
         let iop = self.lower_expr(d.index);
         if iop == ir::IR_NONE {
             return ir::IR_NONE;
@@ -5766,7 +5848,7 @@ extend Lowerer {
                         }
                         return self.place_project(
                             base,
-                            ir::Projection { kind: ir::PJ_INDEX_CONST, data: cn.val as u32, sub: 0, ty: ty },
+                            ir::Projection { kind: ir::PJ_INDEX_CONST, data: cn.val as u32, sub: 0, ty: ety },
                         );
                     }
                 }
@@ -5777,7 +5859,7 @@ extend Lowerer {
             let ck1 = self.bounds_check(base, iop, sp);
             iop_use = self.copy_op(ck1);
         }
-        return self.place_project(base, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop_use, sub: 0, ty: ty });
+        return self.place_project(base, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop_use, sub: 0, ty: ety });
     }
 
     // ---- match ------------------------------------------------------------------------------------

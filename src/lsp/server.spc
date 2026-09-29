@@ -2253,40 +2253,21 @@ extend Server {
         } else {
             String::new();
         };
-        // Borrowed views of the documents, the probe in the cursor's slot.
-        let mut ovf = Vector::<str>::new();
-        let mut ovt = Vector::<str>::new();
-        for i in 0..self.docs.len() {
-            ovf.push(self.docs.at(i).path.as_str());
-            ovt.push(self.docs.at(i).txt.as_str());
-        }
-        ovt.set(slot, synth.as_str());
         let mut out = Vector::<feat::CompItem>::new();
-        let mut scratch = Vector::<analysis::DiagRec>::new();
-        let mut st = analysis::RecompileStats {};
-        let mut ok = analysis::recompile(
-            &mut self.roots[ru].pkg,
-            self.target,
-            rf.as_str(),
-            ld.as_str(),
-            &ovf,
-            &ovt,
-            &mut scratch,
-            &mut st,
-        );
-        if ok {
-            let m = self.root_module(ru, path);
-            if m >= 0 && self.roots.at(ru).pkg.modules.at(m as usize).has_ast {
-                out = if member {
-                    feat::complete_member(&self.roots.at(ru).pkg, m as usize, off);
-                } else {
-                    feat::complete_general(&self.roots.at(ru).pkg, m as usize, off);
-                };
+        let mut ok = false;
+        // Borrowed views of the documents, the probe in the cursor's slot. They end with this block,
+        // before a rebuild below claims the server: a vector of borrows counts as used when it is
+        // destroyed.
+        {
+            let mut ovf = Vector::<str>::new();
+            let mut ovt = Vector::<str>::new();
+            for i in 0..self.docs.len() {
+                ovf.push(self.docs.at(i).path.as_str());
+                ovt.push(self.docs.at(i).txt.as_str());
             }
-            // The real buffers back (the round records nothing: the root's diagnostics stand).
-            ovt.set(slot, self.docs.at(slot).txt.as_str());
-            scratch.clear();
-            let mut st2 = analysis::RecompileStats {};
+            ovt.set(slot, synth.as_str());
+            let mut scratch = Vector::<analysis::DiagRec>::new();
+            let mut st = analysis::RecompileStats {};
             ok = analysis::recompile(
                 &mut self.roots[ru].pkg,
                 self.target,
@@ -2295,8 +2276,32 @@ extend Server {
                 &ovf,
                 &ovt,
                 &mut scratch,
-                &mut st2,
+                &mut st,
             );
+            if ok {
+                let m = self.root_module(ru, path);
+                if m >= 0 && self.roots.at(ru).pkg.modules.at(m as usize).has_ast {
+                    out = if member {
+                        feat::complete_member(&self.roots.at(ru).pkg, m as usize, off);
+                    } else {
+                        feat::complete_general(&self.roots.at(ru).pkg, m as usize, off);
+                    };
+                }
+                // The real buffers back (the round records nothing: the root's diagnostics stand).
+                ovt.set(slot, self.docs.at(slot).txt.as_str());
+                scratch.clear();
+                let mut st2 = analysis::RecompileStats {};
+                ok = analysis::recompile(
+                    &mut self.roots[ru].pkg,
+                    self.target,
+                    rf.as_str(),
+                    ld.as_str(),
+                    &ovf,
+                    &ovt,
+                    &mut scratch,
+                    &mut st2,
+                );
+            }
         }
         if !ok {
             // Outside the incremental domain: the package may be part-updated, so the root is rebuilt

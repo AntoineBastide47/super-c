@@ -10,11 +10,10 @@
 #      and print the same diagnostics;
 #   4. every emitted translation unit compiles under the strict warning set, and the tree meets the
 #      readability rules;
-#   5. every supported target transpiles the compiler and every built-in profile builds it;
-#   6. the self-transpile benchmark runs with a successful compiler, C compiler and linker.
+#   5. every built-in profile other than dev (which every build above produced) builds the compiler.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
 # `sh ci/gate.sh --no-check` skips step 1 (CI, after its own build and test steps); `--core` also skips
-# steps 5 and 6: check.sh runs it last, over the compiler its bootstrap step installed.
+# step 5: check.sh runs it last, over the compiler its bootstrap step installed.
 set -eu
 cd "$(dirname "$0")/.."
 . ci/contract.sh
@@ -133,22 +132,10 @@ if [ "$mode" = --core ]; then
     exit 0
 fi
 
-step "targets ($CONTRACT_TARGETS) and profiles ($CONTRACT_PROFILES)"
-host=$(uname -s)
-for t in $CONTRACT_TARGETS; do
-    case "$host:$t" in
-    Darwin:macos|Linux:linux) continue ;; # the host target is what every build above linked
-    esac
-    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen2-super-c src/main.spc --target="$t" >/dev/null ) || fail "target $t"
-    rm -rf "$tree/src/build"
-    echo "gate: target $t transpiles"
-done
+step "profiles ($CONTRACT_PROFILES)"
 for p in $CONTRACT_PROFILES; do
     ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen2-super-c build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c" >/dev/null ) || fail "profile $p"
     echo "gate: profile $p builds"
 done
-
-step "benchmark ($CONTRACT_CMD_BENCH)"
-./super-c bench --bench-filter=self_transpile || fail "the benchmark reported a failure (compiler, C compiler or linker)"
 
 printf '\ngate: OK (contract v%s)\n' "$CONTRACT_VERSION"

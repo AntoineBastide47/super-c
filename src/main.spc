@@ -711,8 +711,8 @@ struct BuildOpts<'a> {
     pub lib_sel: bool, // --lib: build only the [lib] target
 }
 
-extend BuildOpts {
-    fn build_flag(self: &mut Self, co: &mut CommonOpts, arg: str) bool {
+extend<'a> BuildOpts<'a> {
+    fn build_flag(self: &mut Self, co: &mut CommonOpts, arg: str<'a>) bool {
         if arg.starts_with("--profile=") {
             self.profile = arg[10..];
         } else if arg.starts_with("--out-dir=") {

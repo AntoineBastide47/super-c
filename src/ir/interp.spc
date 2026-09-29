@@ -884,7 +884,7 @@ extend Interp {
         self.failed = false;
     }
 
-    const fn p(self: &Self) &loader::Package {
+    const fn p<'a>(self: &Self) &'a loader::Package {
         return unsafe &*self.pkg;
     }
 
@@ -893,7 +893,7 @@ extend Interp {
         return (lay::target_for(self.p().arch).ptr * 8) as i32;
     }
 
-    const fn src_of(self: &Self, m: ModuleId) str {
+    const fn src_of<'a>(self: &Self, m: ModuleId) str<'a> {
         return self.p().modules.at(m as usize).source.as_str();
     }
 
@@ -2230,7 +2230,7 @@ extend Interp {
 
     // The libm name extern `nm` of module `fm` spells: a trailing `f` selects the f32 narrowing
     // (`f32suf`) and is stripped; "" when the name cannot be a libm name.
-    const fn libm_name(self: &Self, fm: ModuleId, nm: tok::Span, f32suf: &mut bool) str {
+    const fn libm_name<'a>(self: &Self, fm: ModuleId, nm: tok::Span, f32suf: &mut bool) str<'a> {
         let ln = (nm.end - nm.start) as usize;
         if ln == 0 || ln >= 24 {
             return "";

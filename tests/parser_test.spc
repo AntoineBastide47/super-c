@@ -855,6 +855,25 @@ fn lifetimes() {
     assert(h::parse_has_error("fn f<T, 'a>(x: &'a T) {}\n"), "lifetime params must precede type params");
 }
 
+// Slice lifetime sugar: `[]'a T` / `[]'a mut T` put the lifetime right after `[]`, one `Label`
+// check as after `&`; `[]T` stays elided.
+@test
+fn slice_lifetimes() {
+    let c = h::parse_ast("fn f<'a>(x: []'a u8, y: []'a mut u8, z: []u8) []'static str<'static> { return z; }\n");
+    assert(c.errors == 0, "slice lifetimes parse");
+    let fnd = item(&c.ast, 0).as_data.function;
+    let x = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[0]).as_data.parameter.ty);
+    assert(x.kind == NodeKind::NODE_SLICE_TYPE, "`[]'a T` is a slice type");
+    assert(x.as_data.indirect_type.lifetime != NODE_NONE, "`[]'a T` records its lifetime");
+    assert(x.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE, "`[]'a T` is shared");
+    let y = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[1]).as_data.parameter.ty);
+    assert(y.as_data.indirect_type.lifetime != NODE_NONE, "`[]'a mut T` records its lifetime");
+    assert(y.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT, "`[]'a mut T` is mutable");
+    let z = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[2]).as_data.parameter.ty);
+    assert(z.as_data.indirect_type.lifetime == NODE_NONE, "`[]T` is elided");
+    assert(h::parse_has_error("fn f(x: []mut 'a u8) {}\n"), "the lifetime precedes `mut`");
+}
+
 // The grammar batch: a higher-ranked bound `for<'a>` and a lifetime-parameterised associated type.
 // Both store their lifetimes in the same side table as a declared `<'a>`, and both wrap them in
 // NODE_GENERIC_PARAM so every consumer (side table, checker, formatter) sees one shape.

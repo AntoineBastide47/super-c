@@ -267,7 +267,7 @@ jobs:
 
       # The correctness gate after the suite (ci/gate.sh without its check.sh step, which the steps above
       # replace): the two-generation fixpoint, the worker-count identity under each task-delay seed, the
-      # strict C warnings, every target and built-in profile, and the benchmark run. One leg per POSIX host.
+      # strict C warnings, and every built-in profile but dev. One leg per POSIX host.
       - name: Run the correctness gate
         if: runner.os != 'Windows' && matrix.cache_shard == 1
         run: sh ci/gate.sh --no-check

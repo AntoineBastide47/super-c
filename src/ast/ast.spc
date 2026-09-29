@@ -434,8 +434,8 @@ pub struct TypePathData {
 pub struct IndirectTypeData {
     pub ty: NodeId,
     pub qualifier: TypeQualifier,
-    // The source lifetime annotation on a NODE_REFERENCE_TYPE (`&'a T`): a NODE_LIFETIME node, or
-    // NODE_NONE when elided. Never set for pointers. Erased from the interned `Ty` -- the region
+    // The source lifetime annotation on a NODE_REFERENCE_TYPE (`&'a T`) or NODE_SLICE_TYPE (`[]'a T`):
+    // a NODE_LIFETIME node, or NODE_NONE when elided. Never set for pointers. Erased from the interned `Ty` -- the region
     // checker reads it from here.
     pub lifetime: NodeId,
 }

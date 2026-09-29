@@ -717,7 +717,7 @@ const fn lit_digits(p: *const u8, len: usize, base: u64, max: u64, out: &mut u64
     return true;
 }
 
-extend TypeChecker {
+extend<'a> TypeChecker<'a> {
     /// Ownership: borrows `ast` (the module keeps it); `package` is a borrowed raw pointer.
     pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
         assert(package != null, "a type checker reads through its package");
@@ -846,7 +846,7 @@ extend TypeChecker {
         return self.ast;
     }
     /// Module `m`'s source text, for span rendering.
-    pub const fn mod_src(self: &Self, m: ModuleId) str {
+    pub const fn mod_src(self: &Self, m: ModuleId) str<'a> {
         if m != self.cur_module() {
             return unsafe (*self.package).modules[m as usize].source.as_str();
         }
@@ -866,7 +866,7 @@ extend TypeChecker {
     }
 
     /// The interned record of `x` in the current module's pool.
-    pub const fn type_at(self: &Self, x: TypeId) &Ty {
+    pub const fn type_at<'t>(self: &Self, x: TypeId) &'t Ty {
         return unsafe (*self.cur_ast()).type_at(x);
     }
 
@@ -2148,7 +2148,7 @@ pub fn render_type_into(
 /// does not cascade.
 pub const TYPE_ERROR: TypeId = 0;
 
-extend TypeChecker {
+extend<'a> TypeChecker<'a> {
     /// Unwrap a struct/enum/instance type to its module + decl; for an instance also copies up to 8
     /// param->arg substitution pairs into `params`/`args`. False for any other type kind.
     pub fn aggregate_of(
@@ -4106,7 +4106,7 @@ extend TypeChecker {
     // there is none. Memoized: callers re-resolve the same method's owner repeatedly (tc_method_param +
     // tc_method_ret alone scan twice per operator check). Lazy insert through a const-cast, the
     // codebase's established pattern for caches behind &Self.
-    fn enclosing(self: &Self, m: ModuleId, method: NodeId, kind: NodeKind) NodeId {
+    pub fn enclosing(self: &Self, m: ModuleId, method: NodeId, kind: NodeKind) NodeId {
         let key = (kind == NodeKind::NODE_INTERFACE) as u64 << 63 | m as u64 << 32 | method as u64;
         switch self.encl_memo.get(&key) {
             Some(v) => {
@@ -4341,7 +4341,13 @@ extend TypeChecker {
                 start as u64 << 8 | nout as u64,
             );
         } else if lit.len() == 0 {
-            self.method_all_memo.insert(mq, start as u64 << 8);
+            let key = MQKey {
+                m: m,
+                decl: decl,
+                kind: 2,
+                name: self.source.slice(name.start as usize, name.end as usize),
+            };
+            self.method_all_memo.insert(key, start as u64 << 8);
         }
         return nout;
     }
@@ -4791,7 +4797,7 @@ extend TypeChecker {
     // The interface DEFAULT method named `mname` that a conformance of `tdecl` inherits, found through
     // the interface and its superinterfaces. Kind 2 of the method memo: find_interface_method reads only
     // frozen interface bodies.
-    fn find_default_method_cstr(self: &mut Self, tmod: ModuleId, tdecl: NodeId, mname: str) DefId {
+    fn find_default_method_cstr(self: &mut Self, tmod: ModuleId, tdecl: NodeId, mname: str<'a>) DefId {
         let mq = MQKey { m: tmod, decl: tdecl, kind: 2, name: mname };
         switch self.method_memo.get(&mq) {
             Some(v) => {
@@ -13869,6 +13875,7 @@ extend TypeChecker {
                 elem = we;
                 mis = NODE_NONE;
                 self.tc_retype_array_elems(elements, we);
+                self.tc_view_array_elems(elements, we);
             } else if mis != NODE_NONE && we == TYPE_NONE && self.elements_fit(elements, elem) {
                 mis = NODE_NONE;
             }
@@ -13884,6 +13891,25 @@ extend TypeChecker {
             );
         }
         return TYPE_NONE;
+    }
+
+    // Record the slice coercion of every array element adopted into slice element type `we`
+    // (`[x, y]` as `[[]u8; 2]`): lowering builds each view from the element's recorded type.
+    fn tc_view_array_elems(self: &mut Self, elements: NodeList, we: TypeId) {
+        let mut se = TYPE_NONE;
+        if self.slice_kind(we, &mut se) == 0 {
+            return;
+        }
+        for i in 0..elements.len {
+            let mut v = unsafe (*self.cur_ast()).list(elements)[i as usize];
+            if unsafe (*self.cur_ast()).at_const(v).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                v = unsafe (*self.cur_ast()).at_const(v).as_data.field_initializer.value;
+            }
+            let vt = unsafe (*self.cur_ast()).type_of(v);
+            if vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_ARRAY {
+                let _ = self.compatible(we, v);
+            }
+        }
     }
 
     // Give every element that is itself a (non-repeat) array literal the adopted element type
@@ -13965,6 +13991,9 @@ extend TypeChecker {
         let mut elem = self.check_expr(vid);
         let we = self.wanted_elem(expected); // same widening as the element-list form above
         if we != TYPE_NONE && we != elem && elem != TYPE_NONE && self.compatible_in(we, vid, true) {
+            if self.type_at(elem).kind == TypeKind::TYPE_ARRAY {
+                let _ = self.compatible(we, vid); // record the slice coercion, as for element lists
+            }
             elem = we;
         }
         let cnt = self.check_expr(nid);

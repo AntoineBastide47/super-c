@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 14.
+# Super-C compatibility contract, version 15.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=14
+CONTRACT_VERSION=15
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -17,18 +17,18 @@ CONTRACT_FFI=ffi
 CONTRACT_BIN=./super-c
 
 # ---- targets, profiles, commands -----------------------------------------------------------------------
-# Every target must complete a transpile of the compiler (`super-c src/main.spc --target=T`, emit only);
-# the host target is also compiled and linked.
+# The supported targets. Each native CI leg builds and tests its own target; the wasm job transpiles
+# and runs the compiler under wasmtime.
 CONTRACT_TARGETS="macos linux windows wasm"
-# Every built-in profile must build the compiler on the host (`super-c build --profile=P`). The `test`
-# profile builds only the test runner and is exercised by CONTRACT_CMD_TEST.
-CONTRACT_PROFILES="dev debug release bench race"
+# Every built-in profile but dev must build the compiler on the host (`super-c build --profile=P`); dev is
+# the profile every other build step produces. The `test` profile builds only the test runner and is
+# exercised by CONTRACT_CMD_TEST.
+CONTRACT_PROFILES="debug release bench race"
 # The commands, exactly as the gates run them (<T> is one of CONTRACT_TARGETS).
 CONTRACT_CMD_BUILD="./super-c build"
 CONTRACT_CMD_FMT="SC_LEAK_CHECK=fatal ./super-c fmt src std ffi tests bench ci --check"
 CONTRACT_CMD_LINT="SC_LEAK_CHECK=fatal ./super-c lint src std ffi tests bench ci examples --target=<T>"
 CONTRACT_CMD_TEST="SC_LEAK_CHECK=fatal ./super-c test --quiet"
-CONTRACT_CMD_BENCH="./super-c bench --bench-filter=self_transpile"
 # The two-generation self-hosting fixpoint, in a clean copy of src/, std/, ffi/ and build.toml:
 #   gen1: ./super-c build            (copied beside the tree, so std/ffi resolve inside the copy)
 #   gen2: build/dev/super-c build    (the gen1 binary, after removing build/)

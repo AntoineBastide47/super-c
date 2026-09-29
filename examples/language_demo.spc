@@ -91,7 +91,7 @@ const fn identity<T>(value: T) T {
     return value;
 }
 
-const fn greater(left: &'a i32, right: &'a i32) &'a i32 {
+const fn greater<'a>(left: &'a i32, right: &'a i32) &'a i32 {
     if *left > *right {
         return left;
     }

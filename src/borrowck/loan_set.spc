@@ -36,6 +36,11 @@ extend LoanMat {
         }
     }
 
+    /// Whether loan `li` is set in row `row`.
+    pub const fn get(self: &Self, row: u32, li: u32) bool {
+        return (self.pool[(row * self.words + li / 64) as usize] >> (li & 63) as u64 & 1u64) != 0;
+    }
+
     /// OR scratch row `s` into row `row`; true when the row changed.
     pub fn or_scratch(self: &mut Self, row: u32, s: &Vector<u64>) bool {
         let mut changed = false;

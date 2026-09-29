@@ -3,7 +3,7 @@
 import fmt::doc as d;
 
 // `group( "foo(" indent(softline join("," line, args)) softline ")" )`.
-fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
+fn call_doc<'a>(p: &mut d::DocPool<'a>, args: []str<'a>) d::DocId {
     let mut parts = Vector::<d::DocId>::new();
     parts.push(p.txt("foo("));
     let mut inner = Vector::<d::DocId>::new();

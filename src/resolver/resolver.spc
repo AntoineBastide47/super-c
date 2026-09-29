@@ -61,6 +61,7 @@ pub struct Resolver<'a> {
     pub lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
     pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
+    pub lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
 }
 
 /// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -167,6 +168,7 @@ extend Resolver {
             lint: false,
             lint_decls: Vector::<NodeId>::new(),
             bin_spine: Vector::<NodeId>::new(),
+            lt_owners: Vector::<NodeId>::new(),
         };
     }
 
@@ -723,8 +725,56 @@ extend Resolver {
     fn resolve_bounds(self: &mut Self, bounds: NodeList) {
         for i in 0..bounds.len {
             let cid = self.child(bounds, i);
+            // A `for<'a>` bound binds its lifetimes over the bound itself.
+            let lt_mark = self.lt_open(cid);
             self.resolve_type(cid);
+            self.lt_owners.truncate(lt_mark as usize);
         }
+    }
+
+    /// Bring `owner`'s lifetime params into scope; returns the mark `lt_owners` truncates back to.
+    fn lt_open(self: &mut Self, owner: NodeId) u32 {
+        let mark = self.lt_owners.len() as u32;
+        if self.ast.lifetimes_of(owner).len != 0 {
+            self.lt_owners.push(owner);
+        }
+        return mark;
+    }
+
+    /// Report lifetime `lt` unless it is `'static`, `'_` or a lifetime param in scope.
+    fn resolve_lifetime(self: &mut Self, lt: NodeId) {
+        if lt == NODE_NONE {
+            return;
+        }
+        let name = self.ast.at_const(lt).as_data.name.text;
+        if span_is(self.source, name, "'static") || span_is(self.source, name, "'_") {
+            return;
+        }
+        let mut i = self.lt_owners.len();
+        while i > 0 {
+            i -= 1;
+            let lts = self.ast.lifetimes_of(self.lt_owners[i]);
+            for k in 0..lts.len {
+                let pn = self.ast.at_const(self.child(lts, k)).as_data.generic_param.name;
+                if span_eq(self.source, self.ast.at_const(pn).as_data.name.text, name) {
+                    return;
+                }
+            }
+        }
+        self.errors.emit_span(
+            name,
+            format("use of undeclared lifetime name `{}`", self.source.slice(name.start as usize, name.end as usize)),
+        );
+    }
+
+    /// Declare `owner`'s lifetime params, and check their outlives bounds; returns the `lt_owners` mark.
+    fn declare_lifetimes(self: &mut Self, owner: NodeId) u32 {
+        let mark = self.lt_open(owner);
+        let lts = self.ast.lifetimes_of(owner);
+        for k in 0..lts.len {
+            self.resolve_bounds(self.ast.at_const(self.child(lts, k)).as_data.generic_param.bounds);
+        }
+        return mark;
     }
 
     fn declare_generics(self: &mut Self, generics: NodeList) {
@@ -787,6 +837,10 @@ extend Resolver {
             return;
         }
         let kind = self.ast.at_const(id).kind;
+        if kind == NodeKind::NODE_LIFETIME {
+            self.resolve_lifetime(id);
+            return;
+        }
         if kind == NodeKind::NODE_TYPE_PATH {
             let tp = self.ast.at_const(id).as_data.type_path;
             let mq = self.module_qualified_type(tp.parts);
@@ -842,8 +896,11 @@ extend Resolver {
             return;
         }
         if kind == NodeKind::NODE_POINTER_TYPE || kind == NodeKind::NODE_REFERENCE_TYPE || kind == NodeKind::NODE_SLICE_TYPE || kind == NodeKind::NODE_DYN_TYPE {
-            let t = self.ast.at_const(id).as_data.indirect_type.ty;
-            self.resolve_type(t);
+            let it = self.ast.at_const(id).as_data.indirect_type;
+            if kind == NodeKind::NODE_REFERENCE_TYPE || kind == NodeKind::NODE_SLICE_TYPE {
+                self.resolve_lifetime(it.lifetime);
+            }
+            self.resolve_type(it.ty);
             return;
         }
         if kind == NodeKind::NODE_TUPLE_TYPE {
@@ -895,6 +952,7 @@ extend Resolver {
     fn resolve_function(self: &mut Self, id: NodeId) {
         let fd = self.ast.at_const(id).as_data.function;
         self.scope_enter();
+        let lt_mark = self.declare_lifetimes(id);
         self.declare_generics(fd.generics);
         let mut i: u32 = 0;
         while i < fd.params.len {
@@ -920,14 +978,17 @@ extend Resolver {
         if fd.body != NODE_NONE {
             self.resolve_block_stmts(fd.body);
         }
+        self.lt_owners.truncate(lt_mark as usize);
         self.scope_exit();
     }
 
     fn resolve_type_alias(self: &mut Self, id: NodeId) {
         let ta = self.ast.at_const(id).as_data.type_alias;
         self.scope_enter();
+        let lt_mark = self.declare_lifetimes(id);
         self.declare_generics(ta.generics);
         self.resolve_type(ta.ty);
+        self.lt_owners.truncate(lt_mark as usize);
         self.scope_exit();
     }
 
@@ -1006,6 +1067,7 @@ extend Resolver {
             NODE_STRUCT | NODE_ENUM => {
                 let ag = self.ast.at_const(id).as_data.aggregate;
                 self.scope_enter();
+                let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ag.generics);
                 if ag.is_tuple {
                     // Tuple struct: members ARE type nodes.
@@ -1016,6 +1078,7 @@ extend Resolver {
                 } else {
                     self.resolve_members(ag.members);
                 }
+                self.lt_owners.truncate(lt_mark as usize);
                 self.scope_exit();
             },
             NODE_INTERFACE => {
@@ -1026,9 +1089,11 @@ extend Resolver {
                 // interface names it in a parameter default (`Mul<Rhs = Self>`).
                 self.current_self = DefId { module: self.ast.module, node: id };
                 let old_aliases = self.self_aliases_open(it.items);
+                let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(it.generics);
                 self.resolve_bounds(it.bounds);
                 self.resolve_associated_items(it.items);
+                self.lt_owners.truncate(lt_mark as usize);
                 self.current_self = old_self;
                 self.self_aliases_close(old_aliases);
                 self.scope_exit();
@@ -1036,6 +1101,7 @@ extend Resolver {
             NODE_EXTEND => {
                 let ex = self.ast.at_const(id).as_data.extend_def;
                 self.scope_enter();
+                let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ex.generics);
                 self.resolve_type(ex.target_type);
                 self.resolve_type(ex.interface_type);
@@ -1074,6 +1140,7 @@ extend Resolver {
                 self.resolve_associated_items(ex.items);
                 self.self_aliases_close(old_aliases);
                 self.current_self = old_self;
+                self.lt_owners.truncate(lt_mark as usize);
                 self.scope_exit();
             },
             NODE_TYPE_ALIAS => {
@@ -1617,7 +1684,7 @@ extend Resolver {
         }
     }
 
-    const fn package_file(self: &Self) str {
+    const fn package_file<'a>(self: &Self) str<'a> {
         if self.package == null {
             return "";
         }

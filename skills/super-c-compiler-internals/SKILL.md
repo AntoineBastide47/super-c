@@ -269,8 +269,18 @@ after codegen.
 is typed. It **extends `TypeChecker`** (same state, helpers, and diagnostics) rather
 than defining a new context. Two layers:
 
-1. **Declaration-level lifetime analyses** — elision rules on return types, aggregates
-   naming the lifetime they borrow for, the modular return-lifetime check.
+1. **Declaration-level lifetime analyses** — elision rules on return types (references,
+   slices and lifetime-generic paths are lifetime positions, inside tuples and every type
+   argument too; `Self` is never elided; a slice node carries its `[]'a T` lifetime in
+   `indirect_type.lifetime` like a reference; `tc_elision_source` names the parameter an
+   elided output takes), aggregates naming a declared lifetime (or `'static`) at every
+   field lifetime position, the modular return-lifetime check. That check and the call
+   check treat an elided input lifetime as its own anonymous universal region: only
+   `'static` outlives it, and it outlives nothing else. A call whose `&mut` argument and
+   stored argument are both caller parameters maps each lifetime the callee's storage
+   pointee names to the caller's lifetime at the same position (`tc_caller_lts_at`) and
+   requires the stored argument's lifetimes there to outlive it (`relate_store_lts_ok`).
+   Store escapes have no declaration-level check: the flow analysis judges them.
 2. **The flow analysis**, per function (`bc_fn`):
    - `bc_ir_lower` lowers the item's bodies (closures included) to Core IR; each
      `Lowerer` also records an **event tape** at the walk's AST sites.
@@ -286,10 +296,62 @@ than defining a new context. Two layers:
      (`Owner::generate_into(.., loans=false)`: events and block ranges, no origins,
      loans, accesses, subsets, kills or liveness rows); otherwise `facts.spc` generates
      dense points/origins/loans/subset edges in Core IR order and
-     `loans.spc`/`dataflow.spc` solve them. Every new loan source in `facts.spc` must
+     `loans.spc`/`dataflow.spc` solve them. The solver keeps origin liveness, required
+     points and the flood's visited set as dense bitsets over the body's points, or,
+     above `SPARSE_MIN_CELLS` (2^20 origin x point cells), as sorted interval and point
+     lists queried by binary search plus a hashed visited set (`Solver.sparse`); the
+     block x loan scope matrix stays dense in both. Every new loan source in `facts.spc` must
      be covered by a feature bit: `SC_BC_VALIDATE=1` runs every skipped stage anyway
      and asserts it found nothing (the gate's fixpoint and worker-identity builds run
      under it). `bc_ir_emit` reports.
+   - Call loans follow the callee signature: a result pins the autoref'd receiver place,
+     or the pointee of a `&mut` argument (`Loan.deref`), only when the signature ties
+     that parameter's lifetime to the return (`reborrow_ties`, `has_elided_lt`; elision
+     rules 2 and 3), whether or not the pointee type carries borrows. Loans carry a
+     reference level (`Loan.deep`; subset edges `SD_KEEP`/`SD_DEREF`/`SD_REF`), so a
+     reference's own loans and what its referent holds stay apart. No loan forms on a
+     place reached through a raw-pointer deref (`behind_raw`). A call-entry claim or a
+     two-phase activation conflicts with loans live at the claim's successor point, so
+     an argument's borrow carried into the call conflicts and a copied-out value does
+     not. Only a type with an explicit `Free` (itself or a member) reads its stored
+     borrows at destruction (`Owner::observes`); `Access.def` marks true stores for
+     origin liveness.
+   - The signature walks (`lt_tokens`, `behind_walk`, `names_static`) read a `Self` of the
+     callee's signature as its extend's target type (`Gen::enter_callee`, `unself`), so a
+     `Self` result, a `&mut Self` store target or a `Self` argument ties to the extend's
+     lifetimes. A parameter naming `'static` flows its argument's origin into origin 0
+     (`'static`; `callee_flag` bits from 8). An argument taken by implicit autoref for a
+     `&'static` parameter gets an origin of its own holding a shared loan on the place and
+     flowing into origin 0; `body_features` sets `FT_BORROW_OP` for a call to such a callee
+     (`Owner::takes_static_ref`), so the body is never loan-skipped.
+   - An array coerced to a slice is an explicit view temp: `RV_USE` of the array place at
+     the `Slice`/`SliceMut` type, `b` = 1 (shared) or 2 (mutable). The facts treat it as
+     `&a` / `&mut a` (`Gen::borrow_place`, shared with `RV_REF`): an access, an init use and
+     a loan on the array place held by the view's origin, never a move. Lowering builds a
+     literal coerced to a slice as an array temp, and registers an unregistered array temp
+     in its scope (`own_temp`): its storage ends, and an owning one drops, at the block's end.
+   - Stores through a `&mut` argument (a signature tie to the parameter's pointee, or a
+     `&mut self` receiver whose pointee holds borrows) flow into a frame-owned container at
+     once; through a reference they are recorded (`StoreVia`) and `resolve_stores` resolves
+     them after the walk, flow-insensitively like NLL's outlives constraints: the reference's
+     origin reaches the places its loans borrow (through a reborrow's reference, what that
+     reference reaches) and what its KEEP sources reach; an argument placeholder is caller
+     storage. An assignment through a reference records its stores the same way
+     (`store_through`: each edge the statement added into the reference's origin). A local's
+     borrow reaching a placeholder is reported at the borrow (`bc_ir_escape`): through the
+     return when a return carries it, else as a store into caller-visible data.
+   - `bc_ir_universal` is Rust's check of universal regions: `'static`, the signature's named
+     lifetimes and elided input positions, related by declared and implied bounds. The
+     parameters' regions flow over the subset edges, flow-insensitively, into the return
+     slots, the storage the parameters reach and `'static`; each arrival must outlive a region
+     of the slot at its level. A read of a parameter's field, or of a slice or array
+     parameter's element, takes the declared type's regions (`bc_uni_place`). A body local of
+     a struct or tuple type (at most `UNI_MEMBERS_MAX` members, never a union) keeps one state
+     per member (`UniSt.mem`): a member store, an aggregate built from an origin's places and
+     a whole copy between locals of one type pass regions member by member (`bc_uni_pass`), a
+     member read passes its member (`bc_uni_read`), and a slot of a struct or tuple type
+     takes such a value member by member (`bc_uni_split`, member slots from
+     `bc_uni_members`).
    - `bc_elaborate` then classifies the body's storage markers against the same forest,
      facts and move/init solution (building the CFG and the solution when the analyses
      skipped them) and rewrites the body with `TM_DROP` terminators (`ir/drops.spc`), so

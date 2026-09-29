@@ -1209,11 +1209,16 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
     }
     typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
-    let mut views = Vector::<str>::new();
-    for k in 0..p.overlay_files.len() {
-        views.push(p.overlay_files[k].as_str());
+    // The views end before the release claims the package: a vector of borrows counts as used when
+    // it is destroyed.
+    let mut ovk = Vector::<i64>::new();
+    {
+        let mut views = Vector::<str>::new();
+        for k in 0..p.overlay_files.len() {
+            views.push(p.overlay_files[k].as_str());
+        }
+        ovk = overlay_slots(p, &views);
     }
-    let ovk = overlay_slots(p, &views);
     release_closed(p, &ovk);
     return st;
 }

@@ -95,7 +95,7 @@ Each `Projection` carries the type **after** it applies.
 
 | Kind | Meaning |
 |------|---------|
-| `RV_USE` | `a` = OperandId |
+| `RV_USE` | `a` = OperandId; `b` = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array |
 | `RV_REF` | `&place`; `b` = 1 when mutable |
 | `RV_ADDR` | Raw address of place; `b` = 1 when `*mut` |
 | `RV_UNARY` / `RV_BINARY` | Operand(s) + token op |

@@ -515,6 +515,11 @@ extend Parser {
         }
         if self.match(TokenType::LeftBracket) {
             if self.match(TokenType::RightBracket) {
+                // `[]'a T` / `[]'a mut T`: the lifetime binds right after `[]`, as after `&`.
+                let mut life = NODE_NONE;
+                if self.check(TokenType::Label) {
+                    life = self.parse_lifetime();
+                }
                 let qualifier = if self.match(TokenType::Mut) {
                     TypeQualifier::TYPE_QUAL_MUT;
                 } else {
@@ -524,7 +529,7 @@ extend Parser {
                 return self.mk(
                     NodeKind::NODE_SLICE_TYPE,
                     Span::new(start, self.node_span(element).end),
-                    NodeAs { indirect_type: IndirectTypeData { ty: element, qualifier: qualifier } },
+                    NodeAs { indirect_type: IndirectTypeData { ty: element, qualifier: qualifier, lifetime: life } },
                 );
             }
             let element = self.parse_type();
@@ -4101,7 +4106,7 @@ const PLATFORM_NAMES: [str<'static>; 6] = ["windows", "macos", "linux", "wasm", 
 const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
 
 /// The identifiers accepted inside `@arch(...)` (`is_arch`) or `@platform(...)`.
-pub fn axis_names(is_arch: bool) []str {
+pub fn axis_names(is_arch: bool) Slice<'static, str<'static>> {
     return if is_arch {
         ARCH_NAMES;
     } else {

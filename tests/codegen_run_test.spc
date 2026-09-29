@@ -725,7 +725,7 @@ fn tuple_structs_byte_strings_and_slice_for() {
     // Tuple index then method: `0.len` must lex as an index access, not a malformed float.
     h::expect_exit(
         "tuple index chained method",
-        "struct Words([]i32);\nfn main() i32 { let a: [i32; 3] = [4, 5, 6]; let w = Words(a[0..3]); return w.0.len() as i32 - 3; }\n",
+        "struct Words<'a>([]'a i32);\nfn main() i32 { let a: [i32; 3] = [4, 5, 6]; let w = Words(a[0..3]); return w.0.len() as i32 - 3; }\n",
         0,
     );
     // A tuple struct wrapping an owner gets an auto-derived destructor; the leak gate would fail if
@@ -820,6 +820,16 @@ fn array_const_read_as_slice_keeps_array_storage() {
     h::expect_exit(
         "a slice view and an index of one array constant",
         "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn main() i32 {\n    let n: []str = NAMES;\n    return (NAMES[2].len() + n.len()) as i32 - 6;\n}\n",
+        0,
+    );
+}
+
+// A `[]'static str` result views a constant array: it outlives every caller.
+@test
+fn static_slice_result() {
+    h::expect_exit(
+        "a function returns a 'static slice of a constant",
+        "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn names() []'static str<'static> { return NAMES; }\nfn main() i32 {\n    let n = names();\n    return (n.len() + n[1].len()) as i32 - 5;\n}\n",
         0,
     );
 }

@@ -89,6 +89,13 @@ fn golden_unsafe_extend() {
     expect_fmt("unsafe extend<T>Box<T>as Sync{}", "unsafe extend<T> Box<T> as Sync {}\n");
 }
 
+// An extend that declares only lifetimes prints them: dropping `<'a>` leaves `Lexer<'a>` naming an
+// undeclared lifetime.
+@test
+fn golden_extend_lifetimes() {
+    expect_fmt("struct L<'a>{s:&'a u8}\nextend<'a>L<'a>{}", "struct L<'a> {\n    s: &'a u8,\n}\nextend<'a> L<'a> {}\n");
+}
+
 // A block `defer` ends its statement: a `;` after the block would not parse.
 @test
 fn golden_defer_block() {
@@ -286,6 +293,11 @@ fn golden_lifetimes() {
     );
     // A lifetime-parameterised associated type (GAT).
     expect_fmt("interface Lend{type Item<'a>;}", "interface Lend {\n    type Item<'a>;\n}\n");
+    // Slice lifetime sugar keeps lifetime-before-mut, as `&'a mut T` does.
+    expect_fmt(
+        "fn s<'a>(x:[]'a u8,y:[]'a mut u8)[]'static str<'static>{return NAMES;}",
+        "fn s<'a>(x: []'a u8, y: []'a mut u8) []'static str<'static> {\n    return NAMES;\n}\n",
+    );
 }
 
 // `&dyn T` / `&mut dyn T` fold the borrow into the dyn node as its qualifier, so the printer must

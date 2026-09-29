@@ -155,7 +155,7 @@ extend Constant {
 }
 
 /// Rvalue kinds.
-pub const RV_USE: u8 = 0; // a = OperandId
+pub const RV_USE: u8 = 0; // a = OperandId; b = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array
 // Borrowck replay tape events (recorded by the Lowerer at the walk's AST sites; consumed by
 // bc_replay): entry = kind << 56 | aux << 32 | node. Synthetic/desugared lowering never records.
 pub const TP_SCOPE_PUSH: u8 = 1;

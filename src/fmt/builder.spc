@@ -413,12 +413,12 @@ extend Builder {
     // comment-preservation check then refuses to write the file.
     fn b_comma_list_tr(
         self: &mut Self,
-        open: str,
+        open: str<'static>,
         elems: usize,
         ids: NodeList,
         open_end: u32,
         close_pos: u32,
-        close: str,
+        close: str<'static>,
         trailing_comma: bool,
     ) d::DocId {
         // A comment in ANY gap breaks the whole list.
@@ -431,12 +431,12 @@ extend Builder {
     // The broken, comment-carrying shape of `b_comma_list_tr`, for a list whose gaps hold trivia.
     fn b_trivia_list(
         self: &mut Self,
-        open: str,
+        open: str<'static>,
         elems: usize,
         ids: NodeList,
         open_end: u32,
         close_pos: u32,
-        close: str,
+        close: str<'static>,
         trailing_comma: bool,
     ) d::DocId {
         let n = self.st.len() - elems;
@@ -479,7 +479,7 @@ extend Builder {
 
     // group( open indent(softline join(", "-line, elems)) ifbreak(",") softline close ). The elements are the
     // scratch entries above `elems`; the call consumes them.
-    fn b_comma_list(self: &mut Self, open: str, elems: usize, close: str, trailing_comma: bool) d::DocId {
+    fn b_comma_list(self: &mut Self, open: str<'static>, elems: usize, close: str<'static>, trailing_comma: bool) d::DocId {
         let n = self.st.len() - elems;
         if n == 0 {
             self.st.push(self.p.txt(open));
@@ -599,10 +599,14 @@ extend Builder {
                 self.st.push(self.b_type(n.as_data.indirect_type.ty));
             },
             NODE_SLICE_TYPE => {
+                // `[]T` / `[]mut T`, with an optional lifetime binding first: `[]'a T` / `[]'a mut T`.
+                self.st.push(self.p.txt("[]"));
+                if n.as_data.indirect_type.lifetime != NODE_NONE {
+                    self.st.push(self.node_text(n.as_data.indirect_type.lifetime));
+                    self.st.push(self.p.txt(" "));
+                }
                 if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                    self.st.push(self.p.txt("[]mut "));
-                } else {
-                    self.st.push(self.p.txt("[]"));
+                    self.st.push(self.p.txt("mut "));
                 }
                 self.st.push(self.b_type(n.as_data.indirect_type.ty));
             },
@@ -1525,7 +1529,7 @@ extend Builder {
 
     // `KW let PAT = EXPR BLOCK` from the two-arm match the parser desugars `if let` and `while let` into:
     // arm 0 holds the pattern and the written block. Printing the match itself would rewrite user syntax.
-    fn b_let_head(self: &mut Self, kw: str, mid: NodeId) d::DocId {
+    fn b_let_head(self: &mut Self, kw: str<'static>, mid: NodeId) d::DocId {
         let m = self.nd(mid).as_data.match_expr;
         let hit = self.nd(self.list_at(m.arms, 0)).as_data.match_arm;
         let v = self.st.len();
@@ -1849,9 +1853,7 @@ extend Builder {
                     self.st.push(self.p.txt("unsafe "));
                 }
                 self.st.push(self.p.txt("extend"));
-                if e.generics.len > 0 {
-                    self.b_generics_lt(unsafe (*self.ast).lifetimes_of(id), e.generics);
-                }
+                self.b_generics_lt(unsafe (*self.ast).lifetimes_of(id), e.generics);
                 self.st.push(self.p.txt(" "));
                 self.st.push(self.b_type(e.target_type));
                 if e.interface_type != NODE_NONE {

@@ -64,7 +64,7 @@ extend str {
 
     /// The sub-view of bytes [start, end): allocation-free, it borrows `self`'s bytes. Panics unless
     /// `start <= end <= len`; the caller keeps `start`/`end` on UTF-8 boundaries.
-    pub const fn slice(self: &str, start: usize, end: usize) str {
+    pub const fn slice<'a>(self: &str<'a>, start: usize, end: usize) str<'a> {
         if start > end || end > self.len {
             panic("str::slice: range out of bounds");
         }
@@ -130,7 +130,7 @@ extend str {
     // --- trim (returns sub-views; no allocation) -----------------------------------------------.
 
     /// The view with leading ASCII whitespace (space, tab, newline, carriage return) removed.
-    pub const fn trim_start(self: &str) str {
+    pub const fn trim_start<'a>(self: &str<'a>) str<'a> {
         let mut start: usize = 0;
         while start < self.len {
             let b = unsafe self.ptr[start];
@@ -143,7 +143,7 @@ extend str {
     }
 
     /// The view with trailing ASCII whitespace removed.
-    pub const fn trim_end(self: &str) str {
+    pub const fn trim_end<'a>(self: &str<'a>) str<'a> {
         let mut end = self.len;
         while end > 0 {
             let b = unsafe self.ptr[end - 1];
@@ -156,7 +156,7 @@ extend str {
     }
 
     /// The view with ASCII whitespace removed from both ends.
-    pub const fn trim(self: &str) str {
+    pub const fn trim<'a>(self: &str<'a>) str<'a> {
         let t = self.trim_start();
         return t.trim_end();
     }
@@ -283,7 +283,7 @@ extend str as Index<u8, str> {
         }
         return &unsafe self.ptr[i];
     }
-    pub const fn index_range(self: &str, r: Range<usize>) str {
+    pub const fn index_range<'a>(self: &str<'a>, r: Range<usize>) str<'a> {
         if r.inclusive && r.end >= self.len() {
             panic("str[a..b]: range out of bounds");
         }
@@ -331,25 +331,25 @@ pub struct Lines<'a> {
 
 extend str {
     /// Iterate the raw bytes (`u8`).
-    pub const fn bytes(self: &str) Bytes {
+    pub const fn bytes<'a>(self: &str<'a>) Bytes<'a> {
         return Bytes { s: self.slice(0, self.len), i: 0 };
     }
 
     /// Iterate Unicode scalar values (`u32` code points), decoding UTF-8. Assumes valid UTF-8; a
     /// malformed leading byte yields U+FFFD and advances one byte.
-    pub const fn chars(self: &str) Chars {
+    pub const fn chars<'a>(self: &str<'a>) Chars<'a> {
         return Chars { s: self.slice(0, self.len), i: 0 };
     }
 
     /// Iterate the sub-views separated by `sep`. An empty `sep` yields the whole view once; adjacent or
     /// edge separators produce empty views.
-    pub const fn split(self: &str, sep: str) Split {
+    pub const fn split<'a>(self: &str<'a>, sep: str<'a>) Split<'a> {
         return Split { s: self.slice(0, self.len), i: 0, sep: sep };
     }
 
     /// Iterate lines split on '\n', dropping a trailing '\r' (so "\r\n" works). A final newline does not
     /// yield a trailing empty line.
-    pub const fn lines(self: &str) Lines {
+    pub const fn lines<'a>(self: &str<'a>) Lines<'a> {
         return Lines { s: self.slice(0, self.len), i: 0 };
     }
 
@@ -969,7 +969,7 @@ extend Chars as Iterator<u32> {
 }
 
 extend Split as Iterator<str> {
-    pub const fn next(self: &mut Split) Option<str> {
+    pub const fn next<'a>(self: &mut Split<'a>) Option<str<'a>> {
         if self.i > self.s.len() {
             return Option::<str>::None;
         }
@@ -993,7 +993,7 @@ extend Split as Iterator<str> {
 }
 
 extend Lines as Iterator<str> {
-    pub const fn next(self: &mut Lines) Option<str> {
+    pub const fn next<'a>(self: &mut Lines<'a>) Option<str<'a>> {
         if self.i >= self.s.len() {
             return Option::<str>::None;
         }

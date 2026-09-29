@@ -81,15 +81,22 @@ per body, in `bc_validate_facts` and `bc_elaborate`:
   same local);
 - the init rows are sized by the path count and there is one per block;
 - every loan issues at a borrow operation: a reference, a carrying projected copy or view,
-  a closure capture, or a call's implicit autoref;
+  an array's slice view, a closure capture, a call's implicit autoref, or a call's reborrow
+  of a `&mut` argument;
 - every borrow error names a loan and a point of the body;
+- the loan solver runs in both row representations (dense bitsets and sparse lists) and
+  `Solver::assert_agrees` compares errors, required points, origin liveness, prepass
+  columns and in-scope bits (`BorrowCtx::new` reads the switch, so harness-driven borrow
+  tests are compared too);
 - the liveness queue stayed within its tight bound (seeds plus two pushes per edge and
   local); every build asserts the looser monotone bound of each fixpoint queue at each push
   (`Liveness.pushes`, `MoveFlow.pushes`, `Solver.flow_pushes`: the seeds plus one push per
   row change, a row changing at most once per lattice bit);
 - a body outside the schedule gate schedules nothing;
 - the elaborated body passes the structural verifier (`ir::verify`, which walks the
-  blocks' live statement runs) and the ownership verifier. The flag materialization
+  blocks' live statement runs) and the ownership verifier. A body the checker rejected skips
+  both (`bc_elaborate`'s `verify`): it never reaches emission, and its elaboration has no
+  correct schedule (a field moved out of a `Free` value cannot be released). The flag materialization
   re-copies every run and then removes the superseded entries: the emitter's per-local
   counts read the whole statement pool.
 

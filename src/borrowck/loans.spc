@@ -4,6 +4,12 @@
 // it may produce false candidates but can never hide one, because every edge it drops exists at
 // SOME point. The reference solver at the bottom materializes the full product graph and must agree
 // with the optimized path on small bodies; only tests run it.
+// Rows over points come in two representations. Dense rows are bitsets spanning the whole body, so
+// one body costs origins x points bits. Sparse rows are sorted point intervals per local and sorted
+// point lists per loan, the flood's visited set is a hash set, and the prepass keeps only the
+// columns anything asks about (placeholders and return slots), so every row costs its own size.
+// Bodies above SPARSE_MIN_CELLS origin-point cells take the sparse rows; both give the same results,
+// and SC_BC_VALIDATE solves every body both ways and compares them (`assert_agrees`).
 import lexer::token as tok;
 import ir::core as ir;
 import borrowck::facts as bf;
@@ -48,6 +54,17 @@ pub struct Solver {
     pub req_cache: Vector<u64>, // per queried loan: required-point bitset (pwords), or empty
     pub req_have: Vector<bool>,
     pub scope: ls::LoanMat, // block-entry loans-in-scope
+    pub kill_keys: Vector<u64>, // sparse: every kill as loan << 32 | point, sorted
+    pub ret_pts: Vector<u32>, // return terminators' entry points, ascending block order
+    pub sparse: bool, // interval and point-list rows instead of dense point bitsets
+    pub lv_start: Vector<u32>, // sparse: per local (+1), CSR into lv_iv
+    pub lv_iv: Vector<u64>, // sparse: live intervals start << 32 | end (inclusive), ascending per local
+    pub rq_range: Vector<u64>, // sparse: per queried loan, range start << 32 | end into rq_pts
+    pub rq_pts: Vector<u32>, // sparse: required points, ascending per loan
+    pub tgt_col: Vector<u32>, // sparse prepass: per origin, its oreach column or BF_NONE
+    vt: Vector<u64>, // sparse flood visited set: open addressing, (origin << 32 | point) << 2 | levels
+    vt_used: Vector<u32>, // slots set this query, so clearing is O(touched)
+    vt_shift: u32, // 64 - log2(vt.len())
     pub issues_blk: Vector<u32>, // per block: loan issues, generation (= point) order
     pub issue_start: Vector<u32>,
     pub kills_blk: Vector<u64>, // per block: kill records (point << 32 | loan), sorted
@@ -73,6 +90,29 @@ pub struct Solver {
     // the prepass: per origin, CSR of the subset sources flowing into it
     s_lb_flat: Vector<u32>,
     s_omask: Vector<u64>, // origin_live_points: per local word, the locals owning an inference origin
+    s_open: Vector<u32>, // live_intervals: per local, top point + 1 of its open interval (0 = closed)
+    s_opos: Vector<u32>, // live_intervals: per open local, its index in s_members
+    s_members: Vector<u32>, // live_intervals: the open locals
+    s_flags: Vector<u8>, // live_intervals: per local, this pair's def (1), use (2), copy-out (4) records
+    s_touched: Vector<u32>, // live_intervals: the locals with records in this pair
+    s_ivloc: Vector<u32>, // live_intervals: per closed interval (s_ivrec), its local
+    s_ivrec: Vector<u64>, // live_intervals: closed intervals in block order, start << 32 | end
+    s_rq: Vector<u32>, // required (sparse): the flood's required points before sorting
+}
+
+/// Origin x point cells above which a body takes the sparse rows.
+pub const SPARSE_MIN_CELLS: u64 = 1u64 << 20;
+
+// The reference level (0 or 1) a loan at level `d` reaches over a subset edge of kind `delta`,
+// or 2 when the edge drops it (see bf::SD_KEEP).
+const fn edge_level(delta: u8, d: u32) u32 {
+    if delta == bf::SD_REF {
+        return 1;
+    }
+    if delta == bf::SD_DEREF && d == 0 {
+        return 2;
+    }
+    return d;
 }
 
 /// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
@@ -103,6 +143,17 @@ extend Solver {
             req_cache: Vector::<u64>::new(),
             req_have: Vector::<bool>::new(),
             scope: ls::LoanMat::new(0, 0),
+            kill_keys: Vector::<u64>::new(),
+            ret_pts: Vector::<u32>::new(),
+            sparse: false,
+            lv_start: Vector::<u32>::new(),
+            lv_iv: Vector::<u64>::new(),
+            rq_range: Vector::<u64>::new(),
+            rq_pts: Vector::<u32>::new(),
+            tgt_col: Vector::<u32>::new(),
+            vt: Vector::<u64>::new(),
+            vt_used: Vector::<u32>::new(),
+            vt_shift: 64,
             issues_blk: Vector::<u32>::new(),
             issue_start: Vector::<u32>::new(),
             kills_blk: Vector::<u64>::new(),
@@ -126,12 +177,20 @@ extend Solver {
             s_lb_start: Vector::<u32>::new(),
             s_lb_flat: Vector::<u32>::new(),
             s_omask: Vector::<u64>::new(),
+            s_open: Vector::<u32>::new(),
+            s_opos: Vector::<u32>::new(),
+            s_members: Vector::<u32>::new(),
+            s_flags: Vector::<u8>::new(),
+            s_touched: Vector::<u32>::new(),
+            s_ivloc: Vector::<u32>::new(),
+            s_ivrec: Vector::<u64>::new(),
+            s_rq: Vector::<u32>::new(),
         };
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.cuts.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8) as u64;
+        return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.cuts.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8 + self.kill_keys.capacity() * sizeof(u64) + self.ret_pts.capacity() * sizeof(u32) + self.lv_start.capacity() * sizeof(u32) + self.lv_iv.capacity() * sizeof(u64) + self.rq_range.capacity() * sizeof(u64) + self.rq_pts.capacity() * sizeof(u32) + self.tgt_col.capacity() * sizeof(u32) + self.vt.capacity() * sizeof(u64) + self.vt_used.capacity() * sizeof(u32) + self.s_open.capacity() * sizeof(u32) + self.s_opos.capacity() * sizeof(u32) + self.s_members.capacity() * sizeof(u32) + self.s_flags.capacity() * sizeof(u8) + self.s_touched.capacity() * sizeof(u32) + self.s_ivloc.capacity() * sizeof(u32) + self.s_ivrec.capacity() * sizeof(u64) + self.s_rq.capacity() * sizeof(u32)) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
@@ -155,12 +214,33 @@ extend Solver {
         self.work.truncate(0);
         self.succs.truncate(0);
         self.scope.reset_to(0, 0);
+        self.kill_keys.truncate(0);
+        self.ret_pts.truncate(0);
+        self.lv_iv.truncate(0);
+        self.rq_range.truncate(0);
+        self.rq_pts.truncate(0);
+        self.tgt_col.truncate(0);
+        self.vt_clear();
     }
 
-    /// Solve body `b` in place, keeping this solver's heap capacity from earlier bodies.
+    /// Solve body `b` in place, keeping this solver's heap capacity from earlier bodies. Bodies above
+    /// SPARSE_MIN_CELLS origin-point cells take the sparse rows.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
+        self.build_rows(b, f, c, lv, f.norigins as u64 * f.npoints as u64 > SPARSE_MIN_CELLS);
+    }
+
+    /// Solve body `b` in place with sparse (`sparse`) or dense rows.
+    pub fn build_rows(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        f: &bf::BodyFacts,
+        c: &df::Cfg,
+        lv: &df::Liveness,
+        sparse: bool,
+    ) {
         let s = self;
         s.reset();
+        s.sparse = sparse;
         s.b = b;
         s.f = f;
         s.c = c;
@@ -271,6 +351,21 @@ extend Solver {
             );
             self.s_kc.set(blk, self.s_kc[blk] + 1);
         }
+        // Sparse rows: kills by loan, sorted once, for the overwrite test and the in-scope query.
+        if self.sparse {
+            for k in 0..f.kills.len() {
+                self.kill_keys.push(f.kills.at(k).loan as u64 << 32 | f.kills.at(k).point as u64);
+            }
+            self.kill_keys.sort();
+        }
+        // Return points, found once for every escape candidate.
+        let bd = unsafe &*self.b;
+        for bi in 0..nb {
+            let blk = bd.blocks.at(bi as usize);
+            if blk.term.kind == ir::TM_RETURN {
+                self.ret_pts.push(f.block_base[bi as usize] + blk.stmt_len * 2);
+            }
+        }
     }
 
     // Statement-exact liveness points for every inference origin, from one backward replay of each
@@ -278,15 +373,6 @@ extend Solver {
     fn origin_live_points(self: &mut Self) {
         let bd = unsafe &*self.b;
         let f = unsafe &*self.f;
-        let c = unsafe &*self.c;
-        let lvr = unsafe &*self.lv;
-        self.pwords = (f.npoints + 63) / 64;
-        if self.pwords == 0 {
-            self.pwords = 1;
-        }
-        let ninf = f.norigins - f.nuniversal;
-        self.live_pts.truncate(0);
-        self.live_pts.resize_default((ninf * self.pwords) as usize);
         let lw = f.lwords as usize;
         // Invert origin_local into a per-local CSR: each statement pair then touches only the
         // origins whose local is live there (found by scanning the live-word bits), instead of
@@ -323,11 +409,12 @@ extend Solver {
                 self.s_omask.set(l / 64, self.s_omask[l / 64] | 1u64 << (l & 63) as u64);
             }
         }
-        // Per-point use/def of locals, derived from accesses (a full write defines, all else uses).
+        // Per-point use/def of locals, derived from accesses (a whole-local store defines, all else uses).
         // The four scratch vectors swap out of their reused Solver slots and back at the end.
         // Only locals that own an inference origin matter here (the fill below reads their CSR
-        // range), so the record list and the live rows are cut to those locals up front.
-        let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // point << 32 | local, sorted by point
+        // range), so the record list and the live rows are cut to those locals up front. A record
+        // is point << 32 | local, bit 63 marking a def and bit 62 a copy-out use.
+        let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // sorted by point
         uses.truncate(0);
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
@@ -342,13 +429,12 @@ extend Solver {
             if (self.s_omask[(pl.base / 64) as usize] >> (pl.base & 63) as u64 & 1u64) == 0 {
                 continue;
             }
-            let mut is_def = false;
-            if ac.kind == bf::ACC_WRITE && pl.proj_len == 0 {
-                is_def = true;
-            }
+            let is_def = ac.def;
             let mut enc = ac.point as u64 << 32 | pl.base as u64;
             if is_def {
                 enc = enc | 1u64 << 63;
+            } else if ac.copy_out {
+                enc = enc | 1u64 << 62;
             }
             uses.push(enc);
         }
@@ -356,12 +442,36 @@ extend Solver {
         for i in 1..uses.len() {
             let v = uses[i];
             let mut j = i;
-            while j > 0 && (uses[j - 1] & 0x7FFFFFFF00000000u64) > (v & 0x7FFFFFFF00000000u64) {
+            while j > 0 && (uses[j - 1] & 0x3FFFFFFF00000000u64) > (v & 0x3FFFFFFF00000000u64) {
                 uses.set(j, uses[j - 1]);
                 j -= 1;
             }
             uses.set(j, v);
         }
+        self.s_uses = uses;
+        if self.sparse {
+            self.live_intervals();
+        } else {
+            self.live_dense();
+        }
+    }
+
+    // Dense rows: one bit per (inference origin, point).
+    fn live_dense(self: &mut Self) {
+        let bd = unsafe &*self.b;
+        let f = unsafe &*self.f;
+        let c = unsafe &*self.c;
+        let lvr = unsafe &*self.lv;
+        self.pwords = (f.npoints + 63) / 64;
+        if self.pwords == 0 {
+            self.pwords = 1;
+        }
+        let ninf = f.norigins - f.nuniversal;
+        self.live_pts.truncate(0);
+        self.live_pts.resize_default((ninf * self.pwords) as usize);
+        let lw = f.lwords as usize;
+        let nl = bd.locals.len();
+        let uses = replace(&mut self.s_uses, Vector::<u64>::new());
         // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
         // statement (loans and subsets injected there must flow onward) and dead before it.
         // dset/uset live outside the block loop (the pair loop re-zeroes them) so a body allocates
@@ -395,11 +505,11 @@ extend Solver {
             }
             // Blocks ascend and pairs descend while `uses` is point-sorted, so two monotone cursors
             // replace the per-block and per-pair binary searches: each use record is visited once.
-            while ub < uses.len() && (uses[ub] >> 32 & 0x7FFFFFFFu64) < base as u64 {
+            while ub < uses.len() && (uses[ub] >> 32 & 0x3FFFFFFFu64) < base as u64 {
                 ub += 1;
             }
             let first = ub;
-            while ub < uses.len() && (uses[ub] >> 32 & 0x7FFFFFFFu64) < end as u64 {
+            while ub < uses.len() && (uses[ub] >> 32 & 0x3FFFFFFFu64) < end as u64 {
                 ub += 1;
             }
             let mut wpos = ub;
@@ -413,13 +523,18 @@ extend Solver {
                 p -= 2;
                 // Every use's point falls in exactly one pair; the window walks left as pairs descend.
                 let mut wlo = wpos;
-                while wlo > first && (uses[wlo - 1] >> 32 & 0x7FFFFFFFu64) >= lo2 as u64 {
+                while wlo > first && (uses[wlo - 1] >> 32 & 0x3FFFFFFFu64) >= lo2 as u64 {
                     wlo -= 1;
                 }
                 dirty.truncate(0);
+                let hi_w = wpos;
                 let mut i = wlo;
                 while i < wpos {
                     let l = (uses[i] & 0xFFFFFFFFu64) as usize;
+                    if (uses[i] >> 62 & 1u64) != 0 {
+                        i += 1;
+                        continue;
+                    }
                     if (dset[l / 64] | uset[l / 64]) == 0 {
                         dirty.push((l / 64) as u32);
                     }
@@ -462,6 +577,22 @@ extend Solver {
                     dset.set(k, 0u64);
                     uset.set(k, 0u64);
                 }
+                // A copy-out use is live at the entry point and before it, not at the exit.
+                for j in wlo..hi_w {
+                    if (uses[j] >> 62 & 1u64) == 0 {
+                        continue;
+                    }
+                    let l = (uses[j] & 0xFFFFFFFFu64) as usize;
+                    cur.set(l / 64, cur[l / 64] | 1u64 << (l & 63) as u64);
+                    for oi in self.s_lo_start[l]..self.s_lo_start[l + 1] {
+                        let o = self.s_lo_flat[oi as usize];
+                        let row = ((o - f.nuniversal) * self.pwords) as usize;
+                        self.live_pts.set(
+                            row + (lo2 / 64) as usize,
+                            self.live_pts[row + (lo2 / 64) as usize] | 1u64 << (lo2 & 63) as u64,
+                        );
+                    }
+                }
             }
         }
         self.s_uses = uses;
@@ -471,10 +602,197 @@ extend Solver {
         self.s_cur32 = dirty;
     }
 
+    // Sparse rows: per local owning an inference origin, its live points as intervals. The same
+    // backward pair replay as live_dense, driven by the records: a pair touches only the locals it
+    // records, an interval opens where its local turns live and closes where it dies or at the
+    // block's base, so the work follows the records and the intervals instead of the local count.
+    fn live_intervals(self: &mut Self) {
+        let bd = unsafe &*self.b;
+        let f = unsafe &*self.f;
+        let c = unsafe &*self.c;
+        let lvr = unsafe &*self.lv;
+        let lw = f.lwords as usize;
+        let nl = bd.locals.len();
+        let uses = replace(&mut self.s_uses, Vector::<u64>::new());
+        let mut open = replace(&mut self.s_open, Vector::<u32>::new());
+        let mut opos = replace(&mut self.s_opos, Vector::<u32>::new());
+        let mut members = replace(&mut self.s_members, Vector::<u32>::new());
+        let mut flags = replace(&mut self.s_flags, Vector::<u8>::new());
+        let mut touched = replace(&mut self.s_touched, Vector::<u32>::new());
+        let mut ivloc = replace(&mut self.s_ivloc, Vector::<u32>::new());
+        let mut ivrec = replace(&mut self.s_ivrec, Vector::<u64>::new());
+        open.truncate(0);
+        opos.truncate(0);
+        flags.truncate(0);
+        open.resize_default(nl);
+        opos.resize_default(nl);
+        flags.resize_default(nl);
+        members.truncate(0);
+        ivloc.truncate(0);
+        ivrec.truncate(0);
+        let mut ub: usize = 0;
+        for bi in 0..c.nblocks {
+            let base = f.block_base[bi as usize];
+            let mut end = f.npoints;
+            if (bi + 1) as usize < f.block_base.len() {
+                end = f.block_base[bi as usize + 1];
+            }
+            let first_iv = ivrec.len();
+            // Live after the block: the live-out locals, plus the return slots a return consumes.
+            for k in 0..lw {
+                let mut m = lvr.live_out[bi as usize * lw + k] & self.s_omask[k];
+                while m != 0 {
+                    let l = k * 64 + m.trailing_zeros();
+                    m = m & m - 1u64;
+                    open.set(l, end);
+                    opos.set(l, members.len() as u32);
+                    members.push(l as u32);
+                }
+            }
+            if bd.blocks.at(bi as usize).term.kind == ir::TM_RETURN {
+                for r in 0..bd.returns {
+                    let owns = (self.s_omask[(r / 64) as usize] >> (r & 63) as u64 & 1u64) != 0;
+                    if owns && open[r as usize] == 0 {
+                        open.set(r as usize, end);
+                        opos.set(r as usize, members.len() as u32);
+                        members.push(r);
+                    }
+                }
+            }
+            while ub < uses.len() && (uses[ub] >> 32 & 0x3FFFFFFFu64) < base as u64 {
+                ub += 1;
+            }
+            let first = ub;
+            while ub < uses.len() && (uses[ub] >> 32 & 0x3FFFFFFFu64) < end as u64 {
+                ub += 1;
+            }
+            let mut wpos = ub;
+            let mut p = end;
+            while p > base + 1 {
+                let hi2 = p - 1;
+                let lo2 = p - 2;
+                p -= 2;
+                let mut wlo = wpos;
+                while wlo > first && (uses[wlo - 1] >> 32 & 0x3FFFFFFFu64) >= lo2 as u64 {
+                    wlo -= 1;
+                }
+                touched.truncate(0);
+                for i in wlo..wpos {
+                    let l = (uses[i] & 0xFFFFFFFFu64) as usize;
+                    let bit: u8 = if uses[i] >> 63 != 0 {
+                        1;
+                    } else if (uses[i] >> 62 & 1u64) != 0 {
+                        4;
+                    } else {
+                        2;
+                    };
+                    if flags[l] == 0 {
+                        touched.push(l as u32);
+                    }
+                    flags.set(l, flags[l] | bit);
+                }
+                wpos = wlo;
+                for ti in 0..touched.len() {
+                    let l = touched[ti] as usize;
+                    let fl = flags[l];
+                    flags.set(l, 0);
+                    // A use or definition is live at both points of its pair, a copy-out alone at
+                    // the entry point only.
+                    if open[l] == 0 {
+                        let top = if (fl & 3) != 0 {
+                            hi2;
+                        } else {
+                            lo2;
+                        };
+                        open.set(l, top + 1);
+                        opos.set(l, members.len() as u32);
+                        members.push(l as u32);
+                    }
+                    // Live before the pair unless only defined here.
+                    if fl == 1 {
+                        ivloc.push(l as u32);
+                        ivrec.push(lo2 as u64 << 32 | (open[l] - 1) as u64);
+                        let last = members[members.len() - 1];
+                        members.set(opos[l] as usize, last);
+                        opos.set(last as usize, opos[l]);
+                        let _ = members.pop();
+                        open.set(l, 0);
+                    }
+                }
+            }
+            // The block's base closes every interval still open.
+            for mi in 0..members.len() {
+                let l = members[mi] as usize;
+                ivloc.push(l as u32);
+                ivrec.push(base as u64 << 32 | (open[l] - 1) as u64);
+                open.set(l, 0);
+            }
+            members.truncate(0);
+            // A block closes intervals in descending order: reverse them so each local's ascend.
+            let mut i = first_iv;
+            let mut j = ivrec.len();
+            while i + 1 < j {
+                j -= 1;
+                ivrec.swap(i, j);
+                ivloc.swap(i, j);
+                i += 1;
+            }
+        }
+        // Rows by local (a stable counting sort keeps each row ascending).
+        self.lv_start.truncate(0);
+        self.lv_start.resize_default(nl + 1);
+        for i in 0..ivloc.len() {
+            let l = ivloc[i] as usize;
+            self.lv_start.set(l + 1, self.lv_start[l + 1] + 1);
+        }
+        self.s_cur32.truncate(0);
+        for l in 0..nl {
+            self.lv_start.set(l + 1, self.lv_start[l + 1] + self.lv_start[l]);
+            self.s_cur32.push(self.lv_start[l]);
+        }
+        self.lv_iv.truncate(0);
+        self.lv_iv.resize_default(ivrec.len());
+        for i in 0..ivloc.len() {
+            let l = ivloc[i] as usize;
+            self.lv_iv.set(self.s_cur32[l] as usize, ivrec[i]);
+            self.s_cur32.set(l, self.s_cur32[l] + 1);
+        }
+        self.s_uses = uses;
+        self.s_open = open;
+        self.s_opos = opos;
+        self.s_members = members;
+        self.s_flags = flags;
+        self.s_touched = touched;
+        self.s_ivloc = ivloc;
+        self.s_ivrec = ivrec;
+    }
+
+    // Is point `p` inside one of local `l`'s live intervals (sparse rows)?
+    const fn local_live_at(self: &Self, l: u32, p: u32) bool {
+        let i0 = self.lv_start[l as usize] as usize;
+        let mut lo = i0;
+        let mut hi = self.lv_start[l as usize + 1] as usize;
+        // Past the last interval starting at or before `p`.
+        let key = p as u64 << 32 | 0xFFFFFFFFu64;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.lv_iv[mid] <= key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo > i0 && (self.lv_iv[lo - 1] & 0xFFFFFFFFu64) >= p as u64;
+    }
+
     const fn origin_live_at(self: &Self, o: u32, p: u32) bool {
         let f = self.fx();
         if o < f.nuniversal {
             return true;
+        }
+        if self.sparse {
+            let l = f.origin_local[o as usize];
+            return l != bf::BF_NONE && self.local_live_at(l, p);
         }
         let row = ((o - f.nuniversal) * self.pwords) as usize;
         return (*self.live_pts.at(row + (p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
@@ -485,6 +803,11 @@ extend Solver {
     // whose row grew. Rows only gain bits, so an origin is queued at most norigins + 1 times.
     fn prepass(self: &mut Self) {
         let f = unsafe &*self.f;
+        self.subset_sources();
+        if self.sparse {
+            self.reach_targets();
+            return;
+        }
         self.owords = (f.norigins + 63) / 64;
         if self.owords == 0 {
             self.owords = 1;
@@ -498,26 +821,7 @@ extend Solver {
                 self.oreach.push(v);
             }
         }
-        // Subset sources grouped by target origin (counting sort).
         let no = f.norigins as usize;
-        self.s_lb_start.truncate(0);
-        self.s_lb_start.resize_default(no + 1);
-        for i in 0..f.subsets.len() {
-            let t = f.subsets.at(i).to as usize;
-            self.s_lb_start.set(t + 1, self.s_lb_start[t + 1] + 1);
-        }
-        self.s_ic.truncate(0);
-        for o in 0..no {
-            self.s_lb_start.set(o + 1, self.s_lb_start[o + 1] + self.s_lb_start[o]);
-            self.s_ic.push(self.s_lb_start[o]);
-        }
-        self.s_lb_flat.truncate(0);
-        self.s_lb_flat.resize_default(f.subsets.len());
-        for i in 0..f.subsets.len() {
-            let e = *f.subsets.at(i);
-            self.s_lb_flat.set(self.s_ic[e.to as usize] as usize, e.from);
-            self.s_ic.set(e.to as usize, self.s_ic[e.to as usize] + 1);
-        }
         let ow = self.owords as usize;
         self.s_flow_queue.truncate(0);
         self.s_flow_queued.truncate(0);
@@ -548,7 +852,95 @@ extend Solver {
         }
     }
 
+    // Subset sources grouped by target origin (counting sort) into s_lb_start / s_lb_flat.
+    fn subset_sources(self: &mut Self) {
+        let f = unsafe &*self.f;
+        let no = f.norigins as usize;
+        self.s_lb_start.truncate(0);
+        self.s_lb_start.resize_default(no + 1);
+        for i in 0..f.subsets.len() {
+            let t = f.subsets.at(i).to as usize;
+            self.s_lb_start.set(t + 1, self.s_lb_start[t + 1] + 1);
+        }
+        self.s_ic.truncate(0);
+        for o in 0..no {
+            self.s_lb_start.set(o + 1, self.s_lb_start[o + 1] + self.s_lb_start[o]);
+            self.s_ic.push(self.s_lb_start[o]);
+        }
+        self.s_lb_flat.truncate(0);
+        self.s_lb_flat.resize_default(f.subsets.len());
+        for i in 0..f.subsets.len() {
+            let e = *f.subsets.at(i);
+            self.s_lb_flat.set(self.s_ic[e.to as usize] as usize, e.from);
+            self.s_ic.set(e.to as usize, self.s_ic[e.to as usize] + 1);
+        }
+    }
+
+    // The sparse prepass: reachability only toward the origins anything asks about, the
+    // placeholders (escapes) and the return slots' origins (escape wording), one column each. Each
+    // column is a backward search from its target over the subset sources, so an origin enters a
+    // column's queue at most once.
+    fn reach_targets(self: &mut Self) {
+        let f = unsafe &*self.f;
+        let bd = unsafe &*self.b;
+        let no = f.norigins as usize;
+        self.tgt_col.truncate(0);
+        self.tgt_col.resize_default(no);
+        for o in 0..no {
+            self.tgt_col.set(o, bf::BF_NONE);
+        }
+        let mut ncol: u32 = 0;
+        for u in 0..f.nuniversal {
+            self.tgt_col.set(u as usize, ncol);
+            ncol += 1;
+        }
+        for r in 0..bd.returns {
+            if r as usize < f.local_origin.len() {
+                let o = f.local_origin[r as usize];
+                if o != bf::BF_NONE && self.tgt_col[o as usize] == bf::BF_NONE {
+                    self.tgt_col.set(o as usize, ncol);
+                    ncol += 1;
+                }
+            }
+        }
+        self.owords = (ncol + 63) / 64;
+        if self.owords == 0 {
+            self.owords = 1;
+        }
+        let ow = self.owords as usize;
+        self.oreach.resize_default(no * ow);
+        let mut queue = replace(&mut self.s_flow_queue, Vector::<u32>::new());
+        for t in 0..no {
+            let col = self.tgt_col[t];
+            if col == bf::BF_NONE {
+                continue;
+            }
+            let w = (col / 64) as usize;
+            let bit = 1u64 << (col & 63) as u64;
+            self.oreach.set(t * ow + w, self.oreach[t * ow + w] | bit);
+            queue.truncate(0);
+            queue.push(t as u32);
+            while queue.len() != 0 {
+                let to = queue[queue.len() - 1] as usize;
+                let _ = queue.pop();
+                for k in self.s_lb_start[to]..self.s_lb_start[to + 1] {
+                    let from = self.s_lb_flat[k as usize] as usize;
+                    if (self.oreach[from * ow + w] & bit) == 0 {
+                        self.oreach.set(from * ow + w, self.oreach[from * ow + w] | bit);
+                        queue.push(from as u32);
+                    }
+                }
+            }
+        }
+        self.s_flow_queue = queue;
+    }
+
     const fn prereach(self: &Self, from: u32, to: u32) bool {
+        if self.sparse {
+            let col = self.tgt_col[to as usize];
+            assert(col != bf::BF_NONE, "the sparse prepass has a column for every asked target");
+            return (*self.oreach.at(from as usize * self.owords as usize + (col / 64) as usize) >> (col & 63) as u64 & 1u64) != 0;
+        }
         return (*self.oreach.at(from as usize * self.owords as usize + (to / 64) as usize) >> (to & 63) as u64 & 1u64) != 0;
     }
 
@@ -622,9 +1014,9 @@ extend Solver {
         self.s_flow_queue = queue;
     }
 
-    // Replay block `bi` from its entry row; stop AFTER applying facts at points <= `upto`
-    // (BF_NONE = whole block). Leaves the state in `scratch`.
-    fn transfer_block(self: &mut Self, bi: u32, upto: u32, scratch: &mut Vector<u64>) {
+    // Replay block `bi` from its entry row through the facts at points below `before` (BF_NONE:
+    // the whole block). Leaves the state in `scratch`.
+    fn transfer_block(self: &mut Self, bi: u32, before: u32, scratch: &mut Vector<u64>) {
         let f = self.fx();
         self.scope.read_row(bi, scratch);
         // Issues and kills interleave in point order (both lists are already point-sorted); a kill
@@ -645,13 +1037,13 @@ extend Solver {
                 bf::BF_NONE;
             };
             if kp != bf::BF_NONE && (ip == bf::BF_NONE || kp <= ip) {
-                if upto != bf::BF_NONE && kp > upto {
+                if kp >= before {
                     break;
                 }
                 bits::bit_clear(scratch, (self.kills_blk[k as usize] & 0xFFFFFFFFu64) as u32);
                 k += 1;
             } else if ip != bf::BF_NONE {
-                if upto != bf::BF_NONE && ip > upto {
+                if ip >= before {
                     break;
                 }
                 bits::bit_set(scratch, self.issues_blk[i as usize]);
@@ -679,63 +1071,156 @@ extend Solver {
         }
     }
 
-    /// The point bitset row where loan `li` is required: some origin that can hold it is live there.
+    // Empty the sparse visited set, keeping its table.
+    fn vt_clear(self: &mut Self) {
+        for i in 0..self.vt_used.len() {
+            self.vt.set(self.vt_used[i] as usize, 0u64);
+        }
+        self.vt_used.truncate(0);
+    }
+
+    // The visited set's slot for node key `k` (origin << 32 | point): its entry, or the empty slot it
+    // takes. The table stays at most half full.
+    const fn vt_find(self: &Self, k: u64) usize {
+        let mask = self.vt.len() - 1;
+        let mut i = (k * 0x9E3779B97F4A7C15u64 >> self.vt_shift as u64) as usize;
+        for _ in 0..self.vt.len() {
+            let e = self.vt[i];
+            if e == 0 || e >> 2 == k {
+                return i;
+            }
+            i = i + 1 & mask;
+        }
+        assert(false, "the visited set is never full");
+        return 0;
+    }
+
+    // Double the visited set's table (64 slots first) and re-place its entries.
+    fn vt_grow(self: &mut Self) {
+        let mut n = self.vt.len() * 2;
+        if n < 64 {
+            n = 64;
+        }
+        let old = replace(&mut self.vt, Vector::<u64>::new());
+        self.vt.resize_default(n);
+        self.vt_shift = 64 - n.trailing_zeros() as u32;
+        for i in 0..self.vt_used.len() {
+            let e = old[self.vt_used[i] as usize];
+            let slot = self.vt_find(e >> 2);
+            self.vt.set(slot, e);
+            self.vt_used.set(i, slot as u32);
+        }
+    }
+
+    // Mark flood node (o, p) visited at level `d` (level 1 covers level 0, as in the dense bits);
+    // false when it already was.
+    fn vt_mark(self: &mut Self, o: u32, p: u32, d: u32) bool {
+        let k = o as u64 << 32 | p as u64;
+        let slot = self.vt_find(k);
+        let e = self.vt[slot];
+        if (e >> d as u64 & 1u64) != 0 {
+            return false;
+        }
+        if e == 0 {
+            self.vt_used.push(slot as u32);
+        }
+        self.vt.set(slot, k << 2 | e & 3u64 | 1u64 + 2u64 * d as u64);
+        if self.vt_used.len() * 2 > self.vt.len() {
+            self.vt_grow();
+        }
+        return true;
+    }
+
+    /// The row where loan `li` is required: some origin that can hold it is live there. Dense rows
+    /// are point bitsets (`req_word`), sparse rows sorted point lists; `req_at` reads either.
     pub fn required(self: &mut Self, li: u32) usize {
         let f = unsafe &*self.f;
         if self.req_have.len() == 0 {
             self.req_have.resize_default(f.loans.len());
-            self.req_cache.resize_default(f.loans.len() * self.pwords as usize);
+            if self.sparse {
+                self.rq_range.resize_default(f.loans.len());
+            } else {
+                self.req_cache.resize_default(f.loans.len() * self.pwords as usize);
+            }
         }
-        let row = (li * self.pwords) as usize;
+        let row = if self.sparse {
+            li as usize;
+        } else {
+            (li * self.pwords) as usize;
+        };
         if self.req_have[li as usize] {
             return row;
         }
         self.req_have.set(li as usize, true);
-        let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
-        // Keep `visit` sized once per body and clear only the words the previous query set: the flood
-        // touches at most `steps` words, so this is O(touched) instead of O(norigins*npoints/64).
-        self.visit.resize_default(vwords);
-        for d in 0..self.visit_dirty.len() {
-            self.visit.set(self.visit_dirty[d] as usize, 0u64);
+        if self.sparse {
+            assert(f.norigins < 1u32 << 30, "a visited-set key leaves room for its level bits");
+            self.vt_clear();
+            if self.vt.len() == 0 {
+                self.vt_grow();
+            }
+            self.s_rq.truncate(0);
+        } else {
+            // Two visit bits per (origin, point): the loan's reference level there (bf::SD_KEEP).
+            let vwords = ((f.norigins as u64 * f.npoints as u64 * 2 + 63) / 64) as usize;
+            // Keep `visit` sized once per body and clear only the words the previous query set: the
+            // flood touches at most `steps` words, so this is O(touched) instead of
+            // O(norigins*npoints/64).
+            self.visit.resize_default(vwords);
+            for d in 0..self.visit_dirty.len() {
+                self.visit.set(self.visit_dirty[d] as usize, 0u64);
+            }
+            self.visit_dirty.truncate(0);
         }
-        self.visit_dirty.truncate(0);
         self.work.clear();
         let lo = *f.loans.at(li as usize);
         // A loan never flows into the origin of the local it borrows: `&mut p` handed onward must
         // not pin `p` through p's OWN origin (the invariance backlink would self-contain it).
         let self_org = f.local_origin[self.body().places.at(lo.place as usize).base as usize];
-        self.work.push(lo.origin as u64 << 32 | lo.issued_at as u64);
+        self.work.push(lo.origin as u64 << 32 | lo.issued_at as u64 | lo.deep as u64 << 31);
         let mut succs = replace(&mut self.succs, Vector::<u32>::new());
         while self.work.len() != 0 {
             let node = self.work[self.work.len() - 1];
             let _ = self.work.pop();
             let o = (node >> 32) as u32;
-            let p = (node & 0xFFFFFFFFu64) as u32;
-            let bit = o as u64 * f.npoints as u64 + p as u64;
-            let w = (bit / 64) as usize;
-            let msk = 1u64 << (bit & 63);
-            if (self.visit[w] & msk) != 0 {
-                continue;
+            let p = (node & 0x7FFFFFFFu64) as u32;
+            let d = (node >> 31 & 1u64) as u32;
+            // Level 1 reaches everything level 0 reaches (no edge drops it), so it marks both.
+            if self.sparse {
+                if !self.vt_mark(o, p, d) {
+                    continue;
+                }
+            } else {
+                let bit = (o as u64 * f.npoints as u64 + p as u64) * 2;
+                let w = (bit / 64) as usize;
+                let msk = 1u64 + 2u64 * d as u64 << (bit & 63);
+                if (self.visit[w] & 1u64 << (bit & 63) + d as u64) != 0 {
+                    continue;
+                }
+                if self.visit[w] == 0 {
+                    self.visit_dirty.push(w as u32);
+                }
+                self.visit.set(w, self.visit[w] | msk);
             }
-            if self.visit[w] == 0 {
-                self.visit_dirty.push(w as u32);
-            }
-            self.visit.set(w, self.visit[w] | msk);
             if self.origin_live_at(o, p) {
-                self.req_cache.set(
-                    row + (p / 64) as usize,
-                    self.req_cache[row + (p / 64) as usize] | 1u64 << (p & 63) as u64,
-                );
+                if self.sparse {
+                    self.s_rq.push(p);
+                } else {
+                    self.req_cache.set(
+                        row + (p / 64) as usize,
+                        self.req_cache[row + (p / 64) as usize] | 1u64 << (p & 63) as u64,
+                    );
+                }
             }
             // Subset edges at this point.
             for i in self.sub_pt_start[p as usize]..self.sub_pt_start[p as usize + 1] {
                 let e = *f.subsets.at(self.sub_by_point[i as usize] as usize);
-                if e.from == o && (self_org == bf::BF_NONE || e.to != self_org) {
+                let nd = edge_level(e.delta, d);
+                if e.from == o && nd <= 1 && (self_org == bf::BF_NONE || e.to != self_org) {
                     let mut tp = p;
                     if self.cut_at(e.to, p) {
                         tp = p + 1;
                     }
-                    self.work.push(e.to as u64 << 32 | tp as u64);
+                    self.work.push(e.to as u64 << 32 | tp as u64 | nd as u64 << 31);
                 }
             }
             // Liveness edges along the CFG (universal origins always flow, rebind cuts sever).
@@ -746,20 +1231,51 @@ extend Solver {
                     continue;
                 }
                 if o < f.nuniversal || self.origin_live_at(o, q) {
-                    self.work.push(o as u64 << 32 | q as u64);
+                    self.work.push(o as u64 << 32 | q as u64 | d as u64 << 31);
                 }
             }
         }
         // Return the reused scratch to the solver, keeping its capacity.
         self.succs = succs;
+        if self.sparse {
+            self.s_rq.sort();
+            let start = self.rq_pts.len();
+            for i in 0..self.s_rq.len() {
+                if i == 0 || self.s_rq[i] != self.s_rq[i - 1] {
+                    self.rq_pts.push(self.s_rq[i]);
+                }
+            }
+            self.rq_range.set(li as usize, start as u64 << 32 | self.rq_pts.len() as u64);
+        }
         return row;
     }
 
+    // Is `p` the entry point of a call terminator?
+    const fn call_entry(self: &Self, p: u32) bool {
+        let bi = self.point_block[p as usize] as usize;
+        let blk = self.body().blocks.at(bi);
+        return blk.term.kind == ir::TM_CALL && self.fx().block_base[bi] + blk.stmt_len * 2 == p;
+    }
+
     const fn req_at(self: &Self, row: usize, p: u32) bool {
+        if self.sparse {
+            let r = self.rq_range[row];
+            let mut lo = (r >> 32) as usize;
+            let mut hi = (r & 0xFFFFFFFFu64) as usize;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.rq_pts[mid] < p {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo < (r & 0xFFFFFFFFu64) as usize && self.rq_pts[lo] == p;
+        }
         return (*self.req_cache.at(row + (p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
     }
 
-    /// Word `w` of the cached required-loan row starting at `row`.
+    /// Word `w` of the cached dense required-loan row starting at `row`.
     pub const fn req_word(self: &Self, row: usize, w: u32) u64 {
         return *self.req_cache.at(row + w as usize);
     }
@@ -780,6 +1296,40 @@ extend Solver {
         return true;
     }
 
+    // Sparse rows: does loan `li` have a kill at a point in [lo, hi)?
+    const fn killed_in(self: &Self, li: u32, lo: u32, hi: u32) bool {
+        if lo >= hi {
+            return false;
+        }
+        let first = li as u64 << 32 | lo as u64;
+        let mut a: usize = 0;
+        let mut z = self.kill_keys.len();
+        while a < z {
+            let mid = a + (z - a) / 2;
+            if self.kill_keys[mid] < first {
+                a = mid + 1;
+            } else {
+                z = mid;
+            }
+        }
+        return a < self.kill_keys.len() && self.kill_keys[a] < (li as u64 << 32 | hi as u64);
+    }
+
+    /// Sparse rows: is loan `li` in scope just before access point `p`? The block replay
+    /// (transfer_block before p) for one loan: its single issue and its kills in the block before
+    /// `p` decide, a kill at the issue's own point applying first. At a block's first point the
+    /// entry row alone decides.
+    pub const fn in_scope(self: &Self, li: u32, p: u32) bool {
+        let f = self.fx();
+        let bi = self.point_block[p as usize];
+        let base = f.block_base[bi as usize];
+        let ip = f.loans.at(li as usize).issued_at;
+        if ip >= base && ip < p {
+            return !self.killed_in(li, ip + 1, p);
+        }
+        return self.scope.get(bi, li) && !self.killed_in(li, base, p);
+    }
+
     fn conflicts(self: &mut Self) {
         let f = unsafe &*self.f;
         let mut scratch = replace(&mut self.s_flow, Vector::<u64>::new());
@@ -791,13 +1341,18 @@ extend Solver {
         // Bucket order is ascending loan id: the exact subsequence the full sweep visited.
         let bucketed = na * nl >= 1024;
         if bucketed {
-            bf::bucket_loans_by_base(self.body(), &f.loans, &mut self.s_lb_start, &mut self.s_lb_flat, &mut self.s_ic);
+            bf::bucket_loans_by_base(
+                unsafe &*self.b,
+                &f.loans,
+                &mut self.s_lb_start,
+                &mut self.s_lb_flat,
+                &mut self.s_ic,
+            );
         }
         for a in 0..na {
             let ac = *f.accesses.at(a);
             let mut it0: usize = 0;
             let mut it1 = nl;
-            // The in-scope row at the access depends on the access alone: replayed on first need.
             let mut scoped = false;
             if bucketed {
                 let base = if ac.place == bf::BF_NONE {
@@ -851,12 +1406,17 @@ extend Solver {
                         continue;
                     }
                 }
-                // In scope at the access?
-                if !scoped {
-                    self.transfer_block(self.point_block[ac.point as usize], ac.point - 1, &mut scratch);
-                    scoped = true;
-                }
-                if !bits::bit_get(&scratch, li as u32) {
+                // In scope at the access? Dense rows replay the access's block row once; sparse rows
+                // ask per loan, as a row costs a word per 64 loans at every access.
+                if !self.sparse {
+                    if !scoped {
+                        self.transfer_block(self.point_block[ac.point as usize], ac.point, &mut scratch);
+                        scoped = true;
+                    }
+                    if !bits::bit_get(&scratch, li as u32) {
+                        continue;
+                    }
+                } else if !self.in_scope(li as u32, ac.point) {
                     continue;
                 }
                 // Still required (some live origin can hold it)?
@@ -864,30 +1424,52 @@ extend Solver {
                 if !self.req_at(row, ac.point) {
                     continue;
                 }
+                // Does this write KILL the loan (it overwrites the borrowed storage)? Then the
+                // conflict exists only if the loan is still wanted past this statement
+                // (`rel = rel.slice(..)` re-owns; `x = 2; *r` still dangles).
                 let mut overwrite = false;
                 if ac.kind == bf::ACC_WRITE {
-                    // Does this write KILL the loan (it overwrites the borrowed storage)? Then the
-                    // conflict exists only if the loan is still wanted past this statement
-                    // (`rel = rel.slice(..)` re-owns; `x = 2; *r` still dangles).
-                    for kk in 0..f.kills.len() {
-                        let kl = *f.kills.at(kk);
-                        if kl.loan == li as u32 && kl.point == ac.point {
-                            overwrite = true;
+                    if self.sparse {
+                        overwrite = self.killed_in(li as u32, ac.point, ac.point + 1);
+                    } else {
+                        // A dense body is small: scan every kill.
+                        for kk in 0..f.kills.len() {
+                            let kl = *f.kills.at(kk);
+                            if kl.loan == li as u32 && kl.point == ac.point {
+                                overwrite = true;
+                            }
                         }
                     }
                 }
-                if ac.kind == bf::ACC_ACT || overwrite {
+                if overwrite && lo.deref {
+                    // Overwriting the reference a reborrow went through replaces the reference, not
+                    // the borrowed pointee: the write only ends the loan.
+                    continue;
+                }
+                // A write at a call's entry is an argument autoref claiming `&mut`, and an activation
+                // there is a two-phase `&mut` argument claiming it: the claim takes effect after the
+                // argument reads, so a loan only those reads required (copy-out uses stop at the
+                // entry) is over by then, and a loan an argument hands to the callee is not.
+                let claim = (ac.kind == bf::ACC_WRITE || ac.kind == bf::ACC_ACT) && self.call_entry(ac.point);
+                if ac.kind == bf::ACC_ACT || overwrite || claim {
                     // Two-phase activation (and an overwriting kill) tolerates loans whose LAST
                     // requirement is this statement itself. Same-pair liveness injection reaches
-                    // point + 1, so "later" starts past the pair.
+                    // point + 1, so "later" starts past the pair, except for a call claim: every
+                    // argument but a copy-out stays live at the call's exit. A loan wanted at any
+                    // later point on a path through this access is wanted there: its holder must
+                    // stay live across it, and the flood only advances through live points.
                     let mut later = false;
-                    let mut q = ac.point + 2;
-                    while q < f.npoints {
-                        if self.req_at(row, q) {
-                            later = true;
-                            break;
+                    if claim && !overwrite {
+                        later = self.req_at(row, ac.point + 1);
+                    } else {
+                        let mut succs = replace(&mut self.succs, Vector::<u32>::new());
+                        self.point_succs(ac.point + 1, &mut succs);
+                        for k in 0..succs.len() {
+                            if self.req_at(row, succs[k]) {
+                                later = true;
+                            }
                         }
-                        q += 1;
+                        self.succs = succs;
                     }
                     if !later {
                         continue;
@@ -909,7 +1491,6 @@ extend Solver {
     // A loan of storage this body owns must never reach a placeholder that is live at a return.
     fn escapes(self: &mut Self) {
         let f = unsafe &*self.f;
-        let c = unsafe &*self.c;
         let bd = unsafe &*self.b;
         for li in 0..f.loans.len() {
             let lo = *f.loans.at(li);
@@ -943,16 +1524,102 @@ extend Solver {
             let row = self.required(li as u32);
             // The flood marked universal-held points; find one at a return terminator. Rebind cuts
             // already stop flows a reassignment ended (`r = &x; r = p; return r` escapes p, not x).
-            for bi in 0..c.nblocks {
-                let t = bd.blocks.at(bi as usize).term;
-                if t.kind != ir::TM_RETURN {
-                    continue;
-                }
-                let p = f.block_base[bi as usize] + bd.blocks.at(bi as usize).stmt_len * 2;
+            for ri in 0..self.ret_pts.len() {
+                let p = self.ret_pts[ri];
                 if self.req_at(row, p) || self.req_at(row, p + 1) {
                     self.errs.push(BorrowErr { kind: BE_ESCAPE, acc: 0, loan: li as u32, point: p, span: lo.span });
                     break;
                 }
+            }
+        }
+    }
+
+    /// Validation: `self` (sparse rows) and `d` (dense rows), solved over the same body, agree on
+    /// the errors in order, every loan's required points, every inference origin's live points, the
+    /// prepass columns the sparse rows keep, and the in-scope bit against the block replay at every
+    /// access for every loan on its base (the conflicts' candidates).
+    pub fn assert_agrees(self: &mut Self, d: &mut Solver) {
+        assert(self.sparse && !d.sparse, "one sparse and one dense solve");
+        assert(self.errs.len() == d.errs.len(), "sparse and dense rows find as many borrow errors");
+        for i in 0..self.errs.len() {
+            let a = *self.errs.at(i);
+            let b = *d.errs.at(i);
+            assert(
+                a.kind == b.kind && a.acc == b.acc && a.loan == b.loan && a.point == b.point && a.span.start == b.span.start && a.span.end == b.span.end,
+                "sparse and dense rows find the same borrow errors in the same order",
+            );
+        }
+        let f = unsafe &*self.f;
+        let bd = unsafe &*self.b;
+        if f.loans.len() == 0 {
+            return;
+        }
+        for li in 0..f.loans.len() {
+            let rs = self.required(li as u32);
+            let rd = d.required(li as u32);
+            let r = self.rq_range[rs];
+            let mut k = (r >> 32) as usize;
+            for w in 0..d.pwords {
+                let mut m = d.req_word(rd, w);
+                while m != 0 {
+                    let p = w as usize * 64 + m.trailing_zeros();
+                    m = m & m - 1u64;
+                    assert(
+                        k < (r & 0xFFFFFFFFu64) as usize && self.rq_pts[k] as usize == p,
+                        "a required point in both rows",
+                    );
+                    k += 1;
+                }
+            }
+            assert(k == (r & 0xFFFFFFFFu64) as usize, "no required point only in the sparse row");
+        }
+        for o in f.nuniversal..f.norigins {
+            let l = f.origin_local[o as usize];
+            let mut n: u64 = 0;
+            for w in 0..d.pwords {
+                let mut m = d.live_pts[((o - f.nuniversal) * d.pwords + w) as usize];
+                while m != 0 {
+                    let p = w * 64 + m.trailing_zeros() as u32;
+                    m = m & m - 1u64;
+                    assert(l != bf::BF_NONE && self.local_live_at(l, p), "a live point in both rows");
+                    n += 1;
+                }
+            }
+            if l != bf::BF_NONE {
+                for i in self.lv_start[l as usize]..self.lv_start[l as usize + 1] {
+                    let iv = self.lv_iv[i as usize];
+                    n -= (iv & 0xFFFFFFFFu64) - (iv >> 32) + 1;
+                }
+            }
+            assert(n == 0, "no live point only in the sparse row");
+        }
+        for t in 0..f.norigins {
+            if self.tgt_col[t as usize] == bf::BF_NONE {
+                continue;
+            }
+            for o in 0..f.norigins {
+                assert(self.prereach(o, t) == d.prereach(o, t), "the prepass columns agree");
+            }
+        }
+        let mut start = Vector::<u32>::new();
+        let mut flat = Vector::<u32>::new();
+        let mut cur = Vector::<u32>::new();
+        let mut row = Vector::<u64>::new();
+        bf::bucket_loans_by_base(bd, &f.loans, &mut start, &mut flat, &mut cur);
+        for a in 0..f.accesses.len() {
+            let ac = *f.accesses.at(a);
+            let base = if ac.place == bf::BF_NONE {
+                ac.local as usize;
+            } else {
+                bd.places.at(ac.place as usize).base as usize;
+            };
+            d.transfer_block(d.point_block[ac.point as usize], ac.point, &mut row);
+            for it in start[base]..start[base + 1] {
+                let li = flat[it as usize];
+                assert(
+                    self.in_scope(li, ac.point) == bits::bit_get(&row, li),
+                    "the in-scope query matches the block replay",
+                );
             }
         }
     }
@@ -978,20 +1645,21 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
     for li in 0..f.loans.len() {
         let lo = *f.loans.at(li);
         let mut seen = Vector::<u64>::new();
-        let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
+        let vwords = ((f.norigins as u64 * f.npoints as u64 * 2 + 63) / 64) as usize;
         seen.resize_default(vwords);
         let mut req = Vector::<u64>::new();
         req.resize_default(pwords as usize);
         let mut work = Vector::<u64>::new();
         let self_org = f.local_origin[b.places.at(lo.place as usize).base as usize];
-        work.push(lo.origin as u64 << 32 | lo.issued_at as u64);
+        work.push(lo.origin as u64 << 32 | lo.issued_at as u64 | lo.deep as u64 << 31);
         let mut succs = Vector::<u32>::new();
         while work.len() != 0 {
             let node = work[work.len() - 1];
             let _ = work.pop();
             let o = (node >> 32) as u32;
-            let p = (node & 0xFFFFFFFFu64) as u32;
-            let bit = o as u64 * f.npoints as u64 + p as u64;
+            let p = (node & 0x7FFFFFFFu64) as u32;
+            let d = (node >> 31 & 1u64) as u32;
+            let bit = (o as u64 * f.npoints as u64 + p as u64) * 2 + d as u64;
             if (seen[(bit / 64) as usize] & 1u64 << (bit & 63)) != 0 {
                 continue;
             }
@@ -1001,12 +1669,13 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
             }
             for i in 0..f.subsets.len() {
                 let e = *f.subsets.at(i);
-                if e.point == p && e.from == o && (self_org == bf::BF_NONE || e.to != self_org) {
+                let nd = edge_level(e.delta, d);
+                if e.point == p && e.from == o && nd <= 1 && (self_org == bf::BF_NONE || e.to != self_org) {
                     let mut tp = p;
                     if sv.cut_at(e.to, p) {
                         tp = p + 1;
                     }
-                    work.push(e.to as u64 << 32 | tp as u64);
+                    work.push(e.to as u64 << 32 | tp as u64 | nd as u64 << 31);
                 }
             }
             sv.point_succs(p, &mut succs);
@@ -1016,7 +1685,7 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
                     continue;
                 }
                 if o < f.nuniversal || sv.origin_live_at(o, q) {
-                    work.push(o as u64 << 32 | q as u64);
+                    work.push(o as u64 << 32 | q as u64 | d as u64 << 31);
                 }
             }
         }

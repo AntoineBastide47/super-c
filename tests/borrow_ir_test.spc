@@ -404,6 +404,79 @@ fn reference_solver_agrees() {
     assert(ref_agrees(&q, "g"), "reborrow and two-phase shapes agree");
 }
 
+// Solve `name` with sparse and with dense rows: the two must agree (`Solver::assert_agrees`).
+// Returns the error count and whether the default row choice is sparse.
+fn rows_agree(p: &loader::Package, name: str) (usize, bool) {
+    let node = find_fn(p, name);
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let mut ow = bfx::Owner::new(p);
+    let forest = bmp::MoveForest::build(&lw.body);
+    let bfacts = ow.generate(&lw.body, &forest);
+    let cfg = bdf::build_cfg(&lw.body);
+    let lv = bdf::solve_liveness(&bfacts, &cfg);
+    let mut sp = bln::Solver::empty();
+    sp.build_rows(&lw.body, &bfacts, &cfg, &lv, true);
+    let mut dn = bln::Solver::empty();
+    dn.build_rows(&lw.body, &bfacts, &cfg, &lv, false);
+    sp.assert_agrees(&mut dn);
+    let dflt = bln::solve(&lw.body, &bfacts, &cfg, &lv);
+    return sp.errs.len(), dflt.sparse;
+}
+
+@test
+fn sparse_rows_agree_with_dense() {
+    // Implementation fidelity: interval and point-list rows find the same errors, required points,
+    // live points and in-scope bits as the dense bitsets, on small shapes and on a body large
+    // enough that the default takes the sparse rows.
+    let p = typed_package(
+        "fn f(c: bool, n: i32) i32 { let mut x = 1; let mut y = 2; let mut r = &x; if c { r = &y; } let mut acc = 0; let mut i = 0; while i < n { acc += *r; r = &x; i += 1; } let m = &mut x; *m = 4; return acc + x; }\nfn g() i32 { let mut v = Vector::<usize>::new(); v.push(v.len()); let e = v.at(0); v.push(2); let mut x = 5; let r = &mut x; let r2 = &mut *r; *r2 = 6; return x + *e as i32; }\nfn h() &i32 { let x = 1; return &x; }\nfn main() i32 { return f(true, 2) + g() + *h(); }",
+    );
+    let (fe, _) = rows_agree(&p, "f");
+    assert(fe == 0, "the loop shape is accepted");
+    let (ge, _) = rows_agree(&p, "g");
+    assert(ge != 0, "the push while an element is borrowed is rejected");
+    let (he, _) = rows_agree(&p, "h");
+    assert(he != 0, "the local escape is rejected");
+    let mut src = String::from_str("fn main() i32 { let mut a = 1; let mut s = 0; let c = s == 0;\n");
+    for k in 0..400 {
+        src.push_str(format("let r{} = &a; if c {{ s += 1; }} a = a + 1; s = s + *r{};\n", k, k).as_str());
+    }
+    src.push_str("return s; }\n");
+    let q = typed_package(src.as_str());
+    let (le, lsparse) = rows_agree(&q, "main");
+    assert(lsparse, "the long body takes the sparse rows");
+    assert(le == 400, "every write under a live borrow is rejected");
+}
+
+@test
+fn entry_point_has_no_loan_in_scope() {
+    // Implementation fidelity: the replay before a block's first point applies none of the block's
+    // facts, so a loan issued later in the entry block is not in scope at point 0, and it is in
+    // scope right after its issue.
+    let p = typed_package("fn main() i32 { let mut x = 1; let r = &mut x; *r = 2; return x; }");
+    let node = find_fn(&p, "main");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let mut ow = bfx::Owner::new(&p);
+    let forest = bmp::MoveForest::build(&lw.body);
+    let bfacts = ow.generate(&lw.body, &forest);
+    let cfg = bdf::build_cfg(&lw.body);
+    let lv = bdf::solve_liveness(&bfacts, &cfg);
+    let mut sp = bln::Solver::empty();
+    sp.build_rows(&lw.body, &bfacts, &cfg, &lv, true);
+    assert(bfacts.loans.len() != 0, "the body borrows");
+    for li in 0..bfacts.loans.len() {
+        let ip = bfacts.loans.at(li).issued_at;
+        assert(ip > 0 && sp.point_block[ip as usize] == 0, "the loan issues inside the entry block");
+        assert(!sp.in_scope(li as u32, 0), "nothing is in scope before the entry block's first point");
+        assert(!sp.in_scope(li as u32, ip), "a loan is not in scope before its own issue");
+        assert(sp.in_scope(li as u32, ip + 1), "a loan is in scope after its issue");
+    }
+}
+
 @test
 fn features_plain_body_skips_every_stage() {
     // No carrier, no borrow op, no owned local, no split init: every stage may skip.
