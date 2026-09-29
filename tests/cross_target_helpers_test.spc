@@ -57,6 +57,17 @@ fn wasi_sysroot_is_one_unquoted_argument() {
         found = found || args[i].as_str() == "--sysroot=/opt/wasi/share/wasi-sysroot";
     }
     assert(found, "the sysroot is one argument");
+    assert(fl.as_str().contains("-target wasm32-wasip1 "), "the wasi triple is the current wasip1 one");
+}
+
+// wasm-ld's default 64 KiB stack is far below a native main thread's: every wasm link asks for 8 MiB,
+// placed first so an overflow traps.
+@test
+fn wasm_links_with_the_native_stack_size() {
+    let mut ld = String::new();
+    util::push_sdk_libs(&mut ld, 3);
+    assert(ld.as_str().contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB stack");
+    assert(ld.as_str().contains(" -Wl,--stack-first"), "the stack below static data");
 }
 
 @test

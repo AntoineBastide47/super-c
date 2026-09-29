@@ -1840,7 +1840,147 @@ extend Parser {
         }
         let arms = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.fin(NodeKind::NODE_MATCH, start, NodeAs { match_expr: MatchData { value: value, arms: arms } });
+        let id = self.fin(NodeKind::NODE_MATCH, start, NodeAs { match_expr: MatchData { value: value, arms: arms } });
+        let k = self.bc_const(value);
+        if bc_enum(k).len() != 0 && self.bc_arms(k, arms, false) {
+            let _ = self.bc_arms(k, arms, true);
+            self.ast.bc_sites.push(id);
+        }
+        return id;
+    }
+
+    // The build constant (`BC_*`) the identifier `id` names, -1 for any other node.
+    fn bc_const(self: &Self, id: NodeId) i32 {
+        let n = self.ast.at_const(id);
+        if n.kind != NodeKind::NODE_IDENTIFIER {
+            return -1;
+        }
+        let sp = n.as_data.name.text;
+        return bc_index(self.source.slice(sp.start as usize, sp.end as usize));
+    }
+
+    // Whether condition `id` is decided by the build constants alone: `TEST`, `!c`, `c && c`,
+    // `c || c`, and `==` or `!=` between PLATFORM, ARCH or ENDIAN and a path `Platform::X`,
+    // `Arch::X` or `Endian::X`, TEST and `true` or `false`, or POINTER_WIDTH and a decimal integer.
+    // `report` records every unknown variant such a comparison names.
+    fn bc_cond(self: &mut Self, id: NodeId, report: bool) bool {
+        let n = *self.ast.at_const(id);
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            return self.bc_const(id) == BC_TEST;
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            return n.as_data.unary.op == TokenType::Bang && self.bc_cond(n.as_data.unary.operand, report);
+        }
+        if n.kind != NodeKind::NODE_BINARY {
+            return false;
+        }
+        let b = n.as_data.binary;
+        if b.op == TokenType::AmpersandAmpersand || b.op == TokenType::PipePipe {
+            return self.bc_cond(b.left, report) && self.bc_cond(b.right, report);
+        }
+        if b.op != TokenType::EqualEqual && b.op != TokenType::BangEqual {
+            return false;
+        }
+        return self.bc_cmp(b.left, b.right, report) || self.bc_cmp(b.right, b.left, report);
+    }
+
+    // Whether `c == v` compares build constant `c` with a value the early prune can read.
+    fn bc_cmp(self: &mut Self, c: NodeId, v: NodeId, report: bool) bool {
+        let k = self.bc_const(c);
+        let vn = *self.ast.at_const(v);
+        if k == BC_TEST || k == BC_POINTER_WIDTH {
+            if vn.kind != NodeKind::NODE_LITERAL {
+                return false;
+            }
+            let t = vn.as_data.literal.token_type;
+            if k == BC_TEST {
+                return t == TokenType::True || t == TokenType::False;
+            }
+            return t == TokenType::IntegerLiteral && bc_decimal(self.source, vn.as_data.literal.raw) >= 0;
+        }
+        if bc_enum(k).len() == 0 || vn.kind != NodeKind::NODE_MEMBER || !vn.as_data.member.path {
+            return false;
+        }
+        let o = self.ast.at_const(vn.as_data.member.object);
+        if o.kind != NodeKind::NODE_IDENTIFIER {
+            return false;
+        }
+        let osp = o.as_data.name.text;
+        if self.source.slice(osp.start as usize, osp.end as usize) != bc_enum(k) {
+            return false;
+        }
+        if report {
+            self.bc_check_variant(k, vn.as_data.member.member);
+        }
+        return true;
+    }
+
+    // Whether every arm of a `switch` over enum build constant `k` is decided by the value alone:
+    // no guard, and a pattern of variant names, `_` and `|` only. `report` records every
+    // capitalized name that is no variant (a lower-case name is a binding: not decided).
+    fn bc_arms(self: &mut Self, k: i32, arms: NodeList, report: bool) bool {
+        for i in 0..arms.len {
+            let arm = self.ast.at_const(unsafe self.ast.list(arms)[i as usize]).as_data.match_arm;
+            if arm.guard != NODE_NONE {
+                return false;
+            }
+            let pn = *self.ast.at_const(arm.pattern);
+            if pn.kind == NodeKind::NODE_PATTERN_OR {
+                for j in 0..pn.as_data.pattern.children.len {
+                    if !self.bc_arm_pattern(k, unsafe self.ast.list(pn.as_data.pattern.children)[j as usize], report) {
+                        return false;
+                    }
+                }
+            } else if !self.bc_arm_pattern(k, arm.pattern, report) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn bc_arm_pattern(self: &mut Self, k: i32, pat: NodeId, report: bool) bool {
+        let pn = *self.ast.at_const(pat);
+        if pn.kind == NodeKind::NODE_PATTERN_WILDCARD {
+            return true;
+        }
+        if pn.kind != NodeKind::NODE_PATTERN_NAME || pn.as_data.pattern.children.len != 0 {
+            return false;
+        }
+        let nm = self.ast.at_const(pn.as_data.pattern.name).as_data.name;
+        let first = self.source[nm.text.start as usize];
+        if nm.is_mutable || first < b'A' || first > b'Z' {
+            return false;
+        }
+        if report {
+            self.bc_check_variant(k, pn.as_data.pattern.name);
+        }
+        return true;
+    }
+
+    // Record an error when identifier `name` is no variant of the enum build constant `k` holds.
+    fn bc_check_variant(self: &mut Self, k: i32, name: NodeId) {
+        let sp = self.ast.at_const(name).as_data.name.text;
+        let text = self.source.slice(sp.start as usize, sp.end as usize);
+        if bc_variant(k, text) >= 0 {
+            return;
+        }
+        let vs = bc_variants(k);
+        let mut msg = format("unknown {} variant '{}'; expected ", bc_enum(k), text);
+        for i in 0..vs.len() {
+            if i != 0 {
+                msg.push_str(
+                    if i + 1 != vs.len() {
+                        ", ";
+                    } else if vs.len() == 2 {
+                        " or ";
+                    } else {
+                        ", or ";
+                    },
+                );
+            }
+            msg.push_str(vs[i]);
+        }
+        self.ast.bc_errs.push(BcErr { span: sp, msg: msg });
     }
 
     pub fn parse_pattern_atom(self: &mut Self) NodeId {
@@ -2785,7 +2925,7 @@ extend Parser {
                 else_branch = self.parse_block();
             }
         }
-        return self.mk(
+        let id = self.mk(
             NodeKind::NODE_IF,
             Span::new(
                 start,
@@ -2799,6 +2939,11 @@ extend Parser {
             ),
             NodeAs { if_stmt: IfData { condition: condition, then_branch: then_branch, else_branch: else_branch } },
         );
+        if self.bc_cond(condition, false) {
+            let _ = self.bc_cond(condition, true);
+            self.ast.bc_sites.push(id);
+        }
+        return id;
     }
 
     pub fn parse_loop_stmt(self: &mut Self, start: u32, label: Span) NodeId {

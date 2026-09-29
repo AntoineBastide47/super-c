@@ -106,7 +106,9 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nout-dir = \"out\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     p.mkfile("build/keep.txt", "mine\n");
-    p.mkfile("src/build/raw/main.c", "stale\n");
+    p.mkfile("src/build/dev/raw/super_rt.h", "stale\n");
+    p.mkfile("src/build/release/raw/main.c", "stale\n");
+    p.mkfile("src/build/release/raw/super_rt.h", "stale\n");
     let root = str::from_cstr(p.rootp());
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
     assert(cli::superc_env_in(root, E, "1", "clean").ok(), "clean succeeds");
@@ -224,4 +226,29 @@ fn escaped_space_dependency_keeps_the_object_fresh() {
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TIMINGS=1", "build");
     assert(r.ok(), "second build");
     assert(r.out_has("(0/2 stale"), "no unit is stale after an unchanged build");
+}
+
+// A manifest's own profile is a name PROFILE may be compared with, and its generated C lands in that
+// profile's directory.
+@test
+fn manifest_profile_is_a_build_constant() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "build.toml",
+        "bin = \"app\"\nroot = \"src/main.spc\"\nout-dir = \"out\"\n\n[profile.fast]\nopt-level = 1\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "fn main() i32 {\n    if PROFILE == \"fast\" {\n        return 0;\n    }\n    return 1;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, E, "1", "run --profile=fast");
+    assert(r.ok(), "the fast profile takes the fast branch");
+    let mut raw = String::from_str(root);
+    raw.push_str("/out/fast/raw");
+    assert_eq(cli::dir_count_suffix(raw.as_str(), "main.c"), 1);
+    assert_eq(cli::superc_env_in(root, E, "1", "run").exit, 1);
 }

@@ -106,6 +106,90 @@ pub struct WhereBound {
     pub pred: NodeId,
 }
 
+/// The build-setting constants the compiler defines in every package, by index (`BC_*`). The names
+/// are reserved: no item or binding may take one, so a bare use always means the constant, and the
+/// platform filter decides a condition over them before name resolution.
+const BC_NAMES: [str<'static>; 6] = ["PLATFORM", "ARCH", "TEST", "POINTER_WIDTH", "ENDIAN", "PROFILE"];
+pub const BC_PLATFORM: i32 = 0;
+pub const BC_ARCH: i32 = 1;
+pub const BC_TEST: i32 = 2;
+pub const BC_POINTER_WIDTH: i32 = 3;
+pub const BC_ENDIAN: i32 = 4;
+pub const BC_PROFILE: i32 = 5;
+
+/// The variants of std's `Platform`, `Arch` and `Endian`, in declaration order: the index of a
+/// `Platform` or `Arch` variant is its bit in the `@platform` or `@arch` mask.
+const PLATFORM_VARIANTS: [str<'static>; 6] = ["Windows", "MacOS", "Linux", "Wasm", "IOS", "Android"];
+const ARCH_VARIANTS: [str<'static>; 3] = ["X86_64", "AArch64", "Wasm32"];
+const ENDIAN_VARIANTS: [str<'static>; 2] = ["Little", "Big"];
+
+/// The build constant `s` names (a `BC_*` index), -1 for any other text.
+pub const fn bc_index(s: str) i32 {
+    let names: Slice<'static, str<'static>> = BC_NAMES;
+    for i in 0..names.len() {
+        if names[i] == s {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+/// Whether `s` names one of std's build-constant enums (`Platform`, `Arch`, `Endian`): reserved like
+/// the constants, so the platform filter reads `Platform::X` as std's variant before resolution.
+pub const fn bc_type_name(s: str) bool {
+    return s == "Platform" || s == "Arch" || s == "Endian";
+}
+
+/// The std enum build constant `k` holds (`Platform`, `Arch`, `Endian`), "" for the others.
+pub const fn bc_enum(k: i32) str<'static> {
+    if k == BC_PLATFORM {
+        return "Platform";
+    }
+    if k == BC_ARCH {
+        return "Arch";
+    }
+    if k == BC_ENDIAN {
+        return "Endian";
+    }
+    return "";
+}
+
+/// The variants of the enum build constant `k` (PLATFORM, ARCH or ENDIAN) holds.
+pub const fn bc_variants(k: i32) Slice<'static, str<'static>> {
+    if k == BC_PLATFORM {
+        return PLATFORM_VARIANTS;
+    }
+    if k == BC_ARCH {
+        return ARCH_VARIANTS;
+    }
+    return ENDIAN_VARIANTS;
+}
+
+/// The index of variant `s` of the enum build constant `k` (PLATFORM, ARCH or ENDIAN) holds, -1
+/// when it names none.
+pub const fn bc_variant(k: i32, s: str) i32 {
+    let vs = bc_variants(k);
+    for i in 0..vs.len() {
+        if vs[i] == s {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+/// A reference to an unknown variant in a build-constant comparison or `switch` arm, found at
+/// parse time and reported by the resolver (the platform filter may remove the code before then).
+pub struct BcErr {
+    pub span: tok::Span,
+    pub msg: String,
+}
+
+/// A site the platform filter replaced: its node (now the taken branch) and its source span.
+pub struct BcCut {
+    pub node: NodeId,
+    pub span: tok::Span,
+}
+
 pub struct Attr {
     pub owner: NodeId,
     pub kind: u8,
@@ -1890,6 +1974,16 @@ pub struct Ast {
     /// appended by a desugar or a checker rewrite inside the body it extends, so it belongs to
     /// the item under check (the parse-time item ranges do not cover it).
     pub hir_base: u32,
+    /// In parse order: every `if` whose condition the build constants alone decide, and every
+    /// `switch` over PLATFORM, ARCH or ENDIAN whose arms they decide. The platform filter replaces
+    /// each by its taken branch (`Package::prune_build_sites`).
+    pub bc_sites: Vector<NodeId>,
+    pub bc_errs: Vector<BcErr>,
+    /// Every site the platform filter replaced, in prune order.
+    pub bc_cuts: Vector<BcCut>,
+    /// The sorted distinct `str::hash` of every identifier in the removed source text: the removed
+    /// code is never resolved, so the lints that count uses treat these names as used.
+    pub bc_names: Vector<u64>,
 }
 
 // Bootstrap constraint: the release compiler skips fields it never typed when it synthesizes a
@@ -1932,10 +2026,30 @@ extend Ast as Free {
         self.cap_facts.free();
         self.closure_at.free();
         self.free_touched.free();
+        self.bc_sites.free();
+        self.bc_errs.free();
+        self.bc_cuts.free();
+        self.bc_names.free();
     }
 }
 
 extend Ast {
+    /// Whether identifier text `name` occurs in code the platform filter removed.
+    pub fn bc_removed_name(self: &Self, name: str) bool {
+        return self.bc_names.len() != 0 && self.bc_names.binary_search(&name.hash()).is_ok();
+    }
+
+    /// Whether node `id` (source span `sp`) is or holds a site the platform filter replaced.
+    pub fn bc_cut_at(self: &Self, id: NodeId, sp: tok::Span) bool {
+        for i in 0..self.bc_cuts.len() {
+            let c = self.bc_cuts[i];
+            if c.node == id || c.span.start >= sp.start && c.span.end <= sp.end {
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn new(token_count: usize) Ast {
         let mut a = Ast {
             nodes: SplitVec::<Node>::new(),
@@ -3305,4 +3419,26 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) B
         }
     }
     return BuiltinType::BT_COUNT;
+}
+
+/// The value of a decimal integer literal (`_` separators and an integer suffix allowed), -1 for
+/// any other literal text.
+pub fn bc_decimal(src: str, raw: tok::Span) i64 {
+    let mut end = raw.end;
+    let sfx = ast_numeric_suffix(src, raw.start, raw.end, &mut end);
+    if sfx == BuiltinType::BT_F32 || sfx == BuiltinType::BT_F64 || end <= raw.start {
+        return -1;
+    }
+    let mut v: i64 = 0;
+    for i in raw.start..end {
+        let c = src[i as usize];
+        if c == b'_' {
+            continue;
+        }
+        if c < b'0' || c > b'9' || v > 0xFFFFFFFF {
+            return -1;
+        }
+        v = v * 10 + (c - b'0') as i64;
+    }
+    return v;
 }

@@ -1101,8 +1101,9 @@ extend<'a> TypeChecker<'a> {
         };
     }
 
+    // A build constant is not closed: a condition over one is a deliberate switch.
     const fn tc_def_closed(self: &Self, d: DefId) bool {
-        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() {
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || d.module as i32 == unsafe (*self.package).build_module {
             return false;
         }
         let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node);
@@ -1222,6 +1223,57 @@ extend<'a> TypeChecker<'a> {
         }
         *out = v.i;
         return true;
+    }
+
+    // Whether `id` is the build constant PROFILE (the name is reserved, so its resolution decides).
+    const fn tc_is_profile(self: &Self, id: NodeId) bool {
+        let a = self.cur_ast();
+        if unsafe (*a).at_const(id).kind != NodeKind::NODE_IDENTIFIER || (unsafe (*a).resolution_def(id).module) as i32 != unsafe (*self.package).build_module {
+            return false;
+        }
+        let sp = self.name_span(id);
+        return bc_index(self.source.slice(sp.start as usize, sp.end as usize)) == BC_PROFILE;
+    }
+
+    // A string literal compared with PROFILE must name a profile this build knows: a typo would
+    // silently select the other branch. The package lists no profiles when its driver sets none.
+    fn tc_profile_lit(self: &mut Self, lit: NodeId) {
+        let pk = unsafe &*self.package;
+        let n = *unsafe (*self.cur_ast()).at_const(lit);
+        if pk.profiles.len() == 0 || n.kind != NodeKind::NODE_LITERAL || n.as_data.literal.token_type != TokenType::StringLiteral {
+            return;
+        }
+        let raw = n.as_data.literal.raw;
+        let name = self.source.slice(raw.start as usize + 1, raw.end as usize - 1);
+        let mut known = String::new();
+        for i in 0..pk.profiles.len() {
+            if pk.profiles.at(i).as_str() == name {
+                return;
+            }
+            if i != 0 {
+                known.push_str(", ");
+            }
+            known.push_str(pk.profiles.at(i).as_str());
+        }
+        self.errors.emit_span(raw, format("unknown profile '{}'; this build knows {}", name, known.as_str()));
+    }
+
+    // The profile literals of a `PROFILE == "x"` comparison or of the arms of `switch PROFILE`.
+    fn tc_profile_check(self: &mut Self, c: NodeId, other: NodeId) {
+        if !self.tc_is_profile(c) {
+            return;
+        }
+        let n = *unsafe (*self.cur_ast()).at_const(other);
+        if n.kind == NodeKind::NODE_PATTERN_OR {
+            for j in 0..n.as_data.pattern.children.len {
+                let alt = unsafe (*self.cur_ast()).list(n.as_data.pattern.children)[j as usize];
+                self.tc_profile_check(c, alt);
+            }
+        } else if n.kind == NodeKind::NODE_PATTERN_LITERAL {
+            self.tc_profile_lit(n.as_data.single.value);
+        } else {
+            self.tc_profile_lit(other);
+        }
     }
 
     @c.cold
@@ -8501,7 +8553,8 @@ extend TypeChecker {
                     self.icx.unsafe_used = 1;
                 }
             }
-            if self.lint && self.icx.unsafe_used == 0 {
+            // Code the platform filter removed inside the operand may be what needs `unsafe`.
+            if self.lint && self.icx.unsafe_used == 0 && !unsafe (*a).bc_cut_at(id, unsafe (*a).at_const(id).span) {
                 let usp = unsafe (*a).at_const(id).span;
                 self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
                 // Prefix form only: a bare block is not an expression, so `unsafe { .. }` keeps its marker.
@@ -8921,6 +8974,10 @@ extend TypeChecker {
             rwant = self.strip(l);
         }
         let r = self.check_expr_w(rn, rwant);
+        if eq {
+            self.tc_profile_check(ln, rn);
+            self.tc_profile_check(rn, ln);
+        }
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Plus || op == TokenType::Minus {
             let mut ov: TypeId = TYPE_NONE;
@@ -12885,6 +12942,7 @@ extend TypeChecker {
             let aid = unsafe (*a).list(arms)[i as usize];
             let arm = unsafe (*a).at_const(aid).as_data.match_arm;
             self.check_pattern(arm.pattern, scrut, 0);
+            self.tc_profile_check(unsafe (*a).at_const(id).as_data.match_expr.value, arm.pattern);
             let g = self.check_expr(arm.guard);
             if arm.guard != NODE_NONE && g != TYPE_NONE && !self.is_bool(g) {
                 let sp = unsafe (*a).at_const(arm.guard).span;
@@ -14736,7 +14794,8 @@ extend TypeChecker {
                         diverged = false;
                     }
                     self.check_stmt(sid);
-                    if self.lint && !diverged {
+                    // A statement holding code the platform filter removed diverges on this target only.
+                    if self.lint && !diverged && !unsafe (*a).bc_cut_at(sid, unsafe (*a).at_const(sid).span) {
                         diverged = self.stmt_diverges(sid, 0);
                     }
                 }
@@ -15878,7 +15937,10 @@ extend TypeChecker {
             }
             if nn != NODE_NONE && used[k9] && !marked[k9] {
                 let sp = unsafe (*a).at_const(nn).as_data.name.text;
-                if sp.end > sp.start && self.source[sp.start as usize] != b'_' {
+                // Code the platform filter removed may hold the only write.
+                if sp.end > sp.start && self.source[sp.start as usize] != b'_' && !unsafe (*a).bc_removed_name(
+                    self.source.slice(sp.start as usize, sp.end as usize),
+                ) {
                     self.errors.warn_span(
                         sp,
                         format("'{}' does not need to be mutable", diag::span_str(self.source, sp.start, sp.end)),

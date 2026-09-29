@@ -1348,6 +1348,9 @@ extend Lowerer {
         if kc < 0 {
             kc = self.zst_cond(d.condition);
         }
+        if kc < 0 {
+            kc = self.bc_cond(d.condition);
+        }
         if kc == 1 {
             self.lower_stmt(d.then_branch);
         } else if kc == 0 {
@@ -2291,6 +2294,138 @@ extend Lowerer {
     /// per-instance constants, and the untaken side of a ZST container branch may not even be
     /// spellable C for this instantiation (pointer arithmetic over an incomplete element type).
     /// -1 = not that shape / not foldable.
+    // A closed condition that reads a build constant (PROFILE, or a form the early prune does not
+    // decide): 1 or 0 when the engine folds it, else -1. Only the taken branch lowers, so the
+    // dead one reaches no later stage and no emitted C.
+    fn bc_cond(self: &mut Self, cond: NodeId) i32 {
+        let pk = unsafe &*self.pkg;
+        if pk.build_module < 0 || pk.cir == null || self.bc_closed(cond, pk.build_module, 0) != 2 {
+            return -1;
+        }
+        let cev = unsafe &mut *(pk.cir as *mut iri::Interp);
+        let v = cev.eval(self.module, cond);
+        if v.kind != iri::IV_BOOL {
+            return -1;
+        }
+        return (v.i != 0) as i32;
+    }
+
+    // 0: `nid` reads a run-time value; 1: it is closed (literals, constants, enum variants and
+    // operators over them); 2: it is closed and reads a constant of module `bm`.
+    fn bc_closed(self: &Self, nid: NodeId, bm: i32, depth: u32) i32 {
+        if nid == NODE_NONE || depth > 24 {
+            return 0;
+        }
+        let n = *self.f.node(nid);
+        if n.kind == NodeKind::NODE_LITERAL {
+            return 1;
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            return self.bc_closed(n.as_data.unary.operand, bm, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_CAST {
+            return self.bc_closed(n.as_data.cast.expression, bm, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_BINARY {
+            let l = self.bc_closed(n.as_data.binary.left, bm, depth + 1);
+            if l == 0 {
+                return 0;
+            }
+            let r = self.bc_closed(n.as_data.binary.right, bm, depth + 1);
+            return if r == 0 {
+                0;
+            } else if l > r {
+                l;
+            } else {
+                r;
+            };
+        }
+        if n.kind != NodeKind::NODE_IDENTIFIER && (n.kind != NodeKind::NODE_MEMBER || !n.as_data.member.path) {
+            return 0;
+        }
+        let d = self.f.res(nid);
+        if d.node == NODE_NONE {
+            return 0;
+        }
+        let dn = unsafe (*(&*self.pkg).module_ast_const(d.module)).at_const(d.node);
+        if dn.kind == NodeKind::NODE_VARIANT {
+            return 1;
+        }
+        if dn.kind != NodeKind::NODE_CONST || dn.as_data.const_def.is_static_mut || dn.as_data.const_def.is_extern {
+            return 0;
+        }
+        return if d.module as i32 == bm {
+            2;
+        } else {
+            1;
+        };
+    }
+
+    // The body of the arm a `switch PROFILE` takes, when every arm is a string literal, an
+    // alternative of them or `_`, and no arm has a guard; else NODE_NONE.
+    fn bc_profile_arm(self: &Self, d: MatchData) NodeId {
+        let pk = unsafe &*self.pkg;
+        let vn = self.f.node(d.value);
+        if vn.kind != NodeKind::NODE_IDENTIFIER || self.f.res(d.value).module as i32 != pk.build_module {
+            return NODE_NONE;
+        }
+        let sp = vn.as_data.name.text;
+        if bc_index(self.src.slice(sp.start as usize, sp.end as usize)) != BC_PROFILE {
+            return NODE_NONE;
+        }
+        let mut taken = NODE_NONE;
+        for i in 0..d.arms.len {
+            let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+            if ad.guard != NODE_NONE {
+                return NODE_NONE;
+            }
+            let pn = *self.f.node(ad.pattern);
+            let mut hit = self.bc_profile_hit(ad.pattern, pk.profile_name());
+            if pn.kind == NodeKind::NODE_PATTERN_OR {
+                hit = 0;
+                for j in 0..pn.as_data.pattern.children.len {
+                    let h = self.bc_profile_hit(
+                        unsafe self.f.list(pn.as_data.pattern.children)[j as usize],
+                        pk.profile_name(),
+                    );
+                    if h < 0 {
+                        return NODE_NONE;
+                    }
+                    hit = hit | h;
+                }
+            }
+            if hit < 0 {
+                return NODE_NONE;
+            }
+            if hit == 1 && taken == NODE_NONE {
+                taken = ad.body;
+            }
+        }
+        return taken;
+    }
+
+    // Whether pattern `pat` matches profile `name`: 1 or 0, -1 when it is no plain string literal
+    // or `_`.
+    fn bc_profile_hit(self: &Self, pat: NodeId, name: str) i32 {
+        let pn = self.f.node(pat);
+        if pn.kind == NodeKind::NODE_PATTERN_WILDCARD {
+            return 1;
+        }
+        if pn.kind != NodeKind::NODE_PATTERN_LITERAL {
+            return -1;
+        }
+        let ln = self.f.node(pn.as_data.single.value);
+        if ln.kind != NodeKind::NODE_LITERAL || ln.as_data.literal.token_type != tt::TokenType::StringLiteral {
+            return -1;
+        }
+        let raw = ln.as_data.literal.raw;
+        let text = self.src.slice(raw.start as usize + 1, raw.end as usize - 1);
+        if text.find_byte(b'\\') >= 0 {
+            return -1;
+        }
+        return (text == name) as i32;
+    }
+
     fn zst_cond(self: &mut Self, cond: NodeId) i32 {
         let n = *self.f.node(cond);
         if n.kind != NodeKind::NODE_BINARY {
@@ -4836,7 +4971,11 @@ extend Lowerer {
     fn lower_if_expr(self: &mut Self, id: NodeId) ir::OperandId {
         let sp = self.f.node(id).span;
         let pl = self.place_of_local(self.temp(self.nty(id), sp));
-        if !self.lower_if_arms(id, pl) {
+        let d = self.f.node(id).as_data.if_stmt;
+        let kc = self.bc_cond(d.condition);
+        if kc >= 0 {
+            self.lower_arm(pick(kc == 1, d.then_branch, d.else_branch), pl);
+        } else if !self.lower_if_arms(id, pl) {
             return ir::IR_NONE;
         }
         return self.copy_op(pl);
@@ -5869,6 +6008,13 @@ extend Lowerer {
     fn lower_match(self: &mut Self, id: NodeId, dest: ir::PlaceId) bool {
         let d = self.f.node(id).as_data.match_expr;
         let sp = self.f.node(id).span;
+        let taken = self.bc_profile_arm(d);
+        if taken != NODE_NONE {
+            self.scope_enter();
+            self.lower_arm(taken, dest);
+            self.scope_exit();
+            return self.err.len() == 0;
+        }
         self.tp(ir::TP_MARK_PUSH, 0, id);
         let vop = self.lower_expr(d.value);
         if vop == ir::IR_NONE {

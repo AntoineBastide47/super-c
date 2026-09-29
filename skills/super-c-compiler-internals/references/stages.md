@@ -19,13 +19,40 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
   per module, the module arena (`Ast.nodes`) and the body arena (`Ast.b`, releasable bodies,
   ids tagged `NODE_BODY`; see syntax-ownership.md). Sugar keywords (`launch`,
   `select`, `parallel for`, ...) parse to marker nodes; `@derive` synthesis happens here
-  at parse time.
+  at parse time. The parser records the build-constant sites (`Ast.bc_sites`: every `if`
+  whose condition the build constants alone decide, every `switch` over PLATFORM, ARCH or
+  ENDIAN with decided arms) and the unknown variants they name (`Ast.bc_errs`, reported
+  by the resolver).
+- Prelude: the std files, then the build-constant module `__std::build`, generated from
+  the package's settings (`--target`, `arch`, `test_build`, `profile`; `add_build_module`).
+  A driver that sets them creates the package with `package_new` and loads with
+  `load_root`.
 
 ## 2. Platform Filter (`platform_filter`)
 
 `@platform` / `@arch` gating: items are compacted out of each AST by target mask before
 resolution (`Package::platform_filter` in `src/module/loader.spc`; the driver, the LSP and
 `package_from_source` all apply it). An item carries at most one of each (the parser rejects a repeated attribute); an item with both needs both to hold. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
+
+The early prune runs here too (`prune_build_sites`, idempotent): each build-constant
+site the settings decide is rewritten in place, an `if` into its taken block (an empty
+block when none is), a `switch` into the body of its first matching arm (an expression
+arm into a one-statement block). Sites are in parse order, so an `else if` is decided
+before the `if` holding it. The removed nodes stay in the arena, unreachable, like the
+items of a gated-out declaration. Each replaced site records its node and source span
+(`Ast.bc_cuts`) and the hashes of the identifiers of its removed text (`Ast.bc_names`,
+sorted): the use-counting lints treat those names as used (`Ast::bc_removed_name`; the
+item, member and import lints take the package's union), skip the unnecessary-`unsafe`
+lint on an `unsafe` holding a site, and never count a statement that is or holds a site as
+diverging (`Ast::bc_cut_at`). The six build-constant names and the enum names `Platform`,
+`Arch` and `Endian` (outside std's `target.spc`) are reserved (the resolver's `declare`), so
+the prune needs no resolution. The LSP re-prunes a module whose bodies it parses back
+and reparses a module with sites whole instead of splicing a body.
+
+Conditions the filter does not decide (PROFILE, or a mix with other operands) fold in
+the Core IR lowering: `Lowerer::bc_cond` evaluates a closed condition that reads a
+build constant and lowers only the taken branch (`bc_profile_arm` does the same for a
+`switch PROFILE` over string literals).
 
 ## 3. Resolve + HIR, per module (`src/resolver/`, `src/hir/lower.spc`)
 
@@ -124,7 +151,7 @@ modular return-lifetime check) run alongside.
 
 ## 8. Runtime + External C (`write_super_rt`, `ext_c_collect`)
 
-`super_rt.h` / `super_rt.c` are written into `gen_root` (default `<root>/build/raw`;
+`super_rt.h` / `super_rt.c` are written into `gen_root` (default `<root>/build/<profile>/raw`;
 manifest builds point it into their out-dir). `@c.source` files and backing-header `.c`
 siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 `@c.link` flags land in `__ldflags`.

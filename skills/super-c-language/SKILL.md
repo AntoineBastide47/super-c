@@ -338,7 +338,7 @@ const N: usize = table_size(8);
 static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 ```
 
-## Platform Gating
+## Build Constants and Platform Gating
 
 ```superc
 @platform(macos)
@@ -346,11 +346,66 @@ fn platform_init() { /* macOS-specific */ }
 
 @platform(windows)
 fn platform_init() { /* Windows-specific */ }
+
+fn page_size() usize {
+    if PLATFORM == Platform::Windows {
+        return win_page_size(); // a @platform(windows) item: the call is removed on other platforms
+    } else if ARCH == Arch::AArch64 {
+        return 16384;
+    }
+    return 4096;
+}
 ```
 
-No `#ifdef` in Super-C. Use `@platform(windows|macos|linux)` on items; several `@platform`
-attributes on one item intersect (all must hold), and `|` inside one attribute is a union. `--target=` for
-cross-compilation.
+No `#ifdef` in Super-C. Use `@platform(windows|macos|linux|wasm|ios|android)` and
+`@arch(x86_64|aarch64|wasm32)` on items; `|` inside the attribute is a union, `!x` the
+complement. An item with both `@platform` and `@arch` compiles only where both hold.
+`--target=` and `--arch=` select the target.
+
+The prelude defines the build settings as constants usable in any expression:
+
+| Constant | Type | Value |
+|----------|------|-------|
+| `PLATFORM` | `Platform` (`Windows`, `MacOS`, `Linux`, `Wasm`, `IOS`, `Android`) | `--target` (default: the host) |
+| `ARCH` | `Arch` (`X86_64`, `AArch64`, `Wasm32`) | `--arch` (default: the host's; `--target=wasm`, `ios` and `android` set theirs) |
+| `TEST` | `bool` | true in a `--test` build (`super-c test`, `super-c --test`) |
+| `POINTER_WIDTH` | `u32` | 64; 32 on `wasm32` |
+| `ENDIAN` | `Endian` (`Little`, `Big`) | `Little` on every supported target |
+| `PROFILE` | `str<'static>` | the build profile name (`dev` when none is named) |
+
+The compiler generates their module (`__std::build`) from its flags; std declares only
+the enums (`std/target.spc`). The six names are reserved: an item or binding with one of
+them is an error, and so is a type, item, binding or generic parameter named `Platform`,
+`Arch` or `Endian` outside `std/target.spc` (the filter reads `Platform::X` as std's
+variant before name resolution). ARCH and POINTER_WIDTH are absent when the host
+instruction set is unknown and no `--arch` names one.
+
+The platform filter decides a condition over PLATFORM, ARCH, TEST, POINTER_WIDTH and
+ENDIAN alone before name resolution: bare `TEST`, `!`, `&&`, `||`, parentheses, and `==`
+or `!=` against `Platform::X` / `Arch::X` / `Endian::X`, `true` / `false`, or a decimal
+integer. Such an `if` / `else if` / `else` chain (statement or value) becomes its taken
+block (with its own scope), and a `switch PLATFORM { Windows => .., _ => .. }` (or over
+ARCH or ENDIAN; arms of bare variant names, `|` and `_`, no guard) becomes its taken arm.
+The removed code is parsed but never resolved or checked, like a gated-out item: it may
+call items of another platform. A variant name these forms spell that does not exist
+(`Platform::Macos`) is an error, in removed code too. A condition that mixes the
+constants with anything else is an ordinary constant expression: both branches are
+checked, and the dead one is not emitted when the condition folds.
+
+PROFILE is an ordinary constant: both branches of `if PROFILE == "release"` are checked,
+and only the taken one is emitted (`switch PROFILE` over string literals too). A string
+literal compared with PROFILE must name a built-in profile or a `[profile.*]` of the
+package (a single-file build knows the built-ins only). The constant-condition and
+unreachable lints never fire on these conditions. Removed code may hold the only use of a
+name, so the lints that count uses treat every identifier its text spells as used, by
+name: a binding, item, field, variant or import that removed code names is not reported
+unused (nor a `mut` binding not mutable, nor a store dead), in any module for items,
+fields and variants; a glob import of a module with removed code is kept. An `unsafe` that
+holds removed code is not reported unnecessary, and a statement that is or holds a decided
+site does not make the next one unreachable. Everything else is linted as usual. The name
+match is textual: a removed use of `x` also covers an unrelated `x`. The LSP loads and
+filters with the configured `--target` and does not analyze removed code (no hover or
+navigation inside it); hover on a constant shows its value.
 
 ## C FFI
 

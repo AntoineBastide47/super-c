@@ -71,11 +71,11 @@ same_tree() {
 
 step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)"
 ( cd "$tree" && SC_LEAK_CHECK=fatal ./super-c build >/dev/null )
-cp -R "$tree/build/raw" "$tmp/gen1-raw"
+cp -R "$tree/build/dev/raw" "$tmp/gen1-raw"
 cp "$tree/build/dev/super-c" "$tree/gen1-super-c"
 rm -rf "$tree/build"
 ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 ./gen1-super-c build >/dev/null )
-same_tree "$tmp/gen1-raw" "$tree/build/raw" || fail "gen1 and gen2 emitted different C (above)"
+same_tree "$tmp/gen1-raw" "$tree/build/dev/raw" || fail "gen1 and gen2 emitted different C (above)"
 # Generation two is compiled and run: every build below is its own.
 cp "$tree/build/dev/super-c" "$tree/gen2-super-c"
 echo "gate: byte-identical"
@@ -85,7 +85,7 @@ echo "gate: byte-identical"
 gen2_build() {
     rm -rf "$tree/build"
     ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} ./gen2-super-c build --jobs="$1" >/dev/null 2>"$tmp/$3-err" ) || { cat "$tmp/$3-err" >&2; fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"; }
-    cp -R "$tree/build/raw" "$tmp/$3-raw"
+    cp -R "$tree/build/dev/raw" "$tmp/$3-raw"
 }
 # The identity of two records: the emitted tree, the type table, the item index digest, the
 # diagnostics (stderr without the measurement lines).
@@ -109,7 +109,7 @@ for seed in $CONTRACT_DELAY_SEEDS; do
 done
 
 step "strict C warnings ($CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS) and readability"
-raw="$tree/build/raw"
+raw="$tree/build/dev/raw"
 units=0
 for c in $(find "$raw" -name '*.c' | sort); do
     cc $CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS -fsyntax-only "$c" || fail "strict warnings: $c"

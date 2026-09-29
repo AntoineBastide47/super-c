@@ -1,5 +1,5 @@
-// build.toml engine: transpile the root's module closure into <out-dir>/raw, content-sync it into
-// <out-dir>/<profile>/gen (unchanged files keep their mtime), compile stale objects in parallel with
+// build.toml engine: transpile the root's module closure into <out-dir>/<profile>/raw, content-sync it
+// into <out-dir>/<profile>/gen (unchanged files keep their mtime), compile stale objects in parallel with
 // -MMD dep tracking into <out-dir>/<profile>/obj, link, then optionally strip. `super-c command <name>`
 // and `super-c clean` live here too.
 //
@@ -887,6 +887,15 @@ fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String
 /// with no manifest to read them from: `super-c release foo.spc`, which compiles and links in one command.
 /// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
 /// failing. `target` drops what that target cannot honour, exactly as a manifest build does.
+/// The names of `m`'s profiles: the ones a PROFILE comparison may name.
+pub fn profile_names(m: &mf::Manifest) Vector<String> {
+    let mut out = Vector::<String>::new();
+    for i in 0..m.profiles.len() {
+        out.push(String::from_str(m.profiles.at(i).name));
+    }
+    return out;
+}
+
 pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     let mut out = String::new();
     if name.len() == 0 {
@@ -2222,7 +2231,7 @@ pub struct BuildCtx<'a> {
 }
 
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
-// the transpiled C lands in <out-dir>/<raw> first.
+// the transpiled C lands in <out-dir>/<sub>/raw first (PROFILE makes it depend on the profile).
 // link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
 fn engine_build(
     m: &mf::Manifest,
@@ -2231,14 +2240,13 @@ fn engine_build(
     root_dir: str,
     alt: str,
     sub: str,
-    raw: str,
     bin: str,
     cx: &BuildCtx,
     link_kind: i32,
     topts: *const TestOpts,
 ) i32 {
     bst::begin();
-    let rc = engine_build_i(m, prof_name, root, root_dir, alt, sub, raw, bin, cx, link_kind, topts);
+    let rc = engine_build_i(m, prof_name, root, root_dir, alt, sub, bin, cx, link_kind, topts);
     bst::finish(rc);
     return rc;
 }
@@ -2250,7 +2258,6 @@ fn engine_build_i(
     root_dir: str,
     alt: str,
     sub: str,
-    raw: str,
     bin: str,
     cx: &BuildCtx,
     link_kind: i32,
@@ -2267,8 +2274,8 @@ fn engine_build_i(
 
     // Compile-side setup happens BEFORE the transpile: the EmitSink streams each finished TU into
     // the worker pool, overlapping cc with the remainder of the emit pass.
-    let srcgen = loader::join2(m.out_dir.as_str(), raw);
     let pdir = loader::join2(m.out_dir.as_str(), sub);
+    let srcgen = loader::join2(pdir.as_str(), "raw");
     let gen = loader::join2(pdir.as_str(), "gen");
     let obj = loader::join2(pdir.as_str(), "obj");
     mkdir_p(gen.as_str());
@@ -2313,6 +2320,10 @@ fn engine_build_i(
     let mut ldbase = String::new();
     push_sdk_flags(&mut ldbase, m.sdk, m.arch);
     push_sdk_libs(&mut ldbase, m.sdk);
+    // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
+    if prof.strip && (m.sdk == 2 || m.sdk == 3) {
+        ldbase.push_str(" -Wl,--strip-all");
+    }
     push_all(&mut ldbase, &m.ldflags);
     push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
     let mut lto_req = prof.lto;
@@ -2427,14 +2438,19 @@ fn engine_build_i(
     if !skip_emit {
         loader::set_load_jobs(jobs);
         let tl0 = unsafe shim::sc_ticks_ms();
-        let mut p = loader::package_load_rooted(root, root_dir, alt, cx.std_dir, cx.bootstrap_tags, cx.target);
+        // The build settings the prelude's build constants spell (`@arch` gates on the instruction
+        // set too), set before the load.
+        let mut p = loader::package_new(root_dir, alt, cx.std_dir);
+        p.arch = m.arch;
+        p.test_build = topts != null && unsafe (*topts).enabled;
+        p.profile = String::from_str(prof_name);
+        p.profiles = profile_names(m);
+        p.load_root(root, cx.std_dir, cx.bootstrap_tags, cx.target);
         bst::mark(bst::B_LOAD);
         if stdlib::getenv("SC_CEMIT_STATS") != null {
             eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
         }
         loader::set_load_jobs(1);
-        // The instruction-set axis `@arch` gates on.
-        p.arch = m.arch;
         if !p.ok {
             if jobs != 1 {
                 prt::shutdown(); // parallel loading started the pool
@@ -2642,7 +2658,7 @@ fn engine_build_i(
                         eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
                     } else {
-                        if prof.strip && link_kind == 0 {
+                        if prof.strip && link_kind == 0 && m.sdk != 2 && m.sdk != 3 {
                             let mut st = Vector::<String>::new();
                             push_arg(&mut st, "strip");
                             push_arg(&mut st, bin);
@@ -2730,7 +2746,6 @@ fn target_build(
     prof_name: str,
     root: str,
     suffix: str,
-    raw: str,
     leaf: str,
     link_kind: i32,
     cx: &BuildCtx,
@@ -2747,7 +2762,6 @@ fn target_build(
         loader::dirname_of(m.root.as_str()),
         "",
         sub.as_str(),
-        raw,
         path.as_str(),
         cx,
         link_kind,
@@ -2760,17 +2774,15 @@ fn target_build(
 // Build the manifest's primary root with `prof_name`'s flags into <out-dir>/<prof_name>, linking `bin`.
 fn root_build(m: &mf::Manifest, prof_name: str, bin: str, cx: &BuildCtx) i32 {
     let root = m.root.as_str();
-    return engine_build(m, prof_name, root, loader::dirname_of(root), "", prof_name, "raw", bin, cx, 0, null);
+    return engine_build(m, prof_name, root, loader::dirname_of(root), "", prof_name, bin, cx, 0, null);
 }
 
 // Build the [bin.NAME] target `bt` into <out-dir>/<prof_name>-bin-NAME; `out` receives the executable.
 fn bin_build(m: &mf::Manifest, prof_name: str, bt: &mf::BinTarget, cx: &BuildCtx, out: &mut String) i32 {
     let mut suffix = String::from_str("-bin-");
     suffix.push_string(&bt.name);
-    let mut raw = String::from_str("raw-bin-");
-    raw.push_string(&bt.name);
     let leaf = exe_name(bt.name.as_str(), cx.target);
-    return target_build(m, prof_name, bt.root.as_str(), suffix.as_str(), raw.as_str(), leaf.as_str(), 0, cx, out);
+    return target_build(m, prof_name, bt.root.as_str(), suffix.as_str(), leaf.as_str(), 0, cx, out);
 }
 
 /// `super-c build`/`release` over every manifest target (cargo-style): the [lib] section's static and/or
@@ -2797,7 +2809,6 @@ pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib:
                 prof_name,
                 m.lib_root.as_str(),
                 "-lib",
-                "raw-lib",
                 leaf.as_str(),
                 kind,
                 if shared {
@@ -3270,7 +3281,6 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         ".",
         loader::dirname_of(m.root.as_str()),
         tsub,
-        "raw-test",
         tbin.as_str(),
         &nolint,
         0,
@@ -3548,7 +3558,6 @@ pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str,
         ".",
         loader::dirname_of(m.root.as_str()),
         sub.as_str(),
-        "raw-bench",
         bin.as_str(),
         &nolint,
         0,
@@ -3603,14 +3612,27 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
     return 0;
 }
 
-/// `super-c clean`: drop the manifest's outputs; out-dir (raw*/ + per-profile gen/obj) plus the
-/// `<root dir>/build/raw` tree a bare `super-c <root.spc>` emits. That `build` directory goes too only
-/// when nothing else is in it: it can be the user's own.
+/// `super-c clean`: drop the manifest's outputs; out-dir (per-target raw/gen/obj) plus every
+/// `<root dir>/build/<profile>/raw` tree a bare `super-c <root.spc>` emits. A profile directory and
+/// the `build` directory go too only when nothing else is in them: they can be the user's own.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
     let b = loader::join2(loader::dirname_of(m.root.as_str()), "build");
-    let raw = loader::join2(b.as_str(), "raw");
-    rm_rf(raw.as_str());
+    switch list_dir(b.as_str(), false) {
+        Some(names) => {
+            for i in 0..names.len() {
+                // Only an emitted tree: it always holds the runtime header.
+                let mut pd = loader::join2(b.as_str(), names.at(i).as_str());
+                let raw = loader::join2(pd.as_str(), "raw");
+                let mut rt = loader::join2(raw.as_str(), "super_rt.h");
+                if unsafe shim::sc_mtime(rt.cstr()) != 0 {
+                    rm_rf(raw.as_str());
+                    let _ = unsafe shim::sc_rmdir(pd.cstr());
+                }
+            }
+        },
+        None => {},
+    };
     let mut bc = b.clone();
     let _ = unsafe shim::sc_rmdir(bc.cstr());
     return 0;

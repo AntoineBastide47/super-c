@@ -7,6 +7,7 @@ import tests::cli_harness as cli;
 import module::loader as loader;
 import lsp::json as json;
 import ast::parser as par;
+import driver_shim as shim;
 
 fn frame(out: &mut String, body: &String) {
     out.format_into("Content-Length: {}\r\n\r\n", body.len());
@@ -14,10 +15,16 @@ fn frame(out: &mut String, body: &String) {
 }
 
 fn lsp_run(root: str) i32 {
+    return lsp_run_args(root, "");
+}
+
+// `lsp_run` with command-line options `args` after `lsp`.
+fn lsp_run_args(root: str, args: str) i32 {
     let mut cmd = String::new();
     cmd.push_str("\"");
     cmd.push_str(cli::superc_path());
     cmd.push_str("\" lsp");
+    cmd.push_str(args);
     let mut inp = String::from_str(root);
     inp.push_str("/session.bin");
     let mut outp = String::from_str(root);
@@ -1356,4 +1363,94 @@ fn lsp_sweep_skips_directory_links() {
     let o = out.as_str();
     assert(o.contains("extra/stray.spc\",\"diagnostics\":[{"));
     assert(!o.contains("/loop"));
+}
+
+// The LSP loads and filters with `--target`, not the host: the build constants say the target, the
+// branch for the host is removed, and the host-only item that branch calls is gated out without an
+// unresolved name.
+@test
+fn lsp_build_constants_follow_the_target() {
+    let host = unsafe shim::sc_host_platform();
+    let hv = if host == 0 {
+        "Windows";
+    } else if host == 1 {
+        "MacOS";
+    } else {
+        "Linux";
+    };
+    let ha = if host == 0 {
+        "windows";
+    } else if host == 1 {
+        "macos";
+    } else {
+        "linux";
+    };
+    let tv = if host == 2 {
+        "Windows";
+    } else {
+        "Linux";
+    };
+    let ta = if host == 2 {
+        "windows";
+    } else {
+        "linux";
+    };
+    let mut doc = String::from_str("@platform(");
+    doc.push_str(ha);
+    doc.push_str(
+        ")\nfn host_only() i32 {\n    return 1;\n}\n\nfn main() i32 {\n    let _p = PLATFORM;\n    if PLATFORM == Platform::",
+    );
+    doc.push_str(hv);
+    doc.push_str(" {\n        return host_only();\n    }\n    return 0;\n}\n");
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", doc.as_str());
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{}");
+    push_open(&mut ses, root, "src/main.spc", doc.as_str());
+    push_req_at(&mut ses, root, "src/main.spc", 5, "textDocument/hover", 6, 14);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    let mut args = String::from_str(" --target=");
+    args.push_str(ta);
+    assert_eq(lsp_run_args(root, args.as_str()), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert(!o.contains("host_only"), "the removed branch names no gated-out item");
+    let mut want = String::from_str("= Platform::");
+    want.push_str(tv);
+    assert(response_of(o, "\"id\":5").contains(want.as_str()));
+}
+
+const BC_DOC: str = "fn main() i32 {\n    if PROFILE == \"dev\" {\n        return 0;\n    }\n    if TEST {\n        return missing;\n    }\n    return 1;\n}\n";
+const BC_EDIT: str = "fn main() i32 {\n    if PROFILE == \"dev\" {\n        return 0;\n    }\n    if PLATFORM == Platform::Macos {\n        return missing;\n    }\n    return 1;\n}\n";
+
+// Hover on a build constant shows its value; it has no definition site to go to; the branch the
+// platform filter removed is not analyzed; an edit re-decides the module's conditions.
+@test
+fn lsp_build_constants() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", BC_DOC);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{}");
+    push_open(&mut ses, root, "src/main.spc", BC_DOC);
+    push_req_at(&mut ses, root, "src/main.spc", 5, "textDocument/hover", 1, 8);
+    push_req_at(&mut ses, root, "src/main.spc", 6, "textDocument/definition", 1, 8);
+    push_change(&mut ses, root, "src/main.spc", 2, BC_EDIT);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    // The removed branch's unknown name is never reported.
+    assert(!o.contains("missing"));
+    let r5 = response_of(o, "\"id\":5");
+    assert(r5.contains("PROFILE: str<'static> = \\\"dev\\\""));
+    assert(r5.contains("The build profile"));
+    let r6 = response_of(o, "\"id\":6");
+    assert(r6.contains("\"result\":null"));
+    assert(o.contains("unknown Platform variant 'Macos'"));
 }

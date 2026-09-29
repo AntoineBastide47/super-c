@@ -37,20 +37,30 @@ fn run_file(
     jobs: u32,
     out_dir: str,
     cc: str,
+    profile: str,
 ) i32 {
     loader::set_load_jobs(jobs);
     let tl0 = unsafe shim::sc_ticks_ms();
-    let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
+    // The build settings the prelude's build constants spell, set before the load.
+    let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
+    p.arch = arch;
+    p.test_build = unsafe (*topts).enabled;
+    p.profile = String::from_str(profile);
+    let bi = bman::builtins_only();
+    p.profiles = bsys::profile_names(&bi);
+    p.load_root(path, std_dir, bootstrap_tags, target);
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
     }
     loader::set_load_jobs(1);
-    p.arch = arch;
     // `--out-dir` and `--cc` apply to a bare build exactly as to a manifest one: the emitted tree goes under
     // the named directory, and the named compiler links the program.
     if out_dir.len() != 0 {
-        p.gen_root = String::from_str(out_dir);
-        p.gen_root.push_str("/raw");
+        let mut g = String::from_str(out_dir);
+        g.push_byte(b'/');
+        g.push_str(p.profile_name());
+        g.push_str("/raw");
+        p.gen_root = g;
     }
     if cc.len() != 0 {
         p.cc = String::from_str(cc);
@@ -304,6 +314,21 @@ fn lint_alt() str<'static> {
 // `fix`: the exit code. With `fix` (quiet): 1 on an error or a failed write; else, when `apply`, the
 // machine fixes are written (each fixed file reformatted: canonicalization can unlock paren-guarded
 // fixes) and the result is 2 if any was written; else 0.
+// The profiles a PROFILE comparison may name in a lint run: the manifest's, else the built-ins.
+fn lint_profiles() Vector<String> {
+    let manf = stdio::fopen("build.toml", "rb");
+    if manf != null {
+        unsafe stdio::fclose(manf);
+        let mo = bman::load("build.toml", false);
+        if !mo.is_none() {
+            let man = mo.unwrap();
+            return bsys::profile_names(&man);
+        }
+    }
+    let bi = bman::builtins_only();
+    return bsys::profile_names(&bi);
+}
+
 fn lint_pass(
     p: &mut loader::Package,
     target: i32,
@@ -319,6 +344,7 @@ fn lint_pass(
     if p.jobs == 1 {
         prt::shutdown(); // parallel loading may have started the pool
     }
+    p.profiles = lint_profiles();
     let mut cirv = iri::interp_master(p as *mut loader::Package, ce_steps, ce_mem);
     p.cir = &mut cirv;
     let mut rc = 0;
@@ -1362,6 +1388,7 @@ OPTIONS:
         jobs,
         bo.out_dir,
         bo.cc,
+        bo.profile,
     );
     return rc;
 }

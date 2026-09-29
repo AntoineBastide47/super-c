@@ -8095,6 +8095,39 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
     return false;
 }
 
+// The name node of a candidate item of the unused-item lint (`lint_item_candidate`), NODE_NONE for
+// any other kind.
+fn lint_item_name(a: *const Ast, iid: NodeId) NodeId {
+    let it = unsafe (*a).at_const(iid);
+    if it.kind == NodeKind::NODE_FUNCTION {
+        return it.as_data.function.name;
+    }
+    if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
+        return it.as_data.aggregate.name;
+    }
+    if it.kind == NodeKind::NODE_INTERFACE {
+        return it.as_data.interface_def.name;
+    }
+    if it.kind == NodeKind::NODE_TYPE_ALIAS {
+        return it.as_data.type_alias.name;
+    }
+    return NODE_NONE;
+}
+
+// The sorted distinct name hashes of every module's code the platform filter removed (`Ast.bc_names`).
+fn bc_removed_names(p: &loader::Package) Vector<u64> {
+    let mut all = Vector::<u64>::new();
+    for m in 0..p.modules.len() {
+        let ns = &p.modules[m].ast.bc_names;
+        for k in 0..ns.len() {
+            all.push(ns[k]);
+        }
+    }
+    all.sort();
+    all.dedup();
+    return all;
+}
+
 fn lint_report_item(
     p: &loader::Package,
     errs: &mut diag::Errors,
@@ -8115,27 +8148,20 @@ fn lint_report_item(
         }
     }
     let src = p.modules[m as usize].source.as_str();
-    let mut what = "function";
-    let mut nid = NODE_NONE;
-    if it.kind == NodeKind::NODE_FUNCTION {
-        nid = it.as_data.function.name;
+    let what = if it.kind == NodeKind::NODE_FUNCTION {
+        "function";
+    } else if it.kind == NodeKind::NODE_STRUCT && it.as_data.aggregate.is_union {
+        "union";
     } else if it.kind == NodeKind::NODE_STRUCT {
-        what = if it.as_data.aggregate.is_union {
-            "union";
-        } else {
-            "struct";
-        };
-        nid = it.as_data.aggregate.name;
+        "struct";
     } else if it.kind == NodeKind::NODE_ENUM {
-        what = "enum";
-        nid = it.as_data.aggregate.name;
+        "enum";
     } else if it.kind == NodeKind::NODE_INTERFACE {
-        what = "interface";
-        nid = it.as_data.interface_def.name;
+        "interface";
     } else {
-        what = "type alias";
-        nid = it.as_data.type_alias.name;
-    }
+        "type alias";
+    };
+    let nid = lint_item_name(a, iid);
     let nsp = unsafe (*a).at_const(nid).as_data.name.text;
     if root_mod && it.kind == NodeKind::NODE_FUNCTION && diag::span_str(src, nsp.start, nsp.end) == "main" {
         return;
@@ -8178,11 +8204,26 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     } else {
         inc_prelude = only_mod >= 0 && p.modules[only_mod as usize].prelude;
     }
+    // Code the platform filter removed may hold the only use of an item: an item its text names is used.
+    let removed = bc_removed_names(p);
     let mut ents = Vector::<Vector<LintEnt>>::new();
     for m in 0..nm {
         let mut e = Vector::<LintEnt>::new();
         if p.modules[m].has_ast && (!p.modules[m].prelude || inc_prelude) {
             lint_build_entries(p, m, only_mod, &mut e);
+            if removed.len() != 0 {
+                let a = p.module_ast_const(m as ModuleId);
+                let src = p.modules[m].source.as_str();
+                for k in 0..e.len() {
+                    let nid = lint_item_name(a, e[k].node);
+                    if !e[k].root && nid != NODE_NONE {
+                        let nsp = unsafe (*a).at_const(nid).as_data.name.text;
+                        if removed.binary_search(&src.slice(nsp.start as usize, nsp.end as usize).hash()).is_ok() {
+                            e.index_mut(k).root = true;
+                        }
+                    }
+                }
+            }
         }
         ents.push(e);
     }
@@ -8442,9 +8483,9 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // legal import cycles would otherwise self-justify). Modules whose closure carries link-time side
 // effects (@c.source/@c.link) or extends a foreign type (methods/conformances reachable without a
 // resolution edge) are exempt.
-// A module with @platform-gated items is exempt from cross-item unused lints (imports, members):
-// the dropped items' uses are invisible under the current target, so a per-target verdict would
-// contradict another target's.
+// A module with @platform-gated items is exempt from cross-item unused lints (imports, members): the
+// dropped items' uses are invisible under the current target, so a per-target verdict would
+// contradict another target's. Code the early prune removed exempts only the names its text spells.
 fn module_platform_gated(a: *const Ast) bool {
     for i in 0..unsafe (*a).attrs.len() {
         if unsafe (*a).attrs.at(i).kind == AttrKind::ATTR_PLATFORM as u8 {
@@ -8480,6 +8521,31 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
     return false;
 }
 
+// Whether code the platform filter removed from module `a` (source `src`) may use import `iid` through
+// module `mid` (the import's target or a module of its closure): a glob import's names are unknown, a
+// named one's leading name (the alias, or the module's last path segment) is spelled.
+fn import_removed_use(p: &loader::Package, a: *const Ast, src: str, iid: NodeId, mid: ModuleId) bool {
+    if unsafe (*a).bc_names.len() == 0 {
+        return false;
+    }
+    let im = unsafe (*a).at_const(iid).as_data.import_decl;
+    if im.glob {
+        return true;
+    }
+    if im.alias != NODE_NONE {
+        let asp = unsafe (*a).at_const(im.alias).as_data.name.text;
+        if unsafe (*a).bc_removed_name(src.slice(asp.start as usize, asp.end as usize)) {
+            return true;
+        }
+    }
+    let path = p.modules[mid as usize].path.as_str();
+    let mut st = path.len();
+    while st > 0 && path[st - 1] != b':' {
+        st -= 1;
+    }
+    return unsafe (*a).bc_removed_name(path.slice(st, path.len()));
+}
+
 fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
     let nm = p.modules.len();
     for m in 0..nm {
@@ -8511,12 +8577,24 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
             if mid < 0 || mid as usize == m {
                 continue;
             }
-            let mut used = usedm[mid as usize] || import_side_effects(p, mid as ModuleId);
+            let mut used = usedm[mid as usize] || import_side_effects(p, mid as ModuleId) || import_removed_use(
+                p,
+                a,
+                src,
+                iid,
+                mid as ModuleId,
+            );
             if !used {
                 let clo = p.import_closure(mid as ModuleId);
                 for c in 0..clo.len() {
                     let cm = clo[c];
-                    if cm as usize != m && (usedm[cm as usize] || import_side_effects(p, cm)) {
+                    if cm as usize != m && (usedm[cm as usize] || import_side_effects(p, cm) || import_removed_use(
+                        p,
+                        a,
+                        src,
+                        iid,
+                        cm,
+                    )) {
                         used = true;
                         break;
                     }
@@ -8634,6 +8712,7 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
 // exempt entirely (int casts materialize variants without naming them).
 fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     let nm = p.modules.len();
+    let removed = bc_removed_names(p);
     let mut starts = Vector::<usize>::new();
     let mut total: usize = 0;
     for m in 0..nm {
@@ -8728,7 +8807,10 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                 } else {
                     used[starts[m] + mid2 as usize];
                 };
-                if nsp.end <= nsp.start || src[nsp.start as usize] == b'_' || hit {
+                // Code the platform filter removed may hold the only use.
+                if nsp.end <= nsp.start || src[nsp.start as usize] == b'_' || hit || removed.binary_search(
+                    &src.slice(nsp.start as usize, nsp.end as usize).hash(),
+                ).is_ok() {
                     continue;
                 }
                 if it.kind == NodeKind::NODE_STRUCT {
@@ -9171,10 +9253,14 @@ pub fn run_package(
         }
     }
 
-    // Manifest builds point gen_root into their out-dir; bare invocations default next to the sources.
+    // Manifest builds point gen_root into their out-dir; bare invocations default next to the
+    // sources, one tree per profile (PROFILE makes the emitted C depend on it).
     if p.gen_root.len() == 0 {
-        p.gen_root = String::from_str(p.root_dir.as_str());
-        p.gen_root.push_str("/build/raw");
+        let mut g = String::from_str(p.root_dir.as_str());
+        g.push_str("/build/");
+        g.push_str(p.profile_name());
+        g.push_str("/raw");
+        p.gen_root = g;
     }
     // A tree that did not exist before this build holds no orphan to prune afterwards.
     let mut gr9 = String::from_str(p.gen_root.as_str());

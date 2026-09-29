@@ -9,6 +9,7 @@ import atomic;
 import driver_shim as shim;
 import lexer::token as tok;
 import lexer::lexer as lexer;
+import lexer::token_type as tt;
 import ast::ast as *;
 import ast::parser as parser;
 import std::parallel::sync as psy;
@@ -120,6 +121,16 @@ pub struct Package {
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
     pub arch: i32,
+    /// The settings the build-constant module spells and the early prune decides by: a `--test`
+    /// build (TEST), the profile name (PROFILE; empty is `dev`), and the profile names a PROFILE
+    /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
+    pub test_build: bool,
+    pub profile: String,
+    pub profiles: Vector<String>,
+    /// The build-constant module (`__std::build`), -1 until the platform filter adds it; the
+    /// target platform it spells.
+    pub build_module: i32,
+    pub build_target: i32,
     /// The `--bootstrap-tags` flag the ASTs were loaded under: gating changes item sets while
     /// leaving sources identical, so build caches keyed on sources must include it.
     pub bootstrap: bool,
@@ -939,14 +950,15 @@ pub fn package_load_overlaid(
     overlay_texts: Vector<String>,
 ) Package {
     let mut p = package_base(root_dir, alt_dir, std_dir, overlay_files, overlay_texts);
-    p.bootstrap = bootstrap_tags;
-    let rp = stem_of(root_file);
-    let rf = String::from_str(root_file);
-    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
-    p.load_prelude(std_dir, target);
-    p.seed_core();
-    p.bind_types();
+    p.load_root(root_file, std_dir, bootstrap_tags, target);
     return p;
+}
+
+/// An empty package with its import roots, for a driver that sets the build settings (`arch`,
+/// `test_build`, `profile`) before `load_root`: the prelude's build-constant module spells them.
+pub fn package_new(root_dir: str, alt_dir: str, std_dir: str) Package {
+    ts_init();
+    return package_base(root_dir, alt_dir, std_dir, Vector::<String>::new(), Vector::<String>::new());
 }
 
 /// Prelude-only package (import roots set, no root module): the batch `lint` driver and the LSP's
@@ -1066,6 +1078,30 @@ struct RealBuf {
 }
 
 /// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
+// Append the `str::hash` of every identifier of `src[lo..hi]` to `out` (a word that starts with a
+// digit is a number, not a name).
+fn bc_scan_names(src: str, lo: u32, hi: u32, out: &mut Vector<u64>) {
+    let mut i = lo as usize;
+    while i < hi as usize {
+        let c = src[i];
+        if !bc_name_byte(c) {
+            i += 1;
+            continue;
+        }
+        let st = i;
+        while i < hi as usize && bc_name_byte(src[i]) {
+            i += 1;
+        }
+        if c < b'0' || c > b'9' {
+            out.push(src.slice(st, i).hash());
+        }
+    }
+}
+
+const fn bc_name_byte(c: u8) bool {
+    return c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9';
+}
+
 pub const fn basename_of(path: str) str {
     let mut k = path.len();
     while k > 0 && path[k - 1] != b'/' {
@@ -1252,6 +1288,7 @@ extend Package {
     /// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
     /// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
     /// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
+    /// It also prunes every module's build-constant sites.
     pub fn platform_filter(self: &mut Self, target: i32) {
         let n = self.modules.len();
         for mi in 0..n {
@@ -1259,9 +1296,331 @@ extend Package {
         }
     }
 
+    /// Load `root_file` and, transitively, every module it imports, then append the std prelude
+    /// under `std_dir` (empty skips it).
+    pub fn load_root(self: &mut Self, root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) {
+        self.bootstrap = bootstrap_tags;
+        let rp = stem_of(root_file);
+        let rf = String::from_str(root_file);
+        self.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
+        self.load_prelude(std_dir, target);
+        self.seed_core();
+        self.bind_types();
+    }
+
+    /// Add the build-constant module `__std::build`, the prelude's last module: this compilation's
+    /// settings as constants, spelled from `target`, `arch`, `test_build` and `profile`. ARCH and
+    /// POINTER_WIDTH are absent when the instruction set is unknown.
+    fn add_build_module(self: &mut Self, target: i32) {
+        if self.build_module >= 0 || self.std_root.len() == 0 {
+            return;
+        }
+        self.build_target = target;
+        let mut src = String::from_str(
+            "/// The target platform (`--target`).\npub const PLATFORM: Platform = Platform::",
+        );
+        src.push_str(bc_variants(BC_PLATFORM)[target as usize]);
+        src.push_str(";\n/// True in a `--test` build.\npub const TEST: bool = ");
+        src.push_str(
+            if self.test_build {
+                "true";
+            } else {
+                "false";
+            },
+        );
+        src.push_str(
+            ";\n/// The byte order of the target.\npub const ENDIAN: Endian = Endian::Little;\n/// The build profile (`--profile`).\npub const PROFILE: str<'static> = \"",
+        );
+        let prof = self.profile_name();
+        for i in 0..prof.len() {
+            if prof[i] == b'"' || prof[i] == b'\\' {
+                src.push_byte(b'\\');
+            }
+            src.push_byte(prof[i]);
+        }
+        src.push_str("\";\n");
+        if self.arch >= 0 {
+            src.push_str("/// The target instruction set (`--arch`).\npub const ARCH: Arch = Arch::");
+            src.push_str(bc_variants(BC_ARCH)[self.arch as usize]);
+            src.push_str(";\n/// The width of a pointer in bits.\npub const POINTER_WIDTH: u32 = ");
+            src.push_i64(self.bc_value(BC_POINTER_WIDTH));
+            src.push_str(";\n");
+        }
+        let mut parsed = parse_source(&mut src, "", false, Vector::<tok::Token>::new());
+        assert(parsed.ok, "the build-constant module parses");
+        let id = self.add_module(
+            String::from_str("__std::build"),
+            String::new(),
+            src,
+            replace(&mut parsed.ast, Ast::new(0)),
+            true,
+        );
+        self.modules[id as usize].ast.module = id as ModuleId;
+        self.modules[id as usize].prelude = true;
+        self.build_module = id;
+    }
+
+    /// Whether module `m` is std's `target.spc`, the declarer of the build-constant enums.
+    pub fn is_target_module(self: &Self, m: ModuleId) bool {
+        return m as usize < self.modules.len() && self.modules[m as usize].prelude && basename_of(
+            self.modules[m as usize].file.as_str(),
+        ) == "target.spc";
+    }
+
+    /// The build profile's name: `profile`, `dev` when the driver named none.
+    pub fn profile_name<'a>(self: &'a Self) str<'a> {
+        if self.profile.len() == 0 {
+            return "dev";
+        }
+        return self.profile.as_str();
+    }
+
+    /// The value build constant `k` (not PROFILE) has in this compilation, -1 when unknown: a
+    /// platform or instruction set as its variant index, TEST as 0 or 1.
+    pub fn bc_value(self: &Self, k: i32) i64 {
+        if k == BC_PLATFORM {
+            return self.build_target;
+        }
+        if k == BC_ARCH {
+            return self.arch;
+        }
+        if k == BC_TEST {
+            return self.test_build as i64;
+        }
+        if k == BC_POINTER_WIDTH {
+            return if self.arch < 0 {
+                -1;
+            } else if self.arch == 2 {
+                32;
+            } else {
+                64;
+            };
+        }
+        return if k == BC_ENDIAN {
+            0;
+        } else {
+            -1;
+        };
+    }
+
+    /// The early prune of module `mi` (idempotent): every build-constant site the settings decide
+    /// is replaced in place by its taken branch, an `if` by its taken block (an empty block when
+    /// none is), a `switch` by the body of the first arm that matches. Sites are in parse order,
+    /// so an `else if` is decided before the `if` that holds it. Each replaced site records its
+    /// span and the identifiers of its removed text (`Ast.bc_cuts`, `Ast.bc_names`).
+    pub fn prune_build_sites(self: &mut Self, mi: usize) {
+        let mut names = Vector::<u64>::new();
+        let ns = self.modules[mi].ast.bc_sites.len();
+        for i in 0..ns {
+            let a = &self.modules[mi].ast;
+            let id = a.bc_sites[i];
+            let n = *a.at_const(id);
+            let mut take = NODE_NONE;
+            if n.kind == NodeKind::NODE_IF {
+                let v = self.bc_eval(mi, n.as_data.if_stmt.condition);
+                if v < 0 {
+                    continue;
+                }
+                take = pick(v == 1, n.as_data.if_stmt.then_branch, n.as_data.if_stmt.else_branch);
+            } else if n.kind == NodeKind::NODE_MATCH {
+                take = self.bc_arm_body(mi, n.as_data.match_expr.value, n.as_data.match_expr.arms);
+                if take == NODE_NONE {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            // The removed text: the whole site, or the site around its taken branch.
+            let mut ks = n.span.end;
+            let mut ke = n.span.end;
+            if take != NODE_NONE {
+                ks = self.modules[mi].ast.at_const(take).span.start;
+                ke = self.modules[mi].ast.at_const(take).span.end;
+            }
+            bc_scan_names(self.modules[mi].source.as_str(), n.span.start, ks, &mut names);
+            bc_scan_names(self.modules[mi].source.as_str(), ke, n.span.end, &mut names);
+            let ast = &mut self.modules[mi].ast;
+            ast.bc_cuts.push(BcCut { node: id, span: n.span });
+            if take == NODE_NONE {
+                *ast.at(id) = Node {
+                    kind: NodeKind::NODE_BLOCK,
+                    span: n.span,
+                    as_data: NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
+                };
+            } else if ast.at_const(take).kind == NodeKind::NODE_BLOCK || n.kind == NodeKind::NODE_IF {
+                *ast.at(id) = *ast.at_const(take);
+            } else {
+                // An expression arm becomes the value of a one-statement block: the switch node
+                // keeps its id, the arm's expression keeps its own.
+                let tsp = ast.at_const(take).span;
+                ast.sink_body = Ast::in_body(id);
+                let es = ast.add(
+                    Node {
+                        kind: NodeKind::NODE_EXPRESSION_STATEMENT,
+                        span: tsp,
+                        as_data: NodeAs { single: SingleData { value: take } },
+                    },
+                );
+                let mark = ast.mark();
+                ast.push(es);
+                let stmts = ast.commit(mark);
+                ast.sink_body = false;
+                *ast.at(id) = Node {
+                    kind: NodeKind::NODE_BLOCK,
+                    span: n.span,
+                    as_data: NodeAs { block: BlockData { statements: stmts } },
+                };
+            }
+        }
+        if names.len() != 0 {
+            let all = &mut self.modules[mi].ast.bc_names;
+            for k in 0..names.len() {
+                all.push(names[k]);
+            }
+            all.sort();
+            all.dedup();
+        }
+    }
+
+    // A build-constant condition of module `mi`: 1 true, 0 false, -1 not decided here.
+    fn bc_eval(self: &Self, mi: usize, id: NodeId) i32 {
+        let n = *self.modules[mi].ast.at_const(id);
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            return if self.bc_const(mi, id) == BC_TEST {
+                self.bc_value(BC_TEST) as i32;
+            } else {
+                -1;
+            };
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            let v = self.bc_eval(mi, n.as_data.unary.operand);
+            return if v < 0 {
+                -1;
+            } else {
+                1 - v;
+            };
+        }
+        if n.kind != NodeKind::NODE_BINARY {
+            return -1;
+        }
+        let b = n.as_data.binary;
+        if b.op == tt::TokenType::AmpersandAmpersand || b.op == tt::TokenType::PipePipe {
+            let l = self.bc_eval(mi, b.left);
+            let r = self.bc_eval(mi, b.right);
+            if l < 0 || r < 0 {
+                return -1;
+            }
+            return if b.op == tt::TokenType::AmpersandAmpersand {
+                l & r;
+            } else {
+                l | r;
+            };
+        }
+        let mut e = self.bc_eq(mi, b.left, b.right);
+        if e < 0 {
+            e = self.bc_eq(mi, b.right, b.left);
+        }
+        if e < 0 {
+            return -1;
+        }
+        return if b.op == tt::TokenType::EqualEqual {
+            e;
+        } else {
+            1 - e;
+        };
+    }
+
+    // `c == x` for build constant `c` of module `mi`: 1, 0, or -1 when not decided here.
+    fn bc_eq(self: &Self, mi: usize, c: NodeId, x: NodeId) i32 {
+        let k = self.bc_const(mi, c);
+        if k < 0 || k == BC_PROFILE {
+            return -1;
+        }
+        let cur = self.bc_value(k);
+        if cur < 0 {
+            return -1;
+        }
+        let a = &self.modules[mi].ast;
+        let src = self.modules[mi].source.as_str();
+        let xn = a.at_const(x);
+        if k == BC_TEST || k == BC_POINTER_WIDTH {
+            if xn.kind != NodeKind::NODE_LITERAL {
+                return -1;
+            }
+            let t = xn.as_data.literal.token_type;
+            let v = if t == tt::TokenType::True {
+                1;
+            } else if t == tt::TokenType::False {
+                0;
+            } else if k == BC_POINTER_WIDTH && t == tt::TokenType::IntegerLiteral {
+                bc_decimal(src, xn.as_data.literal.raw);
+            } else {
+                -1;
+            };
+            return if v < 0 {
+                -1;
+            } else {
+                (v == cur) as i32;
+            };
+        }
+        if xn.kind != NodeKind::NODE_MEMBER || !xn.as_data.member.path {
+            return -1;
+        }
+        let sp = a.at_const(xn.as_data.member.member).as_data.name.text;
+        return (bc_variant(k, src.slice(sp.start as usize, sp.end as usize)) as i64 == cur) as i32;
+    }
+
+    // The body of the first arm of a `switch` over build constant `value` (module `mi`) whose
+    // pattern matches the setting; NODE_NONE when no arm does or the setting is unknown.
+    fn bc_arm_body(self: &Self, mi: usize, value: NodeId, arms: NodeList) NodeId {
+        let k = self.bc_const(mi, value);
+        let cur = self.bc_value(k);
+        if cur < 0 {
+            return NODE_NONE;
+        }
+        let a = &self.modules[mi].ast;
+        for i in 0..arms.len {
+            let arm = a.at_const(unsafe a.list(arms)[i as usize]).as_data.match_arm;
+            let pn = a.at_const(arm.pattern);
+            if pn.kind == NodeKind::NODE_PATTERN_OR {
+                for j in 0..pn.as_data.pattern.children.len {
+                    if self.bc_arm_hit(mi, k, cur, unsafe a.list(pn.as_data.pattern.children)[j as usize]) {
+                        return arm.body;
+                    }
+                }
+            } else if self.bc_arm_hit(mi, k, cur, arm.pattern) {
+                return arm.body;
+            }
+        }
+        return NODE_NONE;
+    }
+
+    fn bc_arm_hit(self: &Self, mi: usize, k: i32, cur: i64, pat: NodeId) bool {
+        let a = &self.modules[mi].ast;
+        let pn = a.at_const(pat);
+        if pn.kind == NodeKind::NODE_PATTERN_WILDCARD {
+            return true;
+        }
+        let sp = a.at_const(pn.as_data.pattern.name).as_data.name.text;
+        return bc_variant(k, self.modules[mi].source.as_str().slice(sp.start as usize, sp.end as usize)) as i64 == cur;
+    }
+
+    // The build constant (`BC_*`) identifier `id` of module `mi` names, -1 for any other node.
+    fn bc_const(self: &Self, mi: usize, id: NodeId) i32 {
+        let n = self.modules[mi].ast.at_const(id);
+        if n.kind != NodeKind::NODE_IDENTIFIER {
+            return -1;
+        }
+        let sp = n.as_data.name.text;
+        return bc_index(self.modules[mi].source.as_str().slice(sp.start as usize, sp.end as usize));
+    }
+
     /// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters only the
     /// reparsed module.
     pub fn platform_filter_module(self: &mut Self, mi: usize, target: i32) {
+        if self.modules[mi].has_ast {
+            self.prune_build_sites(mi);
+        }
         let arch = self.arch; // the instruction-set axis rides on the package, so no caller has to thread it
         let m = &mut self.modules[mi];
         let root = m.ast.root;
@@ -1661,6 +2020,7 @@ extend Package {
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
+            build_module: -1,
             tt: Box::<TypePool>::new(TypePool {}),
             ok: true,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
@@ -3498,5 +3858,6 @@ extend Package {
                 }
             }
         }
+        self.add_build_module(target);
     }
 }

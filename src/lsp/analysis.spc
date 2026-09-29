@@ -217,16 +217,7 @@ pub fn compile(
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
     let t0 = unsafe shim::sc_ticks_ms();
-    let mut p = loader::package_load_overlaid(
-        root_file,
-        root_dir,
-        alt_dir,
-        std_dir,
-        false,
-        unsafe shim::sc_host_platform(),
-        ov_files,
-        ov_texts,
-    );
+    let mut p = loader::package_load_overlaid(root_file, root_dir, alt_dir, std_dir, false, target, ov_files, ov_texts);
     let st = run_pipeline(&mut p, target, root_file, lint_dir, diags);
     stats_line(&p, "compile", t0, &st);
     return p;
@@ -247,14 +238,7 @@ pub fn compile_batch(
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
     let t0 = unsafe shim::sc_ticks_ms();
-    let mut p = loader::package_load_prelude(
-        root_dir,
-        alt_dir,
-        std_dir,
-        unsafe shim::sc_host_platform(),
-        ov_files,
-        ov_texts,
-    );
+    let mut p = loader::package_load_prelude(root_dir, alt_dir, std_dir, target, ov_files, ov_texts);
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
         let mut fc = String::from_str(files.at(k).as_str());
@@ -267,7 +251,7 @@ pub fn compile_batch(
         }
         if mid < 0 {
             let mp = loader::batch_mod_path(files.at(k).as_str(), root_dir, alt_dir);
-            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, unsafe shim::sc_host_platform());
+            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, target);
         }
         mids.push(mid);
     }
@@ -1126,6 +1110,10 @@ fn try_body_splice(
     we_old: u32,
     delta: i64,
 ) bool {
+    // A module with build-constant sites reparses whole: the early prune rewrote nodes in place.
+    if p.modules[i].ast.bc_sites.len() != 0 {
+        return false;
+    }
     let bodyid = p.modules[i].ast.at_const(fnid).as_data.function.body;
     let bspan = p.modules[i].ast.at_const(bodyid).span;
     // The body's '{' sits in the UNchanged prefix, so its offset is the same in both sources.
@@ -1154,7 +1142,7 @@ fn try_body_splice(
     let want_end = (bspan.end as i64 + delta) as u32;
     let arena_back = ps.take_ast();
     let _ = replace(&mut p.modules[i].ast, arena_back);
-    if bad || p.modules[i].ast.at_const(nb).span.end != want_end {
+    if bad || p.modules[i].ast.at_const(nb).span.end != want_end || p.modules[i].ast.bc_sites.len() != 0 {
         // Orphaned appends only; the caller full-reparses this module.
         return false;
     }
@@ -1349,8 +1337,8 @@ fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool
 // Parse module `i`'s source again and take that parse's body arena. The parser is a function of
 // the source alone, so the arena is byte-identical to the one the release freed: every body id,
 // every fn node's body field and every parse-time side table entry (attributes, lifetimes) is
-// valid again. The arena's per-node analysis tables are empty until the module resolves and
-// typechecks again.
+// valid again, and the early prune rewrites the body sites as it did before. The arena's per-node
+// analysis tables are empty until the module resolves and typechecks again.
 fn reparse_bodies(p: &mut loader::Package, i: usize) {
     let file = p.modules[i].file.clone();
     let mut lx = lex::Lexer::new(&mut p.modules[i].source, file.as_str());
@@ -1362,6 +1350,7 @@ fn reparse_bodies(p: &mut loader::Package, i: usize) {
     assert(!ps.has_errors(), "a parsed module parses again");
     let mut na = ps.take_ast();
     let _ = replace(&mut p.modules[i].ast.b, replace(&mut na.b, BodyArena::new()));
+    p.prune_build_sites(i);
 }
 
 // Keep module `m`'s bodies live across rounds: the engine demanded them once.

@@ -62,6 +62,8 @@ pub struct Resolver<'a> {
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
     pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
     pub lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
+    pub build_names: bool, // the module is the build-constant module: it may declare the reserved names
+    pub target_names: bool, // the module is std's `target`: it declares the build-constant enums
 }
 
 /// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -216,6 +218,25 @@ extend Resolver {
         if ns == Namespace::NS_VALUE && span_is(self.source, name, "_") {
             return;
         }
+        let dk = self.ast.at_const(decl).kind;
+        if !self.build_names && dk != NodeKind::NODE_FIELD && dk != NodeKind::NODE_VARIANT && bc_index(
+            self.source.slice(name.start as usize, name.end as usize),
+        ) >= 0 {
+            self.errors.emit_span(
+                name,
+                format("'{}' is a reserved build constant name", diag::span_str(self.source, name.start, name.end)),
+            );
+            return;
+        }
+        if !self.target_names && dk != NodeKind::NODE_FIELD && dk != NodeKind::NODE_VARIANT && bc_type_name(
+            self.source.slice(name.start as usize, name.end as usize),
+        ) {
+            self.errors.emit_span(
+                name,
+                format("'{}' is a reserved build constant type name", diag::span_str(self.source, name.start, name.end)),
+            );
+            return;
+        }
         let hash = name_hash(self.source, name);
         let key = symbol_key(hash, ns as u8);
         let mut head: u32 = 0;
@@ -245,11 +266,8 @@ extend Resolver {
         self.symbols.push(Symbol { hash: hash, decl: decl | ns as u32 << 31, name: name });
         self.symbol_previous.push(head);
         self.symbol_index.insert(key, self.symbols.len() as u32);
-        if self.lint {
-            let dk = self.ast.at_const(decl).kind;
-            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER {
-                self.lint_decls.push(decl);
-            }
+        if self.lint && (dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER) {
+            self.lint_decls.push(decl);
         }
     }
 
@@ -1701,6 +1719,14 @@ extend Resolver {
     pub fn resolve(self: &mut Self) {
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         self.ast.init_resolutions();
+        if self.package != null {
+            self.build_names = unsafe (&*self.package).build_module == self.ast.module as i32;
+            self.target_names = unsafe (&*self.package).is_target_module(self.ast.module);
+        }
+        for i in 0..self.ast.bc_errs.len() {
+            let e = self.ast.bc_errs.at(i);
+            self.errors.emit_span(e.span, e.msg.clone());
+        }
         self.scan_imports();
         self.scope_enter();
         self.collect_items(items);
@@ -1746,7 +1772,10 @@ extend Resolver {
         if self.source[sp.start as usize] == b'_' {
             return;
         }
-        if span_is(self.source, sp, "self") {
+        // Code the platform filter removed may hold the only use.
+        if span_is(self.source, sp, "self") || self.ast.bc_removed_name(
+            self.source.slice(sp.start as usize, sp.end as usize),
+        ) {
             return;
         }
         self.errors.warn_span(sp, format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)));
@@ -1986,7 +2015,9 @@ extend Resolver {
                     continue;
                 }
                 let nsp = self.ds_decl_name(decl);
-                if nsp.end <= nsp.start || self.source[nsp.start as usize] == b'_' {
+                if nsp.end <= nsp.start || self.source[nsp.start as usize] == b'_' || self.ast.bc_removed_name(
+                    self.source.slice(nsp.start as usize, nsp.end as usize),
+                ) {
                     continue;
                 }
                 self.errors.warn_span(

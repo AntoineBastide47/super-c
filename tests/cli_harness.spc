@@ -411,11 +411,11 @@ extend Proj {
         let _ = unsafe shim::sc_closedir(d);
     }
 
-    // The `@c.link` flags the emit wrote to build/raw/__ldflags, space separated (empty when there are
+    // The `@c.link` flags the emit wrote to build/dev/raw/__ldflags, space separated (empty when there are
     // none): the `cat` a shell command would run.
     fn append_ldflags(self: &Proj, out: *mut char, cap: usize) {
         let mut path = Path512 {};
-        unsafe stdio::snprintf(&mut path[0], 512, "%s/build/raw/__ldflags".ptr() as *const char, self.rootp());
+        unsafe stdio::snprintf(&mut path[0], 512, "%s/build/dev/raw/__ldflags".ptr() as *const char, self.rootp());
         let buf = slurp(&path[0]);
         if buf == null {
             return;
@@ -450,7 +450,7 @@ extend Proj {
             },
         );
         let mut raw = Path512 {};
-        unsafe stdio::snprintf(&mut raw[0], 512, "%s/build/raw".ptr() as *const char, self.rootp());
+        unsafe stdio::snprintf(&mut raw[0], 512, "%s/build/dev/raw".ptr() as *const char, self.rootp());
         self.append_c_files(&raw[0], &mut base[0], 8192);
         let used = unsafe cstring::strlen(&base[0]);
         let tail = (&mut base[0]) as *mut char;
@@ -506,13 +506,13 @@ extend Proj {
     }
 
     // True if the generated <root>/build/rel contains `needle` (the `grep -q` analog).
-    /// True when generated file `rel` (under build/raw) contains `needle`.
+    /// True when generated file `rel` (under build/dev/raw) contains `needle`.
     pub fn gen_has(self: &Proj, rel: str, needle: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/raw/%.*s".ptr() as *const char,
+            "%s/build/dev/raw/%.*s".ptr() as *const char,
             self.rootp(),
             rel.len() as i32,
             rel.ptr(),
@@ -526,12 +526,12 @@ extend Proj {
         return found;
     }
 
-    // How many entries under <root>/build/raw start with `prefix`: the `find ... | wc -l` analog, which
+    // How many entries under <root>/build/dev/raw start with `prefix`: the `find ... | wc -l` analog, which
     // asserts that generated wrapper TUs are pruned.
-    /// Number of entries under build/raw whose name starts with `prefix`.
+    /// Number of entries under build/dev/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
         let mut raw = Path512 {};
-        unsafe stdio::snprintf(&mut raw[0], 512, "%s/build/raw".ptr() as *const char, self.rootp());
+        unsafe stdio::snprintf(&mut raw[0], 512, "%s/build/dev/raw".ptr() as *const char, self.rootp());
         let d = unsafe shim::sc_opendir(&raw[0]);
         if d == null {
             return 0;
@@ -553,13 +553,13 @@ extend Proj {
     }
 
     // True if <root>/build/rel exists (the `access(.., F_OK)` analog).
-    /// True when `rel` exists under build/raw.
+    /// True when `rel` exists under build/dev/raw.
     pub fn gen_exists(self: &Proj, rel: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/raw/%.*s".ptr() as *const char,
+            "%s/build/dev/raw/%.*s".ptr() as *const char,
             self.rootp(),
             rel.len() as i32,
             rel.ptr(),

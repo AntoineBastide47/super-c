@@ -584,3 +584,117 @@ fn format_argument_warnings_report_once() {
     let fixed = loader::read_file(mp.as_str()).unwrap();
     assert(fixed.as_str().contains("print(\"{}\\n\", g[1]);"));
 }
+
+const BC_LINT: str = M"(@platform(windows)
+fn win_count(n: i32) i32 {
+    return n;
+}
+
+fn count(n: i32) i32 {
+    let mut v = 0;
+    if PLATFORM == Platform::Windows {
+        v = win_count(n);
+    }
+    if PROFILE == "release" {
+        v += 1;
+    }
+    if POINTER_WIDTH == 64 && v >= 0 {
+        v += 2;
+    }
+    return v;
+}
+
+fn main() i32 {
+    return count(1) - count(1);
+}
+)";
+
+const BC_LINT_REST: str = M"(fn win_only() i32 {
+    return 3;
+}
+
+fn never() i32 {
+    return 4;
+}
+
+fn page(x: i32) i32 {
+    let mut y = 1;
+    let z = 2;
+    let w = 5;
+    if PLATFORM == Platform::Windows {
+        y = win_only() + z;
+    }
+    unsafe {
+        if PLATFORM == Platform::Linux {
+            return y;
+        }
+    }
+    if PLATFORM != Platform::Windows {
+        return y + x;
+    }
+    return 0;
+}
+
+fn main() i32 {
+    let mut m = 1;
+    return page(0) - 1 + m;
+}
+)";
+
+// Code the platform filter removed suppresses only the answers it could change: a name its text
+// spells (`win_only`, `z`, the write to `y`) is used, an `unsafe` that holds it may be needed, and a
+// statement after a decided branch may be reachable elsewhere. Every other warning of the module
+// stays, on every target.
+@test
+fn build_constant_removed_code_suppresses_only_its_names() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BC_LINT_REST);
+    let root = str::from_cstr(p.rootp());
+    for t in 0..3 {
+        let mut args = String::new();
+        args.format_into(
+            "lint{} \"{}/main.spc\"",
+            if t == 0 {
+                "";
+            } else if t == 1 {
+                " --target=windows";
+            } else {
+                " --target=linux";
+            },
+            root,
+        );
+        let r = p.run_raw(args.as_str());
+        assert(r.out_has("unused variable 'w'"));
+        assert(r.out_has("unused function 'never'"));
+        assert(r.out_has("'m' does not need to be mutable"));
+        assert(!r.out_has("win_only") && !r.out_has("'z'") && !r.out_has("'y'"));
+        assert(!r.out_has("unsafe") && !r.out_has("unreachable"));
+    }
+}
+
+// Conditions over build constants are deliberate switches: no constant-condition or unreachable
+// warning, and the code the platform filter removed (the only use of `n` and the only write to `v`
+// outside Windows) does not make a binding look unused or needlessly mutable.
+@test
+fn build_constant_conditions_lint_quietly() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BC_LINT);
+    let root = str::from_cstr(p.rootp());
+    for t in 0..3 {
+        let mut args = String::new();
+        args.format_into(
+            "lint{} \"{}/main.spc\"",
+            if t == 0 {
+                "";
+            } else if t == 1 {
+                " --target=windows";
+            } else {
+                " --target=linux";
+            },
+            root,
+        );
+        let r = p.run_raw(args.as_str());
+        assert(r.ok(), "the build-constant conditions lint clean on every target");
+        assert(!r.out_has("warning"));
+    }
+}

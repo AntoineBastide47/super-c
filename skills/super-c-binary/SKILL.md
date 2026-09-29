@@ -39,13 +39,14 @@ super-c build                # build from build.toml (dev profile, incremental)
 super-c build -o out         # override output binary name
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # remove the out-dir and <root dir>/build/raw (--cache also removes the global build cache); never a user directory
+super-c clean                # remove the out-dir and every <root dir>/build/<profile>/raw (--cache also removes the global build cache); never a user directory
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
 entire transpile when no input changed (~25 ms no-op); it records the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
-import also makes the stamp stale. Parallel C compilation uses
+import also makes the stamp stale. The stamp lives in the target's profile directory, so it
+is per profile. Parallel C compilation uses
 content-fingerprinted stale detection with longest-job-first scheduling.
 
 ### Testing
@@ -137,8 +138,12 @@ statements/arms/branches (after a `return`, an `if` whose two branches both leav
 `loop` no `break` leaves; the dead branch of a constant condition), constant conditions
 (a closed `if`/`while` condition the engine folds: `--fix` folds an `if` statement into
 its live branch, drops `while false`, spells `while true` as `loop`; `do { } while
-false` is the run-once idiom and is left alone), dead stores, discarded pure results,
-redundant casts, owning unions without `Free`.
+false` is the run-once idiom and is left alone; a condition over a build constant such as
+`PLATFORM` or `PROFILE` is a deliberate switch and never reported), dead stores, discarded
+pure results, redundant casts, owning unions without `Free`. A module whose code the
+platform filter removed (a build-constant `if` or `switch`) skips the lints that count
+uses or reachability, as a module with `@platform` items skips the unused-import and
+unused-member lints.
 
 ### Language server
 
@@ -337,15 +342,15 @@ a `thin` profile keeps `auto` there.
 
 | Flag | Effect |
 |------|--------|
-| `--profile=NAME` | Select build profile |
+| `--profile=NAME` | Select build profile (also the value of `PROFILE`; a bare build without it reports `dev`) |
 | `--jobs=N` | Worker count for parallel stages + cc (default: one per CPU) |
-| `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/raw`) |
+| `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
 | `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
 | `--cstd=STD` | Replace the manifest's base C flags string, passed verbatim (e.g. `gnu11`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target |
-| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` |
-| `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` |
+| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
+| `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
@@ -421,11 +426,15 @@ super-c command bootstrap
 
 ## Generated Output
 
-`super-c app.spc` (and `super-c build app.spc`) emits the C into `build/raw/`:
+`super-c app.spc` (and `super-c build app.spc`) emits the C into `build/<profile>/raw/`
+(`build/dev/raw/` without `--profile`): `PROFILE` makes the emitted C depend on the profile,
+so every profile has its own tree, per-TU cache, manifest and orphan pruning, and switching
+profiles never mixes trees. A program that does not read `PROFILE` emits the same C under
+every profile.
 
 ```
 build/
-  raw/
+  dev/raw/
     super_rt.h        # shared runtime (includes + allocation interposition)
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
@@ -444,14 +453,17 @@ build/
       string.h string.c
 ```
 
-A manifest build (`super-c build` with `build.toml`) adds per-profile directories next
-to `raw/`: emitted C is content-synced into `<out-dir>/<profile>/gen` (unchanged files
-keep their mtime), objects compile into `<out-dir>/<profile>/obj` with `-MMD` dep
-tracking, and `compile_commands.json` lands beside them, with the ThinLTO probe record
-`.lto` for a profile that requests `lto = "thin"`. `super-c test` runs the same
-engine on the generated test root under the `test` profile: emitted C in `raw-test/`,
-objects and the runner in `<out-dir>/test/` (`build/test/__tests`), with the emit stamp
-and object cache making an unchanged suite a link check.
+A manifest build (`super-c build` with `build.toml`) works in one directory per target and
+profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAME` and
+`<out-dir>/<profile>-lib` for the other targets. The emitter writes `raw/` there (the
+per-TU cache and `__sc_manifest` with it), the emitted C is content-synced into `gen/`
+(unchanged files keep their mtime), objects compile into `obj/` with `-MMD` dep tracking,
+and `compile_commands.json` and the emit stamp `.emit_stamp` land beside them, with the
+ThinLTO probe record `.lto` for a profile that requests `lto = "thin"`. `super-c test`
+runs the same engine on the generated test root under the `test` profile in
+`<out-dir>/test/` (`raw/`, `gen/`, `obj/`, the runner `build/test/__tests`), with the emit
+stamp and object cache making an unchanged suite a link check; `super-c bench` uses
+`<out-dir>/bench/<profile>/`.
 
 Parallel analysis (the resolve frontier, the type check, borrow check and always-panics
 item jobs, the emission frontier) is used only when the package holds at least 256 KiB of
@@ -460,5 +472,5 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative — `cc build/**/*.c $(cat build/raw/__ldflags)` builds the whole
+Includes are relative — `cc build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)` builds the whole
 tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`).

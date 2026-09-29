@@ -317,9 +317,10 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
 }
 
 /// The definition site for the position: the resolved decl's name span (decl span as the fallback).
+/// A build constant has none: the compiler generates its module (hover shows its value).
 pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = def_at(p, mi, off);
-    if d.node == NODE_NONE {
+    if d.node == NODE_NONE || p.modules.at(d.module as usize).file.len() == 0 {
         return Option::<Loc>::None;
     }
     let da = mod_ast(p, d.module as usize);
@@ -1778,10 +1779,13 @@ pub fn references_of_def(p: &loader::Package, d: DefId, include_decl: bool) Vect
     if d.node == NODE_NONE {
         return out;
     }
+    // The generated build-constant module has no file to point into.
     for mm in 0..p.modules.len() {
-        refs_in_module(p, d, mm, &mut out);
+        if p.modules.at(mm).file.len() != 0 {
+            refs_in_module(p, d, mm, &mut out);
+        }
     }
-    if include_decl {
+    if include_decl && p.modules.at(d.module as usize).file.len() != 0 {
         push_decl_name(p, d, &mut out);
     }
     return out;

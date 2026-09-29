@@ -78,7 +78,7 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
    inherits this process's standard handles instead of redirecting them. Returns its exit code, or -1 if it
    could not be started. Use this rather than `system()` to run a program at a path we just built: on
    Windows `system()` is cmd.exe, which strips the outer quotes off its `/c` line and then splits the
-   program name at the first '/', so "build/raw-test/__tests.exe" comes back as `'build' is not
+   program name at the first '/', so "build/test/__tests.exe" comes back as `'build' is not
    recognized`. */
 int sc_exec(const char *cmd);
 

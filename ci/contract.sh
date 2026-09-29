@@ -32,7 +32,7 @@ CONTRACT_CMD_TEST="SC_LEAK_CHECK=fatal ./super-c test --quiet"
 # The two-generation self-hosting fixpoint, in a clean copy of src/, std/, ffi/ and build.toml:
 #   gen1: ./super-c build            (copied beside the tree, so std/ffi resolve inside the copy)
 #   gen2: build/dev/super-c build    (the gen1 binary, after removing build/)
-# and the two emitted build/raw trees must be byte-identical except CONTRACT_NONDET_FILES.
+# and the two emitted build/dev/raw trees must be byte-identical except CONTRACT_NONDET_FILES.
 CONTRACT_FIXPOINT_GEN1="./super-c build"
 CONTRACT_FIXPOINT_GEN2="./gen1-super-c build"
 # and the gen2 binary is what runs every later step (generation two is compiled and run).
@@ -49,7 +49,7 @@ CONTRACT_DELAY_SEEDS="1 2 3"
 CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L"
 CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror"
 
-# ---- readability of the emitted C tree (build/raw) ------------------------------------------------------
+# ---- readability of the emitted C tree (build/dev/raw) --------------------------------------------------
 # Checked by the gate on the gen1 tree:
 #   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
 #   module owning generic instances <module>__inst.c, one definition header per type __sc_t/<name>.h),

@@ -1881,7 +1881,7 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
         // super_rt.c comes too: the header's panic path references the runtime's thread-local task id, and
         // a C consumer of an emitted module links that TU exactly as a Super-C one does. (clang drops the
         // unused reference at -O0 and gcc keeps it, so leaving it out only ever worked by luck.)
-        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/raw\" \"%s/cuser.c\" \"%s/build/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/dev/raw\" \"%s/cuser.c\" \"%s/build/dev/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
         cli::cc_name(),
         p.rootp(),
         p.rootp(),
@@ -7659,7 +7659,7 @@ fn jobs_build(root: str, tag: str, jobs: str) {
 // Emitted file `rel` of build `<root>/o<tag>`.
 fn jobs_file(root: str, tag: str, rel: str) String {
     let mut path = String::new();
-    path.format_into("{}/o{}/raw/{}", root, tag, rel);
+    path.format_into("{}/o{}/dev/raw/{}", root, tag, rel);
     return cli::read_text(path.as_str());
 }
 
@@ -7772,4 +7772,243 @@ fn operator_chain_at_the_parser_limit_compiles() {
     args.push_str("/main.spc\"");
     let fr = p.run_raw(args.as_str());
     assert(fr.ok());
+}
+
+const BC_PRUNE: str = M"(@platform(windows)
+fn win_only() i32 {
+    return 10;
+}
+
+@platform(linux)
+fn lin_only() i32 {
+    return 20;
+}
+
+@platform(macos)
+fn mac_only() i32 {
+    return 30;
+}
+
+fn pick() i32 {
+    if PLATFORM == Platform::Windows {
+        return win_only();
+    } else if PLATFORM == Platform::Linux {
+        return lin_only();
+    } else if (PLATFORM == Platform::MacOS) && !TEST {
+        return mac_only();
+    }
+    return 40;
+}
+
+fn arch() i32 {
+    return switch ARCH {
+        X86_64 => 1,
+        AArch64 | Wasm32 => 2,
+    };
+}
+
+fn main() i32 {
+    let base = switch PLATFORM {
+        Windows | Linux | MacOS => 0,
+        _ => 100,
+    };
+    return base + pick() + arch();
+}
+)";
+
+// The platform filter decides an `if` chain or a `switch` over the build constants before name
+// resolution: the removed branches call `@platform` items of other targets, which do not exist there.
+@test
+fn build_constants_prune_other_platforms() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BC_PRUNE);
+    assert(p.compile_flags("--target=windows", "main.spc").ok(), "windows transpiles");
+    assert(!p.gen_has("main.c", "lin_only") && !p.gen_has("main.c", "mac_only"));
+    assert(p.compile_flags("--target=linux", "main.spc").ok(), "linux transpiles");
+    assert(!p.gen_has("main.c", "win_only") && !p.gen_has("main.c", "mac_only"));
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("").ok());
+    let hp = unsafe shim::sc_host_platform();
+    let want = if hp == 0 {
+        10;
+    } else if hp == 2 {
+        20;
+    } else {
+        30;
+    };
+    let wa = if unsafe shim::sc_host_arch() == 0 {
+        1;
+    } else {
+        2;
+    };
+    assert_eq(p.run_bin(), want + wa);
+}
+
+// TEST is true only in a `--test` build.
+@test
+fn build_constant_test_follows_the_test_flag() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn main() i32 {
+    if TEST {
+        return 1;
+    }
+    return 0;
+}
+
+@test
+fn sees_test() {
+    assert(TEST);
+}
+)",
+    );
+    let t = p.compile_flags("--test --quiet", "main.spc");
+    assert(t.ok(), "the test sees TEST");
+    assert(t.out_has("1 passed"));
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 0);
+}
+
+// POINTER_WIDTH and ENDIAN follow the target: the untaken branch is not emitted.
+@test
+fn build_constants_follow_the_target() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn width() i32 {
+    if POINTER_WIDTH == 32 {
+        return 3232;
+    }
+    return 6464;
+}
+
+fn order() i32 {
+    return if ENDIAN == Endian::Little {
+        1111;
+    } else {
+        2222;
+    };
+}
+
+fn main() i32 {
+    return width() + order();
+}
+)",
+    );
+    assert(p.compile_flags("--target=wasm", "main.spc").ok(), "wasm transpiles");
+    assert(p.gen_has("main.c", "3232") && !p.gen_has("main.c", "6464"));
+    assert(p.gen_has("main.c", "1111") && !p.gen_has("main.c", "2222"));
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "6464") && !p.gen_has("main.c", "3232"));
+}
+
+const BC_PROFILE: str = M"(fn level() i32 {
+    if PROFILE == "release" {
+        return 7003;
+    }
+    return 7001;
+}
+
+fn tag() i32 {
+    return switch PROFILE {
+        "dev" | "debug" => 7110,
+        "release" => 7130,
+        _ => 7150,
+    };
+}
+
+fn main() i32 {
+    return level() - 7000 + tag() - 7100;
+}
+)";
+
+// PROFILE folds after type checking: each profile emits only its branch, into its own tree.
+@test
+fn build_constant_profile_selects_the_branch() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BC_PROFILE);
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "7001") && p.gen_has("main.c", "7110"));
+    assert(!p.gen_has("main.c", "7003") && !p.gen_has("main.c", "7130") && !p.gen_has("main.c", "7150"));
+    if cli::on_wasm() {
+        return;
+    }
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 11);
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
+    assert(p.run_raw(args.as_str()).ok());
+    assert_eq(p.run_bin(), 33);
+    let mut rel = String::from_str(root);
+    rel.push_str("/build/release/raw/main.c");
+    let rc = cli::read_text(rel.as_str());
+    assert(rc.as_str().contains("7003") && rc.as_str().contains("7130"));
+    assert(!rc.as_str().contains("7001") && !rc.as_str().contains("7110") && !rc.as_str().contains("7150"));
+    // The dev tree is untouched by the release build.
+    assert(p.gen_has("main.c", "7001"));
+}
+
+// A variant the build constants do not have is an error even in a removed branch, and so is a
+// profile name no profile has; the build-constant names are reserved.
+@test
+fn build_constant_mistakes_are_errors() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "variant.spc",
+        "fn main() i32 {\n    if PLATFORM == Platform::Macos {\n        return 1;\n    }\n    return 0;\n}\n",
+    );
+    p.expect_fail(
+        "variant.spc",
+        "unknown Platform variant 'Macos'; expected Windows, MacOS, Linux, Wasm, IOS, or Android",
+    );
+    p.mkfile(
+        "arm.spc",
+        "fn main() i32 {\n    return switch ENDIAN {\n        Little => 0,\n        Large => 1,\n    };\n}\n",
+    );
+    p.expect_fail("arm.spc", "unknown Endian variant 'Large'; expected Little or Big");
+    p.mkfile(
+        "profile.spc",
+        "fn main() i32 {\n    if PROFILE == \"relase\" {\n        return 1;\n    }\n    return 0;\n}\n",
+    );
+    p.expect_fail("profile.spc", "unknown profile 'relase'; this build knows");
+    p.mkfile(
+        "arm_profile.spc",
+        "fn main() i32 {\n    return switch PROFILE {\n        \"dev\" => 0,\n        \"bogus\" => 1,\n        _ => 2,\n    };\n}\n",
+    );
+    p.expect_fail("arm_profile.spc", "unknown profile 'bogus'");
+    p.mkfile("local.spc", "fn main() i32 {\n    let TEST = 1;\n    return TEST;\n}\n");
+    p.expect_fail("local.spc", "'TEST' is a reserved build constant name");
+    p.mkfile("item.spc", "fn PLATFORM() i32 {\n    return 0;\n}\n\nfn main() i32 {\n    return 0;\n}\n");
+    p.expect_fail("item.spc", "'PLATFORM' is a reserved build constant name");
+    p.mkfile(
+        "param.spc",
+        "fn f(POINTER_WIDTH: i32) i32 {\n    return POINTER_WIDTH;\n}\n\nfn main() i32 {\n    return f(0);\n}\n",
+    );
+    p.expect_fail("param.spc", "'POINTER_WIDTH' is a reserved build constant name");
+    // The enums' names are reserved too: a `Platform` of the program's own would make the filter
+    // decide `PLATFORM == Platform::Windows` against std's `Platform` without a type check.
+    p.mkfile(
+        "shadow.spc",
+        "enum Platform { Windows, Other }\n\nfn main() i32 {\n    if PLATFORM == Platform::Windows {\n        return 1;\n    }\n    return 0;\n}\n",
+    );
+    p.expect_fail("shadow.spc", "'Platform' is a reserved build constant type name");
+    p.mkfile("arch.spc", "struct Arch { pub w: i32 }\n\nfn main() i32 {\n    return 0;\n}\n");
+    p.expect_fail("arch.spc", "'Arch' is a reserved build constant type name");
+    p.mkfile(
+        "endian.spc",
+        "fn f<Endian>(x: Endian) Endian {\n    return x;\n}\n\nfn main() i32 {\n    return f(0);\n}\n",
+    );
+    p.expect_fail("endian.spc", "'Endian' is a reserved build constant type name");
 }

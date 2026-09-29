@@ -414,7 +414,7 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         if sdkp != null && unsafe *sdkp != 0 as char {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
-            cmd.push_str(" -target wasm32-wasi --sysroot=");
+            cmd.push_str(" -target wasm32-wasip1 --sysroot=");
             cmd.push_str(str::from_cstr(sdkp));
             cmd.push_str("/share/wasi-sysroot");
             return;
@@ -422,7 +422,7 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
         let sr = stdlib::getenv("WASI_SYSROOT");
         if sr != null && unsafe *sr != 0 as char {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
-            cmd.push_str(" -target wasm32-wasi --sysroot=");
+            cmd.push_str(" -target wasm32-wasip1 --sysroot=");
             cmd.push_str(str::from_cstr(sr));
             return;
         }
@@ -430,11 +430,14 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
     }
 }
 
-/// Libraries a cross target needs at LINK time only. wasi keeps signals and the process clock behind
-/// opt-in emulation libraries; the runtime's panic path installs a signal handler and `time::clock`
-/// reads the process clock (emulated by the wall clock), so the build asks for both.
+/// Flags and libraries a cross target needs at LINK time only. wasi keeps signals and the process clock
+/// behind opt-in emulation libraries; the runtime's panic path installs a signal handler and `time::clock`
+/// reads the process clock (emulated by the wall clock), so the build asks for both. wasm-ld's default
+/// stack is 64 KiB: a wasm program gets the 8 MiB main-thread stack of the native hosts instead, placed
+/// first so an overflow traps rather than overwriting static data.
 pub fn push_sdk_libs(cmd: &mut String, sdk: i32) {
     if sdk == 3 {
+        cmd.push_str(" -Wl,-z,stack-size=8388608 -Wl,--stack-first");
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         let sr = stdlib::getenv("WASI_SYSROOT");
         if sdkp != null && unsafe *sdkp != 0 as char || sr != null && unsafe *sr != 0 as char {

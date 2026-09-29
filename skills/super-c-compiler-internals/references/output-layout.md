@@ -19,6 +19,13 @@ exact C spelling (`c_ident` escapes keywords only).
 
 ## Files
 
+The tree is written to `gen_root`: `<root>/build/<profile>/raw` for a bare build and
+`<out-dir>/<target dir>/raw` for a manifest build (the target dir is the profile name,
+`<profile>-bin-NAME`, `<profile>-lib`, `test`, or `bench/<profile>`). `PROFILE` makes the
+text depend on the profile, so each profile has its own tree, manifest, per-TU cache and
+orphan pruning; a program that does not read it emits the same bytes under every profile,
+and every tree comparison compares within one profile.
+
 | File | Content | Included by |
 |------|---------|-------------|
 | `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks, dyn fat types, `@emit_macro` templates, assert helpers, extern and block-wrapper prototypes, dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |

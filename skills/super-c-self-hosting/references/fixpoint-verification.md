@@ -30,8 +30,8 @@ export SC_NO_TU_CACHE=1
 mv "$fix_dir/src/build" "$fix_dir/gen1"
 
 # Compile gen-1's emitted C directly.
-cc -O1 -std=gnu11 -Wall -Wextra -Werror $(rg --files "$fix_dir/gen1/raw" -g '*.c') \
-   $(cat "$fix_dir/gen1/raw/__ldflags") -o "$fix_dir/gen2-bin"
+cc -O1 -std=gnu11 -Wall -Wextra -Werror $(rg --files "$fix_dir/gen1/dev/raw" -g '*.c') \
+   $(cat "$fix_dir/gen1/dev/raw/__ldflags") -o "$fix_dir/gen2-bin"
 
 # Gen-2 uses the same inputs and output path, with no previous build tree.
 "$fix_dir/gen2-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"

@@ -404,16 +404,9 @@ jobs:
       - name: Build the native compiler
         run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
 
+      # The build engine cross-compiles with the wasi-sdk (sysroot, emulation libraries, stack size).
       - name: Build the wasm compiler
-        run: |
-          set -eu
-          rm -rf src/build
-          ./super-c src/main.spc --target=wasm
-          "$HOME/wasi-sdk/bin/clang" -O2 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
-            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
-            -Wl,-z,stack-size=8388608 -Wl,--stack-first \
-            $(find src/build/raw -name '*.c') -lm -o super-c.wasm
-          rm -rf src/build
+        run: WASI_SDK_PATH="$HOME/wasi-sdk" ./super-c build --target=wasm --profile=release -o super-c.wasm
 
       # The self-hosting fixpoint, on wasm: gen1 (the artifact) transpiles the WHOLE COMPILER under
       # wasmtime, that tree builds gen2, and gen2's emission of the same input must be byte-identical.
@@ -436,7 +429,7 @@ jobs:
           "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
             -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
             -Wl,-z,stack-size=8388608 -Wl,--stack-first \
-            $(find /tmp/wasm-gen1/raw -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
+            $(find /tmp/wasm-gen1 -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
           wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \
             /tmp/wwasm/gen2.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/dev/null
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build

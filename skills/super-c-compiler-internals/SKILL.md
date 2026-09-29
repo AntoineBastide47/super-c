@@ -163,7 +163,7 @@ pub struct Module {
 pub struct Package {
     pub modules: Vector<Module>,
     pub root_dir: String,  // imports resolve relative to it
-    pub gen_root: String,  // where the emitted C tree goes (default <root>/build/raw)
+    pub gen_root: String,  // where the emitted C tree goes (default <root>/build/<profile>/raw)
     pub std_root: String,  // second import search root
     pub cir: *mut void,    // the Core IR interpreter (opaque to avoid a type cycle)
     pub jobs: u32,         // --jobs worker count (0/1 = serial)
@@ -520,8 +520,8 @@ operation is one branch.
 
 ## Output Tree
 
-`gen_root` defaults to `<root_dir>/build/raw`; manifest builds point it into their
-out-dir. Module paths map to nested directories (`::` → `/`):
+`gen_root` defaults to `<root_dir>/build/<profile>/raw`; manifest builds point it into
+their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map to nested directories (`::` → `/`):
 
 ```
 <gen_root>/

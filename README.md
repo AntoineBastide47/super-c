@@ -537,7 +537,7 @@ extern "C" "native.h" {      // native.c next to it is compiled into the build
 
 * `@c.source("impl.c")` names a C file stored somewhere else.
 * `@c.link("m")` links a library (a value that starts with `-` is passed as is).
-* Link flags are collected in `build/raw/__ldflags`, one per line, and applied automatically.
+* Link flags are collected in `build/<profile>/raw/__ldflags`, one per line, and applied automatically.
 * The bundled `math`, `pthread` and `dlfcn` modules already declare their libraries, so importing
   them is enough.
 
@@ -781,10 +781,11 @@ The `std::parallel` modules provide a full concurrency toolkit on top of OS thre
 
 ## Generated output
 
-`super-c app.spc` writes a `build/raw/` folder next to the source:
+`super-c app.spc` writes a `build/dev/raw/` folder next to the source (`build/<profile>/raw/`
+under `--profile`):
 
 ```text
-build/raw/
+build/dev/raw/
   super_rt.h  super_rt.c   # small runtime: standard includes and the leak checker
   __sc_fwd.h               # forward declarations shared by all files
   app.h  app.c             # one .h/.c pair per module
@@ -792,7 +793,7 @@ build/raw/
 ```
 
 Includes are relative, so the folder builds with no `-I` flags:
-`cc $(find build/raw -name '*.c') $(cat build/raw/__ldflags) -o app`. With a single module, the C names stay plain (no module prefix).
+`cc $(find build/dev/raw -name '*.c') $(cat build/dev/raw/__ldflags) -o app`. With a single module, the C names stay plain (no module prefix).
 
 ## Environment variables
 

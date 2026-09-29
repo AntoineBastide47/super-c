@@ -162,7 +162,7 @@ super-c test --test-no-fork            # in-process (for debuggers; shows passin
 default: `-O1` + ASan/UBSan) and exports it as `$SUPERC` for the CLI tests. The test
 runner itself is a separate engine build of the generated test root under the built-in
 `test` profile (`-O1`, no sanitizers): parallel per-TU compiles with the object cache and
-emit stamp, linked to `build/test/__tests`, emitted C under `build/raw-test/`. An
+emit stamp, linked to `build/test/__tests`, emitted C under `build/test/raw/`. An
 unchanged suite skips straight to the cached link. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run gets `SC_CACHE_DIR=<scratch dir>/.sccache`
