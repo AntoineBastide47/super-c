@@ -651,7 +651,8 @@ pub struct Interp {
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
     pub rets: Vector<IVal>, // the last finished frame's return slots (multi-return call writes)
     pub argpool: Vector<Vector<IVal>>, // argument vectors of finished calls, reused by `call`
-    pub ufree: Map<u64, bool>, // (module << 32 | decl) -> has a user free method (folding such values is refused)
+    pub ufree: Set<u64>, // (module << 32 | decl) of every type with a user free method (folding such values is refused)
+    pub ufree_built: bool,
     pub subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
     pub sub_base: usize,
     pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
@@ -665,12 +666,11 @@ pub struct Interp {
     // interpreter re-enters its own facade while lowering callee bodies.
     pub elock_on: bool,
     /// The reader: the item whose check requested the current evaluation (`set_reader`, under
-    /// the engine lock) and the components it depends on (`gitems::reach_fill`). A body or a
+    /// the engine lock) and the components it depends on (the checker's `gitems::Reach`). A body or a
     /// checked type of an item the reader cannot see (`gitems::visible`) is refused, whatever a
     /// worker has done with it. ITEM_NONE (every stage after the type check) sees everything.
     pub cur_item: loader::ItemId,
-    pub reach: *const u64,
-    pub reach_n: usize,
+    pub reach: *mut gitems::Reach,
     pub elock_sem: psy::Semaphore,
     pub elock_owner: usize,
     pub elock_depth: u32,
@@ -738,7 +738,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         item_active: Vector::<u64>::new(),
         rets: Vector::<IVal>::new(),
         argpool: Vector::<Vector<IVal>>::new(),
-        ufree: Map::<u64, bool>::new(),
+        ufree: Set::<u64>::new(),
+        ufree_built: false,
         subst: Vector::<ISub>::new(),
         sub_base: 0,
         view_memo: Map::<u64, DeclView>::new(),
@@ -750,7 +751,6 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         elock_on: false,
         cur_item: loader::ITEM_NONE,
         reach: null,
-        reach_n: 0,
         elock_sem: psy::Semaphore::new(1),
         elock_owner: 0,
         elock_depth: 0,
@@ -1128,47 +1128,42 @@ extend Interp {
     // The user-free screen: a value of a type with a user-written `free` method never folds (its
     // destructor is runtime behavior the evaluator cannot honor).
     fn user_free(self: &mut Self, dm: ModuleId, dn: NodeId) bool {
-        let key = dm as u64 << 32 | dn as u64;
-        switch self.ufree.get(&key) {
-            Some(u) => {
-                return *u;
-            },
-            None => {},
-        };
-        let mut user = false;
+        if !self.ufree_built {
+            self.build_ufree();
+        }
+        return self.ufree.contains(&(dm as u64 << 32 | dn as u64));
+    }
+
+    // One scan of the user modules' extends: the target of every extend with a `free` method.
+    fn build_ufree(self: &mut Self) {
+        self.ufree_built = true;
         let nm = self.p().modules.len();
-        let mut mm: usize = 0;
-        while mm < nm && !user {
+        for mm in 0..nm {
             let md = self.p().modules.at(mm);
-            if !md.prelude && md.ast.nodes.len() != 0 {
-                let a = unsafe &*self.p().module_ast_const(mm as ModuleId);
-                let items = a.at_const(a.root).as_data.program.items;
-                let mut ii: u32 = 0;
-                while ii < items.len && !user {
-                    let iid = unsafe a.list(items)[ii as usize];
-                    if a.at_const(iid).kind == NodeKind::NODE_EXTEND && a.at_const(iid).as_data.extend_def.target_type != NODE_NONE {
-                        let tg = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
-                        if tg.module == dm && tg.node == dn {
-                            let ms = a.at_const(iid).as_data.extend_def.items;
-                            for k in 0..ms.len {
-                                let mid = unsafe a.list(ms)[k as usize];
-                                if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                                    let mname = a.at_const(a.at_const(mid).as_data.function.name).as_data.name.text;
-                                    if self.span_is(mm as ModuleId, mname, "free") {
-                                        user = true;
-                                        break;
-                                    }
-                                }
-                            }
+            if md.prelude || md.ast.nodes.len() == 0 {
+                continue;
+            }
+            let a = unsafe &*self.p().module_ast_const(mm as ModuleId);
+            let items = a.at_const(a.root).as_data.program.items;
+            for ii in 0..items.len {
+                let iid = unsafe a.list(items)[ii as usize];
+                if a.at_const(iid).kind != NodeKind::NODE_EXTEND || a.at_const(iid).as_data.extend_def.target_type == NODE_NONE {
+                    continue;
+                }
+                let ms = a.at_const(iid).as_data.extend_def.items;
+                for k in 0..ms.len {
+                    let mid = unsafe a.list(ms)[k as usize];
+                    if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                        let mname = a.at_const(a.at_const(mid).as_data.function.name).as_data.name.text;
+                        if self.span_is(mm as ModuleId, mname, "free") {
+                            let tg = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
+                            self.ufree.insert(tg.module as u64 << 32 | tg.node as u64);
+                            break;
                         }
                     }
-                    ii += 1;
                 }
             }
-            mm += 1;
         }
-        self.ufree.insert(key, user);
-        return user;
     }
 
     // Resolve `(m, t)` through the ACTIVE frame's substitution window while it names a generic
@@ -1776,10 +1771,9 @@ extend Interp {
 
     /// Name the reader of the evaluations that follow (under the engine lock): the item under
     /// check and its dependency components. ITEM_NONE sees everything.
-    pub fn set_reader(self: &mut Self, item: loader::ItemId, bits: *const u64, n: usize) {
+    pub fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
         self.cur_item = item;
-        self.reach = bits;
-        self.reach_n = n;
+        self.reach = r;
     }
 
     /// Is the checked state of node `n` of module `m` visible to the reader (`gitems::visible`
@@ -1792,7 +1786,7 @@ extend Interp {
         if t == loader::ITEM_NONE {
             return true;
         }
-        return gitems::visible(self.p(), self.cur_item, t, self.reach, self.reach_n);
+        return gitems::visible(self.p(), self.cur_item, t, unsafe &mut *self.reach);
     }
 
     // Record that module `m`'s body syntax was refused.

@@ -73,7 +73,6 @@ typecheck: the deferred-constant flush and the always-panics probe are where bod
 | `fin_off`, `fin_edges` | the final ranges, filled by `finalize` |
 | `comp`, `ncomp` | the strongly connected component of each item in the schedule graph, numbered dependency-first (a callee's component before its caller's; an import or recursion cycle is one component; an extend and its members are one) |
 | `cdep_off`, `cdep`; `citem_off`, `citem` | the component graph: per component the components it depends on and its items ascending (CSR each) |
-| `reach`, `reach_w` | per component a row of `reach_w` words: the bits of every component it depends on, transitively |
 | `top_lo`, `body_hi` | the own ranges: per item the node of the top-level item before it in node order (the exclusive start of its module-arena range; a member carries its extend's), and per by_node position the largest function body block id so far (the body-arena owner search) |
 | `state` | the readiness state |
 | `dyn_edges` | the dynamic item edges the master engine recorded during this build (`caller << 32 \| callee`), consumed by `finalize` |
@@ -156,8 +155,11 @@ hashes read the whole-package typecheck's metadata.
 What an item under check may read as checked is a static rule over the schedule graph
 (`gitems::visible`), so one worker and every core read the same facts whatever their
 interleaving. Item `target` is visible to item `reader` when it is a transitive dependency
-(`ItemSched.reach`: one bit row per component, built by `build` in one pass over the
-dependency-first numbering, each dependency's finished row folded in), when both share a
+(`graph::items::Reach`, one per checker: a bit set over the components, marked on demand by a
+sweep down the dependency-first numbering from the reader's component to the lowest component
+asked about, each seen component's `cdep` marked once; a reader pays for the components and
+edges it sweeps, not for a dense row per component, which would cost components squared bits:
+200 MiB at 40k components), when both share a
 component and `target` precedes `reader` in index order (a component's items are checked in
 index order in one job), or when `target` is a prelude item and `reader` is not (every
 prelude component completes before any other job starts). Anything else is unchecked to the
@@ -166,7 +168,7 @@ lowerer's `unchecked_view`), and the checker's one foreign checked-type read (a 
 closure's capture types) answers `TYPE_NONE`. A refusal is retried by the deferred flush
 after the stage, never a false value or diagnostic. The checker names the reader on the
 engine under the engine lock for every evaluation it requests (`Interp::set_reader`: the item
-and its reach bits; `ev`, `ev_static`, `fn_recheck_as`) and clears it after; every stage
+and its checker's `Reach`; `ev`, `ev_static`, `fn_recheck_as`) and clears it after; every stage
 after the type check evaluates as no item (everything visible). The language server opens
 the index without the component graph, and there the readiness state decides, as its
 module-order passes require.

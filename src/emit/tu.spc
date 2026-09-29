@@ -45,6 +45,10 @@ pub struct TuEmit {
     // Emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done.
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
+    // Per module, the layout attributes by owner, indexed on the module's first query:
+    // (module << 32 | owner) -> the last `@c.align` argument << 1 | packed.
+    lay_built: Vector<bool>,
+    lay_attrs: Map<u64, u64>,
 }
 
 extend TuEmit {
@@ -65,6 +69,8 @@ extend TuEmit {
             env_defined: Vector::<u64>::new(),
             state: Map::<u64, u64>::new(),
             fwds: Map::<u64, u64>::new(),
+            lay_built: Vector::<bool>::new(),
+            lay_attrs: Map::<u64, u64>::new(),
         };
     }
 
@@ -285,6 +291,42 @@ extend TuEmit {
         return true;
     }
 
+    // The layout attributes of declaration `decl` in module `m`: the last `@c.align` argument
+    // (0 when none) << 1 | whether it is `@c.packed`.
+    fn layout_attrs(self: &mut Self, m: ModuleId, decl: NodeId) u64 {
+        if self.lay_built.len() == 0 {
+            self.lay_built.resize_default(self.p().modules.len());
+        }
+        if !self.lay_built[m as usize] {
+            self.lay_built.set(m as usize, true);
+            let a = unsafe &*self.p().module_ast_const(m);
+            for i in 0..a.attrs.len() {
+                let at = a.attrs.at(i);
+                let packed = at.kind == AttrKind::ATTR_PACKED as u8;
+                if !packed && at.kind != AttrKind::ATTR_ALIGN as u8 {
+                    continue;
+                }
+                let k = m as u64 << 32 | at.owner as u64;
+                let old = switch self.lay_attrs.get(&k) {
+                    Some(v) => *v,
+                    None => 0u64,
+                };
+                self.lay_attrs.insert(
+                    k,
+                    if packed {
+                        old | 1;
+                    } else {
+                        at.arg as u64 << 1 | old & 1;
+                    },
+                );
+            }
+        }
+        return switch self.lay_attrs.get(&(m as u64 << 32 | decl as u64)) {
+            Some(v) => *v,
+            None => 0u64,
+        };
+    }
+
     fn struct_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
         let n = unsafe (*da).at_const(it.decl);
@@ -295,21 +337,9 @@ extend TuEmit {
         let is_union = n.as_data.aggregate.is_union;
         let is_tuple = n.as_data.aggregate.is_tuple;
         let ms = n.as_data.aggregate.members;
-        let mut packed = false;
-        let mut align_attr: u64 = 0;
-        {
-            let dax = unsafe &*self.p().module_ast_const(it.m);
-            for k9 in 0..dax.attrs.len() {
-                if dax.attrs.at(k9).owner != it.decl {
-                    continue;
-                }
-                if dax.attrs.at(k9).kind == AttrKind::ATTR_PACKED as u8 {
-                    packed = true;
-                } else if dax.attrs.at(k9).kind == AttrKind::ATTR_ALIGN as u8 {
-                    align_attr = dax.attrs.at(k9).arg;
-                }
-            }
-        }
+        let la = self.layout_attrs(it.m, it.decl);
+        let packed = (la & 1) != 0;
+        let align_attr = la >> 1;
         // Field plan: a zero-sized field takes no C member (storage is a function of final layout,
         // and strict C11 has no zero-sized object). `keep`: 1 = stored, 0 = elided, 2 = not a
         // field node. A struct with no stored field is itself zero-sized: no C definition exists

@@ -1334,6 +1334,7 @@ extend Parser {
             NodeAs { interface_def: InterfaceData { name: name, generics: generics, bounds: bounds, items: items } },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
+        self.ast.set_members(__decl, items);
         return __decl;
     }
 
@@ -1410,6 +1411,7 @@ extend Parser {
             },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
+        self.ast.set_members(__decl, items);
         return __decl;
     }
 

@@ -46,10 +46,15 @@ pub struct Resolver<'a> {
     pub scope_starts: Vector<u32>, // stack of symbols.len at each scope entry
     pub symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
     pub current_self: DefId, // decl 'Self' refers to inside the current interface/extension
-    pub current_self_items: NodeList, // the interface/extend items in scope, for `Self::Assoc` projection
+    // The type aliases of the open interface/extend blocks, innermost from `self_aliases_start`, for the
+    // `Self::Assoc` projection.
+    pub self_aliases: Vector<NodeId>,
+    pub self_aliases_start: u32,
     pub closures: Vector<ClosureScope>, // open closures, innermost last
+    pub cap_seen: Set<u64>, // closure depth << 32 | decl, for every capture an open closure recorded
     pub package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
     pub mod_names: Vector<ModEntry>, // leading-segment module names (alias / single-segment path), import order
+    pub mod_index: Map<u32, u32>, // name hash -> newest `mod_names` index + 1 with that hash
     pub glob_mids: Vector<ModuleId>, // module ids of `import P as *;` imports, import order
     pub errors: diag::Errors,
     pub lint: bool,
@@ -78,6 +83,12 @@ pub struct ModName {
 pub struct ModEntry {
     pub name: tok::Span,
     pub mid: ModuleId,
+    pub previous: u32, // the entry before it with the same name hash, as index + 1 (0 = none)
+}
+/// A labeled `break`/`continue`: its label and its own span.
+pub struct LabelFlow {
+    pub label: tok::Span,
+    pub span: tok::Span,
 }
 
 // Span-based helpers (no resolver state).
@@ -109,6 +120,22 @@ const fn span_is(src: str, s: tok::Span, lit: str) bool {
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0;
 }
 
+// Order a (label, start) key against a labeled flow: by label text, then by span start.
+fn label_flow_cmp(src: str, label: tok::Span, start: u32, f: &LabelFlow) i32 {
+    let other = diag::span_str(src, f.label.start, f.label.end);
+    let c = diag::span_str(src, label.start, label.end).cmp(&other);
+    if c != 0 {
+        return c;
+    }
+    if start < f.span.start {
+        return -1;
+    }
+    if start > f.span.start {
+        return 1;
+    }
+    return 0;
+}
+
 fn is_builtin_type(src: str, s: tok::Span) bool {
     return bt_of_name(src, s) >= 0;
 }
@@ -128,10 +155,13 @@ extend Resolver {
             scope_starts: Vector::<u32>::new(),
             symbol_index: Map::<u64, u32>::new(),
             current_self: DefId { module: 0, node: NODE_NONE },
-            current_self_items: NodeList { start: 0, len: 0 },
+            self_aliases: Vector::<NodeId>::new(),
+            self_aliases_start: 0,
             closures: Vector::<ClosureScope>::new(),
+            cap_seen: Set::<u64>::new(),
             package: package,
             mod_names: Vector::<ModEntry>::new(),
+            mod_index: Map::<u32, u32>::new(),
             glob_mids: Vector::<ModuleId>::new(),
             errors: diag::Errors::new(),
             lint: false,
@@ -320,7 +350,13 @@ extend Resolver {
             if nm != NODE_NONE {
                 let nsp = self.name_span(nm);
                 if !self.name_is_module(nsp).found {
-                    self.mod_names.push(ModEntry { name: nsp, mid: m as ModuleId });
+                    let h = name_hash(self.source, nsp);
+                    let previous = switch self.mod_index.get(&h) {
+                        Some(e) => *e,
+                        None => 0,
+                    };
+                    self.mod_names.push(ModEntry { name: nsp, mid: m as ModuleId, previous: previous });
+                    self.mod_index.insert(h, self.mod_names.len() as u32);
                 }
             }
         }
@@ -328,11 +364,16 @@ extend Resolver {
 
     // True if `name` names an imported module usable as a single leading segment (via scan_imports' table).
     fn name_is_module(self: &Self, name: tok::Span) ModName {
-        let n = self.mod_names.len();
-        for i in 0..n {
-            if span_eq(self.source, self.mod_names[i].name, name) {
-                return ModName { found: true, mid: self.mod_names[i].mid };
+        let mut e = switch self.mod_index.get(&name_hash(self.source, name)) {
+            Some(h) => *h,
+            None => 0,
+        };
+        while e != 0 {
+            let me = self.mod_names.at(e as usize - 1);
+            if span_eq(self.source, me.name, name) {
+                return ModName { found: true, mid: me.mid };
             }
+            e = me.previous;
         }
         return ModName { found: false, mid: 0 };
     }
@@ -553,15 +594,9 @@ extend Resolver {
                     if idx - 1 >= self.closures[f].floor {
                         break;
                     }
-                    let mut seen = false;
-                    let nc = self.closures[f].caps.len();
-                    for k in 0..nc {
-                        if self.closures[f].caps[k] == decl {
-                            seen = true;
-                            break;
-                        }
-                    }
-                    if !seen {
+                    let key = f as u64 << 32 | decl as u64;
+                    if !self.cap_seen.contains(&key) {
+                        self.cap_seen.insert(key);
                         self.closures[f].caps.push(decl);
                     }
                 }
@@ -775,14 +810,17 @@ extend Resolver {
                         // resolves through it; in the interface it is the abstract associated type.
                         let assoc = self.name_span(self.child(tp.parts, 1));
                         let mut found = NODE_NONE;
-                        for ai in 0..self.current_self_items.len {
-                            let iid = self.child(self.current_self_items, ai);
-                            if self.ast.at_const(iid).kind == NodeKind::NODE_TYPE_ALIAS && span_eq(
+                        let mut ai = self.self_aliases.len();
+                        while ai > self.self_aliases_start as usize {
+                            ai -= 1;
+                            let iid = self.self_aliases[ai];
+                            if span_eq(
                                 self.source,
                                 self.name_span(self.ast.at_const(iid).as_data.type_alias.name),
                                 assoc,
                             ) {
                                 found = iid;
+                                break;
                             }
                         }
                         if found != NODE_NONE {
@@ -921,6 +959,24 @@ extend Resolver {
         }
     }
 
+    // Open `items`' type aliases as the innermost `Self::Assoc` frame; returns the enclosing frame's start.
+    fn self_aliases_open(self: &mut Self, items: NodeList) u32 {
+        let old = self.self_aliases_start;
+        self.self_aliases_start = self.self_aliases.len() as u32;
+        for i in 0..items.len {
+            let iid = self.child(items, i);
+            if self.ast.at_const(iid).kind == NodeKind::NODE_TYPE_ALIAS {
+                self.self_aliases.push(iid);
+            }
+        }
+        return old;
+    }
+
+    fn self_aliases_close(self: &mut Self, old: u32) {
+        self.self_aliases.truncate(self.self_aliases_start as usize);
+        self.self_aliases_start = old;
+    }
+
     fn resolve_associated_items(self: &mut Self, items: NodeList) {
         for i in 0..items.len {
             let iid = self.child(items, i);
@@ -966,16 +1022,15 @@ extend Resolver {
                 let it = self.ast.at_const(id).as_data.interface_def;
                 self.scope_enter();
                 let old_self = self.current_self;
-                let old_items = self.current_self_items;
                 // Self is in scope for the interface's OWN generics, not only its items: an operator
                 // interface names it in a parameter default (`Mul<Rhs = Self>`).
                 self.current_self = DefId { module: self.ast.module, node: id };
-                self.current_self_items = it.items;
+                let old_aliases = self.self_aliases_open(it.items);
                 self.declare_generics(it.generics);
                 self.resolve_bounds(it.bounds);
                 self.resolve_associated_items(it.items);
                 self.current_self = old_self;
-                self.current_self_items = old_items;
+                self.self_aliases_close(old_aliases);
                 self.scope_exit();
             },
             NODE_EXTEND => {
@@ -1015,10 +1070,9 @@ extend Resolver {
                 } else {
                     self.current_self = DefId { module: self.ast.module, node: id };
                 }
-                let old_items = self.current_self_items;
-                self.current_self_items = ex.items;
+                let old_aliases = self.self_aliases_open(ex.items);
                 self.resolve_associated_items(ex.items);
-                self.current_self_items = old_items;
+                self.self_aliases_close(old_aliases);
                 self.current_self = old_self;
                 self.scope_exit();
             },
@@ -1477,6 +1531,7 @@ extend Resolver {
         let mark = self.ast.mark();
         for k in 0..ncaps {
             let cap = self.closures[top].caps[k];
+            let _ = self.cap_seen.remove(&(top as u64 << 32 | cap as u64));
             self.ast.push(cap);
         }
         let list = self.ast.commit(mark);
@@ -1880,6 +1935,33 @@ extend Resolver {
 
     fn lint_unused_labels(self: &mut Self) {
         let n = self.ast.nnodes();
+        let src = self.source;
+        // Every labeled `break`/`continue`, sorted by (label, start), with the least span end from each
+        // entry to the end of its label's run: a loop's label is used iff the first entry at or past
+        // (label, loop start) carries it and that least end lies within the loop. O(N + F log F).
+        let mut flows = Vector::<LabelFlow>::new();
+        for kk in 1..n {
+            let k = self.ast.nth_id(kk);
+            let fk = self.ast.at_const(k).kind;
+            if fk == NodeKind::NODE_BREAK || fk == NodeKind::NODE_CONTINUE {
+                let fl = self.ast.at_const(k).as_data.flow.label;
+                if fl.end > fl.start {
+                    flows.push(LabelFlow { label: fl, span: self.ast.at_const(k).span });
+                }
+            }
+        }
+        flows.sort_by(|a: &LabelFlow, b: &LabelFlow| label_flow_cmp(src, a.label, a.span.start, b));
+        let mut least_end = Vector::<u32>::new();
+        least_end.resize_default(flows.len());
+        let mut i = flows.len();
+        while i > 0 {
+            i -= 1;
+            let mut e = flows[i].span.end;
+            if i + 1 < flows.len() && span_eq(src, flows[i].label, flows[i + 1].label) && least_end[i + 1] < e {
+                e = least_end[i + 1];
+            }
+            least_end.set(i, e);
+        }
         let mut k9: usize = 1;
         while k9 < n {
             let nd = *self.ast.at_const(self.ast.nth_id(k9));
@@ -1891,28 +1973,20 @@ extend Resolver {
                 lsp = nd.as_data.for_stmt.label;
             }
             if lsp.end > lsp.start {
-                let lt = diag::span_str(self.source, lsp.start, lsp.end);
                 let body = nd.span;
-                let mut used = false;
-                let mut kk: usize = 1;
-                while kk < n {
-                    let k = self.ast.nth_id(kk);
-                    kk += 1;
-                    let fk = self.ast.at_const(k).kind;
-                    if fk == NodeKind::NODE_BREAK || fk == NodeKind::NODE_CONTINUE {
-                        let fl = self.ast.at_const(k).as_data.flow.label;
-                        let fsp = self.ast.at_const(k).span;
-                        if fl.end > fl.start && fsp.start >= body.start && fsp.end <= body.end && diag::span_str(
-                            self.source,
-                            fl.start,
-                            fl.end,
-                        ) == lt {
-                            used = true;
-                            break;
-                        }
+                let mut lo: usize = 0;
+                let mut hi = flows.len();
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if label_flow_cmp(src, lsp, body.start, &flows[mid]) > 0 {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
                     }
                 }
+                let used = lo < flows.len() && span_eq(src, flows[lo].label, lsp) && least_end[lo] <= body.end;
                 if !used {
+                    let lt = diag::span_str(self.source, lsp.start, lsp.end);
                     self.errors.warn_span(lsp, format("unused label '{}'", lt));
                 }
             }

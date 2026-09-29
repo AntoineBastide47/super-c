@@ -1117,6 +1117,7 @@ struct Pend {
     pub cobj: String, // global-cache install target for the object; empty = not cacheable
     pub oout: String, // the object this compile writes (the install source)
     pub dout: String, // its .d sibling
+    pub seq: usize, // queue order: the tiebreak among equal durations
 }
 
 // One in-flight compile job: its child pid plus what to record/cleanup on completion.
@@ -1304,7 +1305,7 @@ struct CcStream {
     pub cc_ready: bool,
     pub jobs: u32,
     pub objs: Vector<String>,
-    pub pend: Vector<Pend>,
+    pub pend: Vector<Pend>, // binary heap, `pend_before` order at the root
     pub window: Vector<Job>,
     pub total_c: usize,
     pub stale_n: usize,
@@ -1668,7 +1669,7 @@ extend CcStream {
             }
             let mut log = opath.clone();
             log.push_str(".log");
-            self.pend.push(
+            self.pend_push(
                 Pend {
                     args: args,
                     fp: fp,
@@ -1678,6 +1679,7 @@ extend CcStream {
                     cobj: cobj,
                     oout: opath.clone(),
                     dout: dpath.clone(),
+                    seq: self.stale_n,
                 },
             );
             self.stale_n = self.stale_n + 1;
@@ -1760,13 +1762,7 @@ extend CcStream {
     // Start the pending compile with the longest previous duration, so the slowest unit never starts
     // last. Among equal durations the earliest queued starts first.
     fn spawn_next(self: &mut Self) {
-        let mut best: usize = 0;
-        for i in 1..self.pend.len() {
-            if self.pend.at(i).prev_ms > self.pend.at(best).prev_ms {
-                best = i;
-            }
-        }
-        let mut w = self.pend.remove(best).unwrap();
+        let mut w = self.pend_pop();
         let pid = spawn_args(&mut w.args, w.log.cstr());
         if pid < 0 {
             eprintln("build: cannot spawn compiler");
@@ -1786,6 +1782,39 @@ extend CcStream {
                 dout: replace(&mut w.dout, String::new()),
             },
         );
+    }
+
+    fn pend_push(self: &mut Self, p: Pend) {
+        self.pend.push(p);
+        let mut i = self.pend.len() - 1;
+        while i > 0 && pend_before(self.pend.at(i), self.pend.at((i - 1) / 2)) {
+            self.pend.swap(i, (i - 1) / 2);
+            i = (i - 1) / 2;
+        }
+    }
+
+    fn pend_pop(self: &mut Self) Pend {
+        let last = self.pend.len() - 1;
+        self.pend.swap(0, last);
+        let top = self.pend.pop().unwrap();
+        let n = self.pend.len();
+        let mut i: usize = 0;
+        for _ in 0..n {
+            let l = 2 * i + 1;
+            let mut s = i;
+            if l < n && pend_before(self.pend.at(l), self.pend.at(s)) {
+                s = l;
+            }
+            if l + 1 < n && pend_before(self.pend.at(l + 1), self.pend.at(s)) {
+                s = l + 1;
+            }
+            if s == i {
+                break;
+            }
+            self.pend.swap(i, s);
+            i = s;
+        }
+        return top;
     }
 
     /// Run everything left to completion (blocking): only called once the emit workers are gone, so
@@ -1820,6 +1849,11 @@ extend CcStream {
             }
         }
     }
+}
+
+// Longest previous duration first; among equal durations the earliest queued.
+fn pend_before(a: &Pend, b: &Pend) bool {
+    return a.prev_ms > b.prev_ms || a.prev_ms == b.prev_ms && a.seq < b.seq;
 }
 
 fn stream_notify(ctx: *mut void, path: str, kind: i32) {

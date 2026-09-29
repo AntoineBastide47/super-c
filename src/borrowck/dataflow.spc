@@ -175,7 +175,7 @@ pub struct Liveness {
     pub words: u32,
     pub live_in: Vector<u64>, // per block * words
     pub live_out: Vector<u64>,
-    pub pushes: u32, // fixpoint queue pushes, seeds included (validation asserts the monotone bound)
+    pub pushes: u32, // fixpoint queue pushes, seeds included (asserted within the monotone bound)
     s_queue: Vector<u32>, // reused work queue / queued-flags for the fixpoint
     s_queued: Vector<bool>,
 }
@@ -239,6 +239,9 @@ extend Liveness {
             lv.s_queued.set(bi as usize, true);
         }
         lv.pushes = c.nblocks;
+        // Monotone bound: rows only gain bits, so a block's visit changes its rows at most 2 * 64 * w
+        // times, and each change queues at most the block's predecessors.
+        let bound = c.nblocks as u64 + 128 * c.succ.len() as u64 * w as u64;
         // Rows are sized once above; every `base/succ*w + k` is `< nblocks*w = row.len()`, so the
         // per-word inner loop indexes unchecked (super-c has no BCE pass, so this drops it by hand).
         let pin = lv.live_in.as_ptr() as *mut u64;
@@ -276,6 +279,7 @@ extend Liveness {
                         lv.s_queued.set(pb as usize, true);
                         lv.s_queue.push(pb);
                         lv.pushes += 1;
+                        assert(lv.pushes as u64 <= bound, "the liveness fixpoint stays within its bound");
                     }
                 }
             }
@@ -291,7 +295,7 @@ pub struct MoveFlow {
     pub di: Vector<u64>, // block-entry definitely-init
     pub mm: Vector<u64>, // block-entry maybe-moved
     pub errs: Vector<MoveErr>,
-    pub pushes: u32, // fixpoint visits: the RPO sweep plus every queue push (validation asserts the bound)
+    pub pushes: u32, // fixpoint visits: the RPO sweep plus every queue push (asserted within the monotone bound)
     s_reached: Vector<bool>, // reused per-block reached markers + work queue for the fixpoint
     s_queue: Vector<u32>,
     s_queued: Vector<bool>,
@@ -553,6 +557,9 @@ extend MoveFlow {
         }
         let mut ri: usize = 0;
         mf.pushes = c.rpo.len() as u32;
+        // Monotone bound: a block's entry row changes once on first reach, then only when one of
+        // its 3 * npaths bits flips one way; each change queues the block at most once.
+        let bound = 2 * c.nblocks as u64 + 3 * c.succ.len() as u64 * npaths as u64;
         // Raw row pointers: mf.mi/di/mm and ctx.mi/di/mm are sized once above and never grow inside
         // the fixpoint (errors only accumulate under `fused`/reporting replays), so these stay
         // valid. Every `base/tb + k` is `< nblocks*w = row.len()`, so the per-word loops index unchecked.
@@ -653,6 +660,7 @@ extend MoveFlow {
                         mf.s_queued.set(t as usize, true);
                         mf.s_queue.push(t);
                         mf.pushes += 1;
+                        assert(mf.pushes as u64 <= bound, "the move/init fixpoint stays within its bound");
                     }
                 }
             }

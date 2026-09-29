@@ -120,6 +120,7 @@ pub struct Lowerer {
     pub env: Vector<LSub>,
     proj_frames: Vector<ProjFrame>,
     binds: Vector<Binding>,
+    bind_ix: Map<NodeId, ir::LocalId>, // decl -> its latest local in `binds`
     loops: Vector<LoopCtx>,
     defers: Vector<NodeId>, // active defer statement nodes (or DEFER_TAIL entries), innermost last
     tail_drops: Vector<TailDrop>,
@@ -129,7 +130,8 @@ pub struct Lowerer {
     // `local << 32 | source place` per by-value pattern binding, in binding order: a guarded arm
     // hands its bindings back to the scrutinee on the guard's failure edge.
     moved_binds: Vector<u64>,
-    item_locals: Vector<Binding>, // cached LS_STATIC_REF locals per referenced item decl node
+    item_keys: Vector<u64>, // the `item_ix` keys of this body
+    item_ix: Map<u64, ir::LocalId>, // module << 32 | decl node -> its cached LS_STATIC_REF local
     pub closures: Vector<NodeId>, // closure nodes queued for their own lowering
     pub mut_binds: Vector<NodeId>, // decls mutated in this CLOSURE body (walk's mut_caps peel)
     pub unsafe_spans: Vector<u64>, // start<<32|end per unsafe expr; licenses the IR free-move rules
@@ -311,6 +313,7 @@ extend Lowerer {
             env: Vector::<LSub>::new(),
             proj_frames: Vector::<ProjFrame>::new(),
             binds: Vector::<Binding>::new(),
+            bind_ix: Map::<NodeId, ir::LocalId>::new(),
             loops: Vector::<LoopCtx>::new(),
             defers: Vector::<NodeId>::new(),
             tail_drops: Vector::<TailDrop>::new(),
@@ -318,7 +321,8 @@ extend Lowerer {
             scope_locals: Vector::<ir::LocalId>::new(),
             scope_local_marks: Vector::<usize>::new(),
             moved_binds: Vector::<u64>::new(),
-            item_locals: Vector::<Binding>::new(),
+            item_keys: Vector::<u64>::new(),
+            item_ix: Map::<u64, ir::LocalId>::new(),
             closures: Vector::<NodeId>::new(),
             mut_binds: Vector::<NodeId>::new(),
             unsafe_spans: Vector::<u64>::new(),
@@ -398,6 +402,10 @@ extend Lowerer {
         self.err = "";
         self.err_node = NODE_NONE;
         self.proj_frames.truncate(0);
+        // Remove only this body's keys: clearing the whole table would cost its capacity per body.
+        for i in 0..self.binds.len() {
+            self.bind_ix.remove(&self.binds[i].decl);
+        }
         self.binds.truncate(0);
         self.loops.truncate(0);
         self.defers.truncate(0);
@@ -406,7 +414,10 @@ extend Lowerer {
         self.scope_locals.truncate(0);
         self.scope_local_marks.truncate(0);
         self.moved_binds.truncate(0);
-        self.item_locals.truncate(0);
+        for i in 0..self.item_keys.len() {
+            self.item_ix.remove(&self.item_keys[i]);
+        }
+        self.item_keys.truncate(0);
         self.closures.truncate(0);
         self.mut_binds.truncate(0);
         self.unsafe_spans.truncate(0);
@@ -797,27 +808,26 @@ extend Lowerer {
 
     fn bind(self: &mut Self, decl: NodeId, l: ir::LocalId) {
         self.binds.push(Binding { decl: decl, local: l });
+        self.bind_ix.insert(decl, l);
     }
 
     fn local_of(self: &Self, decl: NodeId) ir::LocalId {
-        let mut i = self.binds.len();
-        while i > 0 {
-            i -= 1;
-            if self.binds[i].decl == decl {
-                return self.binds[i].local;
-            }
-        }
-        return ir::IR_NONE;
+        return switch self.bind_ix.get(&decl) {
+            Some(l) => *l,
+            None => ir::IR_NONE,
+        };
     }
 
     // The cached LS_STATIC_REF local naming item `d` (globals, statics, constants read as places).
     fn item_local(self: &mut Self, d: DefId, ty: TypeId, sp: tok::Span) ir::LocalId {
         // keyed by the FULL DefId: node ids collide across modules
-        for i in 0..self.item_locals.len() {
-            let li = self.item_locals[i].local as usize;
-            if self.item_locals[i].decl == d.node && self.body.locals.at(li).item.module == d.module {
-                return self.item_locals[i].local;
-            }
+        let key = d.module as u64 << 32 | d.node as u64;
+        let hit = switch self.item_ix.get(&key) {
+            Some(l) => *l,
+            None => ir::IR_NONE,
+        };
+        if hit != ir::IR_NONE {
+            return hit;
         }
         // An array constant read as a slice has the slice type on the use node; its place keeps the
         // declared array type, and the emitter wraps the array where a slice is wanted.
@@ -834,7 +844,8 @@ extend Lowerer {
         let mut ld = ir::LocalDecl::anon(lty, ir::LS_STATIC_REF, sp);
         ld.item = d;
         let l = self.body.add_local(ld);
-        self.item_locals.push(Binding { decl: d.node, local: l });
+        self.item_keys.push(key);
+        self.item_ix.insert(key, l);
         return l;
     }
 

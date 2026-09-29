@@ -52,6 +52,19 @@ struct Cache {
     pub leaf: bool,
 }
 
+/// The components one reader depends on, found on demand (`visible`): `seen` marks the
+/// reader's own components and every dependency found so far, and every seen component at or
+/// above `low` has its dependencies marked, so a bit at or above `low` is final. The numbering
+/// is dependency-first, so a sweep down from the reader marks each dependency before it
+/// reaches it. A reader pays for the components and edges between it and the lowest target it
+/// asks about, once; a dense row per component would cost components squared bits.
+pub struct Reach {
+    seen: Vector<u64>,
+    touched: Vector<u32>, // the words of `seen` that hold a bit
+    low: usize,
+    src: u32, // the single source component, or NONE
+}
+
 const fn cache_none() Cache {
     return Cache { m: NONE, item: NONE, s: 0, e: 0, leaf: false };
 }
@@ -553,23 +566,6 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     }
     csr(nc, &ce, &mut p.sched.cdep_off, &mut p.sched.cdep);
     csr(nc, &ci, &mut p.sched.citem_off, &mut p.sched.citem);
-    // Transitive dependencies per component: the numbering is dependency-first, so one pass in
-    // component order folds each dependency's finished row in.
-    let w = (nc + 63) / 64;
-    p.sched.reach_w = w;
-    p.sched.reach.clear();
-    p.sched.reach.resize_default(nc * w);
-    for c in 0..nc {
-        for e in p.sched.cdep_off[c] as usize..p.sched.cdep_off[c + 1] as usize {
-            let d = p.sched.cdep[e] as usize;
-            assert(d < c, "a dependency's component precedes its dependent's");
-            for k in 0..w {
-                let v = p.sched.reach[c * w + k] | p.sched.reach[d * w + k];
-                p.sched.reach.set(c * w + k, v);
-            }
-            p.sched.reach.set(c * w + (d >> 6), p.sched.reach[c * w + (d >> 6)] | 1u64 << (d & 63) as u64);
-        }
-    }
     p.sched.pre_off = off;
     p.sched.pre_edges = tgt;
     p.sched.comp = comp;
@@ -577,34 +573,13 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     p.sched.build_ns = plat::now_ns() - t0;
 }
 
-/// The reachability row of component `c` (`reach_w` words).
-pub fn reach_row(p: &loader::Package, c: u32) *const u64 {
-    return unsafe (p.sched.reach.as_ptr() + c as usize * p.sched.reach_w);
-}
-
-/// `bits` for a check after every item of module `m`: the module's own components and every
-/// component they depend on (the union of their rows).
-pub fn reach_fill_module(p: &loader::Package, m: usize, bits: &mut Vector<u64>) {
-    let s = &p.sched;
-    let w = s.reach_w;
-    bits.clear();
-    bits.resize_default(w);
-    for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-        let c = s.comp[it] as usize;
-        for k in 0..w {
-            bits.set(k, bits[k] | s.reach[c * w + k]);
-        }
-        bits.set(c >> 6, bits[c >> 6] | 1u64 << (c & 63) as u64);
-    }
-}
-
 /// Is item `target`'s checked state visible to a check of item `reader`? A static rule over the
-/// schedule graph, so every worker order answers alike: a dependency component (`bits`, the
-/// reader's row of `reach`) is complete before the reader starts; inside one component the items
-/// are checked in index order; a prelude item is complete before any non-prelude item. Without
-/// the component graph (the language server opens the index but builds no ranges) the readiness
+/// schedule graph, so every worker order answers alike: a dependency component (`r`, the
+/// reader's `Reach`) is complete before the reader starts; inside one component the items are
+/// checked in index order; a prelude item is complete before any non-prelude item. Without the
+/// component graph (the language server opens the index but builds no ranges) the readiness
 /// state decides, as the module-order sweep it runs would.
-pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::ItemId, bits: *const u64, nbits: usize) bool {
+pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::ItemId, r: &mut Reach) bool {
     if target == reader {
         return true;
     }
@@ -621,8 +596,7 @@ pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::Item
     if p.modules.at(tm).prelude && !p.modules.at(rm).prelude {
         return true;
     }
-    let w = (ct >> 6) as usize;
-    return w < nbits && (unsafe bits[w] & 1u64 << (ct & 63) as u64) != 0;
+    return r.has(p, ct as usize);
 }
 
 /// The item whose own ranges hold node `node` of module `m`: an item node answers itself; a
@@ -1112,7 +1086,8 @@ fn makespan_w(
     return end;
 }
 
-fn heap_push(h: &mut Vector<u64>, v: u64) {
+/// Push `v` onto the binary min-heap `h`.
+pub fn heap_push(h: &mut Vector<u64>, v: u64) {
     h.push(v);
     let mut i = h.len() - 1;
     while i > 0 && h[(i - 1) / 2] > h[i] {
@@ -1123,7 +1098,8 @@ fn heap_push(h: &mut Vector<u64>, v: u64) {
     }
 }
 
-fn heap_pop(h: &mut Vector<u64>) u64 {
+/// Remove and return the least value of the non-empty binary min-heap `h`.
+pub fn heap_pop(h: &mut Vector<u64>) u64 {
     let top = h[0];
     let last = h[h.len() - 1];
     h.truncate(h.len() - 1);
@@ -1439,4 +1415,92 @@ fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
         total += worst;
     }
     return total;
+}
+
+extend Reach {
+    pub const fn new() Reach {
+        return Reach { seen: Vector::<u64>::new(), touched: Vector::<u32>::new(), low: 0, src: NONE };
+    }
+
+    /// Read as a check of component `c`. A component's items are checked in one job, so the
+    /// dependencies found for one item serve the next.
+    pub fn of_comp(self: &mut Self, p: &loader::Package, c: u32) {
+        if self.src == c {
+            return;
+        }
+        self.reset(p);
+        self.mark(c as usize);
+        self.low = c as usize + 1;
+        self.src = c;
+    }
+
+    /// Read as a check after every item of module `m`: the module's own components and every
+    /// component they depend on.
+    pub fn of_module(self: &mut Self, p: &loader::Package, m: usize) {
+        self.reset(p);
+        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            let c = p.sched.comp[it] as usize;
+            self.mark(c);
+            self.low = self.low.max(c + 1);
+        }
+    }
+
+    /// Does the reader depend on component `c` (or own it)? Marks the dependencies of every seen
+    /// component above `c`, highest first.
+    pub fn has(self: &mut Self, p: &loader::Package, c: usize) bool {
+        if self.low > c + 1 {
+            let top = self.low - 1 >> 6;
+            let bot = c + 1 >> 6;
+            for j in 0..top - bot + 1 {
+                let k = top - j;
+                let base = k * 64;
+                // The bits of word `k` below `low` and above `c`.
+                let mut below = if self.low - base < 64 {
+                    (1u64 << (self.low - base) as u64) - 1;
+                } else {
+                    ~0u64;
+                };
+                let above = if c >= base {
+                    ~((2u64 << (c - base) as u64) - 1);
+                } else {
+                    ~0u64;
+                };
+                for _ in 0..64 {
+                    let bits = self.seen[k] & below & above;
+                    if bits == 0 {
+                        break;
+                    }
+                    let x = base + 63 - bits.leading_zeros();
+                    let s = &p.sched;
+                    for e in s.cdep_off[x] as usize..s.cdep_off[x + 1] as usize {
+                        let d = s.cdep[e] as usize;
+                        assert(d < x, "a dependency's component precedes its dependent's");
+                        self.mark(d);
+                    }
+                    below = (1u64 << (x - base) as u64) - 1;
+                }
+            }
+            self.low = c + 1;
+        }
+        return (self.seen[c >> 6] & 1u64 << (c & 63) as u64) != 0;
+    }
+
+    fn mark(self: &mut Self, c: usize) {
+        let k = c >> 6;
+        if self.seen[k] == 0 {
+            self.touched.push(k as u32);
+        }
+        self.seen.set(k, self.seen[k] | 1u64 << (c & 63) as u64);
+    }
+
+    // Forget the previous reader (clear the words it touched) and size `seen` to the package.
+    fn reset(self: &mut Self, p: &loader::Package) {
+        for i in 0..self.touched.len() {
+            self.seen.set(self.touched[i] as usize, 0);
+        }
+        self.touched.clear();
+        self.seen.resize_default((p.sched.ncomp as usize + 63) / 64);
+        self.low = 0;
+        self.src = NONE;
+    }
 }

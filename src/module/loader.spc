@@ -91,10 +91,6 @@ pub struct ItemSched {
     pub cdep: Vector<u32>,
     pub citem_off: Vector<u32>,
     pub citem: Vector<u32>,
-    /// Per component, `reach_w` words: the bits of every component it depends on, transitively
-    /// (`build`); what a check of the component may read as checked (`graph::items::visible`).
-    pub reach: Vector<u64>,
-    pub reach_w: usize,
     pub built: bool,
     /// The final ranges hold the post-typecheck edges (`build_final` after the typecheck frontier,
     /// or `finalize`): what the unused-item lint and the emission liveness read.
@@ -108,7 +104,7 @@ pub struct ItemSched {
 extend ItemSched {
     /// Approximate owned bytes.
     pub const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.reach.capacity() * 8 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 
@@ -286,10 +282,14 @@ pub const REF_MODULE_WIDE: u32 = 0x7FFFFFFF;
 pub const REF_BODY_EDGE: u32 = 0x80000000;
 
 /// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
+/// `entries[i]` is sorted; `heads` maps a directory hash to the newest index with that hash, `next[i]` to
+/// the one before it (SYM_NONE ends the chain).
 pub struct DirCache {
     pub dirs: Vector<String>,
     pub entries: Vector<Vector<String>>,
     pub ok: Vector<bool>,
+    pub heads: Map<u64, u32>,
+    pub next: Vector<u32>,
 }
 
 /// The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
@@ -632,10 +632,17 @@ pub fn join2(a: str, b: str) String {
 extend DirCache {
     // Index of `dir` in the cache, scanning (opendir/readdir) it once on first request.
     fn index_of(self: &mut Self, dir: str) usize {
-        for i in 0..self.dirs.len() {
-            if self.dirs[i].as_str() == dir {
-                return i;
+        let h = dir.hash();
+        let head = switch self.heads.get(&h) {
+            Some(i) => *i,
+            None => SYM_NONE,
+        };
+        let mut i = head;
+        while i != SYM_NONE {
+            if self.dirs[i as usize].as_str() == dir {
+                return i as usize;
             }
+            i = self.next[i as usize];
         }
         let mut names = Vector::<String>::new();
         let mut dok = false;
@@ -657,6 +664,9 @@ extend DirCache {
                 let _ = unsafe shim::sc_closedir(d);
             }
         }
+        names.sort();
+        self.heads.insert(h, self.dirs.len() as u32);
+        self.next.push(head);
         self.dirs.push(String::from_str(dir));
         self.entries.push(names);
         self.ok.push(dok);
@@ -685,9 +695,18 @@ extend DirCache {
             return false;
         }
         let ents = self.entries.at(idx);
-        for k in 0..ents.len() {
-            if ents[k].as_str() == file {
+        let mut lo: usize = 0;
+        let mut hi = ents.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let c = ents[mid].as_str().cmp(&file);
+            if c == 0 {
                 return true;
+            }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
         return path_exists(path);
@@ -809,6 +828,7 @@ struct PUnit {
     pub ok: bool,
     pub child_paths: Vector<String>,
     pub child_files: Vector<String>,
+    pub next: u32, // the previous unit whose path hashes alike, or SYM_NONE
 }
 
 // One module on the serial loader's depth-first stack: its unloaded imports and the next to load.
@@ -826,6 +846,43 @@ struct PParse {
 // The unit slot is pinned for the task's lifetime (units only grow between waves) and each task
 // owns exactly one slot.
 unsafe extend PParse as Send {}
+
+// Append the unit for `path`, linked into `heads` (path hash -> newest unit with that hash).
+fn punit_push(units: &mut Vector<PUnit>, heads: &mut Map<u64, u32>, path: str, file: str) {
+    let h = path.hash();
+    let next = switch heads.get(&h) {
+        Some(u) => *u,
+        None => SYM_NONE,
+    };
+    heads.insert(h, units.len() as u32);
+    units.push(
+        PUnit {
+            path: String::from_str(path),
+            file: String::from_str(file),
+            source: String::new(),
+            ast: Ast::new(0),
+            ok: false,
+            child_paths: Vector::<String>::new(),
+            child_files: Vector::<String>::new(),
+            next: next,
+        },
+    );
+}
+
+// The index of the unit for `path`, or `units.len()`.
+fn punit_find(units: &Vector<PUnit>, heads: &Map<u64, u32>, path: str) usize {
+    let mut u = switch heads.get(&path.hash()) {
+        Some(h) => *h,
+        None => SYM_NONE,
+    };
+    while u != SYM_NONE {
+        if units.at(u as usize).path.as_str() == path {
+            return u as usize;
+        }
+        u = units.at(u as usize).next;
+    }
+    return units.len();
+}
 
 fn par_parse_one(t: PParse) {
     let u = unsafe &mut *t.u;
@@ -1211,27 +1268,38 @@ extend Package {
         if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
             return;
         }
+        // The owners of a gate that fails, sorted for the per-item probe: O(A + I log A).
+        let mut dropped = Vector::<NodeId>::new();
+        for k in 0..m.ast.attrs.len() {
+            let at = m.ast.attrs.at(k);
+            if at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
+                dropped.push(at.owner);
+            }
+            // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
+            // keeps every gated item: dropping them all would silently empty the program.
+            if at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
+                dropped.push(at.owner);
+            }
+        }
+        if dropped.len() == 0 {
+            return;
+        }
+        dropped.sort();
         let items = m.ast.at_const(root).as_data.program.items;
         let mut w: u32 = 0;
         for j in 0..items.len {
             let id = unsafe m.ast.list(items)[j as usize];
-            let mut keep = true;
-            {
-                for k in 0..m.ast.attrs.len() {
-                    let at = m.ast.attrs.at(k);
-                    if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
-                        keep = false;
-                    }
-                    // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
-                    // keeps every gated item: dropping them all would silently empty the program.
-                    if at.owner == id && at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
-                        keep = false;
-                    }
-                }
-            }
-            if keep {
+            if dropped.binary_search(&id).is_err() {
                 m.ast.children.set((items.start + w) as usize, id);
                 w = w + 1;
+            } else {
+                // A dropped container's members no longer have one.
+                let n = *m.ast.at_const(id);
+                if n.kind == NodeKind::NODE_EXTEND {
+                    m.ast.set_members(NODE_NONE, n.as_data.extend_def.items);
+                } else if n.kind == NodeKind::NODE_INTERFACE {
+                    m.ast.set_members(NODE_NONE, n.as_data.interface_def.items);
+                }
             }
         }
         m.ast.at(root).as_data.program.items.len = w;
@@ -2365,17 +2433,8 @@ extend Package {
         // The replay's serial loads use the dir cache again: it is out of `self` until then.
         let mut dc = replace(&mut self.dir_cache, DirCache {});
         let mut units = Vector::<PUnit>::new();
-        units.push(
-            PUnit {
-                path: String::from_str(mod_path),
-                file: String::from_str(file_path),
-                source: String::new(),
-                ast: Ast::new(0),
-                ok: false,
-                child_paths: Vector::<String>::new(),
-                child_files: Vector::<String>::new(),
-            },
-        );
+        let mut heads = Map::<u64, u32>::new();
+        punit_push(&mut units, &mut heads, mod_path, file_path);
         let mut next: usize = 0;
         while next < units.len() {
             let wave_end = units.len();
@@ -2410,39 +2469,23 @@ extend Package {
                     if self.find(cp) >= 0 {
                         continue;
                     }
-                    let mut seen = false;
-                    for q in 0..units.len() {
-                        if units.at(q).path.as_str() == cp {
-                            seen = true;
-                            break;
-                        }
-                    }
+                    let seen = punit_find(&units, &heads, cp) < units.len();
                     units.index_mut(k).child_paths.push(String::from_str(cp));
                     units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
                     if !seen {
-                        units.push(
-                            PUnit {
-                                path: String::from_str(cp),
-                                file: String::from_str(all_files[c].as_str()),
-                                source: String::new(),
-                                ast: Ast::new(0),
-                                ok: false,
-                                child_paths: Vector::<String>::new(),
-                                child_files: Vector::<String>::new(),
-                            },
-                        );
+                        punit_push(&mut units, &mut heads, cp, all_files[c].as_str());
                     }
                 }
             }
             next = wave_end;
         }
         self.dir_cache = dc;
-        return self.par_replay(&mut units, bootstrap_tags, target);
+        return self.par_replay(&mut units, &heads, bootstrap_tags, target);
     }
 
     // DFS in recorded import order over the parsed units: the id-assignment replay. Consumes
     // each unit's source/ast on first visit (later visits of the same path are find() hits).
-    fn par_replay(self: &mut Self, units: &mut Vector<PUnit>, bootstrap_tags: bool, target: i32) i32 {
+    fn par_replay(self: &mut Self, units: &mut Vector<PUnit>, heads: &Map<u64, u32>, bootstrap_tags: bool, target: i32) i32 {
         let mut expand = false;
         let root = self.par_visit(units, 0, bootstrap_tags, target, &mut expand);
         // (unit << 32 | next import) pairs: an explicit stack, bounded by the unit count, so a long import
@@ -2466,13 +2509,7 @@ extend Package {
                 continue;
             }
             // The wave loop gave every recorded import its own unit.
-            let mut ci = units.len();
-            for q in 0..units.len() {
-                if units.at(q).path.as_str() == cp {
-                    ci = q;
-                    break;
-                }
-            }
+            let ci = punit_find(units, heads, cp);
             assert(ci < units.len());
             let _ = self.par_visit(units, ci, bootstrap_tags, target, &mut expand);
             if expand {
@@ -3240,14 +3277,13 @@ extend Package {
         if !self.modules[a].has_ast {
             return;
         }
-        let mut dep = Vector::<bool>::new();
-        dep.resize_default(n);
+        let mut dep = Set::<ModuleId>::new();
         let aa = self.module_ast_const(a as ModuleId);
         let mut i: usize = 0;
         while i < unsafe (*aa).ninstances() {
             let it = *unsafe (*aa).used_instance(i);
             let bi = it.module as usize;
-            if bi >= n || bi == a || dep[bi] {
+            if bi >= n || bi == a || dep.contains(&it.module) {
                 i = i + 1;
                 continue;
             }
@@ -3258,7 +3294,7 @@ extend Package {
                 }
             }
             if concrete && self.instance_home_in(a as ModuleId, &it) == a as ModuleId {
-                dep[bi] = true;
+                dep.insert(it.module);
                 out.push(bi as ModuleId);
             }
             i = i + 1;
@@ -3279,7 +3315,7 @@ extend Package {
                 unsafe (*aa).resolution_def(callee_id);
             };
             let bi = fd.module as usize;
-            if fd.node == NODE_NONE || bi >= n || bi == a || dep[bi] {
+            if fd.node == NODE_NONE || bi >= n || bi == a || dep.contains(&fd.module) {
                 i = i + 1;
                 continue;
             }
@@ -3292,7 +3328,7 @@ extend Package {
                 i = i + 1;
                 continue;
             }
-            dep[bi] = true;
+            dep.insert(fd.module);
             out.push(bi as ModuleId);
             i = i + 1;
         }
@@ -3319,54 +3355,75 @@ extend Package {
         if n == 0 {
             return;
         }
-        let mut done = Vector::<bool>::new();
-        done.resize_default(n);
-        let mut dep = Vector::<bool>::new();
-        dep.resize_default(n * n);
-        let mut indeg = Vector::<u32>::new();
-        indeg.resize_default(n);
+        // Reverse edges in CSR form (`users[user_off[b]..user_off[b + 1]]` are the modules that emit
+        // after `b`) and a min-heap of the ready modules: O(E + M log M).
         let recorded = self.emit_deps.len() == n;
-        let mut row = Vector::<ModuleId>::new();
-        for a in 0..n {
-            if !recorded {
-                self.emit_dep_row(a, &mut row);
-            }
-            let r = if recorded {
-                self.emit_deps.at(a);
-            } else {
-                &row;
-            };
-            for k in 0..r.len() {
-                let bi = r[k] as usize;
-                dep[a * n + bi] = true;
-                indeg[a] = indeg[a] + 1;
+        let mut rows = Vector::<Vector<ModuleId>>::new();
+        if !recorded {
+            rows.resize_default(n);
+            for a in 0..n {
+                self.emit_dep_row(a, rows.index_mut(a));
             }
         }
-        for kk in 0..n {
-            let mut pick = n;
-            let mut i: usize = 0;
-            while i < n {
-                if !done[i] && indeg[i] == 0 {
-                    pick = i;
-                    break;
-                }
-                i = i + 1;
+        let deps = if recorded {
+            &self.emit_deps;
+        } else {
+            &rows;
+        };
+        let mut indeg = Vector::<u32>::new();
+        indeg.resize_default(n);
+        let mut user_off = Vector::<u32>::new();
+        user_off.resize_default(n + 1);
+        for a in 0..n {
+            let r = deps.at(a);
+            indeg.set(a, r.len() as u32);
+            for k in 0..r.len() {
+                let bi = r[k] as usize + 1;
+                user_off.set(bi, user_off[bi] + 1);
             }
-            if pick == n {
-                i = 0;
-                while i < n {
-                    if !done[i] {
-                        pick = i;
-                        break;
-                    }
-                    i = i + 1;
-                }
+        }
+        for b in 0..n {
+            user_off.set(b + 1, user_off[b + 1] + user_off[b]);
+        }
+        let mut fill = Vector::<u32>::new();
+        fill.resize_default(n);
+        let mut users = Vector::<u32>::new();
+        users.resize_default(user_off[n] as usize);
+        for a in 0..n {
+            let r = deps.at(a);
+            for k in 0..r.len() {
+                let bi = r[k] as usize;
+                users.set((user_off[bi] + fill[bi]) as usize, a as u32);
+                fill.set(bi, fill[bi] + 1);
             }
+        }
+        let mut done = Vector::<bool>::new();
+        done.resize_default(n);
+        let mut ready = Vector::<u64>::new();
+        for a in 0..n {
+            if indeg[a] == 0 {
+                gitems::heap_push(&mut ready, a as u64);
+            }
+        }
+        // A cycle leaves no ready module: the lowest one not yet emitted goes next.
+        let mut low: usize = 0;
+        for _ in 0..n {
+            if ready.len() == 0 {
+                while done[low] {
+                    low = low + 1;
+                }
+                gitems::heap_push(&mut ready, low as u64);
+            }
+            let pick = gitems::heap_pop(&mut ready) as usize;
             order.push(pick as ModuleId);
-            done[pick] = true;
-            for x in 0..n {
-                if !done[x] && dep[x * n + pick] && indeg[x] > 0 {
-                    indeg[x] = indeg[x] - 1;
+            done.set(pick, true);
+            for k in user_off[pick] as usize..user_off[pick + 1] as usize {
+                let x = users[k] as usize;
+                if !done[x] {
+                    indeg.set(x, indeg[x] - 1);
+                    if indeg[x] == 0 {
+                        gitems::heap_push(&mut ready, x as u64);
+                    }
                 }
             }
         }

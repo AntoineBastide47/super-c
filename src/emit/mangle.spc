@@ -336,6 +336,16 @@ const fn path_base_start(path: str) usize {
     return at;
 }
 
+/// A module basename with the module's index (sort key of the short-prefix table).
+struct BaseIdx<'a> {
+    pub key: str<'a>,
+    pub idx: u32,
+}
+
+const fn base_idx_cmp(a: &BaseIdx, b: &BaseIdx) i32 {
+    return a.key.cmp(&b.key);
+}
+
 /// The symbol-naming state of one emission: the substitution stack, memoized renders, and the
 /// cross-TU use edges the writer prunes by.
 pub struct Mangler {
@@ -344,9 +354,11 @@ pub struct Mangler {
     /// module build emits one standalone TU with bare names).
     pub mangle: bool,
     ph_global: loader::LookupHit,
-    // Per-module short-prefix verdict memo: 0 unknown / 1 full path / 2 short. A pure function of
-    // the package's module path list, so every TU agrees.
-    short_ok: Vector<u8>,
+    // Per-module short-prefix verdicts (1 = short), a pure function of the package's module path
+    // list, so every TU agrees: `short_ok` points into `short_own` (filled on first use) or into
+    // the table of the mangler `share_short` took it from, which outlives this one.
+    short_own: Vector<u8>,
+    short_ok: *const u8,
     /// Instance suffix appended to closure symbols while a generic body instance emits (closures
     /// hoist per instantiation; the bare name would collide across instances in one TU). Only the
     /// closures DECLARED IN that instance take it: `clos_ids` lists them; a concrete closure
@@ -370,10 +382,12 @@ pub struct Mangler {
     /// for a hashed set): one row per context (modules, the package-level row, then one per
     /// owner module's instance shard), one bit per owner module. `used_types` when the context
     /// spelled a type name of the owner (it needs the owner's complete types), `used_syms` for
-    /// any other symbol (it needs the owner's prototypes); `um_hit` is their union. Sized
-    /// lazily on the first edge.
-    pub used_types: Vector<u64>,
-    pub used_syms: Vector<u64>,
+    /// any other symbol (it needs the owner's prototypes); `um_word` reads them. A row takes
+    /// its words on its first edge (an emitter shard fills a few of the 2n + 1 rows):
+    /// `um_slot[row]` is 1 + the row's first word, 0 for a row with no edge.
+    um_slot: Vector<u32>,
+    used_types: Vector<u64>,
+    used_syms: Vector<u64>,
     /// The aggregates each spelling context's C text uses, one log entry per record:
     /// `tn_row` is the context's row (as in `used_types`), `tn_key` the FNV of the C type name
     /// with bit 0 replaced: 1 when the text needs the complete type (a by-value spelling, a
@@ -574,7 +588,8 @@ extend Mangler {
             pkg: pkg,
             mangle: user_mods > 1,
             ph_global: p.prelude_lookup("Global", true),
-            short_ok: Vector::<u8>::new(),
+            short_own: Vector::<u8>::new(),
+            short_ok: null,
             subs: Vector::<MSub>::new(),
             subs_gen: 1,
             clos_sfx: String::new(),
@@ -582,6 +597,7 @@ extend Mangler {
             dyn_reqs: Vector::<DynReq>::new(),
             hidden: Vector::<MSub>::new(),
             macro_on: false,
+            um_slot: Vector::<u32>::new(),
             used_types: Vector::<u64>::new(),
             used_syms: Vector::<u64>::new(),
             tn_key: Vector::<u64>::new(),
@@ -1179,31 +1195,49 @@ extend Mangler {
     // A module mangles as its last path segment alone when no other non-prelude module shares that
     // basename; collisions keep the full form for every involved module.
     fn short_pfx(self: &mut Self, m: ModuleId) bool {
-        if self.short_ok.len() == 0 {
-            self.short_ok.resize_default(self.p().modules.len());
+        return unsafe self.short_table()[m as usize] != 0;
+    }
+
+    /// The short-prefix verdict of every module, by module index; sorting the basenames settles all
+    /// of them at once.
+    pub fn short_table(self: &mut Self) *const u8 {
+        if self.short_ok != null {
+            return self.short_ok;
         }
-        let cached = self.short_ok[m as usize];
-        if cached != 0 {
-            return cached == 2;
+        let p = unsafe &*self.pkg;
+        let n = p.modules.len();
+        let mut kv = Vector::<BaseIdx>::with_capacity(n);
+        for i in 0..n {
+            let path = p.modules.at(i).path.as_str();
+            kv.push(BaseIdx { key: path.slice(path_base_start(path), path.len()), idx: i as u32 });
         }
-        let path = self.p().modules.at(m as usize).path.as_str();
-        let bs = path_base_start(path);
-        let mut ok = bs != 0;
-        if ok {
-            let base = path.slice(bs, path.len());
-            for o in 0..self.p().modules.len() {
-                if o == m as usize || self.p().modules.at(o).prelude {
-                    continue;
-                }
-                let op = self.p().modules.at(o).path.as_str();
-                if op.slice(path_base_start(op), op.len()) == base {
-                    ok = false;
-                    break;
-                }
+        kv.sort_by(base_idx_cmp);
+        self.short_own.resize_default(n);
+        let mut g: usize = 0;
+        while g < n {
+            // One group of equal basenames: a member is short when it has a path prefix and no
+            // other member is a non-prelude module.
+            let mut e = g;
+            let mut users: usize = 0;
+            while e < n && kv[e].key == kv[g].key {
+                users += (!p.modules.at(kv[e].idx as usize).prelude) as usize;
+                e += 1;
             }
+            for k in g..e {
+                let md = p.modules.at(kv[k].idx as usize);
+                let others = users - (!md.prelude) as usize;
+                self.short_own.set(kv[k].idx as usize, (path_base_start(md.path.as_str()) != 0 && others == 0) as u8);
+            }
+            g = e;
         }
-        self.short_ok.set(m as usize, ok as u8 + 1);
-        return ok;
+        self.short_ok = self.short_own.as_ptr();
+        return self.short_ok;
+    }
+
+    /// Take the short-prefix table of `from` (which must outlive this mangler) instead of computing
+    /// it again.
+    pub fn share_short(self: &mut Self, from: &mut Mangler) {
+        self.short_ok = from.short_table();
     }
 
     /// Record the cross-TU edge for module `enc` (a module id, bit 15 set when the spelling
@@ -1239,22 +1273,39 @@ extend Mangler {
         return src as usize;
     }
 
-    // Words per matrix row.
-    const fn um_w(self: &Self) usize {
+    /// Words per matrix row.
+    pub const fn um_w(self: &Self) usize {
         return (self.p().modules.len() + 63) / 64;
     }
 
+    // The first word of row `r`, which takes zeroed words on first use.
+    fn um_take(self: &mut Self, r: usize) usize {
+        if self.um_slot.len() == 0 {
+            self.um_slot.resize_default(2 * self.p().modules.len() + 1);
+        }
+        if self.um_slot[r] == 0 {
+            let at = self.used_types.len();
+            self.um_slot.set(r, at as u32 + 1);
+            self.used_types.resize_default(at + self.um_w());
+            self.used_syms.resize_default(at + self.um_w());
+        }
+        return (self.um_slot[r] - 1) as usize;
+    }
+
+    // The first word of row `r`; none when the row has no edge.
+    const fn um_at(self: &Self, r: usize) Option<usize> {
+        if self.um_slot.len() == 0 || self.um_slot[r] == 0 {
+            return Option::<usize>::None;
+        }
+        return Option::Some((self.um_slot[r] - 1) as usize);
+    }
+
     fn um_set(self: &mut Self, src: u64, dst: ModuleId, ty: bool) {
-        let n = self.p().modules.len();
-        if n == 0 {
+        if self.p().modules.len() == 0 {
             return;
         }
-        let w = self.um_w();
-        if self.used_types.len() == 0 {
-            self.used_types.resize_default((2 * n + 1) * w);
-            self.used_syms.resize_default((2 * n + 1) * w);
-        }
-        let i = self.um_row(src) * w + dst as usize / 64;
+        let r = self.um_row(src);
+        let i = self.um_take(r) + dst as usize / 64;
         let bit = 1u64 << (dst as u64 & 63);
         if ty {
             self.used_types.set(i, self.used_types[i] | bit);
@@ -1269,19 +1320,17 @@ extend Mangler {
     pub fn sh_merge_um(self: &mut Self, o: &mut Mangler, m: u64) {
         let r0 = self.um_row(m) as u32;
         self.tn_take(o, r0, r0 + 1);
-        if o.used_types.len() == 0 {
-            return;
-        }
-        let n = self.p().modules.len();
-        let w = self.um_w();
-        if self.used_types.len() == 0 {
-            self.used_types.resize_default((2 * n + 1) * w);
-            self.used_syms.resize_default((2 * n + 1) * w);
-        }
-        let r = self.um_row(m) * w;
-        for i in r..r + w {
-            self.used_types.set(i, self.used_types[i] | o.used_types[i]);
-            self.used_syms.set(i, self.used_syms[i] | o.used_syms[i]);
+        self.um_or_row(o, r0 as usize);
+    }
+
+    // OR row `r` of shard `o` into this mangler's row `r`.
+    fn um_or_row(self: &mut Self, o: &Mangler, r: usize) {
+        if let Some(src) = o.um_at(r) {
+            let dst = self.um_take(r);
+            for k in 0..self.um_w() {
+                self.used_types.set(dst + k, self.used_types[dst + k] | o.used_types[src + k]);
+                self.used_syms.set(dst + k, self.used_syms[dst + k] | o.used_syms[src + k]);
+            }
         }
     }
 
@@ -1300,32 +1349,18 @@ extend Mangler {
     pub fn sh_merge_inst(self: &mut Self, o: &Mangler) {
         let n0 = self.p().modules.len() as u32;
         self.tn_take(o, n0, 2 * n0 + 1);
-        if o.used_types.len() == 0 {
-            return;
-        }
-        let n = self.p().modules.len();
-        let w = self.um_w();
-        if self.used_types.len() == 0 {
-            self.used_types.resize_default((2 * n + 1) * w);
-            self.used_syms.resize_default((2 * n + 1) * w);
-        }
-        for i in n * w..(2 * n + 1) * w {
-            self.used_types.set(i, self.used_types[i] | o.used_types[i]);
-            self.used_syms.set(i, self.used_syms[i] | o.used_syms[i]);
+        for r in n0 as usize..o.um_slot.len() {
+            self.um_or_row(o, r);
         }
     }
 
-    /// True when context `src` spelled a type name (`ty`) or another symbol owned by module `dst`.
-    pub const fn um_hit_kind(self: &Self, src: u64, dst: usize, ty: bool) bool {
-        if self.used_types.len() == 0 {
-            return false;
-        }
-        let i = self.um_row(src) * self.um_w() + dst / 64;
-        let bit = 1u64 << (dst as u64 & 63);
-        if ty {
-            return (self.used_types[i] & bit) != 0;
-        }
-        return (self.used_syms[i] & bit) != 0;
+    /// Word `k` of context `src`'s row: bit `d` is set when the context spelled a type name (`ty`)
+    /// or another symbol owned by module `k * 64 + d`.
+    pub const fn um_word(self: &Self, src: u64, k: usize, ty: bool) u64 {
+        return switch self.um_at(self.um_row(src)) {
+            Some(i) => pick(ty, self.used_types[i + k], self.used_syms[i + k]),
+            None => 0u64,
+        };
     }
 
     /// Record in the current context's row that its C text uses the aggregate whose C name has
@@ -1541,11 +1576,6 @@ extend Mangler {
         for i in d0..d1 {
             self.dyn_reqs.push(*o.dyn_reqs.at(i));
         }
-    }
-
-    /// True when TU `src` (65534 = the shared instance TU) spells a symbol owned by module `dst`.
-    pub const fn um_hit(self: &Self, src: u64, dst: usize) bool {
-        return self.um_hit_kind(src, dst, true) || self.um_hit_kind(src, dst, false);
     }
 
     /// Append module `m`'s symbol prefix (empty for a single-module build) and record the cross-TU

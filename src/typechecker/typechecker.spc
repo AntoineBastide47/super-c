@@ -231,6 +231,96 @@ extend MQKey as Eq {
     }
 }
 
+/// A bound or marker query (`TypeChecker::sat_memo`): `kind` 0 asks `iface`, 1 `Copy`, 2 `Send`, 3 `Sync`.
+struct SatKey {
+    pub ty: TypeId,
+    pub depth: i32,
+    pub kind: u32,
+    pub iface: DefId,
+}
+
+extend SatKey as Hash {
+    pub fn hash(self: &Self) u64 {
+        let h = (self.ty as u64 << 32 | self.iface.node as u64) * 0x9E3779B97F4A7C15u64;
+        return h ^ (self.iface.module as u64 << 8 | self.kind as u64 << 4 | self.depth as u64);
+    }
+}
+
+extend SatKey as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        return self.ty == other.ty && self.depth == other.depth && self.kind == other.kind && self.iface.module == other.iface.module && self.iface.node == other.iface.node;
+    }
+}
+
+/// An open `sat_memo` frame: the side-effect count and `mark_n` at entry; `on` is false under a
+/// `tc_type_is_free` walk.
+struct SatFrame {
+    pub fx: usize,
+    pub mark_n: u32,
+    pub on: bool,
+}
+
+/// An (interface, target) conformance pair: the duplicate-conformance indexes' key.
+pub struct ConfKey {
+    pub iface: DefId,
+    pub tgt: DefId,
+}
+
+extend ConfKey as Hash {
+    pub fn hash(self: &Self) u64 {
+        let h = (self.iface.module as u64 << 32 | self.iface.node as u64) * 0x9E3779B97F4A7C15u64;
+        return h ^ (self.tgt.module as u64 << 32 | self.tgt.node as u64);
+    }
+}
+
+extend ConfKey as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        return self.iface.module == other.iface.module && self.iface.node == other.iface.node && self.tgt.module == other.tgt.module && self.tgt.node == other.tgt.node;
+    }
+}
+
+// The (interface, target) key of top-level extend `id` when it states a conformance to an interface
+// written without arguments; `iface.node` is NODE_NONE otherwise.
+fn dup_conf_key(a: &Ast, id: NodeId) ConfKey {
+    let none = ConfKey { iface: DefId { module: 0, node: NODE_NONE }, tgt: DefId { module: 0, node: NODE_NONE } };
+    if a.at_const(id).kind != NodeKind::NODE_EXTEND {
+        return none;
+    }
+    let itype = a.at_const(id).as_data.extend_def.interface_type;
+    if itype == NODE_NONE {
+        return none;
+    }
+    if a.at_const(itype).kind == NodeKind::NODE_TYPE_PATH && a.at_const(itype).as_data.type_path.args.len != 0 {
+        return none;
+    }
+    let k = ConfKey {
+        iface: a.resolution_def(itype),
+        tgt: a.resolution_def(a.at_const(id).as_data.extend_def.target_type),
+    };
+    if k.tgt.node == NODE_NONE {
+        return none;
+    }
+    return k;
+}
+
+/// The first extend of each conformance `check_cross_module_dup_conformances` compares, in module
+/// then item order: its key -> module << 32 | extend node. Built once for the package.
+pub fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
+    let mut idx = Map::<ConfKey, u64>::new();
+    for j in 0..p.modules.len() {
+        let a = &p.modules[j].ast;
+        let items = a.at_const(a.root).as_data.program.items;
+        for k in 0..items.len {
+            let id = unsafe a.list(items)[k as usize];
+            let key = dup_conf_key(a, id);
+            if key.iface.node != NODE_NONE && !idx.contains_key(&key) {
+                idx.insert(key, j as u64 << 32 | id as u64);
+            }
+        }
+    }
+    return idx;
+}
+
 /// Parallel-frontier capture of the package-global method marks: replayed by the driver in module
 /// order through the real functions.
 pub struct TcMarkLog {
@@ -317,12 +407,9 @@ pub struct TypeChecker<'a> {
     pub cur_item: loader::ItemId,
     pub cur_top: NodeId,
     pub cur_lo: NodeId,
-    /// The components the item under check depends on: the index's row for its component
-    /// (`reach_ptr`, `reach_n` words), or `reach` when `check_orphans` built a union of rows.
-    /// The checked state the engine and the foreign reads may see.
-    pub reach_ptr: *const u64,
-    pub reach_n: usize,
-    pub reach: Vector<u64>,
+    /// The components the item under check depends on (`check_orphans`: the module's items'
+    /// components and theirs). The checked state the engine and the foreign reads may see.
+    pub reach: gitems::Reach,
     /// `check_orphans`: the diagnostics of each top-level node that is no item, in declaration
     /// order, for the driver to publish at the node's place among the items.
     pub orphan_errs: Vector<diag::Errors>,
@@ -399,6 +486,24 @@ pub struct TypeChecker<'a> {
     // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
     // every method call and every binding/return). 1 = carries, 0 = does not.
     pub carries_memo: Map<u64, u8>,
+    // Bound and marker verdicts (`type_satisfies`, `tc_copy_marker`, `tc_thread_marker`) of the
+    // outermost query in progress, keyed by type, bound and depth: within one query the verdict is a
+    // function of the key. Emptied when the outermost frame returns. A frame under a
+    // `tc_type_is_free` walk (whose answers read the walk's stack) or one that recorded a diagnostic
+    // or an obligation is never stored. Value: verdict bit 0, `mark_recv` written bit 1, the last
+    // written `mark_recv` in the high half.
+    sat_memo: Map<SatKey, u64>,
+    sat_nest: u32,
+    // `mark_recv` writes so far: a memoized verdict replays the last write of its walk.
+    mark_n: u32,
+    // `subst_type`'s memo for one call: instance nodes with compound arguments -> substituted type.
+    subst_memo: Map<TypeId, TypeId>,
+    // The module's conformance extends by (interface, target), built on the first conformance check:
+    // `dup_heads` holds the first item position of each key, `dup_next` links an item position to the
+    // next one with its key (EXT_END ends a list).
+    dup_heads: Map<ConfKey, u32>,
+    dup_next: Vector<u32>,
+    dup_built: bool,
     // Prelude lookup hits resolved once at construction, for the names the checker asks for per call.
     pub ph_str: loader::LookupHit,
     pub ph_string: loader::LookupHit,
@@ -650,9 +755,7 @@ extend TypeChecker {
             cur_item: loader::ITEM_NONE,
             cur_top: NODE_NONE,
             cur_lo: 0,
-            reach_ptr: null,
-            reach_n: 0,
-            reach: Vector::<u64>::new(),
+            reach: gitems::Reach::new(),
             orphan_errs: Vector::<diag::Errors>::new(),
             free_derive_memo: Map::<u64, u64>::new(),
             bc_unsafe_spans: Vector::<u64>::new(),
@@ -683,6 +786,13 @@ extend TypeChecker {
             lower_memo: Map::<u64, TypeId>::new(),
             fdecl_memo: Map::<u64, TypeId>::new(),
             carries_memo: Map::<u64, u8>::new(),
+            sat_memo: Map::<SatKey, u64>::new(),
+            sat_nest: 0,
+            mark_n: 0,
+            subst_memo: Map::<TypeId, TypeId>::new(),
+            dup_heads: Map::<ConfKey, u32>::new(),
+            dup_next: Vector::<u32>::new(),
+            dup_built: false,
             ph_str: ph_lookup(pkg, "str"),
             ph_string: ph_lookup(pkg, "String"),
             ph_unsafecell: ph_lookup(pkg, "UnsafeCell"),
@@ -2055,6 +2165,7 @@ extend TypeChecker {
         // method is resolved on is recorded: the one piece the lookups themselves never carry.
         let mself = (self as *const TypeChecker) as *mut TypeChecker;
         unsafe (*mself).mark_recv = ty;
+        unsafe (*mself).mark_n += 1;
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *mod_out = y.module;
@@ -2089,6 +2200,7 @@ extend TypeChecker {
     fn aggregate_decl(self: &Self, ty: TypeId, mod_out: &mut ModuleId, decl_out: &mut NodeId) bool {
         let mself = (self as *const TypeChecker) as *mut TypeChecker;
         unsafe (*mself).mark_recv = ty;
+        unsafe (*mself).mark_n += 1;
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *mod_out = y.module;
@@ -2105,9 +2217,26 @@ extend TypeChecker {
     }
 
     // Structural params[i]->args[i] substitution; unmatched generics pass through, and unchanged
-    // subtrees return the original TypeId (nothing new interned).
+    // subtrees return the original TypeId (nothing new interned). A shared subterm is substituted
+    // once per call (`subst_memo`), so the cost follows the type's DAG, not its tree.
     fn subst_type(self: &mut Self, ty: TypeId, params: *const DefId, args: *const TypeId, n: i32) TypeId {
         if ty == TYPE_NONE || n == 0 {
+            return ty;
+        }
+        let r = self.subst_rec(ty, params, args, n, true);
+        // A large table is dropped, not cleared: `clear` costs its capacity on every later call.
+        if self.subst_memo.len() > 64 {
+            self.subst_memo = Map::<TypeId, TypeId>::new();
+        } else if self.subst_memo.len() != 0 {
+            self.subst_memo.clear();
+        }
+        return r;
+    }
+
+    // `subst_type` below its root (`top` false): an instance with a compound argument is memoized,
+    // since only such a node can repeat below a shared subterm at a cost.
+    fn subst_rec(self: &mut Self, ty: TypeId, params: *const DefId, args: *const TypeId, n: i32, top: bool) TypeId {
+        if ty == TYPE_NONE {
             return ty;
         }
         let y = *self.type_at(ty);
@@ -2128,7 +2257,7 @@ extend TypeChecker {
             return ty;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
-            let e = self.subst_type(y.as_data.elem, params, args, n);
+            let e = self.subst_rec(y.as_data.elem, params, args, n, false);
             if e == y.as_data.elem {
                 return ty;
             }
@@ -2138,18 +2267,40 @@ extend TypeChecker {
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let src = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            let mut memo = false;
+            if !top {
+                for i in 0..src.n {
+                    let ak = self.type_at(unsafe src.args[i as usize]).kind;
+                    if ak == TypeKind::TYPE_INSTANCE || ak == TypeKind::TYPE_POINTER || ak == TypeKind::TYPE_REFERENCE || ak == TypeKind::TYPE_SLICE || ak == TypeKind::TYPE_ARRAY {
+                        memo = true;
+                    }
+                }
+            }
+            if memo {
+                switch self.subst_memo.get(&ty) {
+                    Some(t) => {
+                        return *t;
+                    },
+                    None => {},
+                };
+            }
             let mut na = Tys8 {};
             let mut changed = false;
             for i in 0..src.n {
-                na[i as usize] = self.subst_type(unsafe src.args[i as usize], params, args, n);
+                na[i as usize] = self.subst_rec(unsafe src.args[i as usize], params, args, n, false);
                 if na[i as usize] != unsafe src.args[i as usize] {
                     changed = true;
                 }
             }
-            if changed {
-                return unsafe (*self.cur_ast()).intern_instance(src.module, src.decl, &na[0], src.n);
+            let r = if changed {
+                unsafe (*self.cur_ast()).intern_instance(src.module, src.decl, &na[0], src.n);
+            } else {
+                ty;
+            };
+            if memo {
+                self.subst_memo.insert(ty, r);
             }
-            return ty;
+            return r;
         }
         return ty;
     }
@@ -4312,6 +4463,7 @@ extend TypeChecker {
         }
         if have && best.node != NODE_NONE {
             self.mark_recv = recv;
+            self.mark_n += 1;
             self.tc_mark_method_used(best);
             return best;
         }
@@ -4529,6 +4681,7 @@ extend TypeChecker {
             if self.tc_method_ret(self.strip(recv), c) == want {
                 // The overload search bypassed aggregate_of.
                 self.mark_recv = self.strip(recv);
+                self.mark_n += 1;
                 self.tc_mark_method_used(c);
                 return c;
             }
@@ -4972,11 +5125,8 @@ extend TypeChecker {
             }
             let nob = (unsafe (*fa).proj_obs).len();
             let ostart = (unsafe starts[cd.module as usize]) as usize;
-            for oi in 0..nob {
-                if oi < ostart {
-                    // An earlier pass already ran this obligation against this module.
-                    continue;
-                }
+            // An earlier pass already ran the obligations below `ostart` against this module.
+            for oi in ostart..nob {
                 let ob = *(unsafe (*fa).proj_obs).at(oi);
                 if ob.fnd != cd.node {
                     continue;
@@ -5028,81 +5178,50 @@ extend TypeChecker {
     /// Report cross-module duplicate conformances for interfaces written WITHOUT arguments (Format,
     /// Hash, ..): the same-module case errors in check_extend_conformance; across modules the two
     /// copies would only collide at link as a C redefinition, so name the duplicate here instead.
-    /// Scans the EARLIER modules so the later declaration carries the error. Argumented conformances
+    /// Only a first declaration in an EARLIER module (`idx`, from `dup_conformance_index`) counts, so
+    /// the later declaration carries the error. Argumented conformances
     /// (`Conv<i32>`) are exempt: distinct arguments are legal, and comparing them across pools is
     /// not worth the rare case the linker still catches.
-    pub fn check_cross_module_dup_conformances(self: &mut Self) {
+    pub fn check_cross_module_dup_conformances(self: &mut Self, idx: &Map<ConfKey, u64>) {
         let items = unsafe (*self.cur_ast()).at_const((*self.cur_ast()).root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe (*self.cur_ast()).list(items)[i as usize];
-            if unsafe (*self.cur_ast()).at_const(id).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
-            if itype == NODE_NONE {
-                continue;
-            }
-            if unsafe (*self.cur_ast()).at_const(itype).kind == NodeKind::NODE_TYPE_PATH && unsafe (*self.cur_ast()).at_const(
-                itype,
-            ).as_data.type_path.args.len != 0 {
-                continue;
-            }
-            let iface = unsafe (*self.cur_ast()).resolution_def(itype);
-            let tgt = unsafe (*self.cur_ast()).resolution_def(
-                unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.target_type,
-            );
-            if iface.node == NODE_NONE || tgt.node == NODE_NONE {
+            let key = dup_conf_key(unsafe &*self.cur_ast(), id);
+            if key.iface.node == NODE_NONE {
                 continue;
             }
             // Earlier modules only: exactly ONE error per duplicate pair, and it embeds the other
             // site's block, so both instances are shown without a mirrored second report.
-            let mut j: usize = 0;
-            let mut hit = false;
-            while j < self.cur_module() as usize && !hit {
-                let a = self.mod_ast(j as ModuleId);
-                let pits = unsafe (*a).at_const((*a).root).as_data.program.items;
-                for k in 0..pits.len {
-                    let pid = unsafe (*a).list(pits)[k as usize];
-                    if unsafe (*a).at_const(pid).kind != NodeKind::NODE_EXTEND {
-                        continue;
-                    }
-                    let pit = unsafe (*a).at_const(pid).as_data.extend_def.interface_type;
-                    if pit == NODE_NONE {
-                        continue;
-                    }
-                    if unsafe (*a).at_const(pit).kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).at_const(pit).as_data.type_path.args.len != 0 {
-                        continue;
-                    }
-                    let piface = unsafe (*a).resolution_def(pit);
-                    let ptgt = unsafe (*a).resolution_def(unsafe (*a).at_const(pid).as_data.extend_def.target_type);
-                    if piface.module == iface.module && piface.node == iface.node && ptgt.module == tgt.module && ptgt.node == tgt.node {
-                        let sp = unsafe (*self.cur_ast()).at_const(itype).span;
-                        let psp = unsafe (*a).at_const(pit).span;
-                        self.errors.emit_span(
-                            sp,
-                            format(
-                                "duplicate conformance: module '{}' also declares this conformance for the type",
-                                unsafe (*self.package).modules[j].path.as_str(),
-                            ),
-                        );
-                        let site = diag::render_site(
-                            self.mod_src(j as ModuleId),
-                            unsafe (*self.package).modules[j].file.as_str(),
-                            psp.start,
-                            psp.end - psp.start,
-                        );
-                        self.errors.note(format("the other conformance is declared here\n{}", site.as_str()));
-                        self.errors.note(
-                            format(
-                                "a type conforms to an interface once across the whole package; remove one of the two",
-                            ),
-                        );
-                        hit = true;
-                        break;
-                    }
-                }
-                j = j + 1;
+            let first = switch idx.get(&key) {
+                Some(v) => *v,
+                None => 0xFFFFFFFFFFFFFFFFu64,
+            };
+            let j = (first >> 32) as usize;
+            if j >= self.cur_module() as usize {
+                continue;
             }
+            let a = self.mod_ast(j as ModuleId);
+            let pit = unsafe (*a).at_const((first & 0xFFFFFFFFu64) as NodeId).as_data.extend_def.interface_type;
+            let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
+            let sp = unsafe (*self.cur_ast()).at_const(itype).span;
+            let psp = unsafe (*a).at_const(pit).span;
+            self.errors.emit_span(
+                sp,
+                format(
+                    "duplicate conformance: module '{}' also declares this conformance for the type",
+                    unsafe (*self.package).modules[j].path.as_str(),
+                ),
+            );
+            let site = diag::render_site(
+                self.mod_src(j as ModuleId),
+                unsafe (*self.package).modules[j].file.as_str(),
+                psp.start,
+                psp.end - psp.start,
+            );
+            self.errors.note(format("the other conformance is declared here\n{}", site.as_str()));
+            self.errors.note(
+                format("a type conforms to an interface once across the whole package; remove one of the two"),
+            );
         }
     }
 
@@ -5344,7 +5463,71 @@ extend TypeChecker {
         if extnode == NODE_NONE {
             return false;
         }
-        return self.ext_bounds_hold(imod, extnode, &iargs[0], in2, depth + 1);
+        // Only an instance's bounds recurse: its verdict is memoized for the query.
+        let key = SatKey { ty: ty, depth: depth, kind: 0, iface: iface };
+        let mut f = SatFrame { fx: 0, mark_n: 0, on: false };
+        if in2 != 0 {
+            let hit = self.sat_open(&key, &mut f);
+            if hit >= 0 {
+                return hit != 0;
+            }
+        }
+        let r = self.ext_bounds_hold(imod, extnode, &iargs[0], in2, depth + 1);
+        self.sat_close(key, &f, r);
+        return r;
+    }
+
+    // The side effects a memoized verdict must not skip: diagnostics and deferred obligations.
+    fn sat_fx(self: &Self) usize {
+        let e = &self.errors;
+        return e.errors.len() + e.warns.len() + e.note_pool.len() + e.fixes.len() + (unsafe (*self.cur_ast()).proj_obs).len();
+    }
+
+    // Open a `sat_memo` frame for `key`: the stored verdict (0 or 1, with its `mark_recv` write
+    // replayed), or -1 with `f` opened.
+    fn sat_open(self: &mut Self, key: &SatKey, f: &mut SatFrame) i32 {
+        f.on = self.derive_busy.len() == 0;
+        if !f.on {
+            return -1;
+        }
+        if self.sat_nest != 0 {
+            switch self.sat_memo.get(key) {
+                Some(v) => {
+                    let w = *v;
+                    if (w & 2u64) != 0 {
+                        self.mark_recv = (w >> 32) as TypeId;
+                        self.mark_n += 1;
+                    }
+                    return (w & 1u64) as i32;
+                },
+                None => {},
+            };
+        }
+        f.fx = self.sat_fx();
+        f.mark_n = self.mark_n;
+        self.sat_nest += 1;
+        return -1;
+    }
+
+    // Close frame `f` with verdict `r`: store it unless it is the outermost frame, which empties the memo.
+    fn sat_close(self: &mut Self, key: SatKey, f: &SatFrame, r: bool) {
+        if !f.on {
+            return;
+        }
+        self.sat_nest -= 1;
+        if self.sat_nest == 0 {
+            // A large table is dropped, not cleared: `clear` costs its capacity on every later query.
+            if self.sat_memo.len() > 64 {
+                self.sat_memo = Map::<SatKey, u64>::new();
+            } else if self.sat_memo.len() != 0 {
+                self.sat_memo.clear();
+            }
+            return;
+        }
+        if self.sat_fx() == f.fx {
+            let w = self.mark_recv as u64 << 32 | pick(self.mark_n != f.mark_n, 2u64, 0u64) | pick(r, 1u64, 0u64);
+            self.sat_memo.insert(key, w);
+        }
     }
 
     // Whether `args[g]` satisfies every bound of generic g of extend `ext` (in module `m`), for each g
@@ -5429,6 +5612,18 @@ extend TypeChecker {
         if k == TypeKind::TYPE_FUNCTION {
             return !self.fn_owns(ty);
         }
+        let key = SatKey { ty: ty, depth: depth, kind: 1, iface: DefId { module: 0, node: NODE_NONE } };
+        let mut f = SatFrame { fx: 0, mark_n: 0, on: false };
+        let hit = self.sat_open(&key, &mut f);
+        if hit >= 0 {
+            return hit != 0;
+        }
+        let r = self.tc_copy_aggregate(ty, depth);
+        self.sat_close(key, &f, r);
+        return r;
+    }
+    // `tc_copy_marker` of an aggregate: not `Free`, and every member Copy.
+    fn tc_copy_aggregate(self: &mut Self, ty: TypeId, depth: i32) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
         let mut gp = Defs8 {};
@@ -5544,7 +5739,24 @@ extend TypeChecker {
             }
             return true;
         }
-        // Aggregate: an explicit conformance is an unsafe override; otherwise every field must qualify.
+        let key = SatKey {
+            ty: ty,
+            depth: depth,
+            kind: pick(sync, 3u32, 2u32),
+            iface: DefId { module: 0, node: NODE_NONE },
+        };
+        let mut f = SatFrame { fx: 0, mark_n: 0, on: false };
+        let hit = self.sat_open(&key, &mut f);
+        if hit >= 0 {
+            return hit != 0;
+        }
+        let r = self.tc_thread_aggregate(ty, sync, depth);
+        self.sat_close(key, &f, r);
+        return r;
+    }
+    // `tc_thread_marker` of an aggregate: an explicit conformance is an unsafe override; otherwise
+    // every field must qualify.
+    fn tc_thread_aggregate(self: &mut Self, ty: TypeId, sync: bool, depth: i32) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
         let mut gp = Defs8 {};
@@ -6185,6 +6397,7 @@ extend TypeChecker {
         // Resolved by decl with no receiver: they land in always_methods, which is what the print
         // lowering needs: it names them for whatever String instance it happens to build.
         self.mark_recv = TYPE_NONE;
+        self.mark_n += 1;
         let fh: []str = FORMAT_HELPERS;
         for k in 0..fh.len() {
             self.find_method_cstr(sh.mid, sh.node, fh[k]);
@@ -6697,6 +6910,7 @@ extend TypeChecker {
             }
             if !probe {
                 self.mark_recv = want;
+                self.mark_n += 1;
                 self.tc_mark_method_used(md);
                 unsafe (*self.cur_ast()).set_coerce(node, want, md);
                 unsafe (*self.cur_ast()).set_type_args(node, &bnd[0], np as u8);
@@ -8013,6 +8227,36 @@ extend TypeChecker {
         return false;
     }
 
+    // Fill `dup_heads` / `dup_next` over the module's items: each list in item order.
+    fn dup_index_build(self: &mut Self) {
+        let a = self.cur_ast();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for _ in 0..items.len {
+            self.dup_next.push(EXT_END);
+        }
+        let mut i = items.len;
+        while i > 0 {
+            i = i - 1;
+            let id = unsafe (*a).list(items)[i as usize];
+            let n = unsafe (*a).at_const(id);
+            if n.kind != NodeKind::NODE_EXTEND || n.as_data.extend_def.interface_type == NODE_NONE {
+                continue;
+            }
+            let key = ConfKey {
+                iface: unsafe (*a).resolution_def(n.as_data.extend_def.interface_type),
+                tgt: unsafe (*a).resolution_def(n.as_data.extend_def.target_type),
+            };
+            switch self.dup_heads.get(&key) {
+                Some(v) => {
+                    self.dup_next[i as usize] = *v;
+                },
+                None => {},
+            };
+            self.dup_heads.insert(key, i);
+        }
+        self.dup_built = true;
+    }
+
     fn check_extend_conformance(self: &mut Self, id: NodeId) {
         let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
         let iface = unsafe (*self.cur_ast()).resolution_def(itype);
@@ -8026,34 +8270,26 @@ extend TypeChecker {
         self.check_copy_conformance(id, iface, suba[0]);
         // A type states one conformance per (interface, arguments) pair: `Conv<i32>` and
         // `Conv<bool>` are distinct, a repeat of either could only redefine its methods. Scan the
-        // EARLIER siblings so the later extend carries the error; a cross-module duplicate still
+        // EARLIER siblings with this interface and target (`dup_heads`) so the later extend carries the error; a cross-module duplicate still
         // surfaces at link.
         let tgt = unsafe (*self.cur_ast()).resolution_def(
             unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.target_type,
         );
         let items = unsafe (*self.cur_ast()).at_const((*self.cur_ast()).root).as_data.program.items;
-        for i in 0..items.len {
-            let prev = unsafe (*self.cur_ast()).list(items)[i as usize];
+        if !self.dup_built {
+            self.dup_index_build();
+        }
+        let mut at = switch self.dup_heads.get(&ConfKey { iface: iface, tgt: tgt }) {
+            Some(v) => *v,
+            None => EXT_END,
+        };
+        while at != EXT_END {
+            let prev = unsafe (*self.cur_ast()).list(items)[at as usize];
             if prev == id {
                 break;
             }
-            if unsafe (*self.cur_ast()).at_const(prev).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
+            at = self.dup_next[at as usize];
             let pit = unsafe (*self.cur_ast()).at_const(prev).as_data.extend_def.interface_type;
-            if pit == NODE_NONE {
-                continue;
-            }
-            let piface = unsafe (*self.cur_ast()).resolution_def(pit);
-            if piface.module != iface.module || piface.node != iface.node {
-                continue;
-            }
-            let ptgt = unsafe (*self.cur_ast()).resolution_def(
-                unsafe (*self.cur_ast()).at_const(prev).as_data.extend_def.target_type,
-            );
-            if ptgt.module != tgt.module || ptgt.node != tgt.node {
-                continue;
-            }
             let mut psubp = Defs8 {};
             let mut psuba = Tys8 {};
             let pnsub = self.tc_extend_self_frame(prev, iface, &mut psubp, &mut psuba);
@@ -11988,6 +12224,7 @@ extend TypeChecker {
         // `T::assoc()` names its type rather than passing a receiver, so aggregate_of never sees it:
         // hand the qualifying instance to the used-marking directly.
         self.mark_recv = inst_ty;
+        self.mark_n += 1;
         let mut method = self.find_method(bmod, bdecl, mname);
         if method.node == NODE_NONE {
             // An interface DEFAULT the conformance inherits (a derived `default()`) is reachable
@@ -15312,6 +15549,12 @@ extend TypeChecker {
     }
 
     fn close_instances(self: &mut Self) {
+        // Each module's generic extends by target node, filled on the module's first instance:
+        // `heads` maps module << 32 | target to the first package extend index (`PkgIndex.exts`),
+        // `next` links an extend to the next one of its target in item order (EXT_END ends a list).
+        let mut heads = Map::<u64, u32>::new();
+        let mut next = Vector::<u32>::new();
+        let mut filled = Vector::<bool>::new();
         let mut ii: usize = 0;
         while ii < unsafe (*self.cur_ast()).ninstances() {
             let it = *unsafe (*self.cur_ast()).used_instance(ii);
@@ -15326,9 +15569,38 @@ extend TypeChecker {
                 continue;
             }
             let ma = self.mod_ast(it.module);
-            let ne = self.ext_count(it.module);
-            for i in 0..ne {
-                let iid = self.ext_at(it.module, i);
+            if filled.len() == 0 {
+                filled.resize_default(self.pkg_count());
+                for _ in 0..(unsafe (*self.package).idx.exts).len() {
+                    next.push(EXT_END);
+                }
+            }
+            if !filled[it.module as usize] {
+                filled[it.module as usize] = true;
+                let base = (unsafe (*self.package).idx.mod_exts)[it.module as usize];
+                let mut i = self.ext_count(it.module);
+                while i > 0 {
+                    i = i - 1;
+                    let en = unsafe (*ma).at_const(self.ext_at(it.module, i));
+                    if en.as_data.extend_def.generics.len != 0 {
+                        let key = it.module as u64 << 32 | (unsafe (*ma).resolution(en.as_data.extend_def.target_type)) as u64;
+                        switch heads.get(&key) {
+                            Some(v) => {
+                                next[base as usize + i] = *v;
+                            },
+                            None => {},
+                        };
+                        heads.insert(key, base + i as u32);
+                    }
+                }
+            }
+            let mut at = switch heads.get(&(it.module as u64 << 32 | it.decl as u64)) {
+                Some(v) => *v,
+                None => EXT_END,
+            };
+            while at != EXT_END {
+                let iid = (unsafe (*self.package).idx.exts)[at as usize];
+                at = next[at as usize];
                 let itn = unsafe (*ma).at_const(iid);
                 // A plain generic extend's methods are instantiated per (instance, method) pair instead,
                 // by the instance graph (`expand_method`): closing their signatures for every instance is what a
@@ -15338,45 +15610,34 @@ extend TypeChecker {
                     it.decl,
                     AttrKind::ATTR_EMIT_MACRO,
                 ) == null;
-                if itn.as_data.extend_def.generics.len != 0 && unsafe (*ma).resolution(
-                    itn.as_data.extend_def.target_type,
-                ) == it.decl {
-                    let gens = itn.as_data.extend_def.generics;
-                    let mut ip = Defs8 {};
-                    let mut ia = Tys8 {};
-                    let mut ipn: i32 = 0;
-                    let mut g: u32 = 0;
-                    while g < gens.len && g as u8 < it.n && ipn < 8 {
-                        ip[ipn as usize] = DefId { module: it.module, node: unsafe (*ma).list(gens)[g as usize] };
-                        ia[ipn as usize] = unsafe it.args[g as usize];
-                        ipn = ipn + 1;
-                        g = g + 1;
-                    }
-                    let ms = unsafe (*ma).at_const(iid).as_data.extend_def.items;
-                    for j in 0..ms.len {
-                        let mid = unsafe (*ma).list(ms)[j as usize];
-                        let mn = unsafe (*ma).at_const(mid);
-                        if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 && !demand {
-                            let ps = mn.as_data.function.params;
-                            for p in 0..ps.len {
-                                let pid = unsafe (*ma).list(ps)[p as usize];
-                                self.subst_type(
-                                    self.lower_type_in(it.module, unsafe (*ma).at_const(pid).as_data.parameter.ty),
-                                    &ip[0],
-                                    &ia[0],
-                                    ipn,
-                                );
-                            }
-                            let rs = mn.as_data.function.returns;
-                            if rs.len == 1 {
-                                let r0 = unsafe (*ma).list(rs)[0];
-                                self.subst_type(
-                                    self.lower_type_in(it.module, unsafe (*ma).slot_type_node(r0)),
-                                    &ip[0],
-                                    &ia[0],
-                                    ipn,
-                                );
-                            }
+                let mut ip = Defs8 {};
+                let mut ia = Tys8 {};
+                let mut ipn: i32 = 0;
+                self.frame_ext(it.module, iid, &it.args[0], it.n, &mut ip[0], &mut ia[0], &mut ipn);
+                let ms = unsafe (*ma).at_const(iid).as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe (*ma).list(ms)[j as usize];
+                    let mn = unsafe (*ma).at_const(mid);
+                    if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 && !demand {
+                        let ps = mn.as_data.function.params;
+                        for p in 0..ps.len {
+                            let pid = unsafe (*ma).list(ps)[p as usize];
+                            self.subst_type(
+                                self.lower_type_in(it.module, unsafe (*ma).at_const(pid).as_data.parameter.ty),
+                                &ip[0],
+                                &ia[0],
+                                ipn,
+                            );
+                        }
+                        let rs = mn.as_data.function.returns;
+                        if rs.len == 1 {
+                            let r0 = unsafe (*ma).list(rs)[0];
+                            self.subst_type(
+                                self.lower_type_in(it.module, unsafe (*ma).slot_type_node(r0)),
+                                &ip[0],
+                                &ia[0],
+                                ipn,
+                            );
                         }
                     }
                 }
@@ -15653,7 +15914,6 @@ extend TypeChecker {
             unsafe (*self.package).set_item_state_deep(rec9, loader::IS_CHECKED);
         }
         self.cur_item = loader::ITEM_NONE;
-        self.reach_ready();
         self.cur_top = NODE_NONE;
         self.cur_lo = 0;
     }
@@ -15677,7 +15937,7 @@ extend TypeChecker {
 
     /// Check the module's top-level nodes that are no item (a `static_assert`) after every item
     /// of the module: the reader is the module's last item with every component the module's
-    /// items depend on, and the module's own, as visible (`gitems::reach_fill_module`). Each
+    /// items depend on, and the module's own, as visible (`gitems::Reach::of_module`). Each
     /// node's diagnostics land in `orphan_errs`, in declaration order.
     pub fn check_orphans(self: &mut Self) {
         if !unsafe (*self.package).sched.built {
@@ -15699,10 +15959,8 @@ extend TypeChecker {
                 continue;
             }
             if !set {
-                gitems::reach_fill_module(unsafe &*self.package, m as usize, &mut self.reach);
+                self.reach.of_module(unsafe &*self.package, m as usize);
                 self.cur_item = i1 - 1;
-                self.reach_ptr = self.reach.as_ptr();
-                self.reach_n = self.reach.len();
                 set = true;
             }
             self.cur_top = it9;
@@ -15714,7 +15972,6 @@ extend TypeChecker {
             prev = it9;
         }
         self.cur_item = loader::ITEM_NONE;
-        self.reach_ready();
         self.cur_top = NODE_NONE;
         self.cur_lo = 0;
     }
@@ -15741,19 +15998,15 @@ extend TypeChecker {
         if t == loader::ITEM_NONE {
             return true;
         }
-        return gitems::visible(unsafe &*self.package, self.cur_item, t, self.reach_ptr, self.reach_n);
+        return gitems::visible(unsafe &*self.package, self.cur_item, t, &mut self.reach);
     }
 
-    /// Point `reach_ptr` at the index's row for the item under check's component.
+    /// Point `reach` at the item under check's component.
     fn reach_ready(self: &mut Self) {
         let sch = unsafe &(*self.package).sched;
-        if sch.ncomp == 0 || self.cur_item == loader::ITEM_NONE {
-            self.reach_ptr = null;
-            self.reach_n = 0;
-            return;
+        if sch.ncomp != 0 && self.cur_item != loader::ITEM_NONE {
+            self.reach.of_comp(unsafe &*self.package, sch.comp[self.cur_item as usize]);
         }
-        self.reach_ptr = gitems::reach_row(unsafe &*self.package, sch.comp[self.cur_item as usize]);
-        self.reach_n = sch.reach_w;
     }
 
     // Take (`on`) or release the constant engine's lock; no-op without an engine.
@@ -15767,13 +16020,13 @@ extend TypeChecker {
     }
 
     // Take the engine's lock and read as the item under check (`on`), or stop reading and release it.
-    fn eng_read(self: &Self, on: bool) {
+    fn eng_read(self: &mut Self, on: bool) {
         let ce = self.cir();
         if on {
             unsafe (*ce).eng_lock();
-            unsafe (*ce).set_reader(self.cur_item, self.reach_ptr, self.reach_n);
+            unsafe (*ce).set_reader(self.cur_item, &mut self.reach);
         } else {
-            unsafe (*ce).set_reader(loader::ITEM_NONE, null, 0);
+            unsafe (*ce).set_reader(loader::ITEM_NONE, null);
             unsafe (*ce).eng_unlock();
         }
     }

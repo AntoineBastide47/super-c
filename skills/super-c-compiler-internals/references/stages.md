@@ -108,7 +108,7 @@ modular return-lifetime check) run alongside.
 | `SC_FACTS_CHECK` | `facts_verify("borrowck")` | No decision table changed since typecheck |
 | `SC_LAYOUT` | `layout_pass` | Every concrete pool type vs the C layout invariants |
 | `SC_CORE_IR` | `apply_drops_of` (emission) | Inlined bodies re-verify; every PROVEN bounds check re-proves |
-| `SC_BC_VALIDATE` | `bc_elaborate` (borrow pass), `apply_drops_of` (emission) | Skipped analysis stages find nothing; loan sources, move-path parents, init rows and fixpoint bounds hold; every elaborated body verifies and `verify_drops` accepts it |
+| `SC_BC_VALIDATE` | `bc_elaborate` (borrow pass), `apply_drops_of` (emission) | Skipped analysis stages find nothing; loan sources, move-path parents, init rows and the tight liveness bound hold; every elaborated body verifies and `verify_drops` accepts it |
 
 ## 7. Lint, Panic Check, Const Flush
 

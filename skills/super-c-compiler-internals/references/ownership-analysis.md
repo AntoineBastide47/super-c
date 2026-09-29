@@ -83,9 +83,10 @@ per body, in `bc_validate_facts` and `bc_elaborate`:
 - every loan issues at a borrow operation: a reference, a carrying projected copy or view,
   a closure capture, or a call's implicit autoref;
 - every borrow error names a loan and a point of the body;
-- every fixpoint queue stayed within its monotone bound (`Liveness.pushes`,
-  `MoveFlow.pushes`, `Solver.flow_pushes`: the seeds plus one push per row change, a row
-  changing at most once per lattice bit);
+- the liveness queue stayed within its tight bound (seeds plus two pushes per edge and
+  local); every build asserts the looser monotone bound of each fixpoint queue at each push
+  (`Liveness.pushes`, `MoveFlow.pushes`, `Solver.flow_pushes`: the seeds plus one push per
+  row change, a row changing at most once per lattice bit);
 - a body outside the schedule gate schedules nothing;
 - the elaborated body passes the structural verifier (`ir::verify`, which walks the
   blocks' live statement runs) and the ownership verifier. The flag materialization

@@ -178,9 +178,11 @@ pub struct Bce {
     pub statics: Vector<u32>,
     pub pend_t: Vector<u32>,
     pub pend_r: Vector<u32>,
-    // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten` marks
-    // locals reassigned inside the window, whose recorded binds describe their OLD value.
-    pub cwritten: Vector<bool>,
+    // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten[l] ==
+    // cstamp` marks a local reassigned inside the current window, whose recorded binds describe its
+    // OLD value; each window takes a fresh stamp, so no per-window reset touches every local.
+    pub cwritten: Vector<u32>,
+    pub cstamp: u32,
     pub la_dest: Vector<u32>,
     pub la_off: Vector<i64>,
     pub ll_dest: Vector<u32>,
@@ -243,7 +245,8 @@ extend Bce {
             statics: Vector::<u32>::new(),
             pend_t: Vector::<u32>::new(),
             pend_r: Vector::<u32>::new(),
-            cwritten: Vector::<bool>::new(),
+            cwritten: Vector::<u32>::new(),
+            cstamp: 0,
             la_dest: Vector::<u32>::new(),
             la_off: Vector::<i64>::new(),
             ll_dest: Vector::<u32>::new(),
@@ -304,20 +307,20 @@ extend Bce {
             return vkey_none();
         }
         let mut l = self.whole_local(b, op.data);
-        if l == ir::IR_NONE || clean && self.cwritten[l as usize] {
+        if l == ir::IR_NONE || clean && self.cwritten[l as usize] == self.cstamp {
             return vkey_none();
         }
         let mut off: i64 = 0;
         let mut guard = 0;
         while guard < 6 {
             let cb = *self.copyof.at(l as usize);
-            if cb.ok && cb.my_v == self.lver[l as usize] && self.lver[cb.src as usize] == cb.src_v && (!clean || !self.cwritten[cb.src as usize]) {
+            if cb.ok && cb.my_v == self.lver[l as usize] && self.lver[cb.src as usize] == cb.src_v && (!clean || self.cwritten[cb.src as usize] != self.cstamp) {
                 l = cb.src;
                 guard += 1;
                 continue;
             }
             let ab = *self.affof.at(l as usize);
-            if ab.ok && ab.my_v == self.lver[l as usize] && self.lver[ab.src as usize] == ab.src_v && (!clean || !self.cwritten[ab.src as usize]) {
+            if ab.ok && ab.my_v == self.lver[l as usize] && self.lver[ab.src as usize] == ab.src_v && (!clean || self.cwritten[ab.src as usize] != self.cstamp) {
                 off = off + ab.c;
                 l = ab.src;
                 guard += 1;
@@ -1066,8 +1069,7 @@ extend Bce {
         if lk.is_local && lk.off == 0 {
             lb = self.len_place_of(lk.l);
         }
-        self.cwritten.clear();
-        self.cwritten.resize_default(b.locals.len());
+        self.cstamp += 1;
         // in-window definitions: affine aliases of the root (absolute offsets) and length copies
         self.la_dest.clear();
         self.la_off.clear();
@@ -1209,7 +1211,7 @@ extend Bce {
                 break; // anything else may write memory, allocate, or panic
             }
             // a reassigned local no longer names its old value anywhere below
-            self.cwritten.set(p2.base as usize, true);
+            self.cwritten.set(p2.base as usize, self.cstamp);
             let mut q2: usize = 0;
             while q2 < self.la_dest.len() {
                 if self.la_dest[q2] == p2.base {
@@ -1310,6 +1312,9 @@ extend Bce {
         self.collecting = false;
         self.escroot.clear();
         self.escroot.resize_default(nl);
+        self.cwritten.clear();
+        self.cwritten.resize_default(nl);
+        self.cstamp = 0;
         self.esclist.clear();
         self.statics.clear();
         for i in 0..nl {

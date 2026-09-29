@@ -36,7 +36,7 @@ pub struct Solver {
     pub c: *const df::Cfg,
     pub lv: *const df::Liveness,
     pub errs: Vector<BorrowErr>,
-    pub flow_pushes: u32, // scope_flow queue pushes, seeds included (validation asserts the bound)
+    pub flow_pushes: u32, // scope_flow queue pushes, seeds included (asserted within the monotone bound)
     pub point_block: Vector<u32>, // per point: its block
     pub sub_by_point: Vector<u32>, // subset indexes sorted by point
     pub sub_pt_start: Vector<u32>, // per point (+1): range into sub_by_point (entry seeds at 0)
@@ -600,6 +600,8 @@ extend Solver {
             queued.set(bi as usize, true);
         }
         self.flow_pushes = nb;
+        // Monotone bound: a block's entry row only gains loan bits, and each gain queues it once.
+        let bound = nb as u64 + c.succ.len() as u64 * f.loans.len() as u64;
         while queue.len() != 0 {
             let bi = queue[queue.len() - 1];
             let _ = queue.pop();
@@ -611,6 +613,7 @@ extend Solver {
                     queued.set(t as usize, true);
                     queue.push(t);
                     self.flow_pushes += 1;
+                    assert(self.flow_pushes as u64 <= bound, "the loan scope fixpoint stays within its bound");
                 }
             }
         }

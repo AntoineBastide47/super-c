@@ -112,8 +112,7 @@ pub struct ElabCtx {
     pub ins_cond_f: Vector<u32>,
     pub ins_clr_at: Vector<u32>,
     pub ins_clr_fl: Vector<u32>,
-    pub ins_clr_blk: Vector<u32>,
-    pub ins_clr_blk_fl: Vector<u32>,
+    pub ins_flag: Vector<u32>,
     pub ins_off: Vector<u32>,
     pub ins_idx: Vector<u32>,
     pub ins_fill: Vector<u32>,
@@ -135,8 +134,7 @@ extend ElabCtx {
             ins_cond_f: Vector::<u32>::new(),
             ins_clr_at: Vector::<u32>::new(),
             ins_clr_fl: Vector::<u32>::new(),
-            ins_clr_blk: Vector::<u32>::new(),
-            ins_clr_blk_fl: Vector::<u32>::new(),
+            ins_flag: Vector::<u32>::new(),
             ins_off: Vector::<u32>::new(),
             ins_idx: Vector::<u32>::new(),
             ins_fill: Vector::<u32>::new(),
@@ -147,7 +145,7 @@ extend ElabCtx {
 
     /// Heap bytes the context keeps across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.sched.drops.capacity() * sizeof(DropAt) + self.sched.moves.capacity() * sizeof(MoveAt) + (self.mi.capacity() + self.di.capacity() + self.mm.capacity()) * 8 + (self.scratch.capacity() + self.sub.capacity() + self.ins_cond_l.capacity() + self.ins_cond_f.capacity() + self.ins_clr_at.capacity() + self.ins_clr_fl.capacity() + self.ins_clr_blk.capacity() + self.ins_clr_blk_fl.capacity() + self.ins_off.capacity() + self.ins_idx.capacity() + self.ins_fill.capacity() + self.fdecls.capacity() + self.ftys.capacity()) * 4) as u64;
+        return (self.sched.drops.capacity() * sizeof(DropAt) + self.sched.moves.capacity() * sizeof(MoveAt) + (self.mi.capacity() + self.di.capacity() + self.mm.capacity()) * 8 + (self.scratch.capacity() + self.sub.capacity() + self.ins_cond_l.capacity() + self.ins_cond_f.capacity() + self.ins_clr_at.capacity() + self.ins_clr_fl.capacity() + self.ins_flag.capacity() + self.ins_off.capacity() + self.ins_idx.capacity() + self.ins_fill.capacity() + self.fdecls.capacity() + self.ftys.capacity()) * 4) as u64;
     }
 }
 
@@ -571,16 +569,6 @@ fn path_place(b: &mut ir::CoreBody, forest: &mp::MoveForest, l: u32, path: u32) 
 
 const NO_FLAG: u32 = 0xFFFFFFFF;
 
-// The guard flag local of conditionally dropped local `l`; NO_FLAG when it has none.
-fn flag_of(cond_l: &Vector<u32>, cond_f: &Vector<u32>, l: u32) u32 {
-    for i in 0..cond_l.len() {
-        if cond_l[i] == l {
-            return cond_f[i];
-        }
-    }
-    return NO_FLAG;
-}
-
 // One `flag = <v>` statement appended to the pool (fresh constant/operand/rvalue/place entries).
 fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
     let bt = Ast::builtin(BuiltinType::BT_BOOL);
@@ -602,16 +590,18 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
     let mut cond_f = replace(&mut cx.ins_cond_f, Vector::<u32>::new());
     let mut clr_at = replace(&mut cx.ins_clr_at, Vector::<u32>::new());
     let mut clr_fl = replace(&mut cx.ins_clr_fl, Vector::<u32>::new());
-    let mut clr_blk = replace(&mut cx.ins_clr_blk, Vector::<u32>::new());
-    let mut clr_blk_fl = replace(&mut cx.ins_clr_blk_fl, Vector::<u32>::new());
+    let mut flag = replace(&mut cx.ins_flag, Vector::<u32>::new());
     let mut ins_off = replace(&mut cx.ins_off, Vector::<u32>::new());
     let mut ins_idx = replace(&mut cx.ins_idx, Vector::<u32>::new());
     cond_l.truncate(0);
     cond_f.truncate(0);
     clr_at.truncate(0);
     clr_fl.truncate(0);
-    clr_blk.truncate(0);
-    clr_blk_fl.truncate(0);
+    // The guard flag local of each original local, NO_FLAG when it has none.
+    flag.truncate(0);
+    for _i in 0..b.locals.len() {
+        flag.push(NO_FLAG);
+    }
     let sched = &cx.sched;
     // Conditional drops test a REAL move flag: one bool temp per guarded local, true at entry and
     // at every storage-live, false after every whole-value move; the guarded Drop carries the flag
@@ -621,7 +611,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         if da.kind != DK_COND && da.kind != DK_OVERC {
             continue;
         }
-        if flag_of(&cond_l, &cond_f, da.local) != NO_FLAG {
+        if flag[da.local as usize] != NO_FLAG {
             continue;
         }
         cond_l.push(da.local);
@@ -629,29 +619,30 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
             ir::LocalDecl::anon(Ast::builtin(BuiltinType::BT_BOOL), ir::LS_TEMP, b.locals.at(da.local as usize).span),
         );
         cond_f.push(b.locals.len() as u32 - 1);
+        flag.set(da.local as usize, b.locals.len() as u32 - 1);
     }
     // Flag clears keyed by ORIGINAL statement index (terminator moves attribute to the block's
-    // last statement -- the consume happens after it and before the terminator).
+    // last statement: the consume happens after it and before the terminator); a move out of a
+    // block with no statements keys on `nst + block`.
+    let nst = b.statements.len() as u32;
     if cond_l.len() != 0 {
         for mvi in 0..sched.moves.len() {
             let mv = *sched.moves.at(mvi);
-            let fl = flag_of(&cond_l, &cond_f, mv.local);
+            let fl = flag[mv.local as usize];
             if fl == NO_FLAG {
                 continue;
             }
             if mv.stmt != 0xFFFFFFFFu32 {
                 clr_at.push(mv.stmt);
-                clr_fl.push(fl);
             } else {
                 let ob = *b.blocks.at(mv.block as usize);
                 if ob.stmt_len != 0 {
                     clr_at.push(ob.stmt_start + ob.stmt_len - 1);
-                    clr_fl.push(fl);
                 } else {
-                    clr_blk.push(mv.block);
-                    clr_blk_fl.push(fl);
+                    clr_at.push(nst + mv.block);
                 }
             }
+            clr_fl.push(fl);
         }
     }
     // The scheduled whole-value drops per block in schedule order (statement order within a block),
@@ -730,7 +721,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
             t.t0 = next;
             if kind == DK_COND || kind == DK_OVERC {
                 t.args_len = 1;
-                t.args_start = flag_of(&cond_l, &cond_f, l);
+                t.args_start = flag[l as usize];
             }
             b.blocks[cur as usize].stmt_start = run_start;
             b.blocks[cur as usize].stmt_len = keep;
@@ -753,6 +744,30 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
     // inits/retrues/clears spliced in (runs stay contiguous), then the old entries are removed: the
     // emitter's per-local counts read the whole pool.
     if cond_l.len() != 0 {
+        // The clears bucketed by key in move order, reusing the drop buckets:
+        // `ins_idx[ins_off[k] .. ins_off[k + 1]]` indexes `clr_at`/`clr_fl`.
+        let nk = nst as usize + nb;
+        ins_off.clear();
+        ins_off.resize_default(nk + 1);
+        for i in 0..clr_at.len() {
+            ins_off.set(clr_at[i] as usize + 1, ins_off[clr_at[i] as usize + 1] + 1);
+        }
+        for k in 0..nk {
+            ins_off.set(k + 1, ins_off[k] + ins_off[k + 1]);
+        }
+        ins_idx.clear();
+        ins_idx.resize_default(clr_at.len());
+        let mut fill = replace(&mut cx.ins_fill, Vector::<u32>::new());
+        fill.truncate(0);
+        for k in 0..nk {
+            fill.push(ins_off[k]);
+        }
+        for i in 0..clr_at.len() {
+            let k = fill[clr_at[i] as usize];
+            ins_idx.set(k as usize, i as u32);
+            fill.set(clr_at[i] as usize, k + 1);
+        }
+        cx.ins_fill = fill;
         let nb2 = b.blocks.len();
         let old = b.statements.len();
         for bi in 0..nb2 {
@@ -763,9 +778,9 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                     flag_stmt(b, cond_f[i], 1, b.locals.at(cond_l[i] as usize).span);
                 }
             }
-            for i in 0..clr_blk.len() {
-                if clr_blk[i] == bi as u32 {
-                    flag_stmt(b, clr_blk_fl[i], 0, blk.term.span);
+            if bi < nb {
+                for c in ins_off[nst as usize + bi]..ins_off[nst as usize + bi + 1] {
+                    flag_stmt(b, clr_fl[ins_idx[c as usize] as usize], 0, blk.term.span);
                 }
             }
             for si in 0..blk.stmt_len {
@@ -779,14 +794,11 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                 } else if st.kind == ir::ST_ASSIGN && b.places.at(st.place as usize).proj_len == 0 {
                     rl = b.places.at(st.place as usize).base;
                 }
-                let rf = flag_of(&cond_l, &cond_f, rl);
-                if rf != NO_FLAG {
-                    flag_stmt(b, rf, 1, st.span);
+                if rl != NO_FLAG && flag[rl as usize] != NO_FLAG {
+                    flag_stmt(b, flag[rl as usize], 1, st.span);
                 }
-                for i in 0..clr_at.len() {
-                    if clr_at[i] == sx {
-                        flag_stmt(b, clr_fl[i], 0, st.span);
-                    }
+                for c in ins_off[sx as usize]..ins_off[sx as usize + 1] {
+                    flag_stmt(b, clr_fl[ins_idx[c as usize] as usize], 0, st.span);
                 }
             }
             b.blocks[bi].stmt_start = ns;
@@ -806,8 +818,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
     cx.ins_cond_f = cond_f;
     cx.ins_clr_at = clr_at;
     cx.ins_clr_fl = clr_fl;
-    cx.ins_clr_blk = clr_blk;
-    cx.ins_clr_blk_fl = clr_blk_fl;
+    cx.ins_flag = flag;
     cx.ins_off = ins_off;
     cx.ins_idx = ins_idx;
 }

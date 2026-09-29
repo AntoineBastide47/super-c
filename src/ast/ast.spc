@@ -1852,8 +1852,11 @@ pub struct Ast {
     pub deref_uses: Vector<DerefUse>,
     pub deref_at: Vector<u32>,
     pub attrs: Vector<Attr>,
+    attr_ix: Map<u64, u32>, // owner << 8 | kind -> its first `attrs` index
     pub metas: Vector<MetaAttr>,
     pub lifetime_decls: Vector<LifetimeDecl>,
+    pub lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
+    pub member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
     pub where_bounds: Vector<WhereBound>,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
@@ -1918,6 +1921,9 @@ extend Ast as Free {
         self.attrs.free();
         self.metas.free();
         self.lifetime_decls.free();
+        self.lifetime_at.free();
+        self.attr_ix.free();
+        self.member_of.free();
         self.where_bounds.free();
         self.call_info.free();
         self.op_method.free();
@@ -2583,19 +2589,24 @@ extend Ast {
         if list.len == 0 {
             return;
         }
+        if !self.lifetime_at.contains_key(&owner) {
+            self.lifetime_at.insert(owner, self.lifetime_decls.len() as u32);
+        }
         self.lifetime_decls.push(LifetimeDecl { owner: owner, list: list });
     }
 
     pub fn lifetimes_of(self: &Self, owner: NodeId) NodeList {
-        for i in 0..self.lifetime_decls.len() {
-            if self.lifetime_decls.at(i).owner == owner {
-                return self.lifetime_decls.at(i).list;
-            }
-        }
-        return NodeList { start: 0, len: 0 };
+        return switch self.lifetime_at.get(&owner) {
+            Some(i) => self.lifetime_decls.at((*i) as usize).list,
+            None => NodeList { start: 0, len: 0 },
+        };
     }
 
     pub fn add_attr(self: &mut Self, attr: Attr) {
+        let key = attr.owner as u64 << 8 | attr.kind as u64;
+        if !self.attr_ix.contains_key(&key) {
+            self.attr_ix.insert(key, self.attrs.len() as u32);
+        }
         self.attrs.push(attr);
     }
 
@@ -3030,36 +3041,31 @@ extend Ast {
 
     /// The top-level extend or interface whose item list holds `fnode`; NODE_NONE when none.
     pub const fn container_of(self: &Self, fnode: NodeId) NodeId {
-        let items = self.at_const(self.root).as_data.program.items;
+        return switch self.member_of.get(&fnode) {
+            Some(c) => *c,
+            None => NODE_NONE,
+        };
+    }
+
+    /// Record `container` as the extend or interface of every node in `items`, or forget it
+    /// (NODE_NONE) when the platform filter drops the container.
+    pub fn set_members(self: &mut Self, container: NodeId, items: NodeList) {
         for i in 0..items.len {
-            let iid = unsafe self.list(items)[i as usize];
-            let n = self.at_const(iid);
-            if n.kind != NodeKind::NODE_EXTEND && n.kind != NodeKind::NODE_INTERFACE {
-                continue;
-            }
-            let ms = if n.kind == NodeKind::NODE_EXTEND {
-                n.as_data.extend_def.items;
+            let m = unsafe self.list(items)[i as usize];
+            if container == NODE_NONE {
+                let _ = self.member_of.remove(&m);
             } else {
-                n.as_data.interface_def.items;
-            };
-            for j in 0..ms.len {
-                if unsafe self.list(ms)[j as usize] == fnode {
-                    return iid;
-                }
+                self.member_of.insert(m, container);
             }
         }
-        return NODE_NONE;
     }
 
     /// The first attribute of `kind` on `owner`; null when none.
     pub const fn attr_of(self: &Self, owner: NodeId, kind: AttrKind) *const Attr {
-        for i in 0..self.attrs.len() {
-            let at = self.attrs.at(i);
-            if at.owner == owner && at.kind == kind as u8 {
-                return at;
-            }
-        }
-        return null;
+        return switch self.attr_ix.get(&(owner as u64 << 8 | kind as u64)) {
+            Some(i) => self.attrs.at((*i) as usize),
+            None => null,
+        };
     }
 
     /// True when enum `decl` has a variant with a payload (it emits as a tagged struct, tagged by

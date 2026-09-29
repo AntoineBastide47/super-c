@@ -191,39 +191,42 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
 
 // Per-module fingerprint: sources of the transitive import closure (prelude included), the
 // module's own identity, and its prelude-live bit. Everything package-shaped lives in the header.
+// The closure is a bit set: clearing and reading it in module order costs a word per 64 modules.
 fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) {
     let n = p.modules.len();
     let mut srch = Vector::<u64>::new();
+    let mut pre = Vector::<u32>::new();
     for i in 0..n {
         srch.push(fnv_cont(FNV_BASIS, p.modules[i].source.as_str()));
+        if p.modules[i].prelude {
+            pre.push(i as u32);
+        }
     }
-    let mut inq = Vector::<u8>::new();
-    inq.resize_default(n);
+    let w = (n + 63) / 64;
+    let mut inq = Vector::<u64>::new();
+    inq.resize_default(w);
     let mut stack = Vector::<u32>::new();
     for m in 0..n {
-        for i in 0..n {
-            inq.set(i, 0);
+        for k in 0..w {
+            inq.set(k, 0);
         }
         stack.truncate(0);
         stack.push(m as u32);
-        inq.set(m, 1);
-        for i in 0..n {
-            if p.modules[i].prelude && *inq.at(i) == 0 {
-                inq.set(i, 1);
+        inq.set(m / 64, inq[m / 64] | 1u64 << (m as u64 & 63));
+        for k in 0..pre.len() {
+            let i = pre[k] as usize;
+            if (inq[i / 64] >> (i as u64 & 63) & 1) == 0 {
+                inq.set(i / 64, inq[i / 64] | 1u64 << (i as u64 & 63));
                 stack.push(i as u32);
             }
         }
-        while stack.len() != 0 {
-            let cur = switch stack.pop() {
-                Some(v) => v as usize,
-                None => 0 as usize,
-            };
-            let lo = (*p.idx.mod_imports.at(cur)) as usize;
-            let hi = (*p.idx.mod_imports.at(cur + 1)) as usize;
+        while let Some(cur) = stack.pop() {
+            let lo = (*p.idx.mod_imports.at(cur as usize)) as usize;
+            let hi = (*p.idx.mod_imports.at(cur as usize + 1)) as usize;
             for e in lo..hi {
                 let d = (*p.idx.imports.at(e)) as usize;
-                if *inq.at(d) == 0 {
-                    inq.set(d, 1);
+                if (inq[d / 64] >> (d as u64 & 63) & 1) == 0 {
+                    inq.set(d / 64, inq[d / 64] | 1u64 << (d as u64 & 63));
                     stack.push(d as u32);
                 }
             }
@@ -231,8 +234,11 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
         let mut h = FNV_BASIS;
         h = fnv_mix(h, m as u64);
         h = fnv_cont(h, p.modules[m].path.as_str());
-        for i in 0..n {
-            if *inq.at(i) != 0 {
+        for k in 0..w {
+            let mut b = inq[k];
+            while b != 0 {
+                let i = k * 64 + b.trailing_zeros();
+                b &= b - 1;
                 h = fnv_mix(h, i as u64);
                 h = fnv_mix(h, srch[i]);
             }

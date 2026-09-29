@@ -604,7 +604,6 @@ fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_nee
         }
         assert(ctx.moves.npaths == np && ctx.moves.words == w, "init rows sized by the path count");
         assert(ctx.moves.mi.len() as u32 == nb * w && ctx.moves.di.len() as u32 == nb * w, "one init row per block");
-        assert(ctx.moves.pushes <= 2 * nb + 3 * nedges * np, "the move/init fixpoint stays within its bound");
     }
     for l in 0..ctx.facts.loans.len() {
         let ln = ctx.facts.loans.at(l);
@@ -634,12 +633,6 @@ fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_nee
     }
     if lv_need {
         assert(ctx.liveness.pushes <= nb + 2 * nedges * nl as u32, "the liveness fixpoint stays within its bound");
-    }
-    if ctx.facts.loans.len() != 0 {
-        assert(
-            ctx.solver.flow_pushes <= nb + nedges * ctx.facts.loans.len() as u32,
-            "the loan scope fixpoint stays within its bound",
-        );
     }
 }
 
