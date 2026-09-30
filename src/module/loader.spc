@@ -87,6 +87,11 @@ pub struct ItemSched {
     /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
     pub top_lo: Vector<u32>,
     pub body_hi: Vector<u32>,
+    /// The member names of the builtin extends outside the prelude (`graph::items::builtin_edges`):
+    /// the name's 32-bit hash << 32 | the extend item, sorted; `bmask` a bit per first byte and
+    /// length class of those names, the prefilter of the scan.
+    pub bnames: Vector<u64>,
+    pub bmask: u64,
     /// The component graph (`build`): `cdep` the components each component depends on, `citem`
     /// each component's items ascending. Both CSR by component.
     pub cdep_off: Vector<u32>,
@@ -106,7 +111,7 @@ pub struct ItemSched {
 extend ItemSched {
     /// Approximate owned bytes.
     pub const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 

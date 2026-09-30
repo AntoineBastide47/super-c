@@ -4401,7 +4401,9 @@ extend Lowerer {
             // `Type::<Args>::assoc()`: the bound args ride the CALLEE (or its qualifying path),
             // not the call node
             tn = self.copy_targs(d.callee);
-            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER {
+            // Only a path's qualifier carries them: a method call's receiver may be a turbofished
+            // call of its own (`x.m::<u8>().get()`), whose arguments are not this call's.
+            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path {
                 let ob9 = self.f.node(d.callee).as_data.member.object;
                 tn = self.copy_targs(ob9);
                 if tn == 0 {

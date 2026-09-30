@@ -45,11 +45,45 @@ super-c clean                # remove the out-dir and every <root dir>/build/<pr
 The build system reads `build.toml` in the working directory. An emit stamp skips the
 entire transpile when no input changed (~25 ms no-op); it records the content hash of the compiler
 that emitted the tree (a different compiler at the same path with the same mtime transpiles again,
-as does the per-TU cache, keyed on the same hash), the loaded module files and
+as does the per-TU cache, keyed on the same hash; a WASI guest hashes the module file its absolute
+argv[0] names, as `wasmtime run --dir=/ --argv0 <abs path>` gives it, and keeps neither stamp nor
+cache when argv[0] is relative), the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
 import also makes the stamp stale. The stamp lives in the target's profile directory, so it
-is per profile. Parallel C compilation uses
+is per profile. A build that transpiles deletes the stamp first; the emission writes its record to
+`.emit_stamp.new`, and the engine moves it into place only after the whole tree is synced into
+`gen/`, so a build that stops part way leaves no stamp for a mixed tree. Parallel C compilation uses
 content-fingerprinted stale detection with longest-job-first scheduling.
+
+### External transpiler
+
+```sh
+super-c build --target=wasm --profile=release -o gen2.wasm \
+    --transpiler="wasmtime run --dir=/ --argv0 /abs/gen1.wasm -- /abs/gen1.wasm"
+```
+
+`--transpiler=CMD` (`build` and `release` from build.toml only) runs CMD as the transpile step in
+place of the engine's own frontend; the engine then syncs, compiles and links that tree with all its
+own target and profile flags, object cache and link record. CMD is split on whitespace like every
+command string of the engine and runs with no shell, so its words hold no space. The engine appends the
+transpile form, each argument one argv entry:
+
+```sh
+CMD <root> --emit-sub=<sub> --manifest-dir=<abs project dir> --out-dir=<out-dir> --profile=<p> \
+    --target=<t> --arch=<a> [--bootstrap-tags] [--no-lint] [--const-eval-steps=N] \
+    [--const-eval-memory=N] [--emit-id=<id>]
+```
+
+`super-c <root> --emit-sub=SUB ...` (`bsys::manifest_emit`) enters the project directory, reads its
+build.toml (shards, profiles, the root's directory), and writes `<out-dir>/SUB/raw` exactly as the
+engine's own frontend does, the same bytes for the same compiler; with `--emit-id` it writes the stamp
+record under that identity. The directory is absolute because a WASI guest starts in `/`. The stamp
+identity of an external transpiler (`transpiler_id`) hashes the words of CMD and the content of each
+word that names a file, the program found through PATH: a different transpiler, or new content at the
+same path (a rebuilt `.wasm`), transpiles again, and so does a switch back to the engine's own frontend.
+A transpiler that exits nonzero fails the build: its own diagnostics print on the inherited stderr,
+then `build: transpiler failed (exit N): <argv>`. The wasm self-host fixpoint in the release and debug
+workflows uses this: WASI has no processes, so the wasm compiler cannot run the C compiler itself.
 
 ### Testing
 
@@ -362,6 +396,7 @@ a `thin` profile keeps `auto` there.
 | `--cstd=STD` | Replace the manifest's base C flags string, passed verbatim (e.g. `gnu11`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target |
+| `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above) |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |

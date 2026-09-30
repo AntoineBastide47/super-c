@@ -803,8 +803,10 @@ pub fn ensure_reactor() *mut Reactor {
                 return null;
             }
             if st == 0 && unsafe atomic::cas_i32(sp, 0, 1, false, 4, 0) {
-                // Closers count in again (a previous reactor left the count negative).
-                unsafe atomic::store_i32(&mut G_CLOSERS, 0, 4);
+                // Closers count in again if a previous reactor's mark is still there (`shutdown` clears it).
+                // A closer that counted in while no reactor ran keeps its count: a plain store lost it,
+                // and its count out then left -1 under a running reactor, whose stop waited for good.
+                let _ = unsafe atomic::cas_i32(&mut G_CLOSERS, -1, 0, false, 4, 4);
                 let r = build_reactor();
                 G_REACTOR = r;
                 unsafe atomic::store_i32(sp, 2, 2);
@@ -1122,4 +1124,8 @@ pub fn shutdown() {
     unsafe g.dealloc((*r).base, reactor_bytes(), 16);
     unsafe G_REACTOR = null;
     unsafe atomic::store_i32(sp, 0, 4);
+    // Clear the reactor's leaving mark once the state says no reactor runs (a closer that counts in from
+    // here on closes plainly). A compare-and-swap, as the builder's: a reactor started since may already
+    // have cleared it and have closers counted in.
+    let _ = unsafe atomic::cas_i32(&mut unsafe G_CLOSERS, -1, 0, false, 4, 4);
 }

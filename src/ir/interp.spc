@@ -2331,6 +2331,53 @@ extend Interp {
         return true;
     }
 
+    // The implicit borrow of a receiver passed by value to a reference parameter (`x.get()` for
+    // `get(self: &Self)`, which the emitter spells `&x`). An aggregate handle is its own referent;
+    // a scalar becomes a pointer to the place it was read from, or to a new cell for a temporary.
+    fn autoref_args(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        env: u32,
+        t: &ir::Terminator,
+        fm: ModuleId,
+        fnode: NodeId,
+        args: &mut Vector<IVal>,
+    ) bool {
+        let fa = unsafe &*self.p().module_ast_const(fm);
+        let ps = fa.at_const(fnode).as_data.function.params;
+        let n = (t.args_len as usize).min(ps.len as usize);
+        for i in 0..n {
+            let v = *args.at(i);
+            if v.kind == IV_PTR || v.kind == IV_OBJ {
+                continue;
+            }
+            let pn = fa.at_const(unsafe fa.list(ps)[i]);
+            if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+                continue;
+            }
+            let pty = fa.type_of(pn.as_data.parameter.ty);
+            if pty == TYPE_NONE || fa.type_at(pty).kind != TypeKind::TYPE_REFERENCE {
+                continue;
+            }
+            let op = *b.operands.at(b.oper_pool[t.args_start as usize + i] as usize);
+            let mut obj: u32 = 0;
+            let mut slot: u32 = 0;
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                if !self.resolve_place(b, env, op.data, &mut obj, &mut slot) {
+                    return false;
+                }
+            } else {
+                obj = self.obj_new(1);
+                if obj == 0 {
+                    return false;
+                }
+                unsafe (*self.obj_ptr(obj)).slots.set(0, v);
+            }
+            args.set(i, iv_ptr(fm, pty, obj, slot));
+        }
+        return true;
+    }
+
     fn call_in(self: &mut Self, b: &ir::CoreBody, env: u32, t: &ir::Terminator, args: &mut Vector<IVal>) bool {
         let mut fm = t.callee.module;
         let mut fnode = t.callee.node;
@@ -2549,6 +2596,9 @@ extend Interp {
                     return self.fail();
                 }
             }
+        }
+        if !closure && !self.autoref_args(b, env, t, fm, fnode, args) {
+            return false;
         }
         // Objects, pointers, and generic instances never memo.
         let mut memoable = t.dests_len <= 1 && binds.len() == 0 && !closure;

@@ -20,6 +20,9 @@ extern "C" "driver_shim.h" {
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
     /// Running executable's path into `buf`: 0 on success, nonzero on failure or truncation.
     pub fn sc_exe_path(buf: *mut char, size: u32) i32;
+    /// Record the process's argv[0], which must outlive every `sc_exe_path` call: under WASI, where
+    /// the module has no other name, an absolute argv[0] is the path `sc_exe_path` reports.
+    pub fn sc_set_argv0(argv0: *const char) void;
     /// This process's id.
     pub fn sc_getpid() i32;
     /// 1 while process `pid` is alive, 0 once it is gone (parent-death detection for the LSP).

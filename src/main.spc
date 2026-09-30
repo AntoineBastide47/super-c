@@ -805,6 +805,10 @@ fn chdir_to_manifest() {
 fn main(argv: Vector<str>) i32 {
     unsafe shim::sc_trace_install();
     let argc = argv.len();
+    if argc > 0 {
+        // Each element views its NUL-terminated argv string, which lives as long as the process.
+        unsafe shim::sc_set_argv0(argv[0].ptr() as *const char);
+    }
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
     let mut bg_link = ""; // bindgen: --link=NAME, the library the bindings need on the link line
@@ -817,6 +821,10 @@ fn main(argv: Vector<str>) i32 {
     let mut vendor_ref = ""; // vendor: --ref=, the branch, tag or commit pinned for a git source
     let mut vendor_force = false; // vendor: --force, replace an existing vendor/<name>
     let mut clean_cache = false; // clean: --cache, also drop the machine-global object cache
+    let mut transpiler = ""; // build/release: --transpiler=CMD, the command that runs the transpile step
+    let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
+    let mut manifest_dir = ""; // transpile form: --manifest-dir=DIR, the project directory
+    let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -860,6 +868,15 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if co.common_flag(arg) {} else if arg == "--test" {
                     topts.enabled = true;
+                } else if arg.starts_with("--emit-sub=") {
+                    emit_sub = arg[11..];
+                } else if arg.starts_with("--manifest-dir=") {
+                    manifest_dir = arg[15..];
+                } else if arg.starts_with("--emit-id=") {
+                    emit_id = arg[10..].parse_u64().unwrap_or(0);
+                    co.bad = co.bad || emit_id == 0;
+                } else if arg.starts_with("--profile=") || arg.starts_with("--out-dir=") {
+                    let _ = bo.build_flag(&mut co, arg);
                 } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
@@ -868,6 +885,11 @@ fn main(argv: Vector<str>) i32 {
                     co.bad = true;
                 }
                 i = i + 1;
+            }
+            // The transpile form's own flags are meaningless without it; it never runs tests.
+            let emit_flags = manifest_dir.len() != 0 || emit_id != 0 || bo.profile.len() != 0 || bo.out_dir.len() != 0;
+            if emit_sub.len() == 0 && emit_flags || emit_sub.len() != 0 && topts.enabled {
+                co.bad = true;
             }
         },
         MODE_BUILD | MODE_RELEASE => {
@@ -881,6 +903,8 @@ fn main(argv: Vector<str>) i32 {
                     } else {
                         co.bad = true;
                     }
+                } else if arg.starts_with("--transpiler=") && arg.len() > 13 {
+                    transpiler = arg[13..];
                 } else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
@@ -889,6 +913,10 @@ fn main(argv: Vector<str>) i32 {
                     co.bad = true;
                 }
                 i = i + 1;
+            }
+            // The transpiler replaces the manifest engine's frontend: a bare build has no engine.
+            if transpiler.len() != 0 && file.len() != 0 {
+                co.bad = true;
             }
             if file.len() != 0 && out_bin.len() == 0 {
                 out_bin = "a.out";
@@ -1138,6 +1166,7 @@ OPTIONS:
     --cstd=F               C standard passed to the C compiler
     --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
     --bin=NAME             build/run only that binary target
+    --transpiler=CMD       build/release: run CMD (words, no shell) as the transpile step
     --lib                  build only the [lib] target
     --link=NAME            bindgen: library the generated bindings link against
     --header=SPELLING      bindgen: how the generated module spells the #include
@@ -1287,6 +1316,44 @@ OPTIONS:
         }
         return rc;
     }
+    if emit_sub.len() != 0 {
+        // The transpile form works from the project directory, as the engine that runs it does.
+        if manifest_dir.len() != 0 {
+            let mut md = String::from_str(manifest_dir);
+            if unsafe shim::sc_chdir(md.cstr()) != 0 {
+                eprintln("error: cannot enter '{}'", manifest_dir);
+                return 1;
+            }
+        }
+        let mo = bman::load("build.toml", co.bootstrap_tags);
+        if mo.is_none() {
+            return 1;
+        }
+        let mut man = mo.unwrap();
+        man.arch = co.arch;
+        if bo.out_dir.len() != 0 {
+            man.out_dir = String::from_str(bo.out_dir);
+        }
+        let cx = bsys::BuildCtx {
+            jobs: jobs,
+            std_dir: std_dir.as_str(),
+            ce_steps: if co.ce_steps != 0 {
+                co.ce_steps;
+            } else {
+                man.ce_steps;
+            },
+            ce_mem: if co.ce_mem != 0 {
+                co.ce_mem;
+            } else {
+                man.ce_mem;
+            },
+            target: co.target,
+            bootstrap_tags: co.bootstrap_tags,
+            lint: co.lint,
+            transpiler: "",
+        };
+        return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
+    }
     if mode == Mode::MODE_LSP {
         // `super-c lsp --capabilities`: print the advertised capability JSON and exit (machine-
         // readable; editors and tests read it without a protocol session).
@@ -1330,6 +1397,7 @@ OPTIONS:
                 target: co.target,
                 bootstrap_tags: co.bootstrap_tags,
                 lint: co.lint,
+                transpiler: transpiler,
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);

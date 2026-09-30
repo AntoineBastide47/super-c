@@ -1288,7 +1288,37 @@ extend Builder {
         return unsafe (*self.ast).is_const_expr_arg(id);
     }
 
+    // A qualified constant of a written instance spelled without braces (`F<W::<u8>::K>`): the
+    // type-argument grammar reads that path bare, so it prints bare. The braced spelling of the
+    // same path keeps its braces.
+    const fn bare_const_path(self: &Self, id: NodeId) bool {
+        let mut cur = id;
+        let mut spec = false;
+        loop {
+            let n = self.nd(cur);
+            if n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
+                cur = n.as_data.member.object;
+            } else if n.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && !spec {
+                spec = true;
+                cur = n.as_data.specialization.expression;
+            } else {
+                break;
+            }
+        }
+        if !spec || self.nd(cur).kind != NodeKind::NODE_IDENTIFIER {
+            return false;
+        }
+        let mut k = self.nd(id).span.start as usize;
+        while k > 0 && self.src.byte_at(k - 1) <= b' ' {
+            k -= 1;
+        }
+        return k == 0 || self.src.byte_at(k - 1) != b'{';
+    }
+
     fn b_const_arg(self: &mut Self, id: NodeId) d::DocId {
+        if self.bare_const_path(id) {
+            return self.b_expr(id);
+        }
         let v = self.st.len();
         self.st.push(self.p.txt("{"));
         self.st.push(self.b_expr(id));

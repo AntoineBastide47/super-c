@@ -361,6 +361,7 @@ fn rs_run_one(t: RsTask) {
     out.errors = replace(&mut r.errors, diag::Errors::new());
     hirl::lower_module(p, i);
     gitems::module_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (&mut *out).edges);
+    gitems::builtin_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (&mut *out).edges);
 }
 
 // Resolution has no cross-module ordering: a module reads only parse-level foreign state through

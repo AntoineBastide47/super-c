@@ -360,6 +360,8 @@ extend Parser {
                 let e = self.parse_expression();
                 self.expect(TokenType::RightBrace, "'}'");
                 e;
+            } else if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
+                self.parse_type_arg_path();
             } else {
                 self.parse_type();
             };
@@ -406,6 +408,67 @@ extend Parser {
         while self.match(TokenType::PathSeparator) {
             self.ast.push(self.identifier());
         }
+        return self.type_path_tail(mark, start);
+    }
+
+    // A type argument that starts with a name: a type path, or a qualified constant of a written
+    // instance (`W::<u8>::K`), which the `<` after a `::` tells apart. The constant is the member
+    // path the braced `{W::<u8>::K}` spells.
+    fn parse_type_arg_path(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        let mark = self.ast.mark();
+        self.ast.push(self.identifier());
+        while self.match(TokenType::PathSeparator) {
+            if self.check(TokenType::LessThan) {
+                return self.const_path_arg(mark, start);
+            }
+            self.ast.push(self.identifier());
+        }
+        return self.type_path_tail(mark, start);
+    }
+
+    // The rest of `W::<u8>::K` at the turbofish, the parts before it on the scratch list from `mark`.
+    fn const_path_arg(self: &mut Self, mark: u32, start: u32) NodeId {
+        let mut expr = self.ast.scratch[mark as usize];
+        for i in mark as usize + 1..self.ast.scratch.len() {
+            let member = self.ast.scratch[i];
+            expr = self.mk(
+                NodeKind::NODE_MEMBER,
+                Span::new(start, self.node_span(member).end),
+                NodeAs { member: MemberData { object: expr, member: member, path: true } },
+            );
+        }
+        self.ast.scratch.truncate(mark as usize);
+        let b0 = self.bind_buf.len();
+        let types = self.parse_type_args();
+        if self.bind_buf.len() != b0 {
+            let bs = self.node_span(self.bind_buf[b0]);
+            self.errors.emit_span(bs, format("an associated type binding is only allowed in a generic bound"));
+            self.bind_buf.truncate(b0);
+        }
+        expr = self.fin(
+            NodeKind::NODE_GENERIC_SPECIALIZATION,
+            start,
+            NodeAs { specialization: SpecializationData { expression: expr, types: types } },
+        );
+        if !self.check(TokenType::PathSeparator) {
+            self.error_here("expected '::' and a constant's name after the type arguments");
+            return expr;
+        }
+        while self.match(TokenType::PathSeparator) {
+            let member = self.identifier();
+            expr = self.mk(
+                NodeKind::NODE_MEMBER,
+                Span::new(start, self.node_span(member).end),
+                NodeAs { member: MemberData { object: expr, member: member, path: true } },
+            );
+        }
+        return expr;
+    }
+
+    // A type path's generic arguments and bindings after its parts, which are on the scratch list
+    // from `mark`.
+    fn type_path_tail(self: &mut Self, mark: u32, start: u32) NodeId {
         let parts = self.ast.commit(mark);
         let b0 = self.bind_buf.len();
         let args = if self.check(TokenType::LessThan) {

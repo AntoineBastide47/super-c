@@ -312,6 +312,14 @@ pub struct StatRef {
 
 /// One demanded per-instance emission: the generic declaration, its C symbol, and the full
 /// substitution chain (parent chain + this instance's own bindings, innermost last).
+/// A call's generic arguments (`n` types of pool `m` at `at`) passed on to the method an interface
+/// method call dispatches to.
+pub struct IfTargs {
+    pub m: ModuleId,
+    pub at: *const TypeId,
+    pub n: u32,
+}
+
 pub struct Demand {
     pub def: DefId,
     pub sym: String,
@@ -7450,6 +7458,47 @@ extend CEmit {
         self.demand.push(d9);
     }
 
+    // `demand_impl` for a generic implementation method called through its interface with the
+    // call's arguments `tg`: its body under the receiver instance (a generic extend's) and its own
+    // parameters bound to `tg` by position, named `sym`.
+    fn demand_impl_targs(self: &mut Self, rm6: ModuleId, rt6: TypeId, sym: &String, tg: IfTargs) {
+        let idef = self.mg.last_method_def;
+        if !self.collect_demand || idef.node == NODE_NONE {
+            return;
+        }
+        let ia = self.p().module_ast_const(idef.module);
+        let ifd = unsafe (*ia).at_const(idef.node);
+        if ifd.kind != NodeKind::NODE_FUNCTION || ifd.as_data.function.is_extern() || ifd.as_data.function.body == NODE_NONE {
+            return;
+        }
+        if !self.mg.rec_on {
+            // The symbol spells the implementation, the receiver instance and every argument under
+            // the active env: an equal symbol is an equal demand.
+            let k0 = skey_mix(4, skey_mix(def_fp(idef), sym.as_str().hash()));
+            if self.demand_seen.contains(&k0) {
+                return;
+            }
+            self.demand_seen.insert(k0);
+        }
+        let mut snap = mbe::subs_copy(&self.mg.subs);
+        let y8 = *unsafe (*self.p().module_ast_const(rm6)).type_at(rt6);
+        let mut sfx = String::new();
+        if y8.kind == TypeKind::TYPE_INSTANCE && self.mg.in_generic_extend(idef.module, idef.node) {
+            let rit = *unsafe (*self.p().module_ast_const(rm6)).instance(y8.as_data.inst);
+            let ext = self.mg.extend_of(idef.module, idef.node);
+            self.bind_recv(&mut snap, idef.module, ext, rm6, &rit);
+            if !self.mg.args_m(rm6, &rit, rit.n, &mut sfx) {
+                return;
+            }
+        } else if !self.push_targs(tg, &mut sfx) {
+            return;
+        }
+        self.bind_targs(&mut snap, idef.module, ifd.as_data.function.generics, tg);
+        let d9 = Demand { def: idef, sym: sym.clone(), dk: 0, subs: snap, sfx: sfx };
+        self.rec_demand(&d9, 0, 0);
+        self.demand.push(d9);
+    }
+
     // `callee` (spelled with its open paren) applied to the `n` operands at `b.oper_pool[a..]`.
     fn emit_intrinsic_call(self: &mut Self, b: &ir::CoreBody, callee: str, a: u32, n: u32, dst: &mut String) bool {
         dst.push_str(callee);
@@ -7573,6 +7622,7 @@ extend CEmit {
                         DefId { module: ifd.module, node: mid },
                         DefId { module: 0, node: NODE_NONE },
                         "",
+                        IfTargs { m: rm, at: null, n: 0 },
                         dst,
                     );
                 }
@@ -7595,12 +7645,37 @@ extend CEmit {
         callee: DefId,
         conf: DefId,
         csfx: str,
+        tg: IfTargs,
         dst: &mut String,
     ) bool {
         let mut sym = self.sget();
-        let ok = self.iface_target_sym_i(rm6, rt6, callee, conf, csfx, &mut sym, dst);
+        let ok = self.iface_target_sym_i(rm6, rt6, callee, conf, csfx, tg, &mut sym, dst);
         self.sput(sym);
         return ok;
+    }
+
+    // `__<arg>` for each of the call's generic arguments `tg`, spelled under the active env; false
+    // when one does not spell.
+    fn push_targs(self: &mut Self, tg: IfTargs, sym: &mut String) bool {
+        for k in 0..tg.n {
+            sym.push_str("__");
+            if !self.mg.type_m(tg.m, unsafe tg.at[k as usize], sym) {
+                return self.fail("callee-targ");
+            }
+        }
+        return true;
+    }
+
+    // Bind generic parameters `gens` (module `fm`) to the call's arguments `tg` into `snap`, by
+    // position: an implementation's parameters stand where the interface method's do.
+    fn bind_targs(self: &Self, snap: &mut Vector<mbe::MSub>, fm: ModuleId, gens: NodeList, tg: IfTargs) {
+        let g0 = snap.len() as u32;
+        let fa = self.p().module_ast_const(fm);
+        let mut k: u32 = 0;
+        while k < gens.len && k < tg.n {
+            self.push_bind(snap, fm, unsafe (*fa).list(gens)[k as usize], tg.m, unsafe tg.at[k as usize], g0);
+            k += 1;
+        }
     }
 
     fn iface_target_sym_i(
@@ -7610,6 +7685,7 @@ extend CEmit {
         callee: DefId,
         conf: DefId,
         csfx: str,
+        tg: IfTargs,
         sym: &mut String,
         dst: &mut String,
     ) bool {
@@ -7639,7 +7715,14 @@ extend CEmit {
                 self.mg.method_by_name(rm6, rt6, mname8, sym);
             };
             if found && (mname8 != "free" || self.user_free_covers(rm6, rt6)) {
-                self.demand_impl(rm6, rt6, sym);
+                if tg.n != 0 {
+                    if !self.push_targs(tg, sym) {
+                        return false;
+                    }
+                    self.demand_impl_targs(rm6, rt6, sym, tg);
+                } else {
+                    self.demand_impl(rm6, rt6, sym);
+                }
                 dst.push_string(sym);
                 return true;
             }
@@ -7689,6 +7772,9 @@ extend CEmit {
             sym.push_str("__");
             sym.push_str(csfx);
         }
+        if !self.push_targs(tg, sym) {
+            return false;
+        }
         // The default body's prototype lives in the interface's module.
         self.mg.mark_used(callee.module);
         // Demand the default BODY under `Self -> receiver` (the interface DECL NODE is Self's
@@ -7701,6 +7787,7 @@ extend CEmit {
                 let l7 = snap.len() as u32;
                 snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6, lim: l7 });
                 self.bind_conformance(&mut snap, rm6, rt6, DefId { module: callee.module, node: idecl }, conf);
+                self.bind_targs(&mut snap, callee.module, fd7.as_data.function.generics, tg);
                 let d9 = Demand { def: callee, sym: sym.clone(), dk: 0, subs: snap, sfx: String::new() };
                 self.rec_demand(&d9, 0, 0);
                 self.demand.push(d9);
@@ -8567,7 +8654,15 @@ extend CEmit {
             } else if mid == NODE_NONE {
                 ok = self.fail("dyn-thunk");
             } else {
-                ok = self.iface_target_sym(srm, srt, DefId { module: dm, node: mid }, conf, csfx, &mut head);
+                ok = self.iface_target_sym(
+                    srm,
+                    srt,
+                    DefId { module: dm, node: mid },
+                    conf,
+                    csfx,
+                    IfTargs { m: dm, at: null, n: 0 },
+                    &mut head,
+                );
                 head.push_str("((");
                 head.push_str(srcc);
                 head.push_str(" *)__self");
@@ -9538,8 +9633,18 @@ extend CEmit {
             if !got {
                 return self.fail("iface-default-recv");
             }
+            // A generic interface method's own arguments (the trailing ones of the call's) bind the
+            // method the call dispatches to by position.
+            let own = unsafe (*self.p().module_ast_const(callee.module)).at_const(callee.node).as_data.function.generics.len;
+            let tn = pick(own < targs_len, own, targs_len);
+            let tat: *const TypeId = if tn != 0 {
+                &b.targ_pool[(targs_start + targs_len - tn) as usize];
+            } else {
+                null;
+            };
+            let tg = IfTargs { m: b.module, at: tat, n: tn };
             if iface == TYPE_NONE {
-                return self.iface_target_sym(rm6, rt6, callee, DefId { module: 0, node: NODE_NONE }, "", dst);
+                return self.iface_target_sym(rm6, rt6, callee, DefId { module: 0, node: NODE_NONE }, "", tg, dst);
             }
             // A bound call on a generic interface: the conformance with the bound's arguments,
             // resolved under this instance (`conf_for_args`), and its default bodies' suffix.
@@ -9551,7 +9656,7 @@ extend CEmit {
             if !ok6 {
                 ok6 = self.fail("dyn-stem");
             } else {
-                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, csfx.as_str(), dst);
+                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, csfx.as_str(), tg, dst);
             }
             self.sput(csfx);
             return ok6;

@@ -235,7 +235,11 @@ bounds-checked container access.
 Monomorphized, Rust-style. Turbofish in expression position, on a method call too
 (`x.m::<u8>(3)`, as `X::m::<u8>(&x, 3)`): its arguments bind the leading generic parameters,
 lifetimes bind none, and more arguments than the function declares are an error ("'m' takes 1
-generic argument but 2 were supplied"); a field, a function pointer and a closure take none.
+generic argument but 2 were supplied"); a field, a function pointer and a closure take none. A
+struct, enum or alias takes as many type arguments as it declares, fewer only down to its defaults,
+in every type and expression position: `P<i32, u8>`, `P::<i32, u8> { .. }` and a bare `P` outside
+a literal's target are "'P' takes 1 generic argument but 2 were supplied" ("takes at most" / "at
+least" with defaults).
 
 ```superc
 fn id<T>(x: T) T { return x; }
@@ -261,7 +265,7 @@ reference. `for mut i in a..b` makes the induction variable itself mutable: a wr
 the next iteration.
 
 ```superc
-fn twice<T: Copy>(x: T) (T, T) { return (x, x); }
+fn twice<T: Copy>(x: T) (T, T) { return x, x; }
 fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out through a reference
 ```
 

@@ -17,6 +17,7 @@ int sc_dirent_isdir(void *entry);                    /* readdir d_type: 1 dir, 0
 int sc_same_file(const char *a, const char *b);      /* 1 same file (POSIX dev+ino / Win32 file id), 0 not, -1 on failure */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
 int sc_exe_path(char *buf, unsigned size);           /* absolute path of the running binary; 0 on success */
+void sc_set_argv0(const char *argv0);        /* record argv[0]: sc_exe_path answers it under WASI */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
 int sc_process_alive(int64_t pid); /* 1 while `pid` exists (kill 0 / OpenProcess); 0 once it is gone */
 /* Bytes of `f`'s descriptor into `buf` (at most `n`), past the stdio buffer: what one read returns (a pipe

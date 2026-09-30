@@ -231,6 +231,25 @@ fn nested_generic_closers() {
     );
 }
 
+// A type argument `W::<u8>::K` is the member path the braced `{W::<u8>::K}` spells, told from the type
+// `W<u8>` by the `<` after its `::`; a turbofish there needs the constant's name after it.
+@test
+fn bare_instance_constant_argument() {
+    let c = h::parse_ast("type A = F<W::<u8>::K, W<u8>>;\n");
+    assert(c.errors == 0, "a bare instance constant argument parses");
+    let tp = c.ast.at_const(item(&c.ast, 0).as_data.type_alias.ty).as_data.type_path;
+    assert(tp.args.len == 2, "two arguments");
+    let k = c.ast.at_const(unsafe c.ast.list(tp.args)[0]);
+    assert(k.kind == NodeKind::NODE_MEMBER && k.as_data.member.path, "the constant is a member path");
+    assert(
+        c.ast.at_const(k.as_data.member.object).kind == NodeKind::NODE_GENERIC_SPECIALIZATION,
+        "its qualifier is the written instance",
+    );
+    let w = c.ast.at_const(unsafe c.ast.list(tp.args)[1]);
+    assert(w.kind == NodeKind::NODE_TYPE_PATH && w.as_data.type_path.args.len == 1, "W<u8> stays a type");
+    assert(h::parse_has_error("type A = F<W::<u8>>;\n"), "a turbofish needs the constant's name after it");
+}
+
 @test
 fn rebuilt_greater_operators() {
     let c = h::parse_ast(

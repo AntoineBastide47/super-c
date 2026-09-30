@@ -148,6 +148,13 @@ char *sc_realpath(const char *path, char *resolved) {
 #endif
 }
 
+#if defined(__wasi__)
+static const char *sc_argv0; /* the host's argv[0]: WASI has no other name for the running module */
+void sc_set_argv0(const char *argv0) { sc_argv0 = argv0; }
+#else
+void sc_set_argv0(const char *argv0) { (void)argv0; }
+#endif
+
 int sc_exe_path(char *buf, unsigned size) {
 #if defined(_WIN32)
   DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)size);
@@ -166,6 +173,17 @@ int sc_exe_path(char *buf, unsigned size) {
   if (n <= 0 || (size_t)n >= (size_t)size)
     return -1;
   buf[n] = '\0';
+  return 0;
+#elif defined(__wasi__)
+  /* An absolute argv[0] names the module file through a preopened root (`wasmtime run --dir=/
+     --argv0 <abs path>`); a relative one resolves against the guest's cwd, not the host's, so it
+     names no file this can trust. */
+  if (!sc_argv0 || sc_argv0[0] != '/')
+    return -1;
+  size_t n = strlen(sc_argv0);
+  if (n >= (size_t)size)
+    return -1;
+  memcpy(buf, sc_argv0, n + 1);
   return 0;
 #else
   (void)buf;

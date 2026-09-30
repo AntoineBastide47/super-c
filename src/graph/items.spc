@@ -471,6 +471,7 @@ pub fn open(p: &mut loader::Package) {
     }
     sch.sig_hash.resize_default(n);
     sch.fin_off.resize_default(n + 1);
+    builtin_names(p, &mut sch);
     sch.built = true;
     p.sched = sch;
 }
@@ -573,6 +574,171 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     p.sched.build_ns = plat::now_ns() - t0;
 }
 
+// The member names of the builtin extends outside the prelude (`extend u8 as I`), for
+// `builtin_edges`: the name's hash << 32 | the extend item, sorted. Read from the syntax, so it
+// exists before resolution: a target that is one builtin name, and the member names of the extend
+// and of every interface named like its interface (whose default body a call may run). Prelude
+// extends get no entry: a prelude item is visible to every item outside the prelude, and inside the
+// prelude the common names (`fmt`, `eq`, `hash`) would merge most of it into one component (940 of
+// 1,832 items where the largest is 336 without them).
+fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
+    let n = p.idx.items.len();
+    let names = &mut sch.bnames;
+    for i in 0..n {
+        let it = *p.idx.items.at(i);
+        let m = it.module as usize;
+        if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(m).has_ast || p.modules.at(m).prelude {
+            continue;
+        }
+        let a = &p.modules.at(m).ast;
+        let src = p.modules.at(m).source.as_str();
+        let ed = a.at_const(it.node).as_data.extend_def;
+        if ed.target_type == NODE_NONE || a.at_const(ed.target_type).kind != NodeKind::NODE_TYPE_PATH {
+            continue;
+        }
+        let tp = a.at_const(ed.target_type).as_data.type_path;
+        if tp.parts.len != 1 || bt_of_name(src, a.at_const(unsafe a.list(tp.parts)[0]).as_data.name.text) < 0 {
+            continue;
+        }
+        for j in i + 1..n {
+            let mj = *p.idx.items.at(j);
+            if mj.owner != i as u32 {
+                break;
+            }
+            names.push(
+                name_key(&mut sch.bmask, src.slice(mj.start as usize, (mj.start + mj.len) as usize)) << 32 | i as u64,
+            );
+        }
+        if ed.interface_type == NODE_NONE || a.at_const(ed.interface_type).kind != NodeKind::NODE_TYPE_PATH {
+            continue;
+        }
+        let ip = a.at_const(ed.interface_type).as_data.type_path.parts;
+        let iname = a.at_const(unsafe a.list(ip)[(ip.len - 1) as usize]).as_data.name.text;
+        let sym = p.idx.syms.find(src.slice(iname.start as usize, iname.end as usize));
+        if sym == loader::SYM_NONE {
+            continue;
+        }
+        for f in 0..n {
+            let fi = *p.idx.items.at(f);
+            if fi.kind != loader::ItemKind::IK_INTERFACE as u8 || fi.name != sym || !p.modules.at(fi.module as usize).has_ast {
+                continue;
+            }
+            let fa = &p.modules.at(fi.module as usize).ast;
+            let fsrc = p.modules.at(fi.module as usize).source.as_str();
+            let its = fa.at_const(fi.node).as_data.interface_def.items;
+            for k in 0..its.len {
+                let fnode = fa.at_const(unsafe fa.list(its)[k as usize]);
+                if fnode.kind == NodeKind::NODE_FUNCTION {
+                    let t = fa.at_const(fnode.as_data.function.name).as_data.name.text;
+                    names.push(name_key(&mut sch.bmask, fsrc.slice(t.start as usize, t.end as usize)) << 32 | i as u64);
+                }
+            }
+        }
+    }
+    names.sort();
+}
+
+/// The builtin dispatch edges of module `m` for the schedule graph. A member of an extend of a
+/// builtin type is reached through a receiver or a qualifier that no resolved reference names
+/// (`x.get()`, `T::load(p)`, `u8::K`), so the type dispatch in `build` has no user to start from:
+/// every item that spells a member access or a qualified type argument by the name of such a member
+/// depends on that extend (`ItemSched.bnames`). The name over-approximates the checker's choice,
+/// which only costs parallelism; the final ranges carry the checker's resolutions instead. Pure over
+/// the module's syntax and the index, so the resolve frontier runs it per task.
+pub fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mut Vector<u64>) {
+    let names = &p.sched.bnames;
+    if names.len() == 0 || !p.modules.at(m).has_ast || p.modules.at(m).prelude {
+        return;
+    }
+    let mut c = cache_none();
+    let a = &p.modules.at(m).ast;
+    let src = p.modules.at(m).source.as_str();
+    let nm = a.nodes.len();
+    let nb = if a.b.released {
+        0usize;
+    } else {
+        a.b.nodes.len();
+    };
+    for x in 0..nm + nb {
+        // The arenas' contiguous prefixes through raw pointers, as `module_edges` reads them.
+        let sv = if x < nm {
+            &a.nodes;
+        } else {
+            &a.b.nodes;
+        };
+        let xi = if x < nm {
+            x;
+        } else {
+            x - nm;
+        };
+        let nd = if xi < sv.base_len() {
+            unsafe &*(sv.base_ptr() + xi);
+        } else {
+            unsafe &*sv.ptr_at(xi);
+        };
+        if nd.kind != NodeKind::NODE_MEMBER && nd.kind != NodeKind::NODE_TYPE_PATH {
+            continue;
+        }
+        let id = if x < nm {
+            x as NodeId;
+        } else {
+            xi as NodeId | NODE_BODY;
+        };
+        let mut name = NODE_NONE;
+        if nd.kind == NodeKind::NODE_MEMBER {
+            name = nd.as_data.member.member;
+        } else if nd.kind == NodeKind::NODE_TYPE_PATH && nd.as_data.type_path.parts.len > 1 {
+            name = unsafe a.list(nd.as_data.type_path.parts)[(nd.as_data.type_path.parts.len - 1) as usize];
+        }
+        if name == NODE_NONE {
+            continue;
+        }
+        let t = a.at_const(name).as_data.name.text;
+        let nt = src.slice(t.start as usize, t.end as usize);
+        if nt.len() == 0 || (p.sched.bmask >> mask_bit(nt) & 1) == 0 {
+            continue;
+        }
+        let h = nt.hash() >> 32;
+        let mut k = switch names.binary_search(&(h << 32)) {
+            Ok(v) => v,
+            Err(v) => v,
+        };
+        if k >= names.len() || names[k] >> 32 != h {
+            continue;
+        }
+        let mut owner = owner_of(p, m as ModuleId, id);
+        if owner == NONE {
+            // A node a desugar appended past every item: its span names the item.
+            owner = owner_at(p, sps, &mut c, m as u32, nd.span.start);
+            if owner == NONE {
+                continue;
+            }
+        }
+        while k < names.len() && names[k] >> 32 == h {
+            let e = (names[k] & 0xFFFFFFFFu64) as u32;
+            if owner != e {
+                out.push(owner as u64 << 32 | e as u64);
+            }
+            k += 1;
+        }
+    }
+}
+
+// The 32-bit key of member name `s` in `ItemSched.bnames` (equal names share it, and a collision
+// only adds an edge), marking its bit in the prefilter `mask`.
+fn name_key(mask: &mut u64, s: str) u64 {
+    if s.len() != 0 {
+        *mask = *mask | 1u64 << mask_bit(s);
+    }
+    return s.hash() >> 32;
+}
+
+// The prefilter bit of a nonempty name: its first byte and length, which most member names in a
+// module differ from every builtin extend's in, so `builtin_edges` hashes few of them.
+const fn mask_bit(s: str) u64 {
+    return s.byte_at(0) as u64 * 7 + s.len() as u64 & 63;
+}
+
 /// Is item `target`'s checked state visible to a check of item `reader`? A static rule over the
 /// schedule graph, so every worker order answers alike: a dependency component (`r`, the
 /// reader's `Reach`) is complete before the reader starts; inside one component the items are
@@ -660,6 +826,7 @@ pub fn build_serial(p: &mut loader::Package) {
     let mut edges = Vector::<u64>::new();
     for m in 0..p.modules.len() {
         module_edges(p, m, &sps, &mut edges);
+        builtin_edges(p, m, &sps, &mut edges);
     }
     let t3 = plat::now_ns();
     build(p, &edges);

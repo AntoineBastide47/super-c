@@ -195,7 +195,8 @@ than the turbofish names is not viable:
 5. More exact parameter matches.
 6. A more specific receiver or interface relation, where the language defines one.
 
-Two candidates with equal best scores are an ambiguity error. Source order and
+Two candidates with equal best scores are an ambiguity error; its notes name each candidate (or the
+conformances, or the bounds of a type parameter) at its source location. Source order and
 declaration order never break a tie. An error type never makes a candidate viable and never
 selects an overload.
 

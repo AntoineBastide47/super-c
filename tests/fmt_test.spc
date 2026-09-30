@@ -65,6 +65,16 @@ fn golden_braced_const_arguments() {
     );
 }
 
+// A qualified constant of a written instance reads bare in a type argument, and each spelling prints as
+// written: bare stays bare, braced keeps its braces.
+@test
+fn golden_bare_instance_constant_arguments() {
+    expect_fmt(
+        "fn f() F<W::<u8>::K, {W::<i32>::K}> { return g::<W::<u8>::K, { W::<u16>::K }>(); }",
+        "fn f() F<W::<u8>::K, {W::<i32>::K}> {\n    return g::<W::<u8>::K, {W::<u16>::K}>();\n}\n",
+    );
+}
+
 @test
 fn golden_brace_in_member_comment() {
     // A leading member comment containing `{` must survive: the block-opener scan skips comments.

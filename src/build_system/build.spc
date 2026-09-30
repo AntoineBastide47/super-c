@@ -23,6 +23,7 @@ import ir::interp as iri;
 import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
+import ast::parser as par;
 import lsp::json as json;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
@@ -2221,6 +2222,176 @@ pub struct BuildCtx<'a> {
     pub target: i32,
     pub bootstrap_tags: bool,
     pub lint: bool,
+    /// `--transpiler`: the command that runs the transpile step in place of this compiler's own frontend
+    /// (`run_transpiler`); empty for the frontend.
+    pub transpiler: str<'a>,
+}
+
+// Transpile `root`'s closure into `srcgen` with this compiler's own frontend, streaming each finished
+// file into `sink` when non-null. On success, when `cid` is not 0, write the emit stamp for the tree to
+// `stamp` (the engine moves it into place once the tree is synced).
+fn emit_closure(
+    m: &mf::Manifest,
+    prof_name: str,
+    root: str,
+    root_dir: str,
+    alt: str,
+    srcgen: str,
+    jobs: u32,
+    cx: &BuildCtx,
+    topts: *const TestOpts,
+    sink: *mut EmitSink,
+    stamp: str,
+    cid: u64,
+) i32 {
+    loader::set_load_jobs(jobs);
+    let tl0 = unsafe shim::sc_ticks_ms();
+    // The build settings the prelude's build constants spell (`@arch` gates on the instruction
+    // set too), set before the load.
+    let mut p = loader::package_new(root_dir, alt, cx.std_dir);
+    p.arch = m.arch;
+    p.test_build = topts != null && unsafe (*topts).enabled;
+    p.profile = String::from_str(prof_name);
+    p.profiles = profile_names(m);
+    p.load_root(root, cx.std_dir, cx.bootstrap_tags, cx.target);
+    bst::mark(bst::B_LOAD);
+    if stdlib::getenv("SC_CEMIT_STATS") != null {
+        eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
+    }
+    loader::set_load_jobs(1);
+    if !p.ok {
+        if jobs != 1 {
+            prt::shutdown(); // parallel loading started the pool
+        }
+        return 1;
+    }
+    p.gen_root = String::from_str(srcgen);
+    for i in 0..m.shards.len() {
+        p.shard_rules.push(
+            loader::ShardRule {
+                module: m.shards.at(i).module.clone(),
+                tus: m.shards.at(i).tus,
+                insts: m.shards.at(i).insts,
+            },
+        );
+    }
+    p.jobs = p.analysis_jobs(jobs);
+    if p.jobs == 1 && jobs != 1 {
+        prt::shutdown(); // parallel loading may have started the pool
+    }
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
+    p.cir = &mut cirv;
+    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", sink);
+    if rc == 0 && cid != 0 {
+        stamp_write(stamp, &p, cx.std_dir, root_dir, cx.target, m.arch, cx.bootstrap_tags, cx.lint, srcgen, cid);
+    }
+    return rc;
+}
+
+// The identity of the external transpiler `cmd` for the emit stamp: its words, and the content of each
+// word that names a file (the program found through PATH as `which_path` finds it; for a runtime
+// command, the module it runs). A different transpiler, or new content at the same path, emits again.
+fn transpiler_id(cmd: str) u64 {
+    let mut words = Vector::<String>::new();
+    split_args(&mut words, cmd);
+    let mut h = fnv_cont(FNV_BASIS, "transpiler");
+    for i in 0..words.len() {
+        let w = words.at(i).as_str();
+        h = skey_mix(fnv_cont(h, w), w.len() as u64);
+        let mut path = String::new();
+        let mt = if i == 0 {
+            which_path(w, &mut path);
+        } else {
+            path.push_str(w);
+            unsafe shim::sc_mtime(path.cstr());
+        };
+        if mt != 0 && unsafe shim::sc_stat_isdir(path.cstr()) != 1 {
+            h = skey_mix(h, file_id(path.as_str()));
+        }
+    }
+    // 0 means "no identity"; a real hash never takes it.
+    return h | (h == 0) as u64;
+}
+
+// The transpile step through the external transpiler `cx.transpiler`: its words (whitespace-split, the
+// contract of every command string in the engine; no shell), then the transpile form of this compiler's
+// command line (`manifest_emit`), each argument one argv entry. The transpiler reads build.toml in this
+// working directory and writes the tree where the engine's own frontend would, so the tree is the same
+// function of the same inputs. `cid` (0: no stamp) becomes the identity in the stamp it writes.
+fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &BuildCtx, cid: u64) i32 {
+    let mut args = Vector::<String>::new();
+    split_args(&mut args, cx.transpiler);
+    push_arg(&mut args, root);
+    args.push(format("--emit-sub={}", sub));
+    // Absolute: a transpiler under a WASI runtime starts in the guest's "/".
+    let mut cwdb = PathBuf {};
+    if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) == null {
+        eprintln("build: cannot resolve the working directory for the transpiler");
+        return 1;
+    }
+    args.push(format("--manifest-dir={}", str::from_cstr(&cwdb[0])));
+    args.push(format("--out-dir={}", m.out_dir.as_str()));
+    args.push(format("--profile={}", prof_name));
+    args.push(format("--target={}", par::axis_names(false)[cx.target as usize]));
+    args.push(format("--arch={}", par::axis_names(true)[m.arch as usize]));
+    if cx.bootstrap_tags {
+        push_arg(&mut args, "--bootstrap-tags");
+    }
+    if !cx.lint {
+        push_arg(&mut args, "--no-lint");
+    }
+    if cx.ce_steps != 0 {
+        args.push(format("--const-eval-steps={}", cx.ce_steps));
+    }
+    if cx.ce_mem != 0 {
+        args.push(format("--const-eval-memory={}", cx.ce_mem));
+    }
+    if cid != 0 {
+        args.push(format("--emit-id={}", cid));
+    }
+    let rc = exec_args(&mut args, null);
+    if rc != 0 {
+        eprintln("build: transpiler failed (exit {}): {}", rc, render_cmd(&args).as_str());
+        return 1;
+    }
+    return 0;
+}
+
+/// The transpile form of the command line (`super-c <root> --emit-sub=SUB ...`, run by an engine whose
+/// `--transpiler` names this compiler): the transpile step of a manifest build alone. `root`'s closure
+/// goes to `<out-dir>/<sub>/raw` exactly as the engine's own frontend writes it, and with a nonzero `id`
+/// the emit stamp for it, under that identity, to `<out-dir>/<sub>/.emit_stamp.new`.
+pub fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: str, cx: &BuildCtx, id: u64) i32 {
+    let prof_name = resolve_profile(m, profile);
+    if m.profile_index(prof_name) < 0 {
+        eprintln("build: unknown profile '{}'", prof_name);
+        return 1;
+    }
+    let pdir = loader::join2(m.out_dir.as_str(), sub);
+    let srcgen = loader::join2(pdir.as_str(), "raw");
+    let stamp = loader::join2(pdir.as_str(), ".emit_stamp.new");
+    let jobs: u32 = if cx.jobs != 0 {
+        cx.jobs;
+    } else if m.jobs != 0 {
+        m.jobs;
+    } else {
+        (unsafe shim::sc_ncpu()) as u32;
+    };
+    return emit_closure(
+        m,
+        prof_name,
+        root,
+        loader::dirname_of(m.root.as_str()),
+        "",
+        srcgen.as_str(),
+        jobs,
+        cx,
+        null,
+        null,
+        stamp.as_str(),
+        id,
+    );
 }
 
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
@@ -2412,13 +2583,18 @@ fn engine_build_i(
     // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool:
     // unless the emit stamp proves every input unchanged since the last successful emission, in
     // which case the generated tree is already exact and the pipeline skips straight to cc/link.
-    let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+    let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+    let mut stamp_new = stamp_path.clone();
+    stamp_new.push_str(".new");
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
-    // The running compiler's identity, read before the emission: the tree it emits is its function.
-    let cid = if cache_on {
-        compiler_id();
-    } else {
+    let external = cx.transpiler.len() != 0;
+    // The emitting compiler's identity, read before the emission: the tree it emits is its function.
+    let cid = if !cache_on {
         0 as u64;
+    } else if external {
+        transpiler_id(cx.transpiler);
+    } else {
+        compiler_id();
     };
     let skip_emit = cache_on && stamp_fresh(
         stamp_path.as_str(),
@@ -2437,46 +2613,28 @@ fn engine_build_i(
     let mut t_transpile = t0;
     let mut ret: i32 = 0;
     if !skip_emit {
-        loader::set_load_jobs(jobs);
-        let tl0 = unsafe shim::sc_ticks_ms();
-        // The build settings the prelude's build constants spell (`@arch` gates on the instruction
-        // set too), set before the load.
-        let mut p = loader::package_new(root_dir, alt, cx.std_dir);
-        p.arch = m.arch;
-        p.test_build = topts != null && unsafe (*topts).enabled;
-        p.profile = String::from_str(prof_name);
-        p.profiles = profile_names(m);
-        p.load_root(root, cx.std_dir, cx.bootstrap_tags, cx.target);
-        bst::mark(bst::B_LOAD);
-        if stdlib::getenv("SC_CEMIT_STATS") != null {
-            eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
-        }
-        loader::set_load_jobs(1);
-        if !p.ok {
-            if jobs != 1 {
-                prt::shutdown(); // parallel loading started the pool
-            }
-            stream.drain(true);
-            return 1;
-        }
-        p.gen_root = srcgen.clone();
-        for i in 0..m.shards.len() {
-            p.shard_rules.push(
-                loader::ShardRule {
-                    module: m.shards.at(i).module.clone(),
-                    tus: m.shards.at(i).tus,
-                    insts: m.shards.at(i).insts,
-                },
+        // An emission that stops part way leaves raw/ and gen/ partly rewritten: no stamp may vouch for
+        // them, or a later build with the old inputs would skip the transpile over a mixed tree.
+        let _ = unsafe shim::sc_unlink(stamp_path.cstr());
+        let _ = unsafe shim::sc_unlink(stamp_new.cstr());
+        let rc = if external {
+            run_transpiler(m, prof_name, root, sub, cx, cid);
+        } else {
+            emit_closure(
+                m,
+                prof_name,
+                root,
+                root_dir,
+                alt,
+                srcgen.as_str(),
+                jobs,
+                cx,
+                topts,
+                &mut sink,
+                stamp_new.as_str(),
+                cid,
             );
-        }
-        p.jobs = p.analysis_jobs(jobs);
-        if p.jobs == 1 && jobs != 1 {
-            prt::shutdown(); // parallel loading may have started the pool
-        }
-        let pkg = (&mut p) as *mut loader::Package;
-        let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
-        p.cir = &mut cirv;
-        let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", &mut sink);
+        };
         if rc != 0 {
             // Reap what is in flight; abandon what has not started.
             stream.drain(true);
@@ -2487,23 +2645,15 @@ fn engine_build_i(
         // 2) whole-tree content-sync as the safety net: every file was already synced when its
         // notification arrived, so this is a byte-compare no-op that (a) unlinks gen/ orphans and
         // (b) surfaces anything the stream never heard about: planned below off the directory walk.
+        // An external transpiler streams nothing, so the sync copies its whole tree here.
         ret = stream.ret;
         if ret == 0 {
             ret = sync_tree(srcgen.as_str(), gen.as_str(), &stream.synced);
         }
-        if ret == 0 && cache_on {
-            stamp_write(
-                stamp_path.as_str(),
-                &p,
-                cx.std_dir,
-                root_dir,
-                cx.target,
-                m.arch,
-                cx.bootstrap_tags,
-                cx.lint,
-                gen.as_str(),
-                cid,
-            );
+        // The emission wrote its stamp beside the final one; only a synced tree gets it. A missing stamp
+        // (an input the emission could not read) only makes the next build transpile again.
+        if ret == 0 && cid != 0 {
+            let _ = unsafe shim::sc_rename(stamp_new.cstr(), stamp_path.cstr());
         }
     } else {
         t_transpile = unsafe shim::sc_ticks_ms();

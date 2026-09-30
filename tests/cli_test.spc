@@ -3617,12 +3617,41 @@ fn main() i32 {
 
 // `@blocking`: the attribute makes a call to an extern function go through a generated
 // wrapper that hands it to the blocking pool, so the call site is unchanged but the coroutine parks instead
-// of holding its worker. Two one-second blocking sleeps on ONE worker: serialized they would take two
-// seconds, so finishing under 1.8s is the proof they overlapped: plus the emitted C is checked for the
-// wrapper, since a missing one would still pass a looser timing bound.
+// of holding its worker. Two blocking calls on ONE worker return only once a third task has opened their
+// gate: that task runs only on the worker, so the calls return the open gate only if they did not hold
+// it (a held worker keeps the gate shut until the C side gives up, and the calls report that). The
+// emitted C is checked for the wrapper too.
 @test
 fn blocking_attribute() {
     let p = cli::proj_new();
+    p.mkfile("gate.h", "int gate_wait(void);\nvoid gate_open(void);\n");
+    p.mkfile(
+        "gate.c",
+        M"(#include "gate.h"
+#include <stdatomic.h>
+#if defined(_WIN32)
+#include <windows.h>
+static void nap(void) { Sleep(1); }
+#else
+#include <time.h>
+static void nap(void) {
+  struct timespec t = {0, 1000000};
+  nanosleep(&t, 0);
+}
+#endif
+static atomic_int gate;
+/* 1 once the gate opens; 0 when it stays shut for twenty seconds (the hang guard). */
+int gate_wait(void) {
+  for (int i = 0; i < 20000; i++) {
+    if (atomic_load(&gate))
+      return 1;
+    nap();
+  }
+  return 0;
+}
+void gate_open(void) { atomic_store(&gate, 1); }
+)",
+    );
     p.mkfile(
         "main.spc",
         M"(import std::parallel::runtime as rt;
@@ -3631,11 +3660,11 @@ import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
 import std::parallel::time as time;
-import std::parallel::platform as platform;
 
-extern "C" "unistd.h" {
+extern "C" "gate.h" {
     @blocking
-    pub fn sleep(seconds: u32) u32;
+    pub fn gate_wait() i32;
+    pub fn gate_open();
 }
 
 fn main() i32 {
@@ -3643,13 +3672,12 @@ fn main() i32 {
     let done = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let wg = sync::WaitGroup::new();
     wg.add(3);
-    let t0 = platform::now_ns();
     for _i in 0..2 {
         let d = done.clone();
         let w = wg.clone();
         launch fn() {
-            let _ = unsafe sleep(1); // a blocking syscall: must not hold the only worker
-            let _ = d.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+            // a blocking call that returns once the task below has run: it must not hold the only worker
+            let _ = d.get().fetch_add(unsafe gate_wait() as i64, atom::MemoryOrder::Relaxed);
             w.done();
         };
     }
@@ -3657,18 +3685,15 @@ fn main() i32 {
     let w2 = wg.clone();
     launch fn() {
         let _ = d2.get().fetch_add(100, atom::MemoryOrder::Relaxed);
+        unsafe gate_open();
         w2.done();
     };
-    let ok = wg.wait_timeout(time::Duration::from_secs(20));
-    let dt = platform::now_ns() - t0;
+    let ok = wg.wait_timeout(time::Duration::from_secs(60));
     let n = done.get().load(atom::MemoryOrder::SeqCst);
     blocking::shutdown();
     rt::shutdown();
     if !ok || n != 102 {
         return 1;
-    }
-    if dt > 1800000000 {
-        return 2; // two 1s blocking calls serialized would take 2s
     }
     return 0;
 }
@@ -3676,7 +3701,7 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "__sc_blk_sleep("), "the call goes through the generated wrapper");
+    assert(p.gen_has("main.c", "__sc_blk_gate_wait("), "the call goes through the generated wrapper");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -4869,7 +4894,6 @@ import std::parallel::channel as chan;
 import std::parallel::sync as sync;
 import std::parallel::time as time;
 import std::parallel::arc as arc;
-import std::parallel::platform as platform;
 
 struct Pair {
     pub rx: chan::Receiver<i64>,
@@ -4941,7 +4965,6 @@ fn main() i32 {
     };
 
     // A `default` arm: nothing is ready, so it fires at once instead of waiting.
-    let t0 = platform::now_ns();
     select {
         crx.recv() => {
             got = -8;
@@ -4950,7 +4973,7 @@ fn main() i32 {
             got = 99;
         }
     }
-    if got != 99 || platform::now_ns() - t0 > 500000000 {
+    if got != 99 {
         return 5;
     }
 
@@ -8631,11 +8654,6 @@ fn worker_count_keeps_instance_shard_includes() {
 // SC_NO_TU_CACHE=1 leaves no per-TU cache image in the tree, also after a cached build wrote one.
 @test
 fn no_tu_cache_removes_the_image() {
-    // A wasm guest cannot read its own executable's path, so the per-TU cache has no compiler identity
-    // to key on and never writes an image there.
-    if cli::on_wasm() {
-        return;
-    }
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     assert(p.compile("main.spc").ok());

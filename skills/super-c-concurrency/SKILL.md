@@ -356,7 +356,11 @@ the kernel for good; registering threads count themselves into per-slot counters
 back off while a close is pending), then reports the close to the reactor: the record's
 generation moves on, every wait on the number settles as not ready at once, and an arm
 whose registration raced the close registers again and fails. The exclusion also holds
-while the reactor is stopping; once it has left, a close is a plain close. A descriptor closed with
+while the reactor is stopping; once it has left, a close is a plain close. The leaving
+mark (a closer count of -1) is cleared by compare-and-swap in `shutdown` and in the next
+reactor's builder, never by a store: a closer counted in while no reactor runs keeps its
+count, where a store once let its count out leave -1 under a running reactor, whose stop
+then waited for good (`closes_racing_the_reactor_start_keep_their_count`). A descriptor closed with
 a raw `close(2)` instead gets none of this: its waiters run to their deadlines, and on
 macOS the close itself may wedge. Its next file is registered afresh by the next arm.
 `wait_until` reports `false` when the deadline passed, the wait was cancelled, the

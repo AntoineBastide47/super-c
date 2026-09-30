@@ -132,6 +132,19 @@ and a constant fold in the referencing item may call it; the extend's target res
 alias included, keys the lookup). Reachability is transitive, so an item that reaches a type
 through a callee's signature reaches the extends too.
 
+The type dispatch has no user to start from for an extend of a builtin type (`extend u8 as I`):
+no resolved reference names `u8` at a call `x.get()`, `T::load(p)` or `u8::K`. `builtin_edges`
+adds a precheck edge from every item that spells a member access or a multi-part type path whose
+last name is a member of such an extend, or of a member of the interface it names (a default body
+the call may run), to that extend (`ItemSched.bnames`: the names' 32-bit hashes with their extend,
+read from the syntax in `open`; `bmask`: a first-byte and length prefilter). It runs per module in
+the resolve frontier beside `module_edges` (and in `build_serial`), never for the final ranges,
+which carry the checker's resolution of the call instead. Prelude extends get no names: a prelude
+item is visible to every other item, and inside the prelude the common names (`fmt`, `eq`,
+`hash`) merged 940 of 1,832 items of a small program into one component (336 without them). On
+the compiler (six builtin extends in `std::parallel::atomics`) the serial scan costs about 5 ms
+of the dev build's item graph; the parallel frontier hides it.
+
 The schedule graph is conservative: a missing edge is a correctness failure, an extra edge only
 costs parallelism. The final graph adds the method and field resolutions typecheck writes and
 the engine's dynamic edges. Both are bounded by construction: at most one edge per (owner,

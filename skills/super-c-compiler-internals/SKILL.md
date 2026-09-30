@@ -506,6 +506,13 @@ Full monomorphization is the only generic backend.
   and ZST queries under substitution read each binding's argument under its own env
   (`LayoutEnv.penv`, built per `MSub` by `Mangler::layout_sub`), so a generic body and its
   concrete caller agree on sizes.
+- **Generic interface methods:** a call terminator whose callee is an interface method with its own
+  generic parameters carries them as its trailing type arguments. `InstGraph::note_iface_call`
+  resolves the receiver's conformance under the frame and records the implementation's method
+  (`IG_FN`, or `IG_METHOD` with the receiver's arguments first) or walks the inherited default body
+  with `Self`, the conformance's arguments and the method's bound; the emitter
+  (`iface_target_sym`, `IfTargs`) spells the same instance (`C__conv__u8`) and demands it
+  (`demand_impl_targs`); the evaluator binds them in `call_in`.
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 

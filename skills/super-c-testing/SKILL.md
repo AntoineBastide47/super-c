@@ -226,6 +226,12 @@ A test's verdict never depends on that variable: a test that checks leak behavio
 `SC_LEAK_CHECK` on the child it runs (`run_bin_env`, `compile_flags_env`, `compile_and_run_env`),
 so an unarmed `super-c test --quiet` gives the same result as the gate.
 
+The wasm lane runs the same suite with `SC_TEST_SUPERC=ci/wasm-superc.sh`: the wrapper runs
+every transpile-class command (a script, `fmt`, `lint`, the transpile form an engine's
+`--transpiler` runs) inside wasmtime and sends the commands that spawn processes (`build`,
+`test`, `bindgen` and the rest) to the native binary. A CLI test that needs the working
+directory of a guest command or runs a shell line returns early under `cli::on_wasm()`.
+
 ## Lint-Based Leak Detection
 
 ```sh
@@ -288,8 +294,10 @@ filtering for the host like a real build.
   the idle block pool has settled under a budget (worker stashes are sized so the pool
   stays within its budget at all times). Every
   wait is bounded at five seconds and returns whether the state was reached, so the
-  caller asserts on it and a hang fails with a name. The io tests wait on `io::pending_waits()` (wait records, which precede registration), the
-  blocking tests on `blocking::stats()` (running, queued, `admit_waits`).
+  caller asserts on it and a hang fails with a name. The io tests wait for their I/O wait
+  records through `wait_waiting(rt::WK_IO, n)` (what `io::pending_waits()` counts; a record
+  precedes registration), the blocking tests on `blocking::stats()` (running, queued,
+  `admit_waits`).
 - **Hold with a gate, not a clock.** A pool thread or a lock holder that must stay busy
   while other callers queue holds until a shared counter opens (`hold_open` in
   `tests/blocking_test.spc`, `hold_until` in `tests/mutex_test.spc`), and the test
@@ -303,6 +311,14 @@ filtering for the host like a real build.
   (`wait_frees`, `wait_quiet` in `tests/blocking_test.spc`) instead of asserting right
   after the wait.
 - **A wake's latency belongs to a benchmark.** A test asserts that a wake happened and
-  followed its cause, not that it arrived within some milliseconds: that number measures
-  the runner. The only latency bounds kept are those a real defect alone can exceed
-  (a whole second where a missed wake would take the full deadline).
+  followed its cause, not that it arrived within some milliseconds or before a deadline:
+  that number measures the runner. A wait that only its cause may end has no deadline
+  (`io::wait_until(fd, w, 0)`), so a missed wake shows as a bounded state wait that fails.
+  The task reports what ended its wait (a counter the test reads with `wait_count`), and
+  a call that must return without waiting is covered by the hang guard alone. A lower
+  bound (a deadline was waited out, a sleep never ends early) is kept: load only makes
+  it hold more easily.
+- **Prove a blocking call leaves its worker with a gate.** `blocking_attribute` in
+  `tests/cli_test.spc` gives the blocking calls a C wait that returns only once another
+  task on the same single worker opens it, so the calls return the open gate only if
+  they parked; a duration they overlap in measures the runner.

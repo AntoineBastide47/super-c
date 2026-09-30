@@ -257,6 +257,43 @@ fn emit_stamp_keys_on_the_compiler_content() {
     assert(!again.out_has("phase load"), "the new compiler's own tree is reused");
 }
 
+// `--transpiler` runs the transpile step through another command (here the compiler under test itself)
+// and the engine compiles and links its tree: the program runs, the tree equals the one the engine's own
+// frontend writes, and the emit stamp keys on the transpiler, so an unchanged build skips the transpile
+// and a switch between transpilers transpiles again. A failing transpiler fails the build with its
+// diagnostics. `phase load` prints only when the build transpiles.
+@test
+fn external_transpiler_builds_and_keys_the_emit_stamp() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
+    p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 3;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let ext = format("build --out-dir=ext \"--transpiler={}\" -o app", cli::superc_path());
+    let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    assert(first.ok(), "the build through the transpiler succeeds");
+    assert(first.out_has("phase load"), "the first build transpiles");
+    let app = format("{}/app{}", root, str::from_cstr(cli::binext()));
+    assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
+    let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
+    // The engine's own frontend emits the same tree, and it is another emitter for the stamp.
+    assert(cli::superc_env_in(root, E, "1", "build --out-dir=int -o app").ok(), "the frontend build");
+    let own = cli::read_text(format("{}/int/dev/raw/lib.c", root).as_str());
+    assert(own.len() != 0, "the frontend wrote the tree");
+    assert(own.as_str() == cli::read_text(format("{}/ext/dev/raw/lib.c", root).as_str()).as_str(), "same tree");
+    let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --out-dir=ext -o app");
+    assert(back.ok() && back.out_has("phase load"), "the frontend does not reuse the transpiler's tree");
+    let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    assert(again.ok() && again.out_has("phase load"), "the transpiler does not reuse the frontend's tree");
+    // A transpiler error fails the build and shows the transpiler's diagnostics.
+    p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return missing;\n}\n");
+    let bad = cli::superc_env_in(root, E, "1", ext.as_str());
+    assert(!bad.ok(), "a failing transpiler fails the build");
+    assert(bad.out_has("cannot find value 'missing'"), "the transpiler's diagnostic reaches the output");
+    assert(bad.out_has("build: transpiler failed"), "the engine names the failed step");
+}
+
 // A dependency path with a space is escaped as `\ ` in the compiler's .d file; read as written, an
 // unchanged object stays fresh instead of recompiling on every build.
 @test

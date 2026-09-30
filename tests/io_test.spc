@@ -3,7 +3,9 @@
 // race to a single winner on every round and every wait settles, cancellation and close reach the reactor
 // before a waiting frame ends, a descriptor that cannot be registered reports not ready, shutdown settles
 // what is still parked, and a thousand idle descriptors cost an active one nothing. Every test ends with
-// no admitted wait left behind.
+// no admitted wait left behind. Waits that readiness must end have no deadline, and the tests wait for
+// state through the parallel harness: a missed wake shows as a bounded wait that fails, never as a
+// duration a loaded runner exceeds.
 
 import std::parallel::runtime as rt;
 import std::parallel::io as io;
@@ -14,8 +16,7 @@ import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
 import std::parallel::time as time;
-
-const PROMPT_NS: u64 = 1000000000; // a wake that takes longer than this under load is a defect
+import tests::parallel_harness as ph;
 
 // A connected pair: `a` is the client end, `b` the accepted end.
 struct Pair {
@@ -46,31 +47,18 @@ fn write_one(s: &net::TcpStream) {
     let _ = s.write(msg);
 }
 
-// Wait on `fd` with a deadline of `secs` seconds and count a prompt readiness.
-fn wait_prompt_for(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>, secs: u64) {
-    let t0 = platform::now_ns();
-    let ok = io::wait_until(fd, write, time::deadline_in(time::Duration::from_secs(secs)));
-    if ok && platform::now_ns() - t0 < PROMPT_NS {
+// Wait on `fd` without a deadline, so only readiness (or a close or shutdown) ends the wait, and count
+// a readiness.
+fn wait_ready(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>) {
+    if io::wait_until(fd, write, 0) {
         bump(hits);
     }
 }
 
-// Wait readable on `fd` with a three-second deadline and count a prompt readiness.
-fn wait_prompt(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>) {
-    wait_prompt_for(fd, write, hits, 3);
-}
-
-// Wait, bounded, until the reactor holds `want` pending waits: the waiters have ARMED, so a byte written
-// now is what wakes them rather than what they find already there.
+// Wait, bounded, until `want` tasks have recorded an I/O wait (`io::pending_waits`): the waiters are at
+// their wait, so a byte written now is what wakes them rather than what they find already there.
 fn wait_pending(want: usize) bool {
-    let deadline = platform::now_ns() + 5000000000;
-    while io::pending_waits() < want {
-        if platform::now_ns() > deadline {
-            return false;
-        }
-        time::sleep(time::Duration::from_millis(1));
-    }
-    return true;
+    return ph::wait_waiting(rt::WK_IO, want);
 }
 
 fn finish() {
@@ -94,7 +82,7 @@ fn two_readers_on_one_socket_both_wake() {
         let h = hits.clone();
         launch || {
             defer w.done();
-            wait_prompt(fd, false, &h);
+            wait_ready(fd, false, &h);
         };
     }
     assert(wait_pending(2), "both readers arm");
@@ -119,7 +107,7 @@ fn read_and_write_waits_on_one_socket_are_independent() {
     let h1 = hits.clone();
     launch || {
         defer w1.done();
-        wait_prompt(fd, false, &h1);
+        wait_ready(fd, false, &h1);
     };
     assert(wait_pending(1), "the reader arms first");
     let writer = sync::WaitGroup::new();
@@ -128,7 +116,7 @@ fn read_and_write_waits_on_one_socket_are_independent() {
     let h2 = hits.clone();
     launch || {
         defer w2.done();
-        wait_prompt(fd, true, &h2);
+        wait_ready(fd, true, &h2);
     };
     // The write wait is satisfied at once (the socket is writable) and never pending, so its completion
     // is what orders it: only once it has finished is the byte written, and the still-armed reader must
@@ -160,14 +148,14 @@ fn a_write_wait_arming_under_a_read_event_is_still_served() {
         let h1 = hits.clone();
         launch || {
             defer w1.done();
-            wait_prompt(fd, false, &h1);
+            wait_ready(fd, false, &h1);
         };
         assert(wait_pending(1), "the reader arms first");
         let w2 = wg.clone();
         let h2 = hits.clone();
         launch || {
             defer w2.done();
-            wait_prompt(fd, true, &h2);
+            wait_ready(fd, true, &h2);
         };
         write_one(&p.a);
         assert(wg.wait_timeout(time::Duration::from_secs(10)), "both waits finish");
@@ -206,7 +194,7 @@ fn a_reused_descriptor_number_serves_its_new_waiter() {
     let h2 = hits.clone();
     launch || {
         defer w2.done();
-        wait_prompt(fd2, false, &h2);
+        wait_ready(fd2, false, &h2);
     };
     assert(wait_pending(1), "the new wait arms on the reused number");
     write_one(&q.a);
@@ -236,6 +224,35 @@ fn close_racing_shutdown_drains_its_report() {
             };
         }
         assert(wg.wait_timeout(time::Duration::from_secs(10)), "the tasks signal");
+        io::shutdown();
+    }
+    finish();
+}
+
+// Closes racing the reactor's start keep their count: the builder clears only a stopped reactor's mark, so
+// every close counts out to zero and each round's shutdown finds no closer left. A lost count leaves the
+// stopping reactor waiting for a closer that is gone, and the shutdown never returns.
+@test
+fn closes_racing_the_reactor_start_keep_their_count() {
+    rt::set_worker_count(2);
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    for _i in 0..50 {
+        let p = pair(&l);
+        let fd = p.b.fd;
+        let hits = counter();
+        let h = hits.clone();
+        let mut spare = Vector::<net::TcpListener>::new();
+        for _k in 0..16 {
+            spare.push(net::TcpListener::bind("127.0.0.1", 0).unwrap());
+        }
+        launch || {
+            wait_ready(fd, false, &h); // the first wait starts the reactor
+        };
+        spare.clear(); // sixteen closes while it starts
+        assert(wait_pending(1), "the wait is recorded");
+        write_one(&p.a);
+        assert(ph::wait_count(&hits, 1), "the byte ends the wait");
+        assert(ph::wait_quiescent(), "the woken task completes");
         io::shutdown();
     }
     finish();
@@ -401,25 +418,20 @@ fn an_unregisterable_descriptor_reports_not_ready_at_once() {
     let fd = p.b.fd;
     p.b.close();
     p.a.close();
-    let wg = sync::WaitGroup::new();
-    wg.add(1);
-    let w = wg.clone();
-    let took = counter();
-    let t = took.clone();
+    let result = counter(); // 1: the wait reported not ready, 2: it reported ready
+    let r = result.clone();
     launch || {
-        defer w.done();
-        let t0 = platform::now_ns();
-        // The deadline lies far past the gate below: a wait that ends at all did not run to it.
-        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(3600)));
-        if !ok {
-            t.get().store((platform::now_ns() - t0) as i64, atomics::MemoryOrder::Release);
+        // No deadline: the refused registration alone ends the wait.
+        let v: i64 = if io::wait_until(fd, false, 0) {
+            2;
         } else {
-            t.get().store(-1i64, atomics::MemoryOrder::Release);
-        }
+            1;
+        };
+        r.get().store(v, atomics::MemoryOrder::Release);
     };
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the wait ends before its deadline");
-    let el = count(&took);
-    assert(el >= 0, "the wait reports not ready");
+    assert(ph::wait_count(&result, 1), "the refused registration ends the wait");
+    assert_eq(count(&result), 1);
+    assert(ph::wait_quiescent(), "the task completes");
     finish();
 }
 
@@ -468,53 +480,46 @@ fn a_number_the_reactor_took_reports_not_ready() {
     finish();
 }
 
-// Shutdown with a wait still parked: the wait settles promptly as not ready, the task resumes, and a
-// wait started after the shutdown starts a fresh reactor.
+// Shutdown with a wait still parked: the wait settles as not ready, the task resumes, and a wait started
+// after the shutdown starts a fresh reactor. The waits have no deadline and no byte arrives before the
+// shutdown, so the shutdown alone can end the first one.
 @test
 fn shutdown_settles_a_pending_wait() {
     rt::set_worker_count(2);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let p = pair(&l);
     let fd = p.b.fd;
-    let wg = sync::WaitGroup::new();
-    wg.add(1);
-    let w = wg.clone();
-    let took = counter();
-    let t = took.clone();
+    let result = counter(); // 1: the wait reported not ready, 2: it reported ready
+    let r = result.clone();
     launch || {
-        defer w.done();
-        let t0 = platform::now_ns();
-        // The deadline lies far past the gate below: a wait that ends at all was settled by the shutdown.
-        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(3600)));
-        if !ok {
-            t.get().store((platform::now_ns() - t0) as i64, atomics::MemoryOrder::Release);
+        let v: i64 = if io::wait_until(fd, false, 0) {
+            2;
         } else {
-            t.get().store(-1i64, atomics::MemoryOrder::Release);
-        }
+            1;
+        };
+        r.get().store(v, atomics::MemoryOrder::Release);
     };
-    assert(wait_pending(1), "the wait arms");
+    assert(wait_pending(1), "the wait is recorded");
     io::shutdown();
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the settled wait ends before its deadline");
-    let el = count(&took);
-    assert(el >= 0, "the wait reports not ready");
+    assert(ph::wait_count(&result, 1), "the shutdown ends the wait");
+    assert_eq(count(&result), 1);
+    assert(ph::wait_quiescent(), "the settled task completes");
     // A fresh reactor serves the next wait.
     let hits = counter();
-    wg.add(1);
-    let w2 = wg.clone();
     let h = hits.clone();
     launch || {
-        defer w2.done();
-        wait_prompt(fd, false, &h);
+        wait_ready(fd, false, &h);
     };
-    assert(wait_pending(1), "the new wait arms");
+    assert(wait_pending(1), "the new wait is recorded");
     write_one(&p.a);
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the new wait ends");
-    assert_eq(count(&hits), 1);
+    assert(ph::wait_count(&hits, 1), "the byte ends the new wait");
+    assert(ph::wait_quiescent(), "the woken task completes");
     finish();
 }
 
 // A thousand idle descriptors parked on the reactor while one connection does a hundred round trips: the
-// active one is served promptly, the idle ones stay parked, and one byte each wakes them all.
+// active one is served, the idle ones stay parked, and one byte each wakes them all. How fast the round
+// trips go is the reactor benchmark's question.
 @test
 fn idle_descriptors_do_not_delay_an_active_one() {
     rt::set_worker_count(2);
@@ -533,18 +538,10 @@ fn idle_descriptors_do_not_delay_an_active_one() {
         let h = hits.clone();
         launch || {
             defer w.done();
-            // Longer than the poll below: a loaded runner parks the last of a thousand after the first
-            // would otherwise have expired.
-            wait_prompt_for(fd, false, &h, 30);
+            wait_ready(fd, false, &h);
         };
     }
-    // Let them all park.
-    let deadline = platform::now_ns() + 5000000000;
-    while io::pending_waits() < idle as usize && platform::now_ns() < deadline {
-        time::sleep(time::Duration::from_millis(1));
-    }
-    assert_eq(io::pending_waits(), idle as usize);
-    eprintln("idle waits parked: {}", idle);
+    assert(wait_pending(idle as usize), "every idle wait is recorded");
     // The active connection.
     let p = pair(&l);
     let afd = p.b.fd;
@@ -569,32 +566,12 @@ fn idle_descriptors_do_not_delay_an_active_one() {
     let mut back = Vector::<u8>::new();
     back.resize_default(8);
     let bcap: usize = 8;
-    let t0 = platform::now_ns();
-    let mut slowest: u64 = 0;
     for _k in 0..100 {
-        let t1 = platform::now_ns();
         write_one(&p.a);
         assert(p.a.read(back.index_range_mut(0..bcap)) == 1, "the echo comes back");
-        let trip = platform::now_ns() - t1;
-        if trip > slowest {
-            slowest = trip;
-        }
     }
-    let spent = platform::now_ns() - t0;
-    eprintln("round trips done in {} ms", spent / 1000000);
     assert(awg.wait_timeout(time::Duration::from_secs(10)), "the echo task finishes");
-    eprintln("echo task finished");
     assert_eq(count(&trips), 100);
-    // Replayed only when the test fails: the numbers say whether the wake path or the machine is slow.
-    eprintln(
-        "a hundred round trips under {} idle waits: {} ms, slowest trip {} us",
-        idle,
-        spent / 1000000,
-        slowest / 1000,
-    );
-    // A loaded runner on the select backend rebuilds a thousand-entry set per wake: the bound is about
-    // delay by the idle waits, not about the machine, so it stays wide.
-    assert(spent < 20000000000, "a hundred round trips under a thousand idle waits");
     assert_eq(io::pending_waits(), idle as usize);
     for i in 0..idle as usize {
         write_one(&pairs.at(i).a);
@@ -625,20 +602,13 @@ fn a_burst_of_waits_from_one_worker_is_all_served() {
         let h = hits.clone();
         launch || {
             defer w.done();
-            // The byte comes only after the yield phase below, so the read wait's own duration is the
-            // test's, not the wake's: it counts on readiness, with a deadline only a lost wake reaches.
-            if io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(30))) {
-                bump(&h);
-            }
-            wait_prompt(fd, true, &h); // writable at once: a second wait on the same descriptor
+            // The byte comes only after the yield phase below; only readiness ends the wait.
+            wait_ready(fd, false, &h);
+            wait_ready(fd, true, &h); // writable at once: a second wait on the same descriptor
         };
     }
     // Progress behind the burst: a task that only yields must finish while every wait is still pending.
-    let deadline = platform::now_ns() + 5000000000;
-    while io::pending_waits() < n as usize && platform::now_ns() < deadline {
-        time::sleep(time::Duration::from_millis(1));
-    }
-    assert_eq(io::pending_waits(), n as usize);
+    assert(wait_pending(n as usize), "every wait of the burst is recorded");
     let turns = counter();
     let pw = sync::WaitGroup::new();
     pw.add(1);

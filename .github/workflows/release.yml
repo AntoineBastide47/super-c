@@ -408,31 +408,30 @@ jobs:
       - name: Build the wasm compiler
         run: WASI_SDK_PATH="$HOME/wasi-sdk" ./super-c build --target=wasm --profile=release -o super-c.wasm
 
-      # The self-hosting fixpoint, on wasm: gen1 (the artifact) transpiles the WHOLE COMPILER under
-      # wasmtime, that tree builds gen2, and gen2's emission of the same input must be byte-identical.
-      # Emission is path-dependent (hashes mix path strings), so gen2 emits at the SAME path gen1 did.
-      # (No byte-diff against the native binary: instance homing follows hash orders that differ
-      # between 32- and 64-bit hosts.) The tree carries its own compiler: std/ffi resolve beside the
-      # binary, and inputs are absolute because wasmtime's guest cwd is "/".
+      # The self-hosting fixpoint, on wasm: the build engine builds gen2 from the whole compiler with gen1
+      # (the artifact) as its transpiler under wasmtime, then gen3 with gen2 as its transpiler, and
+      # gen2's emission must be byte-identical to gen1's. WASI has no processes, so the native engine
+      # runs the transpile step through `--transpiler` and compiles and links with its own wasm target
+      # flags. Emission is path-dependent (hashes mix path strings), so both emit from the SAME project
+      # copy. (No byte-diff against the native binary: instance homing follows hash orders that differ
+      # between 32- and 64-bit hosts.) The copy carries each transpiler: std/ffi resolve beside the
+      # module, and the engine passes absolute paths because wasmtime's guest cwd is "/".
       - name: Self-host fixpoint under wasmtime
         run: |
           set -eu
-          mkdir -p /tmp/wwasm
-          cp -R src std ffi /tmp/wwasm/ && rm -rf /tmp/wwasm/src/build
-          cp super-c.wasm /tmp/wwasm/
-          wasmtime run --dir=/ --argv0 /tmp/wwasm/super-c.wasm -- \
-            /tmp/wwasm/super-c.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/tmp/wasm-err.txt \
-            || { head -60 /tmp/wasm-err.txt; exit 1; }
-          # warnings (unused-pub etc.) are expected; any error line is not
-          if grep -m1 -E '^error' /tmp/wasm-err.txt; then head -40 /tmp/wasm-err.txt; exit 1; fi
-          mv /tmp/wwasm/src/build /tmp/wasm-gen1
-          "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L -funsigned-char \
-            -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -lwasi-emulated-signal -lwasi-emulated-process-clocks \
-            -Wl,-z,stack-size=8388608 -Wl,--stack-first \
-            $(find /tmp/wasm-gen1 -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
-          wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \
-            /tmp/wwasm/gen2.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/dev/null
-          diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            WASI_SDK_PATH="$HOME/wasi-sdk" "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r /tmp/wasm-gen1 build/release/raw
 
       - name: Run the test suite against the wasm compiler
         run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}

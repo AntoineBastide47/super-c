@@ -171,6 +171,10 @@ need.
   source order; match scrutinee once, arm tests in order, guard after bindings; `defer`
   bodies run LIFO at every scope exit; multi-return destinations written in declaration
   order.
+- A method call passes its receiver as the value the call site wrote; a reference `self`
+  parameter makes the implicit borrow: the emitter spells `&x` (`emit_call_arg`), the
+  evaluator passes a pointer to the operand's place, or to a new cell for a temporary
+  (`autoref_args`), so `x.get()` on a builtin runs at compile time as it runs in C.
 - A body that reaches a construct the lowering cannot handle fails with a reason string.
 - **One lowering per body:** `irl::Keep` caches `KeptBody` records (body plus closures) keyed by body; borrowck
   fills it, emission's InstGraph walks it. Bodies with `has_reflect` / `has_zst_cond`

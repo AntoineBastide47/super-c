@@ -300,6 +300,60 @@ fn index_final_edges_carry_type_path_calls() {
     assert(fin(&p, run, helper), "the checker's resolution of the type-path call is a final edge");
 }
 
+// A method of an extend of a builtin type, called on a builtin receiver: no resolved reference names
+// the type, so the precheck ranges carry the call's edge to the extend (a constant fold of `f` runs
+// `get`), and the qualified constant's user reaches it too.
+const A2: str = M"(import b;
+import c;
+
+interface I {
+    fn get(self: &Self) i64;
+    fn twice(self: &Self) i64 {
+        return self.get() * 2;
+    }
+}
+
+extend u8 as I {
+    fn get(self: &u8) i64 {
+        return *self;
+    }
+}
+
+extend u8 {
+    pub const K: i64 = 4;
+}
+
+fn f() i64 {
+    let x: u8 = 3;
+    return x.twice();
+}
+
+fn k() i64 {
+    return u8::K;
+}
+
+fn main() i32 {
+    return (f() + k()) as i32 + b::bee() + c::cee();
+}
+)";
+
+@test
+fn index_edges_reach_builtin_extends() {
+    let ws = ws_new(A2, B1, C1);
+    let p = indexed(&ws, A2, B1, C1, true);
+    let am = mod_of(&p, "/a.spc");
+    let f = item_named(&p, am, "f");
+    let k = item_named(&p, am, "k");
+    let get = item_named(&p, am, "get");
+    let kc = item_named(&p, am, "K");
+    assert(f != loader::ITEM_NONE && k != loader::ITEM_NONE && get != loader::ITEM_NONE, "items indexed");
+    let conf = p.idx.items.at(get as usize).owner;
+    let inh = p.idx.items.at(kc as usize).owner;
+    assert(pre(&p, f, conf), "a method call on a builtin receiver depends on the conformance");
+    assert(pre(&p, k, inh), "a qualified constant of a builtin depends on its extend");
+    assert(p.sched.comp[conf as usize] < p.sched.comp[f as usize], "the extend precedes its caller");
+}
+
 @test
 fn index_components_collapse_cycles() {
     let ws = ws_new(A0, B0, C0);

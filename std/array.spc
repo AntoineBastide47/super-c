@@ -6,7 +6,7 @@
 // (every slot `T::default()`) or `filled(&x)` (every slot a clone of `x`). Conditionally `Free`: an Array of
 // a Free element type deep-frees its elements at scope exit; an Array of plain values stays a plain value.
 
-/// A fixed-size inline array of N elements, always fully initialized; the prelude type behind `[T; N]`.
+/// A fixed-size inline array of N elements, always fully initialized. A distinct type from the builtin `[T; N]`.
 pub struct Array<T, const N: usize> {
     data: [T; N], // the N elements, all always initialized (private)
 }

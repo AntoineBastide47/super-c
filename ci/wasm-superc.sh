@@ -1,5 +1,6 @@
 #!/bin/sh
-# The compiler under test, as wasm. Transpile-class commands run inside wasmtime; the subcommands
+# The compiler under test, as wasm. Transpile-class commands (a script, fmt, lint, and the transpile
+# form `<root> --emit-sub=...` a build engine's --transpiler runs) run inside wasmtime; the subcommands
 # that must spawn processes (the build engine's cc, bindgen's preprocessor, the test runner) fall
 # back to the native binary -- WASI has no processes, so this split IS the wasm lane. Used through
 # SC_TEST_SUPERC, which `super-c test` installs as the harness's compiler under test.

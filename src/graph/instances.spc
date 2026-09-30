@@ -1371,7 +1371,7 @@ extend InstGraph {
             if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
                 continue;
             }
-            if t.targs_len != 0 {
+            if t.targs_len != 0 && !self.note_iface_call(a, &t, b, frame) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             self.note_method(a, &t, b, frame);
@@ -1422,6 +1422,154 @@ extend InstGraph {
         }
         let mut fresh = false;
         let _ = self.add(IG_METHOD, t.callee, &mut fresh);
+    }
+
+    // A call of generic interface method `t.callee` (module AST `a`, under `frame`) dispatches per
+    // instance to the method of the receiver's conformance, with the call's arguments bound to that
+    // method's parameters by position, or runs the interface's default body under the conformance:
+    // that method's record, or the default body's walk, once the receiver and the arguments are
+    // concrete. False when the callee is no interface method.
+    fn note_iface_call(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) bool {
+        let p = unsafe &*self.pkg;
+        let ca = unsafe &*p.module_ast_const(t.callee.module);
+        let inode = iface_of_member(ca, t.callee.node);
+        let fg = ca.at_const(t.callee.node).as_data.function.generics;
+        if inode == NODE_NONE || fg.len == 0 || t.targs_len < fg.len {
+            return false;
+        }
+        let mut rt = t.recv;
+        if rt == TYPE_NONE && t.args_len != 0 {
+            rt = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+        }
+        for _ in 0..4 {
+            if rt == TYPE_NONE {
+                break;
+            }
+            let y = *a.type_at(rt);
+            if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            rt = y.as_data.elem;
+        }
+        if rt == TYPE_NONE || !self.concrete_subst(a, rt, frame, 0) {
+            return true; // still symbolic: the enclosing instantiation walks it bound
+        }
+        // The method's own arguments are the call's trailing ones.
+        let mut tk = Vector::<ArgKey>::new();
+        for i in t.targs_len - fg.len..t.targs_len {
+            let ta = b.targ_pool[(t.targs_start + i) as usize];
+            if !self.concrete_subst(a, ta, frame, 0) {
+                return true;
+            }
+            tk.push(self.argkey_subst(a, ta, frame));
+        }
+        let rk = self.argkey_subst(a, rt, frame);
+        let ry = *a.type_at(rk.ty);
+        let mut d = DefId { module: ry.module, node: NODE_NONE };
+        let mut keys = Vector::<ArgKey>::new();
+        if ry.kind == TypeKind::TYPE_STRUCT || ry.kind == TypeKind::TYPE_ENUM {
+            d.node = ry.as_data.decl;
+        } else if ry.kind == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(ry.as_data.inst);
+            d = DefId { module: it.module, node: it.decl };
+            for i in 0..it.n {
+                keys.push(self.argkey_subst(a, unsafe it.args[i as usize], frame));
+            }
+        } else if ry.kind == TypeKind::TYPE_BUILTIN {
+            d = DefId { module: p.core_module, node: p.builtin_decl(ry.as_data.builtin) };
+        }
+        if d.node == NODE_NONE {
+            return true;
+        }
+        let want = pick(t.iface != TYPE_NONE, self.subst_intern(a, t.iface, frame, 0), TYPE_NONE);
+        let mn = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+        let mname = p.modules.at(t.callee.module as usize).source.as_str().slice(mn.start as usize, mn.end as usize);
+        let mut r = self.ext_first(d);
+        while r != IG_NONE {
+            let ri = r;
+            let row = *self.exts.at(r as usize);
+            r = *self.ext_next.at(r as usize);
+            let ea = unsafe &*p.module_ast_const(row.emod);
+            let ed = ea.at_const(row.enode).as_data.extend_def;
+            let ir = self.ext_interface(ea, row.enode);
+            if ir.module != t.callee.module || ir.node != inode || !self.ext_applies(
+                ea,
+                row.enode,
+                &keys,
+                0,
+                keys.len() as u32,
+            ) {
+                continue;
+            }
+            let mut ef = Vector::<Subst>::new();
+            let _ = self.bind_ext_keys(ea, row.enode, &keys, 0, keys.len() as u32, &mut ef);
+            let dt = ea.type_of(ed.interface_type);
+            if want != TYPE_NONE && (dt == TYPE_NONE || self.subst_intern(ea, dt, &ef, 1) != want) {
+                continue;
+            }
+            let esrc = p.modules.at(row.emod as usize).source.as_str();
+            for j in 0..ed.items.len {
+                let hid = unsafe ea.list(ed.items)[j as usize];
+                let hn = ea.at_const(hid);
+                if hn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+                if esrc.slice(hs.start as usize, hs.end as usize) != mname {
+                    continue;
+                }
+                // The conformance's own method: the receiver's arguments (a generic extend's
+                // method), then the call's.
+                self.argbuf.truncate(0);
+                let generic = ed.generics.len != 0;
+                if generic {
+                    for k in 0..keys.len() {
+                        self.argbuf.push(*keys.at(k));
+                    }
+                }
+                for k in 0..tk.len() {
+                    self.argbuf.push(*tk.at(k));
+                }
+                let mut fresh = false;
+                let _ = self.add(pick(generic, IG_METHOD, IG_FN), DefId { module: row.emod, node: hid }, &mut fresh);
+                return true;
+            }
+            if ca.at_const(t.callee.node).as_data.function.body == NODE_NONE {
+                return true;
+            }
+            // The inherited default body under `Self`, the conformance's interface arguments and
+            // the call's.
+            let mut wk = skey_mix(skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64), ri);
+            wk = skey_mix(wk, rk.ty as u64 | 1u64 << 40);
+            for k in 0..tk.len() {
+                wk = skey_mix(wk, tk.at(k).ty);
+            }
+            if self.dwalked.contains(&wk) {
+                return true;
+            }
+            self.dwalked.insert(wk);
+            ef.push(Subst { pmod: t.callee.module, pdecl: inode, key: rk });
+            if dt != TYPE_NONE {
+                let di = *ea.instance(ea.type_at(dt).as_data.inst);
+                let igens = ca.at_const(inode).as_data.interface_def.generics;
+                let mut g: u32 = 0;
+                while g < igens.len && g < di.n as u32 {
+                    let at = unsafe di.args[g as usize];
+                    if !self.concrete_subst(ea, at, &ef, 0) {
+                        return true;
+                    }
+                    let k0 = self.argkey_subst(ea, at, &ef);
+                    ef.push(Subst { pmod: t.callee.module, pdecl: unsafe ca.list(igens)[g as usize], key: k0 });
+                    g += 1;
+                }
+            }
+            for k in 0..fg.len {
+                ef.push(Subst { pmod: t.callee.module, pdecl: unsafe ca.list(fg)[k as usize], key: *tk.at(k as usize) });
+            }
+            self.seed_body(t.callee.module, t.callee.node, ca, &ef);
+            return true;
+        }
+        return true;
     }
 
     // A resolved call/value use of a generic function with bound arguments.
@@ -2223,7 +2371,7 @@ extend InstGraph {
         }
         for i in 0..(unsafe &*wp).calls.len() {
             let t = b.blocks.at((*(unsafe &*wp).calls.at(i)) as usize).term;
-            if t.targs_len != 0 {
+            if t.targs_len != 0 && !self.note_iface_call(a, &t, b, frame) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             self.note_method(a, &t, b, frame);

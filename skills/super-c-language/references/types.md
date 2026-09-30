@@ -197,7 +197,12 @@ position is "mismatched types". A local constant of a generic function may use i
 (`const S: usize = sizeof(T);`): each instance has its own value. A qualified constant is an argument
 unbraced as braced, like a named one: a builtin limit (`F<u64::MAX>`, read as the literal of its
 value), an associated constant of a builtin, a struct or an enum from a non-generic extend
-(`F<Foo::K>`, in its own type) and a variant (`F<D::Y>`). A module may qualify each of them
+(`F<Foo::K>`, in its own type) and a variant (`F<D::Y>`). With disjoint extends of a generic type
+each defining the constant (`extend W<u8>`, `extend W<i32>`), `F<W::K>` takes the one whose type is
+the parameter's, and a path names the instance, bare or braced (`F<W::<u8>::K>`, `F<{W::<u8>::K}>`;
+the `<` after a `::` tells it from the type `W<u8>`, and `fmt` keeps the spelling), also a generic
+extend's constant for a concrete instance (`F<{G::<u16>::S * 2}>`); otherwise it is "cannot infer the generic
+arguments of associated constant 'K'; give explicit type arguments", with a note at each candidate. A module may qualify each of them
 (`F<m::B>`, `F<{m::B}>`, `F<m::Foo::K>`, `F<m::D::Y>`, `g::<m::B>()`, and a builtin limit through
 an alias, `F<m::U::MAX>`); only a `pub` constant is visible ("no public type or constant 'P' in the
 imported module", "no associated constant 'Q' on 'm::Foo'"). A type for a const parameter is "expected a
@@ -245,7 +250,7 @@ initializer may use the extend's parameters (`pub const S: usize = sizeof(T);`);
 is its own static datum. With disjoint extends each defining `K` (`extend W<u8>`, `extend W<i32>`),
 `W::<u8>::K` names the one whose extend applies, and a bare `W::K` the only one whose type is the
 expected type ("cannot infer the generic arguments of associated constant 'K'; give explicit type
-arguments" otherwise).
+arguments" otherwise, with a note at each candidate).
 
 An unbounded `T` owns: uses move, leftovers drop. `T: Copy` (derived structurally, see the
 ownership section of the skill) makes it copyable.
@@ -307,6 +312,15 @@ chosen extend's parameters bind from the arguments and the expected type. Candid
 equally are "ambiguous call: two candidates for 'mk' fit equally well"; an inherited interface
 default, which names no instance, is "cannot infer the generic argument 'T' for this call; add an
 explicit argument".
+
+An interface method may declare generic parameters (`fn conv<U: Num>(self: &Self, n: i32) U;`). An
+implementation matches it by position: the same number and kinds of parameters (a const parameter's
+type too), bounds equal as sets once renamed (inline or in `where`, in any order), and the parameter
+and result types read with the interface method's parameters as the implementation's; anything else
+is "method 'conv' does not match interface signature". A call through a bound (`t.conv::<u8>(3)`,
+`T::conv::<u8>(t, 3)`, or inferred from the expected result), on a concrete receiver and from a
+default body runs the implementation's instance for those arguments (`C__conv__u8` in C) or the
+default body's, at run time and at compile time. Such an interface is not dyn-compatible.
 
 A method call takes a turbofish as its path form does: `x.m::<u8>(3)` is `X::m::<u8>(&x, 3)`, through
 autoref, auto-deref and `Box` alike. Its type-level arguments bind the
@@ -465,5 +479,6 @@ type Q2<T> = Q1<Q1<T>>;        // Q2<i32> is Pair<Pair<i32, i32>, Pair<i32, i32>
 type Arr3<T> = Array<T, 3>;
 ```
 
-The argument count must match the alias's parameters (after defaults). A generic alias
+The argument count must match the alias's parameters (after defaults): "'Q' takes 1 generic argument
+but 2 were supplied", as for a struct or an enum. A generic alias
 cannot be an `extend` target; extend the aliased type. A cyclic alias is an error.

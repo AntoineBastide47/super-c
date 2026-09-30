@@ -3453,3 +3453,135 @@ fn main() i32 {
         0,
     );
 }
+
+// A generic interface method runs its implementation's instance for the call's arguments through a
+// bound (method and path form, inferred or turbofished), from a default body, on a generic
+// conformance, and at compile time; owning results are freed once.
+@test
+fn generic_interface_methods_run() {
+    run_leak_free(
+        "generic interface methods",
+        M"(interface Num {
+    fn of(v: i32) Self;
+    fn get(self: &Self) i64;
+}
+struct B { pub v: i64 }
+extend B as Num {
+    fn of(v: i32) B { return B { v: v }; }
+    fn get(self: &Self) i64 { return self.v; }
+}
+struct Name { pub s: String }
+extend Name as Num {
+    fn of(v: i32) Name {
+        let mut s = String::new();
+        s.push_i64(v);
+        return Name { s: s };
+    }
+    fn get(self: &Self) i64 { return self.s.len() as i64; }
+}
+interface Conv {
+    fn conv<U: Num>(self: &Self, n: i32) U;
+    fn twice<V: Num>(self: &Self) i64 { return self.conv::<V>(1).get() + self.conv::<V>(2).get(); }
+}
+struct C { pub k: i32 }
+extend C as Conv {
+    fn conv<U: Num>(self: &Self, n: i32) U { return U::of(n + self.k); }
+}
+struct G<T> { pub t: T }
+extend<T: Num> G<T> as Conv {
+    fn conv<W: Num>(self: &Self, n: i32) W { return W::of(n + self.t.get() as i32); }
+}
+fn via<T: Conv>(t: &T) i64 { return t.conv::<B>(3).get() + T::conv::<Name>(t, 1000).get(); }
+fn named<T: Conv>(t: &T) i64 { let x: Name = t.conv(12345); return x.get() + t.twice::<Name>(); }
+const K1: i64 = via(&C { k: 1 });
+const K2: i64 = C { k: 1 }.twice::<B>();
+fn main() i32 {
+    let c = C { k: 1 };
+    let g = G::<B> { t: B { v: 10 } };
+    let n: Name = c.conv::<Name>(99999);
+    if via(&c) != 8 || via(&g) != 17 { return 1; }
+    if named(&c) != 7 || named(&g) != 9 { return 2; }
+    if c.twice::<B>() + g.twice::<B>() != 28 || n.get() != 6 { return 3; }
+    if K1 != 8 || K2 != 5 { return 4; }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// A const-generic argument takes an associated constant of one of several disjoint extends when the
+// parameter's type chooses it or the instance is written (braced or bare), and a generic extend's
+// constant for the written instance.
+@test
+fn const_argument_selects_an_extend() {
+    run_leak_free(
+        "associated constants as const arguments",
+        M"(struct W<T> { pub v: T }
+extend W<u8> { pub const K: u64 = 3; }
+extend W<i32> { pub const K: u32 = 5; }
+struct G<T> { pub v: T }
+extend<T> G<T> { pub const S: u64 = sizeof(T) as u64 * 2; }
+struct F<const N: u64> { pub x: i32 }
+extend<const N: u64> F<N> { pub fn n(self: &Self) u64 { return N; } }
+fn main() i32 {
+    let a = F::<W::K> { x: 1 };
+    let b: F<{W::<i32>::K + 1}> = F { x: 2 };
+    let c = F::<{G::<u16>::S * W::<u8>::K}> { x: 0 };
+    let d: F<W::<u8>::K> = F { x: 3 };
+    let e = F::<W::<i32>::K> { x: 4 };
+    return (a.n() + b.n() + c.n() + d.n() + e.n()) as i32 - 29;
+}
+)",
+        0,
+    );
+}
+
+// The methods and constants of a user extend of a builtin type run at compile time: a receiver the
+// call borrows (a local, a temporary, a `&mut self` that writes it back), an interface default, a
+// bound call, and a qualified constant, from array lengths the type check folds and from constants.
+@test
+fn builtin_extend_methods_fold_at_compile_time() {
+    run_leak_free(
+        "builtin extend methods in constant evaluation",
+        M"(interface I {
+    fn get(self: &Self) usize;
+    fn twice(self: &Self) usize { return self.get() * 2; }
+}
+extend u8 as I {
+    fn get(self: &u8) usize { return *self as usize + 1; }
+}
+extend u8 {
+    pub const K: usize = 5;
+    fn bump(self: &mut u8) { *self = *self + 1; }
+}
+fn f1() usize {
+    let mut x: u8 = 3;
+    x.bump();
+    return x.twice();
+}
+fn f2<T: I>(t: &T) usize { return t.get(); }
+const A: usize = f1();
+const B: usize = (6u8).get();
+fn main() i32 {
+    let a: [u8; f1()] = [0u8; 10];
+    let b: [u8; f2(&6u8)] = [0u8; 7];
+    let d: [u8; u8::K] = [0u8; 5];
+    if sizeof(a) != 10 || sizeof(b) != 7 || sizeof(d) != 5 { return 1; }
+    if A != 10 || B != 7 { return 2; }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// A method call on the result of a turbofished method call takes none of that call's arguments.
+@test
+fn method_on_a_turbofished_call() {
+    run_leak_free(
+        "a call on a turbofished call's result",
+        "struct N { pub s: String }\nextend N { pub fn get(self: &Self) i64 { return self.s.len() as i64; } }\nstruct X { pub k: i32 }\nextend X { pub fn m<U>(self: &Self, u: U) N { return N { s: String::from_str(\"abc\") }; } }\nfn main() i32 { let x = X { k: 1 }; return x.m::<u8>(1).get() as i32 - 3; }\n",
+        0,
+    );
+}

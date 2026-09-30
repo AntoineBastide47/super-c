@@ -4777,12 +4777,12 @@ fn rejection_messages() {
     h::expect_err_msg(
         "generic alias argument count",
         "struct Pair<A, B> { pub a: A, pub b: B }\ntype Q<T> = Pair<T, T>;\nfn f(x: Q<i32, i32>) {}\nfn main() i32 { return 0; }\n",
-        "this type alias takes 1 generic argument(s) but 2 were supplied",
+        "error: 'Q' takes 1 generic argument but 2 were supplied\n--> <harness>:3:16",
     );
     h::expect_err_msg(
         "generic alias path base without arguments",
         "struct Pair<A, B> { pub a: A, pub b: B }\nextend<A, B> Pair<A, B> { pub fn mk(a: A, b: B) Pair<A, B> { return Pair::<A, B> { a: a, b: b }; } }\ntype Q<T> = Pair<T, T>;\nfn main() i32 { let q = Q::mk(1, 2); return q.a - 1; }\n",
-        "this type alias takes 1 generic argument(s) but 0 were supplied",
+        "error: 'Q' takes 1 generic argument but 0 were supplied\n--> <harness>:4:25",
     );
     h::expect_err_msg(
         "extend of a generic alias",
@@ -6144,5 +6144,187 @@ fn main() i32 {
 }
 )",
         8,
+    );
+}
+
+// An implementation matches a generic interface method by position: the same number and kinds of
+// generic parameters, equal bounds (inline or in `where`, in any order) once renamed, and the
+// signature read with the interface method's parameters as the implementation's.
+@test
+fn generic_interface_method_signatures() {
+    const HEAD: str = "interface Num { fn get(self: &Self) i64; }\ninterface I<A> {\n    fn a<U: Num>(self: &Self, x: A) U;\n    fn b<U: Num + Copy, V>(self: &Self, u: U, v: V) A;\n    fn e<U>(self: &Self, u: U) i32 where U: Num;\n    fn d<const N: u64>(self: &Self) u64;\n}\nstruct C { pub k: i32 }\n";
+    h::expect_ok(
+        "renamed parameters, reordered and moved bounds",
+        format(
+            "{}extend C as I<bool> {{\n    fn a<W: Num>(self: &Self, x: bool) W {{ return self.a::<W>(x); }}\n    fn b<U: Copy + Num, V>(self: &Self, u: U, v: V) bool {{ return true; }}\n    fn e<U: Num>(self: &Self, u: U) i32 {{ return 0; }}\n    fn d<const M: u64>(self: &Self) u64 {{ return M; }}\n}}\n",
+            HEAD,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "an extra bound",
+        format(
+            "{}extend C as I<bool> {{\n    fn a<U: Num + Copy>(self: &Self, x: bool) U {{ return self.a::<U>(x); }}\n    fn b<U: Num + Copy, V>(self: &Self, u: U, v: V) bool {{ return true; }}\n    fn e<U: Num>(self: &Self, u: U) i32 {{ return 0; }}\n    fn d<const N: u64>(self: &Self) u64 {{ return N; }}\n}}\n",
+            HEAD,
+        ).as_str(),
+        "error: method 'a' does not match interface signature\n--> <harness>:10:5",
+    );
+    h::expect_err_msg(
+        "another parameter count",
+        format(
+            "{}extend C as I<bool> {{\n    fn a<U: Num>(self: &Self, x: bool) U {{ return self.a::<U>(x); }}\n    fn b<U: Num + Copy>(self: &Self, u: U, v: U) bool {{ return true; }}\n    fn e<U: Num>(self: &Self, u: U) i32 {{ return 0; }}\n    fn d<const N: u64>(self: &Self) u64 {{ return N; }}\n}}\n",
+            HEAD,
+        ).as_str(),
+        "error: method 'b' does not match interface signature\n--> <harness>:11:5",
+    );
+    h::expect_err_msg(
+        "a const parameter of another type",
+        format(
+            "{}extend C as I<bool> {{\n    fn a<U: Num>(self: &Self, x: bool) U {{ return self.a::<U>(x); }}\n    fn b<U: Num + Copy, V>(self: &Self, u: U, v: V) bool {{ return true; }}\n    fn e<U: Num>(self: &Self, u: U) i32 {{ return 0; }}\n    fn d<const N: u32>(self: &Self) u64 {{ return 0; }}\n}}\n",
+            HEAD,
+        ).as_str(),
+        "error: method 'd' does not match interface signature\n--> <harness>:13:5",
+    );
+    h::expect_err_msg(
+        "a parameter written as the interface's argument",
+        format(
+            "{}extend C as I<bool> {{\n    fn a<U: Num>(self: &Self, x: bool) bool {{ return x; }}\n    fn b<U: Num + Copy, V>(self: &Self, u: U, v: V) bool {{ return true; }}\n    fn e<U: Num>(self: &Self, u: U) i32 {{ return 0; }}\n    fn d<const N: u64>(self: &Self) u64 {{ return N; }}\n}}\n",
+            HEAD,
+        ).as_str(),
+        "error: method 'a' does not match interface signature\n--> <harness>:10:5",
+    );
+}
+
+// A call through a bound takes the interface method's turbofish and checks its length; a generic
+// method keeps its interface from `dyn`.
+@test
+fn generic_interface_method_calls() {
+    const HEAD: str = "interface Num { fn of(v: i32) Self; }\nstruct B { pub v: i32 }\nextend B as Num { fn of(v: i32) B { return B { v: v }; } }\ninterface Conv { fn conv<U: Num>(self: &Self, n: i32) U; }\nstruct C { pub k: i32 }\nextend C as Conv { fn conv<U: Num>(self: &Self, n: i32) U { return U::of(n); } }\n";
+    h::expect_ok(
+        "method, path and inferred calls through a bound",
+        format(
+            "{}fn f<T: Conv>(t: &T) i32 {{ let x: B = t.conv(1); return t.conv::<B>(2).v + T::conv::<B>(t, 3).v + x.v; }}\n",
+            HEAD,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "a turbofish longer than the interface method's",
+        format("{}fn f<T: Conv>(t: &T) i32 {{ return T::conv::<B, B>(t, 3).v; }}\n", HEAD).as_str(),
+        "error: 'conv' takes 1 generic argument but 2 were supplied\n--> <harness>:7:48",
+    );
+    h::expect_err_msg(
+        "a generic method is not dyn-compatible",
+        format("{}fn main() i32 {{ let c = C {{ k: 1 }}; let d: &dyn Conv = &c; return 0; }}\n", HEAD).as_str(),
+        "error: interface 'Conv' is not dyn-compatible: a method has its own generic parameters",
+    );
+}
+
+// A struct, enum or alias named with more type arguments than it declares, or fewer than its
+// parameters without a default, is an error in every type and expression position.
+@test
+fn aggregate_generic_argument_counts() {
+    const HEAD: str = "struct P<T> { pub v: T }\nstruct D<A, B = i32> { pub a: A, pub b: B }\nenum E<T> { X(T), Y }\ntype AL<T> = P<T>;\n";
+    h::expect_err_msg(
+        "a struct in a parameter",
+        format("{}fn f(p: P<i32, u8>) {{}}\n", HEAD).as_str(),
+        "error: 'P' takes 1 generic argument but 2 were supplied\n--> <harness>:5:16",
+    );
+    h::expect_err_msg(
+        "a struct without its argument",
+        format("{}fn f(p: P) {{}}\n", HEAD).as_str(),
+        "error: 'P' takes 1 generic argument but 0 were supplied\n--> <harness>:5:9",
+    );
+    h::expect_err_msg(
+        "a struct literal's turbofish",
+        format("{}fn main() i32 {{ let p = P::<i32, u8> {{ v: 1 }}; return p.v; }}\n", HEAD).as_str(),
+        "error: 'P' takes 1 generic argument but 2 were supplied\n--> <harness>:5:34",
+    );
+    h::expect_err_msg(
+        "a let annotation",
+        format("{}fn main() i32 {{ let q: P<i32, u8> = P {{ v: 2 }}; return q.v; }}\n", HEAD).as_str(),
+        "error: 'P' takes 1 generic argument but 2 were supplied\n--> <harness>:5:31",
+    );
+    h::expect_err_msg(
+        "a default leaves at most",
+        format("{}fn f(d: D<i32, i32, i32>) {{}}\n", HEAD).as_str(),
+        "error: 'D' takes at most 2 generic arguments but 3 were supplied\n--> <harness>:5:21",
+    );
+    h::expect_err_msg(
+        "a default needs at least",
+        format("{}fn f(d: D) {{}}\n", HEAD).as_str(),
+        "error: 'D' takes at least 1 generic argument but 0 were supplied\n--> <harness>:5:9",
+    );
+    h::expect_err_msg(
+        "an enum variant path",
+        format("{}fn main() i32 {{ let e = E::<i32, u8>::Y; return 0; }}\n", HEAD).as_str(),
+        "error: 'E' takes 1 generic argument but 2 were supplied\n--> <harness>:5:34",
+    );
+    h::expect_err_msg(
+        "an alias in an expression",
+        format("{}fn main() i32 {{ let a = AL::<i32, u8> {{ v: 1 }}; return a.v; }}\n", HEAD).as_str(),
+        "error: 'AL' takes 1 generic argument but 2 were supplied\n--> <harness>:5:35",
+    );
+    h::expect_err_msg(
+        "a value for a type parameter",
+        format("{}fn f(p: P<5>) {{}}\n", HEAD).as_str(),
+        "error: expected a type for generic parameter 'T', found a constant\n--> <harness>:5:11",
+    );
+    h::expect_ok(
+        "a default fills the rest; a literal infers a bare name",
+        format(
+            "{}fn f(d: D<u8>) i32 {{ return d.b; }}\nfn main() i32 {{ let p = P {{ v: 1 }}; let b = new P {{ v: 2 }}; return p.v + unsafe (*b).v + f(D::<u8> {{ a: 1, b: 2 }}); }}\n",
+            HEAD,
+        ).as_str(),
+    );
+}
+
+// Every ambiguity note names its candidate with its source location.
+@test
+fn ambiguity_notes_name_locations() {
+    h::expect_err_msg(
+        "two methods of one name",
+        "interface A { fn m(self: &Self) i32; }\ninterface B { fn m(self: &Self) i32; }\nstruct V { pub a: i32 }\nextend V as A { fn m(self: &V) i32 { return 1; } }\nextend V as B { fn m(self: &V) i32 { return 2; } }\nfn main() i32 { let v = V { a: 1 }; return v.m(); }\n",
+        "  = note: the first candidate is declared here\n--> <harness>:4:17\n  |\n4 | extend V as A { fn m(self: &V) i32 { return 1; } }\n  |                 ^^^^^^^^^^^^^^^^^^\n  = note: the second candidate is declared here\n--> <harness>:5:17",
+    );
+    h::expect_err_msg(
+        "one default under two conformances",
+        "interface Mk<A> {\n    fn make(self: &Self, a: A) i32;\n    fn make2(self: &Self, a: A, b: A) i32 { return self.make(a) + self.make(b); }\n}\nstruct K { pub base: i32 }\nextend K as Mk<i64> { fn make(self: &Self, a: i64) i32 { return 1; } }\nextend K as Mk<u64> { fn make(self: &Self, a: u64) i32 { return 2; } }\nfn main() i32 { let k = K { base: 1 }; return k.make2(1, 2); }\n",
+        "  = note: the first candidate conformance is declared here\n--> <harness>:6:1",
+    );
+    h::expect_err_msg(
+        "several bounds of a parameter",
+        "interface Conv<X> { fn conv(self: &Self) X; }\nfn h<U: Conv<i32> + Conv<bool>>(u: &U) i32 { let d = u.conv(); return 0; }\n",
+        "  = note: the bounds are declared here\n--> <harness>:2:6",
+    );
+    h::expect_err_msg(
+        "several conformances infer no argument",
+        "interface I<A> { fn put(self: &Self) A; }\nfn f<T: I<A>, A>(t: T) i32 { return 0; }\nstruct P { pub a: i32 }\nextend P as I<i32> { fn put(self: &Self) i32 { return 1; } }\nextend P as I<i64> { fn put(self: &Self) i64 { return 1; } }\nfn m() i32 { let p = P { a: 1 }; return f(p); }\n",
+        "  = note: a conformance is declared here\n--> <harness>:4:1",
+    );
+    h::expect_err_msg(
+        "several bounds declare an associated type",
+        "interface Ad<R> { type Output; fn add(self: &Self, r: R) Self::Output; }\nfn k<T: Ad<i32> + Ad<bool>>(t: &T) i32 { let x: T::Output = t.add(1); return 0; }\n",
+        "  = note: the bounds are declared here\n--> <harness>:2:6",
+    );
+}
+
+// A const-generic argument naming an associated constant that disjoint extends of a generic type
+// each define: the parameter's type or the written instance chooses, else the candidates are named.
+@test
+fn const_argument_from_disjoint_extends() {
+    const HEAD: str = "struct W<T> { pub v: T }\nextend W<u8> { pub const K: u64 = 3; }\nextend W<i32> { pub const K: u64 = 5; }\nstruct F<const N: u64> { pub x: i32 }\n";
+    h::expect_err_msg(
+        "no type chooses",
+        format("{}fn main() i32 {{ let a = F::<W::K> {{ x: 1 }}; return a.x; }}\n", HEAD).as_str(),
+        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:32\n  |\n5 | fn main() i32 { let a = F::<W::K> { x: 1 }; return a.x; }\n  |                                ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
+    );
+    h::expect_err_msg(
+        "no extend applies to the instance",
+        format("{}fn main() i32 {{ let a = F::<{{W::<i64>::K}}> {{ x: 1 }}; return a.x; }}\n", HEAD).as_str(),
+        "error: no associated constant 'K' on 'W::<i64>'\n--> <harness>:5:40",
+    );
+    h::expect_err_msg(
+        "an expression names the candidates",
+        format("{}fn main() i32 {{ let c: u64 = W::K; return 0; }}\n", HEAD).as_str(),
+        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:33\n  |\n5 | fn main() i32 { let c: u64 = W::K; return 0; }\n  |                                 ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
     );
 }

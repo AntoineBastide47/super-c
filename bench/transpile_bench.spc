@@ -475,6 +475,7 @@ fn real_build(js: &mut String) bool {
         target: unsafe dshim::sc_host_platform(),
         bootstrap_tags: false,
         lint: true,
+        transpiler: "",
     };
     let rc = bsys::manifest_build(&m, "dev", bin.as_str(), &cx);
     let gp = bst::last();

@@ -22,17 +22,22 @@ pub const fn fnv_cont(h: u64, s: str) u64 {
     return x;
 }
 
-/// The identity of the running compiler: a content hash of its executable. The C a compiler emits is a
-/// function of the compiler, so the emit stamp and the per-TU cache key on this, not on the file's
-/// path or mtime: a reinstall, a copy or an extracted archive can keep both while the content changes.
-/// 0 when the executable cannot be read (the caller then keeps no cache). Four independent lanes over
-/// 8-byte words keep the multiply chains parallel: about 1 ms per 10 MB.
+/// The identity of the running compiler: a content hash of its executable (`file_id`). The C a compiler
+/// emits is a function of the compiler, so the emit stamp and the per-TU cache key on this, not on the
+/// file's path or mtime: a reinstall, a copy or an extracted archive can keep both while the content
+/// changes. 0 when the executable cannot be read (the caller then keeps no cache).
 pub fn compiler_id() u64 {
     let mut exe = PathBuf {};
     if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
         return 0;
     }
-    let f = stdio::fopen(str::from_cstr(&exe[0]), "rb");
+    return file_id(str::from_cstr(&exe[0]));
+}
+
+/// A content hash of the file at `path`; 0 when it cannot be read or is empty. Four independent lanes
+/// over 8-byte words keep the multiply chains parallel: about 1 ms per 10 MB.
+pub fn file_id(path: str) u64 {
+    let f = stdio::fopen(path, "rb");
     if f == null {
         return 0;
     }

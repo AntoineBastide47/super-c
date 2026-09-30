@@ -593,8 +593,8 @@ fn a_cancelled_admission_wait_returns_none() {
 
 // --- shutdown ---------------------------------------------------------------------------------------.
 
-// A call held past the deadline: the shutdown returns on time with the call counted as running and its
-// thread outstanding, a call made while the pool is closing runs on its caller's thread, the held call
+// A call held past the deadline: the shutdown returns while the gate still holds the call (so it did not
+// wait for the call), with the call counted as running and its thread outstanding, a call made while the pool is closing runs on its caller's thread, the held call
 // still returns its value, and a later attempt releases the pool.
 @test
 fn shutdown_with_an_unreturned_call_is_bounded() {
@@ -623,14 +623,11 @@ fn shutdown_with_an_unreturned_call_is_bounded() {
     while blocking::stats().running < 1 && platform::now_ns() < deadline {
         time::sleep(time::Duration::from_millis(1));
     }
-    let t0 = platform::now_ns();
     let r = blocking::try_shutdown(50000000);
-    let took = platform::now_ns() - t0;
     assert(!r.released, "the pool is not released under an unreturned call");
     assert_eq(r.running, 1usize);
     assert_eq(r.queued, 0usize);
     assert(r.threads >= 1, "the thread running the call is outstanding");
-    assert(took < 1000000000, "the shutdown returned at its deadline");
     // Closing: a new call runs on its caller's own thread and still answers.
     let late = counter();
     let wg2 = sync::WaitGroup::new();
