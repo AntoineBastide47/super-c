@@ -303,7 +303,8 @@ emitted C is the same under every profile: it calls the arithmetic helpers of `s
 `push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
 foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
 gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.c` fails to compile
-without the flag.
+without the flag. It also gets `-Werror=incompatible-pointer-types`, so clang rejects the
+incompatible pointer arguments gcc 14 already rejects (`@c.source` files included).
 
 ### Link-time optimization
 

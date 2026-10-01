@@ -45,13 +45,19 @@ fn cell_drop<T>(c: *mut Cell<T>) {
     if unsafe atomic::sub_i32(&mut unsafe (*c).refs, 1, 3) != 1 {
         return;
     }
-    if unsafe atomic::load_i32(&mut unsafe (*c).done, 1) == 1 && sizeof(T) != 0 {
-        // The unclaimed value is destroyed in place: a read through the raw pointer would be a copy the
-        // drop elaboration does not own. (A zero-sized value has no storage and nothing to destroy.)
-        let vp = (&mut unsafe (*c).value) as *mut T;
-        vp.free();
-    }
     let mut g = Global {};
+    if unsafe atomic::load_i32(&mut unsafe (*c).done, 1) == 1 && sizeof(T) != 0 {
+        // The unclaimed value leaves the cell, the cell is released, and only then is the value
+        // destroyed: whoever observes the destruction (a `free` that counts) observes a released cell.
+        // It is destroyed through a raw pointer exactly once, and `forget` keeps the local from a
+        // second drop. (A zero-sized value has no storage and nothing to destroy.)
+        let mut v = replace(&mut unsafe (*c).value, unsafe zeroed::<T>());
+        unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
+        let vp = (&mut v) as *mut T;
+        vp.free();
+        forget(v);
+        return;
+    }
     unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
 }
 
@@ -69,12 +75,16 @@ pub struct ThreadPayload<F, T> {
 /// `sc_rt_thread_create`. `pub` for linkage.
 pub fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
     let pp = arg as *mut ThreadPayload<F, T>;
-    // Each field is read out of the block once: the body moves to `f`, and the block is released raw.
-    let f = unsafe (*pp).body;
     let c = unsafe (*pp).cell;
-    let mut g = Global {};
-    unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
-    unsafe (*c).value = f();
+    {
+        // Each field is read out of the block once: the body moves to `f`, and the block is released raw.
+        // The body and its captures are gone before the result is published, so the last release the
+        // thread makes is the cell's (in `cell_drop`).
+        let f = unsafe (*pp).body;
+        let mut g = Global {};
+        unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
+        unsafe (*c).value = f();
+    }
     unsafe atomic::store_i32(&mut unsafe (*c).done, 1, 2);
     cell_drop(c);
     return null;

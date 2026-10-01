@@ -20,8 +20,9 @@ import std::testing::bench_sys as sys;
 
 @platform(macos | linux)
 extern "C" "unistd.h" {
+    // `sleep`, not `usleep`: POSIX 2008 (`_POSIX_C_SOURCE=200809L`) no longer declares `usleep`.
     @blocking
-    fn usleep(us: u32) i32;
+    fn sleep(seconds: u32) u32;
 }
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one destruction.
@@ -446,7 +447,7 @@ fn burst_and_idle_cycles_plateau() {
     );
     let st = blocking::stats();
     assert(st.created >= 4, "each burst started threads");
-    assert_eq(st.reaped + st.live, st.created);
+    assert_eq(st.reaped + st.exited + st.live, st.created);
     finish();
 }
 
@@ -715,7 +716,7 @@ fn shutdown_with_an_unreturned_foreign_call_is_bounded() {
         defer w.done();
         // Foreign code the runtime cannot stop, and cannot signal either: long enough that the shutdown
         // below, asked for once the call is running, cannot outlast it on a loaded runner.
-        r0.get().store(unsafe usleep(1000000), atomics::MemoryOrder::Release);
+        r0.get().store(unsafe sleep(1), atomics::MemoryOrder::Release);
     };
     // Wait until the pool reports the call running: a fixed sleep loses to a slow start under load.
     let deadline = platform::now_ns() + 5000000000;

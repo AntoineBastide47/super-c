@@ -17112,11 +17112,21 @@ extend TypeChecker {
             let pid9 = unsafe (*fa).list(params)[(i + skip) as usize];
             let raw9 = self.decl_type_in(fmod, pid9);
             let mut open9 = false;
+            // The parameter's fn shape: its own fn type, or the fn bound of the generic parameter it
+            // names (`f: F` with `F: fn(T) void`), whose other parameters the earlier arguments may
+            // have solved already.
+            let mut shape9 = raw9;
+            if self.type_at(raw9).kind == TypeKind::TYPE_GENERIC {
+                let fb9 = self.generic_fn_bound(self.type_at(raw9).module, self.type_at(raw9).as_data.decl);
+                if fb9 != NODE_NONE {
+                    shape9 = self.lower_type_in(self.type_at(raw9).module, fb9);
+                }
+            }
             // A decl-referenced fn type does not substitute as a whole: seed each unannotated
             // closure parameter with its substituted component instead.
-            if self.type_at(raw9).kind == TypeKind::TYPE_FUNCTION {
+            if shape9 != TYPE_NONE && self.type_at(shape9).kind == TypeKind::TYPE_FUNCTION {
                 let clp9 = unsafe (*a).at_const(aid9).as_data.closure.params;
-                let fs9 = self.fn_sig(raw9);
+                let fs9 = self.fn_sig(shape9);
                 let mut j: u32 = 0;
                 while j < clp9.len && j < fs9.np {
                     let cpid = unsafe (*a).list(clp9)[j as usize];

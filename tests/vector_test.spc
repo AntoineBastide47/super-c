@@ -281,3 +281,24 @@ fn error_message_round_trip() {
     let f = e.fmt();
     assert(f.as_str().starts_with("Error(7: failure"), "format");
 }
+
+fn middle_sum(v: &Vector<u32>) u32 {
+    let mut s: u32 = 0;
+    for x in v[1..v.len() - 1] {
+        s = s + x;
+    }
+    return s;
+}
+
+// A range index through a reference slices the referent.
+@test
+fn range_index_through_a_reference() {
+    let mut v = Vector::<u32>::new();
+    for k in 0..5u32 {
+        v.push(k);
+    }
+    assert_eq(middle_sum(&v), 6u32);
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let r = &a;
+    assert_eq(r[1..3].len(), 2);
+}

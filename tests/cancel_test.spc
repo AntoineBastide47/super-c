@@ -17,6 +17,7 @@ import std::parallel::net as net;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
+import std::iter as iter;
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one cleanup per value.
 static mut G_FREES: i64 = 0;
@@ -225,6 +226,334 @@ fn edge_frees_let_receiver_temporary(fx: &mut Base) {
 @test
 fn edge_frees_statement_receiver_temporary(fx: &mut Base) {
     receiver_edge(fx, false);
+}
+
+// --- edges after calls outside a statement root ---------------------------------------------------.
+
+// An iterator whose `next` parks on a channel.
+struct Drain {
+    pub rx: chan::Receiver<i64>,
+}
+
+extend Drain as Iterator<i64> {
+    pub fn next(self: &mut Drain) Option<i64> {
+        return self.rx.recv(); // parks; a cancellation unwinds from here
+    }
+}
+
+fn take_value(rx: &chan::Receiver<i64>) i64 {
+    let v = rx.recv(); // parks; a cancellation unwinds from here
+    return v.unwrap_or(-1);
+}
+
+fn drop_value(_x: i64) {}
+
+// Operator and `Deref` methods that park: their calls are implicit.
+struct Gate {
+    pub rx: chan::Receiver<i64>,
+    pub v: i64,
+}
+
+extend Gate as Add<i64> {
+    type Output = i64;
+    pub fn add(self: &Gate, other: &i64) i64 {
+        let _ = self.rx.recv(); // parks; a cancellation unwinds from here
+        return self.v + *other;
+    }
+}
+
+extend Gate as Deref<i64> {
+    pub fn deref(self: &Gate) &i64 {
+        let _ = self.rx.recv(); // parks; a cancellation unwinds from here
+        return &self.v;
+    }
+}
+
+// A lone return value is a clean position: the arm with the side effect never runs.
+fn returned_switch(rx: &chan::Receiver<i64>) i64 {
+    return switch rx.recv() {
+        Some(x) => x,
+        _ => {
+            after_mark();
+            -1;
+        },
+    };
+}
+
+// Cancel a task parked in a call whose result feeds position `form` rather than the root of a
+// statement or a plain `let`: every call evaluated with nothing unregistered pending carries the
+// edge, so code after the cancelled wait never runs, in the waiting frame or in its callers.
+fn position_edge(fx: &mut Base, form: i32) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let rx = ch.receiver();
+    let _tx_keep = ch.sender();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        defer finish(&w);
+        let _ = ktx.send(rt::current_key());
+        if form == 0 {
+            switch rx.recv() {
+                Some(_v) => {
+                    after_mark();
+                },
+                _ => {
+                    after_mark();
+                },
+            };
+        } else if form == 1 {
+            let v = switch rx.recv() {
+                Some(x) => x,
+                _ => 7,
+            };
+            after_mark();
+            let _ = v;
+        } else if form == 2 {
+            let v = rx.recv().unwrap_or(0);
+            after_mark();
+            let _ = v;
+        } else if form == 3 {
+            if rx.recv().is_none() {
+                after_mark();
+            }
+            after_mark();
+        } else if form == 4 {
+            while rx.recv().is_none() {
+                after_mark();
+            }
+            after_mark();
+        } else if form == 5 {
+            let mut v: i64 = 3;
+            v = rx.recv().unwrap_or(v);
+            after_mark();
+            let _ = v;
+        } else if form == 6 {
+            let v: i64;
+            v = rx.recv().unwrap_or(1);
+            after_mark();
+            let _ = v;
+        } else if form == 7 {
+            let _ = returned_switch(&rx);
+            after_mark();
+        } else if form == 8 {
+            let d = Drain { rx: rx.clone() };
+            for x in d {
+                let _ = x;
+                after_mark();
+            }
+            after_mark();
+        } else if form == 9 {
+            iter::for_each(Drain { rx: rx.clone() }, drop_value);
+            after_mark();
+        } else if form == 11 {
+            let h = Gate { rx: rx.clone(), v: 1 };
+            let s = h + 2;
+            after_mark();
+            let _ = s;
+        } else if form == 12 {
+            let h = Gate { rx: rx.clone(), v: 1 };
+            let x = *h;
+            after_mark();
+            let _ = x;
+        } else {
+            let f: fn(&chan::Receiver<i64>) i64 = take_value;
+            let _ = f(&rx);
+            after_mark();
+        }
+    };
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the task parks");
+    assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    // Nothing after the cancelled wait ran: no switch arm, no loop body, no later statement.
+    assert_eq(afters(), 0);
+}
+
+@test
+fn edge_after_a_switch_statement_scrutinee(fx: &mut Base) {
+    position_edge(fx, 0);
+}
+
+@test
+fn edge_after_a_let_switch_scrutinee(fx: &mut Base) {
+    position_edge(fx, 1);
+}
+
+@test
+fn edge_after_the_first_call_of_a_receiver_chain(fx: &mut Base) {
+    position_edge(fx, 2);
+}
+
+@test
+fn edge_after_a_call_in_an_if_condition(fx: &mut Base) {
+    position_edge(fx, 3);
+}
+
+@test
+fn edge_after_a_call_in_a_while_condition(fx: &mut Base) {
+    position_edge(fx, 4);
+}
+
+@test
+fn edge_after_a_call_on_an_assignment_right_side(fx: &mut Base) {
+    position_edge(fx, 5);
+}
+
+@test
+fn edge_after_a_split_init_assignment(fx: &mut Base) {
+    position_edge(fx, 6);
+}
+
+@test
+fn edge_after_a_call_in_a_return_value(fx: &mut Base) {
+    position_edge(fx, 7);
+}
+
+@test
+fn edge_after_a_for_loop_next(fx: &mut Base) {
+    position_edge(fx, 8);
+}
+
+@test
+fn edge_after_a_bound_dispatched_next_in_std(fx: &mut Base) {
+    position_edge(fx, 9);
+}
+
+@test
+fn edge_after_a_fn_value_call(fx: &mut Base) {
+    position_edge(fx, 10);
+}
+
+@test
+fn edge_after_an_operator_method(fx: &mut Base) {
+    position_edge(fx, 11);
+}
+
+@test
+fn edge_after_a_deref_hop(fx: &mut Base) {
+    position_edge(fx, 12);
+}
+
+// A switch over `lock_c` unwinds before its arms, exactly as `let g = m.lock_c();` does: no arm
+// runs, and the lock works afterwards.
+@test
+fn lock_c_switch_unwinds_before_its_arms(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let m2 = m.clone();
+    let hold = sync::WaitGroup::new();
+    hold.add(1);
+    let h2 = hold.clone();
+    let holding = sync::WaitGroup::new();
+    holding.add(1);
+    let hg = holding.clone();
+    launch || {
+        let _g = m2.get().lock();
+        hg.done();
+        h2.wait();
+    };
+    holding.wait();
+    let m3 = m.clone();
+    let done = sync::WaitGroup::new();
+    done.add(1);
+    let d2 = done.clone();
+    launch || {
+        defer finish(&d2);
+        let _ = ktx.send(rt::current_key());
+        switch m3.get().lock_c() {
+            Some(_g) => {
+                after_mark();
+            },
+            _ => {
+                after_mark();
+            },
+        };
+        after_mark();
+    };
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the task parks");
+    assert(rt::request_cancel(key, rt::CR_USER), "the lock waiter is live");
+    assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled waiter finishes");
+    hold.done();
+    {
+        let g = m.get().lock();
+        assert_eq(*g.get(), 0);
+    }
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
+}
+
+// Returns a REAL guard after accepting a cancellation: the acceptance sits in an argument, where
+// no edge follows it, so the check after this call sees a real value (probe 2).
+fn keep_guard(g: sync::MutexGuard<i64>, _accepted: bool) Option<sync::MutexGuard<i64>> {
+    return Option::<sync::MutexGuard<i64>>::Some(g);
+}
+
+fn lock_accepted(m: &sync::Mutex<i64>) Option<sync::MutexGuard<i64>> {
+    let g = m.lock();
+    return keep_guard(g, rt::cancel_point());
+}
+
+// The edge after a switch scrutinee that returned a real value moves it into its spill and frees
+// it: the guard unlocks, and no arm runs.
+@test
+fn an_accepted_real_scrutinee_is_freed_before_the_arms(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    // main -> task: released only after the cancel is requested, so the request is pending when the
+    // task leaves its masked park.
+    let rch = chan::Channel::<i32>::bounded(1);
+    let rtx = rch.sender();
+    let rrx = rch.receiver();
+    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let m2 = m.clone();
+    let done = sync::WaitGroup::new();
+    done.add(1);
+    let d2 = done.clone();
+    launch || {
+        defer finish(&d2);
+        let _ = ktx.send(rt::current_key());
+        rt::cancel_mask_enter();
+        let _ = rrx.recv(); // a masked park: the pending cancel does not claim it
+        rt::cancel_mask_exit();
+        switch lock_accepted(m2.get()) {
+            Some(_g) => {
+                after_mark();
+            },
+            _ => {
+                after_mark();
+            },
+        };
+        after_mark();
+    };
+    let key = krx.recv().unwrap();
+    assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
+    let _ = rtx.send(1);
+    assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    // The spill freed the guard: the lock is free.
+    {
+        let g = m.get().try_lock();
+        assert(g.is_some(), "the edge released the guard");
+    }
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
 }
 
 @test

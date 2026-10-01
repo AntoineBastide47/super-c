@@ -135,6 +135,15 @@ struct RefBind {
     pub my_v: u32,
     pub ok: bool,
 }
+// `l = IN_CHUNK(i, e)` at version `my_v`: `l <= e`, so a branch fact `x < l` (or `x <= l`) also
+// holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
+// its index bound through this.
+struct ChunkBind {
+    pub e: VKey,
+    pub e_lp: LenBind,
+    pub l: u32,
+    pub my_v: u32,
+}
 
 pub struct Bce {
     pub pkg: *const loader::Package,
@@ -146,6 +155,7 @@ pub struct Bce {
     pub copyof: Vector<CopyBind>,
     pub affof: Vector<AffBind>,
     pub refof: Vector<RefBind>,
+    pub chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
     pub facts: Vector<Fact>, // facts of the block being processed
     // Facts entering each block, filled by its single predecessor: block k's facts are
     // in_facts[in_start[k] .. in_start[k] + in_len[k]] (one pool per pass, no per-block vectors).
@@ -224,6 +234,7 @@ extend Bce {
             copyof: Vector::<CopyBind>::new(),
             affof: Vector::<AffBind>::new(),
             refof: Vector::<RefBind>::new(),
+            chunks: Vector::<ChunkBind>::new(),
             facts: Vector::<Fact>::new(),
             in_facts: Vector::<Fact>::new(),
             in_start: Vector::<u32>::new(),
@@ -1265,6 +1276,36 @@ extend Bce {
 
     /// Reset every per-body table for a fresh body; capacity persists across the bodies one
     /// DropCtx emits.
+    // Push the true-edge fact of comparison `cb` with its right side read as `rk` (length place
+    // `lp`), within the edge's fact budget (the edge's facts start at `st0`).
+    fn edge_fact(self: &mut Self, cb: &CmpBind, rk: VKey, lp: LenBind, st0: usize) {
+        if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
+            return;
+        }
+        self.in_facts.push(
+            Fact {
+                kind: if cb.le {
+                    1;
+                } else {
+                    0;
+                },
+                iconst: cb.a.is_const,
+                ic: cb.a.c,
+                il: cb.a.l,
+                iv: cb.a.v,
+                ioff: cb.a.off,
+                ln_ok: true,
+                ln_l: rk.l,
+                ln_v: rk.v,
+                ln_off: rk.off,
+                lp_ok: lp.ok,
+                lp: lp.pl,
+                lp_hg: lp.hg,
+                lp_bg: lp.bg,
+            },
+        );
+    }
+
     fn begin_body(self: &mut Self, b: &ir::CoreBody) {
         let nl = b.locals.len();
         let nb = b.blocks.len();
@@ -1278,6 +1319,7 @@ extend Bce {
         self.copyof.clear();
         self.affof.clear();
         self.refof.clear();
+        self.chunks.clear();
         for _i in 0..nl {
             self.lenof.push(lenbind_none());
             self.cmpof.push(
@@ -1338,6 +1380,7 @@ extend Bce {
             self.refof[i].ok = false;
         }
         self.heapgen = 0;
+        self.chunks.clear();
         self.facts.clear();
         self.in_facts.clear();
         for i in 0..nb {
@@ -1555,6 +1598,13 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         // success establishes end <= len
                         let ek = z.vkey(b, eop);
                         z.fact_from_check(b, 1, ek, lop);
+                    } else if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK && dest != ir::IR_NONE {
+                        let eop = b.oper_pool[(rv.a + 1) as usize];
+                        let ek = z.vkey(b, eop);
+                        let elp = z.oper_len_lp(b, eop);
+                        z.write_place(b, stm.place);
+                        z.chunks.push(ChunkBind { e: ek, e_lp: elp, l: dest, my_v: z.lver[dest as usize] });
+                        continue;
                     } else if rv.kind == ir::RV_LEN && dest != ir::IR_NONE {
                         z.write_place(b, stm.place);
                         z.lenof.set(dest as usize, z.len_capture(b, rv.a, z.lver[dest as usize]));
@@ -1813,29 +1863,15 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         let cb = *z.cmpof.at(ck.l as usize);
                         if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
                             let lp = cb.b_lp; // captured at the comparison, so never stale here
-                            if z.in_facts.len() - st0 < MAX_EDGE_FACTS {
-                                z.in_facts.push(
-                                    Fact {
-                                        kind: if cb.le {
-                                            1;
-                                        } else {
-                                            0;
-                                        },
-                                        iconst: cb.a.is_const,
-                                        ic: cb.a.c,
-                                        il: cb.a.l,
-                                        iv: cb.a.v,
-                                        ioff: cb.a.off,
-                                        ln_ok: true,
-                                        ln_l: cb.b.l,
-                                        ln_v: cb.b.v,
-                                        ln_off: cb.b.off,
-                                        lp_ok: lp.ok,
-                                        lp: lp.pl,
-                                        lp_hg: lp.hg,
-                                        lp_bg: lp.bg,
-                                    },
-                                );
+                            z.edge_fact(&cb, cb.b, lp, st0);
+                            if cb.b.off == 0 {
+                                // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
+                                for ci in 0..z.chunks.len() {
+                                    let ch = z.chunks[ci];
+                                    if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
+                                        z.edge_fact(&cb, ch.e, ch.e_lp, st0);
+                                    }
+                                }
                             }
                         }
                     }

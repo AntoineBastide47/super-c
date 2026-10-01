@@ -346,6 +346,11 @@ pub const IN_BOUNDS_GROUP: u8 = 19;
 /// enters the frame's cancellation ladder. Emitted instead of IN_SAFEPOINT when the body can carry
 /// a cancellation edge.
 pub const IN_SAFEPOINT_C: u8 = 20;
+/// Strip-mined counted loop: IN_CHUNK(i, end) with `i < end` returns the exclusive end `lim` of the
+/// chunk that starts at `i`, `i < lim <= end`. A safepoint right before it counted the chunk's first
+/// iteration; the chunk's other `lim - i - 1` iterations fit the tick budget left and are charged
+/// to it here, so the chunk's backedges run without a tick. Where no tick prints, `lim` is `end`.
+pub const IN_CHUNK: u8 = 21;
 
 /// True for the five safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {
@@ -487,6 +492,15 @@ pub struct CoreBody {
     /// The pre-elaboration size passed the inliner's callee limits (`ir::inline`): the vet reads
     /// this bit so an elaborated callee is judged by the shape the limits were tuned for.
     pub inline_size_ok: bool,
+    /// The owner is a std decl that runs user code only through bound dispatch
+    /// (`Package::co_inst_on`): an instance prints its preemption ticks only when a binding names
+    /// a type whose methods can be user code.
+    pub inst_ticks: bool,
+    /// The blocks and the chunks the counted-loop lowering added (`chunk_open`: one block per
+    /// counted loop; `chunk_close`: two blocks, two statements and two locals per chunk): the
+    /// inliner's size gate leaves them out.
+    pub count_blocks: u32,
+    pub chunks: u32,
     pub locals: Vector<LocalDecl>,
     pub blocks: Vector<BasicBlock>,
     pub statements: Vector<Statement>,
@@ -590,6 +604,9 @@ extend CoreBody {
             is_generic: false,
             has_reflect: false,
             has_zst_cond: false,
+            inst_ticks: false,
+            count_blocks: 0,
+            chunks: 0,
             has_uninit_decl: false,
             elaborated: false,
             inline_size_ok: false,
@@ -622,6 +639,9 @@ extend CoreBody {
         self.is_generic = false;
         self.has_reflect = false;
         self.has_zst_cond = false;
+        self.inst_ticks = false;
+        self.count_blocks = 0;
+        self.chunks = 0;
         self.has_uninit_decl = false;
         self.elaborated = false;
         self.inline_size_ok = false;
@@ -665,6 +685,9 @@ extend CoreBody {
         out.is_generic = src.is_generic;
         out.has_reflect = src.has_reflect;
         out.has_zst_cond = src.has_zst_cond;
+        out.inst_ticks = src.inst_ticks;
+        out.count_blocks = src.count_blocks;
+        out.chunks = src.chunks;
         out.elaborated = src.elaborated;
         out.inline_size_ok = src.inline_size_ok;
         out.entry = src.entry;
@@ -686,6 +709,20 @@ extend CoreBody {
     }
 
     /// Append statement `place = rv`.
+    /// Does the body hold a preemption safepoint (plain or combined)?
+    pub fn has_safepoint(self: &Self) bool {
+        for si in 0..self.statements.len() {
+            let s = *self.statements.at(si);
+            if s.kind == ST_ASSIGN {
+                let rv = *self.rvalues.at(s.rvalue as usize);
+                if rv.kind == RV_INTRINSIC && (rv.c as u32 == IN_SAFEPOINT as u32 || rv.c as u32 == IN_SAFEPOINT_C as u32) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     pub fn push_assign(self: &mut Self, place: PlaceId, rv: Rvalue, sp: tok::Span) {
         self.rvalues.push(rv);
         self.statements.push(

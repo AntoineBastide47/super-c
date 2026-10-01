@@ -98,9 +98,6 @@ const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
 // `Lowerer.err` when lowering met a TYPE_ERROR node or generic argument.
 const ERR_TYPE_SLUG: str<'static> = "error type";
 
-// `Lowerer.chk_let` when the checked root call is an expression statement.
-const CHK_NO_LET: usize = 0xFFFFFFFF;
-
 // The `data` of a member projection: IR_NONE for a named field (its identity is the decl in
 // `sub`, as a member access spells it), else the positional index.
 const fn member_data(sub: NodeId, index: u32) u32 {
@@ -141,14 +138,22 @@ pub struct Lowerer {
     pub tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
     tape_mute: u32,
     in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
-    // The one call node this STATEMENT may put a cancellation check after: the root call of an
-    // expression statement or a plain `let`. Mid-expression checks would unwind past pending
-    // sibling temporaries the ladder cannot see.
-    chk_root: NodeId,
-    // The scope_locals index of a plain-let's own local, which is registered before its initializer
-    // and is still UNINITIALIZED on the check's cancel edge (a dead there is a drop-use that poisons
-    // loan liveness across loop back edges); CHK_NO_LET for an expression statement.
-    chk_let: usize,
+    // The clean nodes of the open root (`chk_nodes[chk_base..]`, see `chk_open`): the calls among
+    // them may carry a cancellation check. Any other call is evaluated with pending sibling
+    // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
+    chk_nodes: Vector<NodeId>,
+    chk_base: usize,
+    // A std::parallel body: its primitives report cancellation through their results and clean up
+    // raw resources after a failed wait, so only the call at the root of an expression statement or
+    // a plain `let` carries a check there.
+    chk_narrow: bool,
+    // Depth of value blocks and value loops lowered in an unclean position: no root opens inside
+    // them, and their loop safepoints take no cancellation ladder.
+    chk_mask: u32,
+    // The locals of the `let`s whose initializers are being lowered: registered in scope_locals but
+    // still UNINITIALIZED on a cancel edge inside the initializer (a dead there is a drop-use that
+    // poisons loan liveness across loop back edges), so every ladder skips them.
+    pending_lets: Vector<ir::LocalId>,
     // Per-body cache of the check-eligibility test (cancel pass ran, sugar items present, owner on
     // a coroutine stack, not the runtime module): 0 uncomputed, 1 off, 2 on.
     chk_on: u8,
@@ -161,6 +166,7 @@ pub struct Lowerer {
     sp_ladder_b: u32, // 0xFFFFFFFF = none cached
     sp_ladder_locals: Vector<ir::LocalId>,
     sp_ladder_defers: Vector<NodeId>,
+    sp_ladder_pending: Vector<ir::LocalId>,
     // Reusable u32 buffers (argument lists, match work lists): call/aggregate lowering builds one
     // per expression, so the pool keeps their capacity across the whole body and package.
     u32_pool: Vector<Vector<u32>>,
@@ -332,14 +338,18 @@ extend Lowerer {
             tape: Vector::<u64>::new(),
             tape_mute: 0,
             in_defer: 0,
-            chk_root: NODE_NONE,
-            chk_let: CHK_NO_LET,
+            chk_nodes: Vector::<NodeId>::new(),
+            chk_base: 0,
+            chk_narrow: false,
+            chk_mask: 0,
+            pending_lets: Vector::<ir::LocalId>::new(),
             chk_on: 0,
             chk_caw_m: 0,
             chk_caw_n: NODE_NONE,
             sp_ladder_b: 0xFFFFFFFFu32,
             sp_ladder_locals: Vector::<ir::LocalId>::new(),
             sp_ladder_defers: Vector::<NodeId>::new(),
+            sp_ladder_pending: Vector::<ir::LocalId>::new(),
             u32_pool: Vector::<Vector<u32>>::new(),
             lay: lay::Svc::new(pkg),
             views: ViewDecls {
@@ -428,12 +438,18 @@ extend Lowerer {
         self.lay.reset();
         self.tape_mute = 0;
         self.in_defer = 0;
-        self.chk_root = NODE_NONE;
-        self.chk_let = CHK_NO_LET;
+        self.chk_nodes.truncate(0);
+        self.chk_base = 0;
+        self.chk_narrow = unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str().starts_with(
+            "std::parallel",
+        );
+        self.chk_mask = 0;
+        self.pending_lets.truncate(0);
         self.chk_on = 0;
         self.sp_ladder_b = 0xFFFFFFFFu32;
         self.sp_ladder_locals.truncate(0);
         self.sp_ladder_defers.truncate(0);
+        self.sp_ladder_pending.truncate(0);
         self.cur = 0;
         self.run_start = 0;
     }
@@ -1019,12 +1035,9 @@ extend Lowerer {
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
             self.tp(ir::TP_MARK_PUSH, 0, id);
-            if self.f.node(v).kind == NodeKind::NODE_CALL {
-                self.chk_root = v; // a statement-root call may carry a cancellation check
-                self.chk_let = CHK_NO_LET;
-            }
+            let cb = self.chk_open(v, true);
             let op = self.lower_expr(v);
-            self.chk_root = NODE_NONE;
+            self.chk_close(cb);
             self.tp(ir::TP_MARK_POP, 0, id);
             // A fully discarded result still OWNS its value (`foo();`).
             if op != ir::IR_NONE {
@@ -1049,7 +1062,9 @@ extend Lowerer {
         } else if k == NodeKind::NODE_DEFER {
             self.defers.push(id);
         } else if k == NodeKind::NODE_MATCH {
+            let cb = self.chk_open(id, false);
             let _ = self.lower_match(id, ir::IR_NONE);
+            self.chk_close(cb);
         } else if k == NodeKind::NODE_ASM {
             self.lower_asm(id);
         } else if k == NodeKind::NODE_CONST {
@@ -1093,7 +1108,9 @@ extend Lowerer {
             // Item statements: local consts fold at CTFE; nested items own their own bodies.
         } else {
             // Everything else is an expression in statement position.
+            let cb = self.chk_open(id, false);
             let _ = self.lower_expr(id);
+            self.chk_close(cb);
         }
     }
 
@@ -1180,7 +1197,10 @@ extend Lowerer {
                 self.fail_at("let-pattern-without-value", NODE_NONE);
                 return;
             }
+            // The pattern's names bind after the value: nothing is pending while it evaluates.
+            let cb = self.chk_open(ld.value, false);
             let vop = self.lower_expr(ld.value);
+            self.chk_close(cb);
             if vop == ir::IR_NONE {
                 return;
             }
@@ -1204,12 +1224,13 @@ extend Lowerer {
             self.body.has_uninit_decl = true; // split init: only this form can use-before-init
         }
         if ld.value != NODE_NONE {
-            if self.f.node(ld.value).kind == NodeKind::NODE_CALL {
-                self.chk_root = ld.value; // a plain-let root call may carry a cancellation check
-                self.chk_let = self.scope_locals.len() - 1; // exclude `l`: uninit until the assign
-            }
+            // `l` is uninitialized until the assign below: every ladder inside the initializer
+            // skips it.
+            self.pending_lets.push(l);
+            let cb = self.chk_open(ld.value, true);
             let op = self.lower_expr(ld.value);
-            self.chk_root = NODE_NONE;
+            self.chk_close(cb);
+            let _ = self.pending_lets.pop();
             if op == ir::IR_NONE {
                 return;
             }
@@ -1227,7 +1248,14 @@ extend Lowerer {
         self.tp(ir::TP_MARK_PUSH, 0, id);
         for i in 0..rd.values.len {
             let v = unsafe self.f.list(rd.values)[i as usize];
+            // A later value would evaluate with this one pending: only a lone value is a root.
+            let mut root = NODE_NONE;
+            if rd.values.len == 1 {
+                root = v;
+            }
+            let cb = self.chk_open(root, false);
             let op = self.lower_expr(v);
+            self.chk_close(cb);
             if op == ir::IR_NONE {
                 return;
             }
@@ -1350,7 +1378,9 @@ extend Lowerer {
         } else if kc == 0 {
             self.lower_stmt(d.else_branch);
         } else {
+            let cb = self.chk_open(id, false);
             let _ = self.lower_if_arms(id, ir::IR_NONE);
+            self.chk_close(cb);
         }
     }
 
@@ -1394,16 +1424,29 @@ extend Lowerer {
     // same tick, whose cold half also accepts a pending unmasked cancellation and enters this
     // frame's cleanup ladder -- a compute-bound task that never waits still cleanly stops.
     fn loop_safepoint(self: &mut Self, sp: tok::Span) {
-        // Only a body a launched coroutine can execute needs the preemption tick; every other
-        // loop skips the intrinsic (and so the emitted `__sc_spc` countdown and its hook check).
+        if self.loop_ticks() {
+            self.safepoint(sp);
+        }
+    }
+
+    // Do this body's loops take a safepoint? Only a body a launched coroutine can execute needs
+    // the preemption tick; every other loop skips the intrinsic (and so the emitted `__sc_spc`
+    // countdown and its hook check).
+    fn loop_ticks(self: &mut Self) bool {
         let ow9 = self.body.owner;
         if ow9.node != NODE_NONE {
             let osp = unsafe (&*(&*self.pkg).module_ast_const(ow9.module)).at_const(ow9.node).span;
             if !unsafe (&*self.pkg).co_on(ow9.module, osp) {
-                return;
+                return false;
             }
+            self.body.inst_ticks = unsafe (&*self.pkg).co_inst_on(ow9.module, osp);
         }
-        if self.in_defer == 0 && unsafe (&*self.pkg).cancel_used && self.chk_enabled() {
+        return true;
+    }
+
+    // The safepoint itself: plain, or combined with a cancellation check.
+    fn safepoint(self: &mut Self, sp: tok::Span) {
+        if self.in_defer == 0 && self.chk_mask == 0 && unsafe (&*self.pkg).cancel_used && self.chk_enabled() {
             self.safepoint_cancel(sp);
             return;
         }
@@ -1412,17 +1455,18 @@ extend Lowerer {
     }
 
     // The combined preemption + cancellation safepoint: tick result 1 means the cold half accepted
-    // a pending request -- run this frame's cancellation ladder. All locals in scope at a loop-body
-    // top are initialized (a pending mid-let cannot exist here), so the ladder deads everything.
-    // Safepoints whose live scope state matches a previously emitted ladder JUMP to that ladder
-    // instead of duplicating it -- sibling loops in one body then share one cleanup sequence.
+    // a pending request -- run this frame's cancellation ladder. The locals in scope at a loop-body
+    // top are initialized except the pending `let`s whose initializer holds the loop, which the
+    // ladder skips. Safepoints whose live scope state matches a previously emitted ladder JUMP to
+    // that ladder instead of duplicating it -- sibling loops in one body then share one cleanup
+    // sequence.
     fn safepoint_cancel(self: &mut Self, sp: tok::Span) {
         let it = Ast::builtin(BuiltinType::BT_I32);
         let pl = self.rv_temp(ir::rv(ir::RV_INTRINSIC, 0, 0, ir::IN_SAFEPOINT_C, it), sp);
         let cond = self.copy_op(pl);
         if self.sp_ladder_b != 0xFFFFFFFFu32 && self.sp_ladder_locals.eq(&self.scope_locals) && self.sp_ladder_defers.eq(
             &self.defers,
-        ) {
+        ) && self.sp_ladder_pending.eq(&self.pending_lets) {
             let cont0 = self.open_block();
             self.branch_on(cond, self.sp_ladder_b, cont0, cont0, sp);
             return;
@@ -1434,6 +1478,7 @@ extend Lowerer {
         self.sp_ladder_b = ladder_b;
         self.sp_ladder_locals = self.scope_locals.clone();
         self.sp_ladder_defers = self.defers.clone();
+        self.sp_ladder_pending = self.pending_lets.clone();
     }
 
     fn lower_while(self: &mut Self, id: NodeId) {
@@ -1455,7 +1500,9 @@ extend Lowerer {
             // head: evaluate the condition (an infinite `loop` has no condition node)
             if d.condition != NODE_NONE {
                 self.tp(ir::TP_MARK_PUSH, 0, id);
+                let cb = self.chk_open(d.condition, false);
                 let cop = self.lower_expr(d.condition);
+                self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, id);
                 if cop == ir::IR_NONE {
                     return;
@@ -1470,14 +1517,16 @@ extend Lowerer {
         } else {
             0;
         };
-        self.loop_body(d.label, exit, head, ar9, d.body, id, sp, self.scope_locals.len(), self.defers.len());
+        self.loop_body(d.label, exit, head, ar9, d.body, id, sp, self.scope_locals.len(), self.defers.len(), true);
         if d.is_do {
             // tail: condition decides back-edge vs exit; `head` is the continue target
             self.seal(ir::goto_term(head, sp), head);
             if d.condition != NODE_NONE {
                 let cond_from = self.tape.len();
                 self.tp(ir::TP_MARK_PUSH, 0, id);
+                let cb = self.chk_open(d.condition, false);
                 let cop = self.lower_expr(d.condition);
+                self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, id);
                 self.tape_splice(cond_at, cond_from);
                 if cop == ir::IR_NONE {
@@ -2942,16 +2991,16 @@ extend Lowerer {
         let step = self.open_block();
         let exit = self.open_block();
         self.seal(ir::goto_term(head, sp), head);
+        // An exclusive range over a builtin integer whose binding the body cannot assign is a
+        // counted loop: its tick moves to the chunk top (`chunk_open`, `chunk_close`).
+        let counted = rd.end != NODE_NONE && !rd.inclusive && self.counted_ty(ity) && !self.binding_mut(d.binding) && self.loop_ticks();
+        let mut pre = ir::IR_NONE;
+        let mut inner = ir::IR_NONE;
         if rd.end == NODE_NONE {
             self.seal(ir::goto_term(body_b, sp), body_b);
         } else {
             let iop = self.copy_op(ipl);
-            let eop2: ir::OperandId = if ecst != ir::IR_NONE {
-                let c2 = *self.body.constants.at(ecst as usize);
-                self.const_op(c2);
-            } else {
-                self.copy_op(epl);
-            };
+            let eop2 = self.range_end(ecst, epl);
             let cmp_op = if rd.inclusive {
                 tt::TokenType::LessThanEqual;
             } else {
@@ -2959,18 +3008,16 @@ extend Lowerer {
             };
             let cop = self.bool_bin(iop, eop2, cmp_op, sp);
             self.branch_bool(cop, body_b, exit, sp);
+            if counted {
+                inner = self.chunk_open(sp, &mut pre);
+            }
         }
-        self.loop_body(d.label, exit, step, 0, d.body, id, sp, self.scope_locals.len(), self.defers.len());
+        self.loop_body(d.label, exit, step, 0, d.body, id, sp, self.scope_locals.len(), self.defers.len(), !counted);
         self.seal(ir::goto_term(step, sp), step);
         if rd.inclusive {
             // The body ran with `i <= end`: step only while `i < end`, so an end at the type's
             // maximum ends the loop instead of wrapping or trapping the increment.
-            let eop3: ir::OperandId = if ecst != ir::IR_NONE {
-                let c3 = *self.body.constants.at(ecst as usize);
-                self.const_op(c3);
-            } else {
-                self.copy_op(epl);
-            };
+            let eop3 = self.range_end(ecst, epl);
             let more = self.cmp_test(ipl, eop3, tt::TokenType::LessThan, sp);
             let inc = self.open_block();
             self.branch_bool(more, inc, exit, sp);
@@ -2980,7 +3027,115 @@ extend Lowerer {
         let one = self.kop(ir::CK_INT, ity, 1, sp);
         self.assign(ipl, ir::rv(ir::RV_BINARY, iop2, one, tt::TokenType::Plus as u8, ity), sp);
         self.seal(ir::goto_term(head, sp), exit);
+        if counted {
+            let eop4 = self.range_end(ecst, epl);
+            self.chunk_close(pre, inner, step, ipl, eop4, head, exit, sp);
+        }
         self.for_close(id);
+    }
+
+    // A fresh operand for a range loop's end: the constant `ecst`, else a copy of `epl`.
+    fn range_end(self: &mut Self, ecst: u32, epl: ir::PlaceId) ir::OperandId {
+        if ecst != ir::IR_NONE {
+            let c = *self.body.constants.at(ecst as usize);
+            return self.const_op(c);
+        }
+        return self.copy_op(epl);
+    }
+
+    // Is `t` a builtin integer: a type whose loop index `IN_CHUNK` counts?
+    fn counted_ty(self: &Self, t: TypeId) bool {
+        let y = self.f.ty(t);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return false;
+        }
+        let bt = y.as_data.builtin as u32;
+        return bt >= BuiltinType::BT_I8 as u32 && bt <= BuiltinType::BT_USIZE as u32;
+    }
+
+    // Does a `for` binding name a mutable local (`for mut i in ..`), which the body may assign?
+    fn binding_mut(self: &Self, binding: NodeId) bool {
+        if binding == NODE_NONE {
+            return false;
+        }
+        let bn = self.f.node(binding);
+        if bn.kind == NodeKind::NODE_PATTERN_NAME {
+            return self.f.node(bn.as_data.pattern.name).as_data.name.is_mutable;
+        }
+        return bn.kind != NodeKind::NODE_IDENTIFIER && bn.kind != NodeKind::NODE_PATTERN_WILDCARD;
+    }
+
+    // A counted loop's chunk top, the open block, entered once `i < end` held: its safepoint, then a
+    // goto to the returned block, where the body starts. `pre` receives the chunk top's last block.
+    fn chunk_open(self: &mut Self, sp: tok::Span, pre: &mut ir::BlockId) ir::BlockId {
+        self.safepoint(sp);
+        *pre = self.cur;
+        self.body.count_blocks += 1;
+        let inner = self.open_block();
+        self.seal(ir::goto_term(inner, sp), inner);
+        return inner;
+    }
+
+    // Strip-mine the counted loop opened by `chunk_open` (its step, sealed with a goto to `head`, is
+    // `step`; the open block is `exit`) when its body, the blocks from `inner` on, runs no call, drop
+    // or safepoint: then the chunk top goes on to `lim = IN_CHUNK(i, end)` and a test block
+    // `i < lim`, which enters the body or returns to `head`, whose `i < end` test starts the next
+    // chunk; the step continues at the test, so the chunk's backedges never tick. The body keeps
+    // the test as its only predecessor: the branch fact `i < lim` reaches it, and with `lim <= end`
+    // (BCE reads IN_CHUNK) so does `i < end`. A body with a call keeps its tick per iteration at
+    // the chunk top: a chunk there spares little and costs a chunk end per loop entry.
+    fn chunk_close(
+        self: &mut Self,
+        pre: ir::BlockId,
+        inner: ir::BlockId,
+        step: ir::BlockId,
+        ipl: ir::PlaceId,
+        eop: ir::OperandId,
+        head: ir::BlockId,
+        exit: ir::BlockId,
+        sp: tok::Span,
+    ) {
+        if !self.chunk_free(inner) {
+            return;
+        }
+        self.body.count_blocks += 2;
+        self.body.chunks += 1;
+        let ity = self.body.places.at(ipl as usize).ty;
+        let chunk = self.open_block();
+        self.cur = chunk;
+        self.run_start = self.body.statements.len() as u32;
+        let iop = self.copy_op(ipl);
+        let start = self.body.oper_pool.len() as u32;
+        self.body.oper_pool.push(iop);
+        self.body.oper_pool.push(eop);
+        let lim = self.rv_temp(ir::rv(ir::RV_INTRINSIC, start, 2, ir::IN_CHUNK, ity), sp);
+        let test = self.open_block();
+        self.seal(ir::goto_term(test, sp), test);
+        let lop = self.copy_op(lim);
+        let more = self.cmp_test(ipl, lop, tt::TokenType::LessThan, sp);
+        self.branch_on(more, inner, head, exit, sp);
+        self.body.blocks[pre as usize].term.t0 = chunk;
+        self.body.blocks[step as usize].term.t0 = test;
+    }
+
+    // Do the blocks from `first` on run no call, drop or safepoint?
+    fn chunk_free(self: &Self, first: ir::BlockId) bool {
+        for bi in first as usize..self.body.blocks.len() {
+            let bb = *self.body.blocks.at(bi);
+            if bb.term.kind == ir::TM_CALL || bb.term.kind == ir::TM_DROP {
+                return false;
+            }
+            for si in bb.stmt_start..bb.stmt_start + bb.stmt_len {
+                let s = *self.body.statements.at(si as usize);
+                if s.kind == ir::ST_ASSIGN {
+                    let rv = self.body.rvalues.at(s.rvalue as usize);
+                    if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SAFEPOINT || rv.c == ir::IN_SAFEPOINT_C) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     // Is `t` an instance of the prelude Range struct?
@@ -3067,7 +3222,7 @@ extend Lowerer {
         let a2 = self.bool_and(nop, lt_op, sp);
         let cond = self.bool_bin(a1, a2, tt::TokenType::PipePipe, sp);
         self.branch_bool(cond, body_b, exit, sp);
-        self.loop_body(d.label, exit, step, 0, d.body, id, sp, self.scope_locals.len(), self.defers.len());
+        self.loop_body(d.label, exit, step, 0, d.body, id, sp, self.scope_locals.len(), self.defers.len(), true);
         self.seal(ir::goto_term(step, sp), step);
         // The body ran with `x < end` (or `x <= end`): step only while `x < end`, so an inclusive
         // end at the type's maximum ends the loop instead of wrapping or trapping the increment.
@@ -3141,6 +3296,12 @@ extend Lowerer {
         let cont = self.open_block();
         tm.t0 = cont;
         self.seal(tm, cont);
+        // A `for` statement's head evaluates nothing unregistered besides `next`'s own result: a
+        // clean position unless an enclosing value block masks it, or the narrow std::parallel rule.
+        if self.chk_mask == 0 && !self.chk_narrow {
+            let top = self.copy_op(tpl);
+            self.cancel_check_at(next_def, false, top, opt_ty, sp);
+        }
         let ut = Ast::builtin(BuiltinType::BT_U32);
         let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, tpl, 0, 0, ut), sp);
         let oop = self.kop(ir::CK_INT, ut, ok_ord, sp);
@@ -3157,7 +3318,7 @@ extend Lowerer {
         let xpl = self.place_of_local(l);
         let erv = self.rv_use(eop, elem);
         self.assign(xpl, erv, sp);
-        self.loop_body(d.label, exit, head, 0, d.body, id, sp, lbase, self.defers.len());
+        self.loop_body(d.label, exit, head, 0, d.body, id, sp, lbase, self.defers.len(), true);
         self.iter_binding_dead(lbase);
         self.seal(ir::goto_term(head, sp), exit);
     }
@@ -3206,6 +3367,15 @@ extend Lowerer {
         let lop = self.copy_op(lpl);
         let cop = self.bool_bin(iop, lop, tt::TokenType::LessThan, sp);
         self.branch_bool(cop, body_b, exit, sp);
+        // A counted loop: its tick moves to the chunk top (`chunk_open`, `chunk_close`), before the
+        // element load. A consuming loop keeps its tick after the load: its cancellation ladder's
+        // TailDrop frees the elements after the one the binding took.
+        let counted = !consume && self.loop_ticks();
+        let mut pre = ir::IR_NONE;
+        let mut inner = ir::IR_NONE;
+        if counted {
+            inner = self.chunk_open(sp, &mut pre);
+        }
         let iop2 = self.copy_op(idx_pl);
         let mut iop_e = iop2;
         if self.checked_view(self.peeled_view_ty(ipl)) {
@@ -3225,13 +3395,17 @@ extend Lowerer {
         let lbase = self.iter_binding_live(el, sp);
         let bind_pl = self.place_of_local(el);
         self.assign(bind_pl, erv, sp);
-        self.loop_body(d.label, exit, step, 0, d.body, id, sp, lbase, dmark);
+        self.loop_body(d.label, exit, step, 0, d.body, id, sp, lbase, dmark, !counted);
         self.iter_binding_dead(lbase);
         self.seal(ir::goto_term(step, sp), step);
         let iop3 = self.copy_op(idx_pl);
         let one = self.kop(ir::CK_INT, ut, 1, sp);
         self.assign(idx_pl, ir::rv(ir::RV_BINARY, iop3, one, tt::TokenType::Plus as u8, ut), sp);
         self.seal(ir::goto_term(head, sp), exit);
+        if counted {
+            let lop4 = self.copy_op(lpl);
+            self.chunk_close(pre, inner, step, idx_pl, lop4, head, exit, sp);
+        }
         // Every exit but the normal one (which took every element) ran the TailDrop on its way,
         // inside the loop: the index it reads is the loop's own.
         self.defers.truncate(dmark);
@@ -3305,6 +3479,7 @@ extend Lowerer {
                         let start = self.body.oper_pool.len() as u32;
                         self.body.oper_pool.push(op);
                         let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp);
+                        self.maybe_cancel_check(id, m, false, res, rt2, sp);
                         if res == ir::IR_NONE {
                             return ir::IR_NONE;
                         }
@@ -4013,9 +4188,16 @@ extend Lowerer {
             }
             // A by-reference parameter (`other: &i32`) borrows the right operand, as `m.add(&n)` does:
             // the operand's place, or a temporary holding a constant (`m + 5`).
-            let ro = *self.body.operands.at(rop as usize);
+            let mut ro = *self.body.operands.at(rop as usize);
             let by_val = ro.ty == TYPE_NONE || self.f.ty(ro.ty).kind != TypeKind::TYPE_REFERENCE;
             if by_val && self.param_is_ref(DefId { module: m, node: decl }, 1) {
+                // A numeric operand the checker widened (`g + 2` or an `i32` against `&i64`) takes the
+                // parameter's element type first: the borrow must point at a value of that type.
+                let want = self.ref_param_elem(DefId { module: m, node: decl }, 1);
+                if want != ro.ty && self.is_num_builtin(want) && self.is_num_builtin(ro.ty) {
+                    rop = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, rop, ir::CAST_NUMERIC, 0, want), sp));
+                    ro = *self.body.operands.at(rop as usize);
+                }
                 let pl = if ro.kind == ir::OP_CONST {
                     self.spill(rop, sp);
                 } else {
@@ -4034,7 +4216,13 @@ extend Lowerer {
         self.avput(argv);
         // Through a type parameter's bound: the conformance each instance dispatches to.
         let bc = self.proj_subst_ty(self.f.bound_call(id));
-        return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, bc, TYPE_NONE, ty, sp);
+        let res = self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, bc, TYPE_NONE, ty, sp);
+        // The operator's implicit call is checked like an explicit one; a compound assignment checks
+        // after it stores the result (`lower_assignment`).
+        if self.f.node(id).kind != NodeKind::NODE_ASSIGNMENT {
+            self.maybe_cancel_check(id, DefId { module: m, node: decl }, false, res, ty, sp);
+        }
+        return res;
     }
 
     // Whether parameter `i` of function `f` is declared a reference.
@@ -4049,6 +4237,26 @@ extend Lowerer {
             return false;
         }
         return unsafe (*fa).at_const(pn.as_data.parameter.ty).kind == NodeKind::NODE_REFERENCE_TYPE;
+    }
+
+    // The element type of `f`'s by-reference parameter `i` (`&E` -> E), or TYPE_NONE.
+    fn ref_param_elem(self: &Self, f: DefId, i: u32) TypeId {
+        let fa = unsafe (&*self.pkg).module_ast_const(f.module);
+        let pn = unsafe (*fa).list(unsafe (*fa).at_const(f.node).as_data.function.params)[i as usize];
+        let t = unsafe (*fa).type_of(pn);
+        if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_REFERENCE {
+            return TYPE_NONE;
+        }
+        return self.f.ty(t).as_data.elem;
+    }
+
+    // True for a builtin integer or float type.
+    fn is_num_builtin(self: &Self, t: TypeId) bool {
+        if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_BUILTIN {
+            return false;
+        }
+        let b = self.f.ty(t).as_data.builtin;
+        return bt_int_width(b, false) != 0 || b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
     }
 
     // Copy the checker's bound generic arguments for `node` into targ_pool; returns the count
@@ -4341,7 +4549,7 @@ extend Lowerer {
                 if base9 == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
-                base9 = self.apply_place_derefs(base9, du9, sp);
+                base9 = self.apply_place_derefs(base9, du9, recv, sp);
                 if base9 == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
@@ -4479,9 +4687,9 @@ extend Lowerer {
     //
     // The ladder is the same defers-then-deads sequence an early return takes, bracketed by the
     // runtime's ladder mask (cleanup can wait, but never re-cancel), and ends in a flagged return
-    // the backend spells as a zero the (also unwinding) caller never reads. An unpinned fn-value
-    // callee is cancellation-masked: no check follows it, and the next pinned
-    // cancellation point delivers a pending edge.
+    // the backend spells as a zero the (also unwinding) caller never reads. A call to a fn value
+    // nothing pins carries the check when some fn value of the package can accept a cancellation
+    // (`Package::cancel_fnv`).
     // The per-body half of the check-eligibility test, cached in `chk_on`: everything that does
     // not depend on the callee. The sugar items are re-read (cheaply) by the emitting path.
     fn chk_enabled(self: &mut Self) bool {
@@ -4519,30 +4727,38 @@ extend Lowerer {
         ty: TypeId,
         sp: tok::Span,
     ) {
-        if id != self.chk_root {
-            return; // only a statement-root call: no pending sibling temporaries to unwind past
+        if !self.chk_has(id) {
+            return; // a call evaluated with pending sibling temporaries the ladder cannot see
         }
+        self.cancel_check_at(target, is_fn_value, res, ty, sp);
+    }
+
+    // The check after a call in a clean position (see `maybe_cancel_check`).
+    fn cancel_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, ty: TypeId, sp: tok::Span) {
         if self.in_defer != 0 {
             return; // cleanup is masked: no edge inside a defer body
-        }
-        if is_fn_value {
-            return; // unpinned callee: cancellation-masked across the call
         }
         if !self.chk_enabled() {
             return;
         }
         let pk = unsafe &*self.pkg;
-        if target.node == NODE_NONE {
-            return;
+        if is_fn_value {
+            if !pk.cancel_fnv {
+                return; // no fn value of the package can accept a cancellation
+            }
+        } else {
+            if target.node == NODE_NONE {
+                return;
+            }
+            let ta = unsafe &*pk.module_ast_const(target.module);
+            if ta.at_const(target.node).kind != NodeKind::NODE_FUNCTION {
+                return;
+            }
+            if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
+                return; // this callee can never accept a cancellation
+            }
         }
-        let ta = unsafe &*pk.module_ast_const(target.module);
-        if ta.at_const(target.node).kind != NodeKind::NODE_FUNCTION {
-            return;
-        }
-        if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
-            return; // this callee can never accept a cancellation
-        }
-        if target.node == self.chk_caw_n && target.module == self.chk_caw_m {
+        if !is_fn_value && target.node == self.chk_caw_n && target.module == self.chk_caw_m {
             // The acceptance call of a primitive's own wait cleanup: it reports through its result so
             // the primitive can finish removing its registrations and hand back the value it waited
             // with, and the edge belongs after the PRIMITIVE, at its caller's check. A check here
@@ -4591,21 +4807,153 @@ extend Lowerer {
             );
         }
         self.seal(ir::goto_term(ladder_b, sp), ladder_b);
-        // The ladder: masked cleanup, then hand the edge to the caller. A pending plain-let local is
-        // uninitialized on this path: no dead for it. Call-result receiver temporaries the root call
-        // registered above it hold values and die here.
-        let mut pending: i64 = -1;
-        if self.chk_let != CHK_NO_LET {
-            switch self.scope_locals.remove(self.chk_let) {
-                Some(pl0) => {
-                    pending = pl0;
-                },
-                _ => {},
-            };
-        }
+        // The ladder: masked cleanup, then hand the edge to the caller. Call-result receiver
+        // temporaries registered above the call hold values and die here.
         self.cancel_ladder(cont_b, sp);
-        if pending >= 0 {
-            self.scope_locals.insert(self.chk_let, pending as ir::LocalId);
+    }
+
+    // Open the clean skeleton of `root` (an expression evaluated with nothing unregistered
+    // pending: a statement, a `let` initializer, a lone return value, an `if` or `while`
+    // condition) and return the enclosing base for `chk_close`. A clean node's first-evaluated
+    // parts are clean too: a method receiver, a field access's object, a unary or cast operand, a
+    // binary operator's left side, both sides of `&&` and `||` (the left is a bool, consumed by
+    // the branch), a switch scrutinee and its arm bodies, an `if`'s condition and branches, and
+    // the right side of an assignment to a call-free place. A call among these nodes may carry a
+    // cancellation check; a value block or value loop outside them masks every root inside it.
+    // `stmt`: the root of an expression statement or a plain `let`, the one root a std::parallel
+    // body keeps (`chk_narrow`).
+    fn chk_open(self: &mut Self, root: NodeId, stmt: bool) usize {
+        let base = self.chk_base;
+        self.chk_base = self.chk_nodes.len();
+        if root == NODE_NONE || self.chk_mask != 0 {
+            return base;
+        }
+        self.chk_nodes.push(root);
+        if self.chk_narrow {
+            if !stmt || self.f.node(root).kind != NodeKind::NODE_CALL {
+                let _ = self.chk_nodes.pop();
+            }
+            return base;
+        }
+        // A worklist over the skeleton itself: every node enters once, and it holds only nodes of
+        // the root's expression tree.
+        let mut i = self.chk_base;
+        while i < self.chk_nodes.len() {
+            let n = self.chk_nodes[i];
+            i += 1;
+            let nd = self.f.node(n);
+            let k = nd.kind;
+            if k == NodeKind::NODE_CALL {
+                let c = nd.as_data.call.callee;
+                if self.f.node(c).kind == NodeKind::NODE_MEMBER && !self.f.node(c).as_data.member.path {
+                    self.chk_nodes.push(self.f.node(c).as_data.member.object);
+                }
+            } else if k == NodeKind::NODE_MEMBER {
+                if !nd.as_data.member.path {
+                    self.chk_nodes.push(nd.as_data.member.object);
+                }
+            } else if k == NodeKind::NODE_UNARY {
+                self.chk_nodes.push(nd.as_data.unary.operand);
+            } else if k == NodeKind::NODE_CAST {
+                self.chk_nodes.push(nd.as_data.cast.expression);
+            } else if k == NodeKind::NODE_BINARY {
+                self.chk_nodes.push(nd.as_data.binary.left);
+                if nd.as_data.binary.op == tt::TokenType::AmpersandAmpersand || nd.as_data.binary.op == tt::TokenType::PipePipe {
+                    self.chk_nodes.push(nd.as_data.binary.right);
+                }
+            } else if k == NodeKind::NODE_ASSIGNMENT {
+                // An operator method takes the right side as an argument after the place.
+                if self.f.op_method(n).is_none() && self.chk_place_clean(nd.as_data.binary.left) {
+                    self.chk_nodes.push(nd.as_data.binary.right);
+                }
+            } else if k == NodeKind::NODE_MATCH {
+                let md = nd.as_data.match_expr;
+                self.chk_nodes.push(md.value);
+                for a in 0..md.arms.len {
+                    self.chk_nodes.push(self.f.node(unsafe self.f.list(md.arms)[a as usize]).as_data.match_arm.body);
+                }
+            } else if k == NodeKind::NODE_IF {
+                let fd = nd.as_data.if_stmt;
+                self.chk_nodes.push(fd.condition);
+                self.chk_nodes.push(fd.then_branch);
+                if fd.else_branch != NODE_NONE {
+                    self.chk_nodes.push(fd.else_branch);
+                }
+            }
+        }
+        return base;
+    }
+
+    fn chk_close(self: &mut Self, base: usize) {
+        self.chk_nodes.truncate(self.chk_base);
+        self.chk_base = base;
+    }
+
+    // The local of assignment target `left` when it names an immutable split-init `let` (its one
+    // assign), else IR_NONE.
+    fn chk_split_let(self: &Self, left: NodeId) ir::LocalId {
+        if self.f.node(left).kind != NodeKind::NODE_IDENTIFIER {
+            return ir::IR_NONE;
+        }
+        let d = self.f.res(left);
+        if d.node == NODE_NONE || d.module != self.module {
+            return ir::IR_NONE;
+        }
+        let dn = unsafe (&*(&*self.pkg).module_ast_const(d.module)).at_const(d.node);
+        if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || dn.as_data.let_stmt.is_mutable {
+            return ir::IR_NONE;
+        }
+        return self.local_of(d.node);
+    }
+
+    // Is `n` a clean node of the open root?
+    fn chk_has(self: &Self, n: NodeId) bool {
+        for i in self.chk_base..self.chk_nodes.len() {
+            if self.chk_nodes[i] == n {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // An assignment target whose place evaluates no call: a local, a field, a deref, or an element
+    // at a name or literal index. A split-init `let` target is uninitialized or maybe-initialized
+    // on a cancel edge in the right side: an immutable one is definitely uninitialized (it is
+    // assigned once), so the ladder skips it (`chk_split_let`); a `mut` one qualifies only when its
+    // type holds no loan and no drop, so its dead is inert.
+    fn chk_place_clean(self: &Self, left: NodeId) bool {
+        let mut n = left;
+        loop {
+            let nd = self.f.node(n);
+            if nd.kind == NodeKind::NODE_IDENTIFIER {
+                let d = self.f.res(n);
+                if d.node == NODE_NONE || d.module != self.module {
+                    return true;
+                }
+                let dn = unsafe (&*(&*self.pkg).module_ast_const(d.module)).at_const(d.node);
+                if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || !dn.as_data.let_stmt.is_mutable {
+                    return true;
+                }
+                let l = self.local_of(d.node);
+                if l == ir::IR_NONE {
+                    return false;
+                }
+                let tk = self.f.ty(self.body.locals.at(l as usize).ty).kind;
+                return tk == TypeKind::TYPE_BUILTIN || tk == TypeKind::TYPE_POINTER;
+            }
+            if nd.kind == NodeKind::NODE_MEMBER && !nd.as_data.member.path {
+                n = nd.as_data.member.object;
+            } else if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == tt::TokenType::Star {
+                n = nd.as_data.unary.operand;
+            } else if nd.kind == NodeKind::NODE_INDEX {
+                let ik = self.f.node(nd.as_data.index.index).kind;
+                if ik != NodeKind::NODE_IDENTIFIER && ik != NodeKind::NODE_LITERAL {
+                    return false;
+                }
+                n = nd.as_data.index.object;
+            } else {
+                return false;
+            }
         }
     }
 
@@ -4628,7 +4976,19 @@ extend Lowerer {
             sp,
         );
         self.emit_defers_down_to(0);
-        self.emit_deads_down_to(0);
+        // A pending `let` local is uninitialized on this path: no dead for it.
+        let mut i = self.scope_locals.len();
+        while i > 0 {
+            i -= 1;
+            let l = self.scope_locals[i];
+            if self.pending_lets.contains(&l) {
+                continue;
+            }
+            let lsp = self.body.locals.at(l as usize).span;
+            self.stmt(
+                ir::Statement { kind: ir::ST_STORAGE_DEAD, place: ir::IR_NONE, rvalue: ir::IR_NONE, a: l, span: lsp },
+            );
+        }
         let e0 = self.body.oper_pool.len() as u32;
         let _ = self.emit_call(
             pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND),
@@ -4826,12 +5186,30 @@ extend Lowerer {
                 }
                 let rv = self.rv_use(res, lt);
                 self.assign(pl, rv, sp);
+                // Checked once the place holds the result: the ladder drops it with the place.
+                if self.chk_has(id) && self.chk_place_clean(d.left) {
+                    self.cancel_check_at(
+                        DefId { module: (m >> 32) as ModuleId, node: (m & 0xFFFFFFFFu64) as NodeId },
+                        false,
+                        ir::IR_NONE,
+                        TYPE_NONE,
+                        sp,
+                    );
+                }
                 self.tp(ir::TP_ASSIGN_POST, 0, id);
                 return self.unit_op(ty, sp);
             },
             None => {},
         };
+        // An immutable split-init target is uninitialized until this assign (see `chk_place_clean`).
+        let split = self.chk_split_let(d.left);
+        if split != ir::IR_NONE {
+            self.pending_lets.push(split);
+        }
         let rop = self.lower_expr(d.right);
+        if split != ir::IR_NONE {
+            let _ = self.pending_lets.pop();
+        }
         if rop == ir::IR_NONE {
             return ir::IR_NONE;
         }
@@ -5126,6 +5504,18 @@ extend Lowerer {
     // A block with no value-producing tail still writes `dest` (unit), so every consumer of the
     // destination reads initialized storage.
     fn lower_value_block(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
+        // Outside the open root's clean nodes, something unregistered is pending: no root inside.
+        let masked = !self.chk_has(id);
+        if masked {
+            self.chk_mask += 1;
+        }
+        self.lower_value_block_in(id, dest);
+        if masked {
+            self.chk_mask -= 1;
+        }
+    }
+
+    fn lower_value_block_in(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
         self.tp(ir::TP_SCOPE_PUSH, 0, id);
         self.scope_enter();
         let stmts = self.f.node(id).as_data.block.statements;
@@ -5136,7 +5526,9 @@ extend Lowerer {
             if i == stmts.len - 1 && self.f.node(s).kind == NodeKind::NODE_EXPRESSION_STATEMENT {
                 let v = self.f.node(s).as_data.single.value;
                 self.tp(ir::TP_MARK_PUSH, 0, s);
+                let cb = self.chk_open(v, false);
                 let op = self.lower_expr(v);
+                self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, s);
                 if op == ir::IR_NONE {
                     return;
@@ -5164,15 +5556,24 @@ extend Lowerer {
 
     fn lower_loop_expr(self: &mut Self, id: NodeId, result: ir::PlaceId) {
         self.tape_mute += 1; // the walk has no value-position loop case: nothing replays
+        let masked = !self.chk_has(id);
+        if masked {
+            self.chk_mask += 1;
+        }
         let d = self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
         let head = self.open_block();
         let exit = self.open_block();
         self.seal(ir::goto_term(head, sp), head);
         self.push_loop(d.label, exit, head, result, self.scope_locals.len(), self.defers.len());
+        // A value loop preempts like a statement loop: every backedge enters `head`.
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(ir::goto_term(head, sp), exit);
+        if masked {
+            self.chk_mask -= 1;
+        }
         self.tape_mute -= 1;
     }
 
@@ -5280,8 +5681,8 @@ extend Lowerer {
         );
     }
 
-    // Lower statement loop `id`'s body inside its loop context, after the loop safepoint; `ar` is
-    // the body-start tape argument.
+    // Lower statement loop `id`'s body inside its loop context, after the loop safepoint (none with
+    // `tick` false: a strip-mined loop ticks once per chunk); `ar` is the body-start tape argument.
     fn loop_body(
         self: &mut Self,
         label: tok::Span,
@@ -5293,9 +5694,12 @@ extend Lowerer {
         sp: tok::Span,
         lbase: usize,
         brk_defers: usize,
+        tick: bool,
     ) {
         self.push_loop(label, brk, cont, ir::IR_NONE, lbase, brk_defers);
-        self.loop_safepoint(sp);
+        if tick {
+            self.loop_safepoint(sp);
+        }
         self.tp(ir::TP_BODY_START, ar, id);
         // A destructuring `for` moves the element's parts into the pattern's names; they live for
         // the iteration (`break` and `continue` end them through `lbase`).
@@ -5658,7 +6062,7 @@ extend Lowerer {
             // call's type is the impl's declared `&Target` return
             let du = self.f.derefs(id);
             if du != null {
-                base = self.apply_place_derefs(base, du, sp);
+                base = self.apply_place_derefs(base, du, id, sp);
                 if base == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
@@ -5690,7 +6094,9 @@ extend Lowerer {
     // declared `&T` with the enclosing extend's generics bound by the receiver instance's args.
     // Apply auto-deref chain `du` to place `base`: a user Deref hop calls the recorded impl and
     // spills its `&Target` result, a builtin hop projects a deref. IR_NONE when a call fails.
-    fn apply_place_derefs(self: &mut Self, base0: ir::PlaceId, du: *const DerefUse, sp: tok::Span) ir::PlaceId {
+    // `key`: the node the hops apply to; a user hop there is an implicit call, checked like an
+    // explicit one (`maybe_cancel_check`).
+    fn apply_place_derefs(self: &mut Self, base0: ir::PlaceId, du: *const DerefUse, key: NodeId, sp: tok::Span) ir::PlaceId {
         let mut base = base0;
         for s in 0..unsafe (*du).n {
             let m = unsafe (*du).method[s as usize];
@@ -5707,6 +6113,7 @@ extend Lowerer {
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
+                self.maybe_cancel_check(key, m, false, res, rt2, sp);
                 base = self.spill(res, sp);
             } else {
                 base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: rt });
@@ -5854,7 +6261,7 @@ extend Lowerer {
             du = self.f.derefs(d.member);
         }
         if du != null {
-            base = self.apply_place_derefs(base, du, sp);
+            base = self.apply_place_derefs(base, du, id, sp);
             if base == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -6162,10 +6569,12 @@ extend Lowerer {
                 eop = self.copy_op(vtpl);
                 fl = 0;
             }
+            // A view through a reference slices its referent.
+            let sbase = self.deref_refs(base);
             return self.rv_temp(
                 ir::Rvalue {
                     kind: ir::RV_SLICE,
-                    a: base,
+                    a: sbase,
                     b: sop,
                     c: fl,
                     target: ty,

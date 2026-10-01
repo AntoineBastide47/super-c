@@ -295,6 +295,10 @@ fn reactor_thread_failure_is_fatal() {
 
 // --- steady state -----------------------------------------------------------------------------------------
 
+// Detached threads a steady-state loop keeps in flight at most: each spawn first waits until the thread
+// this many spawns back has destroyed its result.
+const IN_FLIGHT: i64 = 48;
+
 // Two thousand detached and two thousand joined threads: every cell, payload and handle block comes back
 // (the suite's leak gate checks the child at exit), the task stacks are untouched, and the resident set
 // does not keep growing.
@@ -302,7 +306,9 @@ fn reactor_thread_failure_is_fatal() {
 fn repeated_spawn_and_detach_reach_a_steady_state() {
     let stk0 = platform::stack_bytes();
     let rss0 = unsafe sys::sc_bs_rss_now();
-    for _i in 0..2000 {
+    for i in 0..2000 {
+        // Bound the threads alive at once: an unbounded burst runs the process to thousands of threads.
+        assert(wait_frees(i as i64 - IN_FLIGHT), "an earlier detached thread destroyed its result");
         let _h = thread::spawn(
             fn() Tracked {
                 return Tracked { n: 5 };

@@ -2,6 +2,7 @@
 #define SC_BENCH_SYS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Platform glue for std/testing/bench.spc: CPU cycles, CPU time, allocation accounting, resident memory,
    machine identity and an optimisation barrier. Every platform split lives in bench_sys.c, compiled as the
@@ -31,7 +32,8 @@ long long sc_bs_cpu_ns(void);
    counted: `free`, aligned allocation calls (std's Global makes them only for types aligned above what
    malloc guarantees), and on macOS the allocations libc makes internally (two-level namespace: libc binds
    its own malloc); glibc binds ours, so on Linux those count too. Windows (no real allocator to forward to
-   across CRTs), wasm and libcs other than glibc count nothing: `supported` is 0.
+   across CRTs), wasm, libcs other than glibc and builds under an address, thread or memory sanitizer (its
+   runtime owns the malloc family) count nothing: `supported` is 0.
 
    Accounting is per thread (a cache line per thread, handed out on the thread's first counted call, never
    reclaimed, at most SC_BS_ACCT_THREADS; later threads share one atomic line) so counting costs the owning
@@ -44,7 +46,7 @@ void sc_bs_alloc_enable(int on);
 int sc_bs_alloc_enabled(void);
 /* out[0] calls, out[1] bytes requested, out[2] threads that allocated, out[3] 1 when more than
    SC_BS_ACCT_THREADS threads allocated (the excess shared one contended line). */
-void sc_bs_alloc_snapshot(long long out[4]);
+void sc_bs_alloc_snapshot(int64_t out[4]);
 long long sc_bs_alloc_calls(void);
 long long sc_bs_alloc_bytes(void);
 

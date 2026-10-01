@@ -2202,6 +2202,14 @@ fn main() i32 { return 0; }
     let nf = p.compile_flags("--test --test-no-fork --test-filter=boom", "main.spc");
     assert(nf.ok());
     assert(nf.out_has("skipped (should_panic needs fork)"), "no-fork skips should_panic");
+    // The runner rejects an argument it does not know (a driver flag given to it directly) instead of
+    // running the whole suite.
+    let mut runner = String::new();
+    runner.format_into("{}/build/dev/raw/__tests{}", str::from_cstr(p.rootp()), str::from_cstr(cli::binext()));
+    let ua = cli::exe_env_in(runner.as_str(), str::from_cstr(p.rootp()), "SC_UNUSED", "1", "--test-filter=boom");
+    assert_eq(ua.exit, 2);
+    assert(ua.out_has("unknown test runner argument '--test-filter=boom'"), "the runner names the argument");
+    assert(!ua.out_has("running"), "the runner runs nothing");
     // A normal (non---test) build still compiles and runs its own main (tests not emitted).
     let nb = p.compile("main.spc");
     assert(nb.ok());
@@ -2859,9 +2867,9 @@ fn main() i32 {
     assert(!q.gen_has("main.c", "__sc_spc"), "a program that never launches gets no safepoints");
 }
 
-// The coroutine-reachability scan pins every call inside a launched body to a declaration; one callee it
-// cannot pin widens the scan, and every loop in the program pays a safepoint. An explicit `x.free()` on a
-// value whose destructor is synthesized resolves to no declaration: it is a drop, not an unpinned call.
+// The coroutine-reachability scan pins every call inside a launched body to a declaration; a call to a
+// fn value it cannot trace reaches every fn value of the program. An explicit `x.free()` on a value
+// whose destructor is synthesized resolves to no declaration: it is a drop, not a fn-value call.
 @test
 fn explicit_drop_in_a_task_keeps_safepoints_scoped() {
     let p = cli::proj_new();
@@ -2904,8 +2912,8 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// The scan stops at the standard library, and only there: a user module whose name merely begins
-// with `std` is user code, and its loops reached from a launched body get their safepoints.
+// A user module whose name merely begins with `std` is user code, not std: its loops reached from a
+// launched body get their safepoints.
 @test
 fn std_prefixed_user_module_keeps_safepoints() {
     let p = cli::proj_new();
@@ -3011,6 +3019,808 @@ fn main() i32 {
     let r2 = p.compile("main.spc");
     assert(r2.ok());
     assert(p.gen_has("work.c", "__sc_spc"), "the rebuilt program reaches the loop from a launched body");
+}
+
+// Build `src` as main.spc and run it under the leak gate. The programs below run a task that never
+// blocks on the only worker, and exit 1 when its loop never reaches a safepoint (it neither yields
+// nor stops on cancellation).
+fn run_preempted(src: str) {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", src);
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
+}
+
+// Every coroutine entry API seeds the reachability scan, not only `launch`: a `TaskGroup::spawn`
+// child is preempted like a launched task.
+@test
+fn task_group_child_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    let mut g = task::TaskGroup::new();
+    g.spawn(fn() {
+        // A group child that never blocks: only its safepoint gives the worker back.
+        while !raised() {}
+        wa.done();
+    });
+    let fb = flag.clone();
+    g.spawn(fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    });
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: the group's join would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    let r = g.join();
+    rt::shutdown();
+    return r.completed as i32 - 2;
+}
+)",
+    );
+}
+
+// ... and a compute-bound group child stops at its combined safepoint when the group cancels.
+@test
+fn task_group_cancel_stops_a_compute_bound_child() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    let mut g = task::TaskGroup::new();
+    g.spawn(fn() {
+        defer wa.done();
+        // A compute loop with no wait and no explicit cancellation point: only the combined loop
+        // safepoint can stop it. The xorshift state never reaches zero from a nonzero seed.
+        let mut x: u64 = 88172645463325252;
+        loop {
+            x = x ^ x << 13;
+            x = x ^ x >> 7;
+            x = x ^ x << 17;
+            if x == 0 {
+                break;
+            }
+        }
+    });
+    g.cancel();
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The child never reached a cancellation point: the group's join would wait forever.
+        unsafe stdlib::exit(1);
+    }
+    let r = g.join();
+    rt::shutdown();
+    return r.cancelled as i32 - 1;
+}
+)",
+    );
+}
+
+// Reachability continues through std: a named function std calls back as a fn value is reached from
+// the launched body that passes it.
+@test
+fn std_callback_by_name_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+fn body(x: &i32) {
+    let _ = x;
+    while !raised() {}
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    launch fn() {
+        let mut v = Vector::<i32>::new();
+        v.push(1);
+        iter::for_each(v.iter(), body);
+        wa.done();
+    };
+    let fb = flag.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: shutdown would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+}
+
+// A user conformance method std dispatches through a bound is reached (every conformance method of
+// the interface method's name).
+@test
+fn bound_dispatched_next_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+struct Slow {
+    pub n: i32,
+}
+
+extend Slow as Iterator<i32> {
+    pub fn next(self: &mut Slow) Option<i32> {
+        if self.n == 0 {
+            return Option::<i32>::None;
+        }
+        self.n = self.n - 1;
+        while !raised() {}
+        return Option::<i32>::Some(self.n);
+    }
+}
+
+fn ignore(_x: i32) {}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    launch fn() {
+        iter::for_each(Slow { n: 2 }, ignore);
+        wa.done();
+    };
+    let fb = flag.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: shutdown would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+}
+
+// A std loop that drives user code gets its tick: this iterator yields until the flag rises and has
+// no loop of its own, so the loop in `iter::for_each` is the only place the task can yield.
+@test
+fn std_loop_driving_user_code_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+struct Slow {
+    pub n: i32,
+}
+
+extend Slow as Iterator<i32> {
+    // No loop here: only the std loop driving it can yield.
+    pub fn next(self: &mut Slow) Option<i32> {
+        if raised() {
+            return Option::<i32>::None;
+        }
+        self.n = self.n + 1;
+        return Option::<i32>::Some(self.n);
+    }
+}
+
+fn ignore(_x: i32) {}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    launch fn() {
+        iter::for_each(Slow { n: 0 }, ignore);
+        wa.done();
+    };
+    let fb = flag.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: shutdown would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+}
+
+// A std body that runs user code only through bound dispatch ticks only in the instances binding a
+// type whose methods can be user code: `Map<u64, u64>` probes are bounded by the table and stay
+// tick-free, a map keyed by a user type and a `for_each` over a user function tick.
+@test
+fn std_instance_ticks_follow_its_type_arguments() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+struct Key {
+    pub k: u64,
+}
+
+extend Key as Hash {
+    pub fn hash(self: &Key) u64 {
+        return self.k;
+    }
+}
+
+extend Key as Eq {
+    pub fn eq(self: &Key, other: &Key) bool {
+        return self.k == other.k;
+    }
+}
+
+fn keep(_x: &i32) {}
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let mut m = Map::<u64, u64>::new();
+        m.insert(1, 2);
+        let mut u = Map::<Key, u64>::new();
+        u.insert(Key { k: 1 }, 2);
+        let mut v = Vector::<i32>::new();
+        v.push(1);
+        iter::for_each(v.iter(), keep);
+        let _ = m.get(&1);
+        let _ = u.get(&Key { k: 1 });
+        let mut w = Vector::<u64>::new();
+        w.push(1);
+        let mut kw = Vector::<Key>::new();
+        kw.push(Key { k: 1 });
+        let _ = w.contains(&1);
+        let _ = kw.contains(&Key { k: 1 });
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(
+        p.gen_fn_has("__std/map__inst.c", "Map__u64__u64__slot", "Map__u64__u64__slot"),
+        "the std-typed probe is emitted",
+    );
+    assert(!p.gen_fn_has("__std/map__inst.c", "Map__u64__u64__slot", "__sc_spc"), "a std-typed probe loop has no tick");
+    assert(p.gen_fn_has("__std/map__inst.c", "Map__main__Key__u64__slot", "__sc_spc"), "a user-keyed probe loop ticks");
+    assert(
+        p.gen_fn_has("std/iter__inst.c", "for_each__VecIter__i32__ptr_i32__main__keep", "__sc_spc"),
+        "a std loop over a user function ticks",
+    );
+    // `==` on a type parameter dispatches to `eq` at emission: the instance binding a user type
+    // ticks once per chunk of its counted loop; the instance that prints no tick ends its only
+    // chunk at the loop's end. Without inlining, so each instance keeps its own function.
+    let r2 = p.compile_flags_env("", "main.spc", "SC_INLINE=0");
+    assert(r2.ok());
+    assert(
+        p.gen_fn_has("__std/vector__inst.c", "Vector__main__Key__contains", "__sc_chunk_end(&__sc_spc, "),
+        "a user-typed == ticks",
+    );
+    assert(!p.gen_fn_has("__std/vector__inst.c", "Vector__u64__contains", "__sc_spc"), "a std-typed == has no tick");
+    assert(
+        p.gen_fn_has("__std/vector__inst.c", "Vector__u64__contains", "Vector__u64__contains"),
+        "the std-typed instance is emitted",
+    );
+}
+
+// A fn value handed to std::parallel from a task is reached even when it was built outside every
+// task, and so is one stored in a field and called later: the only loop of each program is in that
+// closure.
+@test
+fn fn_values_handed_to_std_parallel_or_stored_are_reached() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::data as data;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    // Built outside any task: only its hand-off to std::parallel inside the task reaches it.
+    let body = |i: usize| {
+        let mut k: usize = 0;
+        while k < i {
+            k = k + 1;
+        }
+    };
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        data::range(0..4, body);
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "__sc_spc"), "the closure handed to data::range ticks");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+struct Job {
+    pub f: fn(usize) usize,
+}
+
+fn count(n: usize) usize {
+    let mut k: usize = 0;
+    while k < n {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn main() i32 {
+    let job = Job { f: count };
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let _ = (job.f)(4);
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let r2 = q.compile("main.spc");
+    assert(r2.ok());
+    assert(q.gen_fn_has("main.c", "main__count", "__sc_spc"), "a stored fn value called in a task ticks");
+}
+
+// A user `free` that std's drop of a container runs is reached.
+@test
+fn free_run_by_std_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+struct Spin {
+    pub k: i32,
+}
+
+extend Spin as Free {
+    pub fn free(self: &mut Spin) {
+        let _ = self.k;
+        while !raised() {}
+    }
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    launch fn() {
+        let mut v = Vector::<Spin>::new();
+        v.push(Spin { k: 1 });
+        v.clear();
+        wa.done();
+    };
+    let fb = flag.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: shutdown would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+}
+
+// A loop in value position gets its tick like a statement loop.
+@test
+fn value_loop_is_preempted() {
+    run_preempted(
+        M"(import stdlib;
+import std::iter as iter;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+static mut G_FLAG: *const atom::Atomic<i64> = null;
+
+fn raised() bool {
+    return unsafe (*G_FLAG).load(atom::MemoryOrder::Relaxed) != 0;
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    unsafe G_FLAG = flag.get() as *const atom::Atomic<i64>;
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let wa = wg.clone();
+    let wb = wg.clone();
+    launch fn() {
+        let n = loop {
+            if raised() {
+                break 1;
+            }
+        };
+        let _ = n;
+        wa.done();
+    };
+    let fb = flag.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        // The spinner never yielded: shutdown would wait for it forever.
+        unsafe stdlib::exit(1);
+    }
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+}
+
+// A counted loop (a range over a builtin integer, a slice) whose body runs no call is strip-mined:
+// one safepoint per chunk of at most the tick budget left, then a chunk loop with no tick. The
+// spinner below holds the only worker in such a loop: the second task runs only if a chunk top
+// yields, and the group's cancellation lands only at a chunk top. `break`, `continue` and labels
+// inside such loops, across many chunk ends, give what the same loops written with `while` (a
+// tick per iteration) give. A body with a call, and a `for mut` binding the body can assign, keep
+// the tick per iteration.
+@test
+fn counted_loop_ticks_once_per_chunk() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import stdlib;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::task as task;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+fn flow(n: i64) i64 {
+    let mut s: i64 = 0;
+    'outer: for i in 0 - n..n {
+        if i % 1000 == 999 {
+            continue;
+        }
+        for j in 0..3000i64 {
+            if j == 2500 {
+                continue 'outer;
+            }
+            if i == n - 7 && j == 11 {
+                break 'outer;
+            }
+            if j % 7 != 0 {
+                continue;
+            }
+            s = s + (j ^ i);
+        }
+    }
+    return s;
+}
+
+fn flow_while(n: i64) i64 {
+    let mut s: i64 = 0;
+    let mut i = 0 - n;
+    'outer: while i < n {
+        let ci = i;
+        i = i + 1;
+        if ci % 1000 == 999 {
+            continue;
+        }
+        let mut j: i64 = 0;
+        while j < 3000 {
+            let cj = j;
+            j = j + 1;
+            if cj == 2500 {
+                continue 'outer;
+            }
+            if ci == n - 7 && cj == 11 {
+                break 'outer;
+            }
+            if cj % 7 != 0 {
+                continue;
+            }
+            s = s + (cj ^ ci);
+        }
+    }
+    return s;
+}
+
+fn picks(v: []u32) u64 {
+    let mut s: u64 = 0;
+    for x in v {
+        if x % 3 == 0 {
+            continue;
+        }
+        if x == 9001 {
+            break;
+        }
+        s = s + x as u64;
+    }
+    return s;
+}
+
+fn picks_while(v: []u32) u64 {
+    let mut s: u64 = 0;
+    let mut k: usize = 0;
+    while k < v.len() {
+        let x = v[k];
+        k = k + 1;
+        if x % 3 == 0 {
+            continue;
+        }
+        if x == 9001 {
+            break;
+        }
+        s = s + x as u64;
+    }
+    return s;
+}
+
+fn narrow() i64 {
+    let mut c: i64 = 0;
+    for b in 0..255u8 {
+        c = c + b as i64;
+    }
+    let lo: i8 = -127;
+    for i in lo - 1..127i8 {
+        c = c + i as i64;
+    }
+    return c;
+}
+
+fn twice(x: i32) i32 {
+    return x * 2;
+}
+
+fn calls(n: i32) i32 {
+    let mut c: i32 = 0;
+    for i in 0..n {
+        c = c + twice(i);
+    }
+    return c;
+}
+
+fn stride(n: i32) i32 {
+    let mut c: i32 = 0;
+    for mut i in 0..n {
+        i = i + 1;
+        c = c + i;
+    }
+    return c;
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let mut g = task::TaskGroup::new();
+    g.spawn(fn() {
+        // Ends only by cancellation; holds the only worker unless a chunk top yields.
+        let mut x: u64 = 88172645463325252;
+        for i in 0..0x7FFFFFFFFFFFFFFFu64 {
+            x = x ^ (x << 13);
+            x = x ^ (x >> 7);
+            x = x ^ (x << 17) ^ i;
+            if x == 0 {
+                break;
+            }
+        }
+    });
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wb = wg.clone();
+    launch fn() {
+        wb.done();
+    };
+    if !wg.wait_timeout(time::Duration::from_secs(30)) {
+        unsafe stdlib::exit(1);
+    }
+    g.cancel();
+    let r = g.join();
+    if r.cancelled != 1 {
+        unsafe stdlib::exit(2);
+    }
+    let res = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let rc = res.clone();
+    let wd = sync::WaitGroup::new();
+    wd.add(1);
+    let wc = wd.clone();
+    launch fn() {
+        let mut v = Vector::<u32>::new();
+        for k in 0..10000u32 {
+            v.push(k);
+        }
+        let sl = v.index_range(0..v.len());
+        let mut bad: i64 = 0;
+        if flow(5000) != flow_while(5000) {
+            bad = bad | 4;
+        }
+        if picks(sl) != picks_while(sl) {
+            bad = bad | 8;
+        }
+        if narrow() != 32385 - 255 {
+            bad = bad | 16;
+        }
+        if calls(100) != 9900 {
+            bad = bad | 32;
+        }
+        if stride(10) != 25 {
+            bad = bad | 64;
+        }
+        rc.get().store(bad, atom::MemoryOrder::Relaxed);
+        wc.done();
+    };
+    wd.wait();
+    rt::shutdown();
+    return res.get().load(atom::MemoryOrder::Relaxed) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(
+        p.gen_has("main.c", "(uint64_t)__sc_chunk_end(&__sc_spc, i, 0x7FFFFFFFFFFFFFFFULL);\n  for (; i < _"),
+        "the spinner's chunk loop follows its chunk end with no tick",
+    );
+    assert(p.gen_has("main.c", " = __sc_cancel_tick(); }\n"), "the chunk top carries the combined safepoint");
+    assert(
+        p.gen_fn_has("main.c", "main__flow", "(int64_t)__sc_chunk_end(&__sc_spc, (uint64_t)j, (uint64_t)"),
+        "a signed index counts through 64-bit two's complement",
+    );
+    assert_eq(p.gen_fn_count("main.c", "main__flow", "__sc_chunk_end"), 1);
+    assert(p.gen_fn_has("main.c", "main__picks", "__sc_chunk_end(&__sc_spc, "), "a slice loop is strip-mined");
+    assert(!p.gen_fn_has("main.c", "main__flow_while", "__sc_chunk_end"), "a while loop ticks per iteration");
+    assert(!p.gen_fn_has("main.c", "main__calls", "__sc_chunk_end"), "a loop with a call ticks per iteration");
+    assert(p.gen_fn_has("main.c", "main__calls", "__sc_preempt_check()"), "a loop with a call still ticks");
+    assert(!p.gen_fn_has("main.c", "main__stride", "__sc_chunk_end"), "an assignable index ticks per iteration");
+    assert(p.gen_fn_has("main.c", "main__stride", "__sc_preempt_check()"), "an assignable index still ticks");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
 }
 
 // Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it; a

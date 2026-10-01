@@ -8,6 +8,7 @@ import std::parallel::sync as sync;
 import std::parallel::platform as platform;
 import std::testing::bench_sys as sys;
 import std::testing::bench as bench;
+import tests::cli_harness as cli;
 
 const THREADS: i64 = 8;
 const EACH: i64 = 20000;
@@ -195,4 +196,45 @@ fn summary_percentiles() {
     let sw = bench::summarize(&mut w);
     assert_eq(sw.p99, 0.0);
     assert_eq(sw.p95, 9.0);
+}
+
+// A sanitizer runtime owns the malloc family and allocates while it starts (TSan on glibc resolves
+// symbols through dlsym, which allocates before any state of an interposer exists): a race-profile
+// program that imports bench_sys starts, runs a task, and counts nothing.
+@test
+fn a_sanitized_build_leaves_the_allocator_to_the_sanitizer() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // no thread sanitizer build on these targets
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::testing::bench_sys as sys;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let mut v = Vector::<i64>::new();
+        v.push(1);
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    println("supported {}", unsafe sys::sc_bs_alloc_supported());
+    return 0;
+}
+)",
+    );
+    let root = str::from_cstr(p.rootp());
+    let b = cli::superc_env_in(root, "SC_UNUSED", "1", "build main.spc -o app --profile=race");
+    assert(b.ok());
+    let mut app = String::new();
+    app.format_into("{}/app", root);
+    let r = cli::exe_env_in(app.as_str(), root, "SC_UNUSED", "1", "");
+    assert(r.ok());
+    assert(r.out_has("supported 0"), "a sanitized build counts no allocation");
 }

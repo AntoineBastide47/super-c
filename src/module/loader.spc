@@ -159,12 +159,18 @@ pub struct Package {
     /// type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
     pub method_used: Vector<Vector<bool>>,
     /// Coroutine-reachability for preemption safepoints: 0 = uncomputed (emit everywhere),
-    /// 1 = computed (only bodies inside co_spans need safepoints), 2 = widened (a coroutine entry
-    /// could not be tracked: emit everywhere). co_spans[m] holds start<<32|end body spans, in marking order,
-    /// of the functions and closures a `launch`ed coroutine can execute; everything else can never
-    /// starve a worker, so its loops need no safepoint tick.
+    /// 1 = computed (only bodies inside co_spans need safepoints). co_spans[m] holds start<<32|end
+    /// body spans, in marking order, of the functions and closures a coroutine can execute
+    /// (`co_compute`); everything else can never starve a worker, so its loops need no safepoint tick.
     pub co_state: u8,
     pub co_spans: Vector<Vector<u64>>,
+    /// Per module: the decl spans of `co_spans` in std whose bodies run user code only through bound
+    /// dispatch, so an instance ticks only when it binds a type that can reach user code (`co_inst_on`).
+    pub co_inst: Vector<Vector<u64>>,
+    /// The fn values `co_compute` found (module << 32 | decl node): every closure but a coroutine
+    /// entry's, every function named as a value outside std::parallel. `cancel_compute` reads them
+    /// for `cancel_fnv`.
+    pub co_fnv: Vector<u64>,
     /// Per module: the modules that emit before it (`emit_dep_row`), recorded before its body
     /// syntax is released; empty when the rows are computed at emission planning.
     pub emit_deps: Vector<Vector<ModuleId>>,
@@ -174,6 +180,9 @@ pub struct Package {
     /// body is followed by a compiled cancellation check with a cleanup edge.
     pub cancel_state: u8,
     pub cancel_marks: Vector<Set<u64>>,
+    /// Can a call to a fn value nothing pins reach `runtime::cancel_accept` (some fn value of
+    /// `co_fnv` can)? Then such a call in a task-reachable body carries a cancellation check too.
+    pub cancel_fnv: bool,
     /// Does any non-std module request cancellation (runtime::request_cancel, runtime::try_shutdown,
     /// or anything in std::parallel::task)? Combined loop safepoints are emitted only then: a
     /// program that never cancels pays no per-loop ladder, and its shutdown reports a spinning task
@@ -525,6 +534,316 @@ fn pin_callee(a: &Ast, ni: NodeId, callee: NodeId) DefId {
         return a.resolution_def(a.at_const(callee).as_data.member.member);
     }
     return t;
+}
+
+// The coroutine entry APIs: calling one runs its entry argument (a parameter, by declaration index)
+// on a fresh coroutine. Resolved by (module, extended type or "" for a free function, name). A call
+// inside std::parallel is one of its own trampolines, covered by the seed at the public API.
+const CO_ENTRY_N: usize = 4;
+const CO_ENTRY_MOD: [str<'static>; CO_ENTRY_N] = [
+    "std::parallel::runtime",
+    "std::parallel::runtime",
+    "std::parallel::runtime",
+    "std::parallel::task",
+];
+const CO_ENTRY_TYPE: [str<'static>; CO_ENTRY_N] = ["", "", "", "TaskGroup"];
+const CO_ENTRY_FN: [str<'static>; CO_ENTRY_N] = ["submit", "spawn_coroutine", "spawn_coroutine_env", "spawn"];
+const CO_ENTRY_PARAM: [u32; CO_ENTRY_N] = [0, 0, 0, 1];
+
+// A declaration index or record target that names none.
+const CO_NONE: u32 = 0xFFFFFFFFu32;
+// The record target of a call to a fn value that nothing pins: every fn value may run.
+const CO_ESC: u32 = 0xFFFFFFFEu32;
+// A record without a call site whose arguments to check.
+const CO_NO_SITE: u64 = 0xFFFFFFFFFFFFFFFFu64;
+
+// The name of function `n`, as written.
+fn fn_name<'s>(a: &Ast, src: str<'s>, n: NodeId) str<'s> {
+    let sp = a.at_const(a.at_const(n).as_data.function.name).as_data.name.text;
+    return src.slice(sp.start as usize, sp.end as usize);
+}
+
+// The node an argument or callee names a declaration through: `&x`, `move x` and `unsafe x` name
+// what `x` names, a turbofish what its expression names, and a path what its last segment names.
+fn named_node(a: &Ast, n0: NodeId) NodeId {
+    let mut n = n0;
+    loop {
+        let nd = a.at_const(n);
+        if nd.kind == NodeKind::NODE_UNARY && (nd.as_data.unary.op == tt::TokenType::Ampersand || nd.as_data.unary.op == tt::TokenType::Move || nd.as_data.unary.op == tt::TokenType::Unsafe) {
+            n = nd.as_data.unary.operand;
+        } else if nd.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            n = nd.as_data.specialization.expression;
+        } else {
+            return n;
+        }
+    }
+}
+
+// The declaration node `n` names, or NODE_NONE.
+fn named_decl(a: &Ast, n: NodeId) DefId {
+    let r = a.resolution_def(n);
+    if r.node == NODE_NONE && a.at_const(n).kind == NodeKind::NODE_MEMBER {
+        return a.resolution_def(a.at_const(n).as_data.member.member);
+    }
+    return r;
+}
+
+// The index of parameter `p` among the parameters of function or closure `d` (module-local), or -1.
+fn param_index(a: &Ast, d: NodeId, p: NodeId) i64 {
+    let dn = a.at_const(d);
+    let ps = if dn.kind == NodeKind::NODE_FUNCTION {
+        dn.as_data.function.params;
+    } else {
+        dn.as_data.closure.params;
+    };
+    for i in 0..ps.len {
+        if unsafe a.list(ps)[i as usize] == p {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// The argument node call `ni` passes for parameter `p` of its callee, or NODE_NONE: method-call
+// syntax passes parameter 0 as its receiver.
+fn site_arg(a: &Ast, ni: NodeId, p: u32) NodeId {
+    let cd = a.at_const(ni).as_data.call;
+    let c = a.at_const(cd.callee);
+    let mut i = p;
+    if c.kind == NodeKind::NODE_MEMBER && !c.as_data.member.path {
+        if p == 0 {
+            return NODE_NONE;
+        }
+        i = p - 1;
+    }
+    if i >= cd.args.len {
+        return NODE_NONE;
+    }
+    return unsafe a.list(cd.args)[i as usize];
+}
+
+// Is call `ni` a method call through a `dyn` receiver (behind references and pointers)?
+fn dyn_receiver(a: &Ast, ni: NodeId) bool {
+    let c = a.at_const(a.at_const(ni).as_data.call.callee);
+    if c.kind != NodeKind::NODE_MEMBER || c.as_data.member.path {
+        return false;
+    }
+    let mut t = a.type_of(c.as_data.member.object);
+    for _ in 0..8 {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = a.type_at(t);
+        if y.kind == TypeKind::TYPE_DYN {
+            return true;
+        }
+        if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
+            return false;
+        }
+        t = y.as_data.elem;
+    }
+    return false;
+}
+
+// Can argument `arg` hold a fn value: is its type a function (behind references and pointers) or a
+// type parameter with a fn bound? An unbounded parameter's value cannot be called, nor passed where a
+// fn is expected.
+fn fn_valued(a: &Ast, arg: NodeId) bool {
+    let mut t = a.type_of(arg);
+    for _ in 0..8 {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = a.type_at(t);
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_GENERIC {
+            return fn_bounded(a, y.module, y.as_data.decl);
+        }
+        if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
+            return false;
+        }
+        t = y.as_data.elem;
+    }
+    return true;
+}
+
+// The method a binary operator or compound assignment `n` calls with no method the checker
+// recorded: an aggregate or type-parameter operand (behind references) dispatches `==`/`!=` to
+// `eq`, an ordering to `cmp` and arithmetic to its operator method at emission. "" for any other.
+fn agg_op_name(a: &Ast, n: &Node) str<'static> {
+    let mut t = a.type_of(n.as_data.binary.left);
+    for _ in 0..4 {
+        let y = a.type_at(t);
+        if y.kind != TypeKind::TYPE_REFERENCE {
+            break;
+        }
+        t = y.as_data.elem;
+    }
+    let k = a.type_at(t).kind;
+    if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM && k != TypeKind::TYPE_GENERIC {
+        return "";
+    }
+    let op = n.as_data.binary.op;
+    if op == tt::TokenType::EqualEqual || op == tt::TokenType::BangEqual {
+        return "eq";
+    }
+    if op == tt::TokenType::LessThan || op == tt::TokenType::LessThanEqual || op == tt::TokenType::GreaterThan || op == tt::TokenType::GreaterThanEqual {
+        return "cmp";
+    }
+    return op.op_method();
+}
+
+// Does type parameter `gp` (module `gm`) carry a fn bound, inline or in a where clause? One declared
+// in another module than `a`'s answers yes.
+fn fn_bounded(a: &Ast, gm: ModuleId, gp: NodeId) bool {
+    if gm != a.module || a.at_const(gp).kind != NodeKind::NODE_GENERIC_PARAM {
+        return true;
+    }
+    let bs = a.at_const(gp).as_data.generic_param.bounds;
+    for i in 0..bs.len {
+        if a.at_const(unsafe a.list(bs)[i as usize]).kind == NodeKind::NODE_FUNCTION_TYPE {
+            return true;
+        }
+    }
+    for w in 0..a.where_bounds.len() {
+        let wp = a.at_const(a.where_bounds.at(w).pred).as_data.where_predicate;
+        if a.resolution_def(wp.ty).node != gp {
+            continue;
+        }
+        for i in 0..wp.bounds.len {
+            if a.at_const(unsafe a.list(wp.bounds)[i as usize]).kind == NodeKind::NODE_FUNCTION_TYPE {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// The coroutine-reachability graph of `Package::co_compute`: every function and closure declaration
+// of the package, per module in span order, and the marking state of the closure over them.
+struct CoGraph {
+    pub start: Vector<u32>, // per module (+ sentinel): its first decl
+    pub span: Vector<u64>, // start << 32 | end
+    pub parent: Vector<u32>, // innermost enclosing decl, or CO_NONE
+    pub lim: Vector<u32>, // one past the last decl of the decl's module
+    pub dmod: Vector<u32>, // the decl's module
+    pub node: Vector<u32>, // the decl's node
+    pub closure: Vector<u8>, // 1 for a closure
+    pub need: Vector<u64>, // bit p: parameter p holds a fn value the body may call (checked at call sites)
+    pub ix: Vector<u32>, // per node of every module (dense order): its decl + 1, or 0
+    pub ix_start: Vector<usize>, // per module: its first `ix` slot
+    pub nb: Vector<usize>, // per module: the node count of its main arena (the dense offset of its body arena)
+    pub on: Vector<u8>, // the decl runs on a coroutine (marked, or inside a marked decl)
+    pub marked: Vector<u8>, // the decl's span is in the output
+    pub queue: Vector<u32>,
+    pub spans: Vector<Vector<u64>>, // the output, per module
+    pub esc: Vector<u32>, // the fn values: every closure, every function named as a value outside std::parallel
+    pub in_esc: Vector<u8>,
+    pub escaped: bool,
+    pub stdm: Vector<u8>, // per module: 0 user code, 1 std, 2 std::parallel
+    // Per decl of std: whether its body can run user code (see `co_compute`): 0 no, 1 only through
+    // bound dispatch (its instances decide), 2 through a fn value or `dyn`.
+    pub ureach: Vector<u8>,
+    pub inst: Vector<Vector<u64>>, // the output's spans whose ticks the emitting instance decides
+}
+
+extend CoGraph {
+    // The decl of module `m` declared at node `n`, or CO_NONE.
+    fn decl_of(self: &Self, m: ModuleId, n: NodeId) u32 {
+        let mut k = n as usize;
+        if (n & NODE_BODY) != 0 {
+            k = self.nb[m as usize] + (n & NODE_BODY_MASK) as usize;
+        }
+        let v = self.ix[self.ix_start[m as usize] + k];
+        if v == 0 {
+            return CO_NONE;
+        }
+        return v - 1;
+    }
+
+    // The innermost decl of module `m` whose span covers `sp`, or CO_NONE (a site outside every
+    // decl, such as a const initializer, never runs on a coroutine).
+    fn decl_at(self: &Self, m: usize, sp: tok::Span) u32 {
+        let lo = self.start[m] as usize;
+        let mut l = lo;
+        let mut h = self.start[m + 1] as usize;
+        while l < h {
+            let mid = (l + h) / 2;
+            if (self.span[mid] >> 32) as u32 <= sp.start {
+                l = mid + 1;
+            } else {
+                h = mid;
+            }
+        }
+        if l == lo {
+            return CO_NONE;
+        }
+        let mut d = (l - 1) as u32;
+        while d != CO_NONE && (self.span[d as usize] & 0xFFFFFFFFu64) as u32 < sp.end {
+            d = self.parent[d as usize];
+        }
+        return d;
+    }
+
+    // `decl_at` for a site near the one whose innermost decl is `hint` (CO_NONE: none): `hint`
+    // itself when it covers `sp` and the next decl starts after `sp` (no decl inside `hint` can
+    // cover it), else the search. Sites in node order mostly share their decl.
+    fn decl_near(self: &Self, m: usize, sp: tok::Span, hint: u32) u32 {
+        if hint != CO_NONE {
+            let hs = self.span[hint as usize];
+            let nx = hint as usize + 1;
+            if (hs >> 32) as u32 <= sp.start && sp.end <= (hs & 0xFFFFFFFFu64) as u32 && (nx >= self.start[m + 1] as usize || (self.span[nx] >> 32) as u32 > sp.start) {
+                return hint;
+            }
+        }
+        return self.decl_at(m, sp);
+    }
+
+    // The module of decl `d`.
+    fn module_of(self: &Self, d: u32) usize {
+        return self.dmod[d as usize] as usize;
+    }
+
+    // Mark decl `d`: it turns on, and its span joins the output unless it is std code that runs no
+    // user code, or std::parallel.
+    fn mark(self: &mut Self, d: u32) {
+        if self.marked[d as usize] != 0 {
+            return;
+        }
+        self.marked.set(d as usize, 1);
+        let m = self.module_of(d);
+        if self.stdm[m] == 0 || self.stdm[m] == 1 && self.ureach[d as usize] != 0 {
+            self.spans.index_mut(m).push(self.span[d as usize]);
+        }
+        if self.stdm[m] == 1 && self.ureach[d as usize] == 1 {
+            self.inst.index_mut(m).push(self.span[d as usize]);
+        }
+        if self.on[d as usize] == 0 {
+            self.on.set(d as usize, 1);
+            self.queue.push(d);
+        }
+    }
+
+    // A fn value nothing pins may run: mark every fn value of the package.
+    fn escape(self: &mut Self) {
+        if self.escaped {
+            return;
+        }
+        self.escaped = true;
+        for i in 0..self.esc.len() {
+            self.mark(self.esc[i]);
+        }
+    }
+
+    // Add decl `d` to the fn values.
+    fn add_esc(self: &mut Self, d: u32) {
+        if self.in_esc[d as usize] == 0 {
+            self.in_esc.set(d as usize, 1);
+            self.esc.push(d);
+        }
+    }
 }
 
 // Path + string helpers (heap-allocated results; callers own them).
@@ -2070,50 +2389,171 @@ extend Package {
         return false;
     }
 
-    /// Compute co_spans: seed with the closure/function arguments of `std::parallel::runtime::submit`
-    /// (what `launch` desugars to), then close over direct calls made inside marked spans. A callee
-    /// that cannot be pinned to a declaration (a fn value, a dyn method) widens to everywhere.
-    /// One pass over the nodes builds a decl table (every function and closure, per module in span
-    /// order) and attaches each pinned call to its innermost decl; the closure is then a worklist
-    /// over decls, never a rescan of the node arrays.
+    /// Is the std decl declared exactly at `sp` (module `m`) one whose ticks its instances decide
+    /// (`co_inst`)?
+    pub fn co_inst_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
+        if m as usize >= self.co_inst.len() {
+            return false;
+        }
+        let row = self.co_inst.at(m as usize);
+        let k = sp.start as u64 << 32 | sp.end as u64;
+        for i in 0..row.len() {
+            if row[i] == k {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Compute co_spans: the functions and closures a coroutine can execute. Seeds are the entry
+    /// arguments of the coroutine entry APIs (`CO_ENTRY_*`; `launch` desugars to `runtime::submit`);
+    /// the closure marks, from every marked decl, everything declared inside it and every decl it
+    /// reaches, std included:
+    ///   - a pinned call reaches its callee; a call to an interface method reaches the method and
+    ///     every conformance method of the same name (a bound or `dyn` dispatch, class-hierarchy
+    ///     style);
+    ///   - an implicit call reaches its method: a `for` loop's `next`, an operator method, a
+    ///     user `Deref` hop, and every `free` of a conformance (a drop runs anywhere); an operator
+    ///     on an aggregate or type parameter that emission dispatches (`agg_op_name`) reaches the
+    ///     interface methods of that name, and through them their conformances;
+    ///   - a function named as a value reaches it;
+    ///   - a call to the decl's own parameter makes that parameter a NEED of a function: each call
+    ///     site of the function must pass a closure, a named function, or a parameter of its own
+    ///     function (which becomes a need in turn); a function entered any other way, or any other
+    ///     call to a fn value, reaches every fn value of the package (every closure, every function
+    ///     named as a value outside std::parallel).
+    /// std::parallel runs fn values only through its own dispatch: coroutine entries (seeded at
+    /// their public APIs), jobs and pool threads, and its own commit and hook functions; its calls
+    /// to fn values and its functions named as values add nothing. A call into it from outside
+    /// passes each argument that can hold a fn value under the need rule (`co_parallel_args_ok`),
+    /// so a fn value it stores and runs later is reached.
+    /// std decls join co_spans only when their bodies can run user code (a std loop is otherwise
+    /// bounded by its inputs), and never in std::parallel; those that run it only through bound
+    /// dispatch also join co_inst, whose ticks each instance decides at emission.
+    /// One scan of every node builds the decl table and keeps, in node order, the sites the records
+    /// come from; the closure is a worklist over decls.
     pub fn co_compute(self: &mut Self) {
         self.co_state = 1;
         self.co_spans.truncate(0);
         self.co_spans.resize_default(self.modules.len());
-        let rt = self.find("std::parallel::runtime");
-        if rt < 0 {
+        self.co_fnv.truncate(0);
+        self.co_inst.truncate(0);
+        if self.find("std::parallel::runtime") < 0 {
             // No coroutine runtime loaded: nothing can launch.
             return;
         }
-        let sub = self.glob_lookup(rt as ModuleId, "submit", false);
-        if sub.node == NODE_NONE {
-            return;
-        }
+        let mut ent = Vector::<u64>::new(); // module << 32 | node
+        let mut ent_p = Vector::<u32>::new();
+        self.co_entries(&mut ent, &mut ent_p);
         let nm = self.modules.len();
+        let mut g = CoGraph {
+            start: Vector::<u32>::new(),
+            span: Vector::<u64>::new(),
+            parent: Vector::<u32>::new(),
+            lim: Vector::<u32>::new(),
+            dmod: Vector::<u32>::new(),
+            node: Vector::<u32>::new(),
+            closure: Vector::<u8>::new(),
+            need: Vector::<u64>::new(),
+            ix: Vector::<u32>::new(),
+            ix_start: Vector::<usize>::new(),
+            nb: Vector::<usize>::new(),
+            on: Vector::<u8>::new(),
+            marked: Vector::<u8>::new(),
+            queue: Vector::<u32>::new(),
+            spans: Vector::<Vector<u64>>::new(),
+            esc: Vector::<u32>::new(),
+            in_esc: Vector::<u8>::new(),
+            escaped: false,
+            stdm: Vector::<u8>::new(),
+            ureach: Vector::<u8>::new(),
+            inst: Vector::<Vector<u64>>::new(),
+        };
+        for m in 0..nm {
+            let pth = self.modules.at(m).path.as_str();
+            let mut sm: u8 = 0;
+            if pth.starts_with("std::parallel") {
+                sm = 2;
+            } else if pth.starts_with("std::") || pth.starts_with("__std::") {
+                sm = 1;
+            }
+            g.stdm.push(sm);
+        }
         // Decls sorted by span start within each module: the decls inside decl `d` are the run that
         // follows it while their starts stay below its end, and a site's innermost decl is the
         // last start at or before it whose end covers it (else that decl's ancestor).
-        let mut d_start = Vector::<u32>::new(); // per module (+ sentinel): first decl
-        let mut d_span = Vector::<u64>::new(); // start << 32 | end
-        let mut d_parent = Vector::<u32>::new(); // innermost enclosing decl, or NONE
-        let mut d_lim = Vector::<u32>::new(); // per decl: one past its module's last decl
-        let mut d_of = Map::<u64, u32>::new(); // (module << 32 | node) -> decl
         let mut dm_span = Vector::<u64>::new(); // per-module collection scratch
         let mut dm_node = Vector::<u32>::new();
-        let none: u32 = 0xFFFFFFFFu32;
+        let mut callee = Vector::<u64>::new(); // bit set over `g.ix` slots: nodes in callee position
+        // One slot per node of every module, sized once.
+        let mut total: usize = 0;
         for m in 0..nm {
-            d_start.push(d_span.len() as u32);
+            g.ix_start.push(total);
             let a = unsafe &*self.module_ast_const(m as ModuleId);
+            g.nb.push(a.nodes.len());
+            total += a.nnodes();
+        }
+        g.ix.resize_default(total);
+        callee.resize_default(total / 64 + 1);
+        // The one scan of every node also keeps, in node order, the nodes the records come from:
+        // calls, `for` loops, `?` conversions, and the nodes of function type that can name a
+        // function as a value (outside std::parallel).
+        let mut sites = Vector::<u32>::new();
+        // Per site: 1 when it may name a function as a value, 2 for an operator `agg_op_name` names.
+        let mut site_named = Vector::<u8>::new();
+        let mut site_start = Vector::<u32>::new(); // per module (+ sentinel): its first site
+        for m in 0..nm {
+            g.start.push(g.span.len() as u32);
+            site_start.push(sites.len() as u32);
+            let a = unsafe &*self.module_ast_const(m as ModuleId);
+            let spar = g.stdm[m] == 2;
             dm_span.truncate(0);
             dm_node.truncate(0);
             let nb9 = a.nodes.len();
             let nn9 = a.nnodes();
+            let ix0 = g.ix_start[m];
             for k in 0..nn9 {
                 let ni = Ast::nth_id_n(nb9, k);
                 let n = a.at_const(ni);
-                if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
+                let nk = n.kind;
+                if nk == NodeKind::NODE_FUNCTION || nk == NodeKind::NODE_CLOSURE {
                     dm_span.push(n.span.start as u64 << 32 | n.span.end as u64);
                     dm_node.push(ni);
+                } else if nk == NodeKind::NODE_FOR {
+                    sites.push(ni);
+                    site_named.push(0);
+                } else if !spar && nk == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Question {
+                    sites.push(ni);
+                    site_named.push(1);
+                } else if nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_ASSIGNMENT {
+                    if agg_op_name(a, n).len() != 0 {
+                        sites.push(ni);
+                        site_named.push(2);
+                    }
+                } else if nk != NodeKind::NODE_CALL {
+                    // The type test first and without a branch on TYPE_NONE (it reads slot 0, the
+                    // error type): it is rarely true, while the kind tests are not.
+                    if !spar && a.type_at(a.type_of(ni)).kind == TypeKind::TYPE_FUNCTION && (nk == NodeKind::NODE_IDENTIFIER || nk == NodeKind::NODE_MEMBER && n.as_data.member.path || nk == NodeKind::NODE_GENERIC_SPECIALIZATION) {
+                        sites.push(ni);
+                        site_named.push(1);
+                    }
+                } else {
+                    sites.push(ni);
+                    site_named.push(0);
+                    // Mark the callee and the nodes it names through (turbofish, path segment).
+                    let mut c = n.as_data.call.callee;
+                    loop {
+                        let ck = ix0 + a.dense(c);
+                        callee.set(ck / 64, callee[ck / 64] | 1u64 << (ck % 64) as u64);
+                        let cn = a.at_const(c);
+                        if cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                            c = cn.as_data.specialization.expression;
+                        } else if cn.kind == NodeKind::NODE_MEMBER {
+                            c = cn.as_data.member.member;
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
             // Insertion sort by start: decl order is nearly source order already.
@@ -2129,209 +2569,748 @@ extend Package {
                     y -= 1;
                 }
             }
-            let base = d_span.len() as u32;
-            let mut open = none; // the innermost decl whose span is still open
+            let base = g.span.len() as u32;
+            let mut open = CO_NONE; // the innermost decl whose span is still open
             for x in 0..dm_span.len() {
                 let sp = dm_span[x];
                 let st = (sp >> 32) as u32;
-                while open != none && (d_span[open as usize] & 0xFFFFFFFFu64) as u32 <= st {
-                    open = d_parent[open as usize];
+                while open != CO_NONE && (g.span[open as usize] & 0xFFFFFFFFu64) as u32 <= st {
+                    open = g.parent[open as usize];
                 }
-                d_span.push(sp);
-                d_parent.push(open);
-                d_lim.push(base + dm_span.len() as u32);
-                d_of.insert(m as u64 << 32 | dm_node[x] as u64, base + x as u32);
+                g.span.push(sp);
+                g.parent.push(open);
+                g.lim.push(base + dm_span.len() as u32);
+                g.dmod.push(m as u32);
+                g.node.push(dm_node[x]);
+                let mut clo: u8 = 0;
+                if a.at_const(dm_node[x]).kind == NodeKind::NODE_CLOSURE {
+                    clo = 1;
+                }
+                g.closure.push(clo);
+                g.ix.set(ix0 + a.dense(dm_node[x]), base + x as u32 + 1);
                 open = base + x as u32;
             }
         }
-        d_start.push(d_span.len() as u32);
-        // Call records attached to their innermost decl: a pinned target outside std (a decl to
-        // mark), or NONE for a callee the tracker cannot pin (fires: everything widens).
+        g.start.push(g.span.len() as u32);
+        site_start.push(sites.len() as u32);
+        let nd = g.span.len();
+        g.need.resize_default(nd);
+        g.on.resize_default(nd);
+        g.marked.resize_default(nd);
+        g.in_esc.resize_default(nd);
+        g.ureach.resize_default(nd);
+        g.spans.resize_default(nm);
+        g.inst.resize_default(nm);
+        for d in 0..nd {
+            if g.closure[d] != 0 {
+                g.add_esc(d as u32);
+            }
+        }
+        // Records, attached to their innermost decl: the target decl (or CO_ESC), the call site whose
+        // arguments a need of the target checks (CO_NO_SITE: none), and whether the entry is checked
+        // (a call site, or a conformance reached through its interface method's call sites).
         let mut r_decl = Vector::<u32>::new();
         let mut r_tgt = Vector::<u32>::new();
+        let mut r_site = Vector::<u64>::new();
+        let mut r_chk = Vector::<u8>::new();
         let mut seeds = Vector::<u32>::new();
+        let mut seed_esc = false;
+        let mut opn = Vector::<u32>::new(); // per-module scratch: the operator nodes with a method
+        // The interface and conformance methods, by name: an operator dispatched at emission reaches
+        // the interface methods of its method's name.
+        let mut ifm = Vector::<u64>::new(); // name hash << 32 | index into `defs`
+        let mut imp = Vector::<u64>::new();
+        let mut defs = Vector::<u64>::new(); // module << 32 | node
+        self.co_dispatch(&mut ifm, &mut imp, &mut defs);
         for m in 0..nm {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
-            let lo = d_start[m] as usize;
-            let hi = d_start[m + 1] as usize;
-            let nb9 = a.nodes.len();
-            let nn9 = a.nnodes();
-            for k in 0..nn9 {
-                let ni = Ast::nth_id_n(nb9, k);
-                let n = a.at_const(ni);
-                if n.kind != NodeKind::NODE_CALL {
-                    continue;
-                }
-                let cd = n.as_data.call;
-                let cr = a.resolution_def(cd.callee);
-                if cr.module == sub.mid && cr.node == sub.node {
-                    if cd.args.len < 1 {
+            let src = self.modules.at(m).source.as_str();
+            let spar = g.stdm[m] == 2;
+            let ix0 = g.ix_start[m];
+            let mut hint = CO_NONE; // the previous site's decl
+            for si in site_start[m]..site_start[m + 1] {
+                let ni = sites[si as usize];
+                if site_named[si as usize] == 1 {
+                    // Most of these sites are callees: test that before reading the node.
+                    let ck = ix0 + a.dense(ni);
+                    if (callee[ck / 64] >> (ck % 64) as u64 & 1u64) != 0 {
                         continue;
                     }
-                    let a0 = unsafe a.list(cd.args)[0];
-                    let mut sk: u64 = 0;
-                    if a.at_const(a0).kind == NodeKind::NODE_CLOSURE {
-                        sk = m as u64 << 32 | a0 as u64;
-                    } else {
-                        let fr = a.resolution_def(a0);
-                        if fr.node != NODE_NONE && unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).kind == NodeKind::NODE_FUNCTION {
-                            sk = fr.module as u64 << 32 | fr.node as u64;
-                        } else {
-                            // A coroutine entry the tracker cannot pin.
-                            self.co_state = 2;
-                            return;
+                }
+                let n = a.at_const(ni);
+                if site_named[si as usize] == 2 {
+                    // A recorded operator method is a record of the operator loop below.
+                    if a.op_method.get(&ni).is_some() {
+                        continue;
+                    }
+                    let d = g.decl_near(m, n.span, hint);
+                    hint = d;
+                    if d == CO_NONE {
+                        continue;
+                    }
+                    let h = agg_op_name(a, n).hash() & 0xFFFFFFFFu64;
+                    for i in 0..ifm.len() {
+                        if ifm[i] >> 32 != h {
+                            continue;
+                        }
+                        let dm = defs[(ifm[i] & 0xFFFFFFFFu64) as usize];
+                        let md = g.decl_of((dm >> 32) as ModuleId, (dm & 0xFFFFFFFFu64) as NodeId);
+                        if md != CO_NONE {
+                            r_decl.push(d);
+                            r_tgt.push(md);
+                            r_site.push(CO_NO_SITE);
+                            r_chk.push(0);
                         }
                     }
-                    switch d_of.get(&sk) {
-                        Some(d) => {
-                            seeds.push(*d);
+                    continue;
+                }
+                let nk = n.kind;
+                if nk == NodeKind::NODE_CALL {
+                    let d = g.decl_near(m, n.span, hint);
+                    hint = d;
+                    let cd = n.as_data.call;
+                    let mut t = pin_callee(a, ni, cd.callee);
+                    if t.node != NODE_NONE && g.decl_of(t.module, t.node) == CO_NONE {
+                        let tk = unsafe (&*self.module_ast_const(t.module)).at_const(t.node).kind;
+                        if tk == NodeKind::NODE_STRUCT || tk == NodeKind::NODE_ENUM || tk == NodeKind::NODE_VARIANT || tk == NodeKind::NODE_TYPE_ALIAS {
+                            // Ctor/variant/type call: no body to run.
+                            continue;
+                        }
+                        // Pinned to the field or binding that holds the callee: a fn value.
+                        t = DefId { module: 0, node: NODE_NONE };
+                    }
+                    if t.node == NODE_NONE {
+                        if a.is_free_call(ni, src) {
+                            // An explicit drop: every conformance `free` is marked with the seeds.
+                            continue;
+                        }
+                        if d == CO_NONE {
+                            continue;
+                        }
+                        let cn = named_node(a, cd.callee);
+                        if a.at_const(cn).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(cn).node == NODE_NONE {
+                            // A compiler intrinsic (`type_info`, `zeroed`, ..): a fn value is bound.
+                            continue;
+                        }
+                        // A call to the decl's own parameter: a need of a function, checked at its
+                        // call sites. A closure's call sites are fn-value calls nothing pins.
+                        let pr = a.resolution_def(cd.callee);
+                        if g.closure[d as usize] == 0 && pr.node != NODE_NONE && pr.module == m as ModuleId && a.at_const(
+                            pr.node,
+                        ).kind == NodeKind::NODE_PARAMETER {
+                            let pi = param_index(a, g.node[d as usize], pr.node);
+                            if pi >= 0 && pi < 64 {
+                                g.need.set(d as usize, g.need[d as usize] | 1u64 << pi as u64);
+                                continue;
+                            }
+                        }
+                        if spar {
+                            continue;
+                        }
+                        r_decl.push(d);
+                        r_tgt.push(CO_ESC);
+                        r_site.push(CO_NO_SITE);
+                        r_chk.push(0);
+                        continue;
+                    }
+                    let td = g.decl_of(t.module, t.node);
+                    // Every entry API lives in std::parallel.
+                    if !spar && g.stdm[t.module as usize] == 2 {
+                        let tk = t.module as u64 << 32 | t.node as u64;
+                        for e in 0..ent.len() {
+                            if ent[e] != tk {
+                                continue;
+                            }
+                            let arg = site_arg(a, ni, ent_p[e]);
+                            let an = if arg != NODE_NONE {
+                                named_node(a, arg);
+                            } else {
+                                NODE_NONE;
+                            };
+                            let mut sd = CO_NONE;
+                            if an != NODE_NONE && a.at_const(an).kind == NodeKind::NODE_CLOSURE {
+                                sd = g.decl_of(m as ModuleId, an);
+                            } else if an != NODE_NONE {
+                                let fr = named_decl(a, an);
+                                if fr.node != NODE_NONE {
+                                    sd = g.decl_of(fr.module, fr.node);
+                                }
+                            }
+                            if sd != CO_NONE {
+                                seeds.push(sd);
+                            } else {
+                                // An entry the tracker cannot pin: any fn value may run.
+                                seed_esc = true;
+                            }
+                        }
+                    }
+                    if d != CO_NONE {
+                        r_decl.push(d);
+                        r_tgt.push(td);
+                        r_site.push(m as u64 << 32 | ni as u64);
+                        r_chk.push(1);
+                    }
+                    continue;
+                }
+                let mut t = DefId { module: 0, node: NODE_NONE };
+                if nk == NodeKind::NODE_FOR {
+                    // The loop's `next`, when it iterates an iterator.
+                    switch a.call_info.get(&ni) {
+                        Some(v) => {
+                            t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
                         },
                         _ => {},
                     };
-                    continue;
-                }
-                // The innermost decl around the site; a site outside every decl (a const
-                // initializer) never runs inside a coroutine.
-                let mut d = none;
-                {
-                    let mut l = lo;
-                    let mut h = hi;
-                    while l < h {
-                        let mid = (l + h) / 2;
-                        if (d_span[mid] >> 32) as u32 <= n.span.start {
-                            l = mid + 1;
-                        } else {
-                            h = mid;
+                } else {
+                    // A function named as a value (not called here) has a function type; a `?`
+                    // conversion names one too.
+                    // Not in callee position (tested above): a function, not the declaration's own name.
+                    let r = a.resolution_def(ni);
+                    if r.node != NODE_NONE {
+                        let rd = g.decl_of(r.module, r.node);
+                        if rd != CO_NONE && g.closure[rd as usize] == 0 && !(r.module == m as ModuleId && a.at_const(
+                            r.node,
+                        ).as_data.function.name == ni) {
+                            t = r;
+                            g.add_esc(rd);
                         }
                     }
-                    if l > lo {
-                        d = (l - 1) as u32;
-                    }
-                    while d != none && (d_span[d as usize] & 0xFFFFFFFFu64) as u32 < n.span.end {
-                        d = d_parent[d as usize];
-                    }
                 }
-                if d == none {
+                if t.node == NODE_NONE {
                     continue;
                 }
-                let t = pin_callee(a, ni, cd.callee);
-                if t.node == NODE_NONE {
-                    if a.is_free_call(ni, self.modules.at(m).source.as_str()) {
-                        // An explicit drop: no callee body to run.
+                let d = g.decl_near(m, n.span, hint);
+                hint = d;
+                let td = g.decl_of(t.module, t.node);
+                if d != CO_NONE && td != CO_NONE {
+                    r_decl.push(d);
+                    r_tgt.push(td);
+                    r_site.push(CO_NO_SITE);
+                    r_chk.push(0);
+                }
+            }
+            // An operator node calls the method the checker chose, in node order.
+            if a.op_method.len() != 0 {
+                opn.truncate(0);
+                let mut ki = a.op_method.keys();
+                loop {
+                    switch ki.next() {
+                        Some(k) => {
+                            opn.push(*k);
+                        },
+                        _ => {
+                            break;
+                        },
+                    };
+                }
+                opn.sort();
+                for i in 0..opn.len() {
+                    let v = *a.op_method.get(&opn[i]).unwrap();
+                    let d = g.decl_at(m, a.at_const(opn[i]).span);
+                    let td = g.decl_of((v >> 32) as ModuleId, (v & 0xFFFFFFFFu64) as NodeId);
+                    if d != CO_NONE && td != CO_NONE {
+                        r_decl.push(d);
+                        r_tgt.push(td);
+                        r_site.push(CO_NO_SITE);
+                        r_chk.push(0);
+                    }
+                }
+            }
+            // A user `Deref` hop calls its method from the node that dereferences.
+            for i in 0..a.deref_uses.len() {
+                let du = a.deref_uses.at(i);
+                let d = g.decl_at(m, a.at_const(du.node).span);
+                if d == CO_NONE {
+                    continue;
+                }
+                for s in 0..du.n {
+                    let dm = unsafe du.method[s as usize];
+                    if dm.node == NODE_NONE {
                         continue;
                     }
-                    // Fn value or dyn dispatch: cannot pin the callee.
-                    r_decl.push(d);
-                    r_tgt.push(none);
-                    continue;
-                }
-                let ta = unsafe &*self.module_ast_const(t.module);
-                if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
-                    // Ctor/variant/type call: no body to run.
-                    continue;
-                }
-                // The scan stops at the std boundary: std loops are bounded by their inputs
-                // (containers, strings), so they always return to a marked frame, and a closure
-                // built in coroutine code is covered lexically by its enclosing marked span.
-                // std::parallel additionally never emits safepoints at all.
-                let tp9 = self.modules.at(t.module as usize).path.as_str();
-                if tp9.starts_with("std::") || tp9.starts_with("__std::") {
-                    continue;
-                }
-                switch d_of.get(&(t.module as u64 << 32 | t.node as u64)) {
-                    Some(td) => {
+                    let td = g.decl_of(dm.module, dm.node);
+                    if td != CO_NONE {
                         r_decl.push(d);
-                        r_tgt.push(*td);
-                    },
-                    _ => {},
-                };
+                        r_tgt.push(td);
+                        r_site.push(CO_NO_SITE);
+                        r_chk.push(0);
+                    }
+                }
+            }
+        }
+        // Dispatch: an interface method reaches every conformance method of its name, a checked
+        // entry (the method's call sites check the conformance's needs, merged below).
+        let free_h = "free".hash() & 0xFFFFFFFFu64;
+        let mut frees = Vector::<u32>::new();
+        for i in 0..imp.len() {
+            if imp[i] >> 32 == free_h {
+                let df = defs[(imp[i] & 0xFFFFFFFFu64) as usize];
+                let fd = g.decl_of((df >> 32) as ModuleId, (df & 0xFFFFFFFFu64) as NodeId);
+                if fd != CO_NONE {
+                    frees.push(fd);
+                }
+            }
+        }
+        let cha0 = r_decl.len();
+        for i in 0..ifm.len() {
+            let h = ifm[i] >> 32; // the name hash
+            // The first conformance of this name: the sorted run starts at the lower bound.
+            let mut l: usize = 0;
+            let mut hi = imp.len();
+            while l < hi {
+                let mid = (l + hi) / 2;
+                if imp[mid] >> 32 < h {
+                    l = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let dm = defs[(ifm[i] & 0xFFFFFFFFu64) as usize];
+            let md = g.decl_of((dm >> 32) as ModuleId, (dm & 0xFFFFFFFFu64) as NodeId);
+            while l < imp.len() && imp[l] >> 32 == h {
+                let di = defs[(imp[l] & 0xFFFFFFFFu64) as usize];
+                let id = g.decl_of((di >> 32) as ModuleId, (di & 0xFFFFFFFFu64) as NodeId);
+                if md != CO_NONE && id != CO_NONE {
+                    r_decl.push(md);
+                    r_tgt.push(id);
+                    r_site.push(CO_NO_SITE);
+                    r_chk.push(1);
+                }
+                l += 1;
+            }
+        }
+        // A fn value handed to std::parallel may run on a coroutine later: a parameter of the caller
+        // handed on is a need of the caller. These bits depend on no other need.
+        for i in 0..cha0 {
+            let t = r_tgt[i];
+            if t == CO_ESC || r_site[i] == CO_NO_SITE {
+                continue;
+            }
+            let d = r_decl[i];
+            if g.closure[d as usize] != 0 || g.stdm[g.module_of(t)] != 2 || g.stdm[g.module_of(d)] == 2 {
+                continue;
+            }
+            let sm = (r_site[i] >> 32) as ModuleId;
+            let a = unsafe &*self.module_ast_const(sm);
+            let args = a.at_const((r_site[i] & 0xFFFFFFFFu64) as NodeId).as_data.call.args;
+            for j in 0..args.len {
+                let arg = unsafe a.list(args)[j as usize];
+                if !fn_valued(a, arg) {
+                    continue;
+                }
+                let pr = a.resolution_def(named_node(a, arg));
+                if pr.node == NODE_NONE || pr.module != sm || a.at_const(pr.node).kind != NodeKind::NODE_PARAMETER {
+                    continue;
+                }
+                let q = param_index(a, g.node[d as usize], pr.node);
+                if q >= 0 && q < 64 {
+                    g.need.set(d as usize, g.need[d as usize] | 1u64 << q as u64);
+                }
+            }
+        }
+        // Records by target (counting sort): a need and a user-reach level flow from a record's
+        // target to its decl.
+        let nr = r_decl.len();
+        let mut t_start = Vector::<u32>::new();
+        t_start.resize_default(nd + 1);
+        for i in 0..nr {
+            let t = r_tgt[i];
+            if t != CO_ESC {
+                t_start.set(t as usize + 1, t_start[t as usize + 1] + 1);
+            }
+        }
+        for d in 0..nd {
+            t_start.set(d + 1, t_start[d + 1] + t_start[d]);
+        }
+        let mut t_ix = Vector::<u32>::new();
+        t_ix.resize_default(t_start[nd] as usize);
+        let mut cur = Vector::<u32>::new();
+        for d in 0..nd {
+            cur.push(t_start[d]);
+        }
+        for i in 0..nr {
+            let t = r_tgt[i];
+            if t != CO_ESC {
+                t_ix.set(cur[t as usize] as usize, i as u32);
+                cur.set(t as usize, cur[t as usize] + 1);
+            }
+        }
+        // Needs, by a worklist over decls: a site that passes its own function's parameter for a need
+        // makes that parameter a need; an interface method's call sites check its conformances'
+        // needs. A decl enters the list once, then again only when it gains a bit.
+        let mut wq = Vector::<u32>::new();
+        let mut inq = Vector::<u8>::new();
+        inq.resize_default(nd);
+        for d in 0..nd {
+            if g.need[d] != 0 {
+                wq.push(d as u32);
+                inq.set(d, 1);
+            }
+        }
+        let mut wi: usize = 0;
+        while wi < wq.len() {
+            assert(wq.len() <= nd * 65, "a decl re-enters the need list only when it gains a bit");
+            let t = wq[wi] as usize;
+            wi += 1;
+            inq.set(t, 0);
+            for k in t_start[t]..t_start[t + 1] {
+                let i = t_ix[k as usize] as usize;
+                let d = r_decl[i] as usize;
+                let old = g.need[d];
+                if i >= cha0 {
+                    g.need.set(d, old | g.need[t]);
+                } else if r_site[i] != CO_NO_SITE && g.closure[d] == 0 {
+                    let sm = (r_site[i] >> 32) as ModuleId;
+                    let a = unsafe &*self.module_ast_const(sm);
+                    for p in 0..64u32 {
+                        if (g.need[t] >> p as u64 & 1u64) == 0 {
+                            continue;
+                        }
+                        let arg = site_arg(a, (r_site[i] & 0xFFFFFFFFu64) as NodeId, p);
+                        if arg == NODE_NONE {
+                            continue;
+                        }
+                        let pr = a.resolution_def(named_node(a, arg));
+                        if pr.node == NODE_NONE || pr.module != sm || a.at_const(pr.node).kind != NodeKind::NODE_PARAMETER {
+                            continue;
+                        }
+                        let q = param_index(a, g.node[d], pr.node);
+                        if q >= 0 && q < 64 {
+                            g.need.set(d, g.need[d] | 1u64 << q as u64);
+                        }
+                    }
+                }
+                if g.need[d] != old && inq[d] == 0 {
+                    wq.push(d as u32);
+                    inq.set(d, 1);
+                }
+            }
+        }
+        // A std body can run user code when it calls a fn value or a `dyn` method (always), dispatches
+        // through a bound (only in instances binding a type whose methods can be user code), or calls
+        // such a std body; any other std loop is bounded by its inputs and gets no tick.
+        let mut iface = Vector::<u8>::new();
+        iface.resize_default(nd);
+        for i in 0..ifm.len() {
+            let dm = defs[(ifm[i] & 0xFFFFFFFFu64) as usize];
+            let md = g.decl_of((dm >> 32) as ModuleId, (dm & 0xFFFFFFFFu64) as NodeId);
+            if md != CO_NONE {
+                iface.set(md as usize, 1);
+            }
+        }
+        let mut r_std = Vector::<u8>::new(); // per record below `cha0`: its decl is std code
+        r_std.resize_default(cha0);
+        for i in 0..cha0 {
+            let d = r_decl[i];
+            if g.stdm[g.module_of(d)] == 0 {
+                continue;
+            }
+            r_std.set(i, 1);
+            let t = r_tgt[i];
+            let mut u: u8 = 0;
+            if t == CO_ESC {
+                u = 2;
+            } else if iface[t as usize] != 0 {
+                u = 1;
+                if r_site[i] != CO_NO_SITE && dyn_receiver(
+                    unsafe &*self.module_ast_const((r_site[i] >> 32) as ModuleId),
+                    (r_site[i] & 0xFFFFFFFFu64) as NodeId,
+                ) {
+                    u = 2;
+                }
+            }
+            if u > g.ureach[d as usize] {
+                g.ureach.set(d as usize, u);
+            }
+        }
+        for d in 0..nd {
+            if g.need[d] != 0 {
+                g.ureach.set(d, 2);
+            }
+        }
+        // The levels, by a worklist over decls: a decl enters the list once, then again only when its
+        // level rises.
+        wq.truncate(0);
+        wi = 0;
+        for d in 0..nd {
+            if g.ureach[d] != 0 {
+                wq.push(d as u32);
+                inq.set(d, 1);
+            }
+        }
+        while wi < wq.len() {
+            assert(wq.len() <= nd * 3, "a decl re-enters the user-reach list only when its level rises");
+            let t = wq[wi] as usize;
+            wi += 1;
+            inq.set(t, 0);
+            for k in t_start[t]..t_start[t + 1] {
+                let i = t_ix[k as usize] as usize;
+                let d = r_decl[i] as usize;
+                if i < cha0 && r_std[i] != 0 && g.ureach[t] > g.ureach[d] {
+                    g.ureach.set(d, g.ureach[t]);
+                    if inq[d] == 0 {
+                        wq.push(d as u32);
+                        inq.set(d, 1);
+                    }
+                }
             }
         }
         // Records by decl (counting sort).
-        let nd = d_span.len();
         let mut r_start = Vector::<u32>::new();
         r_start.resize_default(nd + 1);
-        for i in 0..r_decl.len() {
+        for i in 0..nr {
             let d = r_decl[i] as usize;
             r_start.set(d + 1, r_start[d + 1] + 1);
         }
         for d in 0..nd {
             r_start.set(d + 1, r_start[d + 1] + r_start[d]);
         }
-        let mut r_flat = Vector::<u32>::new();
-        r_flat.resize_default(r_decl.len());
-        let mut cur = Vector::<u32>::new();
+        let mut r_ix = Vector::<u32>::new();
+        r_ix.resize_default(nr);
+        cur.truncate(0);
         for d in 0..nd {
             cur.push(r_start[d]);
         }
-        for i in 0..r_decl.len() {
+        for i in 0..nr {
             let d = r_decl[i] as usize;
-            r_flat.set(cur[d] as usize, r_tgt[i]);
+            r_ix.set(cur[d] as usize, i as u32);
             cur.set(d, cur[d] + 1);
         }
-        // The closure: a marked decl (a span) turns itself and every decl inside it on; an on decl
-        // fires its records once, marking each target. Every decl turns on at most once.
-        let mut on = Vector::<u8>::new();
-        let mut marked = Vector::<u8>::new();
-        on.resize_default(nd);
-        marked.resize_default(nd);
-        let mut queue = Vector::<u32>::new();
-        let mut m_of = 0 as usize; // the module of the decl being marked, found by d_start
-        for si in 0..seeds.len() {
-            let d = seeds[si] as usize;
-            if marked[d] == 0 {
-                marked.set(d, 1);
-                while d_start[m_of + 1] as usize <= d {
-                    m_of += 1;
-                }
-                while d_start[m_of] as usize > d {
-                    m_of -= 1;
-                }
-                self.co_spans.index_mut(m_of).push(d_span[d]);
-                if on[d] == 0 {
-                    on.set(d, 1);
-                    queue.push(d as u32);
-                }
+        // The closure: a marked decl turns itself and every decl inside it on; an on decl fires its
+        // records once. Every decl turns on at most once.
+        if seeds.len() != 0 || seed_esc {
+            for i in 0..frees.len() {
+                g.mark(frees[i]);
             }
         }
+        for si in 0..seeds.len() {
+            if g.need[seeds[si] as usize] != 0 {
+                g.escape(); // an entry's parameters come from no checked site
+            }
+            g.mark(seeds[si]);
+        }
+        if seed_esc {
+            g.escape();
+        }
         let mut qi: usize = 0;
-        while qi < queue.len() {
-            let d = queue[qi] as usize;
+        while qi < g.queue.len() {
+            let d = g.queue[qi] as usize;
             qi += 1;
             // Everything declared inside `d` runs inside its span: the run of the module's
             // decls after `d` whose starts fall below its end (spans nest).
-            let dend = (d_span[d] & 0xFFFFFFFFu64) as u32;
+            let dend = (g.span[d] & 0xFFFFFFFFu64) as u32;
             let mut k = d + 1;
-            while k < d_lim[d] as usize && (d_span[k] >> 32) as u32 < dend {
-                if on[k] == 0 {
-                    on.set(k, 1);
-                    queue.push(k as u32);
+            while k < g.lim[d] as usize && (g.span[k] >> 32) as u32 < dend {
+                if g.on[k] == 0 {
+                    g.on.set(k, 1);
+                    g.queue.push(k as u32);
                 }
                 k += 1;
             }
             for ri in r_start[d]..r_start[d + 1] {
-                let t = r_flat[ri as usize];
-                if t == none {
-                    // Fn value or dyn dispatch inside coroutine code: cannot pin the callee.
-                    self.co_state = 2;
-                    return;
+                let i = r_ix[ri as usize] as usize;
+                let t = r_tgt[i];
+                if t == CO_ESC {
+                    g.escape();
+                    continue;
                 }
-                if marked[t as usize] == 0 {
-                    marked.set(t as usize, 1);
-                    while d_start[m_of + 1] as usize <= t as usize {
-                        m_of += 1;
+                if g.need[t as usize] != 0 && !g.escaped {
+                    if r_chk[i] == 0 {
+                        g.escape(); // entered other than through a call site that checks its needs
+                    } else if r_site[i] != CO_NO_SITE && !self.co_site_ok(&g, r_site[i], d as u32, g.need[t as usize]) {
+                        g.escape();
                     }
-                    while d_start[m_of] as usize > t as usize {
-                        m_of -= 1;
-                    }
-                    self.co_spans.index_mut(m_of).push(d_span[t as usize]);
-                    if on[t as usize] == 0 {
-                        on.set(t as usize, 1);
-                        queue.push(t);
+                }
+                if !g.escaped && r_site[i] != CO_NO_SITE && g.stdm[g.module_of(t)] == 2 && !self.co_parallel_args_ok(
+                    &g,
+                    r_site[i],
+                    d as u32,
+                ) {
+                    // A fn value std::parallel stores and runs later that the tracker cannot pin.
+                    g.escape();
+                }
+                g.mark(t);
+            }
+        }
+        // The fn values, for the cancellation analysis (see `cancel_compute`). A closure written as a
+        // coroutine entry is consumed by its spawn call: nothing calls it as a fn value.
+        let mut seeded = Vector::<u8>::new();
+        seeded.resize_default(nd);
+        for si in 0..seeds.len() {
+            seeded.set(seeds[si] as usize, 1);
+        }
+        for i in 0..g.esc.len() {
+            let e = g.esc[i];
+            if g.closure[e as usize] == 0 || seeded[e as usize] == 0 {
+                self.co_fnv.push(g.module_of(e) as u64 << 32 | g.node[e as usize] as u64);
+            }
+        }
+        self.co_spans = replace(&mut g.spans, Vector::<Vector<u64>>::new());
+        self.co_inst = replace(&mut g.inst, Vector::<Vector<u64>>::new());
+    }
+
+    // Resolve the coroutine entry APIs (`CO_ENTRY_*`) that are loaded: (module << 32 | node) and the
+    // entry parameter index of each.
+    fn co_entries(self: &Self, out: &mut Vector<u64>, par: &mut Vector<u32>) {
+        for e in 0..CO_ENTRY_N {
+            let mi = self.find(unsafe CO_ENTRY_MOD[e]);
+            if mi < 0 {
+                continue;
+            }
+            let mid = mi as ModuleId;
+            if unsafe CO_ENTRY_TYPE[e].len() == 0 {
+                let h = self.glob_lookup(mid, unsafe CO_ENTRY_FN[e], false);
+                if h.node != NODE_NONE && h.mid == mid {
+                    out.push(mid as u64 << 32 | h.node as u64);
+                    par.push(unsafe CO_ENTRY_PARAM[e]);
+                }
+                continue;
+            }
+            let ty = self.glob_lookup(mid, unsafe CO_ENTRY_TYPE[e], true);
+            if ty.node == NODE_NONE || ty.mid != mid {
+                continue;
+            }
+            let a = unsafe &*self.module_ast_const(mid);
+            let src = self.modules.at(mid as usize).source.as_str();
+            let items = a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let it = unsafe a.list(items)[i as usize];
+                let n = a.at_const(it);
+                if n.kind != NodeKind::NODE_EXTEND || n.as_data.extend_def.interface_type != NODE_NONE {
+                    continue;
+                }
+                let tr = a.resolution_def(n.as_data.extend_def.target_type);
+                if tr.node != ty.node || tr.module != mid {
+                    continue;
+                }
+                let ms = n.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let f = unsafe a.list(ms)[j as usize];
+                    if a.at_const(f).kind == NodeKind::NODE_FUNCTION && fn_name(a, src, f) == unsafe CO_ENTRY_FN[e] {
+                        out.push(mid as u64 << 32 | f as u64);
+                        par.push(unsafe CO_ENTRY_PARAM[e]);
                     }
                 }
             }
         }
+    }
+
+    // Collect the interface methods (`ifm`) and the conformance methods (`imp`, sorted) of every
+    // module as (name hash << 32 | index into `defs`, which holds module << 32 | node), the hash cut
+    // to 32 bits: a collision only adds an edge.
+    fn co_dispatch(self: &Self, ifm: &mut Vector<u64>, imp: &mut Vector<u64>, defs: &mut Vector<u64>) {
+        for m in 0..self.modules.len() {
+            let a = unsafe &*self.module_ast_const(m as ModuleId);
+            let src = self.modules.at(m).source.as_str();
+            let items = a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let n = a.at_const(unsafe a.list(items)[i as usize]);
+                let mut ms = NodeList {};
+                let mut conf = false;
+                if n.kind == NodeKind::NODE_INTERFACE {
+                    ms = n.as_data.interface_def.items;
+                } else if n.kind == NodeKind::NODE_EXTEND && n.as_data.extend_def.interface_type != NODE_NONE {
+                    ms = n.as_data.extend_def.items;
+                    conf = true;
+                } else {
+                    continue;
+                }
+                for j in 0..ms.len {
+                    let f = unsafe a.list(ms)[j as usize];
+                    if a.at_const(f).kind != NodeKind::NODE_FUNCTION {
+                        continue;
+                    }
+                    let e = (fn_name(a, src, f).hash() & 0xFFFFFFFFu64) << 32 | defs.len() as u64;
+                    defs.push(m as u64 << 32 | f as u64);
+                    if conf {
+                        imp.push(e);
+                    } else {
+                        ifm.push(e);
+                    }
+                }
+            }
+        }
+        imp.sort();
+    }
+
+    // Does call site `site` (module << 32 | call node) in decl `d`, calling into std::parallel, pass as
+    // each argument that can hold a fn value a closure, a named function, or a parameter of function
+    // `d` (a need of `d` by the fixpoint)? A site inside std::parallel is its own dispatch: always yes.
+    fn co_parallel_args_ok(self: &Self, g: &CoGraph, site: u64, d: u32) bool {
+        let sm = (site >> 32) as ModuleId;
+        if g.stdm[sm as usize] == 2 {
+            return true;
+        }
+        let a = unsafe &*self.module_ast_const(sm);
+        let args = a.at_const((site & 0xFFFFFFFFu64) as NodeId).as_data.call.args;
+        for j in 0..args.len {
+            let arg = unsafe a.list(args)[j as usize];
+            if !fn_valued(a, arg) {
+                continue;
+            }
+            let an = named_node(a, arg);
+            if a.at_const(an).kind == NodeKind::NODE_CLOSURE {
+                continue; // declared inside `d`: on with it
+            }
+            let r = named_decl(a, an);
+            if r.node == NODE_NONE {
+                return false;
+            }
+            let rk = unsafe (&*self.module_ast_const(r.module)).at_const(r.node).kind;
+            if rk == NodeKind::NODE_FUNCTION {
+                continue; // named as a value inside `d`: marked by its own record
+            }
+            if rk == NodeKind::NODE_PARAMETER && r.module == sm && g.closure[d as usize] == 0 && param_index(
+                a,
+                g.node[d as usize],
+                r.node,
+            ) >= 0 {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // Does call site `site` (module << 32 | call node) in function decl `d` pass, for every parameter
+    // in `need`, a closure, a named function, or a parameter of `d` (a need of `d` by the fixpoint)?
+    // A site inside std::parallel is its own dispatch: always yes.
+    fn co_site_ok(self: &Self, g: &CoGraph, site: u64, d: u32, need: u64) bool {
+        let sm = (site >> 32) as ModuleId;
+        if g.stdm[sm as usize] == 2 {
+            return true;
+        }
+        let a = unsafe &*self.module_ast_const(sm);
+        for p in 0..64u32 {
+            if (need >> p as u64 & 1u64) == 0 {
+                continue;
+            }
+            let arg = site_arg(a, (site & 0xFFFFFFFFu64) as NodeId, p);
+            if arg == NODE_NONE {
+                continue;
+            }
+            let an = named_node(a, arg);
+            if a.at_const(an).kind == NodeKind::NODE_CLOSURE {
+                continue; // declared inside `d`: on with it
+            }
+            let r = named_decl(a, an);
+            if r.node == NODE_NONE {
+                return false;
+            }
+            let rk = unsafe (&*self.module_ast_const(r.module)).at_const(r.node).kind;
+            if rk == NodeKind::NODE_FUNCTION {
+                continue; // named as a value inside `d`: marked by its own record
+            }
+            if rk == NodeKind::NODE_PARAMETER && r.module == sm && g.closure[d as usize] == 0 && param_index(
+                a,
+                g.node[d as usize],
+                r.node,
+            ) >= 0 {
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 
     /// Can the function or closure declared exactly at `sp` reach the runtime's cancellation
@@ -2349,13 +3328,13 @@ extend Package {
 
     /// Compute cancel_marks: the decl spans of every function and closure whose body can reach
     /// `runtime::cancel_accept`. Seeded at direct calls to the acceptance leaf, then closed upward:
-    /// a call to a marked callee marks the decls enclosing the call site. A callee that cannot be
-    /// pinned (a fn value, a dyn method) is cancellation-MASKED: the request stays
-    /// pending across it and the next pinned cancellation point delivers the edge. Treating unknown
-    /// callees as reaching would mark nearly every task-reachable body and put a probe after nearly
-    /// every call.
+    /// a call to a marked callee (a `for` loop's `next` included) marks the decls enclosing the call
+    /// site, and a marked conformance method marks the interface methods of its name, whose call
+    /// sites a bound or `dyn` dispatch pins. A call to a fn value nothing pins marks nothing: when
+    /// some fn value of `co_fnv` is marked (`cancel_fnv`), every such call carries its own check.
     pub fn cancel_compute(self: &mut Self) {
         self.cancel_state = 1;
+        self.cancel_fnv = false;
         self.cancel_marks.truncate(0);
         self.cancel_marks.resize_default(self.modules.len());
         let rt = self.find("std::parallel::runtime");
@@ -2378,6 +3357,7 @@ extend Package {
         let mut rec_m = Vector::<u32>::new();
         let mut rec_span = Vector::<u64>::new();
         let mut rec_t = Vector::<u64>::new();
+        let mut opn = Vector::<u32>::new(); // per-module scratch: the operator nodes with a method
         for m in 0..self.modules.len() {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             let mut row = Vector::<u64>::new();
@@ -2389,13 +3369,25 @@ extend Package {
                 if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
                     row.push(n.span.start as u64 << 32 | n.span.end as u64);
                 }
+                if n.kind == NodeKind::NODE_FOR {
+                    // The loop's `next`, when it iterates an iterator.
+                    switch a.call_info.get(&ni) {
+                        Some(v) => {
+                            rec_m.push(m as u32);
+                            rec_span.push(n.span.start as u64 << 32 | n.span.end as u64);
+                            rec_t.push(*v >> 40 << 32 | *v >> 8 & 0xFFFFFFFFu64);
+                        },
+                        _ => {},
+                    };
+                    continue;
+                }
                 if n.kind != NodeKind::NODE_CALL {
                     continue;
                 }
                 let cd = n.as_data.call;
                 let t = pin_callee(a, ni, cd.callee);
                 if t.node == NODE_NONE {
-                    // Fn value or dyn dispatch: cancellation-masked.
+                    // A fn value: `cancel_fnv` covers it.
                     continue;
                 }
                 if !self.cancel_used && !self.modules.at(m).path.as_str().starts_with("std::") {
@@ -2416,7 +3408,72 @@ extend Package {
                 rec_span.push(n.span.start as u64 << 32 | n.span.end as u64);
                 rec_t.push(t.module as u64 << 32 | t.node as u64);
             }
+            // Implicit calls: an operator's method and a user `Deref` hop, from the node that makes them.
+            if a.op_method.len() != 0 {
+                opn.truncate(0);
+                let mut ki = a.op_method.keys();
+                loop {
+                    switch ki.next() {
+                        Some(k) => {
+                            opn.push(*k);
+                        },
+                        _ => {
+                            break;
+                        },
+                    };
+                }
+                opn.sort();
+                for i in 0..opn.len() {
+                    let osp = a.at_const(opn[i]).span;
+                    rec_m.push(m as u32);
+                    rec_span.push(osp.start as u64 << 32 | osp.end as u64);
+                    rec_t.push(*a.op_method.get(&opn[i]).unwrap());
+                }
+            }
+            for i in 0..a.deref_uses.len() {
+                let du = a.deref_uses.at(i);
+                let dsp = a.at_const(du.node).span;
+                for s in 0..du.n {
+                    let dm = unsafe du.method[s as usize];
+                    if dm.node != NODE_NONE {
+                        rec_m.push(m as u32);
+                        rec_span.push(dsp.start as u64 << 32 | dsp.end as u64);
+                        rec_t.push(dm.module as u64 << 32 | dm.node as u64);
+                    }
+                }
+            }
             decls.push(row);
+        }
+        // Dispatch: a conformance method that reaches acceptance marks each interface method of its
+        // name, as a call from that method's own span.
+        {
+            let mut ifm = Vector::<u64>::new();
+            let mut imp = Vector::<u64>::new();
+            let mut defs = Vector::<u64>::new();
+            self.co_dispatch(&mut ifm, &mut imp, &mut defs);
+            for i in 0..ifm.len() {
+                let h = ifm[i] >> 32; // the name hash
+                let dm = defs[(ifm[i] & 0xFFFFFFFFu64) as usize];
+                let msp = unsafe (&*self.module_ast_const((dm >> 32) as ModuleId)).at_const(
+                    (dm & 0xFFFFFFFFu64) as NodeId,
+                ).span;
+                let mut l: usize = 0;
+                let mut hi = imp.len();
+                while l < hi {
+                    let mid = (l + hi) / 2;
+                    if imp[mid] >> 32 < h {
+                        l = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                while l < imp.len() && imp[l] >> 32 == h {
+                    rec_m.push((dm >> 32) as u32);
+                    rec_span.push(msp.start as u64 << 32 | msp.end as u64);
+                    rec_t.push(defs[(imp[l] & 0xFFFFFFFFu64) as usize]);
+                    l += 1;
+                }
+            }
         }
         // Fixpoint over the call records. A record fires at most once: firing marks its enclosing
         // decls, and only a fresh mark can make another record's target newly reach acceptance.
@@ -2453,6 +3510,15 @@ extend Package {
                         }
                     }
                 }
+            }
+        }
+        for i in 0..self.co_fnv.len() {
+            let e = self.co_fnv[i];
+            let em = (e >> 32) as ModuleId;
+            let esp = unsafe (&*self.module_ast_const(em)).at_const((e & 0xFFFFFFFFu64) as NodeId).span;
+            if self.cancel_on(em, esp) {
+                self.cancel_fnv = true;
+                break;
             }
         }
     }

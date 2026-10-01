@@ -47,9 +47,55 @@ Blocking **parks** the coroutine (saves context, returns worker to scheduler) in
 blocking the OS thread. A worker and its coroutine share an OS thread — the switch only
 swaps stacks — so per-coroutine fields need no atomics.
 
-**Preemption:** the compiler emits a safepoint at every loop backedge (only in programs
-that use `launch`). The scheduler yields there when other work is waiting, so a
-compute-bound task cannot starve the pool.
+**Preemption:** in a program that loads the coroutine runtime, the compiler emits a
+safepoint at every loop backedge (statement and value loops) of every user function and
+closure a coroutine can execute. The scheduler yields there when other work is waiting, so
+a compute-bound task cannot starve the pool. A std loop is bounded by its inputs unless its
+body can run user code, so a reachable std body ticks only then: always when it calls a fn
+value or a `dyn` method (or a std body that does), and, when it runs user code only through
+bound dispatch, only in the instances binding a type whose methods can be user code
+(`Map<u64, u64>` probes never tick; `Map<UserKey, V>` probes and `iter::for_each` over a user
+iterator do). Loops in `std::parallel` never tick.
+
+The tick is a function-local countdown (`__sc_spc`, budget 2048): every iteration takes one,
+and the iteration that takes the last one calls the hook and resets it. A counted loop is an
+exclusive range over a builtin integer whose binding the body cannot assign, or a
+non-consuming `for` over an array, slice or sequence value (index against the length read at
+entry). Its safepoint sits at the top of each iteration, before a slice element's load. When
+its lowered body runs no call, drop or safepoint, it is strip-mined: the safepoint sits at each
+chunk top only, then `IN_CHUNK` (`__sc_chunk_end`) computes the chunk's end, at most the budget
+left, charged up front, so the chunk loop runs with no tick and no call (a tight loop in a task
+then optimizes like one outside: a slice sum ran 4.5x faster), and a tick still comes at most
+every 2048 iterations. A body with a call keeps the tick per iteration: a chunk spares little
+there and costs its end per loop entry (measured: +1% self-transpile cycles when every
+counted loop was strip-mined). The test for calls runs on the lowered generic body, so an
+operator a type argument dispatches at emission can still call inside a chunk; the bound
+holds regardless. A `break` or `return` out of a chunk leaves its charge spent (the next tick
+comes earlier); `continue` and labeled `continue` go to the step, which stays in the chunk. In
+a body that can carry a cancellation edge the chunk top holds the combined safepoint, so an
+accepted cancellation runs the ladder at the top of an iteration, as the per-iteration
+safepoint does. `while`, `loop`, iterator loops, inclusive ranges, `Range` values, `for mut`
+ranges and consuming `for` loops tick per iteration. Where the body prints no tick (a std
+instance binding no user type), the chunk end is the loop's end. BCE reads `IN_CHUNK`
+(`lim <= end`), so `i < lim` in the chunk proves `i < end`.
+
+Reachability (`Package::co_compute`) starts at the entry argument of every spawn API
+(`runtime::submit`, which `launch` lowers to, `TaskGroup::spawn`,
+`runtime::spawn_coroutine[_env]`) and continues through std. From a reached body it reaches
+every decl declared inside it, every pinned callee, every conformance method named like a
+called interface method (bound and `dyn` dispatch), the implicit callees (a `for` loop's
+`next`, operator methods, `Deref` hops, every conformance `free`, since a drop runs
+anywhere, and for an operator on an aggregate or type parameter that emission dispatches,
+every conformance method named `eq`, `cmp` or the operator's method), and every function named
+as a value. A fn value the body calls through its own
+parameter is checked at the function's call sites, which must pass a closure, a named
+function, or a parameter of their own; any other call of a fn value (a field, a local, a call
+result) reaches every closure and every function named as a value. `std::parallel` runs fn
+values only through its own dispatch, so its own fn-value calls add nothing; instead each
+call into `std::parallel` from outside it must pass every argument that can hold a fn value
+(a function type, or a type parameter with a fn bound) as a closure, a named function or a
+parameter of its own function, else every fn value is reached. A closure built outside
+every task and handed to `data::range` from one is therefore reached.
 
 **Run queues.** Each worker owns a fixed ring (256 slots) that it appends to; the owner
 and thieves alike take from its head with a CAS, FIFO for everyone, and a thief takes half
@@ -522,17 +568,29 @@ Registration contract (`CancelToken::bind_current`, documented at the top of
 Lock order: a source lock is taken alone and never held across a request or a task's
 cleanup. A key-based request takes only the registry slot lock.
 
-**Compiled cancellation edges.** After a statement-root call whose callee can reach the
-runtime's acceptance, a task-reachable body outside `std::parallel::runtime` probes for an
-accepted cancellation and, on one, runs its cleanup ladder and returns a poison value its
-caller never reads. Two calls never carry an edge of their own: an unpinned fn-value or
-`dyn` callee (cancellation is masked across it), and `runtime::cancel_after_wait` itself.
-That function is how a primitive's wait cleanup accepts the request; it reports through
-its result so the primitive finishes removing its registrations and hands back the value
-it waited with, and the edge fires after the primitive, at its caller. A probe placed
-right after it unwound the primitive mid-cleanup and leaked a channel's unsent payload.
-Whether a body is task-reachable comes from a whole-package analysis that turns
-conservative (every body probes) when it meets a callee it cannot pin; targets differ
+**Compiled cancellation edges.** After a call whose callee can reach the runtime's
+acceptance, a task-reachable body outside `std::parallel::runtime` probes for an accepted
+cancellation and, on one, runs its cleanup ladder and returns a poison value its caller
+never reads. A call carries the edge when it is evaluated with nothing unregistered
+pending: the root of a statement or of a `let` initializer, a lone return value, an `if`
+or `while` condition, a switch scrutinee (the task unwinds before any arm runs) and the arm
+values of a switch or `if` in such a position, the first call of a receiver chain
+(`rx.recv().unwrap_or(0)` unwinds after `recv`), both sides of `&&` and `||`, the right
+side of an assignment to a call-free place, and a `for` loop's `next`. Implicit calls follow
+the same rule: an operator method at such a node (a compound assignment checks once the place
+holds its result) and a user `Deref` hop. A call after an
+evaluated argument or a left operand carries none; the next edge delivers the request. An
+edge after a call that returned a real value frees it first (a `Some(guard)` unlocks). A
+call to a fn value carries the edge when some fn value of the package can accept (a closure
+written as a spawn entry is not one); a bound or `dyn` call, when some conformance method of
+its name can. In `std::parallel` only the root call of an expression statement or a plain
+`let` carries one: its primitives report a cancelled wait through their results and release
+raw resources after it (`TcpStream::connect` closes its socket). `runtime::cancel_after_wait`
+never carries an edge. That function is how a primitive's wait cleanup accepts the request;
+it reports through its result so the primitive finishes removing its registrations and hands
+back the value it waited with, and the edge fires after the primitive, at its caller. A probe
+placed right after it unwound the primitive mid-cleanup and leaked a channel's unsent payload.
+Whether a body is task-reachable comes from the whole-package analysis above; targets differ
 here, so a probe that is absent on one target may be present on another.
 
 Known gap: in a generic body an unbounded `T` is not an owning type, so a `T` value a

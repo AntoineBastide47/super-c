@@ -623,7 +623,11 @@ extend<T> Mutex<T> {
     }
     /// `lock`, but the wait is a cancellation point: `None` means the wait was cancelled; no guard
     /// exists, the lock is not held, and the cancellation is accepted. The cancellable form of `lock` for
-    /// callers that can propagate cancellation; ordinary code uses `lock`.
+    /// callers that can propagate cancellation; ordinary code uses `lock`. In a task, the compiled
+    /// cancellation edge after the call unwinds the caller before anything reads the result wherever
+    /// the call is evaluated with nothing unregistered pending: a statement, a `let` initializer, a
+    /// switch scrutinee (no arm runs), a condition, the first call of a receiver chain. A result that
+    /// reaches the edge as a guard is freed there, so the lock is released.
     pub fn lock_c(self: &Mutex<T>) Option<MutexGuard<T>> {
         if !unsafe raw_mutex_lock_c(self.raw.get()) {
             return Option::<MutexGuard<T>>::None;

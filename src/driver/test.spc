@@ -735,6 +735,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid test shard: expected K/N with 1 <= K <= N\n");
         return 2;
       }
+    } else { /* a misspelled option must not quietly run the whole suite */
+      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --quiet or --no-fork\n", argv[i]);
+      return 2;
     }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
@@ -909,6 +912,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid test shard: expected K/N with 1 <= K <= N\n");
         return 2;
       }
+    } else { /* a misspelled option must not quietly run the whole suite */
+      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --quiet or --no-fork\n", argv[i]);
+      return 2;
     }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
@@ -1193,7 +1199,7 @@ pub fn test_build_and_run(
     };
     let mut args = Vector::<String>::new();
     split_args(&mut args, ccs.as_str());
-    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char");
+    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -Werror=incompatible-pointer-types");
     // The cross triple comes first so the profile's flags (`cflags`, empty for a bare build) can override it.
     let mut fl = String::new();
     push_sdk_flags(&mut fl, sdk, p.arch);

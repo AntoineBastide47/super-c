@@ -58,7 +58,7 @@ read a body-arena table after lowering are what the earlier release had to move)
 
 Publishing a body inside the typecheck frontier, when its module's check ends, is not
 reachable in this compiler: the lowerer places a safepoint in every loop and a cancellation
-check after every statement-root call from the package-wide coroutine and cancellation
+check after every call in a clean position from the package-wide coroutine and cancellation
 reachability (`Package::co_on`, `cancel_on`), and that reachability flows from the callers
 (a body is on a coroutine stack when some launch site reaches it). Under the import-first
 frontier the callers of a module are typed after it, so nearly every body would publish

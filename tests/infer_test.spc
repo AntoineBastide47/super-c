@@ -349,6 +349,24 @@ fn closure_inference() {
         "fn ap<T>(f: fn(T) T, x: T) T { return f(x); }\nfn main() i32 { let f2 = |v| v * 2; return ap(f2, 10) - 20; }\n",
         "closure parameter needs a type annotation",
     );
+    // A closure passed for a generic parameter takes its parameter types from that parameter's fn
+    // bound, once an earlier argument solves the bound's own parameters: here `T` comes from the
+    // iterator argument's `Iterator<T>` conformance.
+    h::expect_exit(
+        "closure parameters from a generic fn bound solved by a conformance",
+        "import std::iter as iter;\nstruct Down { pub n: i32 }\nextend Down as Iterator<i32> {\n    pub fn next(self: &mut Down) Option<i32> {\n        if self.n == 0 { return Option::<i32>::None; }\n        self.n = self.n - 1;\n        return Option::<i32>::Some(self.n);\n    }\n}\nfn main() i32 { let mut s: i32 = 0; iter::for_each(Down { n: 3 }, |x| { s = s + x; }); return s - 3; }\n",
+        0,
+    );
+    h::expect_exit(
+        "closure parameters from generic fn bounds across an adapter pipeline",
+        "import std::iter as iter;\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let s = iter::fold(iter::map(v.iter(), |x| *x * 2), 0, |a, x| a + x);\n    let c = iter::count(iter::filter(v.iter(), |x| **x > 1));\n    return s + c as i32 - 7;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "closure parameters from a direct generic fn bound",
+        "fn apply<F: fn(i32) i32>(f: F) i32 { return f(4); }\nfn main() i32 { return apply(|y| y + 1) - 5; }\n",
+        0,
+    );
 }
 
 @test

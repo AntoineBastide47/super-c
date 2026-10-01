@@ -534,6 +534,66 @@ extend Proj {
         return found;
     }
 
+    /// True when the definition of C function `name` in generated file `rel` (under build/dev/raw)
+    /// contains `needle`.
+    pub fn gen_fn_has(self: &Proj, rel: str, name: str, needle: str) bool {
+        return self.gen_fn_count(rel, name, needle) > 0;
+    }
+
+    /// How many times the definition of C function `name` in generated file `rel` (under
+    /// build/dev/raw) contains `needle`, or -1 without that definition: the text from the line that
+    /// defines it to its closing brace at column 0.
+    pub fn gen_fn_count(self: &Proj, rel: str, name: str, needle: str) i32 {
+        let mut path = Path512 {};
+        unsafe stdio::snprintf(
+            &mut path[0],
+            512,
+            "%s/build/dev/raw/%.*s".ptr() as *const char,
+            self.rootp(),
+            rel.len() as i32,
+            rel.ptr(),
+        );
+        let buf = slurp(&path[0]);
+        if buf == null {
+            return -1;
+        }
+        let mut n: i32 = -1;
+        let text = str::from_cstr(buf);
+        let mut head = String::from_str(" ");
+        head.push_str(name);
+        head.push_str("(");
+        // A prototype ends its line with `;`, the definition with `{`.
+        let mut at: usize = 0;
+        while at < text.len() {
+            let i = text.slice(at, text.len()).find(head.as_str());
+            if i < 0 {
+                break;
+            }
+            let st = at + i as usize;
+            let rest = text.slice(st, text.len());
+            let eol = rest.find("\n");
+            if eol > 0 && rest.slice(0, eol as usize).ends_with("{") {
+                let end = rest.find("\n}\n");
+                if end > 0 {
+                    let mut body = rest.slice(0, end as usize);
+                    n = 0;
+                    loop {
+                        let k = body.find(needle);
+                        if k < 0 {
+                            break;
+                        }
+                        n += 1;
+                        body = body.slice(k as usize + needle.len(), body.len());
+                    }
+                }
+                break;
+            }
+            at = st + head.len();
+        }
+        unsafe stdlib::free(buf);
+        return n;
+    }
+
     // How many entries under <root>/build/dev/raw start with `prefix`: the `find ... | wc -l` analog, which
     // asserts that generated wrapper TUs are pruned.
     /// Number of entries under build/dev/raw whose name starts with `prefix`.

@@ -334,19 +334,6 @@ pub struct Demand {
 
 // Does the body carry any loop-back-edge safepoint marker? Decides whether the function needs
 // its local preemption tick declared.
-fn body_has_safepoint(b: &ir::CoreBody) bool {
-    for si in 0..b.statements.len() {
-        let s = *b.statements.at(si);
-        if s.kind == ir::ST_ASSIGN {
-            let rv = *b.rvalues.at(s.rvalue as usize);
-            if rv.kind == ir::RV_INTRINSIC && (rv.c as u32 == ir::IN_SAFEPOINT as u32 || rv.c as u32 == ir::IN_SAFEPOINT_C as u32) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 extend CEmit {
     /// An emitter over `pkg` (which must outlive it) with empty buffers and gates.
     pub fn new(pkg: *const loader::Package) CEmit {
@@ -3387,7 +3374,7 @@ extend CEmit {
         // Preemption tick, function-local so the C compiler can keep it in a register: the TLS
         // countdown cost a load+store on every loop back-edge. A loop reaching 2048 back-edges
         // still hits the hook; the cross-call accumulation the TLS tick had was incidental.
-        if body_has_safepoint(b) && self.safepoints_on(b.module) {
+        if b.has_safepoint() && self.ticks_on(b) {
             o.push_str("  int32_t __sc_spc = 2048;\n");
         }
         // Every non-argument local declares up front, explicitly typed; unit locals carry no C.
@@ -5458,7 +5445,7 @@ extend CEmit {
                 return self.emit_asm_stmt(o, b, &rv0);
             }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
-                if self.safepoints_on(b.module) {
+                if self.ticks_on(b) {
                     o.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
                 }
                 return true;
@@ -5472,7 +5459,7 @@ extend CEmit {
                     o.push_str("  ");
                     o.push_string(&cp);
                     o.push_str(" = 0;\n");
-                    if self.safepoints_on(b.module) {
+                    if self.ticks_on(b) {
                         o.push_str("  if (--__sc_spc == 0) { __sc_spc = __sc_preempt_check(); ");
                         o.push_string(&cp);
                         o.push_str(" = __sc_cancel_tick(); }\n");
@@ -9203,6 +9190,75 @@ extend CEmit {
         return true;
     }
 
+    // Does body `b`, under the current substitutions, print its preemption ticks? A std body whose
+    // user code runs only through bound dispatch (`Package::co_inst_on`) prints them only when a
+    // binding names a type whose methods can be user code; with std types alone its loops are bounded
+    // by their inputs.
+    fn ticks_on(self: &mut Self, b: &ir::CoreBody) bool {
+        if !self.safepoints_on(b.module) {
+            return false;
+        }
+        if !b.inst_ticks {
+            return true;
+        }
+        let ow = b.owner;
+        // The body's own parameters are declared in its module; other frames belong to the
+        // instances it is emitted within.
+        for i in 0..self.mg.subs.len() {
+            let sb = *self.mg.subs.at(i);
+            if sb.pm != ow.module {
+                continue;
+            }
+            let mut rm = sb.am;
+            let mut rt = sb.at;
+            if !self.mg.resolve(sb.am, sb.at, &mut rm, &mut rt) || self.user_type(rm, rt, 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Can a method of type `(m, t)` be user code: does it name, at any depth, a type declared
+    // outside std, a function or closure, a `dyn` value, or an unbound parameter?
+    fn user_type(self: &Self, m: ModuleId, t: TypeId, depth: u32) bool {
+        if depth > 16 || t == TYPE_NONE {
+            return true;
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        let y = *a.type_at(t);
+        let k = y.kind;
+        if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_NEVER || k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR {
+            return false;
+        }
+        if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+            return self.user_type(m, y.as_data.elem, depth + 1);
+        }
+        if k == TypeKind::TYPE_ARRAY {
+            return self.user_type(m, y.as_data.arr.elem, depth + 1);
+        }
+        if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+            return !self.std_module(y.module);
+        }
+        if k == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(y.as_data.inst);
+            if !self.std_module(it.module) {
+                return true;
+            }
+            for i in 0..it.n {
+                if self.user_type(m, unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    fn std_module(self: &Self, m: ModuleId) bool {
+        let pth = self.p().modules.at(m as usize).path.as_str();
+        return pth.starts_with("std::") || pth.starts_with("__std::");
+    }
+
     // A `@blocking` extern function (non-variadic): calls route through a pool wrapper.
     fn blocking_callee(self: &Self, d: DefId) bool {
         let a = unsafe &*self.p().module_ast_const(d.module);
@@ -9947,6 +10003,13 @@ extend CEmit {
         let mut em = tm;
         let mut et = ty.as_data.elem;
         let _ = self.mg.resolve(tm, ty.as_data.elem, &mut em, &mut et);
+        // A pointer to a fixed array spells its element unqualified (`Mangler`), while the address of
+        // an array reached through a `const` path is `const T (*)[N]`: C11 converts neither into the
+        // other, so the address is cast.
+        let ek = unsafe (*self.p().module_ast_const(em)).type_at(et).kind;
+        if ek == TypeKind::TYPE_ARRAY && !self.mg.ptr_wraps(em, et) {
+            return true;
+        }
         let mut pm = b.module;
         let mut pt = b.places.at(place as usize).ty;
         self.rty(b, pt, &mut pm, &mut pt);
@@ -10509,6 +10572,25 @@ extend CEmit {
             if k == ir::IN_RANGE_BOUNDS_PROVEN as u32 {
                 // Only the validated exclusive end remains.
                 return self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst);
+            }
+            if k == ir::IN_CHUNK as u32 {
+                // A strip-mined loop's chunk end, through the tick budget; the loop's own end where
+                // the body prints no tick. The helper counts in 64-bit two's complement.
+                let eop = b.oper_pool[(rv.a + 1) as usize];
+                if !self.ticks_on(b) {
+                    return self.emit_operand(b, eop, dst);
+                }
+                let wide = mbe::if_s(int_signed(self.int_builtin(b, rv.target)), "(uint64_t)", "");
+                dst.push_str("(");
+                let mut ok = self.ty_c(b.module, rv.target, "", dst);
+                dst.push_str(")__sc_chunk_end(&__sc_spc, ");
+                dst.push_str(wide);
+                ok = ok && self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
+                dst.push_str(", ");
+                dst.push_str(wide);
+                ok = ok && self.emit_operand(b, eop, dst);
+                dst.push_str(")");
+                return ok;
             }
             return self.fail("intrinsic");
         }

@@ -158,9 +158,19 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     if p.cancel_used {
         reach = reach | 1u64 << 16;
     }
+    if p.cancel_fnv {
+        reach = reach | 1u64 << 17;
+    }
     h = fnv_mix(h, reach);
     for i in 0..p.co_spans.len() {
         let row = p.co_spans.at(i);
+        h = fnv_mix(h, row.len() as u64);
+        for k in 0..row.len() {
+            h = fnv_mix(h, *row.at(k));
+        }
+    }
+    for i in 0..p.co_inst.len() {
+        let row = p.co_inst.at(i);
         h = fnv_mix(h, row.len() as u64);
         for k in 0..row.len() {
             h = fnv_mix(h, *row.at(k));

@@ -4652,6 +4652,10 @@ extend Interp {
                 // no task exists at compile time: the combined safepoint never cancels
                 return iv_int(b.module, rv.target, 0);
             }
+            if rv.c == ir::IN_CHUNK {
+                // no tick budget at compile time: one chunk runs to the loop's end
+                return self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+            }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
                 // PROVEN keeps the identical check here: CTFE catches a false proof as a trap
                 let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);

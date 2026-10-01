@@ -49,12 +49,21 @@ const char *sc_bs_arch(void) {
 /* ---- allocation accounting (see the header for what is counted) ------------------------------------- */
 /* Counted only where this file can interpose malloc and forward to the real allocator: macOS (zone API)
    and glibc (__libc_*). Everywhere else (Windows, wasm, other libcs) the counters stay at zero and
-   `supported` says so. */
-#if !defined(__APPLE__) && !defined(__GLIBC__)
+   `supported` says so. A sanitizer runtime owns the malloc family itself and allocates while it starts
+   (TSan resolves symbols through dlsym, which calloc's), before this file's thread-local state exists:
+   a definition here would replace the sanitizer's, so a sanitized build counts nothing either. */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define SC_BS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define SC_BS_SANITIZED 1
+#endif
+#endif
+#if (!defined(__APPLE__) && !defined(__GLIBC__)) || defined(SC_BS_SANITIZED)
 int sc_bs_alloc_supported(void) { return 0; }
 void sc_bs_alloc_enable(int on) { (void)on; }
 int sc_bs_alloc_enabled(void) { return 0; }
-void sc_bs_alloc_snapshot(long long out[4]) { out[0] = out[1] = out[2] = out[3] = 0; }
+void sc_bs_alloc_snapshot(int64_t out[4]) { out[0] = out[1] = out[2] = out[3] = 0; }
 long long sc_bs_alloc_calls(void) { return 0; }
 long long sc_bs_alloc_bytes(void) { return 0; }
 #else
@@ -93,7 +102,7 @@ static inline void sc_bs_note(size_t n) {
   __atomic_store_n(&a->calls, __atomic_load_n(&a->calls, __ATOMIC_RELAXED) + 1ull, __ATOMIC_RELAXED);
 }
 
-void sc_bs_alloc_snapshot(long long out[4]) {
+void sc_bs_alloc_snapshot(int64_t out[4]) {
   unsigned n = __atomic_load_n(&sc_bs_line_n, __ATOMIC_RELAXED);
   unsigned k = n < SC_BS_ACCT_THREADS ? n : SC_BS_ACCT_THREADS;
   unsigned long long calls = __atomic_load_n(&sc_bs_over.calls, __ATOMIC_RELAXED);
@@ -102,18 +111,18 @@ void sc_bs_alloc_snapshot(long long out[4]) {
     calls += __atomic_load_n(&sc_bs_lines[i].calls, __ATOMIC_RELAXED);
     bytes += __atomic_load_n(&sc_bs_lines[i].bytes, __ATOMIC_RELAXED);
   }
-  out[0] = (long long)calls;
-  out[1] = (long long)bytes;
-  out[2] = (long long)n;
+  out[0] = (int64_t)calls;
+  out[1] = (int64_t)bytes;
+  out[2] = (int64_t)n;
   out[3] = n > SC_BS_ACCT_THREADS;
 }
 long long sc_bs_alloc_calls(void) {
-  long long v[4];
+  int64_t v[4];
   sc_bs_alloc_snapshot(v);
   return v[0];
 }
 long long sc_bs_alloc_bytes(void) {
-  long long v[4];
+  int64_t v[4];
   sc_bs_alloc_snapshot(v);
   return v[1];
 }

@@ -2462,7 +2462,8 @@ fn engine_build_i(
     let mut tail = String::new();
     tail.push_byte(b' ');
     tail.push_string(&m.cstd);
-    tail.push_str(" -funsigned-char");
+    // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
+    tail.push_str(" -funsigned-char -Werror=incompatible-pointer-types");
     if m.lib_shared && cx.target != 0 {
         // Shared-library objects need it; harmless for the exe targets.
         tail.push_str(" -fPIC");

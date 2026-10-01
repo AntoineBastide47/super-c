@@ -239,6 +239,16 @@ static inline __attribute__((unused)) int32_t __sc_preempt_check(void) {
   if (__sc_pre_hook) __sc_pre_hook();
   return 2048;
 }
+/* Strip-mined counted loop (IN_CHUNK): the exclusive end of the chunk that starts at `__i`
+   (`__i < __end`, the loop's induction values as 64-bit two's complement). The safepoint before it
+   counted the chunk's first iteration; the others fit the budget left and are charged here, so the
+   chunk's backedges need no tick and a tick still comes at most every 2048 iterations. */
+static inline __attribute__((unused)) uint64_t __sc_chunk_end(int32_t *__spc, uint64_t __i, uint64_t __end) {
+  uint64_t __n = __end - __i;
+  if (__n > (uint64_t)*__spc) __n = (uint64_t)*__spc;
+  *__spc -= (int32_t)(__n - 1U);
+  return __i + __n;
+}
 /* Cancellation half of a combined safepoint (emitted only on its cold path): asks the runtime
    whether the current task has an unmasked pending cancellation, ACCEPTING it on yes -- the
    emitted branch then enters the frame's cancellation ladder. The hook lives in sc_rt.c and is

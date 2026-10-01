@@ -41,7 +41,8 @@ The elaboration point is now the end of each body's analyses in the borrow pass
 receives the bodies):
 
 1. The size verdict for the inliner is recorded on the pre-elaboration shape
-   (`CoreBody.inline_size_ok`, from `inline::callee_size_ok`).
+   (`CoreBody.inline_size_ok`, from `inline::callee_size_ok`; the two blocks, statements and
+   locals each strip-mined loop chunk adds do not count).
 2. The feature bits decide whether anything can be scheduled: an owning local
    (`FT_OWNED`), else a store into a projected place that owns through auto-freeing
    storage (`drops::assign_may_schedule`, which tests the storage class before the

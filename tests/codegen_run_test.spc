@@ -2949,6 +2949,7 @@ extend K as Make<i32> {
         return s;
     }
 }
+
 extend K as Make<bool> {
     type Out = bool;
     pub fn make(self: &Self, a: bool) bool { return !a; }
@@ -3020,6 +3021,30 @@ fn main() i32 {
         return 6;
     }
     return 0;
+}
+)",
+        0,
+    );
+}
+
+// A by-reference operator operand of a narrower numeric type (a literal, an `i32` local) is widened to
+// the parameter's element type before it is borrowed: the method reads a full `i64`.
+@test
+fn operator_operand_widens_before_its_borrow() {
+    run_leak_free(
+        "operator operand widens before its borrow",
+        M"(struct G { pub v: i64 }
+extend G as Add<i64> {
+    type Output = i64;
+    pub fn add(self: &G, other: &i64) i64 { return self.v + *other; }
+}
+fn main() i32 {
+    let h = G { v: 1 };
+    let x: i32 = -2;
+    let s = h + 3000000000;
+    let t = h + 2;
+    let u = h + x;
+    return (s + t + u - 3000000003) as i32;
 }
 )",
         0,

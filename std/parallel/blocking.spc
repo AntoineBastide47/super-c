@@ -128,6 +128,7 @@ pub struct Stats {
     pub peak_threads: usize, // most live plus starting at once
     pub peak_queued: usize, // most accepted calls waiting at once
     pub created: usize, // threads created over the pool's life
+    pub exited: usize, // exited threads not joined yet (the next creation or the shutdown joins them)
     pub reaped: usize, // exited threads joined
     pub admit_waits: usize, // admission parks and blocks
     pub cache_bytes: usize, // recycled record bytes held
@@ -164,6 +165,7 @@ struct Pool {
     pub peak_threads: usize,
     pub peak_queued: usize,
     pub created: usize,
+    pub exited: usize, // retired, not yet joined: live + exited + reaped == created
     pub reaped: usize,
     pub admit_waits: usize,
     pub pad_q: Array<u64, 16>, // `queued` on a line of its own: every submitting worker adds to it outside
@@ -203,6 +205,7 @@ fn build_pool() *mut Pool {
         peak_threads: 0,
         peak_queued: 0,
         created: 0,
+        exited: 0,
         reaped: 0,
         admit_waits: 0,
         pad_q: Array::<u64, 16> {},
@@ -330,6 +333,7 @@ fn reap(p: *mut Pool) {
         t = nx;
     }
     lock(p);
+    unsafe (*p).exited = unsafe (*p).exited - n;
     unsafe (*p).reaped = unsafe (*p).reaped + n;
 }
 
@@ -469,6 +473,7 @@ fn retire(p: *mut Pool, t: *mut PThread) {
     unsafe (*t).next = unsafe (*p).retired;
     unsafe (*p).retired = t;
     unsafe (*p).live = unsafe (*p).live - 1;
+    unsafe (*p).exited = unsafe (*p).exited + 1;
     done_bump(p);
 }
 
@@ -1183,6 +1188,7 @@ pub fn stats() Stats {
         peak_threads: 0,
         peak_queued: 0,
         created: 0,
+        exited: 0,
         reaped: 0,
         admit_waits: 0,
         cache_bytes: 0,
@@ -1201,6 +1207,7 @@ pub fn stats() Stats {
     s.peak_threads = unsafe (*p).peak_threads;
     s.peak_queued = unsafe (*p).peak_queued;
     s.created = unsafe (*p).created;
+    s.exited = unsafe (*p).exited;
     s.reaped = unsafe (*p).reaped;
     s.admit_waits = unsafe (*p).admit_waits;
     unlock(p);

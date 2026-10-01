@@ -65,8 +65,13 @@ const MAX_CALLEE_LOCALS: usize = 32;
 /// The callee size gate over a body's current shape. The borrow pass records the answer for the
 /// pre-elaboration shape in `CoreBody.inline_size_ok` (the shape the limits were tuned for), and
 /// the vet reads that bit.
+/// The blocks, statements and locals the counted-loop lowering added (`count_blocks`, `chunks`)
+/// do not count.
 pub const fn callee_size_ok(b: &ir::CoreBody) bool {
-    return b.statements.len() <= MAX_CALLEE_STMTS && b.blocks.len() <= MAX_CALLEE_BLOCKS && b.locals.len() <= MAX_CALLEE_LOCALS;
+    let ns = b.statements.len() - 2 * b.chunks as usize;
+    let nb = b.blocks.len() - b.count_blocks as usize;
+    let nl = b.locals.len() - 2 * b.chunks as usize;
+    return ns <= MAX_CALLEE_STMTS && nb <= MAX_CALLEE_BLOCKS && nl <= MAX_CALLEE_LOCALS;
 }
 /// Per caller body: total statements added by all splices (nested ones included).
 const MAX_ADDED_STMTS: usize = 512;
@@ -965,6 +970,11 @@ fn splice(
     let pkg9 = lw.pkg;
     let b = &mut lw.body;
     let sp = t.span;
+    // A spliced loop keeps its callee's tick rule: the merged body prints ticks by the instance only
+    // when both do.
+    if !k.inst_ticks && k.has_safepoint() {
+        b.inst_ticks = false;
+    }
     let km = k.owner.module;
     let l0 = b.locals.len() as u32;
     let b0 = b.blocks.len() as u32;
