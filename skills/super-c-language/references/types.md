@@ -26,7 +26,7 @@ a type argument) names a type: `let x: u64::MAX` is "expected a type, found cons
 is "expected a type, found variant 'E::A'". Only a struct literal names a variant after its enum
 (`E::A { x: 1 }`).
 
-Builtin types are **nominal** — `i32` is not an alias for anything. `int` is not a
+Builtin types are **nominal**: `i32` is not an alias for anything. `int` is not a
 builtin; there is no implicit integer type. `str` is a prelude struct (a borrowed
 `(ptr, len)` view), not a builtin.
 
@@ -72,6 +72,21 @@ unary `-` and parentheses) is computed in one type, at compile time and at run t
   `1 + 2.0`, `(1 / 2) * 2.0`, `1.5 * 2`, `y * 2` with `y: f64`, and `let f: f32 = 1;` are
   "mismatched types" errors; write `2.0`.
 
+## Matchertext Literals
+
+`M"(..)"`, `M"[..]"` and `M"{..}"` are raw string literals: the content between the outer
+matchers is verbatim (no escapes, quotes allowed), and its ASCII matchers `()`, `[]`, `{}` must
+match ("mismatched matchers in matchertext literal"). Without holes the literal is a `str`
+(`M"(a<b)" == "a<b"`).
+
+A delimiter chain of nested matcher pairs between `M` and `"` turns on interpolation: the
+chain's openers start a hole and its closers end it (`M{}"(n={n})"`, `M[]"(a{b} [x])"`,
+`M{{}}"(..{{x}}..)"`). Pick a chain the verbatim text does not contain. The literal becomes a
+`String`, built as `format()` builds one. A hole whose value can carry matcher bytes (strings,
+chars, `Format` values) goes through `sugar_mt_splice` (std/string.spc), which panics when the
+value's ASCII matchers do not match, so no value can break the literal's structure. The check
+is a byte scan with no UTF-8 validation. `format()` and `print` arguments are not checked.
+
 ## Arithmetic Semantics
 
 Compile-time evaluation and the compiled program give the same result; where the program
@@ -98,6 +113,9 @@ range").
   ("arithmetic overflow", "division by zero"). A signed `<<` shifts
   the two's complement bits (`-1 << 1` is -2; bits shifted out are lost); `>>` is
   arithmetic on signed types.
+- Float `Eq`, `Ord` and `Hash` use the IEEE-754 total order (`total_cmp`, std/core.spc): NaN
+  equals itself and `-0.0` differs from `0.0`, so floats sort and work as `Map`/`Set` keys. The
+  `==` and `<` operators stay IEEE. There is no PartialEq/PartialOrd split.
 - A float `%` is the C `fmod` remainder: the result has the sign of the dividend
   (`-7.5 % 2.0` is -1.5).
 - A float-to-integer `as` truncates toward zero and **saturates**: a value past either end
@@ -450,6 +468,10 @@ let c = switch t {    // tuple patterns: nested patterns, literals, `_`, `mut` b
 
 A tuple pattern `(p0, p1, ..)` also works in `if let` and `while let`; the element count must
 match the tuple's arity.
+
+`t.0.1` lexes `0.1` as a float ("nested tuple access needs parentheses: write '(t.0).1'"). This
+is deliberate: do not add dot-number lexing. A return list `(A, B)` is several results, not a
+tuple; return a tuple through an alias (`type P = (A, B);`).
 
 ## Unions
 

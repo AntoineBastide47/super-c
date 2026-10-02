@@ -35,7 +35,7 @@ ensures the closure owns its captures.
 
 `launch` is a **sugar keyword**: the parser emits a `NODE_LAUNCH` marker, and a desugar
 pass lowers it to `runtime::submit(...)` before typecheck. No later pass ever sees the
-marker. The runtime module is loaded conditionally — programs without `launch` pay nothing.
+marker. The runtime module is loaded conditionally: programs without `launch` pay nothing.
 
 ## Coroutine Model
 
@@ -44,8 +44,8 @@ Each task is a stackful coroutine on its own guard-paged stack (256 KiB via
 (Windows).
 
 Blocking **parks** the coroutine (saves context, returns worker to scheduler) instead of
-blocking the OS thread. A worker and its coroutine share an OS thread — the switch only
-swaps stacks — so per-coroutine fields need no atomics.
+blocking the OS thread. A worker and its coroutine share an OS thread (the switch only
+swaps stacks), so per-coroutine fields need no atomics.
 
 **Preemption:** in a program that loads the coroutine runtime, the compiler emits a
 safepoint at every loop backedge (statement and value loops) of every user function and
@@ -118,6 +118,29 @@ which delays whoever reaches a named point so a race window of nanoseconds becom
 reproducible under the `race` profile. The scheduler's point is `HOOK_STEAL_READ`
 (between a thief's slot reads and its head claim); the lock's are `sync::HOOK_BEFORE_ENQUEUE`,
 `sync::HOOK_AFTER_POP` and `sync::HOOK_AFTER_RELEASE`, driven by `ci/mutex_hunt.spc`.
+A per-worker counter must fold into the process-lifetime total in `destroy_pool`; one that
+does not makes every runtime program abort at shutdown, the installed compiler included
+(recover with an older `super-c` binary).
+
+**Measured scheduler decisions.** Before a tuning change, read the constant's comment and
+the lists in this skill; measure again only with a new argument. Interleaved A/B results
+that set the current design:
+
+- Injection take (`take_injection`): a share proportional to the queue length over the
+  worker count, at most `BATCH_MAX`. A floor of three per lock cost 10% on
+  spawn_to_completion: the taker ran the extra tasks while other workers idled.
+- `Worker` keeps the ring, `head` and `tail` on its first line. `head` and `tail` on a line
+  of their own cost 12% (a push touches two lines); per-task counters on the ring's line
+  cost 10%. New counters go on the later lines.
+- `Scheduler` and task records are line-aligned (`CO_ALIGN`, `sched_alloc`, `co_alloc`).
+  New `Scheduler` fields go last: a field inserted in the middle moved the hot atomics and
+  cost 37% on the spawn lane. Malloc-placed task records cost 5% to 40%.
+- `STASH_MAX` is both the stash cap and the per-lock batch: a larger value halves pool
+  lock traffic and doubles each worker's idle retention. Left at its value.
+- Idle-stack trim is rate-limited (`TRIM_INTERVAL_NS`): a trim on every park cost 22% on
+  bursty lanes.
+- `POOL_BUDGET_DEFAULT` (256 MiB) is below the earlier effective cap of about 323 MiB.
+  Accepted at +10% on live_above_pool and +5% on parked_task_memory.
 
 ## Send / Sync
 
@@ -132,9 +155,13 @@ Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:
 | Aggregates | if all fields are `Send`/`Sync` | (same) |
 | `String`, `Vector<T>`, `Box<T>`, `Map<K,V>` | if `T: Send` | if `T: Send` |
 | `Arc<T>` | if `T: Send + Sync` | if `T: Send + Sync` |
+| `UnsafeCell<T>` | if `T: Send` | no |
 
 Share through `Arc`. Mutate through `Mutex`, `RwLock`, or atomics. Raw pointers cannot
-cross thread boundaries.
+cross thread boundaries. A type with an `UnsafeCell` field is not `Sync`, so `Arc` of it
+is neither `Send` nor `Sync` and every `launch` that captures it fails. Assert both with
+`unsafe extend T as Send {}` and `unsafe extend T as Sync {}`, and write the lock argument
+beside them, as `sync::Mutex` does.
 
 ## Synchronization Primitives
 
@@ -196,15 +223,33 @@ up there left every waiter queued behind it parked for good; the test
 `a_cancel_after_the_wake_claim_passes_the_release_on` pins the window with one busy
 worker.
 
+Measured lock decisions (`std/parallel/sync.spc`):
+
+- Lost acquisitions count against `MUTEX_LOSSES`, not `MUTEX_SPIN`: charged to the spin
+  budget, they made contended channels park too early.
+- `MUTEX_SPIN_QUEUED` at 32 instead of 128 cost channel_mpmc 9.5% and channel_cap64 7.6%.
+- `MUTEX_SPIN` at 32 instead of 256 cost mpmc 92% and section_64 75%; at 0, mpmc 129%.
+- The arm64 spin hint is `isb` (`sc_rt_cpu_relax`). `yield` at the same spin time cost
+  section_0 31% and mixed_callers 36%: it is a no-op on Apple cores, so the loop polls
+  the line many times more.
+- The lock word is inline in `Mutex<T>`: one allocation fewer per lock for +0.4 ns on
+  mutex_uncontended (not false sharing: padding changed nothing).
+- The channel_mpmc residual (39% in `raw_mutex_lock_slow` on one state lock) is accepted:
+  `select` needs one lock per channel, and a shorter spin only buys parks (0.724
+  contended locks against 0.011 parks per message).
+
 Parking an OS thread retains a little: on POSIX, one parker (a mutex, a condvar and a
 flag) per thread that has parked at least once, held for that thread's life so a waker
 can always reach it, plus a fixed bucket table. Windows parks through `WaitOnAddress`
 and retains nothing. Wait records themselves live in the parking frame and are not
 retained; `sc_rt_parked()` counts them, so a test can wait until its plain threads are
-asleep (zero on Windows, which keeps no records; pool workers sleep elsewhere).
+asleep (zero on Windows, which keeps no records; pool workers sleep elsewhere). The bucket
+table (`sc_rt_lot_bucket` in `ffi/sc_rt.c`) is a fixed power of two, each bucket aligned.
+Bucket count did not matter (one bucket against sixteen for sixteen locks measured the
+same), and padding each mutex to a line is the wrong trade: `Mutex<i64>` is 16 bytes.
 
 Method calls auto-deref through the guard (`guard.push(42)`); deref-assignment goes
-through `.get_mut()` (`*guard.get_mut() = v` — plain `*guard = v` is rejected), and any
+through `.get_mut()` (`*guard.get_mut() = v`; plain `*guard = v` is rejected), and any
 mutation needs a `mut` guard binding:
 
 ```superc
@@ -216,7 +261,7 @@ launch || {
 };   // guard drops -> mutex released
 ```
 
-(Imports: `std::parallel::arc`, `std::parallel::sync`, `std::parallel::runtime` —
+(Imports: `std::parallel::arc`, `std::parallel::sync`, `std::parallel::runtime`;
 aliased or glob, e.g. `import std::parallel::sync as *;`.)
 
 ## Channels
@@ -283,7 +328,7 @@ select {
 
 `select` is a sugar keyword lowered in the desugar pass. Backed by
 `std::parallel::selector`. Random fairness among ready arms; first-notifier-wins when
-parked. A `default` arm fires immediately when nothing is ready — a `select` cannot have
+parked. A `default` arm fires immediately when nothing is ready. A `select` cannot have
 both a `timeout` and a `default` arm. A closed channel makes its recv arm ready
 (yielding `None`).
 
@@ -358,10 +403,10 @@ launch || {
 ```
 
 `bind` takes host and port as separate arguments; `accept` returns
-`Result<TcpStream, IoError>` (no peer-address tuple — the stream carries it). Consume
+`Result<TcpStream, IoError>` (no peer-address tuple; the stream carries it). Consume
 these Results with `switch` or `.unwrap()`: the `?` operator cannot move a `Free` payload
 (like a `TcpStream`) out of the Result. A closure that owns a captured stream may call
-its methods but not move it out — pass `&stream` to helpers.
+its methods but not move it out. Pass `&stream` to helpers.
 
 `net::TcpStream` accept/read/write/connect park the coroutine. A hundred connections are
 a hundred parked tasks and one poller thread, not a hundred threads. `UdpSocket` too,
@@ -398,7 +443,8 @@ registers both directions again when the second one gains a waiter. Several wait
 one direction are all woken by its event and each retries. Every `net` handle closes through
 `io::close`, which first excludes the close from every registration in flight (on macOS
 a `close` overlapping a `kevent` registration of the same socket wedges both threads in
-the kernel for good; registering threads count themselves into per-slot counters and
+the kernel for good, and the process stays unkillable in state `?E` until a reboot, so do
+not run wedge experiments casually; registering threads count themselves into per-slot counters and
 back off while a close is pending), then reports the close to the reactor: the record's
 generation moves on, every wait on the number settles as not ready at once, and an arm
 whose registration raced the close registers again and fails. The exclusion also holds
@@ -420,6 +466,13 @@ registered (zero when every task has left its wait), so a test must not treat a 
 as proof that the reactor registered the wait;
 `io_stats()` returns arm, disarm, registration, poll, event, wake and batch counters when
 `IO_STATS` in `io.spc` is true, and zeros otherwise.
+
+Measured reactor decisions: registration by the reactor per arm (a pipe wake per arm) cost
+6% of all-thread cycles on the echo lanes, so the worker registers. A global live-wait
+counter put cross-core line traffic on every wait and, kept in the reactor record, a
+use-after-free window, so the stopping reactor scans the task registry's wait records
+instead (`admit`). Plain echo lanes stay 1.4% to 2.2% above the earlier reactor in cycles
+at flat wall time; accepted.
 
 ## Blocking Calls
 
@@ -499,6 +552,14 @@ pool threads' wakes reach workers through the injection queue one at a time, so 
 mixed compute-and-call load workers take one task per injection lock instead of a
 share; that is the queue's take policy, not the pool.
 
+Other measured pool decisions: an OS mutex for the queue spent fan-out in
+`__psynch_mutexwait`, so the queue keeps its spinlock. Shared parking-lot buckets per
+thread wake cost 7% of cycles on io_short; each thread keeps its own mutex and condvar.
+The spinner's ceiling (`SPIN_MAX`): 8192 cost the mixed lane 12%, 128 made fan-out worse,
+no spinner made the round trip ten times slower, and an early yield of the pool lock cost
+the mixed lane 13%. The spinner covers one queued job: covering every job starved a burst
+behind one thread. A 16-thread pool measured worse (284 against 267 Mcycles).
+
 ## Task Diagnostics
 
 | Tool | Purpose |
@@ -525,6 +586,50 @@ must be smaller FIRST, with a Release store on its side: `live_tasks` reads comp
 before spawns, so while tasks run it can be high but never below the truth. A trap without
 `[task N]` came from a worker's scheduler loop or a plain thread; on macOS the crash report
 in `~/Library/Logs/DiagnosticReports` names the function and line.
+
+### Hunting races and hangs
+
+- Get the stuck thread's backtrace before any fix; a guessed fix hides the cause. Probe
+  with a program that parks instead of aborting on the bad state, then attach `gdb -p`
+  (in a Linux container started with `--cap-add=SYS_PTRACE`) or run macOS `sample` on the
+  child. lldb cannot unwind coroutine stacks; gdb in a Linux container can.
+- Rare races show only under load: run about eight processes at once in a Linux container
+  limited to two to four CPUs.
+- Prove a hunt shape reaches its window: flip `RT_HOOKS`, rebuild, and count the hook hits.
+  A passing hunt proves nothing about its shape.
+- In `ci/mutex_hunt.spc`, create the `Sender` before the holder (a `recv` with no live
+  sender returns at once). A "cancel after selection" shape must release first and cancel
+  inside the held-open pop window.
+- In a hunt's `fail`, print `rt::task_snapshot` (state, phase, wait kind, wait object).
+  `rt::try_shutdown` reports nothing there: its own cancellation releases the parked tasks.
+- After a counter change in runtime or sync code, run race_hunt, cancel_hunt and
+  queue_hunt under the `race` profile twice each; expect zero reports.
+- Linux TSan in Docker needs `--security-opt seccomp=unconfined`. gcc libtsan reports
+  fd-table races on close-under-wait; these are not memory races. macOS clang TSan does
+  not intercept `kevent`.
+- `Condvar::unlink` walks the wait queue, so thousands of timed waiters on one condvar cost
+  O(n^2). A timed-wait benchmark spreads its waiters over many condvars.
+
+### Measuring the runtime
+
+- Keep construction, spawn and join out of the timed round: `bench/mutex_bench.spc`
+  builds a `Crew` once and parks it on a `Barrier` between rounds. A crew that spins
+  between rounds takes the workers the lock needs.
+- mutex_section_0, mutex_section_64 and mutex_handoff are bimodal (all spin, or waiters
+  park). Judge a contention policy on mutex_starvation's distribution, not on a throughput
+  median. A per-round minimum is useless for contended lanes.
+- To show caller-class bias, give all callers one shared budget; a fixed quota per caller
+  cannot show it.
+- Socket echo lanes leave thousands of sockets in TIME_WAIT (30 s on macOS). Back-to-back
+  runs exhaust ephemeral ports and look like a reactor hang: let TIME_WAIT drain between
+  passes.
+- Faster spawn raises resident memory in bursts (more tasks live at once). That is not a
+  leak.
+- A lane stalled at 0% CPU is a runtime deadlock: sample it and fix it before measuring.
+- A scheduler A/B base build also needs `RT_STATS` on; drop calls to entry points the base
+  lacks.
+- A tail-recursive deep-stack helper becomes a loop under optimization. Escape the frame
+  address with `bench::black_box` (`deep` in `bench/micro_bench.spc`).
 
 ## Cancellation Sources and Groups
 

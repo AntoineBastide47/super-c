@@ -3,7 +3,7 @@
 The skills in this directory are the operational documentation for the Super-C
 compiler and language.
 
-Verified against git tag: `v0.14.1`
+Verified against git tag: `v0.15.11`
 
 ## Precedence
 
@@ -36,6 +36,11 @@ Keep stable contracts separate from current implementation details. Replace exac
 counts and historical dates with commands or source references that produce current
 values.
 
+Skills and their references contain no plan or phase references ("plan v2", "the plan's
+gate", "Phase-3"): state the design fact, the threshold as a number, the decision as a
+fact. Driver phase identifiers (`plan`, `borrowck`, `render`) and the optimization
+skill's numbered steps are identifiers and stay.
+
 Every change to compiler, language, build, standard-library, or tooling behavior must
 end with a stale-skill review. The review must name the affected skill, section, stale
 claim, and corrected claim. If no skill is stale, say so.
@@ -63,3 +68,5 @@ does not replace code review.
 - Preserve the self-hosting fixpoint for compiler changes.
 - Run the focused validation required by the selected skill.
 - Review the diff for stale skills before handoff.
+- After a skill edit, run `grep -rnE 'plan v|v2/|the plan|Phase-' skills/` and remove
+  every plan or phase reference it finds.

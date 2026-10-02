@@ -29,8 +29,15 @@ Follow these rules for all tasks unless the current user message gives a more sp
 - Complete the full requested task.
 - Do not stop mid-task to report progress. Continue until the task is complete or blocked on input only the user can provide.
 - Do not defer a sub-item silently. List anything not done, with the reason.
-- Before reporting completion, verify every sub-item against the files, builds, and tests — not against your recollection.
-- Surface every defect you find. Never leave a known defect unreported.
+- Before reporting completion, verify every sub-item against the files, builds, and tests, not against your recollection.
+- Fix every defect you find, also minor ones and ones CI does not hit. Leave a found defect unfixed only when the user decides so.
+- Send a subagent's "too large" or shortcut result back for the full implementation. Never present the shortcut to the user as an option.
+- Run heavy verification (full suite, fixpoint, `ci/gate.sh`, release bootstrap) once, at the end. The coordinator runs it; every agent brief says so.
+- When a plan's gate conflicts with the request, finish the independent work, then ask one question with a current, after, and delta table.
+- An unsatisfied interface bound in your own snippet means the snippet is wrong. Do not add std conformances unasked.
+- A host-specific output difference is a defect where the bytes are produced. Never normalize it in tests.
+- Never pipe a gate into `tail` or another filter: the pipeline returns the last command's status.
+- Never run parallel stress loops of thread- or process-spawning programs on the developer's machine. Use CI or a container with `--pids-limit`.
 - When the user asks a question, answer it. Do not change code unless asked.
 - Verify a checkable fact (git state, API signature, numbers, environment) before you state it.
 - Check related code and behavior when needed to make the requested change correct.
@@ -99,6 +106,9 @@ If natural and correct code fails because of a defect in a tool, compiler, or de
 
 - Never run `git commit` unless the current user message explicitly asks for a commit.
 - Never run `git push` unless the current user message explicitly asks for a push.
+- "Fix it" or "fix CI" is not permission to commit, push, dispatch a workflow, or cut a release. Every remote action needs an explicit ask.
+- Commit on `main`. Create a branch only to fix CI. Do not open a pull request unless asked.
+- The local commit-msg hook rejects `Co-authored-by:` lines and runs the full `check.sh`, which moves the release binary onto `./super-c`. Before any test, fixpoint, or commit claim, run `cmp super-c build/dev/super-c`.
 - Run `git status` before any `checkout`, `restore`, `reset`, or `clean`. Never revert paths you did not create.
 - After any git action, verify with `git status` or `git log` that it happened before reporting it.
 - Permission to commit or push applies only to the current user message. It does not carry to later messages.
@@ -109,6 +119,7 @@ If natural and correct code fails because of a defect in a tool, compiler, or de
 ### Commit Messages
 
 - Use only a short subject line unless the user explicitly asks for a body.
+- Write the subject as one clause under about 72 characters that names the main change.
 - Do not use `--` punctuation or em dashes.
 - Do not mention session-local identifiers such as phase numbers, bug numbers, or increment numbers unless they are real project identifiers required by the user.
 - Do not mention tests, checks, benchmarks, or validation results.
@@ -157,5 +168,5 @@ working rules no skill covers.
 Three rules bind every task regardless of which skill applies:
 
 1. Every compiler change must preserve the byte-identical two-generation fixpoint documented in `super-c-self-hosting`.
-2. Before reporting any task complete, apply the completion contract in `super-c-task-discipline`: every sub-item verified against reality, nothing silently deferred, every found defect surfaced.
+2. Before reporting any task complete, apply the completion contract in `super-c-task-discipline`: every sub-item verified against reality, nothing silently deferred, every found defect fixed.
 3. After you complete a change to the compiler, language, build system, or standard library, apply `super-c-skill-maintenance`: tell the user which skills the change made stale and why, or state that none did.

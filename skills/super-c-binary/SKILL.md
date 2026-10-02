@@ -14,7 +14,7 @@ allowed-tools: Bash Read
 - Report undocumented flags or environment variables as stale documentation.
 
 Super-C is a self-hosting compiler that transpiles `.spc` source to readable C99/C11,
-then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows — MSVC's cl.exe is out
+then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
 of contract) to produce a native binary. The single binary `super-c` drives every stage
 of the workflow.
 
@@ -28,9 +28,21 @@ super-c build app.spc -o app # compile + link only, name the binary (default: a.
 ```
 
 A bare `.spc` argument compiles the file (and its transitive imports) and emits a `build/`
-tree of `.h`/`.c` files. It links and runs nothing —
-use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. Single-file programs
+tree of `.h`/`.c` files. It links and runs nothing.
+Use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. Single-file programs
 emit plain C names; multi-module programs mangle symbols by module path.
+
+The binary finds `std/` in its own directory or in one of its two parent directories
+(`exe_std_dir` in `src/main.spc`: the real executable path, else argv[0]); `ffi/` resolves
+beside that `std/`. A copy of the binary with no `std/` near it loses the prelude ("cannot
+find type 'Vector'"): run test binaries from the repository root, or put `std/` and `ffi/`
+beside the copy. There is no prebuilt `libstd.a`: std compiles from
+source into each binary, because monomorphization needs its generic source.
+
+On macOS, a `cp` over a running Mach-O gets the binary killed (SIGKILL) by code signing:
+`rm` the target before `cp`, or re-sign it (`codesign -f -s -`). The engine installs the
+manifest binary by rename, so `super-c build` is not affected. For a symbolized crash
+trace of the dev build, run it under `lldb -b -o run -k "bt 30" -k quit -- <cmd>` (`-b`: batch mode).
 
 ### Build system (manifest-driven)
 
@@ -116,7 +128,10 @@ super-c command profile      # build then run under samply (if [command.profile]
 ```
 
 `super-c bench` writes an import-only root covering every `.spc` under `bench/` and
-collects `pub @bench` functions. The generated runner carries the checkout's identity
+collects `pub @bench` functions. `tests/` and `bench/` sit beside `src/` at the project
+root. A bench file that imports the program's root module links a second `main`
+(duplicate `__sc_user_main`): put the code under benchmark in a module other than the
+root. The generated runner carries the checkout's identity
 (the short commit, `-dirty` when tracked files differ, `unknown` without version
 control) and prints it as `running benchmarks (build <id>)`. The filter is forwarded to the
 bench binary as a run-time argument, so a filtered run never relinks; a filter that
@@ -187,6 +202,15 @@ platform filter removed (a build-constant `if` or `switch`) skips the lints that
 uses or reachability, as a module with `@platform` items skips the unused-import and
 unused-member lints.
 
+`print`, `println`, `eprint` and `eprintln` are prelude functions (`std/string.spc`) the
+compiler lowers itself, so an `import stdio;` used only for printing is unused. The
+unused-`pub` lint runs only where no external caller can exist: `super-c lint` of a project
+with `src/` whose `build.toml` declares no `[lib]`, and a script build with no `build.toml`
+in the working directory (`src/main.spc`); it never applies to std or ffi
+modules (`lint_pub_applies` in `src/driver/emit.spc`). `--const` never suggests prelude
+functions: a const prelude function turns a failed fold into an error in every downstream
+program (`cs_check_fn` in `src/driver/emit.spc`).
+
 ### Language server
 
 ```sh
@@ -204,6 +228,9 @@ demand (`syntax-ownership.md` in the compiler-internals skill). The server handl
 at a time over a reader on its descriptor: a `didChange` folds every `didChange` already
 waiting into its round, so a superseded buffer is never analyzed; every `publishDiagnostics`
 for an open document carries the `version` it analyzed.
+
+To measure server memory, drive a scripted session (`initialize`, `didOpen`, a loop of
+`didChange`) and sample `ps -o rss= -p <pid>`; `SC_LSP_STATS` shows what each round retains.
 
 ### Project scaffolding
 
@@ -228,6 +255,14 @@ super-c bindgen header.h -o out.spc    # generate .spc bindings from a C header
                                        # (--link=, --header=, -I, --from=, --cflag=, --cc=)
 super-c vendor <source>                # vendor a dependency (--dir=, --ref=, --force)
 ```
+
+`vendor` copies a dependency into `<root>/vendor/<name>` (`vendor_dep` in
+`src/build_system/build.spc`). A git source (a scheme, `git@`, or a `.git` suffix) gets a
+full clone that includes its submodules; `--ref` checks out a branch, tag or commit, and the
+submodules follow it; then every `.git` entry is removed, at every level. A local directory is
+copied without any `.git` entry.
+`vendor/<name>/.vendor` records the source and, for git, the commit. The manifest records
+nothing: `import vendor::<name>::<module>;` resolves by path.
 
 ## build.toml
 
@@ -277,7 +312,7 @@ lto = "thin"
 ```
 
 The compiler decides shard counts itself from the emitted size, about one shard per
-256 KiB of C, and records them in `<gen>/__sc_shards` (`module<TAB>tus<TAB>insts`, one
+256 KiB of C, and records them in `raw/__sc_shards` (`module<TAB>tus<TAB>insts`, one
 line per module with more than one shard); the next build reads that file and keeps a
 count while every shard stays between half and one and a half times the target, so a
 module near a boundary does not flip (a fresh tree splits at the target). A `[shards]` or `[instance-shards]` entry
@@ -298,7 +333,7 @@ edit never moves a chunk between shards.
 | `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
 
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
-character of each profile, not the verbatim flags. **Never profile the `dev` build** —
+character of each profile, not the verbatim flags. **Never profile the `dev` build**:
 sanitizer frames dominate the samples.
 
 Integer overflow (signed and unsigned) traps under `dev`, `debug`, `test` and `race` and wraps under
@@ -530,9 +565,11 @@ per-TU cache and `__sc_manifest` with it), the emitted C is content-synced into 
 and `compile_commands.json` and the emit stamp `.emit_stamp` land beside them, with the
 ThinLTO probe record `.lto` for a profile that requests `lto = "thin"`. `super-c test`
 runs the same engine on the generated test root under the `test` profile in
-`<out-dir>/test/` (`raw/`, `gen/`, `obj/`, the runner `build/test/__tests`), with the emit
+`<out-dir>/test/` (`raw/`, `gen/`, `obj/`, the runner `__tests`), with the emit
 stamp and object cache making an unchanged suite a link check; `super-c bench` uses
-`<out-dir>/bench/<profile>/`.
+`<out-dir>/bench/<profile>/`. Engine code takes every manifest output path from out-dir
+(the `out-dir` key or `--out-dir`, default `build`) and never spells `build/`. The bare
+`super-c <root.spc>` tree under `<root dir>/build/<profile>/raw` is the one exception.
 
 Parallel analysis (the resolve frontier, the type check, borrow check and always-panics
 item jobs, the emission frontier) is used only when the package holds at least 256 KiB of

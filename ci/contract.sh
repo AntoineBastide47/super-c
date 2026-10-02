@@ -61,11 +61,9 @@ CONTRACT_READABLE_FORBIDDEN='^#line '
 CONTRACT_READABLE_SHARED="super_rt.h super_rt.c __sc_fwd.h __sc_registry.c __sc_manifest __ldflags"
 
 # ---- accepted nondeterminism ---------------------------------------------------------------------------
-# Excluded from every byte comparison: the per-TU cache embeds the compiler executable's path and mtime.
+# Excluded from every byte comparison: the per-TU cache header hashes the compiler that wrote it, and the
+# two generations are different binaries.
 CONTRACT_NONDET_FILES=".tu_cache"
-# Identical between generations in ONE checkout, different between checkouts (absolute #include paths to
-# ffi/ and src/): excluded only when two checkouts are compared.
-CONTRACT_PATH_FILES="__sc_fwd.h __ext0_sc_rt.c __ext1_driver_shim.c"
 
 # ---- language fixtures and expected diagnostics --------------------------------------------------------
 # The test corpus, one file per entry, sorted; every expected diagnostic is asserted inside the file that

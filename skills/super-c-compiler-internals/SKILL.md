@@ -72,7 +72,7 @@ cc + link                 -- external C compiler (parallel window under --jobs)
 Order facts that surprise people:
 
 - **HIR runs inside the resolve stage**, per module, immediately after that module's
-  `resolve()` — not before resolution and not after typecheck (`resolve_module`,
+  `resolve()`, not before resolution and not after typecheck (`resolve_module`,
   `src/driver/emit.spc`).
 - There is **no separate desugar pass or `src/desugar/`**: `src/hir/lower.spc` IS the
   desugar stage. The parser is `src/ast/parser.spc` (no `src/parser/` either).
@@ -101,6 +101,12 @@ pass ends; the language server frees a closed document's after every round and p
 back on demand (`BodyArena.released`, `Interp.body_missing`); the model, the release contract
 and the owned records the later passes read instead are in
 [syntax-ownership.md](references/syntax-ownership.md).
+
+A node's payload is the `NodeAs` union (`src/ast/ast.spc`). Check the node kind before you
+read a member. A wrong-variant read returns heap-dependent bytes: it passed on macOS and
+Linux and failed only on Windows, in LSP completion, constant evaluation and `dyn fn`
+handling. Measure `sizeof(Node)` before you add a field to `FunctionData` or any other
+`NodeAs` member; rare data such as lifetime lists goes to an `Ast` side table.
 
 ### ItemId
 
@@ -177,7 +183,7 @@ Package slot. There is no `override_ast` indirection (it was deleted); the Ast n
 leaves its slot, so lookups that land back on the in-flight module read the live tree.
 
 **Cross-module lookup:** `Package::lookup(mid, name, want_type)` finds a public top-level
-decl. It is **O(1)** — a byte-exact symbol probe plus one name-map probe into the package
+decl. It is **O(1)**: a byte-exact symbol probe plus one name-map probe into the package
 declaration index (`ensure_index`, built in deterministic module and source order).
 
 **Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority):
@@ -192,7 +198,7 @@ declaration index (`ensure_index`, built in deterministic module and source orde
 ## Core IR
 
 The Core IR (`src/ir/core.spc`) is the typed, control-flow, non-SSA executable form
-every body lowers to — one `CoreBody` per function, method, closure, or constant
+every body lowers to: one `CoreBody` per function, method, closure, or constant
 initializer. Storage is dense append-only vectors of u32-indexed records with body-local
 pools; no per-node heap allocation, no pointers into other stages.
 
@@ -232,7 +238,7 @@ seen otherwise only by the formatter and resolver; typecheck, borrowck, const-ev
 codegen never see one.
 
 - `lower_to_core_call` turns a marker into a real `NODE_CALL` by seeding the callee's
-  resolution to a std shim (a resolved `loader::SugarItem` from the package index — no
+  resolution to a std shim (a resolved `loader::SugarItem` from the package index; no
   name lookup) and flipping the node kind. `launch` → `SI_SUBMIT`, etc.
 - `lower_select` builds nodes: every identifier it creates has its resolution seeded through
   `Ast::seed_resolution` (as do the typechecker's `format` and print rewrites). A seed is
@@ -247,10 +253,10 @@ assignment, and string-switch lowering happen in the typechecker.
 
 ## The Freeze Contract
 
-From `src/ast/facts.spc` (the typed-facts boundary — the read-only interface Core IR
+From `src/ast/facts.spc` (the typed-facts boundary, the read-only interface Core IR
 lowering and every later consumer reads instead of the Ast side tables):
 
-At type-check completion every semantic **decision** table is final — nodes, children,
+At type-check completion every semantic **decision** table is final: nodes, children,
 resolutions, per-node types, coercions, instance demands, method_refs, dyn/deref
 selections, wide literals, attributes, lifetime declarations, `call_info`, `op_method`, bound
 calls (`bound_calls`: the conformance a call through a generic interface's bound, an operator
@@ -264,7 +270,7 @@ ids into final ids and remaps every retained table in the same step, and a final
 never removed or renumbered.
 
 Enforcement is report-only and env-gated: under `SC_FACTS_CHECK` the driver snapshots
-per-module watermarks after typecheck and verifies them **twice** — after borrowck and
+per-module watermarks after typecheck and verifies them **twice**: after borrowck and
 after codegen.
 
 ## Borrow Checker
@@ -273,7 +279,7 @@ after codegen.
 is typed. It **extends `TypeChecker`** (same state, helpers, and diagnostics) rather
 than defining a new context. Two layers:
 
-1. **Declaration-level lifetime analyses** — elision rules on return types (references,
+1. **Declaration-level lifetime analyses**: elision rules on return types (references,
    slices and lifetime-generic paths are lifetime positions, inside tuples and every type
    argument too; `Self` is never elided; a slice node carries its `[]'a T` lifetime in
    `indirect_type.lifetime` like a reference; `tc_elision_source` names the parameter an
@@ -288,7 +294,7 @@ than defining a new context. Two layers:
 2. **The flow analysis**, per function (`bc_fn`):
    - `bc_ir_lower` lowers the item's bodies (closures included) to Core IR; each
      `Lowerer` also records an **event tape** at the walk's AST sites.
-   - `bc_replay` replays that tape — the same helper calls the old AST walk made
+   - `bc_replay` replays that tape: the same helper calls the old AST walk made
      (`bc_let_post`, `bc_assign_pre`, `tc_scope_exit`, ...), without traversing the
      expression tree. The AST walk itself was deleted.
    - `bc_ir_analyze` runs the analyses over the lowered bodies through one reusable
@@ -376,6 +382,26 @@ than defining a new context. Two layers:
 Callee resolution is never re-derived: the typechecker's `call_info` side table is the
 bridge (`bc_call_info`).
 
+Lifetimes are erased structurally: no `Ty` or `TyInstance` carries a region
+([type-identity.md](references/type-identity.md)). The parser keeps a declaration's
+lifetime parameters in a separate list (`Ast::set_lifetimes`, `lifetimes_of`), so
+`generics` holds only mono-relevant parameters. Variance has little to act on, because
+aggregate lifetime arguments are erased.
+
+Rules for a new borrow or region rule:
+
+- Measure over-rejection on the compiler and `std` first. Receiver-level heuristics ("any
+  `&` argument to a borrow-carrying receiver is stored") rejected the compiler's own
+  source and were reverted. The fixes that held changed the model (where a borrow is
+  rooted, reborrow versus fresh borrow), not the engine.
+- `str` is a long-lived field type (`self.source: str`). A rule that pins every `str`
+  producer over-rejects. A borrow-carrying result pins its receiver only when the receiver
+  carries no borrow (`String::as_str` pins the `String`); a borrow-carrying receiver
+  passes its region through (the result-pin step in `src/borrowck/borrowck.spc`,
+  `pin_view` in `src/borrowck/facts.spc`).
+- A point-set (MIR-style) region engine was measured: about 15 NLL divergence cases, all
+  accepted already. Do not build one without a concrete over-rejection.
+
 ## Drop Elaboration
 
 `src/ir/drops.spc`: destruction is a Core IR property. The storage markers the lowerer
@@ -440,7 +466,7 @@ checks is [ownership-analysis.md](references/ownership-analysis.md).
 
 ## CTFE (Compile-Time Function Evaluation)
 
-`src/ir/interp.spc` is the Core IR interpreter — the only evaluator (the AST-based one
+`src/ir/interp.spc` is the Core IR interpreter, the only evaluator (the AST-based one
 was deleted). It serves typechecker folds (array lengths, const args, static_assert),
 `const`/`static` emission, `type_info` rendering, the `fx` scanner (const-fn
 eligibility, always-panics), and lint probes.
@@ -484,7 +510,7 @@ Full monomorphization is the only generic backend.
   the per-module `Ast.instances` pool; demand tables (`method_used`,
   `always_methods`) gate what emits.
 - **During emission:** `cemit_package` builds an `InstGraph` (`src/graph/instances.spc`)
-  seeded with the `irl::Keep` cache and calls `collect()` — it discovers every concrete
+  seeded with the `irl::Keep` cache and calls `collect()`; it discovers every concrete
   instantiation by walking lowered Core IR bodies from concrete roots, expanding generic
   bodies under substitution frames. Roots are the concrete bodies of every module that
   emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the
@@ -514,7 +540,7 @@ Full monomorphization is the only generic backend.
   with `Self`, the conformance's arguments and the method's bound; the emitter
   (`iface_target_sym`, `IfTargs`) spells the same instance (`C__conv__u8`) and demands it
   (`demand_impl_targs`); the evaluator binds them in `call_in`.
-- **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
+- **Emit order:** `Package::emit_order`: if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 
 ## Emission Buffers and Probes

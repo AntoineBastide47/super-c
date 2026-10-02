@@ -50,7 +50,7 @@ let result: i32 = handle.join();
 ```
 
 `thread::spawn<F: fn move() T + Send + 'static, T>(f)` returns a `JoinHandle<T>`.
-(Anonymous functions spell the return type after the parameter list — there is no
+(Anonymous functions spell the return type after the parameter list; there is no
 Rust-style `->`.)
 
 ## Arc
@@ -62,7 +62,7 @@ let shared = Arc::<Data>::new(Data { n: 7 });
 let clone = shared.clone();    // atomic increment
 
 launch || {
-    let val = clone.get();     // &Data — Arc has no deref
+    let val = clone.get();     // &Data (Arc has no deref)
     println("n = {}", val.n);
 };
 ```
@@ -73,7 +73,7 @@ inner value when the last `Arc` is freed.
 ## Mutex and RwLock
 
 ```superc
-// Mutex — the guard exposes the value via get()/get_mut(); *guard = v is rejected
+// Mutex: the guard exposes the value via get()/get_mut(); *guard = v is rejected
 let m = Mutex::<i32>::new(0);
 {
     let mut guard = m.lock();  // RAII guard, auto-release on scope exit
@@ -93,7 +93,7 @@ let rw = RwLock::<Vector<i32>>::new(Vector::<i32>::new());
 ```
 
 Both are task-aware: a coroutine that contends parks instead of blocking its worker.
-Method calls auto-deref through a guard; deref-assignment does not — write through
+Method calls auto-deref through a guard; deref-assignment does not. Write through
 `.get_mut()` (`*guard.get_mut() = v`, never `*guard = v`).
 
 ## Channel

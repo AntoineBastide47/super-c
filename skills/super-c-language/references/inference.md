@@ -33,7 +33,8 @@ Never inferred (the signature barrier):
 - An unsuffixed integer literal defaults to `i32`, or to the first of `i64` and `u64` that
   holds its value when `i32` does not (`let x = 3000000000;` is an `i64`).
 - An unsuffixed float literal defaults to `f32`, or to `f64` when its value is past the f32
-  range (`let f = 1e39;` is an `f64`).
+  range (`let f = 1e39;` is an `f64`). The `f32` default is a deliberate choice, parallel to
+  the `i32` integer default; do not change it to `f64`.
 - Literal-only arithmetic (unsuffixed literals under `+ - * / %`, `& | ^ << >>`, unary `-`
   and parentheses) is typed as one expression. An expected builtin type of its kind (from a
   declaration, a parameter, a return, or the other operand of an enclosing operator) types every
@@ -77,6 +78,10 @@ Ranked from best to worst for candidate comparison:
    concrete to `dyn` erasure, `Box<T>` to `Box<dyn I>`.
 5. Literal adaptation (an unsuffixed literal re-typed by context).
 6. User conversions through `From`/`widen` (explicit conformances only).
+
+The integer widening matrix and the reference, pointer and void-pointer coercion matrices are
+user decisions, pinned by `int_widening_matrix`, `ref_pointer_coalescing` and
+`void_pointer_coalescing` (tests/typechecker_test.spc); do not change them without asking.
 
 Nested type positions require equality, not conversion, unless the declared variance
 of the position says otherwise. A top-level safe conversion never makes a nested

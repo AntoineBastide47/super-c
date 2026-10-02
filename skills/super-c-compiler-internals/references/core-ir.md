@@ -1,7 +1,7 @@
 # Core IR Reference
 
 Source of truth: `src/ir/core.spc`. The Core IR is the typed, control-flow, **non-SSA**
-executable form every body lowers to — one `CoreBody` per function, method, closure, or
+executable form every body lowers to: one `CoreBody` per function, method, closure, or
 constant initializer. Storage is dense append-only vectors of u32-indexed records with
 **body-local pools**: no per-node heap allocation, no pointers into other stages. Types
 are the owning module's TypeIds; syntax is referenced only through spans and the
@@ -36,7 +36,7 @@ pub struct CoreBody {
 }
 ```
 
-`CoreBody::clear` re-seeds for a fresh body keeping every pool's capacity — one Lowerer
+`CoreBody::clear` re-seeds for a fresh body keeping every pool's capacity: one Lowerer
 is reused across bodies.
 
 ## Locals
@@ -63,7 +63,7 @@ A `Place` is a base local plus a projection **range** into `projections`
 | Kind | Meaning |
 |------|---------|
 | `PJ_DEREF` | Dereference |
-| `PJ_FIELD` | `data` = stable field index, `sub` = field decl NodeId (`data == PJ_UNION_FIELD` marks a union member — fields alias) |
+| `PJ_FIELD` | `data` = stable field index, `sub` = field decl NodeId (`data == PJ_UNION_FIELD` marks a union member; fields alias) |
 | `PJ_INDEX_CONST` | `data` = constant index |
 | `PJ_INDEX_OP` | `data` = OperandId of the dynamic index |
 | `PJ_DOWNCAST` | `data` = variant index, `sub` = variant decl NodeId |
@@ -100,7 +100,7 @@ Each `Projection` carries the type **after** it applies.
 
 ## Rvalues
 
-`Rvalue { a, b, target, item, kind, c }` — packed to 24 bytes; one record per expression:
+`Rvalue { a, b, target, item, kind, c }`: packed to 24 bytes; one record per expression:
 
 | Kind | Meaning |
 |------|---------|
@@ -115,7 +115,7 @@ Each `Projection` carries the type **after** it applies.
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
 | `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc) |
-| `RV_SLICE` | Structural `base[lo..hi]` view — kept structural so end-openness survives |
+| `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
 
 ## Statements
 
@@ -132,7 +132,7 @@ Each `Projection` carries the type **after** it applies.
 
 ## Terminators and Blocks
 
-`BasicBlock { stmt_start, stmt_len, term, sealed }` — a statement range plus exactly one
+`BasicBlock { stmt_start, stmt_len, term, sealed }`: a statement range plus exactly one
 terminator; the verifier rejects unsealed blocks. `Terminator` is 64 bytes:
 
 | Kind | Meaning |
@@ -162,7 +162,7 @@ need.
 
 ## Lowering Contract (`src/ir/lower.spc`)
 
-- Consumes ONLY the typed-facts boundary (`ast::facts`) plus syntax and spans — every
+- Consumes ONLY the typed-facts boundary (`ast::facts`) plus syntax and spans: every
   semantic decision is read from recorded facts, never re-derived.
 - Documented evaluation order: receiver before arguments, arguments left to right;
   short-circuit `&&`/`||` evaluate the right operand only on the deciding path;

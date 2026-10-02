@@ -15,6 +15,8 @@
 - Do not reuse one name for different concepts when a qualifier removes ambiguity.
 - Prefer related names that make related code visually symmetric when clarity is equal.
 - Prefer names that also read well in diagnostics and documentation.
+- The concurrency feature is "coroutines", spawned with `launch`. Never write "goroutines" or
+  `go`, in code, docs or commit messages.
 
 ## File Organization
 
@@ -32,12 +34,30 @@ Top-down order within each file:
 Module-level constants must be declared **above** their first use. Keep important
 definitions near the top when dependencies allow it.
 
+## Methods
+
+- A free function whose first parameter is `&T` or `&mut T` of a type defined in the same file
+  is a method in that type's `extend` block. Some older code keeps free-function receivers; do
+  not copy it.
+- Exceptions stay free: helpers on std or foreign receivers (`String`, `Vector`, a type of
+  another module) and comparators or sort keys passed as function pointers.
+- On conversion, drop a prefix that repeats the type (`lexer_error` becomes `error`); keep a
+  prefix with other meaning (`b_*` build, `ex_*` expression).
+- Never move a module-level constant into an `extend` block: it becomes an associated
+  constant and bare references to it break.
+- `super-c fmt` only parses, so a bad rename shows only at `super-c build`.
+
 ## Formatting
 
 - `super-c fmt` is canonical. Treat its output as authoritative.
 - Wadler-style layout, width 120.
 - 4-space indentation.
 - `@fmt.skip` on an item exempts it from the formatter.
+- Fully canonical: blocks always expand, and the renderer owns every line break.
+- A parameter group (`a, b: T`) prints as written; separately written parameters never merge.
+  A comment in the parameter list prints each parameter on its own.
+- `fmt` refuses to write a file when its output's comment count differs from the lexer's
+  comment-token count.
 
 ## Comments
 

@@ -27,7 +27,7 @@ Before any optimization work, understand these non-negotiable constraints:
    [fixpoint.md](references/fixpoint.md) for the verification protocol.
 
 2. **LTO gate.** Gate LTO first. Do not keep a micro-optimization that LTO already
-   performs — at `-O3` with LTO (the `release` and `bench` profiles use `lto = "auto"`,
+   performs: at `-O3` with LTO (the `release` and `bench` profiles use `lto = "auto"`,
    which Clang runs as full LTO, see the binary skill), Clang inlines hot calls across
    modules, CSEs `strlen` of literals, and lowers fixed-size `memcmp` to branchless
    compares. Under opt-in ThinLTO (`lto = "thin"`) cross-module inlining is import-based,
@@ -42,7 +42,7 @@ Before any optimization work, understand these non-negotiable constraints:
    Judge on **Mcyc/Kalloc**, not wall-clock ms (clock frequency varies 2.0–3.8 GHz
    between E/P cores and thermal state); the run prints min/median/p95/sd of every
    round, and a wide spread means the box was not quiet. First run after a rebuild is
-   a cold outlier — ignore it. Run 3x interleaved A/B on a quiet machine. A run that
+   a cold outlier. Ignore it. Run 3x interleaved A/B on a quiet machine. A run that
    reports a C compiler or linker failure exits nonzero and measures nothing.
    `sh ci/perf_gate.sh` compares a run with the limits resolved from the accepted
    constants in `ci/baseline.env` and the accepted-work ledger `ci/ledger.tsv` (every
@@ -59,7 +59,7 @@ Before any optimization work, understand these non-negotiable constraints:
 
 Work through these phases in order. Each phase grounds the next: do not skip ahead.
 
-### Phase 0 — Profile (grounded proof, not guesswork)
+### Phase 0: Profile (grounded proof, not guesswork)
 
 **Never guess what to optimize.** Every optimization must start from profiled evidence.
 
@@ -68,8 +68,13 @@ Work through these phases in order. Each phase grounds the next: do not skip ahe
 super-c bench --no-run
 
 # Profile with samply (1000 Hz is samply's default rate; raise it for short runs)
-samply record --rate 1000 build/bench-bin
+samply record --rate 1000 build/bench-bin --filter=self_transpile
 ```
+
+`build/bench-bin` runs every benchmark unless filtered: unfiltered, concurrency I/O and
+scheduler idle time took about 44% of the samples. Filter the run or the profile before
+you conclude. `super-c bench` builds `bench-bin` with the compiler that runs it, so an
+emitter change shows in the benchmark only when the new compiler runs `bench`.
 
 **Run samply 10–15 times minimum** to capture stable, statistically significant data.
 Single-run profiles miss intermittent hotspots and are skewed by cache state. A function
@@ -84,13 +89,13 @@ super-c command profile
 **Headless capture (required for agents, useful for scripted runs):** by default samply
 opens the Firefox Profiler UI in a browser, which cannot be read programmatically.
 `--save-only` skips the UI, and `--unstable-presymbolicate` writes a `.syms.json`
-sidecar — without it, native frames in the saved JSON are unsymbolicated hex addresses:
+sidecar. Without it, native frames in the saved JSON are unsymbolicated hex addresses:
 
 ```sh
 # Capture N runs headlessly (each run writes profile + symbol sidecar)
 for i in $(seq 1 15); do
   samply record --save-only --unstable-presymbolicate \
-    -o "prof-$i.profile.json.gz" build/bench-bin
+    -o "prof-$i.profile.json.gz" build/bench-bin --filter=self_transpile
 done
 
 # Aggregate all runs into one hotspot ranking (runs-present, then total samples)
@@ -101,7 +106,7 @@ samply load prof-1.profile.json.gz
 ```
 
 `scripts/samply_top.py` resolves each frame address against the sidecar symbol tables and
-ranks functions by how many runs they appear in, then by total samples — a one-run fluke
+ranks functions by how many runs they appear in, then by total samples: a one-run fluke
 sorts below a hotspot that shows up everywhere.
 
 Two macOS gotchas, both verified:
@@ -110,6 +115,9 @@ Two macOS gotchas, both verified:
 - **Profile the bench binary, never the dev build.** The dev profile carries
   ASan/UBSan, and sanitizer frames (`__asan_memcpy`, `StackDepotBase::Put`) dominate the
   profile, burying the real hotspots.
+- To profile a compiler run directly, build the compiler under the `bench` profile (the
+  `release` profile strips symbols) and make it samply's root process: no `env` or `sh`
+  wrapper between them.
 
 (`samply record --pid <PID>` attaches to a running process; run `samply setup` once
 first on macOS to self-sign the samply binary.)
@@ -126,7 +134,7 @@ What to capture from each profile:
 - Allocation sites (look for `malloc`/`realloc`/`calloc` in hot paths)
 - Cache miss indicators (wide stride patterns, pointer chasing)
 
-### Phase 1 — Analyze Hotspots and Eliminate Allocations
+### Phase 1: Analyze Hotspots and Eliminate Allocations
 
 With profiled hotspots in hand, attack the highest-impact targets first.
 
@@ -162,23 +170,23 @@ Hot-path allocation checklist:
 4. For each: is the allocation only used within a single loop iteration? If yes, clear
    and reuse instead of create and destroy.
 
-### Phase 2 — Compact Hot Structs
+### Phase 2: Compact Hot Structs
 
 Smaller structs mean fewer cache misses. The target is the **next lower power of 2** in
 bytes.
 
 **Why compaction:** Decompacting (a shift or mask to recover a field) is cheaper than
 the cache miss a larger struct causes. The compiler already uses this: `Token` is a
-packed `u64`, not a struct — bits 0–31 start offset, 32–55 length, 56–63 kind
-(`src/lexer/token.spc`). `Node` is kept dense (currently 56 bytes, align 4 — the
+packed `u64`, not a struct: bits 0–31 start offset, 32–55 length, 56–63 kind
+(`src/lexer/token.spc`). `Node` is kept dense (currently 56 bytes, align 4; the
 generated C carries `_Static_assert(sizeof(ast__Node) == 56 && _Alignof(ast__Node) == 4)`
 so any drift is a build error).
 
 **How to compact:**
 
 1. **Measure current size.** Use `static_assert(sizeof(T) == N, "...")` or grep the
-   emitted layout asserts in `build/*/gen/` (`_Static_assert(sizeof(<mangled>) == N`).
-   Never hand-compute — padding and alignment are target-dependent.
+   emitted layout asserts in `build/<profile>/raw/` (`_Static_assert(sizeof(<mangled>) == N`).
+   Never hand-compute: padding and alignment are target-dependent.
 
 2. **Identify waste.** Look for:
    - Booleans stored as full bytes or words (pack into a flags bitfield)
@@ -200,10 +208,10 @@ so any drift is a build error).
 4. **Verify.** Add a `static_assert` for the new size. Run the benchmark. Confirm the
    fixpoint holds.
 
-**Do not unpack something already packed.** `Token` is a 64-bit packed value by design —
+**Do not unpack something already packed.** `Token` is a 64-bit packed value by design:
 unpacking it into a struct would regress every pass that touches tokens.
 
-### Phase 3 — Reduce Algorithmic Complexity
+### Phase 3: Reduce Algorithmic Complexity
 
 Even constant-factor improvements matter at compiler scale. The ordering:
 
@@ -232,7 +240,7 @@ new lookup, check whether an existing interning table covers it.
 **Overload resolution** and **instance propagation** are the passes most likely to harbor
 hidden quadratic behavior. Profile them specifically on large generic-heavy inputs.
 
-### Phase 4 — Stack Over Heap
+### Phase 4: Stack Over Heap
 
 The stack is faster than the heap: no allocator overhead, no fragmentation, perfect
 spatial locality, automatic cleanup.
@@ -256,7 +264,7 @@ spatial locality, automatic cleanup.
 - Data that must outlive the current scope
 - Data shared across threads (use `Arc`)
 
-### Phase 5 — Analyze Generated Assembly
+### Phase 5: Analyze Generated Assembly
 
 When all higher-level theories are exhausted and the profiler still shows a hot function,
 inspect the native assembly the C compiler generates.
@@ -272,20 +280,20 @@ objdump -d build/super-c | grep -A 100 '<function_name>'
 ```
 
 What to look for:
-- **Missed vectorization** — a loop the compiler should have auto-vectorized but did not
+- **Missed vectorization**: a loop the compiler should have auto-vectorized but did not
   (check for data dependencies or aliasing that block it)
-- **Branch misprediction** — a hot branch with poor prediction (reorder to put the common
+- **Branch misprediction**: a hot branch with poor prediction (reorder to put the common
   case first, or convert to branchless with conditional moves)
-- **Redundant loads** — the same memory loaded repeatedly because the C compiler cannot
+- **Redundant loads**: the same memory loaded repeatedly because the C compiler cannot
   prove no aliasing (cache the value in a local, use `restrict` via the emitter)
-- **Unnecessary sign/zero extensions** — type mismatches between 32-bit and 64-bit values
+- **Unnecessary sign/zero extensions**: type mismatches between 32-bit and 64-bit values
   causing extension instructions on every use
-- **Unaligned accesses** — struct fields crossing cache lines (fix with field reordering
+- **Unaligned accesses**: struct fields crossing cache lines (fix with field reordering
   or `@c.align`)
-- **Spill-heavy functions** — too many live variables forcing register spills to the stack
+- **Spill-heavy functions**: too many live variables forcing register spills to the stack
   (split the function, reduce live variable count)
 
-### Phase 6 — Compiler-Specific Optimizations
+### Phase 6: Compiler-Specific Optimizations
 
 Beyond the general phases, these patterns are specific to the Super-C compiler's
 architecture.
@@ -305,6 +313,7 @@ Summary:
   hash map for data already interned elsewhere.
 - **Body-sharing for generic instances:** when multiple monomorphizations share the same
   lowered body, emit once and reference.
+- **Rejected levers:** read the measured list in "What to Avoid" before you try a lever.
 
 ## Measurement Protocol
 
@@ -323,14 +332,27 @@ super-c build
 3. Apply the optimization.
 4. Build the **after** binary from a clean tree.
 5. Run `super-c bench` 3 times, record Mcyc and Kalloc for each.
-6. Interleave: run before, after, before, after, before, after — on a quiet machine.
+6. Interleave: run before, after, before, after, before, after (on a quiet machine).
+
+Rules for a valid A/B:
+- Build both binaries with the same gates and switches. A binary with runtime counters
+  compiled in against one without them gave 300 to 800% false regressions.
+- A change is a regression only when the median moves more than its own three-run spread
+  (about 5%).
+- On macOS the cycle counts come from `proc_pid_rusage` (`std/testing/bench_sys.c`) and
+  include kernel time of every thread.
+- For clean C-compile timings, set `SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_NO_EMIT_CACHE=1
+  SC_NO_TU_CACHE=1`; otherwise a cache makes the "clean" build fast.
+- Never pipe a gate into another command (`./check.sh | tail`): the pipeline returns the
+  status of the last command. Write the output to a file, then read it.
 
 Between steps, check byte identity on a fixed reference tree before the full gate: copy
-the compiler beside `std`/`ffi`, build the reference sources with `--jobs=1` and again
-with every core into separate `--out-dir`s (`SC_NO_CACHE=1 SC_NO_TU_CACHE=1`), and
-`diff -rq` the `gen` trees against the baseline compiler's tree. Only `.tu_cache` and
-path-dependent build records may differ. This takes seconds and localizes a
-reordering to the change that caused it; `ci/gate.sh` confirms at the end.
+each compiler in turn to the same path beside `std`/`ffi`, build the reference sources
+with `--jobs=1` and again with every core into separate `--out-dir`s
+(`SC_NO_CACHE=1 SC_NO_TU_CACHE=1`), and `diff -rq` each `<out-dir>/<profile>/raw` tree
+against the baseline compiler's tree. The emitted tree does not depend on the out-dir,
+so require an empty diff. This takes seconds and localizes a reordering to the change
+that caused it; `ci/gate.sh` confirms at the end.
 
 ### What to report
 
@@ -385,7 +407,9 @@ compiler from before exact folding); both re-lowering regions together <= 1 ms; 
 type-stats probe steps within 2x of the intern hits. The test target of `super-c test`
 is the generic-heavy corpus: its collect line reports a budget stop today (the
 width-generic integer's closure), so a change there is judged by its record count and
-`graph` time against the record's table, never by the self-build alone.
+`graph` time against the record's table, never by the self-build alone. `super-c test`
+first builds the compiler with the invoking binary, so its second stats record and probe
+table are the test corpus; `--cc=true` breaks `super-c test`.
 
 ### Bench gate policy
 

@@ -6,6 +6,12 @@ identity check under each `SC_TASK_DELAY` seed of `ci/contract.sh`: emitted tree
 table, item index digest and diagnostics) as part of the correctness gate; the steps
 below are the manual form.
 
+The gate keeps the per-TU cache on and excludes the files in `CONTRACT_NONDET_FILES`
+(`.tu_cache`) from every tree comparison (`same_tree` in `ci/gate.sh`). It excludes nothing
+else and normalizes nothing: both generations build in one checkout, so the
+files with absolute paths are identical. The manual form
+below disables the per-TU cache instead, so it diffs the whole tree.
+
 Emission hashes include paths. Both generations must use the same source, output,
 standard-library, and FFI paths. Place the bootstrap binary beside the copied `std/`
 and `ffi/` directories so executable-relative library lookup stays consistent.
@@ -30,13 +36,14 @@ export SC_NO_TU_CACHE=1
 mv "$fix_dir/src/build" "$fix_dir/gen1"
 
 # Compile gen-1's emitted C directly.
-cc -O1 -std=gnu11 -Wall -Wextra -Werror $(rg --files "$fix_dir/gen1/dev/raw" -g '*.c') \
+cc -O1 -std=gnu11 -funsigned-char -Wall -Wextra -Werror \
+   $(find "$fix_dir/gen1/dev/raw" -name '*.c') \
    $(cat "$fix_dir/gen1/dev/raw/__ldflags") -o "$fix_dir/gen2-bin"
 
 # Gen-2 uses the same inputs and output path, with no previous build tree.
 "$fix_dir/gen2-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"
 
-# Require an empty diff, with no exclusions or normalization.
+# Require an empty diff over the whole tree: the per-TU cache is off, so nothing is excluded.
 diff -r "$fix_dir/gen1" "$fix_dir/src/build"
 ```
 
@@ -45,10 +52,13 @@ unless the contract itself is intentionally changed.
 
 ## Absolute Paths in the Emitted Tree
 
-External-C wrappers and `__sc_fwd.h` embed absolute include paths. A bootstrap binary
+`__sc_fwd.h` and the `@c.source` wrappers (`__ext<N>_<stem>.c`) embed absolute include
+paths, `__sc_manifest` records their hashes, and every std TU that spells an assertion
+location embeds the absolute std path (for example `__std/int__inst.c`). A bootstrap binary
 outside the temporary tree can select a different `std/` and `ffi/` even when the source
 and output paths match. Correct the library selection and repeat from clean output
-trees; do not normalize or exclude these files.
+trees; do not normalize or exclude these files. Never compare trees from two checkouts:
+run both compilers in one tree (see the optimization skill's `references/fixpoint.md`).
 
 ## Do Not Trust the Cache
 
@@ -56,8 +66,9 @@ Disable build-record, emit-stamp, and per-TU caches for both generations with th
 environment variables above. Start each generation without a `build/` directory.
 `touch` does not invalidate content-hash caches.
 
-The per-TU cache header includes the running compiler's path and modification time
-(`src/driver/tuc.spc:header_hash`). Even a fresh cache file can differ between generations.
+The per-TU cache header hashes the running compiler's content (`header_hash` in
+`src/driver/tuc.spc`, through `compiler_id`). Gen-1 and gen-2 are different binaries, so
+even a fresh cache file differs between generations.
 `SC_NO_TU_CACHE=1` prevents that file from being written; deleting it after emission
 would hide a difference instead of checking the complete output tree.
 
@@ -72,3 +83,4 @@ would hide a difference instead of checking the complete output tree.
 | Whole-tree diff from a path change | Trees emitted at different paths (see above) |
 | Different absolute include paths | Compilers selected different library roots |
 | Only `.tu_cache` differs | Per-TU caching was not disabled |
+| `super_rt.c` static assertion on `CHAR_MIN` | `-funsigned-char` is missing from the C compile |

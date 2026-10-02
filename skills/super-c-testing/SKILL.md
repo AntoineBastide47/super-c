@@ -52,10 +52,13 @@ fn drains(fx: &mut Fx) {
 }
 ```
 
-`@test_init` returns a fixture **value** — built fresh for each test that declares a
+`@test_init` returns a fixture **value**, built fresh for each test that declares a
 matching parameter. Constraints: the `@test_init` function takes no parameters and must
 return a plain non-generic struct or enum; a suite `@test_init` (inside an `extend`) must
-return the extended type itself.
+return the extended type itself. Fixtures are values because a `static mut` cannot hold a
+`Free` type. A test that reads a process-lifetime counter (such as the runtime's cancel
+count) records its baseline in a `@test_init` fixture (`Base` in `tests/cancel_test.spc`)
+and never assumes a fresh process.
 
 ### Teardown with `@test_free`
 
@@ -67,7 +70,7 @@ fn teardown(fx: &mut Fx) {
 ```
 
 Optional. Runs after the test body. The fixture's owned memory is RAII-freed
-automatically after `@test_free` — you only need `@test_free` for effects RAII does not
+automatically after `@test_free`. You only need `@test_free` for effects RAII does not
 cover.
 
 ### Expected panics
@@ -80,7 +83,9 @@ fn rejects_bad_input() {
 ```
 
 Passes only when the body aborts. Skipped under `--test-no-fork` (no fork to catch the
-signal).
+signal). The runner counts any nonzero exit as the panic, so under `SC_LEAK_CHECK=fatal` a
+leak (exit 23) alone can make it pass. Run it once without that variable to confirm the
+intended panic.
 
 ### Global fixtures
 
@@ -102,13 +107,13 @@ fn reads_data(fx: &mut Fx, env: &GlobalEnv) {
 ```
 
 `@test_init(global)` builds a suite-wide environment **once** in the parent process.
-Tests receive it as `&` (shared reference) — and the per-test fixture parameter must
+Tests receive it as `&` (shared reference), and the per-test fixture parameter must
 come **before** the global env (the compiler rejects the reverse order). Fork's
 copy-on-write makes cross-test mutation impossible by construction.
 
 ## Method Suites
 
-Tests can be grouped as methods on a type — the receiver **is** the fixture:
+Tests can be grouped as methods on a type. The receiver **is** the fixture:
 
 ```superc
 extend Counter {
@@ -139,9 +144,11 @@ Requirements:
 | `assert_eq(a, b)` | Fails with left/right values, source text, and file:line |
 | `assert_ne(a, b)` | Fails when values are equal |
 
-Arguments are only **read** (not moved) — asserting on an owned `String` leaves it
+Arguments are only **read** (not moved): asserting on an owned `String` leaves it
 usable. The source text of the expression is captured at compile time; a message spells at
-most 1000 bytes of each expression and ends a longer one with `...`.
+most 1000 bytes of each expression and ends a longer one with `...`. The
+`std/test.spc` bodies are fallbacks that `abort()`, so a constant-evaluated caller bails to
+runtime instead of folding an assertion away.
 
 ## Running Tests
 
@@ -178,10 +185,21 @@ compile once per cache, not once per fixture.
 ### Fork isolation
 
 Each test runs in a **forked child process**. A panic, failed assertion, or crash fails
-only that test — the other tests continue. The parent collects exit status and reports.
+only that test. The other tests continue. The parent collects exit status and reports.
 
 `--test-no-fork` disables forking for debugger attachment. `should_panic` tests are
 skipped in this mode.
+
+Windows has no `fork`: the parent runs the global `@test_init`/`@test_free` pair once, and
+each test runs in its own child process that rebuilds a private global env. CRT
+differences that affect the runner and tests: `_dup2` returns 0 on success; `_spawnv`
+joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit code
+0xC0000409) and flushes nothing, so atexit handlers and the leak report do not run;
+`freopen` resets to full buffering and `_IOLBF` acts as `_IOFBF`, so a capture child sets
+`_IONBF` on both streams. Diagnose a Windows-only failure on the real `windows-latest`
+runner: edit the job in `.github/workflows/debug.yml`, which runs on dispatch only. An
+emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
+instrument the test file and rebuild the suite.
 
 ### Output capture and the failure report
 
@@ -237,15 +255,37 @@ every transpile-class command (a script, `fmt`, `lint`, the transpile form an en
 `test`, `bindgen` and the rest) to the native binary. A CLI test that needs the working
 directory of a guest command or runs a shell line returns early under `cli::on_wasm()`.
 
+The guest has no stable working directory (wasmtime ignores the test's `chdir`) and no
+subprocesses, so guest command lines use absolute paths. The wrapper passes
+`--argv0` with the module's absolute path, and the compiler finds `std/` and `ffi/` beside
+argv0: the module must sit beside them (the repo root by default, else `SC_WASM_MODULE`),
+or every compile fails with "cannot find type 'str'". The wrapper forwards every `SC_*`
+variable into the guest except its own plumbing (`SC_WASM_MODULE`, `SC_WASM_NATIVE`,
+`SC_TEST_SUPERC`); a new plumbing variable for the wrapper must join that exclusion. Run
+one test locally with `SC_TEST_SUPERC=$PWD/ci/wasm-superc.sh ./super-c test --quiet
+--test-filter=NAME`. To find a wasm-only miscompile, bisect at object level: compile every
+TU with both toolchains, link mixed sets, and binary-search the TU set.
+`-fsanitize=undefined -fsanitize-trap=undefined` needs no runtime on wasm, and
+`WASMTIME_BACKTRACE_DETAILS=1` gives file and line in traps. A single-flag fix
+(`-fwrapv`, `-fno-strict-aliasing`) that makes a failure go away is usually a heap-layout
+change; do not trust it.
+
 ## Lint-Based Leak Detection
 
 ```sh
 super-c lint                    # statically detect missing frees (error-level by default)
 ```
 
-The `missing-free` lint fires at compile time for owning values that escape without being
-freed. Combined with the runtime leak tracker, this provides two independent paths to
-leak-freedom.
+The `missing-free` lint is an error. It flags only a non-generic union with an owning
+field (pointer, reference and bare type-parameter fields excepted) and no `Free`
+conformance: structs and enums derive `Free`, but a union cannot, since only its author
+knows the active member (`tc_lint_missing_free` in `src/typechecker/typechecker.spc`). It
+does not track owning values in general; the runtime leak tracker covers those. A test
+that leaks on purpose uses `forget(..)`.
+
+A lint test that imports a sibling fixture file must run the lint from the fixture root
+(`cli::superc_env_in(root, ..)`, as `lint_reports_cross_module_duplicate_conformance` in
+`tests/lint_test.spc` does); otherwise use a prelude-loaded ffi module such as `stdio`.
 
 ## The Compiler's Own Test Corpus
 
@@ -268,7 +308,7 @@ filtering for the host like a real build.
 
 ## Test Design Rules
 
-- **One assertion per concept.** Split independent checks into separate `assert` calls —
+- **One assertion per concept.** Split independent checks into separate `assert` calls:
   a combined boolean hides which condition failed.
 - **No global mutable state.** The fork model means tests run in separate processes.
   Shared state must go through the global fixture mechanism.
@@ -327,3 +367,34 @@ filtering for the host like a real build.
   `tests/cli_test.spc` gives the blocking calls a C wait that returns only once another
   task on the same single worker opens it, so the calls return the open gate only if
   they parked; a duration they overlap in measures the runner.
+- **Grep every new or reviewed concurrency test** for `time::sleep(` and `now_ns() - `;
+  justify each hit by the rules above or replace it with a state wait.
+- **Equal deadlines come from one absolute value.** A test that needs equal deadlines
+  computes one `base` and passes it to every wait (`cv.wait_until(&g, base)`), never
+  `sleep_ns(base - now)` per waiter.
+- **Probe markers go to stderr.** `SC_LEAK_CHECK=fatal` ends a leaking process with
+  `_Exit(23)`, which drops buffered stdout. Detect a stuck run by process age, not by a
+  missing marker line.
+- **Failure injection counts every substrate allocation.** `sc_rt_fail_arm(FAIL_ALLOC, n)`
+  fails the `n`th allocation of the C substrate in construction order (`tests/thread_test.spc`
+  comments name each one). Edit one call by its unique context; a search-and-replace on
+  `FAIL_ALLOC, n` changes every test with that `n`.
+- **Allocation-count tests divide over many runs** (64). Under `SC_LEAK_CHECK` the tracker
+  itself allocates irregularly for the first few measurements of a shape, and a warm-up
+  alone does not fix that.
+- **Unset, do not empty.** `sc_unsetenv` removes a variable; a variable set to `""` still
+  passes a `getenv(..) != NULL` check. On Windows `sc_unsetenv` is `_putenv_s(name, "")`,
+  which removes it.
+- **No shell on Windows.** `sc_run` and `sc_exec` call `CreateProcessA` directly. A harness
+  command line never uses `cd X && K=V cmd`: pass the variable through `sc_run`'s env
+  parameter and change directory with `shim::sc_chdir` (`cli::superc_env_in`), resolving
+  `cli::superc_path()` before the change. A test that runs a shell line returns early under
+  `if cli::on_wasm() || cli::on_windows() { return; }`.
+- **No parallel `system()`.** macOS `system()` serializes across threads; `popen` or a
+  spawn scales (about seven times). Run parallel subprocess work through those.
+- **Pin our own rules, not libc's.** C leaves the zero sign of `fmin`/`fmax` unspecified
+  (glibc returns the second operand for `(+0, -0)`), so a differential test asserts our
+  sign rule on both-zero pairs (`tests/float_test.spc`).
+- **Drive the driver through subprocess tests.** Prune and macro-paste defects that do
+  not change emitted C pass the self-hosting fixpoint; only a test that runs the built
+  driver catches them.

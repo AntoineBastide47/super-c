@@ -6,51 +6,43 @@ this contract.
 
 ## The Protocol
 
-`super-c build` (default `dev` profile) puts the binary at `build/dev/super-c` and the
-generated C under `build/dev/gen/`.
+`sh ci/gate.sh` runs the contract (`sh ci/gate.sh --core` skips `check.sh` and the
+profile builds). The manual clean-room form is
+[fixpoint-verification.md](../../super-c-self-hosting/references/fixpoint-verification.md)
+in the self-hosting skill.
 
-```sh
-# 1. Clean state — the content-hash cache can serve stale bytes; never verify
-#    incrementally, and do not rely on `touch` (hashes ignore timestamps).
-rm -rf /tmp/fix
-mkdir /tmp/fix
+The emitted C tree is `gen_root`: `<root>/build/<profile>/raw` for a bare build,
+`<out-dir>/<profile>/raw` for a manifest build. A manifest build also content-syncs it into
+`<out-dir>/<profile>/gen` for the C compile; compare `raw`, the emitter's output.
 
-# 2. Copy the source tree (no build/ directory, no caches)
-cp -R . /tmp/fix/tree
+The gate's form (`ci/gate.sh`, `ci/contract.sh`):
 
-# 3. Build gen-1: the current compiler builds itself
-cd /tmp/fix/tree
-super-c build
-cp -R build/dev/gen /tmp/fix/gen1
-cp build/dev/super-c /tmp/fix/gen1-bin
+1. Copy `src`, `std`, `ffi` and `build.toml` into a clean tree, and the compiler beside
+   them, so `std`/`ffi` resolve inside the copy.
+2. Gen-1: `./super-c build` in the tree; keep `build/dev/raw` and `build/dev/super-c`.
+3. Remove `build/`. Gen-2: the gen-1 binary, copied into the tree root, builds again.
+4. `diff -r` the two `raw` trees, excluding only `CONTRACT_NONDET_FILES` (`.tu_cache`).
 
-# 4. Build gen-2: the gen-1 binary builds the same source
-rm -rf build
-/tmp/fix/gen1-bin build
-cp -R build/dev/gen /tmp/fix/gen2
+The per-TU cache header hashes the running compiler's content (`header_hash` in
+`src/driver/tuc.spc`, `compiler_id` in `src/driver/util.spc`), so `.tu_cache` differs
+between two generations by construction. Exclude it, or set `SC_NO_TU_CACHE=1` for both
+generations: then the file is not written and the diff needs no exclusion. Any other
+difference is a semantic regression unless the contract itself is intentionally changed.
 
-# 5. Diff gen-1 vs gen-2 emitted C
-diff -r /tmp/fix/gen1 /tmp/fix/gen2
-```
+## Absolute Paths in the Emitted Tree
 
-An empty diff means the fixpoint holds. **Any** non-empty diff is a semantic regression
-unless the contract itself is intentionally changed.
+Emission spells absolute paths: the include paths in `__sc_fwd.h` and the `@c.source`
+wrappers (`__ext<N>_<stem>.c`), the content hash of `__sc_fwd.h` in `__sc_manifest`, and
+the source location of every assertion in a `std` module (std paths resolve beside the
+compiler binary, for example `__std/int__inst.c`).
 
-## Absolute Paths in the Generated Tree
-
-Three generated files embed absolute `#include` paths to the repo's `ffi/` and
-`driver_shim` headers: `__ext0_sc_rt.c`, `__ext1_driver_shim.c`, and `__sc_fwd.h`.
-
-- **Gen-1 vs gen-2 in the same tree** (the protocol above): both generations embed the
-  same paths, so no exclusion is needed — diff everything.
-- **A/B comparison across two different tree copies** (before-change vs after-change):
-  the embedded paths differ by construction. Exclude or normalize those three files:
-
-```sh
-diff -r --exclude='__ext0_sc_rt.c' --exclude='__ext1_driver_shim.c' \
-        --exclude='__sc_fwd.h' /tmp/a/gen /tmp/b/gen
-# then compare the three excluded files with the path prefix normalized out
-```
+- **Gen-1 vs gen-2, or an A/B of two compilers, in one tree:** both builds see the same
+  paths when each compiler sits at the same place beside the same `std`/`ffi`. Diff
+  everything (minus `.tu_cache` when the TU cache is on). The out-dir does not change the
+  emitted tree.
+- **Two different tree copies:** the paths differ by construction, in the files above and
+  in every std TU that spells an assertion location. Do not compare across copies. Run
+  both compilers in one tree instead.
 
 ## Common Fixpoint Breakages
 
@@ -61,6 +53,8 @@ diff -r --exclude='__ext0_sc_rt.c' --exclude='__ext1_driver_shim.c' \
 | Missing or extra function | Dead code elimination changed by optimization |
 | Different constant values | Compile-time evaluation order dependency |
 | Different line/column in emitted comments | Formatter or emitter position tracking changed |
+| Only `.tu_cache` differs | Per-TU cache on and not excluded |
+| Path-only diffs in `__sc_fwd.h`, `__ext*`, `__sc_manifest`, std TUs | Builds ran in different trees or with different `std`/`ffi` roots |
 
 ## Prevention
 

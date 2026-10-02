@@ -7853,6 +7853,76 @@ fn vendor_clones_git_and_strips_the_repository() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A git dependency with a submodule, vendored at an older tag: the submodule holds the tag's commit,
+// and no `.git` survives at any level (a submodule's `.git` file would point at the deleted
+// `.git/modules`). Local submodule clones need `protocol.file.allow`, passed through the environment.
+@test
+fn vendor_strips_submodule_git_and_follows_the_ref() {
+    let p = cli::proj_new();
+    p.mkfile("subrepo/s.spc", "pub fn s() i32 { return 1; }\n");
+    p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
+    let root = str::from_cstr(p.rootp());
+    let gc = "-c user.email=v@e -c user.name=v -c commit.gpgsign=false -c protocol.file.allow=always";
+    if git_ok(root, "subrepo", "init -q") != 0 {
+        // No git on this machine: the clone path cannot be exercised.
+        return;
+    }
+    assert_eq(git_ok(root, "subrepo", "add s.spc"), 0);
+    let mut c1 = String::new();
+    c1.format_into("{} commit -q -m a", gc);
+    assert_eq(git_ok(root, "subrepo", c1.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", "init -q"), 0);
+    let mut sa = String::new();
+    sa.format_into("{} submodule add -q \"{}/subrepo\" sub", gc, root);
+    assert_eq(git_ok(root, "srcrepo", sa.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", "add lib.spc"), 0);
+    assert_eq(git_ok(root, "srcrepo", c1.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", "tag v1"), 0);
+    // Move the submodule past the tag and record it in the superproject.
+    p.mkfile("subrepo/s.spc", "pub fn s() i32 { return 2; }\n");
+    let mut c2 = String::new();
+    c2.format_into("{} commit -q -am b", gc);
+    assert_eq(git_ok(root, "subrepo", c2.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo/sub", "pull -q"), 0);
+    assert_eq(git_ok(root, "srcrepo", c2.as_str()), 0);
+    let mut gb = String::new();
+    gb.format_into("git clone -q --bare \"{}/srcrepo\" \"{}/dep.git\"", root, root);
+    assert_eq(cli::run_quiet(gb.cstr()), 0);
+    let mut args = String::new();
+    args.format_into("vendor \"{}/dep.git\" mylib --ref=v1", root);
+    let r = cli::superc_env_in(
+        root,
+        "GIT_CONFIG_COUNT",
+        "1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always",
+        args.as_str(),
+    );
+    assert(r.ok(), "the vendor succeeds");
+    let mut s = String::new();
+    s.format_into("{}/vendor/mylib/sub/s.spc", root);
+    switch loader::read_file(s.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "return 1"), "the submodule holds the tag's commit");
+            t.free();
+        },
+        None => {
+            assert(false, "the submodule arrived");
+        },
+    };
+    let mut sg = String::new();
+    sg.format_into("{}/vendor/mylib/sub/.git", root);
+    assert(unsafe shim::sc_mtime(sg.cstr()) == 0, "no submodule .git survives");
+    let mut tg = String::new();
+    tg.format_into("{}/vendor/mylib/.git", root);
+    assert(unsafe shim::sc_mtime(tg.cstr()) == 0, "no top .git survives");
+}
+
+// `git -C <root>/<dir> <args>`, its exit status.
+fn git_ok(root: str, dir: str, args: str) i32 {
+    let mut g = String::new();
+    g.format_into("git -C \"{}/{}\" {}", root, dir, args);
+    return cli::run_quiet(g.cstr());
+}
+
 // A writable C global: `static mut` inside an extern block DECLARES what the C side defines. The
 // access carries static mut's unsafe rule across the FFI, codegen emits no definition and no mangled
 // name: the emitted C reads and writes the library's own symbol.

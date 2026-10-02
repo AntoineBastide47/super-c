@@ -11,7 +11,7 @@ allowed-tools: Bash Read
 - Treat any gen-1 versus gen-2 diff as a correctness failure.
 - Follow the clean-room fixpoint reference: identical source and library paths, caches disabled.
 - Fix compiler defects instead of adding source workarounds.
-- Check bootstrap-tag ordering when parser or attribute syntax changes.
+- Follow the new-syntax cadence when parser, attribute, or manifest syntax changes.
 
 The Super-C compiler is self-hosting: it compiles itself. This is a hard correctness
 contract, not a development convenience.
@@ -110,10 +110,68 @@ where the compiler's own sources (and the std they use) instantiate such a bound
 conformance explicitly (`extend u32 as Copy {}`, `extend Global as Copy {}`, the AST pool element
 types); the new compiler accepts a restatement only where its derivation agrees.
 
+## New Syntax Cadence
+
+CI bootstraps from the previous release, so new syntax reaches `src/`, `std/` and `ffi/` in
+four ordered steps:
+
+1. Commit the parser and formatter change; the source keeps the old syntax.
+2. Cut a release.
+3. Validate the release: download its binary and build the tree with it.
+4. Write source in the new syntax.
+
+The same order binds new std surface that the release cannot parse or fold. The formatter
+ships in the same commit as the parser: an old `fmt` deletes syntax it does not know. Until
+step 4, tests embed the new syntax only inside string literals.
+
+## Runtime Helpers Called by std
+
+A C helper that std calls goes in a header beside std (for example `std/int128.h`), never in
+the compiler-embedded `super_rt.h` (`src/driver/rt_c.spc`): the release binary emits its own
+older runtime header, so a helper added there is missing when the release builds the tree.
+
+## Recovery from a Broken Compiler
+
+A compiler that over-rejects valid source cannot rebuild itself, and reverting the source does
+not help. Download the release binary as `check.sh` does
+(`gh release download --pattern super-c-macos-arm64.tar.gz`), build the source with it as
+`check.sh` does (`build --bootstrap-tags`), then continue with the rebuilt compiler.
+
+## Platform Lanes
+
+### Windows (mingw)
+
+A Windows-only failure often comes from mingw emulating POSIX:
+
+- `stat().st_ino` is 0, so file identity uses `GetFileInformationByHandle`
+  (`sc_same_file` in `src/driver_shim.c`).
+- Files and stdio open in text mode: write with `"wb"` and use binary stdio, else CRLF
+  breaks `\`-continued macros and LSP framing.
+- `_dup2` returns 0 on success. `_spawnv` joins arguments with spaces and quotes nothing.
+- `abort()` is fail-fast (exit code 0xC0000409): no flush, no `atexit`, no leak report.
+- `freopen` resets a stream to full buffering and `_IOLBF` acts as `_IOFBF`: a capture
+  stream needs `_IONBF` (`src/driver/test.spc`).
+- `tmpfile()` writes to the drive root: use `GetTempPathA` plus `fopen("wb")`. No
+  `open_memstream`.
+- No `fork`: the test parent runs the global `@test_init`/`@test_free` pair once and each
+  child rebuilds a private env.
+
+Stack traces: `sc_trace_install()` (`src/driver_shim.c`, called from `src/main.spc`) prints,
+on `SIGABRT`, the PE base (`trace: base %p`) and each return address as `trace: +0x<off>`.
+It is in the compiler source, so gen-1 carries it. Symbolize against the same binary:
+`x86_64-w64-mingw32-addr2line -f -e super-c.exe <0x140000000 + off>`.
+
+### wasm32
+
+A single C flag that makes a wasm failure disappear (`-fwrapv`, `-fno-strict-aliasing`)
+usually changes the heap layout, not the defect: do not accept it as the fix. Bisect at the
+object level: compile every TU with both toolchains, link mixed sets, and binary-search for
+the TU that changes the result.
+
 ## Single Compilation Path
 
 Only the multi-file `build/` tree emitter exists. The single-TU emitter and REPL were
-deleted. One path eliminates divergence bugs — every output path that exists must be
+deleted. One path eliminates divergence bugs: every output path that exists must be
 correct, and maintaining two doubles the surface area.
 
 ## Porting-Bug Patterns
@@ -123,12 +181,12 @@ likely to appear when porting a new compiler pass to Super-C.
 
 ### Moving an owning field out of a reference
 
-An owning (`Free`) field cannot be moved out through a reference — the owner would later
+An owning (`Free`) field cannot be moved out through a reference: the owner would later
 free a hollowed-out value. The error is
 `cannot move a field out of a reference; use 'replace' to swap ownership out`.
 
 ```superc
-// WRONG: moves self.m out through &mut self — compile error
+// WRONG: moves self.m out through &mut self (compile error)
 extend Loader {
     fn run(self: &mut Loader) usize {
         let a = self.m;              // error: cannot move a field out of a reference
@@ -156,7 +214,7 @@ precedence differs from C.
 
 ### Stored `&mut` live across `&&` / `||`
 
-Borrows are non-lexical, so a *temporary* `&mut` in a call argument ends at the call —
+Borrows are non-lexical, so a *temporary* `&mut` in a call argument ends at the call:
 `if check(&mut state) && state.ready` is legal. The conflict needs a **stored** borrow
 still live across the expression:
 
@@ -188,7 +246,7 @@ return t;
 ```
 
 Extracting a Copy field in a call argument (`self.process(self.type_at(x).name)`) is
-*not* an error — the immutable borrow ends when the field read completes, before the
+*not* an error: the immutable borrow ends when the field read completes, before the
 `&mut self` call begins.
 
 ### Result tied to `&mut self` held across another `&mut self` call

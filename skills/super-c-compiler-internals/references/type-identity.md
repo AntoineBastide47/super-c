@@ -107,6 +107,17 @@ an `Ast` without a package (`gt == null`, the unit tests) keeps module-local ids
 pool and never tags them. `TYPE_MAX` (`0x1FFFFFF0`) is fatal: the inference terms keep
 two tag bits above a 30-bit payload, so bit 29 is the last free tag bit.
 
+`Ty::eq` compares raw bytes (`memcmp` of the 16-byte record) and `Ty::hash` reads raw
+words, so identity is sound only over canonical bytes (`TyInstance` compares and hashes
+its significant fields only). `Ast::ty_canon`
+(`src/ast/ast.spc`) rewrites a `Ty` through a zeroed union holding only the kind's live
+arm; the intern gate and the pre-seeded builtin pool both pass through it. Without it,
+equal types built differently interned twice ("expected 'Mode', found 'Mode'", seen only
+under clang for wasm32). Any new byte-identity hash or equality needs the same gate.
+
+Lifetimes are not part of a type: a region field in `Ty` or `TyInstance` would change the
+bytes of every record and, because ids number in insertion order, renumber every type.
+
 `Ast::intern_type` (and `intern_instance`, `intern_dyn`, `intern_const_lin`) looks the
 canonical record up in the package table first: a hit is the final id (`mark_used`
 records it in the module's `used` list). A miss goes to the module pool under a

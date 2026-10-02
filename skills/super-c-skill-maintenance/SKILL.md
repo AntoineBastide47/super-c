@@ -13,7 +13,7 @@ allowed-tools: Bash Read
 - Flag only claims that are wrong, contradictory, or materially incomplete.
 - Name the affected section and corrected claim in the handoff.
 
-This skill runs **after** a task is complete. It does not modify skills itself — it
+This skill runs **after** a task is complete. It does not modify skills itself. It
 identifies which skills are stale and reports them to the user with reasons. The
 validator supplies source-reference and changed-path evidence; human review decides
 whether behavior changed.
@@ -21,7 +21,7 @@ whether behavior changed.
 ## When to Fire
 
 At the end of every task that changes the compiler, language semantics, build system,
-standard library, or tooling. Do not fire during the task — wait until the change is
+standard library, or tooling. Do not fire during the task. Wait until the change is
 done and verified.
 
 ## What to Check
@@ -78,10 +78,10 @@ Format:
 ```
 Skills that need updating after this change:
 
-1. super-c-binary — The new `--target-cpu` flag is not documented.
+1. super-c-binary: The new `--target-cpu` flag is not documented.
    Section: "Common flags" table. Add a row for `--target-cpu=NAME`.
 
-2. super-c-compiler-internals — The resolver now runs after desugar, not before.
+2. super-c-compiler-internals: The resolver now runs after desugar, not before.
    Section: "Pipeline Overview" diagram and references/stages.md stage 5.
    The current text says resolver runs before desugar.
 ```
@@ -89,7 +89,7 @@ Skills that need updating after this change:
 If no skills need updating, say so explicitly:
 
 ```
-No skills need updating — this change does not affect any documented behavior.
+No skills need updating: this change does not affect any documented behavior.
 ```
 
 ## Rules
@@ -109,5 +109,5 @@ No skills need updating — this change does not affect any documented behavior.
 - **Group related updates.** If one change affects three sections of the same skill, that
   is one update with three points, not three separate updates.
 - **Prioritize correctness over completeness.** A skill that says something wrong is
-  urgent. A skill that omits a new feature is less urgent — the feature works whether
+  urgent. A skill that omits a new feature is less urgent: the feature works whether
   or not the skill mentions it.

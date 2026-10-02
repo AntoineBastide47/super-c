@@ -2867,12 +2867,17 @@ pub fn scaffold_project(dir: str, name: str) i32 {
     return 0;
 }
 
-// Byte-for-byte file copy, streamed: read_file would also work for source text, but a vendored tree
-// can carry anything (test fixtures, images), so nothing here may assume text.
+const COPY_TREE_DEPTH: u32 = 64;
+
 // Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
 // the project's own history, and a nested repository (the dependency's, or a submodule's) would be
-// invisible to (and shadow files from) the repository the project lives in.
-fn copy_tree(srcd: str, dstd: str) bool {
+// invisible to (and shadow files from) the repository the project lives in. Directory links are
+// followed, so `depth` bounds a link cycle.
+fn copy_tree(srcd: str, dstd: str, depth: u32) bool {
+    if depth == COPY_TREE_DEPTH {
+        eprintln("vendor: '{}' nests deeper than {} directories (a directory link cycle?)", srcd, COPY_TREE_DEPTH);
+        return false;
+    }
     mkdir_p(dstd);
     let lo = list_dir(srcd, true);
     if lo.is_none() {
@@ -2888,7 +2893,7 @@ fn copy_tree(srcd: str, dstd: str) bool {
         let d = loader::join2(dstd, names.at(i).as_str());
         let mut sc = s.clone();
         if unsafe shim::sc_stat_isdir(sc.cstr()) == 1 {
-            if !copy_tree(s.as_str(), d.as_str()) {
+            if !copy_tree(s.as_str(), d.as_str(), depth + 1) {
                 ok = false;
             }
         } else if !copy_file(s.as_str(), d.as_str()) {
@@ -2896,6 +2901,24 @@ fn copy_tree(srcd: str, dstd: str) bool {
         }
     }
     return ok;
+}
+
+// Delete every `.git` entry under `dir`: the top repository's directory and each submodule's
+// `.git` file, which would point at the deleted `.git/modules`.
+fn strip_git(dir: str) {
+    let lo = list_dir(dir, true);
+    if lo.is_none() {
+        return;
+    }
+    let names = lo.unwrap();
+    for i in 0..names.len() {
+        let mut d = loader::join2(dir, names.at(i).as_str());
+        if names.at(i).as_str() == ".git" {
+            rm_rf(d.as_str());
+        } else if unsafe shim::sc_lstat_isdir(d.cstr()) == 1 {
+            strip_git(d.as_str());
+        }
+    }
 }
 
 /// `super-c vendor <src> [name]`: copy a dependency's source into `<root>/vendor/<name>`, where the
@@ -2977,6 +3000,21 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
                 rm_rf(dest.as_str());
                 return 1;
             }
+            // The checkout moves only the top repository: submodules must follow the ref's commits.
+            let mut su = Vector::<String>::new();
+            push_arg(&mut su, "git");
+            push_arg(&mut su, "-C");
+            su.push(dest.clone());
+            push_arg(&mut su, "submodule");
+            push_arg(&mut su, "update");
+            push_arg(&mut su, "-q");
+            push_arg(&mut su, "--init");
+            push_arg(&mut su, "--recursive");
+            if exec_args(&mut su, null) != 0 {
+                eprintln("vendor: submodule update failed at '{}' in '{}'", ref_arg, src);
+                rm_rf(dest.as_str());
+                return 1;
+            }
         }
         // The exact commit, captured BEFORE the repository is stripped: afterwards nobody can ask.
         let head = git_head(dest.as_str());
@@ -2985,15 +3023,14 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
             stamp.push_str(head.as_str());
             stamp.push_str("\"\n");
         }
-        let g = loader::join2(dest.as_str(), ".git");
-        rm_rf(g.as_str());
+        strip_git(dest.as_str());
     } else {
         let mut sp = String::from_str(src);
         if unsafe shim::sc_stat_isdir(sp.cstr()) != 1 {
             eprintln("vendor: '{}' is not a directory (a git source needs a scheme, git@, or .git)", src);
             return 1;
         }
-        if !copy_tree(src, dest.as_str()) {
+        if !copy_tree(src, dest.as_str(), 0) {
             eprintln("vendor: copy failed for '{}'", src);
             rm_rf(dest.as_str());
             return 1;

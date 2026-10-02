@@ -26,7 +26,7 @@ extern "C" {
 }
 ```
 
-- Extern names match the C symbol exactly — never module-mangled. The same applies to an
+- Extern names match the C symbol exactly, never module-mangled. The same applies to an
   opaque `type`: it renders as its bare C name, so it must name a type some included
   header actually defines (`FILE` works headerless because `stdio.h` is auto-included;
   an invented name fails in the C compile).
@@ -56,6 +56,14 @@ extern "C" "./local.h" {         // local header -> #include "local.h"
 The `#include` is emitted in the generated C. A locally-resolved header gets its path
 rewritten to work from inside the `build/` tree. All 31 C standard headers are
 auto-included via `super_rt.h`, so standard C functions need no explicit header.
+
+`setjmp.h` is banned: `longjmp` bypasses normal control flow (drops, defers, borrow scopes) and
+breaks the memory-safety model. Never add it to the runtime includes or to `ffi/`.
+
+A C header must not share its stem with a Super-C module: the emitted module header has that
+name and one shadows the other (`ffi/sc_runtime.spc` binds `sc_rt.h`, not `sc_runtime.h`). A
+std file must not share its stem with an `ffi/` module it imports (`std/parallel/atomics.spc`
+imports `ffi/atomic.spc`).
 
 ## Backing C Sources
 
@@ -108,7 +116,7 @@ parse error). A value starting with `-` may hold several whitespace-separated fl
 library or source otherwise goes on its own extern block.
 
 Link flags are written to `build/__ldflags` (one per line). Libraries declare their flag
-once where the binding lives — importers never repeat it. Flags apply automatically to
+once where the binding lives. Importers never repeat it. Flags apply automatically to
 `--test` builds.
 
 ## Opaque Types
@@ -120,7 +128,7 @@ extern "C" "dirent.h" {
 ```
 
 Opaque types lower to `TYPE_OPAQUE` and render as their bare C name (not `void`), so the
-declaring block must include the header that defines the name — an opaque type used
+declaring block must include the header that defines the name: an opaque type used
 without its header fails in the C compile. By-value handles (`clock_t`) also work when
 the C type is a scalar.
 
@@ -151,7 +159,7 @@ fn format_into(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 ```
 
 `va_list`, `va_start`, `va_arg(ap, T)`, and `va_end` are compiler intrinsics. The
-binding does not need `mut` (the lint flags it). Do not name such a helper `format` —
+binding does not need `mut` (the lint flags it). Do not name such a helper `format`:
 that collides with the prelude's `format()` shim in the generated C.
 
 ## The ffi/ Convention
@@ -182,7 +190,7 @@ FFI modules include safe wrappers alongside raw bindings (e.g., `stdio` has an R
 | Pass to C API expecting `const char*` | `String::cstr()` (writes trailing NUL) | `.ptr()` (no NUL) |
 | Build from C string | `str::from_cstr(p)` | Direct cast |
 
-`.cstr()` exists only on `String` and takes `&mut self` — a `str` view has no `cstr`;
+`.cstr()` exists only on `String` and takes `&mut self`: a `str` view has no `cstr`;
 materialize it first with `.to_string()`.
 
 ```superc
@@ -207,7 +215,7 @@ extern "C" "legacy.h" {
 ```
 
 Exported functions get external linkage (non-`static` in the generated C). `@c.import`
-goes on the `fn` declaration **inside** the extern block — placed before the block it
+goes on the `fn` declaration **inside** the extern block; placed before the block it
 parses but does not rename the call sites.
 
 ## Pointers to Arrays
@@ -259,6 +267,19 @@ Generates `.spc` bindings from C headers (`src/bindgen/bindgen.spc`). Use it for
 APIs where hand-writing bindings is impractical. The generated output follows the `ffi/`
 conventions.
 
+## Platform C Pitfalls
+
+The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L`.
+
+- macOS: strict `_POSIX_C_SOURCE` breaks `<sys/sysctl.h>` and hides `ru_maxrss`.
+  src/driver_shim.c declares `sysctlbyname` locally and defines `_DARWIN_C_SOURCE` before
+  its includes; std/testing/bench_sys.c defines `_DARWIN_C_SOURCE` too.
+- Windows (mingw) fakes POSIX. `stat().st_ino` is 0, so a dev+ino identity test matches
+  unrelated files (src/driver_shim.c uses `GetFileInformationByHandle`). Files and stdio
+  default to text mode: CRLF breaks `\`-continued macros and byte framing, so open with
+  `"wb"` and set stdio binary. `tmpfile()` writes to the drive root: use `GetTempPathA`
+  (`%TEMP%`) and `fopen(.., "wb")`. There is no `open_memstream`.
+
 ## Common Mistakes
 
 | Mistake | Fix |
@@ -266,7 +287,8 @@ conventions.
 | Passing `str` to C `%s` | Use `%.*s` with `.len()` + `.ptr()` (`str` has no `.cstr()`) |
 | Missing `unsafe` on extern call | Add `unsafe` prefix or block |
 | Repeating `@c.link` in every importing module | Declare it once on the binding module |
-| Using `void` for opaque types | Use `type X;` (with its defining header) — renders as the real C name |
+| Using `void` for opaque types | Use `type X;` (with its defining header): renders as the real C name |
 | Assuming `String::ptr()` is NUL-terminated | It is not. Use `String::cstr()` |
+| Passing `.ptr()` to an `sc_*` path call (`sc_mkdir`, `sc_stat_isdir` in src/driver_shim.spc) | Use `.cstr()` as for any C call; a heap string whose allocation equals its length has no NUL after it, so failures depend on the length |
 | Inventing an opaque type name (`type CFile;`) | The name must be a real C type a header defines |
 | `@c.import` before the extern block | Put it on the `fn` inside the block |

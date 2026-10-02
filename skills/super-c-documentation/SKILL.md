@@ -23,7 +23,7 @@ filler and stays deleted. Silence is the default.
 
 ## Three Documentation Tiers
 
-### Tier 1 — Module Header
+### Tier 1: Module Header
 
 A `//` comment block before imports. States the module's contract in the pipeline:
 what it consumes, what it produces, and 1–2 invariants callers rely on.
@@ -38,7 +38,7 @@ what it consumes, what it produces, and 1–2 invariants callers rely on.
 import string as cstring;
 ```
 
-### Tier 2 — API Documentation (`///`)
+### Tier 2: API Documentation (`///`)
 
 On `pub` items only. First sentence = the contract ("what you get and what it costs").
 Never start with "This function...", "This struct...", or "This method...".
@@ -54,12 +54,12 @@ pub fn resolve_call_args(self: &mut Resolver, call: NodeId) { .. }
 
 Audience: the **caller**. Describe external behavior, not internal implementation.
 
-### Tier 3 — Internal Notes (`//`)
+### Tier 3: Internal Notes (`//`)
 
 For maintainers. Cover invariants, constraints, and non-obvious reasons.
 
 ```superc
-// The lexer relies on trailing NUL to terminate scan loops — every module source is
+// The lexer relies on trailing NUL to terminate scan loops: every module source is
 // padded by String::pad_nul so per-byte bounds checks are eliminated.
 pub const SOURCE_PAD: usize = 8;
 ```
@@ -75,7 +75,7 @@ A comment earns its place when it documents one of these:
 | **Sentinel convention** | "Returns UINT32_MAX on miss." |
 | **Panic / abort behavior** | "Panics if the index is out of bounds." |
 | **Cross-pass protocol** | "The resolver fills this field; the typechecker reads it." |
-| **Deliberate performance shape** | "Bucketed by length then first byte — a miss costs 1–2 comparisons." |
+| **Deliberate performance shape** | "Bucketed by length then first byte: a miss costs 1–2 comparisons." |
 | **Invariant** | "The token vector is never empty after a successful scan." |
 | **Why-not** | "Linear scan, not hash: N < 8 in all measured cases." |
 | **Bootstrap / fixpoint constraint** | "This ordering preserves the gen-1 == gen-2 invariant." |
@@ -97,20 +97,20 @@ A comment earns its place when it documents one of these:
 
 ## Body Comments
 
-Body comments have the **highest bar** — the mechanism is visible in the code, so only
+Body comments have the **highest bar**: the mechanism is visible in the code, so only
 intent hides. Before writing a body comment, consider whether a rename or a named
 predicate would make the comment unnecessary.
 
 Five things that earn a body comment:
 
-1. **Load-bearing invariant** — a property the code relies on that is not obvious from
+1. **Load-bearing invariant**: a property the code relies on that is not obvious from
    the surrounding lines.
-2. **State-variable contract at declaration** — what the variable means, not what type it
+2. **State-variable contract at declaration**: what the variable means, not what type it
    is.
-3. **Phase landmark in a long function** — a topic sentence marking a logical boundary
+3. **Phase landmark in a long function**: a topic sentence marking a logical boundary
    (not a blow-by-blow narration).
-4. **Why-not** — a rejected obvious alternative, in one line.
-5. **Recovery semantics on an error path** — what state is valid after the error.
+4. **Why-not**: a rejected obvious alternative, in one line.
+5. **Recovery semantics on an error path**: what state is valid after the error.
 
 Density: 0–3 body comments per function is healthy. More signals the function should be
 split or the code should be clearer.
@@ -156,7 +156,7 @@ Do not use `///` on private items. Use `//` for internal notes.
 - **Complete but compressed.** One line is better than a paragraph.
 - **Caller's view for `///`.** Describe what the caller sees, not how the function works
   internally.
-- **Maintainer's view for `//`.** Describe what the maintainer needs to know — invariants,
+- **Maintainer's view for `//`.** Describe what the maintainer needs to know: invariants,
   constraints, non-obvious reasons.
 
 ## Reviewing Comments

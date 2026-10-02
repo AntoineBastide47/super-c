@@ -6,17 +6,16 @@ allowed-tools: Bash Read
 
 # Task Discipline
 
-This skill encodes the recurring failure modes mined from 37 past agent sessions in
-this repository (~1,370 user turns, ~185 corrections). Each section is a failure mode,
-ranked by frequency, with the procedure that prevents it. These are not style
+This skill encodes the recurring failure modes of past agent sessions in this
+repository. Each section is a failure mode, ranked by frequency, with the procedure that prevents it. These are not style
 preferences: every rule below exists because an agent violated it and the user had to
-correct it — several repeatedly.
+correct it (several repeatedly).
 
 The meta-finding that shapes this file: **vague reminders did not work**. Rules that
 were already written down were still violated. What works is a checkable procedure
 applied at a decision point. Apply each section's checklist at the moment it names.
 
-## 1. Completion Contract (~35 incidents — the #1 failure)
+## 1. Completion Contract (the #1 failure)
 
 Agents stopped at checkpoints to report, deferred sub-items without saying so, and
 claimed completion that did not survive an audit.
@@ -31,14 +30,28 @@ claimed completion that did not survive an audit.
 
 **Before saying "done":**
 - Enumerate every sub-item of the original request.
-- Verify each against reality — files on disk, builds, test runs — not against your
+- Verify each against reality (files on disk, builds, test runs), not against your
   recollection of having done it.
-- Surface every defect discovered along the way. Never bury a known issue; fix it or
-  report it prominently.
+- Fix every defect discovered along the way, also one that is minor, that CI does not
+  hit, or that only a strict warning flag shows. A found defect stays unfixed only when
+  the user decides so; until then it is part of the task.
 - Never declare a goal impossible without exhausting the approaches. Two "unsound /
   unreachable" declarations in past sessions were implemented soundly once challenged.
 
-## 2. Ignored Standing Instructions (~22 incidents)
+**When you coordinate subagents:**
+- A subagent result that says "not done: too large" or ships a shortcut (an error in
+  place of the real behavior) goes back to the subagent for the full implementation.
+  Never present the shortcut to the user as an option.
+- Heavy verification runs once, at the end. While working: rebuild and targeted tests.
+  At the end of an agent task: build, lint for each target, fmt, and the full suite once.
+  The coordinator runs the fixpoint, `sh ci/gate.sh --core`, and the release bootstrap
+  once, after all rounds. Every agent brief states this rule.
+
+**When a plan's gate or stop rule conflicts with the request:** finish the independent
+work, then ask one question with a table of the numbers (current, after, delta). Do not
+choose the plan's branch alone.
+
+## 2. Ignored Standing Instructions
 
 The same explicit instructions were violated repeatedly across sessions: manual
 `.free()` calls despite RAII, parallelism used after it was declared off-limits,
@@ -51,7 +64,7 @@ workflow files.
 - The user's reaction is harshest on the *second* violation of the same instruction.
   If you catch yourself about to repeat something the user has corrected before, stop.
 
-## 3. Unverified Claims (~18 incidents)
+## 3. Unverified Claims
 
 Agents stated git state, API signatures, environment facts, and numbers without
 checking: "unpushed" branches that were pushed, debugging at `-O0` an optimization-
@@ -65,9 +78,12 @@ taken for improvements another agent caused.
 - Bug reproduction → same compiler, same flags, same optimization level, same
   platform as the report.
 - A metric you did not move → say so; never absorb external causes into your narrative.
-- Prefer "I checked X: Y" phrasing — it forces the check.
+- Prefer "I checked X: Y" phrasing: it forces the check.
+- Gate result → never pipe a gate into `tail` or another filter: the pipeline returns
+  the status of the last command. Write the output to a file and check the gate's own
+  exit status.
 
-## 4. Letter-Not-Spirit and Shallow Fixes (~16 incidents)
+## 4. Letter-Not-Spirit and Shallow Fixes
 
 Literal requests satisfied while their purpose was defeated (a strict-mode API built
 but the pipeline never adapted to use it), and the same defect "fixed" cosmetically
@@ -78,20 +94,26 @@ the purpose is achieved end to end, not just that the named artifact exists.
 
 **When a symptom recurs after your fix:** your fix was wrong. Stop patching symptoms;
 trace the mechanism to its origin and fix there. If natural user-level code needs an
-unnatural workaround, the compiler is the bug — see `super-c-self-hosting`.
+unnatural workaround, the compiler is the bug (see `super-c-self-hosting`).
 
-## 5. Overreach on Questions (~14 incidents)
+- An unsatisfied interface bound in your own test snippet means the snippet uses the
+  wrong type. Fix the snippet; do not add std conformances unasked. Compare with a
+  known-good pattern in `src/` or `tests/` before you read more compiler internals.
+- An output difference that depends on the host is a runtime or compiler defect. Fix it
+  where the bytes are produced; never normalize it in a test.
+
+## 5. Overreach on Questions
 
 Code was deleted during an *explain* request; work was done when the user asked *how*
 to do it; unrequested docs and defensive code were added. The user now defensively
-writes "No code changes, just answer" — each such guard marks a past failure.
+writes "No code changes, just answer". Each such guard marks a past failure.
 
 - A question ("why / how / what / is it true that") gets an answer and **zero edits**,
   even when the fix is obvious. Offer the fix in one line; wait for the ask.
 - When asked to change X, touch exactly X. Do not improve neighboring code in passing.
 - Do not add doc comments, READMEs, or explanatory files unless requested.
 
-## 6. Undelivered "Fixes" (~13 incidents)
+## 6. Undelivered "Fixes"
 
 Work was completed but never reached the user's environment: a stale `./super-c`
 measured twice, changes stranded in an unauthorized /tmp worktree, an amend that never
@@ -100,13 +122,19 @@ happened, edits not propagated to a paired directory.
 **Before claiming a fix is live:**
 - Know which binary the user runs (`./super-c` at repo root vs `build/dev/super-c`);
   rebuild before any measurement claim and say when the deployed binary is stale.
+- `check.sh` (also run by the local commit-msg hook) moves the release binary onto
+  `./super-c`; a successful bootstrap installs the rebuilt compiler there again, a failed
+  one leaves the release binary. Before any test, fixpoint, or commit claim, run
+  `cmp super-c build/dev/super-c`; if they differ, run `build/dev/super-c build`, which installs
+  `build/dev/super-c` onto `./super-c` by rename. A hook failure that repeats an emitter error you
+  already fixed means a stale `./super-c`, not a regression.
 - Work in the repo the user works in. Never move work to a worktree or temp clone
   unless asked.
 - After any git action (commit, amend, revert), verify with `git status` / `git log`
   that it happened before reporting it.
 - When two locations mirror content, change both or say which one was left.
 
-## 7. Destructive Actions (~11 incidents — highest severity)
+## 7. Destructive Actions (highest severity)
 
 The rarest but worst failures: a broad `git checkout -- .` reverting the user's live
 edits, a bisection checkout losing new tests, deleted derived files breaking a build
@@ -121,22 +149,25 @@ formatter moved their anchors, unauthorized commits and pushes to main.
 - Review `git status` after any broad `git add`; commit only what the task touched.
 - Commits and pushes happen only on explicit instruction in the current message.
 - After a recovery attempt, verify the build and tests pass before claiming recovery.
+- Never run parallel stress loops of thread- or process-spawning programs on the
+  developer's machine, and never tell an agent to: they can exhaust kernel resources and
+  crash the host. Run stress in CI or in a container with `--pids-limit`.
 
-## 8. Performance-Work Hygiene (~11 incidents)
+## 8. Performance-Work Hygiene
 
 Unmeasured claims (a "2407ms → 1120ms" that was a cold/warm cache artifact), a 10x
 regression accumulating untracked across a session, and the user having to supply the
 techniques themselves (samply, generated asm, struct packing, complexity classes).
 
 - Follow `super-c-compiler-optimization` unprompted for any perf work: profile first,
-  then hotspots/allocations, compaction, complexity, asm — in that order.
+  then hotspots/allocations, compaction, complexity, asm, in that order.
 - Every claim: interleaved A/B on clean builds, cycles/allocations not wall-clock,
   discard the first post-rebuild run, confirm the measured binary contains the change.
 - Track the headline metric across the whole session and report cumulative drift.
 - When stuck, broaden the toolbox yourself (web search, asm, alternative algorithms)
   before reporting "no progress".
 
-## 9. Prose Failures (~9 incidents)
+## 9. Prose Failures
 
 Docs and papers called "not understandable by anyone" (one rewrite failed the same
 test twice), concession-first framing, self-narration tics, the same fact stated three
@@ -146,17 +177,21 @@ times, em-dashes after a ban.
 - State each fact once, at its strongest location.
 - No self-narration ("we now turn to…", "having established…").
 - No em-dashes or `--` punctuation anywhere.
+- Skills and reference records contain no plan or phase references ("plan v2", "the
+  plan's gate", "Phase-3"); write the design fact. Driver phase identifiers (`plan`,
+  `borrowck`, `render`) and the optimization skill's numbered steps are identifiers and
+  stay. Before done, run `grep -rnE 'plan v|v2/|the plan|Phase-' skills/`.
 - If told a text is unreadable, change its structure (sentence length, term choice,
-  order) — not just individual words.
+  order), not just individual words.
 
 ## Rationalizations to Reject
 
-- "I'll report progress and let the user decide." — The user decided when they asked.
+- "I'll report progress and let the user decide." The user decided when they asked.
   Continue.
-- "This sub-item is minor, I'll skip it quietly." — Deferred items have turned out to
+- "This sub-item is minor, I'll skip it quietly." Deferred items have turned out to
   be wins. List it or do it.
-- "The fix is obviously right, no need to rebuild/measure." — Two sessions measured a
+- "The fix is obviously right, no need to rebuild/measure." Two sessions measured a
   stale binary.
-- "The question implies they want it fixed." — It implies they want an answer.
-- "The instruction probably doesn't apply here." — It applies until lifted.
-- "The patch script ran without errors." — Zero matches also runs without errors.
+- "The question implies they want it fixed." It implies they want an answer.
+- "The instruction probably doesn't apply here." It applies until lifted.
+- "The patch script ran without errors." Zero matches also runs without errors.

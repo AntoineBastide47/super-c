@@ -10,12 +10,17 @@ an optional manifest `src/` root, then `std/` and `ffi/`. Directory names are so
 ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`.
 
 - Lexer: byte-driven scanner over a NUL-padded source `String` (`SOURCE_PAD`). Output
-  `Vector<Token>`; tokens are packed `u64` `(kind, start, len)` spans — no text copied.
+  `Vector<Token>`; tokens are packed `u64` `(kind, start, len)` spans, no text copied.
   Character-class table built by `const fn`, held by value per Lexer. Every error is
   recovered; the scan always completes. `keep_trivia` (formatter path) also emits
   comment tokens.
-- Parser (`src/ast/parser.spc` — there is no `src/parser/`): context-free LL(1)
-  structural cover grammar, no predicates or backtracking. Output: two append-only arenas
+- Parser (`src/ast/parser.spc`; there is no `src/parser/`): context-free LL(1)
+  structural cover grammar, no predicates or backtracking. Do not call it "predicated".
+  Every fork decides on one peeked token; never add k>=2 lookahead. To share a prefix,
+  parse the head, then continue from it in an `_after` function (`parse_cast_after`,
+  `parse_struct_initializer_after`). Contextual words resolve from one token: the lexer
+  fuses `inline`/`parallel` before `for` into one modifier token, and splits a lifetime
+  `'a` from a character literal `'a'`. Output: two append-only arenas
   per module, the module arena (`Ast.nodes`) and the body arena (`Ast.b`, releasable bodies,
   ids tagged `NODE_BODY`; see syntax-ownership.md). Sugar keywords (`launch`,
   `select`, `parallel for`, ...) parse to marker nodes; `@derive` synthesis happens here
@@ -68,8 +73,8 @@ One parallel frontier; for each module, `Resolver::resolve()` runs and then
   parameter reads them as an associated constant (`tc_value_path`).
 - HIR lowering IS the desugar stage: sugar-keyword markers become core nodes
   (`launch` → the `SI_SUBMIT` shim call via `lower_to_core_call`; `select` via
-  `lower_select`, which builds nodes with hand-seeded resolutions). Lowering is by MOVE
-  — the parse arena becomes the HIR in place. Typecheck, borrowck, const-eval and codegen
+  `lower_select`, which builds nodes with hand-seeded resolutions). Lowering is by MOVE:
+  the parse arena becomes the HIR in place. Typecheck, borrowck, const-eval and codegen
   never see a sugar node.
 
 ## 4. Typecheck, per item (`typecheck_stage`, `src/typechecker/`)
@@ -117,7 +122,7 @@ lowering, because **this stage produces the lowerings the backend reuses**.
 Per function (`bc_fn`, extending `TypeChecker`):
 1. `bc_ir_lower`: lower the item's bodies to Core IR; the Lowerer records an event tape
    at the walk's AST sites.
-2. `bc_replay`: replay the tape — the same helper calls the deleted AST walk made,
+2. `bc_replay`: replay the tape: the same helper calls the deleted AST walk made,
    without traversing the expression tree.
 3. `bc_ir_analyze`: per body, `flow_ir::body_features` reads the typed IR into feature
    bits and `loan_skip` / `stage_skip` decide what runs: nothing, a moves-only fact walk
@@ -151,8 +156,10 @@ modular return-lifetime check) run alongside.
 
 ## 7. Lint, Panic Check, Const Flush
 
-- `lint_unused_items` (when linting).
-- `check_always_panics` — an **error**, run on every build of user modules: one job per
+- `lint_unused_items` (when linting). A lint `fix` attaches to the last warning emitted
+  (`Errors::last_warn`, `src/utils/errors.spc`), so call it right after the warning it
+  repairs. When a lint disagrees with the compiler, suspect the lint first.
+- `check_always_panics`: an **error**, run on every build of user modules: one job per
   linted module on the item job runner, a private engine leased per worker (the serial
   path scans with the master engine), diagnostics published in declaration order.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
@@ -187,7 +194,7 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 ## 9. Emission Planning
 
 - `compute_emit_live`: reference scan for live modules.
-- `Package::emit_order`: dependency-first module order — if module `a` re-homes a
+- `Package::emit_order`: dependency-first module order: if module `a` re-homes a
   concrete instance of a generic owned by `b`, `b` emits first. Kahn topo-sort with a
   lowest-id tiebreak.
 
@@ -203,7 +210,7 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   [instance-specialization.md](instance-specialization.md).
 - `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (one
   geometrically grown `tus[t]` per module, a chunk table with the shard each chunk landed
-  in, `inst_c` for every owner module's instance shards) — a parallel frontier under
+  in, `inst_c` for every owner module's instance shards), a parallel frontier under
   `--jobs`, gated by `SC_BUILD_MEM_BUDGET`. A body renders straight into its TU buffer
   (`emit_body_core_cf` threads it through the statement renderers; expression renderers
   spell into their `dst`), and the driver writes each shard piecewise, never a file
@@ -217,6 +224,10 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   elaborated callees (their drops, flag temps and markers come along; no ownership
   analysis runs on the merged body), then bounds-check elimination, then rendering.
   Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning fields.
+- A designated array literal (`[[i] = v]`) has the type of its spelled count, not the
+  destination's length. A store of a shorter source zero-fills the destination, then
+  copies `sizeof` the source (`short_src` in `src/emit/cemit.spc`); every consumer sizes
+  copies by the source.
 - Symbol naming through `emit/mangle.spc` (the frozen authority): prefixing only with
   more than one non-prelude module; single-segment prefix when unique; prelude, `main`,
   and extern symbols never prefixed.
@@ -228,7 +239,7 @@ symbols from. Then, in emit order:
 
 1. `__sc_fwd.h`, every definition header `__sc_t/<type>.h` (one per emitted type) and
    every `<module>.h` (prototypes, `_ret` typedefs, constant and descriptor
-   declarations) — before any source file.
+   declarations), before any source file.
 2. Per-module `.c` shards (`<module>.c`, then `<module>__p<k>.c` under the build.toml
    `[shards]` count: a chunk's shard is its stable symbol hash modulo the count). Module
    paths map to directories (`::` → `/`); the prelude loads under the reserved `__std::`
@@ -241,7 +252,7 @@ symbols from. Then, in emit order:
 5. `prune_orphans`: outputs from a previous build that this one no longer emits are
    deleted.
 
-Under `SC_FACTS_CHECK`, `facts_verify("codegen")` runs at the end — emission must have
+Under `SC_FACTS_CHECK`, `facts_verify("codegen")` runs at the end: emission must have
 read the tables frozen (append-only interning is the one sanctioned growth).
 
 ## 12. Test Runner (`--test` only)

@@ -165,7 +165,7 @@ extend Errors {
         self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: self.last_warn(), text: 0xFFFFFFFF });
     }
 
-    // The index of the last warning, or 0xFFFFFFFF when there is none.
+    // The index of the last warning. Callers emit a warning first.
     const fn last_warn(self: &Self) u32 {
         return self.warns.len() as u32 - 1;
     }

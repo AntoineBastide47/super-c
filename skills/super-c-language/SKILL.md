@@ -56,6 +56,9 @@ The return type follows the parameter list with no arrow. `void` is the implicit
 type when omitted. The main function signature is `fn main() i32` or
 `fn main(args: Vector<str>) i32`.
 
+A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
+tuple, name it through an alias: `type P = (A, B); fn f() P`.
+
 ## Structs and Methods
 
 ```superc
@@ -162,7 +165,9 @@ fn longer<'a>(a: &'a String, b: &'a String) &'a String {
 }
 ```
 
-Lifetime annotations are Rust-style and almost always elided. A result whose lifetime
+Lifetime annotations are Rust-style and almost always elided. Lifetime parameters come first
+in a generic list (`<'a, T>`; `<T, 'a>` is "lifetime parameters must come before type
+parameters"). A result whose lifetime
 the signature ties to an input (a named lifetime, or elision to `self` or to the single
 borrowing input) keeps that input borrowed while the result is live, through a `&mut`
 parameter and for receivers whose type holds borrows too: `let r = a.get(0); a.put(5);
@@ -262,7 +267,8 @@ move a `Free` element out. A `for` binding is a name or an irrefutable pattern (
 `for ((a, _), mut c) in ..`, `for P { x, .. } in ..`, `for _ in ..`): each element destructures like
 a `let`, parts no name takes are freed with the element, and elements behind a reference bind by
 reference. `for mut i in a..b` makes the induction variable itself mutable: a write to `i` changes
-the next iteration.
+the next iteration. A range loop evaluates its bounds once: a loop over a worklist that grows while
+it runs must be `while i < v.len()`, with the increment before any `continue`.
 
 ```superc
 fn twice<T: Copy>(x: T) (T, T) { return x, x; }
@@ -272,14 +278,14 @@ fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out throu
 ## Closures
 
 Capture flavors:
-- **Read** — copy at creation (default)
-- **Mutated** (`FnMut`) — a non-owning capture the body assigns, borrows `&mut` or calls a
+- **Read**: copy at creation (default)
+- **Mutated** (`FnMut`): a non-owning capture the body assigns, borrows `&mut` or calls a
   `&mut self` method on: implicit `&mut` capture, writes land on the outer variable. The
   capture is an exclusive borrow: until the closure's last use, the outer binding cannot be
   read, borrowed, assigned or moved
-- **Owned** (`FnOnce`) — a `Free` capture moves into the env, closure becomes `Free`; the body
+- **Owned** (`FnOnce`): a `Free` capture moves into the env, closure becomes `Free`; the body
   mutates its own copy
-- **Borrowed** — when a closure meets a plain `F: fn(..)` bound, its `Free` captures are borrowed
+- **Borrowed**: when a closure meets a plain `F: fn(..)` bound, its `Free` captures are borrowed
   instead of owned (implicit `&`, or `&mut` for the ones the body mutates), so the closure owns
   nothing; the outer binding stays borrowed while the closure lives. A captured reference or pointer
   never owns what it points at.
@@ -336,7 +342,7 @@ import geom as *;            // unqualified glob
 import geom as g;            // alias
 ```
 
-Imports are public and C-style transitive. Cycles are legal. Prelude types (`String`,
+Imports are public and C-style transitive, so there is no `pub import`. Cycles are legal. Prelude types (`String`,
 `Option`, `Vector`, `Box`, `Result`, `Map`, `Set`, `str`) resolve unqualified.
 
 ## Visibility
@@ -393,6 +399,16 @@ const N: usize = table_size(8);
 static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 ```
 
+- A `const` of an owning (`Free`) type lives in static storage. Moving out of it is "cannot
+  move a value out of a 'const' binding"; borrow it instead (`K.v.len()`).
+- A constant whose type embeds a stateful allocator is "a constant cannot use the stateful
+  allocator '...'". A `static mut` cannot hold an owning type (raw pointers and references are
+  allowed).
+- Allocation is valid at compile time. A `@no_const` type (see Attributes) is not: a `const fn`
+  whose signature names one, or that fails on every path (it constructs one), is an error at
+  its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
+  on some paths (a branch, a loop, recursion) is accepted.
+
 ## Build Constants and Platform Gating
 
 ```superc
@@ -446,6 +462,10 @@ call items of another platform. A variant name these forms spell that does not e
 (`Platform::Macos`) is an error, in removed code too. A condition that mixes the
 constants with anything else is an ordinary constant expression: both branches are
 checked, and the dead one is not emitted when the condition folds.
+
+A user `const bool` gate (`if STATS { .. }`) trips the constant-condition lint ("condition is
+always false"); gate through a `pub const fn` instead (`sched_stats_on()` in
+std/parallel/runtime.spc).
 
 PROFILE is an ordinary constant: both branches of `if PROFILE == "release"` are checked,
 and only the taken one is emitted (`switch PROFILE` over string literals too). A string
@@ -526,6 +546,11 @@ source text, values, and file:line on failure.
 | `@platform(P)` | Platform gate |
 | `@test` / `@test_init` / `@test_free` | Test harness |
 | `@blocking` | Run extern on blocking pool |
+| `@no_const` | Struct, union or enum whose values never exist at compile time |
+
+`@no_const` does not pass through fields: the type author tags each type. std tags its OS and
+runtime handles (`Atomic`, `Arc`, locks, channels, threads, sockets, the scheduler); value
+helpers (`Duration`, `IoError`) stay untagged.
 
 An attribute appears at most once on one declaration (item, method, field, variant, extern
 item), whatever its arguments: a second `@c.align`, `@platform`, `@derive`, `@reflect`,
@@ -551,7 +576,7 @@ enforced at spawn boundaries.
 | `Result<T, E>` | `Ok(T)` or `Err(E)` |
 | `Map<K, V>` | Hash map |
 | `Set<T>` | Hash set |
-| `Array<T, N>` | Fixed-size const-generic array |
+| `Array<T, N>` | Fixed-size const-generic array, a type distinct from `[T; N]`. `new()` needs `T: Default`; for raw pointers write `Array::<*mut T, N> {}` |
 | `Slice<T>` / `SliceMut<T>` | Fat-pointer views |
 | `Tuple2<A, B>` ... `Tuple4` | Tuples (access: `.0`, `.1`) |
 | `Arc<T>` | Atomic reference counting |
