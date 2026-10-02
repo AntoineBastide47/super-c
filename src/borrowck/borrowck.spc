@@ -776,7 +776,7 @@ extend tc::TypeChecker {
     }
 
     /// The move rule the Core IR cannot see: moving an owning `const` out through a `.free()`
-    /// receiver or a folded call is an error. Every other move check belongs to the Core IR move
+    /// receiver is an error. Every other move check belongs to the Core IR move
     /// analysis and free-move rules.
     pub fn tc_mark_move(self: &mut Self, expr0: NodeId) {
         if expr0 == NODE_NONE {
@@ -2483,8 +2483,6 @@ extend tc::TypeChecker {
                     self.bc_replay(bodies, bi, start, i, st);
                     self.in_loop_recheck = false;
                 }
-            } else if k == ir::TP_CONST_MOVE {
-                self.tc_mark_move(node);
             }
             i += 1;
         }

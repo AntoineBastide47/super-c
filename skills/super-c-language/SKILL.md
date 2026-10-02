@@ -312,6 +312,10 @@ interface default body. A call on a concrete receiver chooses by its arguments a
 its extends define and the defaults its conformances inherit (see the generics section of
 [types.md](references/types.md)).
 
+The prelude defaults of `Clone`, `Default`, `Eq` and `Ord` (what `@derive` and an empty `extend`
+use) work field by field. An enum must define `clone` and `default` itself, and a union also `eq`
+and `cmp`; inheriting one of those defaults is a compile error at the conformance.
+
 Bounds are enforced at instantiation, with a generic interface's arguments: `T: I<bool>` needs a
 conformance as `I<bool>`, a type parameter meets a bound only through its own bounds, and a call
 through the bound runs that conformance's methods, operators included (`t + 5` for
@@ -376,11 +380,11 @@ moves like its element and frees nothing.
 
 ## Compile-Time Evaluation
 
-Always on. Any call with constant arguments is interpreted at compile time. `const fn`
-marks mandatory evaluation: a chain of `const fn` calls with known arguments that cannot
-evaluate is an error. A plain function is evaluated speculatively: when it fails, the call
-runs at run time, even if a `const fn` it calls hit an evaluator limit (a panic or undefined
-behavior it proves still reports).
+Always on, in constant contexts: `const` and `static` initializers, array lengths, const
+generic arguments, `static_assert`, enum discriminants and `type_info`. A failed evaluation
+there is an error. Outside a constant context every call runs at run time, `const fn` calls
+with known arguments included. `const fn` marks a function that constant contexts can call:
+the declaration is checked for operations compile-time evaluation cannot run.
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }

@@ -193,7 +193,6 @@ analysis does not replace.
 | `TP_FLOW_SAVE` / `ELSE` / `JOIN` | 14,499 each | flow-state save and merge across `if` |
 | `TP_LOOP_PUSH` / `POP`, `TP_BODY_START` / `END` | 3,765 each | loop push and pop, the loop recheck |
 | `TP_MATCH_PRE`, `TP_ARM`, `TP_ARM_END`, `TP_MATCH_POST` | 367 / 1,238 / 1,238 / 367 | match flow and pattern depths |
-| `TP_CONST_MOVE` | 103 | the argument a folded call consumed |
 
 Gate for a category: its removal must cut a measured cost (the replay's 16 to 18 ms and 6.3k
 allocations, or a retained byte count) by a numeric share and leave every consumer on the

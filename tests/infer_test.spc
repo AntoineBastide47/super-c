@@ -615,6 +615,11 @@ fn literals_under_references() {
         14,
     );
     h::expect_exit(
+        "a literal the value rules widen is exact under a reference",
+        "fn g(x: &i64) i64 { return *x; }\nfn h(x: &f64) f64 { return *x; }\nfn main() i32 { return (g(&3) + g(&-1)) as i32 + (h(&1.5) * 2.0) as i32; }\n",
+        5,
+    );
+    h::expect_exit(
         "map lookup with a literal key",
         "fn main() i32 {\n    let mut m = Map::<u64, i32>::new();\n    m.insert(1, 5);\n    return *m.get(&1).unwrap();\n}\n",
         5,

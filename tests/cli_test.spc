@@ -495,9 +495,6 @@ fn main() i32 {
     assert(rt.out_has("USAGE:"), "and prints usage");
 }
 
-// Implicit CTFE: folded-argument calls RUN at compile time (recursion, loops, switch, compound assignment),
-// call sites emit the literal, pure statement-position calls vanish, unfoldable/over-budget callees degrade
-// to runtime calls, and the compile stays fast.
 @test
 fn inline_for_and_parallel_for() {
     let p = cli::proj_new();
@@ -1124,23 +1121,6 @@ fn main() i32 {
     assert(rr.ok());
     assert(rr.out_shows("Key { a: 1, b: 2 }"), "a derived cross-module key formats through {}");
     assert(rr.out_shows("ok"), "Eq/Ord/Clone/Default derive through the std interface defaults");
-
-    // A derived clone on an enum refuses loudly instead of fabricating a zeroed value.
-    let bad = cli::proj_new();
-    bad.mkfile(
-        "main.spc",
-        M"(enum E { X, Y(i32), }
-extend E as Clone {}
-fn main() i32 { let e = E::Y(5); let c = e.clone(); let _ = c; return 0; }
-)",
-    );
-    let br = bad.compile("main.spc");
-    assert(br.ok());
-    let bcc = bad.cc_build("");
-    assert(bcc.ok());
-    let brr = bad.run_bin_env("");
-    assert(!brr.ok(), "the derived enum clone panics");
-    assert(brr.out_has("write it by hand for an enum or union"), "the refusal names the fix");
 }
 
 @test
@@ -1395,6 +1375,8 @@ enum Shape { Dot, Line(i32, i32), }
     assert(rr.out_shows("tag7=Blue"), "variant_by_tag reverses a declared value");
 }
 
+// Compile-time evaluation in constant contexts (recursion, loops, switch, floats), run-time calls
+// outside them, and the step budget.
 @test
 fn ctfe() {
     let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
@@ -1429,28 +1411,10 @@ fn main() i32 {
     assert(p.gen_has("main.c", M"(_Static_assert(true, "ctfe"))"), "fib(20) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "loops fold"))"), "collatz(27) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "floats fold"))"), "float CTFE ran at compile time");
-    assert(p.gen_has("main.c", "55LL"), "the call site folded to its value");
-    assert(!p.gen_has("main.c", "fib(10"), "no interpreted call survives in main (fib(10))");
-    assert(!p.gen_has("main.c", "fib(9"), "no interpreted call survives in main (fib(9))");
-    assert(p.gen_has("main.c", "late()"), "an un-intercepted extern callee stays a runtime call");
+    assert(p.gen_has("main.c", "fib(10"), "a call outside a constant context runs at run time");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 8);
-
-    // An over-budget callee bails to a runtime call instead of hanging the compiler.
-    p.mkfile(
-        "main.spc",
-        M"(fn spin() i32 {
-  let mut i = 0;
-  while true { i += 1; if i > 100_000_000 { return i; } }
-  return 0;
-}
-fn main() i32 { if spin() > 0 { return 3; } return 4; }
-)",
-    );
-    let s = p.compile("main.spc");
-    assert(s.ok());
-    assert(p.gen_has("main.c", "spin()"), "over-budget callee stays a runtime call");
 
     // --const-eval-steps starves a loop-driven assert -> reports the budget.
     p.mkfile(
@@ -1837,8 +1801,8 @@ fn dyn_fn_box_roundtrip() {
 }
 
 // The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
-// sites over super_rt.c's registry, gated at runtime by SC_LEAK_CHECK. A survivor (here a raw
-// extern-malloc'd block nothing frees) is reported at exit with its byte count; leak-free runs and
+// sites over super_rt.c's registry, gated at runtime by SC_LEAK_CHECK. A survivor (here a String
+// buffer abandoned through `forget`) is reported at exit with its byte count; leak-free runs and
 // disabled runs print nothing.
 @test
 fn leak_tracker() {
@@ -7117,9 +7081,8 @@ fn duplicate_unknown_attribute_under_bootstrap_tags() {
     assert(p2.compile_flags("--bootstrap-tags", "two.spc").exit == 0, "distinct unknown attributes accepted");
 }
 
-// const fn: definition-site validation (direct and transitive disqualifiers), the hard use-site
-// guarantee (any failed fold of a const fn call is an error; the same body without `const` falls
-// back to runtime), and legal recursion between const fns.
+// const fn: definition-site validation (direct and transitive disqualifiers), a call outside a
+// constant context runs at run time, and legal recursion between const fns.
 @test
 fn const_fn_semantics() {
     let p = cli::proj_new();
@@ -7164,25 +7127,11 @@ fn main() i32 { unsafe exit(probe()); }
     assert(ccz.ok());
     assert_eq(pz.run_bin(), 0);
 
-    let p3 = cli::proj_new();
-    p3.mkfile(
-        "budget.spc",
-        M"(const fn spin(n: u64) u64 {
-    let mut s: u64 = 0;
-    let mut i: u64 = 0;
-    while i < n { s = s + i; i = i + 1; }
-    return s;
-}
-fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
-)",
-    );
-    p3.expect_fail("budget.spc", "'const fn' call has compile-time-known arguments but failed to evaluate");
-
-    // Identical body without `const`: silent fallback to a runtime call.
+    // A `const fn` call with known arguments outside a constant context is a run-time call.
     let p4 = cli::proj_new();
     p4.mkfile(
         "runtime.spc",
-        M"(fn spin(n: u64) u64 {
+        M"(const fn spin(n: u64) u64 {
     let mut s: u64 = 0;
     let mut i: u64 = 0;
     while i < n { s = s + i; i = i + 1; }

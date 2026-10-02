@@ -699,7 +699,6 @@ pub struct Interp {
     pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
     pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
-    pub record_pause: u32, // >0 suppresses recording (short-circuit RHS probes)
     pub trap_in_constfn: bool,
     // Engine serialization for parallel stages: off = single-threaded. Task-aware (waiters PARK --
     // a raw mutex here deadlocks under safepoint preemption) and reentrant by task token -- the
@@ -801,7 +800,6 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         statics: Vector::<StaticObj>::new(),
         all_typed: false,
         record_folds: false,
-        record_pause: 0,
         trap_in_constfn: false,
         elock_on: false,
         cur_item: loader::ITEM_NONE,
@@ -7099,16 +7097,6 @@ extend Interp {
         return c;
     }
 
-    /// Is THIS task inside one of its own engine evaluations? Engine-driven lowering must not
-    /// re-enter implicit folding; another task's live evaluation is NOT a reason to skip (the
-    /// facade serializes on entry), or folds would depend on scheduling.
-    pub fn folding_self(self: &Self) bool {
-        if self.elock_on && unsafe atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
-            return false;
-        }
-        return self.in_run != 0 || self.ev_depth != 0;
-    }
-
     /// Public bracket for callers that must read trap state coherently with their own evaluation
     /// (the trap fields describe the LAST evaluation; another task's eval must not run between).
     /// Reentrant: nested facade entries under a held bracket are free.
@@ -7144,20 +7132,6 @@ extend Interp {
             unsafe atomic::store_usize(&mut self.elock_owner, 0, 0);
             self.elock_sem.release();
         }
-    }
-
-    /// Suppress fold recording across a speculative probe (the short-circuit RHS): a method so the
-    /// counter update serializes with the engine under parallel stages.
-    pub fn pause_folds(self: &mut Self) {
-        self.eng_enter();
-        self.record_pause += 1;
-        self.eng_leave();
-    }
-
-    pub fn resume_folds(self: &mut Self) {
-        self.eng_enter();
-        self.record_pause -= 1;
-        self.eng_leave();
     }
 
     pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) IVal {
@@ -7222,7 +7196,7 @@ extend Interp {
         self.ev_depth += 1;
         let v = self.run_root(m, id);
         self.ev_depth -= 1;
-        if top && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+        if top && self.record_folds && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // scalar success stores the value; non-scalar success stores the positive fact; failure
@@ -7603,7 +7577,7 @@ extend Interp {
             v = self.cell_of(v, v.tm, v.ty);
         }
         if v.kind != IV_OBJ {
-            if self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+            if self.record_folds && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
                 self.record_fold_err(m, id);
             }
             if self.trap.len() != 0 {

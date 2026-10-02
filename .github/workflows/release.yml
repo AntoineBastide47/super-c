@@ -116,7 +116,7 @@ jobs:
       - name: Configure ccache dir
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          # The saved caches reached 450-475 MB, near the old 500M bound.
+          # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
           echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
           # Debug builds in per-test scratch directories record their directory, which would key every
           # such compile apart: without the directory in the hash they hit each other's entries.
@@ -369,7 +369,7 @@ jobs:
       - name: Configure ccache dir
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          # The saved caches reached 450-475 MB, near the old 500M bound.
+          # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
           echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
           # Debug builds in per-test scratch directories record their directory, which would key every
           # such compile apart: without the directory in the hash they hit each other's entries.

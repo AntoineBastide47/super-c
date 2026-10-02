@@ -275,9 +275,6 @@ pub const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
 pub const TP_ARM: u8 = 27; // node = arm, aux = arm index
 pub const TP_ARM_END: u8 = 28;
 pub const TP_MATCH_POST: u8 = 29;
-/// An argument a FOLDED call consumed: no IR op survives for the analysis, so the replay marks
-/// the move directly with the const-move category loud (the one flow check a fold erases).
-pub const TP_CONST_MOVE: u8 = 30;
 
 pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
 pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut

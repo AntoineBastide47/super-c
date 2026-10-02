@@ -39,7 +39,7 @@
 //         process(input);                 // counted
 //     }.
 //
-// Every report line also goes to `$SC_BENCH_LOG` as one JSON object per line when that variable is set: the
+// Every report also goes to `$SC_BENCH_LOG` as one JSON object per line when that variable is set: the
 // build identity, the platform, the worker limits, the sample counts and every figure above.
 
 import stdio;
@@ -241,8 +241,8 @@ extend Bencher {
         self.unit_name.push_str(name);
     }
 
-    /// Anything else worth printing on this benchmark's line: a cache hit rate, a per-item latency.
-    /// Appended verbatim after the timings.
+    /// Anything else worth printing in this benchmark's report: a cache hit rate, a per-item latency.
+    /// Printed verbatim on the report's last row.
     pub fn note(self: &mut Self, s: str) {
         self.extra.clear();
         self.extra.push_str(s);
@@ -350,7 +350,9 @@ extend Bencher {
     pub fn report(self: &mut Self) {
         let n = self.samples.len();
         if n == 0 {
-            println("  {:<28} (no samples)", self.name.as_str());
+            println("");
+            println("{}", self.name.as_str());
+            println("  no samples");
             return;
         }
         if self.tallied && self.ok != self.work {
@@ -363,64 +365,63 @@ extend Bencher {
             fail(what.as_str());
         }
         let sm = summarize(&mut self.samples);
+        // One labeled row per measure under the name; every row states its units.
+        println("");
+        println("{}", self.name.as_str());
+        print_label("time (ms)");
         unsafe stdio::printf(
-            "  %-28s n %3zu | min %8.3f | median %8.3f | p95 %8.3f | p99 ".ptr() as *const char,
-            self.name.cstr(),
-            n,
-            sm.min * 1000.0,
+            "median %.3f  min %.3f  p95 %.3f".ptr() as *const char,
             sm.median * 1000.0,
+            sm.min * 1000.0,
             sm.p95 * 1000.0,
         );
         if sm.p99 > 0.0 {
-            unsafe stdio::printf("%8.3f".ptr() as *const char, sm.p99 * 1000.0);
-        } else {
-            unsafe stdio::printf("%8s".ptr() as *const char, "-".ptr() as *const char);
+            unsafe stdio::printf("  p99 %.3f".ptr() as *const char, sm.p99 * 1000.0);
         }
-        unsafe stdio::printf(" | sd %7.3f ms".ptr() as *const char, sm.sd * 1000.0);
-        if self.units > 0 {
+        unsafe stdio::printf("  sd %.3f  (%zu rounds)\n".ptr() as *const char, sm.sd * 1000.0, n);
+        if self.cold >= 0.0 {
+            print_label("first round");
             unsafe stdio::printf(
-                " | %9.1f ns/%s".ptr() as *const char,
-                sm.median * 1000000000.0 / self.units as f64,
-                self.unit_name.cstr(),
+                "%.3f ms (cold caches; not in the times above)\n".ptr() as *const char,
+                self.cold * 1000.0,
             );
         }
-        if self.cold >= 0.0 {
-            unsafe stdio::printf(" | cold %8.3f ms".ptr() as *const char, self.cold * 1000.0);
+        if self.units > 0 {
+            let mut per = String::from_str("per ");
+            per.push_str(self.unit_name.as_str());
+            print_label(per.as_str());
+            unsafe stdio::printf("%.1f ns\n".ptr() as *const char, sm.median * 1000000000.0 / self.units as f64);
         }
-        if self.extra.len() != 0 {
-            unsafe stdio::printf(" | %s".ptr() as *const char, self.extra.cstr());
-        }
-        unsafe stdio::printf("\n".ptr() as *const char);
 
         // Per-round resources of the throughput rounds, and the validated work.
-        unsafe stdio::printf("  %-28s ".ptr() as *const char, "".ptr() as *const char);
+        print_label("cpu");
+        let mut cpu_ms: f64 = UNAVAILABLE;
+        if self.cpu.len() != 0 {
+            let sp = summarize(&mut self.cpu);
+            cpu_ms = sp.median / 1000000.0;
+            unsafe stdio::printf("%.3f ms per round".ptr() as *const char, cpu_ms);
+        } else {
+            unsafe stdio::printf("time unavailable".ptr() as *const char);
+        }
         let mut mcyc: f64 = UNAVAILABLE;
         if self.cycles.len() != 0 {
             let sc = summarize(&mut self.cycles);
             mcyc = sc.median / 1000000.0;
             unsafe stdio::printf(
-                "cycles %9.2f Mcyc/round (%s)".ptr() as *const char,
+                ", %.2f M cycles per round (%s)\n".ptr() as *const char,
                 mcyc,
                 cycles_scope_name().ptr() as *const char,
             );
         } else {
-            unsafe stdio::printf("cycles unavailable".ptr() as *const char);
-        }
-        let mut cpu_ms: f64 = UNAVAILABLE;
-        if self.cpu.len() != 0 {
-            let sp = summarize(&mut self.cpu);
-            cpu_ms = sp.median / 1000000.0;
-            unsafe stdio::printf(" | cpu %8.3f ms/round".ptr() as *const char, cpu_ms);
-        } else {
-            unsafe stdio::printf(" | cpu time unavailable".ptr() as *const char);
+            unsafe stdio::printf(", cycles unavailable\n".ptr() as *const char);
         }
         if self.tallied {
-            unsafe stdio::printf(" | work %lld ok %lld".ptr() as *const char, self.work, self.ok);
+            print_label("work");
+            unsafe stdio::printf("%lld units, %lld validated\n".ptr() as *const char, self.work, self.ok);
         }
-        unsafe stdio::printf("\n".ptr() as *const char);
 
         // Allocations (diagnostic rounds) and memory.
-        unsafe stdio::printf("  %-28s ".ptr() as *const char, "".ptr() as *const char);
+        print_label("alloc");
         let dn = self.diag.len();
         let mut calls_pr: f64 = UNAVAILABLE;
         let mut bytes_pr: f64 = UNAVAILABLE;
@@ -430,53 +431,55 @@ extend Bencher {
             bytes_pr = self.diag_bytes as f64 / dn as f64;
             let sd = summarize(&mut self.diag);
             diag_ms = sd.median * 1000.0;
-            unsafe stdio::printf(
-                "alloc %9.1f K calls %9.3f MiB per round (%zu diag rounds, median %.3f ms, %+.1f%%)".ptr() as *const char,
-                calls_pr / 1000.0,
-                bytes_pr / 1048576.0,
-                dn,
-                diag_ms,
-                (sd.median / sm.median - 1.0) * 100.0,
-            );
+            unsafe stdio::printf("%.0f calls, ".ptr() as *const char, calls_pr);
+            print_bytes(bytes_pr);
+            unsafe stdio::printf(" per round".ptr() as *const char);
             if self.units > 0 {
                 unsafe stdio::printf(
-                    " | %.2f calls/%s".ptr() as *const char,
+                    " (%.2f calls per %s)".ptr() as *const char,
                     calls_pr / self.units as f64,
                     self.unit_name.cstr(),
                 );
             }
+            unsafe stdio::printf(
+                "; counted in %zu extra rounds, median %.3f ms (%+.1f%%)\n".ptr() as *const char,
+                dn,
+                diag_ms,
+                (sd.median / sm.median - 1.0) * 100.0,
+            );
         } else if unsafe sys::sc_bs_alloc_supported() == 0 {
-            unsafe stdio::printf("alloc unavailable on this platform".ptr() as *const char);
+            unsafe stdio::printf("unavailable on this platform\n".ptr() as *const char);
         } else {
-            unsafe stdio::printf("alloc not sampled".ptr() as *const char);
+            unsafe stdio::printf("not counted\n".ptr() as *const char);
         }
-        unsafe stdio::printf("\n  %-28s ".ptr() as *const char, "".ptr() as *const char);
+        print_label("memory");
         let peak = unsafe sys::sc_bs_rss_peak();
         if peak >= 0 {
-            unsafe stdio::printf(
-                "rss peak %8.1f MiB%s".ptr() as *const char,
-                peak as f64 / 1048576.0,
-                if unsafe G_FRESH {
-                    "".ptr() as *const char;
-                } else {
-                    " (process-cumulative: not this benchmark alone)".ptr() as *const char;
-                },
-            );
+            unsafe stdio::printf("peak rss ".ptr() as *const char);
+            print_bytes(peak as f64);
+            if !unsafe G_FRESH {
+                unsafe stdio::printf(" (whole process, not this benchmark alone)".ptr() as *const char);
+            }
         } else {
-            unsafe stdio::printf("rss peak unavailable".ptr() as *const char);
+            unsafe stdio::printf("peak rss unavailable".ptr() as *const char);
         }
         if self.rss_after >= 0 && self.rss_before >= 0 {
+            unsafe stdio::printf(", rss after ".ptr() as *const char);
+            print_bytes(self.rss_after as f64);
             unsafe stdio::printf(
-                " | rss now %8.1f MiB (%+.1f during)".ptr() as *const char,
-                self.rss_after as f64 / 1048576.0,
+                " (%+.1f MiB in the rounds)".ptr() as *const char,
                 (self.rss_after - self.rss_before) as f64 / 1048576.0,
             );
         }
-        unsafe stdio::printf(
-            " | stacks %8.1f MiB mapped | pool %8.1f MiB retained\n".ptr() as *const char,
-            self.stack_after as f64 / 1048576.0,
-            self.pool_after as f64 / 1048576.0,
-        );
+        unsafe stdio::printf(", task stacks ".ptr() as *const char);
+        print_bytes(self.stack_after as f64);
+        unsafe stdio::printf(", pool ".ptr() as *const char);
+        print_bytes(self.pool_after as f64);
+        unsafe stdio::printf("\n".ptr() as *const char);
+        if self.extra.len() != 0 {
+            print_label("note");
+            println("{}", self.extra.as_str());
+        }
 
         // The record.
         let mut js = String::with_capacity(1024);
@@ -543,6 +546,22 @@ extend Bencher {
         json_str(&mut js, self.extra.as_str());
         js.push_byte(b'}');
         log_line(js.as_str());
+    }
+}
+
+// A report row's label, indented and padded to one column.
+fn print_label(label: str) {
+    unsafe stdio::printf("  %-14.*s".ptr() as *const char, label.len() as i32, label.ptr() as *const char);
+}
+
+// `bytes` in the largest unit that keeps it at 1 or more: B, KiB or MiB.
+fn print_bytes(bytes: f64) {
+    if bytes < 1024.0 {
+        unsafe stdio::printf("%.0f B".ptr() as *const char, bytes);
+    } else if bytes < 1048576.0 {
+        unsafe stdio::printf("%.1f KiB".ptr() as *const char, bytes / 1024.0);
+    } else {
+        unsafe stdio::printf("%.1f MiB".ptr() as *const char, bytes / 1048576.0);
     }
 }
 
@@ -768,7 +787,7 @@ pub fn begin(build_id: str<'static>, flags: str<'static>) {
         blocking::MAX_THREADS,
         cycles_scope_name().ptr() as *const char,
         if unsafe sys::sc_bs_alloc_supported() != 0 {
-            "counted in diagnostic rounds".ptr() as *const char;
+            "counted in extra rounds".ptr() as *const char;
         } else {
             "unavailable on this platform".ptr() as *const char;
         },

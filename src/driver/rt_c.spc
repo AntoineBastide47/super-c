@@ -3,7 +3,7 @@
 // the driver writes them verbatim next to whatever backend produced the code.
 
 /// The full C standard library include block the generated runtime pulls in, emitted verbatim into
-/// the shared super_rt.h (single-TU builds inline it instead) together with the atomic shims, the
+/// the shared super_rt.h together with the atomic shims, the
 /// panic/bounds helpers, and the leak-tracker macros that interpose malloc/realloc/free call sites.
 pub const fn super_rt_includes() *const char {
     return M"(#if __has_include(<assert.h>)

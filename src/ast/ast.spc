@@ -458,8 +458,8 @@ pub struct GenericParamData {
     pub is_const: bool,
     pub const_type: NodeId,
     // A LIFETIME param (`<'a>`): `bounds` holds its outlives bounds (`'a: 'b`), `const_type` and
-    // `default_type` are NODE_NONE. Lifetimes are ERASED before monomorphization -- every consumer
-    // that maps generic params onto `Ty` args must SKIP these (see non_lifetime_count).
+    // `default_type` are NODE_NONE. Lifetimes are ERASED before monomorphization: the parser keeps
+    // them in the declaration's separate lifetime list, never among the mono-relevant generics.
     pub is_lifetime: bool,
 }
 pub struct WherePredicateData {

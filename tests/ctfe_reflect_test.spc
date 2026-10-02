@@ -72,19 +72,14 @@ fn const_fn_memcmp_reads_an_inline_string_buffer() {
 }
 
 @test
-fn speculative_fold_of_a_plain_fn_stays_silent() {
-    // `make` is not a `const fn`: folding `make(1)` is speculative, so a `const fn` it calls that the
-    // evaluator cannot run (a value of a type with a user `Free` never folds) is no error there.
+fn runtime_call_of_a_const_fn_that_cannot_fold() {
+    // A value of a type with a user `Free` never folds; outside a constant context the call of a
+    // `const fn` that builds one runs at run time.
     h::expect_exit(
-        "a plain fn over a const fn that cannot fold",
-        "struct P { pub n: i32 }\nextend P as Free { fn free(self: &mut Self) {} }\nextend P { pub const fn new() P { return P { n: 0 }; } }\nfn make(x: i32) i32 { let p = P::new(); return p.n + x; }\nfn main() i32 { assert(make(1) == 1, \"one\"); return make(0); }\n",
+        "a const fn over a const fn that cannot fold",
+        "struct P { pub n: i32 }\nextend P as Free { fn free(self: &mut Self) {} }\nextend P { pub const fn new() P { return P { n: 0 }; } }\nconst fn make(x: i32) i32 { let p = P::new(); return p.n + x; }\nfn main() i32 { assert(make(1) == 1, \"one\"); return make(0); }\n",
         0,
     );
-    // A chain of `const fn` frames keeps the guarantee: the same failure fails the build.
-    let r = h::compile_and_run(
-        "struct P { pub n: i32 }\nextend P as Free { fn free(self: &mut Self) {} }\nextend P { pub const fn new() P { return P { n: 0 }; } }\nconst fn make(x: i32) i32 { let p = P::new(); return p.n + x; }\nfn main() i32 { return make(0); }\n",
-    );
-    assert(!r.built, "a const fn over a const fn that cannot fold is an error");
 }
 
 // `n` scalar constants, each derived from the one before (C0 = 1, Ci = C(i-1) % 7 + 1), then `tail`.

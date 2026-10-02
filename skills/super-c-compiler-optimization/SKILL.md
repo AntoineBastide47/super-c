@@ -27,10 +27,11 @@ Before any optimization work, understand these non-negotiable constraints:
    [fixpoint.md](references/fixpoint.md) for the verification protocol.
 
 2. **LTO gate.** Gate LTO first. Do not keep a micro-optimization that LTO already
-   performs — at `-O3` with LTO (the `release` and `bench` profiles use ThinLTO, see the
-   binary skill), Clang inlines same-TU hot calls, CSEs `strlen` of literals, and lowers
-   fixed-size `memcmp` to branchless compares; cross-module inlining under ThinLTO is
-   import-based, so a hot cross-module call is not always inlined. Check the LTO profile
+   performs — at `-O3` with LTO (the `release` and `bench` profiles use `lto = "auto"`,
+   which Clang runs as full LTO, see the binary skill), Clang inlines hot calls across
+   modules, CSEs `strlen` of literals, and lowers fixed-size `memcmp` to branchless
+   compares. Under opt-in ThinLTO (`lto = "thin"`) cross-module inlining is import-based,
+   so a hot cross-module call is not always inlined. Check the LTO profile
    checkpoint before implementing. If a target shows ~0 samples under LTO, the
    optimization will not produce a corpus-level win.
 
@@ -169,8 +170,8 @@ bytes.
 **Why compaction:** Decompacting (a shift or mask to recover a field) is cheaper than
 the cache miss a larger struct causes. The compiler already uses this: `Token` is a
 packed `u64`, not a struct — bits 0–31 start offset, 32–55 length, 56–63 kind
-(`src/lexer/token.spc`). `Node` is kept dense (currently 60 bytes, align 4 — the
-generated C carries `_Static_assert(sizeof(ast__Node) == 60 && _Alignof(ast__Node) == 4)`
+(`src/lexer/token.spc`). `Node` is kept dense (currently 56 bytes, align 4 — the
+generated C carries `_Static_assert(sizeof(ast__Node) == 56 && _Alignof(ast__Node) == 4)`
 so any drift is a build error).
 
 **How to compact:**

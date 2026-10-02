@@ -446,8 +446,9 @@ was deleted). It serves typechecker folds (array lengths, const args, static_ass
 eligibility, always-panics), and lint probes.
 
 Driver protocol: `cir.all_typed` and `record_folds` are set **before the first body
-lowers** (mandatory call-site folds must behave exactly as under the backend's own
-lowering); `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
+lowers** (the constant contexts lowering evaluates, such as build conditions, repeat counts
+and range bounds, must behave exactly as under the backend's own lowering); lowering never
+folds a call outside a constant context; `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
 (a callee outside the item's visibility) at the end, and a top-level `static_assert`
 that still does not fold then is an error; `report_fold_errs` surfaces
 emission-time fold failures. During the type check the engine answers as the item under

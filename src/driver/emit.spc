@@ -2394,11 +2394,8 @@ struct SeedTask {
     pub p: *mut loader::Package,
     pub ctl: *const tctl::Ctl,
     pub est: u64,
-    /// The graph and shard, OPAQUE on purpose: the payload transitively holds `str` fields, and the
-    /// bootstrap compiler's carries-borrow walk peels typed pointers (fixed in this tree, but the
-    /// release binary must still build this source).
-    pub g: *mut void,
-    pub out: *mut void,
+    pub g: *mut ig::InstGraph,
+    pub out: *mut SeedShard,
     pub m: usize,
     pub testing: bool,
     pub verbose: bool,
@@ -2410,8 +2407,8 @@ unsafe extend SeedTask as Send {}
 fn cemit_seed_task(t: SeedTask) {
     let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
-    let o = unsafe &mut *(t.out as *mut SeedShard);
-    let g9 = t.g as *mut ig::InstGraph;
+    let o = unsafe &mut *t.out;
+    let g9 = t.g;
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
     cemit_seed_module(
@@ -2649,18 +2646,17 @@ fn cemit_drain_demand(
 }
 
 // One demanded instance emitted into a private shard by the parallel instance frontier. Shared
-// caches are READ-ONLY during a wave (the master mutates them only at merge); pointers are opaque
-// where the payload transitively reaches `str` (the release bootstrap's carries-borrow walk).
+// caches are READ-ONLY during a wave (the master mutates them only at merge).
 struct DrainTask {
     pub p: *mut loader::Package,
-    pub g: *mut void, // InstGraph
-    pub out: *mut void, // SeedShard
-    pub dem: *const void, // Vector<cbe::Demand>: frozen during the wave
-    pub lws: *const void, // Vector<irl::Lowerer>: frozen during the wave
-    pub cfs: *const void, // Vector<cfl::CFlow>: frozen during the wave
-    pub lwc: *const void, // lw_cache: frozen during the wave
-    pub clc: *const void, // cl_cache: frozen during the wave
-    pub clw: *const void, // clws: frozen during the wave
+    pub g: *mut ig::InstGraph,
+    pub out: *mut SeedShard,
+    pub dem: *const Vector<cbe::Demand>, // frozen during the wave, like the five below
+    pub lws: *const Vector<irl::Lowerer>,
+    pub cfs: *const Vector<cfl::CFlow>,
+    pub lwc: *const Map<u64, u64>, // lw_cache
+    pub clc: *const Map<u64, u64>, // cl_cache
+    pub clw: *const Vector<irl::Lowerer>, // clws
     pub widx: *const u64, // tasked demand indices, ascending
     pub wli: *const u64, // their base lowering slots
     pub lo: u64, // this slice: widx[lo..hi)
@@ -2677,13 +2673,13 @@ fn cemit_drain_task(t: DrainTask) {
     // from nothing.
     let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
-    let o = unsafe &mut *(t.out as *mut SeedShard);
-    let dem = unsafe &*(t.dem as *const Vector<cbe::Demand>);
-    let lws = unsafe &*(t.lws as *const Vector<irl::Lowerer>);
-    let cfs = unsafe &*(t.cfs as *const Vector<cfl::CFlow>);
-    let lwc = unsafe &*(t.lwc as *const Map<u64, u64>);
-    let clc = unsafe &*(t.clc as *const Map<u64, u64>);
-    let clws0 = unsafe &*(t.clw as *const Vector<irl::Lowerer>);
+    let o = unsafe &mut *t.out;
+    let dem = unsafe &*t.dem;
+    let lws = unsafe &*t.lws;
+    let cfs = unsafe &*t.cfs;
+    let lwc = unsafe &*t.lwc;
+    let clc = unsafe &*t.clc;
+    let clws0 = unsafe &*t.clw;
     for w in t.lo..t.hi {
         let di = (unsafe t.widx[w as usize]) as usize;
         let li = unsafe t.wli[w as usize];
@@ -2695,7 +2691,7 @@ fn cemit_drain_task(t: DrainTask) {
 
 fn cemit_drain_slice_one(
     p: &mut loader::Package,
-    gv: *mut void,
+    gv: *mut ig::InstGraph,
     o: &mut SeedShard,
     dem: &Vector<cbe::Demand>,
     lws: &Vector<irl::Lowerer>,
@@ -2886,16 +2882,7 @@ fn cemit_drain_slice_one(
             }
             if !known {
                 let mut cl = irl::Lowerer::new(p, d_def.module, cn);
-                if cemit_seed_take(
-                    unsafe &mut *(gv as *mut ig::InstGraph),
-                    p,
-                    d_def.module,
-                    cn,
-                    &mut cl,
-                    kl,
-                    true,
-                    &mut dow2.pr,
-                ) {
+                if cemit_seed_take(unsafe &mut *gv, p, d_def.module, cn, &mut cl, kl, true, &mut dow2.pr) {
                     dow2.apply_drops(&mut cl);
                     own_ci = o.dclo.len() as u64;
                     o.dclo_keys.push(ckey);
@@ -2938,10 +2925,10 @@ fn cemit_drain_slice_one(
 // One slice of a wave's unique base-definition lowerings; results land in disjoint slots.
 struct LowTask {
     pub p: *mut loader::Package,
-    pub g: *mut void, // InstGraph
+    pub g: *mut ig::InstGraph,
     pub defs: *const u64, // packed module << 32 | node
-    pub res: *mut void, // irl::Lowerer slot base (disjoint writes per index)
-    pub cfr: *mut void, // cfl::CFlow slot base
+    pub res: *mut irl::Lowerer, // slot base (disjoint writes per index)
+    pub cfr: *mut cfl::CFlow, // slot base
     pub oks: *mut bool,
     pub lo: u64,
     pub hi: u64,
@@ -2953,14 +2940,14 @@ unsafe extend LowTask as Send {}
 fn cemit_low_task(t: LowTask) {
     let mut dow2 = dctx_take(t.p);
     let p = unsafe &mut *t.p;
-    let res = t.res as *mut irl::Lowerer;
-    let cfr = t.cfr as *mut cfl::CFlow;
+    let res = t.res;
+    let cfr = t.cfr;
     for i in t.lo..t.hi {
         let dv = unsafe t.defs[i as usize];
         let m = (dv >> 32) as ModuleId;
         let n = (dv & 0xFFFFFFFFu64) as NodeId;
         let mut lw = irl::Lowerer::new(p, m, n);
-        let ok = cemit_seed_take(unsafe &mut *(t.g as *mut ig::InstGraph), p, m, n, &mut lw, t.kl, false, &mut dow2.pr);
+        let ok = cemit_seed_take(unsafe &mut *t.g, p, m, n, &mut lw, t.kl, false, &mut dow2.pr);
         if ok {
             dow2.apply_drops(&mut lw);
             let mut cf = cfl::CFlow::new_empty();
@@ -2997,12 +2984,12 @@ fn cemit_low_launch(
         };
     }
     let wgl = psync::WaitGroup::new();
-    let resb = (res.index_mut(0) as *mut irl::Lowerer) as *mut void;
-    let cfrb = (cfr.index_mut(0) as *mut cfl::CFlow) as *mut void;
+    let resb = res.index_mut(0) as *mut irl::Lowerer;
+    let cfrb = cfr.index_mut(0) as *mut cfl::CFlow;
     let oksb = oks.index_mut(0) as *mut bool;
     let defb = defs.as_ptr();
     let ppd = p as *mut loader::Package;
-    let ggd = (g as *mut ig::InstGraph) as *mut void;
+    let ggd = g as *mut ig::InstGraph;
     let klp9 = (kl9 as *mut psync::Semaphore) as *const psync::Semaphore;
     for sI in 0..nsl {
         let lo9 = nd * sI / nsl;
@@ -3049,14 +3036,14 @@ fn cemit_drain_launch(
 ) {
     let wgd = psync::WaitGroup::new();
     let ppd = p as *mut loader::Package;
-    let ggd = (g as *mut ig::InstGraph) as *mut void;
+    let ggd = g as *mut ig::InstGraph;
     let klp9 = (kl9 as *mut psync::Semaphore) as *const psync::Semaphore;
-    let demp = ((&cem.demand) as *const Vector<cbe::Demand>) as *const void;
-    let lwsp = (lws as *const Vector<irl::Lowerer>) as *const void;
-    let cfsp = (cfs as *const Vector<cfl::CFlow>) as *const void;
-    let lwcp = (lw_cache as *const Map<u64, u64>) as *const void;
-    let clcp = (cl_cache as *const Map<u64, u64>) as *const void;
-    let clwp = (clws as *const Vector<irl::Lowerer>) as *const void;
+    let demp = (&cem.demand) as *const Vector<cbe::Demand>;
+    let lwsp = lws as *const Vector<irl::Lowerer>;
+    let cfsp = cfs as *const Vector<cfl::CFlow>;
+    let lwcp = lw_cache as *const Map<u64, u64>;
+    let clcp = cl_cache as *const Map<u64, u64>;
+    let clwp = clws as *const Vector<irl::Lowerer>;
     let wip = widx.as_ptr();
     let wlp = wli.as_ptr();
     let mut lo9: u64 = 0;
@@ -3716,7 +3703,7 @@ pub fn cemit_package(
         }
         let wg = psync::WaitGroup::new();
         let pp9 = p as *mut loader::Package;
-        let gg9 = ((&mut g) as *mut ig::InstGraph) as *mut void;
+        let gg9 = (&mut g) as *mut ig::InstGraph;
         let klp = ((&mut kl) as *mut psync::Semaphore) as *const psync::Semaphore;
         // Longest-job-first submission (the runtime still executes in any order), gated by the
         // build memory budget; the merge below stays in module order regardless.
@@ -3735,7 +3722,7 @@ pub fn cemit_package(
             mctl.acquire(est9);
             wg.add(1);
             launched9 += 1;
-            let op9 = (shards.index_mut(m) as *mut SeedShard) as *mut void;
+            let op9 = shards.index_mut(m) as *mut SeedShard;
             let t = SeedTask {
                 p: pp9,
                 ctl: &mctl,
@@ -9607,8 +9594,9 @@ pub fn run_package(
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
     // The backend consumes borrowck's lowerings (irkeep), so the evaluator must reach its final
-    // state BEFORE the first body lowers: every module is typed here, and mandatory call-site
-    // folds must behave exactly as they would under the backend's own lowering.
+    // state BEFORE the first body lowers: every module is typed here, and the folds lowering runs
+    // (build conditions, repeat counts, range bounds) must behave exactly as they would under the
+    // backend's own lowering.
     {
         let cirp1 = p.cir as *mut iri::Interp;
         if cirp1 != null {
@@ -9772,7 +9760,7 @@ pub fn run_package(
     {
         let cirg = p.cir as *mut iri::Interp;
         if cirg != null {
-            // The seed/instance lowering attempts mandatory folds.
+            // The seed/instance lowering folds its constant contexts.
             unsafe (*cirg).record_folds = true;
         }
     }

@@ -4124,16 +4124,7 @@ extend Lowerer {
                 tm.t0 = join;
                 self.seal(tm, rhs_b);
             }
-            // the RHS only runs on the deciding path: a failed fold there is not an error
-            if unsafe (&*self.pkg).cir != null {
-                let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-                cev9.pause_folds();
-            }
             let rop = self.lower_expr(d.right);
-            if unsafe (&*self.pkg).cir != null {
-                let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-                cev9.resume_folds();
-            }
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -4371,47 +4362,6 @@ extend Lowerer {
             let rd0 = self.f.res(d.callee);
             if rd0.module == self.module && rd0.node != NODE_NONE && self.local_of(rd0.node) != ir::IR_NONE {
                 target = DefId { module: 0, node: NODE_NONE };
-            }
-        }
-        // Emit-time implicit CTFE (the old backend's fold pass): a scalar call whose arguments
-        // look compile-time constant runs through the evaluator -- success folds the call to its
-        // value, a `const fn` failure records a fold error the driver promotes.
-        if !self.body.is_generic && ty != TYPE_NONE && unsafe (&*self.pkg).cir != null {
-            let cev8 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-            // a body the interpreter lowers for its OWN execution folds through interpretation
-            // itself (and a facade root lowering IS the fold in progress); re-entrant implicit
-            // folding would clobber the live evaluation state
-            if cev8.record_folds && !cev8.folding_self() {
-                let mut ct8 = target;
-                if ct8.node == NODE_NONE {
-                    ct8 = self.path_res(d.callee);
-                }
-                if ct8.node != NODE_NONE && self.decl_kind(ct8) == NodeKind::NODE_FUNCTION {
-                    let ta8 = unsafe &*(&*self.pkg).module_ast_const(ct8.module);
-                    let fd8 = ta8.at_const(ct8.node).as_data.function;
-                    // scalar results only (the fold-worthwhile gate): wide-value const fns fall
-                    // back to runtime calls without complaint
-                    let y8 = *self.f.ty(ty);
-                    let scalar8 = y8.kind == TypeKind::TYPE_BUILTIN && y8.as_data.builtin != BuiltinType::BT_VOID && y8.as_data.builtin != BuiltinType::BT_VALIST && y8.as_data.builtin != BuiltinType::BT_C32 && y8.as_data.builtin != BuiltinType::BT_C64;
-                    if scalar8 && !fd8.is_extern() && fd8.body != NODE_NONE && self.maybe_const(id) {
-                        let v8 = cev8.eval(self.module, id);
-                        if v8.kind == iri::IV_INT || v8.kind == iri::IV_BOOL {
-                            // folded: the replay still sees the call boundary, and each argument's
-                            // consumption is marked explicitly (no IR op survives to carry it)
-                            self.tp(ir::TP_CALL_MARK, 0, id);
-                            for ai8 in 0..d.args.len {
-                                self.tp(ir::TP_CONST_MOVE, 0, unsafe self.f.list(d.args)[ai8 as usize]);
-                            }
-                            self.tp(ir::TP_CALL, 0, id);
-                            let ck8: u8 = if v8.kind == iri::IV_BOOL {
-                                ir::CK_BOOL;
-                            } else {
-                                ir::CK_INT;
-                            };
-                            return self.kop(ck8, ty, v8.i, sp);
-                        }
-                    }
-                }
             }
         }
         // `type_info::<T>()` / `zeroed::<T>()`: compiler intrinsics, not resolved functions.
@@ -5810,67 +5760,6 @@ extend Lowerer {
             return d.node;
         }
         return c; // the checker records the captured DECL itself, not a reference to it
-    }
-
-    // Syntactically constant-looking (the emit-time fold gate): literals, consts, and closed
-    // expressions over them -- anything else makes an eval attempt pure waste.
-    fn maybe_const(self: &Self, id: NodeId) bool {
-        if id == NODE_NONE {
-            return true;
-        }
-        let n = *self.f.node(id);
-        let k = n.kind;
-        if k == NodeKind::NODE_LITERAL || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
-            return true;
-        }
-        if k == NodeKind::NODE_BINARY {
-            // A left-nested chain is walked with a loop, so the depth does not grow with its length.
-            let mut l = id;
-            while self.f.node(l).kind == NodeKind::NODE_BINARY {
-                if !self.maybe_const(self.f.node(l).as_data.binary.right) {
-                    return false;
-                }
-                l = self.f.node(l).as_data.binary.left;
-            }
-            return self.maybe_const(l);
-        }
-        if k == NodeKind::NODE_UNARY {
-            return self.maybe_const(n.as_data.unary.operand);
-        }
-        if k == NodeKind::NODE_CAST {
-            return self.maybe_const(n.as_data.cast.expression);
-        }
-        if k == NodeKind::NODE_INDEX {
-            return self.maybe_const(n.as_data.index.object) && self.maybe_const(n.as_data.index.index);
-        }
-        if k == NodeKind::NODE_CALL {
-            if !self.maybe_const(n.as_data.call.callee) {
-                return false;
-            }
-            for i in 0..n.as_data.call.args.len {
-                if !self.maybe_const(unsafe self.f.list(n.as_data.call.args)[i as usize]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER && n.as_data.member.path {
-            let d = self.path_res(id);
-            if d.node == NODE_NONE {
-                return true;
-            }
-            let dk = self.decl_kind(d);
-            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT {
-                return true;
-            }
-            if dk == NodeKind::NODE_CONST {
-                let da = unsafe &*(&*self.pkg).module_ast_const(d.module);
-                let cd = da.at_const(d.node).as_data.const_def;
-                return cd.value != NODE_NONE && !cd.is_static_mut;
-            }
-            return false;
-        }
-        return false;
     }
 
     // The resolution of a path-shaped expression: the node's own, else the member name's, else the

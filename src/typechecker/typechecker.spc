@@ -12196,6 +12196,12 @@ extend<'a> TypeChecker<'a> {
                 return false;
             }
             if !probe {
+                // A pointee is exact: a literal the value rules accepted by widening (`&-3` for `&i64`)
+                // still has its own type.
+                let lk = self.tc_lit_kind(opnd);
+                if lk != 0 && unsafe (*self.cur_ast()).type_of(opnd) != ex.as_data.elem {
+                    let _ = self.lit_adopt(opnd, lk, ex.as_data.elem);
+                }
                 unsafe (*self.cur_ast()).set_type(
                     node,
                     unsafe (*self.cur_ast()).intern_type(
@@ -12666,6 +12672,40 @@ extend<'a> TypeChecker<'a> {
         }
         let dn = unsafe (*self.mod_ast(m)).at_const(d);
         return dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_union;
+    }
+
+    fn is_prelude_iface(self: &Self, iface: DefId, name: str) bool {
+        let h = unsafe (*self.package).prelude_lookup(name, true);
+        return h.node == iface.node && h.mid == iface.module;
+    }
+
+    // The prelude default method of `iface` that cannot serve `ty`, or "". The reflection-built
+    // defaults work field by field: an enum's `clone`/`default` must construct the active variant,
+    // and a union has no active field to copy, default, compare or order.
+    fn reflect_default_refused(self: &Self, iface: DefId, ty: TypeId) str<'static> {
+        let mut m: ModuleId = 0;
+        let mut d = NODE_NONE;
+        if ty == TYPE_NONE || !self.aggregate_decl(ty, &mut m, &mut d) {
+            return "";
+        }
+        let dn = unsafe (*self.mod_ast(m)).at_const(d);
+        let is_union = dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_union;
+        if dn.kind != NodeKind::NODE_ENUM && !is_union {
+            return "";
+        }
+        if self.is_prelude_iface(iface, "Clone") {
+            return "clone";
+        }
+        if self.is_prelude_iface(iface, "Default") {
+            return "default";
+        }
+        if is_union && self.is_prelude_iface(iface, "Eq") {
+            return "eq";
+        }
+        if is_union && self.is_prelude_iface(iface, "Ord") {
+            return "cmp";
+        }
+        return "";
     }
 
     /// Decompose a place `x.f[i]...` into its root binding + access steps (leaf-first). Returns the
@@ -13289,9 +13329,42 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let req = unsafe (*ia).at_const(iface.node).as_data.interface_def.items;
+        let reflect_m = if depth == 0 {
+            self.reflect_default_refused(iface, self_ty);
+        } else {
+            "";
+        };
         for i in 0..req.len {
             let rid = unsafe (*ia).list(req)[i as usize];
             let rm = unsafe (*ia).at_const(rid);
+            if reflect_m.len() != 0 && rm.kind == NodeKind::NODE_FUNCTION && rm.as_data.function.body != NODE_NONE {
+                let rn = unsafe (*ia).at_const(rm.as_data.function.name).as_data.name.text;
+                if diag::span_str(self.mod_src(iface.module), rn.start, rn.end) == reflect_m && self.find_extend_item_named(
+                    extnode,
+                    rn,
+                    iface.module,
+                ) == NODE_NONE {
+                    let at = unsafe (*self.cur_ast()).at_const(
+                        unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,
+                    ).span;
+                    let tn = self.type_buf(self_ty);
+                    let kind = if self.tc_type_is_union(self_ty) {
+                        "a union";
+                    } else {
+                        "an enum";
+                    };
+                    self.errors.emit_span(
+                        at,
+                        format(
+                            "'{}' is {}, which the default '{}' does not support",
+                            str::from_cstr(&tn[0]),
+                            kind,
+                            reflect_m,
+                        ),
+                    );
+                    self.errors.note(format("define '{}' in an 'extend' of the type", reflect_m));
+                }
+            }
             // An ASSOCIATED TYPE requirement (`type Item<'a>;`, no definition). The impl must
             // provide it with the same lifetime and type-generic arity: the interface's declared
             // shape is a contract even though lifetimes are erased from the interned types.
@@ -23153,7 +23226,7 @@ extend TypeChecker {
         // An owning (Free) type IS representable: its object graph, heap blocks included,
         // materializes into static storage with relocations, exactly as a malloc'd graph does.
         // What makes it sound is that nothing can ever free or mutate it: the value is
-        // immutable, and borrowck refuses to move it out of the const (bc_const_move), so no
+        // immutable, and borrowck refuses to move it out of the const (`tc_mark_move`), so no
         // copy exists to run free() on storage the allocator never handed out.
         // The one thing that does NOT survive materialization is allocator STATE: the constant's
         // storage is static data, so state describing it is fiction, and a state field holding a

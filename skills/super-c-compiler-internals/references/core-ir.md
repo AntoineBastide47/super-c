@@ -154,8 +154,7 @@ Events: `TP_SCOPE_PUSH/POP`, `TP_NLL` (non-lexical borrow end point), `TP_MARK_P
 `TP_LET`, `TP_LET_TUPLE`, `TP_ASSIGN_PRE/POST`, `TP_RET_VAL`, `TP_RET_POST`,
 `TP_CALL_MARK`, `TP_CALL`, `TP_REF`, `TP_CAST_ERASE`, `TP_SLICE`, `TP_CLOSURE`,
 `TP_FLOW_SAVE/ELSE/JOIN`, `TP_LOOP_PUSH/POP`, `TP_BODY_START/END`, `TP_MATCH_PRE`,
-`TP_ARM`, `TP_ARM_END`, `TP_MATCH_POST`, and `TP_CONST_MOVE` (an argument a **folded**
-call consumed — no IR op survives, so the replay marks the move directly).
+`TP_ARM`, `TP_ARM_END` and `TP_MATCH_POST`.
 
 There are no `TP_BORROW`/`TP_MOVE`/`TP_DROP` events: borrows and moves are ordinary IR
 operands (`RV_REF`, `OP_MOVE`); the tape carries the *walk structure* the flow helpers

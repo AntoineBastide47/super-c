@@ -110,9 +110,9 @@ Under `SC_FACTS_CHECK` the driver snapshots watermarks here.
 
 One independent job per module over its function, method and aggregate items in source
 order, on the item job runner (`bc_jobs`; a body split of a module was measured and refused:
-its bodies contend on the module's type-pool lock, item-index.md). Before it starts, the driver sets `cir.all_typed` and `record_folds` —
-mandatory call-site folds must behave exactly as under the backend's own lowering, because
-**this stage produces the lowerings the backend reuses**.
+its bodies contend on the module's type-pool lock, item-index.md). Before it starts, the driver sets `cir.all_typed` and `record_folds`:
+the constant contexts lowering evaluates must behave exactly as under the backend's own
+lowering, because **this stage produces the lowerings the backend reuses**.
 
 Per function (`bc_fn`, extending `TypeChecker`):
 1. `bc_ir_lower`: lower the item's bodies to Core IR; the Lowerer records an event tape

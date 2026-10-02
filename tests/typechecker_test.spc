@@ -616,6 +616,41 @@ fn duplicate_conformance() {
     );
 }
 
+// The prelude's Clone/Default defaults build a value field by field and Eq/Ord compare one field by
+// field: an enum needs its active variant constructed and a union has no active field, so a
+// conformance that inherits one of those defaults is rejected where it is declared.
+@test
+fn field_wise_defaults_refuse_enums_and_unions() {
+    h::expect_err_msg(
+        "a derived enum clone",
+        "@derive(Clone)\nenum E { X, Y(i32), }\nfn main() i32 { return 0; }\n",
+        "'E' is an enum, which the default 'clone' does not support",
+    );
+    h::expect_err_msg(
+        "an inherited enum default",
+        "enum E { X, Y(i32), }\nextend E as Default {}\nfn main() i32 { return 0; }\n",
+        "'E' is an enum, which the default 'default' does not support",
+    );
+    h::expect_err_msg(
+        "a derived union eq",
+        "@derive(Eq)\nunion U { a: i32, b: f32, }\nfn main() i32 { return 0; }\n",
+        "'U' is a union, which the default 'eq' does not support",
+    );
+    h::expect_err_msg(
+        "a derived union cmp",
+        "union U { a: i32, b: f32, }\nextend U as Eq { pub fn eq(self: &U, o: &U) bool { return unsafe self.a == o.a; } }\nextend U as Ord {}\nfn main() i32 { return 0; }\n",
+        "'U' is a union, which the default 'cmp' does not support",
+    );
+    h::expect_ok(
+        "enums keep the derived Eq and Ord",
+        "@derive(Eq, Ord)\nenum E { X, Y(i32), }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "a hand-written clone serves an enum",
+        "enum E { X, Y(i32), }\nextend E as Clone { pub fn clone(self: &E) E { return *self; } }\nfn main() i32 { return 0; }\n",
+    );
+}
+
 @test
 fn fields_projection() {
     h::expect_ok(

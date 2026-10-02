@@ -195,9 +195,9 @@ use it to see a passing test's output.
 
 ### Sharding for CI
 
-`--test-shard=K/N` splits the test list into N stable shards and runs shard K. Shard
-assignment is deterministic — the same shard always runs the same tests, regardless of
-test ordering.
+`--test-shard=K/N` splits the test list into N shards and runs shard K. Tests are dealt
+round-robin over the filter-matched list, so the assignment is deterministic for a fixed
+test list and filter; adding, removing or reordering tests moves tests between shards.
 
 ## Leak Detection
 
@@ -205,7 +205,7 @@ Every compiled binary carries a built-in leak tracker, controlled by environment
 variables:
 
 ```sh
-SC_LEAK_CHECK=1 ./app           # report leaks at exit with call stacks
+SC_LEAK_CHECK=1 ./app           # report leaks at exit with their allocation site
 SC_LEAK_CHECK=fatal ./app       # report + exit 23 on leaks (CI gate)
 ```
 
