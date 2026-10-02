@@ -4825,7 +4825,9 @@ extend Lowerer {
     fn chk_open(self: &mut Self, root: NodeId, stmt: bool) usize {
         let base = self.chk_base;
         self.chk_base = self.chk_nodes.len();
-        if root == NODE_NONE || self.chk_mask != 0 {
+        // A body that takes no cancellation checks (`chk_enabled`) needs no clean nodes: every
+        // reader of them checks that first.
+        if root == NODE_NONE || self.chk_mask != 0 || !self.chk_enabled() {
             return base;
         }
         self.chk_nodes.push(root);

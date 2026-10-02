@@ -40,7 +40,11 @@ jobs:
       - name: Configure ccache dir
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+          # The saved caches reached 450-475 MB, near the old 500M bound.
+          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+          # Debug builds in per-test scratch directories record their directory, which would key every
+          # such compile apart: without the directory in the hash they hit each other's entries.
+          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
 
       - name: Cache mingw-w64 install
         uses: actions/cache@v4
@@ -153,7 +157,11 @@ jobs:
       - name: Configure ccache dir
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+          # The saved caches reached 450-475 MB, near the old 500M bound.
+          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+          # Debug builds in per-test scratch directories record their directory, which would key every
+          # such compile apart: without the directory in the hash they hit each other's entries.
+          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           command -v ccache >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y ccache; }
 
       - name: Fetch bootstrap super-c from the latest release
@@ -236,7 +244,11 @@ jobs:
       - name: Configure ccache dir
         run: |
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+          # The saved caches reached 450-475 MB, near the old 500M bound.
+          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+          # Debug builds in per-test scratch directories record their directory, which would key every
+          # such compile apart: without the directory in the hash they hit each other's entries.
+          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           command -v ccache >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y ccache; }
 
       - name: Cache wasi toolchain

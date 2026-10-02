@@ -18,6 +18,7 @@ import driver::test as *;
 import driver::emit as *;
 import build_system::manifest as bman;
 import build_system::build as bsys;
+import build_system::objcache as ocache;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
 import driver::taskctl as tctl;
@@ -34,6 +35,7 @@ fn run_file(
     bootstrap_tags: bool,
     lint: bool,
     cflags: str,
+    ccflags: str,
     jobs: u32,
     out_dir: str,
     cc: str,
@@ -87,7 +89,7 @@ fn run_file(
         }
         let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
         p.cir = &mut cirv;
-        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null);
+        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
     }
     return rc;
 }
@@ -1411,7 +1413,7 @@ OPTIONS:
             if mode == Mode::MODE_CLEAN {
                 rc = bsys::manifest_clean(&man);
                 if clean_cache {
-                    let cd = bsys::object_cache_dir();
+                    let cd = ocache::object_cache_dir();
                     if cd.len() != 0 {
                         bsys::rm_rf(cd.as_str());
                         println("removed {}", cd.as_str());
@@ -1437,7 +1439,8 @@ OPTIONS:
     }
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
-    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target));
+    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false);
+    let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true);
     let rc = run_file(
         file,
         std_dir.as_str(),
@@ -1450,6 +1453,7 @@ OPTIONS:
         co.bootstrap_tags,
         co.lint,
         pflags.as_str(),
+        pcflags.as_str(),
         jobs,
         bo.out_dir,
         bo.cc,

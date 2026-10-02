@@ -18,6 +18,7 @@
 # the change itself). ci/perf_gate.sh resolves the cutover limits from these rows.
 set -eu
 cd "$(dirname "$0")/.."
+. ci/contract.sh
 fail() { printf 'ledger: FAILED: %s\n' "$1" >&2; exit 1; }
 [ $# -ge 2 ] || fail "usage: sh ci/ledger.sh <baseline-commit> <commit>..."
 out=${SC_LEDGER_OUT:-build/ledger}
@@ -41,10 +42,14 @@ for c in "$@"; do
     ( cd "$d" && SC_BENCH_OUT="$rec" build/bench-bin --filter=self_transpile >"$out/$c.txt" 2>&1 ) || fail "$c: the benchmark reported a failure (see $out/$c.txt)"
     rm -rf "$d"
 done
-python3 - "$out" "$ncpu" "$@" <<'PY'
+python3 - "$out" "$ncpu" "$CONTRACT_BENCH_V" "$@" <<'PY'
 import json, subprocess, sys
-out, ncpu, commits = sys.argv[1], sys.argv[2], sys.argv[3:]
-def metrics(rec):
+out, ncpu, bench_v, commits = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:]
+def metrics(c, rec):
+    # Only records of the contract's schema (CONTRACT_BENCH_V) measure what the gate's constants hold: a
+    # chain starts at a commit whose benchmark writes it.
+    if rec.get("v") != bench_v:
+        sys.exit("ledger: FAILED: %s writes bench schema v%s, the contract reads v%d" % (c, rec.get("v"), bench_v))
     ph, b = rec["phases"], rec["build"]
     m = {
         "serial_cpu_ms": rec["cpu_ms"]["median"],
@@ -54,7 +59,7 @@ def metrics(rec):
         "peak_rss_mib": rec["peak_rss_mib"],
         "frontend_mcyc": ph["parse"]["mcyc"] + ph["resolve"]["mcyc"] + ph["typecheck"]["mcyc"],
     }
-    for k in ("parse", "resolve", "typecheck", "borrowck", "codegen"):
+    for k in ("stamp", "parse", "resolve", "typecheck", "borrowck", "checks", "prepare", "plan", "render", "publish"):
         m["phase_%s_mcyc" % k] = ph[k]["mcyc"]
     if b.get("ok"):
         m["parallel_transpile_ms"] = sum(b["ms"][k] for k in ("stamp", "load", "resolve", "typecheck", "borrowck", "checks", "prepare", "plan", "render", "publish"))
@@ -66,7 +71,7 @@ for c in commits:
     if not rec.get("ok"):
         sys.exit("ledger: FAILED: %s reports failure" % c)
     subj = subprocess.run(["git", "log", "-1", "--format=%s", c], capture_output=True, text=True).stdout.strip()[:72]
-    m = metrics(rec)
+    m = metrics(c, rec)
     if prev is not None:
         pc, pm = prev
         for k in sorted(m):

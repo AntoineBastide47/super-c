@@ -7,6 +7,7 @@ import tests::cli_harness as cli;
 import stdio;
 import module::loader as loader;
 import build_system::build as bsys;
+import build_system::objcache as ocache;
 import driver_shim as shim;
 
 struct Cmd {
@@ -10579,4 +10580,101 @@ fn build_constant_mistakes_are_errors() {
         "fn f<Endian>(x: Endian) Endian {\n    return x;\n}\n\nfn main() i32 {\n    return f(0);\n}\n",
     );
     p.expect_fail("endian.spc", "'Endian' is a reserved build constant type name");
+}
+
+// Build script `main.spc` of directory `dir` to `prog` with object cache root `cache` and `jobs`
+// workers; whether it built.
+fn script_build(dir: str, cache: str, jobs: i32) bool {
+    let args = format(
+        "build {} --jobs={} main.spc -o prog{}",
+        str::from_cstr(cli::cstd_flag()),
+        jobs,
+        str::from_cstr(cli::binext()),
+    );
+    return cli::superc_env_in(dir, "SC_CACHE_DIR", cache, args.as_str()).ok();
+}
+
+// Run `<dir>/prog`; its exit code.
+fn script_run(dir: str) i32 {
+    let mut cmd = format("\"{}/prog{}\"", dir, str::from_cstr(cli::binext()));
+    return cli::run_quiet(cmd.cstr());
+}
+
+// Script builds share one object namespace: a second program in another tree compiles only the units
+// it does not share with the first, and both programs run.
+@test
+fn script_builds_share_cached_objects() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("a/main.spc", "fn main() i32 {\n    println(\"{}\", 3);\n    return 3;\n}\n");
+    p.mkfile("b/main.spc", "fn main() i32 {\n    println(\"{}\", 4);\n    return 4;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let cache = format("{}/ocache", root);
+    let ns = format("{}/o/script", cache.as_str());
+    let ta = format("{}/a", root);
+    let tb = format("{}/b", root);
+    assert(script_build(ta.as_str(), cache.as_str(), 4), "tree a builds");
+    let na = cli::dir_count_suffix(ns.as_str(), ".o");
+    assert(na > 2, "tree a installs its units");
+    assert(script_build(tb.as_str(), cache.as_str(), 4), "tree b builds");
+    let nb = cli::dir_count_suffix(ns.as_str(), ".o");
+    assert(nb > na, "tree b installs the units it does not share");
+    assert(nb - na < na, "tree b reuses the units it shares");
+    assert_eq(script_run(ta.as_str()), 3);
+    assert_eq(script_run(tb.as_str()), 4);
+}
+
+// Units with one file name in two directories (a user module `lib/string` beside the std `string`)
+// compile apart, serially and in parallel, and a rebuild in a fresh tree only reads the cache.
+@test
+fn script_build_same_file_names() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    let lib = "pub fn seven() i32 {\n    return 7;\n}\n";
+    let main = "import lib::string as s;\n\nfn main() i32 {\n    let t = String::from_str(\"abc\");\n    println(\"{}\", t.as_str());\n    return s::seven() - 2;\n}\n";
+    p.mkfile("a/lib/string.spc", lib);
+    p.mkfile("a/main.spc", main);
+    p.mkfile("b/lib/string.spc", lib);
+    p.mkfile("b/main.spc", main);
+    let root = str::from_cstr(p.rootp());
+    let cache = format("{}/ocache", root);
+    let ns = format("{}/o/script", cache.as_str());
+    let ta = format("{}/a", root);
+    let tb = format("{}/b", root);
+    assert(script_build(ta.as_str(), cache.as_str(), 1), "the serial build");
+    assert_eq(script_run(ta.as_str()), 5);
+    let na = cli::dir_count_suffix(ns.as_str(), ".o");
+    assert(script_build(tb.as_str(), cache.as_str(), 4), "the parallel build");
+    assert_eq(script_run(tb.as_str()), 5);
+    assert_eq(cli::dir_count_suffix(ns.as_str(), ".o"), na);
+}
+
+// A unit compiles from its object directory only when no command word names a path relative to the
+// working directory.
+@test
+fn cwd_free_rejects_relative_paths() {
+    let mut cc = Vector::<String>::new();
+    cc.push(String::from_str("cc"));
+    let mut fl = Vector::<String>::new();
+    fl.push(String::from_str("-std=c11"));
+    fl.push(String::from_str("-I/abs/inc"));
+    fl.push(String::from_str("-target"));
+    fl.push(String::from_str("arm64-apple-ios13.0"));
+    assert(ocache::cwd_free(&cc, &fl), "absolute paths and plain words");
+    let bad = ["-Iinc", "-I", "--sysroot=sr/x", "@flags.rsp", "lib/x.a", "-fprofile-generate=out/p"];
+    for i in 0..6 {
+        let mut f2 = Vector::<String>::new();
+        f2.push(String::from_str(unsafe bad[i]));
+        if i == 1 {
+            f2.push(String::from_str("inc"));
+        }
+        assert(!ocache::cwd_free(&cc, &f2), unsafe bad[i]);
+    }
+    let mut rel = Vector::<String>::new();
+    rel.push(String::from_str("./tools/cc"));
+    assert(!ocache::cwd_free(&rel, &fl), "a relative compiler path");
 }

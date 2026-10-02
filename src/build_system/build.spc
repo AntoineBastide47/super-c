@@ -23,6 +23,7 @@ import ir::interp as iri;
 import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
+import build_system::objcache as *;
 import ast::parser as par;
 import lsp::json as json;
 
@@ -137,6 +138,7 @@ pub fn rm_rf(path: str) {
 // generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
 // every object and dependency list no kept generation names (`obj_cache_commit`). A daily sweep
 // removes dead namespaces and idle linker caches (`cache_sweep`).
+// The key, the cache root and the namespace that script builds share live in build_system::objcache.
 
 /// The generations an object cache namespace keeps: the current build and three older ones.
 const OBJ_GENS: usize = 4;
@@ -145,47 +147,6 @@ const OBJ_GENS: usize = 4;
 const OBJ_NS_IDLE: i64 = 30 * 86400;
 /// A linker cache namespace is removed after this many seconds with no entry written or used.
 const LTO_NS_IDLE: i64 = 7 * 86400;
-/// A temp file an interrupted install left behind is removed after this many seconds.
-const TMP_IDLE: i64 = 3600;
-
-/// The object cache root: the build cache root, or empty when caching is disabled (SC_NO_CACHE set,
-/// or no resolvable home).
-pub fn object_cache_dir() String {
-    let off = stdlib::getenv("SC_NO_CACHE");
-    if off != null && unsafe *off != 0 as char {
-        return String::new();
-    }
-    return cache_root();
-}
-
-/// The build cache root: $SC_CACHE_DIR, else <home>/.super-c/cache; empty when no home resolves.
-/// Objects live under `o/<namespace>`, the linker's ThinLTO caches under `lto/<namespace>`.
-pub fn cache_root() String {
-    let dir = stdlib::getenv("SC_CACHE_DIR");
-    if dir != null && unsafe *dir != 0 as char {
-        return String::from_cstr(dir);
-    }
-    let mut home = stdlib::getenv("HOME");
-    if home == null || unsafe *home == 0 as char {
-        home = stdlib::getenv("USERPROFILE");
-    }
-    if home == null || unsafe *home == 0 as char {
-        return String::new();
-    }
-    let mut out = String::from_cstr(home);
-    out.push_str("/.super-c/cache");
-    return out;
-}
-
-/// The real path of `p`; empty when it does not resolve.
-fn real_path(p: str) String {
-    let mut buf = PathBuf {};
-    let mut pp = String::from_str(p);
-    if unsafe shim::sc_realpath(pp.cstr(), &mut buf[0]) == null {
-        return String::new();
-    }
-    return String::from_cstr(&buf[0]);
-}
 
 /// The object cache namespace of the local object tree `pdir` below cache root `root`:
 /// `<root>/o/<hash of pdir's real path>`. Empty when `root` is empty (caching disabled).
@@ -207,21 +168,6 @@ fn obj_cache_ns(root: str, pdir: str) String {
         &mut out,
     );
     return out;
-}
-
-/// `name` starts with a cache key (32 lowercase hex digits) and a dot: `<key>.o`, `<key>.d`, or the
-/// temp file of an install.
-const fn key_prefixed(name: str) bool {
-    if name.len() < 34 || name[32] != b'.' {
-        return false;
-    }
-    for i in 0..32 {
-        let c = name[i as usize];
-        if !(c >= b'0' && c <= b'9' || c >= b'a' && c <= b'f') {
-            return false;
-        }
-    }
-    return true;
 }
 
 /// The newest mtime of `dir` and its entries (0 when `dir` is missing).
@@ -414,180 +360,6 @@ fn cache_sweep(root: str, now: i64) {
             let mut fp = loader::join2(root, flat.at(i).as_str());
             let _ = unsafe shim::sc_unlink(fp.cstr());
         }
-    }
-}
-
-// Two independent mixing lanes: an object served for the WRONG key would be a silent mislink, so the
-// key is 128 bits, not 64.
-fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
-    let mut a = *h1;
-    let mut b = *h2;
-    let mut i: usize = 0;
-    while i + 8 <= n {
-        let mut w: u64 = 0;
-        let mut k: usize = 0;
-        while k < 8 {
-            w = w | (unsafe p[i + k]) as u64 << (k * 8) as u64;
-            k = k + 1;
-        }
-        a = skey_mix(a, w);
-        b = skey_mix(b, ~w);
-        i = i + 8;
-    }
-    let mut tail: u64 = 0;
-    let mut k: usize = 0;
-    while i < n {
-        tail = tail | (unsafe p[i]) as u64 << (k * 8) as u64;
-        i = i + 1;
-        k = k + 1;
-    }
-    a = skey_mix(a, tail ^ n as u64);
-    b = skey_mix(b, ~(tail ^ n as u64));
-    *h1 = a;
-    *h2 = b;
-}
-
-// `p` with every `seg/../` pair removed (`a/b/../c` -> `a/c`); a leading `..` stays.
-fn norm_path(p: str, out: &mut String) {
-    let mut segs = Vector::<str>::new();
-    let mut i: usize = 0;
-    let n = p.len();
-    while i <= n {
-        let mut e = i;
-        while e < n && p[e] != b'/' {
-            e = e + 1;
-        }
-        let seg = p.slice(i, e);
-        if seg == ".." && segs.len() != 0 && segs[segs.len() - 1] != ".." {
-            let _ = segs.pop();
-        } else if seg != "." || segs.len() == 0 {
-            segs.push(seg);
-        }
-        i = e + 1;
-    }
-    for k in 0..segs.len() {
-        if k != 0 {
-            out.push_byte(b'/');
-        }
-        out.push_str(segs[k]);
-    }
-}
-
-// The transitive content hash of one file: its bytes, then the hash of every file its
-// `#include "..."` lines name (resolved the way the C compiler resolves them: relative to the
-// INCLUDING file). Memoized per build in `memo` (path FNV -> two words), so a header shared by
-// many units is read and hashed once; a file on the current include path counts once. False =
-// something was unreadable, and the unit is not cacheable: a header outside the key would mean
-// stale objects served as fresh.
-fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Map<u64, u64>, pool: &mut Vector<u64>) bool {
-    if depth > 64 {
-        return false;
-    }
-    let pk = path.hash();
-    let hit = switch memo.get(&pk) {
-        Some(v) => *v,
-        None => 0xFFFFFFFFFFFFFFFFu64,
-    };
-    if hit != 0xFFFFFFFFFFFFFFFFu64 {
-        // 0 = in progress on this include path (counted where it was entered), else 1 + pool
-        // index of its two words; an unreadable file is pool index with a zero pair.
-        if hit != 0 {
-            let a = pool[(hit - 1) as usize];
-            let b = pool[hit as usize];
-            if a == 0 && b == 0 {
-                return false;
-            }
-            *h1 = skey_mix(*h1, a);
-            *h2 = skey_mix(*h2, b);
-        }
-        return true;
-    }
-    memo.insert(pk, 0);
-    let body = loader::read_file(path);
-    let mut ok = !body.is_none();
-    let mut a = FNV_BASIS;
-    let mut b: u64 = 0x9e3779b97f4a7c15;
-    if ok {
-        let bd = body.unwrap();
-        let s = bd.as_str();
-        ch_mix_bytes(&mut a, &mut b, s.ptr(), s.len());
-        let mut base = path.len();
-        while base > 0 && path[base - 1] != b'/' && path[base - 1] != b'\\' {
-            base = base - 1;
-        }
-        let mut i: usize = 0;
-        let n = s.len();
-        while i < n && ok {
-            // start of line: `#` [ws] `include` [ws] `"..."`.
-            let ls = i;
-            while i < n && s[i] != b'\n' {
-                i = i + 1;
-            }
-            let mut j = ls;
-            while j < i && (s[j] == b' ' || s[j] == b'\t') {
-                j = j + 1;
-            }
-            if j < i && s[j] == b'#' {
-                j = j + 1;
-                while j < i && (s[j] == b' ' || s[j] == b'\t') {
-                    j = j + 1;
-                }
-                if j + 7 <= i && s.slice(j, j + 7) == "include" {
-                    j = j + 7;
-                    while j < i && (s[j] == b' ' || s[j] == b'\t') {
-                        j = j + 1;
-                    }
-                    if j < i && s[j] == b'"' {
-                        j = j + 1;
-                        let hs = j;
-                        while j < i && s[j] != b'"' {
-                            j = j + 1;
-                        }
-                        if j < i {
-                            let name = s.slice(hs, j);
-                            let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
-                            let cut = if base > 0 {
-                                base - 1;
-                            } else {
-                                0 as usize;
-                            };
-                            let mut inc = String::new();
-                            if abs {
-                                inc.push_str(name);
-                            } else {
-                                // One memo entry per file: `dir/../x.h` from every including
-                                // directory collapses to `x.h` (the generated tree has no links).
-                                norm_path(loader::join2(path.slice(0, cut), name).as_str(), &mut inc);
-                            }
-                            ok = ch_hash_file(inc.as_str(), &mut a, &mut b, depth + 1, memo, pool);
-                        }
-                    }
-                }
-            }
-            i = i + 1;
-        }
-    }
-    if !ok {
-        a = 0;
-        b = 0;
-    }
-    pool.push(a);
-    pool.push(b);
-    memo.insert(pk, (pool.len() - 1) as u64);
-    if !ok {
-        return false;
-    }
-    *h1 = skey_mix(*h1, a);
-    *h2 = skey_mix(*h2, b);
-    return true;
-}
-
-fn hex64(v: u64, out: &mut String) {
-    let d = "0123456789abcdef";
-    let mut i = 16;
-    while i > 0 {
-        i = i - 1;
-        out.push_byte(d.byte_at((v >> (i * 4) as u64 & 15u64) as usize));
     }
 }
 
@@ -888,10 +660,6 @@ fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String
     }
 }
 
-/// The built-in flags for profile `name`, as one command-line fragment (cflags then ldflags), for a build
-/// with no manifest to read them from: `super-c release foo.spc`, which compiles and links in one command.
-/// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
-/// failing. `target` drops what that target cannot honour, exactly as a manifest build does.
 /// The names of `m`'s profiles: the ones a PROFILE comparison may name.
 pub fn profile_names(m: &mf::Manifest) Vector<String> {
     let mut out = Vector::<String>::new();
@@ -901,7 +669,13 @@ pub fn profile_names(m: &mf::Manifest) Vector<String> {
     return out;
 }
 
-pub fn profile_flags(name: str, target: i32, sdk: i32) String {
+/// The built-in flags for profile `name`, as one command-line fragment (cflags then ldflags), for a build
+/// with no manifest to read them from: `super-c release foo.spc`. `compile_only` keeps the compile side
+/// alone (cflags and the LTO mode), what each separate compile of a cached script build takes; the link
+/// takes the whole fragment. Empty for an unknown name, so an unrecognised `--profile=` degrades to the
+/// plain build rather than failing. `target` drops what that target cannot honour, exactly as a manifest
+/// build does.
+pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool) String {
     let mut out = String::new();
     if name.len() == 0 {
         return out;
@@ -911,9 +685,11 @@ pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     if pi >= 0 {
         let prof = m.profiles.at(pi as usize);
         push_profile_side(&mut out, prof, &prof.cflags, false, target, sdk);
-        push_profile_side(&mut out, prof, &prof.ldflags, true, target, sdk);
-        // One command compiles and links: nothing to relink, so a ThinLTO request has no probe here
-        // and keeps the automatic mode.
+        if !compile_only {
+            push_profile_side(&mut out, prof, &prof.ldflags, true, target, sdk);
+        }
+        // A script build links once, with no link record to relink against, so a ThinLTO request has
+        // no probe here and keeps the automatic mode.
         let lf = mf::lto_flag(
             if prof.lto == mf::LTO_THIN {
                 mf::LTO_AUTO;
@@ -927,31 +703,6 @@ pub fn profile_flags(name: str, target: i32, sdk: i32) String {
         }
     }
     return out;
-}
-
-// First line of `<argv> ` (a `--version` invocation): part of every command fingerprint so a
-// toolchain upgrade invalidates objects whose sources and flags did not change.
-fn cc_version_argv(args: &mut Vector<String>, dir: str) String {
-    let mut vf = loader::join2(dir, ".ccver");
-    let _ = exec_args(args, vf.cstr());
-    return take_first_line(vf.as_str()).unwrap_or(String::new());
-}
-
-// The first line of file `path`, which is then removed; None when it cannot be read.
-fn take_first_line(path: str) Option<String> {
-    let v = loader::read_file(path);
-    let mut pc = String::from_str(path);
-    unsafe shim::sc_unlink(pc.cstr());
-    if v.is_none() {
-        return Option::<String>::None;
-    }
-    let body = v.unwrap();
-    let s = body.as_str();
-    let mut e: usize = 0;
-    while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
-        e = e + 1;
-    }
-    return Option::<String>::Some(String::from_str(s.slice(0, e)));
 }
 
 /// The linker cache namespace and probe record schema: bump when the emitted C changes shape in a
@@ -2282,10 +2033,13 @@ fn emit_closure(
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
     p.cir = &mut cirv;
-    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", sink);
+    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
     if rc == 0 && cid != 0 {
         stamp_write(stamp, &p, cx.std_dir, root_dir, cx.target, m.arch, cx.bootstrap_tags, cx.lint, srcgen, cid);
     }
+    // The stamp record is the last output of the emission; the package's teardown that follows
+    // belongs to the sync phase.
+    bst::mark(bst::B_PUBLISH);
     return rc;
 }
 
@@ -2371,13 +2125,6 @@ pub fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: str, cx: &B
     let pdir = loader::join2(m.out_dir.as_str(), sub);
     let srcgen = loader::join2(pdir.as_str(), "raw");
     let stamp = loader::join2(pdir.as_str(), ".emit_stamp.new");
-    let jobs: u32 = if cx.jobs != 0 {
-        cx.jobs;
-    } else if m.jobs != 0 {
-        m.jobs;
-    } else {
-        (unsafe shim::sc_ncpu()) as u32;
-    };
     return emit_closure(
         m,
         prof_name,
@@ -2385,13 +2132,109 @@ pub fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: str, cx: &B
         loader::dirname_of(m.root.as_str()),
         "",
         srcgen.as_str(),
-        jobs,
+        build_jobs(m, cx),
         cx,
         null,
         null,
         stamp.as_str(),
         id,
     );
+}
+
+// The worker count of a manifest build: --jobs, else the manifest's `jobs`, else one per core.
+fn build_jobs(m: &mf::Manifest, cx: &BuildCtx) u32 {
+    if cx.jobs != 0 {
+        return cx.jobs;
+    }
+    if m.jobs != 0 {
+        return m.jobs;
+    }
+    return (unsafe shim::sc_ncpu()) as u32;
+}
+
+/// The outcome of `transpile_step`.
+pub struct Transpiled {
+    pub rc: i32, // the emission's exit code; 0 when the stamp skipped it
+    pub skipped: bool, // the emit stamp proved the tree exact: nothing was emitted
+    pub cid: u64, // the emitting compiler's identity in the stamp record; 0 = no stamp
+}
+
+/// The transpile step of an engine build, alone: the emit-stamp check (phase boundary `B_STAMP`), then,
+/// unless the stamp proves the tree of <out-dir>/<sub> exact, the emission of `root`'s closure into
+/// <out-dir>/<sub>/raw through `cx.transpiler` or this compiler's own frontend (boundaries `B_LOAD` to
+/// `B_PUBLISH`), each finished file streamed into `sink` (null: none). The emission writes its stamp
+/// record to `.emit_stamp.new`; the engine installs it once the tree is synced. The engine and the
+/// self-transpile benchmark run this one function, so the benchmark times what a build transpiles.
+pub fn transpile_step(
+    m: &mf::Manifest,
+    prof_name: str,
+    root: str,
+    root_dir: str,
+    alt: str,
+    sub: str,
+    jobs: u32,
+    cx: &BuildCtx,
+    topts: *const TestOpts,
+    sink: *mut EmitSink,
+) Transpiled {
+    let pdir = loader::join2(m.out_dir.as_str(), sub);
+    let srcgen = loader::join2(pdir.as_str(), "raw");
+    let gen = loader::join2(pdir.as_str(), "gen");
+    let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+    let mut stamp_new = stamp_path.clone();
+    stamp_new.push_str(".new");
+    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
+    let external = cx.transpiler.len() != 0;
+    // The emitting compiler's identity, read before the emission: the tree it emits is its function.
+    let cid = if !cache_on {
+        0 as u64;
+    } else if external {
+        transpiler_id(cx.transpiler);
+    } else {
+        compiler_id();
+    };
+    let skipped = cache_on && stamp_fresh(
+        stamp_path.as_str(),
+        root_dir,
+        cx.target,
+        m.arch,
+        cx.bootstrap_tags,
+        cx.lint,
+        gen.as_str(),
+        cid,
+    );
+    bst::mark(bst::B_STAMP);
+    if skipped {
+        return Transpiled { rc: 0, skipped: true, cid: cid };
+    }
+    // An emission that stops part way leaves raw/ and gen/ partly rewritten: no stamp may vouch for
+    // them, or a later build with the old inputs would skip the transpile over a mixed tree.
+    let _ = unsafe shim::sc_unlink(stamp_path.cstr());
+    let _ = unsafe shim::sc_unlink(stamp_new.cstr());
+    let rc = if external {
+        run_transpiler(m, prof_name, root, sub, cx, cid);
+    } else {
+        emit_closure(m, prof_name, root, root_dir, alt, srcgen.as_str(), jobs, cx, topts, sink, stamp_new.as_str(), cid);
+    };
+    return Transpiled { rc: rc, skipped: false, cid: cid };
+}
+
+/// `transpile_step` for the manifest's primary root under `prof_name`: the tree `root_build` compiles,
+/// <out-dir>/<prof_name>/raw. What the self-transpile benchmark runs per round.
+pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mut EmitSink) i32 {
+    let root = m.root.as_str();
+    return transpile_step(
+        m,
+        prof_name,
+        root,
+        loader::dirname_of(root),
+        "",
+        prof_name,
+        build_jobs(m, cx),
+        cx,
+        null,
+        sink,
+    ).rc;
 }
 
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
@@ -2444,13 +2287,7 @@ fn engine_build_i(
     let obj = loader::join2(pdir.as_str(), "obj");
     mkdir_p(gen.as_str());
     mkdir_p(obj.as_str());
-    let jobs: u32 = if cx.jobs != 0 {
-        cx.jobs;
-    } else if m.jobs != 0 {
-        m.jobs;
-    } else {
-        (unsafe shim::sc_ncpu()) as u32;
-    };
+    let jobs = build_jobs(m, cx);
     let stats = bst::last();
     if stats != null {
         let g = unsafe &mut *stats;
@@ -2584,62 +2421,18 @@ fn engine_build_i(
     // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool:
     // unless the emit stamp proves every input unchanged since the last successful emission, in
     // which case the generated tree is already exact and the pipeline skips straight to cc/link.
-    let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
-    let mut stamp_new = stamp_path.clone();
-    stamp_new.push_str(".new");
-    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
-    let external = cx.transpiler.len() != 0;
-    // The emitting compiler's identity, read before the emission: the tree it emits is its function.
-    let cid = if !cache_on {
-        0 as u64;
-    } else if external {
-        transpiler_id(cx.transpiler);
-    } else {
-        compiler_id();
-    };
-    let skip_emit = cache_on && stamp_fresh(
-        stamp_path.as_str(),
-        root_dir,
-        cx.target,
-        m.arch,
-        cx.bootstrap_tags,
-        cx.lint,
-        gen.as_str(),
-        cid,
-    );
-    bst::mark(bst::B_STAMP);
+    let tr = transpile_step(m, prof_name, root, root_dir, alt, sub, jobs, cx, topts, &mut sink);
+    let skip_emit = tr.skipped;
     if stats != null {
         unsafe (*stats).skip_emit = skip_emit;
     }
     let mut t_transpile = t0;
     let mut ret: i32 = 0;
     if !skip_emit {
-        // An emission that stops part way leaves raw/ and gen/ partly rewritten: no stamp may vouch for
-        // them, or a later build with the old inputs would skip the transpile over a mixed tree.
-        let _ = unsafe shim::sc_unlink(stamp_path.cstr());
-        let _ = unsafe shim::sc_unlink(stamp_new.cstr());
-        let rc = if external {
-            run_transpiler(m, prof_name, root, sub, cx, cid);
-        } else {
-            emit_closure(
-                m,
-                prof_name,
-                root,
-                root_dir,
-                alt,
-                srcgen.as_str(),
-                jobs,
-                cx,
-                topts,
-                &mut sink,
-                stamp_new.as_str(),
-                cid,
-            );
-        };
-        if rc != 0 {
+        if tr.rc != 0 {
             // Reap what is in flight; abandon what has not started.
             stream.drain(true);
-            return rc;
+            return tr.rc;
         }
         t_transpile = unsafe shim::sc_ticks_ms();
 
@@ -2653,7 +2446,10 @@ fn engine_build_i(
         }
         // The emission wrote its stamp beside the final one; only a synced tree gets it. A missing stamp
         // (an input the emission could not read) only makes the next build transpile again.
-        if ret == 0 && cid != 0 {
+        if ret == 0 && tr.cid != 0 {
+            let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+            let mut stamp_new = stamp_path.clone();
+            stamp_new.push_str(".new");
             let _ = unsafe shim::sc_rename(stamp_new.cstr(), stamp_path.cstr());
         }
     } else {
@@ -3073,39 +2869,6 @@ pub fn scaffold_project(dir: str, name: str) i32 {
 
 // Byte-for-byte file copy, streamed: read_file would also work for source text, but a vendored tree
 // can carry anything (test fixtures, images), so nothing here may assume text.
-fn copy_file(srcp: str, dstp: str) bool {
-    let fi = stdio::fopen(srcp, "rb");
-    if fi == null {
-        return false;
-    }
-    let fo = stdio::fopen(dstp, "wb");
-    if fo == null {
-        unsafe stdio::fclose(fi);
-        return false;
-    }
-    let mut buf = Array::<char, 4096>::new();
-    let mut ok = true;
-    loop {
-        let n = unsafe stdio::fread(&mut buf[0], 1, 4096, fi);
-        if n == 0 {
-            break;
-        }
-        if unsafe stdio::fwrite(&buf[0], 1, n, fo) != n {
-            ok = false;
-            break;
-        }
-    }
-    // A read error also ends the loop, and would otherwise pass for end of file.
-    if unsafe stdio::ferror(fi) != 0 {
-        ok = false;
-    }
-    unsafe stdio::fclose(fi);
-    if unsafe stdio::fclose(fo) != 0 {
-        ok = false;
-    }
-    return ok;
-}
-
 // Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
 // the project's own history, and a nested repository (the dependency's, or a submodule's) would be
 // invisible to (and shadow files from) the repository the project lives in.
@@ -3421,6 +3184,14 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         binb.push_string(&binp);
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
+    // The fixture builds of one suite run share one object cache (SC_TEST_CACHE_DIR, read by the
+    // harness): the runtime and std units they emit identically compile once, and the cache stays out
+    // of the user's global one. Absolute: tests change directory.
+    let mut fxc = real_path(m.out_dir.as_str());
+    if fxc.len() != 0 {
+        fxc.push_str("/test/fixture-cache");
+        unsafe shim::sc_setenv("SC_TEST_CACHE_DIR".ptr() as *const char, fxc.cstr());
+    }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
     // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
     // link check instead of a serial rebuild of every unit.

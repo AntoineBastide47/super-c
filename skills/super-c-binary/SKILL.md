@@ -122,12 +122,18 @@ control) and prints it as `running benchmarks (build <id>)`. The filter is forwa
 bench binary as a run-time argument, so a filtered run never relinks; a filter that
 selects no benchmark exits nonzero, and so does any benchmark that calls
 `bench::fail`. The compiler's own transpile bench (`self_transpile`) runs 100 serial
-self-transpile rounds and prints per-phase averages (CPU ms, Mcyc, Kalloc, MiB),
-throughput, the min/median/p95/sd of CPU ms, Mcyc and wall ms over the rounds, heap
-requested per round and peak RSS; then it runs one cold build of the compiler through
-the real build engine (dev profile, every core, object cache, emit stamp and ccache off)
-and reports the engine's phase record. A C compiler or linker failure there fails the
-run and keeps the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON.
+rounds of the transpile step a `super-c build` runs (`build_system::build::root_transpile`,
+one worker, into a fresh scratch tree) and samples CPU time, cycles and allocations at the
+build's own phase boundaries (`driver::stats::set_hook`), so its phases are the build's:
+stamp, parse (load, lex and parse), resolve, typecheck, borrowck, checks, prepare, plan,
+render and publish, plus a lexer-only pass reported as a share of parse. It prints
+per-phase averages (CPU ms, Mcyc, Kalloc, MiB), throughput, the min/median/p95/sd of CPU
+ms, Mcyc and wall ms over the rounds, heap requested per round and peak RSS; then it runs
+one cold build of the compiler through the real build engine (dev profile, every core,
+object cache, emit stamp and ccache off) and reports the engine's phase record, sync,
+compile and link included. A C compiler or linker failure there fails the run and keeps
+the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`,
+`CONTRACT_BENCH_V` in `ci/contract.sh`).
 
 ### Gates
 
@@ -359,6 +365,20 @@ namespaces whose owner source directory (`owner`) is gone or that did not change
 days, the idle linker caches, and the flat `<key>.o`/`<key>.d` files that compilers
 before namespaces installed in the root. `super-c clean --cache` removes the whole root.
 
+Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
+namespace, `o/script`, keyed per unit by the compiler version line, the compile flags, the
+unit's path relative to its tree and the text of the unit and its quoted includes (the
+tree's path joins the key only under `-g`, coverage or profile instrumentation), so the
+runtime and std units that programs emit identically compile once. A hit copies the object
+into `<tree>/../obj`, which the link reads. The units to compile run as few `cc -c`
+commands as the process tree's free worker slots allow, all at once, each from a scratch
+directory whose objects then move into place; a unit whose file name another one shares, or
+every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
+The version probe runs beside the compiles when the namespace is new. An install writes a
+temp file and renames it, so concurrent builds never read a torn object. A build that installed an object trims the namespace to 3072 objects, least
+recently used first, once it holds more than 4096. `SC_NO_CACHE` restores the single
+compile-and-link command.
+
 Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
 under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
 runtime (`super-c bench`, self-transpile) within 3%, link memory no higher, the stripped
@@ -383,8 +403,8 @@ than 0.5%), so the built-in profiles keep `auto` and ThinLTO is the validated op
 `SC_LTO=thin` for a session, or `lto = "thin"` under `[profile.release]` in a project
 whose binary is not the shipped compiler. The `bench` profile follows `release` so the benchmark measures
 the compiler users run, and `ci/perf_gate.sh` holds its runtime within 3%. Script mode
-(`super-c release foo.spc`) compiles and links in one command with nothing to relink, so
-a `thin` profile keeps `auto` there.
+(`super-c release foo.spc`) links once with no link record to relink against, so a `thin`
+profile keeps `auto` there.
 
 ### Common flags
 

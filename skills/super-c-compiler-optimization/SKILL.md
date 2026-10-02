@@ -35,7 +35,9 @@ Before any optimization work, understand these non-negotiable constraints:
    optimization will not produce a corpus-level win.
 
 3. **Benchmark protocol.** Measure with `super-c bench --bench-filter=self_transpile`
-   (100 serial self-transpile rounds, then one cold real build through the engine).
+   (100 serial rounds of the build's own transpile step, timed per build phase from
+   stamp to publish, then one cold real build through the engine for sync, compile and
+   link).
    Judge on **Mcyc/Kalloc**, not wall-clock ms (clock frequency varies 2.0–3.8 GHz
    between E/P cores and thermal state); the run prints min/median/p95/sd of every
    round, and a wide spread means the box was not quiet. First run after a rebuild is
@@ -45,7 +47,12 @@ Before any optimization work, understand these non-negotiable constraints:
    constants in `ci/baseline.env` and the accepted-work ledger `ci/ledger.tsv` (every
    percentage gate resolves to a number there); run the benchmark binary
    directly (`build/bench-bin`), never as a child of the ASan dev compiler, whose
-   injected sanitizer runtime changes the allocator and the peak RSS it reports.
+   injected sanitizer runtime changes the allocator and the peak RSS it reports. The
+   lane's peak RSS is the process peak over all rounds: the macOS allocator keeps about
+   12 MiB more after each round until it trims (no leak: flat under `SC_LEAK_CHECK=1`),
+   so it reads 630 to 730 MiB while one serial build peaks near 190 MiB. The gate and the
+   ledger read only records of the contract's schema (`CONTRACT_BENCH_V`); a schema change
+   needs a new `SC_PERF_RECORD=1` baseline and a ledger chain that starts at it.
 
 ## Optimization Phases
 
@@ -368,8 +375,12 @@ The emission probe's `graph` region and the `cemit-stage collect` line (records 
 bodies walked, rounds, a budget stop) are the instance discovery numbers; the
 `relower-refl`/`relower-zst` regions and the re-lowering census are the specialization
 numbers ([instance-specialization.md](../super-c-compiler-internals/references/instance-specialization.md)).
-Budget on the reference sources, serial release: `graph` <= 20 ms and <= 50k
-allocations, 2 rounds, no budget stop; both re-lowering regions together <= 1 ms; the
+Budget on the reference sources, serial release: `graph` <= 34 ms and <= 50k
+allocations, 3 rounds, no budget stop (measured 2026-10: 31-33 ms, 36k allocations, 63k
+records. The older 20 ms budget predates the corpus growth and exact const-generic folding,
+which keeps 6 more width-doubling levels of the speculative `UInt`/`IntBits` chain alive,
+until a limb array leaves the array length range; the same sources take 27-28 ms with the
+compiler from before exact folding); both re-lowering regions together <= 1 ms; the
 type-stats probe steps within 2x of the intern hits. The test target of `super-c test`
 is the generic-heavy corpus: its collect line reports a budget stop today (the
 width-generic integer's closure), so a change there is judged by its record count and

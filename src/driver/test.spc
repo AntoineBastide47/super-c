@@ -15,6 +15,7 @@ import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
 import utils::errors as diag;
 import driver::util as *;
+import build_system::objcache as ocache;
 
 /// --test run options, forwarded to the generated runner.
 pub struct TestOpts {
@@ -1175,19 +1176,24 @@ pub fn push_ldflags(args: &mut Vector<String>, path: str) {
 
 /// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
 /// linked to that path and nothing runs; otherwise it links `<gen_root>/__tests` and runs it as the test
-/// runner, forwarding `topts`' options. Returns the compile's or the runner's exit code.
+/// runner, forwarding `topts`' options. With the object cache on, each unit compiles on its own with the
+/// compile side of the profile's flags (`ccflags`) through the script namespace
+/// (`objcache::compile_units`), so a unit another script build already compiled is copied, and the
+/// link takes the objects with the whole flag set (`cflags`); with it off (SC_NO_CACHE) one command
+/// compiles and links. Returns the compile's or the runner's exit code.
 pub fn test_build_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
     keep: &Vector<String>,
     out_bin: str,
     cflags: str,
+    ccflags: str,
     target: i32,
 ) i32 {
     // A cross target brings its own compiler: $CC on the host would build a host binary while the front end
     // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
-    let mut ccs = resolve_cc(p.cc.as_str(), sdk);
+    let ccs = resolve_cc(p.cc.as_str(), sdk);
     let root = p.gen_root.as_str();
     // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
     // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
@@ -1197,15 +1203,44 @@ pub fn test_build_and_run(
     } else {
         "";
     };
-    let mut args = Vector::<String>::new();
-    split_args(&mut args, ccs.as_str());
-    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -Werror=incompatible-pointer-types");
-    // The cross triple comes first so the profile's flags (`cflags`, empty for a bare build) can override it.
+    let what = if out_bin.len() != 0 {
+        "build";
+    } else {
+        "test build";
+    };
+    let base = "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -Werror=incompatible-pointer-types";
+    // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();
     push_sdk_flags(&mut fl, sdk, p.arch);
+    let mut args = Vector::<String>::new();
+    split_args(&mut args, ccs.as_str());
+    let croot = ocache::object_cache_dir();
+    let mut objs = Vector::<String>::new();
+    if croot.len() != 0 {
+        let mut ccv = Vector::<String>::new();
+        split_args(&mut ccv, ccs.as_str());
+        let mut cfv = Vector::<String>::new();
+        split_args(&mut cfv, base);
+        split_args(&mut cfv, fl.as_str());
+        split_args(&mut cfv, ccflags);
+        let mut units = Vector::<String>::new();
+        for i in 0..keep.len() {
+            let cf = keep[i].as_str();
+            if cf.len() > 2 && cf.ends_with(".c") {
+                units.push(String::from_str(cf));
+            }
+        }
+        let ns = ocache::script_ns(croot.as_str());
+        let crc = ocache::compile_units(&ccv, &cfv, root, &units, ns.as_str(), &mut objs);
+        if crc != 0 {
+            eprintln("super-c: {} failed ({})", what, ccs.as_str());
+            return 1;
+        }
+    }
+    split_args(&mut args, base);
     split_args(&mut args, fl.as_str());
     split_args(&mut args, cflags);
-    // One command compiles and links, so the link-only SDK libs ride along.
+    // The link-only SDK libs ride along on the command that links.
     let mut ll = String::new();
     push_sdk_libs(&mut ll, sdk);
     split_args(&mut args, ll.as_str());
@@ -1219,21 +1254,23 @@ pub fn test_build_and_run(
         outp.push_str(exe);
     }
     args.push(outp.clone());
-    for i in 0..keep.len() {
-        let cf = keep[i].as_str();
-        if cf.len() > 2 && cf.ends_with(".c") {
-            args.push(String::from_str(cf));
+    if croot.len() != 0 {
+        for i in 0..objs.len() {
+            args.push(objs.at(i).clone());
+        }
+    } else {
+        for i in 0..keep.len() {
+            let cf = keep[i].as_str();
+            if cf.len() > 2 && cf.ends_with(".c") {
+                args.push(String::from_str(cf));
+            }
         }
     }
     let ldpath = build_out_path(root, "__ldflags", "");
     push_ldflags(&mut args, ldpath.as_str());
     let brc = exec_args(&mut args, null);
     if brc != 0 {
-        let mut what = "test build".ptr() as *const char;
-        if out_bin.len() != 0 {
-            what = "build".ptr() as *const char;
-        }
-        unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, ccs.cstr());
+        eprintln("super-c: {} failed ({})", what, ccs.as_str());
         return 1;
     }
     // The `build` subcommand: the program is linked, nothing to run.

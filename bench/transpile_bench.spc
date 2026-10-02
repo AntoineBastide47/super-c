@@ -1,366 +1,100 @@
 // Self-hosted benchmark: how long does the compiler take to transpile the WHOLE super-c compiler to C?
-// The corpus is the compiler itself: package_load(selfhost/main.spc) pulls in every module main.spc
-// transitively imports (the entire lexer/ast/parser/resolver/typechecker/const-eval/codegen/loader stack,
-// plus the std prelude + ffi bindings it uses). Each iteration runs the real transpile pipeline in process
-// parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
-// -> borrowck-all -> emit the whole package to C through the streaming backend (shared headers + every TU +
-// the instance TU, written to a real file), and times each phase with CPU time. It mirrors main.spc's
-// run_package (minus the C link step). Emission writes through a FILE exactly as a build does. The benchmark
-// binary IS the self-hosted compiler, so `super-c bench` measures the compiler transpiling its own source.
+// Each round runs the transpile step a `super-c build` runs (`bsys::root_transpile`, the engine's own
+// function: emit-stamp check, load, resolve, typecheck, borrowck, checks, prepare, plan, render and
+// publish of src/main.spc's closure into a fresh scratch tree, serial) and samples CPU time, cycles and
+// allocations at the build's own phase boundaries through `bst::set_hook`, so the lane cannot drift from
+// what a build does. A lexer-only pass over the same sources follows each round, outside the total.
 // After the rounds, one cold build of the compiler runs through the real build engine (the same sources,
-// flags, streamed C compile and link a `super-c build` runs) and its phase record is reported; a C compiler
-// or linker failure there fails the benchmark.
+// flags, streamed C compile and link a `super-c build` runs) and its phase record is reported; a C
+// compiler or linker failure there fails the benchmark.
 import module::loader as loader;
 import lexer::lexer as lexer;
-import resolver::resolver as res;
-import hir::lower as hirl;
-import typechecker::typechecker as tc;
-import borrowck::borrowck as bck;
-import ir::lower as irl;
-import ir::interp as iri;
 import driver::emit as demit;
 import driver::stats as bst;
-import driver::test as dtest;
 import build_system::build as bsys;
 import build_system::manifest as mf;
-import ast::ast as *;
 import std::testing::bench_sys as sys;
 import std::testing::bench as bench;
 import driver_shim as dshim;
 import stdio;
 import stdlib;
-import string as cstring;
 import time;
-
-// tmpfile(): an anonymous auto-removed stream; the file-lane sink codegen emits into. Rides in
-// <stdio.h>, always in super_rt. POSIX-only call sites (mingw's tmpfile() lands in the drive root
-// and fails unprivileged; Windows uses a %TEMP% file instead).
-extern "C" {
-    fn tmpfile() *mut stdio::FILE;
-}
 
 const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
+const BUILD_PROFILE: str = "dev";
 const ITERS: i32 = 100;
 
-// The codegen sink: a real file, on every platform. Codegen writes through a FILE, and this benchmark
-// exists to report what codegen costs, so the sink is the one codegen uses in a build rather
-// than an in-memory stream that would measure lowering with the writes taken out. POSIX gets an anonymous
-// auto-removed stream; mingw's tmpfile() lands in the drive root and fails unprivileged, so Windows names
-// a file under %TEMP% and removes it itself.
-@platform(!windows)
-fn sink_open() *mut stdio::FILE {
-    return unsafe tmpfile();
+// The phases of a round: the build's boundaries B_START..B_PUBLISH, phase k running from boundary k to
+// boundary k + 1. B_LOAD ends `parse` (load, lex and parse every module).
+const PH_N: usize = 10;
+const NB: usize = 11;
+static_assert(bst::B_PUBLISH == PH_N && NB == PH_N + 1, "one phase per boundary from B_STAMP to B_PUBLISH");
+const PH_NAMES: [str<'static>; 10] = [
+    "stamp",
+    "parse",
+    "resolve",
+    "typecheck",
+    "borrowck",
+    "checks",
+    "prepare",
+    "plan",
+    "render",
+    "publish",
+];
+// The emission's phases: plan, render, publish.
+const PH_EMIT: usize = 7;
+
+// The in-process counters at every boundary of one round; bit b of `seen` = boundary b was sampled.
+struct Marks {
+    pub secs: Array<f64, NB>,
+    pub cyc: Array<i64, NB>,
+    pub alc: Array<i64, NB>,
+    pub byt: Array<i64, NB>,
+    pub seen: u32,
 }
 
-@platform(!windows)
-fn sink_close(f: *mut stdio::FILE) usize {
-    unsafe stdio::fflush(f);
-    let t = unsafe stdio::ftell(f);
+fn sample(mk: &mut Marks, b: usize) {
+    mk.secs[b] = time::cpu_seconds();
+    mk.cyc[b] = unsafe sys::sc_bs_cycles();
+    mk.alc[b] = unsafe sys::sc_bs_alloc_calls();
+    mk.byt[b] = unsafe sys::sc_bs_alloc_bytes();
+    mk.seen = mk.seen | 1u32 << b as u32;
+}
+
+// The phase hook: the build's boundaries past B_PUBLISH (sync, compile, link) never run in a round.
+fn on_mark(ctx: *mut void, b: usize) {
+    if b < NB {
+        sample(unsafe &mut *(ctx as *mut Marks), b);
+    }
+}
+
+// The warm-up round's sink: the bytes of every C file the emission writes, headers and sources.
+fn count_bytes(ctx: *mut void, path: str, _kind: i32) {
+    let f = stdio::fopen(path, "rb");
+    if f == null {
+        return;
+    }
+    let _ = unsafe stdio::fseek(f, 0, stdio::SEEK_END);
+    let n = unsafe stdio::ftell(f);
     unsafe stdio::fclose(f);
-    if t > 0 {
-        return t as usize;
+    if n > 0 {
+        let total = ctx as *mut usize;
+        unsafe total[0] = unsafe total[0] + n as usize;
     }
-    return 0;
 }
 
-@platform(windows)
-fn sink_path(buf: *mut char, cap: usize) *const char {
-    let mut dir = stdlib::getenv("TEMP");
-    if dir == null {
-        dir = ".".ptr() as *const char;
-    }
-    unsafe stdio::snprintf(buf, cap, "%s\\sc_bench_sink.tmp".ptr() as *const char, dir);
-    return buf;
-}
-
-@platform(windows)
-fn sink_open() *mut stdio::FILE {
-    let mut buf = Array::<char, 4096>::new();
-    let p = sink_path(&mut buf[0], 4096);
-    return stdio::fopen(str::from_raw(p as *const u8, unsafe cstring::strlen(p)), "wb");
-}
-
-@platform(windows)
-fn sink_close(f: *mut stdio::FILE) usize {
-    unsafe stdio::fflush(f);
-    let t = unsafe stdio::ftell(f);
-    unsafe stdio::fclose(f);
-    let mut buf = Array::<char, 4096>::new();
-    unsafe stdio::remove(sink_path(&mut buf[0], 4096));
-    if t > 0 {
-        return t as usize;
-    }
-    return 0;
-}
-
-/// Per-stage wall times of one self-transpile, in milliseconds.
-pub struct Timing {
-    pub lex: f64,
-    pub parse: f64,
-    pub resolve: f64,
-    pub typecheck: f64,
-    pub borrowck: f64,
-    pub codegen: f64,
-    pub src_bytes: usize,
-    pub src_lines: usize,
-    pub out_bytes: usize,
-    pub modules: usize,
-    pub tokens: usize,
-    pub nodes: usize,
-    pub decls: usize,
-    pub cyc_lex: i64,
-    pub cyc_parse: i64,
-    pub cyc_resolve: i64,
-    pub cyc_typecheck: i64,
-    pub cyc_borrowck: i64,
-    pub cyc_codegen: i64,
-    pub alc_lex: i64,
-    pub alc_parse: i64,
-    pub alc_resolve: i64,
-    pub alc_typecheck: i64,
-    pub alc_borrowck: i64,
-    pub alc_codegen: i64,
-    pub byt_lex: i64,
-    pub byt_parse: i64,
-    pub byt_resolve: i64,
-    pub byt_typecheck: i64,
-    pub byt_borrowck: i64,
-    pub byt_codegen: i64,
-    pub heap_bytes: i64,
-}
-
-// Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
-fn resolve_one(p: &mut loader::Package, i: usize) {
-    let pkg = p as *const loader::Package;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let aptr = (&mut m.ast) as *mut Ast;
-    let mut r = res::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
-    r.resolve();
-    hirl::lower_module(p, i);
-}
-
-// Type-check module `i` in place (mirrors main.spc's typecheck_module).
-fn typecheck_one(p: &mut loader::Package, i: usize) {
-    let pkg = p as *mut loader::Package;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.check();
-}
-
-// One full transpile of the compiler, timed per phase.
-fn transpile_once() Timing {
-    let mut r = Timing {
-        lex: 0.0,
-        parse: 0.0,
-        resolve: 0.0,
-        typecheck: 0.0,
-        borrowck: 0.0,
-        codegen: 0.0,
-        src_bytes: 0,
-        src_lines: 0,
-        out_bytes: 0,
-        modules: 0,
-        tokens: 0,
-        nodes: 0,
-        decls: 0,
-        cyc_lex: 0,
-        cyc_parse: 0,
-        cyc_resolve: 0,
-        cyc_typecheck: 0,
-        cyc_borrowck: 0,
-        cyc_codegen: 0,
-        alc_lex: 0,
-        alc_parse: 0,
-        alc_resolve: 0,
-        alc_typecheck: 0,
-        alc_borrowck: 0,
-        alc_codegen: 0,
-        byt_lex: 0,
-        byt_parse: 0,
-        byt_resolve: 0,
-        byt_typecheck: 0,
-        byt_borrowck: 0,
-        byt_codegen: 0,
-        heap_bytes: 0,
-    };
-
-    let a0 = time::cpu_seconds();
-    let c0 = unsafe sys::sc_bs_cycles();
-    let h0 = unsafe sys::sc_bs_alloc_calls();
-    let y0 = unsafe sys::sc_bs_alloc_bytes();
-    let mut p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
-    let a1 = time::cpu_seconds();
-    let c1 = unsafe sys::sc_bs_cycles();
-    let h1 = unsafe sys::sc_bs_alloc_calls();
-    let y1 = unsafe sys::sc_bs_alloc_bytes();
-
-    let n = p.modules.len();
-    r.modules = n;
-    let mut i: usize = 0;
-    // Corpus stats: bytes, node pools, top-level decls (all fixed once parsed; mono adds instance
-    // records, not nodes, so the pool size is stable through resolve/typecheck).
-    while i < n {
-        let a = &p.modules[i].ast;
-        r.src_bytes = r.src_bytes + p.modules[i].source.len();
-        r.nodes = r.nodes + a.nodes.len();
-        r.decls = r.decls + a.at_const(a.root).as_data.program.items.len as usize;
-        i = i + 1;
-    }
-
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
-    // The bench is the SERIAL perf gate; parallel stages are timed by the driver.
-    p.jobs = 1;
-
-    i = 0;
-    while i < n {
-        resolve_one(&mut p, i);
-        i = i + 1;
-    }
-    let a2 = time::cpu_seconds();
-    let c2 = unsafe sys::sc_bs_cycles();
-    let h2 = unsafe sys::sc_bs_alloc_calls();
-    let y2 = unsafe sys::sc_bs_alloc_bytes();
-
-    i = 0;
-    while i < n {
-        typecheck_one(&mut p, i);
-        i = i + 1;
-    }
-    cirv.all_typed = true;
-    cirv.record_folds = true;
-    let a3 = time::cpu_seconds();
-    let c3 = unsafe sys::sc_bs_cycles();
-    let h3 = unsafe sys::sc_bs_alloc_calls();
-    let y3 = unsafe sys::sc_bs_alloc_bytes();
-
-    let mut irkeep = irl::Keep::new();
-    let _ = demit::borrowck_all(&mut p, &mut irkeep); // the real stage, so the lane measures what ships
-    let a3b = time::cpu_seconds();
-    let c3b = unsafe sys::sc_bs_cycles();
-    let h3b = unsafe sys::sc_bs_alloc_calls();
-    let y3b = unsafe sys::sc_bs_alloc_bytes();
-
-    let f = sink_open();
-    {
-        let tplan = dtest::TestPlan::new(n);
-        let mut o = demit::CemitOut::new(n);
-        demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
-        // Write the whole package to the sink FILE exactly as a build does, so out_bytes is real.
-        unsafe stdio::fwrite(o.fwd_h.as_ptr(), 1, o.fwd_h.len(), f);
-        for d in 0..o.defs_h.len() {
-            unsafe stdio::fwrite(o.defs_h.at(d).as_ptr(), 1, o.defs_h.at(d).len(), f);
-        }
-        for m in 0..n {
-            unsafe stdio::fwrite(o.protos_h.at(m).as_ptr(), 1, o.protos_h.at(m).len(), f);
-        }
-        for m in 0..n {
-            for x in 0..o.tu_heads.at(m).len() {
-                let h = o.tu_heads.at(m).at(x);
-                unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
-            }
-            let tu = o.tus.at(m);
-            unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
-            unsafe stdio::fwrite(o.tu_tail.at(m).as_ptr(), 1, o.tu_tail.at(m).len(), f);
-        }
-        for q in 0..n {
-            for x in 0..o.inst_heads.at(q).len() {
-                let h = o.inst_heads.at(q).at(x);
-                unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
-            }
-        }
-        unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
-        unsafe stdio::fwrite(o.registry_c.as_ptr(), 1, o.registry_c.len(), f);
-    }
-    r.out_bytes = sink_close(f);
-    let a4 = time::cpu_seconds();
-    let c4 = unsafe sys::sc_bs_cycles();
-    let h4 = unsafe sys::sc_bs_alloc_calls();
-    let y4 = unsafe sys::sc_bs_alloc_bytes();
-
-    // Lex-only pass LAST so it can't perturb the pipeline phase timings: re-lex every module source to isolate
-    // pure lexer throughput. Lexing is folded into `parse` (package_load -> scan_tokens), so it is NOT added to
-    // the total: it is the lexer's share OF parse.
-    let lx0 = time::cpu_seconds();
-    let cl0 = unsafe sys::sc_bs_cycles();
-    let hl0 = unsafe sys::sc_bs_alloc_calls();
-    let yl0 = unsafe sys::sc_bs_alloc_bytes();
-    i = 0;
-    while i < n {
-        let mut lx = lexer::Lexer::new(&mut p.modules[i].source, "");
-        lx.scan_tokens();
-        r.tokens = r.tokens + lx.tokens.len();
-        i = i + 1;
-    }
-    r.lex = time::cpu_seconds() - lx0;
-    r.cyc_lex = unsafe sys::sc_bs_cycles() - cl0;
-    r.alc_lex = unsafe sys::sc_bs_alloc_calls() - hl0;
-    r.byt_lex = unsafe sys::sc_bs_alloc_bytes() - yl0;
-
-    // Count source lines (untimed: a constant of the corpus) for a lines/sec figure.
-    i = 0;
-    while i < n {
-        let src = p.modules[i].source.as_str().ptr() as *const char;
-        let len = p.modules[i].source.len();
-        let mut j: usize = 0;
-        while j < len {
-            if (unsafe src[j]) as u8 == b'\n' {
-                r.src_lines = r.src_lines + 1;
-            }
-            j = j + 1;
-        }
-        i = i + 1;
-    }
-
-    r.parse = a1 - a0;
-    r.resolve = a2 - a1;
-    r.typecheck = a3 - a2;
-    r.borrowck = a3b - a3;
-    r.codegen = a4 - a3b;
-    r.cyc_parse = c1 - c0;
-    r.cyc_resolve = c2 - c1;
-    r.cyc_typecheck = c3 - c2;
-    r.cyc_borrowck = c3b - c3;
-    r.cyc_codegen = c4 - c3b;
-    r.alc_parse = h1 - h0;
-    r.alc_resolve = h2 - h1;
-    r.alc_typecheck = h3 - h2;
-    r.alc_borrowck = h3b - h3;
-    r.alc_codegen = h4 - h3b;
-    r.byt_parse = y1 - y0;
-    r.byt_resolve = y2 - y1;
-    r.byt_typecheck = y3 - y2;
-    r.byt_borrowck = y3b - y3;
-    r.byt_codegen = y4 - y3b;
-    r.heap_bytes = y4 - y0;
-    return r;
-}
-
-// This one keeps its own report: a per-phase table (lex/parse/resolve/typecheck/borrowck/codegen with MB/s
-// and allocations) is the point of it, and no generic timing loop can produce that. The Bencher still
-// drives the rounds and keeps the wall-time distribution of every round; the table sums the in-process
-// counters of the same rounds. Any failure (a corpus that does not load, a real build whose C compiler
-// or linker fails) is reported to the runner, so the run exits nonzero.
-@bench(log_results = false)
-/// Benchmark lane: the compiler transpiles its own source, ITERS timed rounds, then one real cold build.
-pub fn self_transpile(b: &mut bench::Bencher) {
-    // The corpus probe below is the warm-up; every round the Bencher runs is a sample. This lane reads the
-    // allocation counters at every phase boundary of every round, so accounting stays on throughout and
-    // the Bencher runs no diagnostic rounds of its own: the reported figures are instrumented ones, the
-    // same protocol the accepted-work ledger measured.
-    b.set_rounds(ITERS);
-    b.set_warmup(0);
-    b.set_diag_rounds(0);
-    unsafe sys::sc_bs_alloc_enable(1);
-    if !run_report(b) {
-        bench::fail("self_transpile");
-    }
+// One round: the transpile step into a fresh tree under `pdir`, every boundary sampled into `mk`. False
+// when the transpile failed or skipped a boundary.
+fn transpile_round(m: &mf::Manifest, cx: &bsys::BuildCtx, pdir: &mut String, sink: *mut demit::EmitSink, mk: &mut Marks) bool {
+    let _ = unsafe dshim::sc_rm_rf(pdir.cstr());
+    mk.seen = 0;
+    sample(mk, bst::B_START);
+    let hook = bst::PhaseHook { ctx: mk as *mut Marks, at: on_mark };
+    bst::set_hook(&hook);
+    let rc = bsys::root_transpile(m, BUILD_PROFILE, cx, sink);
+    bst::set_hook(null);
+    return rc == 0 && mk.seen == (1u32 << NB as u32) - 1;
 }
 
 // Sums of one phase over every round, converted to per-round averages by `avg`.
@@ -477,7 +211,7 @@ fn real_build(js: &mut String) bool {
         lint: true,
         transpiler: "",
     };
-    let rc = bsys::manifest_build(&m, "dev", bin.as_str(), &cx);
+    let rc = bsys::manifest_build(&m, BUILD_PROFILE, bin.as_str(), &cx);
     let gp = bst::last();
     if gp == null {
         eprintln("bench: the build produced no statistics record");
@@ -499,6 +233,18 @@ fn real_build(js: &mut String) bool {
         build_ms(g, bst::B_COMPILE, bst::B_LINK),
         build_ms(g, bst::B_START, bst::B_LINK),
     );
+    // The whole partition, one entry per engine phase (wall ms).
+    unsafe stdio::printf("    phases:".ptr() as *const char);
+    for k in 1..bst::B_COUNT {
+        let nm = unsafe bst::PHASE_NAMES[k - 1];
+        unsafe stdio::printf(
+            " %.*s %.1f".ptr() as *const char,
+            nm.len() as i32,
+            nm.ptr() as *const char,
+            build_ms(g, k - 1, k),
+        );
+    }
+    unsafe stdio::printf(" ms\n".ptr() as *const char);
     unsafe stdio::printf(
         "    %zu C units, %zu compiled, %.*s, ccache wrapper %s (CCACHE_DISABLE=1), object cache off, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
         g.total_c,
@@ -521,9 +267,93 @@ fn real_build(js: &mut String) bool {
     return true;
 }
 
+// This one keeps its own report: a per-phase table (with MB/s and allocations) is the point of it, and no
+// generic timing loop can produce that. The Bencher still drives the rounds and keeps the wall-time
+// distribution of every round; the table sums the in-process counters of the same rounds. Any failure (a
+// corpus that does not load, a round that fails, a real build whose C compiler or linker fails) is
+// reported to the runner, so the run exits nonzero.
+@bench(log_results = false)
+/// Benchmark lane: the compiler transpiles its own source, ITERS timed rounds, then one real cold build.
+pub fn self_transpile(b: &mut bench::Bencher) {
+    // The warm-up round below is untimed; every round the Bencher runs is a sample. This lane reads the
+    // allocation counters at every phase boundary of every round, so accounting stays on throughout and
+    // the Bencher runs no diagnostic rounds of its own: the reported figures are instrumented ones, the
+    // same protocol the accepted-work ledger measured.
+    b.set_rounds(ITERS);
+    b.set_warmup(0);
+    b.set_diag_rounds(0);
+    unsafe sys::sc_bs_alloc_enable(1);
+    if !run_report(b) {
+        bench::fail("self_transpile");
+    }
+}
+
 fn run_report(b: &mut bench::Bencher) bool {
-    let warm = transpile_once(); // warm caches + report corpus size
-    if warm.modules == 0 || warm.out_bytes == 0 {
+    // The corpus, counted once and untimed, and the sources the lexer-only pass scans every round. The
+    // package is dropped before the rounds, so their memory figures hold the rounds alone.
+    let mut srcs = Vector::<String>::new();
+    let mut src_bytes: usize = 0;
+    let mut src_lines: usize = 0;
+    let mut nodes: usize = 0;
+    let mut decls: usize = 0;
+    {
+        let p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
+        if !p.ok || p.modules.len() == 0 {
+            unsafe stdio::fprintf(
+                stdio::stderr(),
+                "transpile-bench: failed to load %s (run from the repo root)\n".ptr() as *const char,
+                ROOT.ptr() as *const char,
+            );
+            return false;
+        }
+        for i in 0..p.modules.len() {
+            let md = &p.modules[i];
+            let s = md.source.as_str();
+            src_bytes += s.len();
+            for j in 0..s.len() {
+                if s[j] == b'\n' {
+                    src_lines += 1;
+                }
+            }
+            nodes += md.ast.nodes.len();
+            decls += md.ast.at_const(md.ast.root).as_data.program.items.len as usize;
+            srcs.push(String::from_str(s));
+        }
+    }
+    let n = srcs.len();
+
+    let m0 = mf::load("build.toml", false);
+    if m0.is_none() {
+        eprintln("bench: cannot load build.toml (run from the repo root)");
+        return false;
+    }
+    let mut m = m0.unwrap();
+    let mut dir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    dir.push_str("/sc_bench_transpile");
+    m.out_dir = dir.clone();
+    let mut pdir = loader::join2(dir.as_str(), BUILD_PROFILE);
+    // The SERIAL perf gate: the parallel stages are measured by the real build below.
+    let cx = bsys::BuildCtx {
+        jobs: 1,
+        std_dir: STD_DIR,
+        ce_steps: 0,
+        ce_mem: 0,
+        target: unsafe dshim::sc_host_platform(),
+        bootstrap_tags: false,
+        lint: true,
+        transpiler: "",
+    };
+    let mut mk = Marks {
+        secs: Array::<f64, NB>::new(),
+        cyc: Array::<i64, NB>::new(),
+        alc: Array::<i64, NB>::new(),
+        byt: Array::<i64, NB>::new(),
+        seen: 0,
+    };
+    // Warm-up: warms the caches and measures the C the emission writes.
+    let mut out_bytes: usize = 0;
+    let mut wsink = demit::EmitSink { ctx: (&mut out_bytes) as *mut usize, notify: count_bytes };
+    if !transpile_round(&m, &cx, &mut pdir, &mut wsink, &mut mk) || out_bytes == 0 {
         unsafe stdio::fprintf(
             stdio::stderr(),
             "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr() as *const char,
@@ -531,15 +361,21 @@ fn run_report(b: &mut bench::Bencher) bool {
         );
         return false;
     }
+    let mut tokens: usize = 0;
+    for i in 0..n {
+        let mut lx = lexer::Lexer::new(srcs.index_mut(i), "");
+        lx.scan_tokens();
+        tokens += lx.tokens.len();
+    }
     unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
     unsafe stdio::printf(
         "  %zu modules, %zu decls, %zu lines, %zu tokens, %.1f KiB source -> %.1f KiB C\n".ptr() as *const char,
-        warm.modules,
-        warm.decls,
-        warm.src_lines,
-        warm.tokens,
-        warm.src_bytes as f64 / 1024.0,
-        warm.out_bytes as f64 / 1024.0,
+        n,
+        decls,
+        src_lines,
+        tokens,
+        src_bytes as f64 / 1024.0,
+        out_bytes as f64 / 1024.0,
     );
     let mut cpu = Array::<char, 256>::new();
     if unsafe sys::sc_bs_cpu_model(&mut cpu[0], 256) != 0 {
@@ -547,52 +383,81 @@ fn run_report(b: &mut bench::Bencher) bool {
     }
     let mut bid = String::from_str(bench::build_id());
     unsafe stdio::printf(
-        "  %zu AST nodes;  %s;  build %s;  single-threaded, %d rounds\n\n".ptr() as *const char,
-        warm.nodes,
+        "  %zu AST nodes;  %s;  build %s;  single-threaded, %d rounds of the build's transpile step (%s profile)\n\n".ptr() as *const char,
+        nodes,
         (&cpu[0]) as *const char,
         bid.cstr(),
         ITERS,
+        BUILD_PROFILE.ptr() as *const char,
     );
 
     let mut s_lex = phase_sum_new();
-    let mut s_parse = phase_sum_new();
-    let mut s_resolve = phase_sum_new();
-    let mut s_tc = phase_sum_new();
-    let mut s_bck = phase_sum_new();
-    let mut s_cg = phase_sum_new();
+    let mut sums = Vector::<PhaseSum>::with_capacity(PH_N);
+    for _ in 0..PH_N {
+        sums.push(phase_sum_new());
+    }
     let mut heap_bytes: i64 = 0;
     let mut totals_ms = Vector::<f64>::with_capacity(ITERS as usize);
     let mut totals_mcyc = Vector::<f64>::with_capacity(ITERS as usize);
+    let mut ok = true;
     while b.running() {
-        let t = transpile_once();
-        phase_add(&mut s_lex, t.lex, t.cyc_lex, t.alc_lex, t.byt_lex);
-        phase_add(&mut s_parse, t.parse, t.cyc_parse, t.alc_parse, t.byt_parse);
-        phase_add(&mut s_resolve, t.resolve, t.cyc_resolve, t.alc_resolve, t.byt_resolve);
-        phase_add(&mut s_tc, t.typecheck, t.cyc_typecheck, t.alc_typecheck, t.byt_typecheck);
-        phase_add(&mut s_bck, t.borrowck, t.cyc_borrowck, t.alc_borrowck, t.byt_borrowck);
-        phase_add(&mut s_cg, t.codegen, t.cyc_codegen, t.alc_codegen, t.byt_codegen);
-        heap_bytes = heap_bytes + t.heap_bytes;
-        totals_ms.push((t.parse + t.resolve + t.typecheck + t.borrowck + t.codegen) * 1000.0);
-        totals_mcyc.push((t.cyc_parse + t.cyc_resolve + t.cyc_typecheck + t.cyc_borrowck + t.cyc_codegen) as f64 / 1e6);
+        if !transpile_round(&m, &cx, &mut pdir, null, &mut mk) {
+            eprintln("bench: a transpile round failed");
+            ok = false;
+            continue;
+        }
+        for k in 0..PH_N {
+            phase_add(
+                sums.index_mut(k),
+                mk.secs[k + 1] - mk.secs[k],
+                mk.cyc[k + 1] - mk.cyc[k],
+                mk.alc[k + 1] - mk.alc[k],
+                mk.byt[k + 1] - mk.byt[k],
+            );
+        }
+        heap_bytes = heap_bytes + mk.byt[PH_N] - mk.byt[0];
+        totals_ms.push((mk.secs[PH_N] - mk.secs[0]) * 1000.0);
+        totals_mcyc.push((mk.cyc[PH_N] - mk.cyc[0]) as f64 / 1e6);
+        // Lexer-only pass LAST so it cannot perturb the pipeline's phases: lexing is folded into `parse`,
+        // so this is the lexer's share OF parse and not a term of the total.
+        let lx0 = time::cpu_seconds();
+        let cl0 = unsafe sys::sc_bs_cycles();
+        let hl0 = unsafe sys::sc_bs_alloc_calls();
+        let yl0 = unsafe sys::sc_bs_alloc_bytes();
+        for i in 0..n {
+            let mut lx = lexer::Lexer::new(srcs.index_mut(i), "");
+            lx.scan_tokens();
+        }
+        phase_add(
+            &mut s_lex,
+            time::cpu_seconds() - lx0,
+            unsafe sys::sc_bs_cycles() - cl0,
+            unsafe sys::sc_bs_alloc_calls() - hl0,
+            unsafe sys::sc_bs_alloc_bytes() - yl0,
+        );
     }
+    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
     let rounds = totals_ms.len();
-    assert(rounds == ITERS as usize);
+    if !ok || rounds != ITERS as usize {
+        return false;
+    }
     let fi = rounds as f64;
     let a_lex = avg(&s_lex, fi);
-    let a_parse = avg(&s_parse, fi);
-    let a_resolve = avg(&s_resolve, fi);
-    let a_tc = avg(&s_tc, fi);
-    let a_bck = avg(&s_bck, fi);
-    let a_cg = avg(&s_cg, fi);
-    // Lexing is the lexer's share OF parse (package_load scans while it parses), so it is not a term.
-    let a_total = PhaseAvg {
-        ms: a_parse.ms + a_resolve.ms + a_tc.ms + a_bck.ms + a_cg.ms,
-        mcyc: a_parse.mcyc + a_resolve.mcyc + a_tc.mcyc + a_bck.mcyc + a_cg.mcyc,
-        kalloc: a_parse.kalloc + a_resolve.kalloc + a_tc.kalloc + a_bck.kalloc + a_cg.kalloc,
-        mib: a_parse.mib + a_resolve.mib + a_tc.mib + a_bck.mib + a_cg.mib,
-    };
-    let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
-    let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
+    let mut a_ph = Vector::<PhaseAvg>::with_capacity(PH_N);
+    let mut tot = phase_sum_new();
+    let mut emit = phase_sum_new();
+    for k in 0..PH_N {
+        a_ph.push(avg(sums.at(k), fi));
+        let s = sums.at(k);
+        phase_add(&mut tot, s.secs, s.cyc, s.alc, s.byt);
+        if k >= PH_EMIT {
+            phase_add(&mut emit, s.secs, s.cyc, s.alc, s.byt);
+        }
+    }
+    let a_total = avg(&tot, fi);
+    let a_emit = avg(&emit, fi);
+    let srcf = src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
+    let linesf = src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
 
     // Per-phase CPU cycles at the same boundaries as the ms timings; all-zero when this box has no
     // cycle source. Effective clock: Mcyc/ms == GHz (counted only while on-core, so P/E scheduling
@@ -610,11 +475,10 @@ fn run_report(b: &mut bench::Bencher) bool {
         "share".ptr() as *const char,
     );
     print_row("lex", &a_lex, srcf, linesf, -1.0);
-    print_row("parse", &a_parse, srcf, linesf, a_parse.ms / a_total.ms * 100.0);
-    print_row("resolve", &a_resolve, srcf, linesf, a_resolve.ms / a_total.ms * 100.0);
-    print_row("typecheck", &a_tc, srcf, linesf, a_tc.ms / a_total.ms * 100.0);
-    print_row("borrowck", &a_bck, srcf, linesf, a_bck.ms / a_total.ms * 100.0);
-    print_row("codegen", &a_cg, srcf, linesf, a_cg.ms / a_total.ms * 100.0);
+    for k in 0..PH_N {
+        let a = a_ph.at(k);
+        print_row(unsafe PH_NAMES[k], a, srcf, linesf, a.ms / a_total.ms * 100.0);
+    }
     unsafe stdio::printf(
         "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f   (%.2f GHz)\n\n".ptr() as *const char,
         "total".ptr() as *const char,
@@ -653,9 +517,9 @@ fn run_report(b: &mut bench::Bencher) bool {
     }
     let sm_wall = bench::summarize(&mut wall);
     unsafe stdio::printf(
-        "  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
-        warm.out_bytes as f64 / 1024.0,
-        warm.out_bytes as f64 / a_cg.ms / 1000.0,
+        "  emission (plan, render, publish) writes %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
+        out_bytes as f64 / 1024.0,
+        out_bytes as f64 / a_emit.ms / 1000.0,
         srcf / sm_ms.min / 1000.0,
     );
     let rss = unsafe sys::sc_bs_rss_peak();
@@ -666,26 +530,26 @@ fn run_report(b: &mut bench::Bencher) bool {
     );
 
     let mut js = String::with_capacity(4096);
-    js.push_str("{\"v\":1,\"build_id\":");
+    js.push_str("{\"v\":2,\"build_id\":");
     bench::json_str(&mut js, bid.as_str());
     js.push_str(",\"cpu\":");
     bench::json_str(&mut js, str::from_cstr(&cpu[0]));
     js.push_str(",\"rounds\":");
     js.push_u64(rounds as u64);
     js.push_str(",\"jobs\":1,\"corpus\":{\"modules\":");
-    js.push_u64(warm.modules as u64);
+    js.push_u64(n as u64);
     js.push_str(",\"decls\":");
-    js.push_u64(warm.decls as u64);
+    js.push_u64(decls as u64);
     js.push_str(",\"lines\":");
-    js.push_u64(warm.src_lines as u64);
+    js.push_u64(src_lines as u64);
     js.push_str(",\"tokens\":");
-    js.push_u64(warm.tokens as u64);
+    js.push_u64(tokens as u64);
     js.push_str(",\"nodes\":");
-    js.push_u64(warm.nodes as u64);
+    js.push_u64(nodes as u64);
     js.push_str(",\"src_bytes\":");
-    js.push_u64(warm.src_bytes as u64);
+    js.push_u64(src_bytes as u64);
     js.push_str(",\"c_bytes\":");
-    js.push_u64(warm.out_bytes as u64);
+    js.push_u64(out_bytes as u64);
     js.push_str("},\"phases\":{\"lex\":{\"ms\":");
     js.push_f64_prec(a_lex.ms, 3);
     js.push_str(",\"mcyc\":");
@@ -695,11 +559,9 @@ fn run_report(b: &mut bench::Bencher) bool {
     js.push_str(",\"mib\":");
     js.push_f64_prec(a_lex.mib, 3);
     js.push_byte(b'}');
-    json_phase(&mut js, "parse", &a_parse);
-    json_phase(&mut js, "resolve", &a_resolve);
-    json_phase(&mut js, "typecheck", &a_tc);
-    json_phase(&mut js, "borrowck", &a_bck);
-    json_phase(&mut js, "codegen", &a_cg);
+    for k in 0..PH_N {
+        json_phase(&mut js, unsafe PH_NAMES[k], a_ph.at(k));
+    }
     json_phase(&mut js, "total", &a_total);
     js.push_byte(b'}');
     bench::json_dist(&mut js, "cpu_ms", &sm_ms, 1.0);
@@ -710,10 +572,10 @@ fn run_report(b: &mut bench::Bencher) bool {
     js.push_str(",\"peak_rss_mib\":");
     js.push_f64_prec(rss as f64 / 1048576.0, 3);
 
-    let ok = real_build(&mut js);
+    let built = real_build(&mut js);
     js.push_str(",\"ok\":");
     js.push_str(
-        if ok {
+        if built {
             "true";
         } else {
             "false";
@@ -732,5 +594,5 @@ fn run_report(b: &mut bench::Bencher) bool {
         unsafe stdio::fclose(f);
         unsafe stdio::printf("  record: %.*s\n".ptr() as *const char, path.len() as i32, path.ptr() as *const char);
     }
-    return ok;
+    return built;
 }

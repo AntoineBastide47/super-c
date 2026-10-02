@@ -193,6 +193,41 @@ pub fn write_file(path: str, body: str) bool {
     return n == body.len() && rc == 0;
 }
 
+/// Copy file `srcp` to `dstp` (created or truncated); false when either cannot be opened or any read,
+/// write or close fails.
+pub fn copy_file(srcp: str, dstp: str) bool {
+    let fi = stdio::fopen(srcp, "rb");
+    if fi == null {
+        return false;
+    }
+    let fo = stdio::fopen(dstp, "wb");
+    if fo == null {
+        unsafe stdio::fclose(fi);
+        return false;
+    }
+    let mut buf = Array::<char, 4096>::new();
+    let mut ok = true;
+    loop {
+        let n = unsafe stdio::fread(&mut buf[0], 1, 4096, fi);
+        if n == 0 {
+            break;
+        }
+        if unsafe stdio::fwrite(&buf[0], 1, n, fo) != n {
+            ok = false;
+            break;
+        }
+    }
+    // A read error also ends the loop, and would otherwise pass for end of file.
+    if unsafe stdio::ferror(fi) != 0 {
+        ok = false;
+    }
+    unsafe stdio::fclose(fi);
+    if unsafe stdio::fclose(fo) != 0 {
+        ok = false;
+    }
+    return ok;
+}
+
 /// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`
 /// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
 /// failure: an old or missing record only makes the next build redo that work.

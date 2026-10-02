@@ -30,8 +30,8 @@ pub const B_CHECKS: usize = 6; // layout, facts verification, always-panics, def
 pub const B_PREPARE: usize = 7; // runtime and external C wrappers, live set, emit order
 pub const B_PLAN: usize = 8; // instance discovery and C planning
 pub const B_RENDER: usize = 9; // C rendering
-pub const B_PUBLISH: usize = 10; // files written, per-TU cache, orphan prune
-pub const B_SYNC: usize = 11; // gen tree sync and stamp write
+pub const B_PUBLISH: usize = 10; // files written, per-TU cache, orphan prune, emit stamp record
+pub const B_SYNC: usize = 11; // gen tree sync and stamp install
 pub const B_COMPILE: usize = 12; // external C compilation drained
 pub const B_LINK: usize = 13;
 pub const B_COUNT: usize = 14;
@@ -72,8 +72,22 @@ pub struct BuildStats {
     pub relower_zst: u64, // instance re-lowerings for a zero-size condition
 }
 
+/// An observer of the phase boundaries: `at(ctx, b)` runs at every `mark(b)`, whether or not a record
+/// is being collected. The in-process benchmark samples its own counters through it, so its phases are
+/// the build's phases by construction.
+pub struct PhaseHook {
+    pub ctx: *mut void,
+    pub at: fn(*mut void, usize) void,
+}
+
 static mut G_STATS: *mut BuildStats = null;
 static mut G_ARMED: bool = false;
+static mut G_HOOK: *const PhaseHook = null;
+
+/// Install `h` as the phase observer; null removes it. The caller keeps `h` alive while it is installed.
+pub fn set_hook(h: *const PhaseHook) {
+    unsafe G_HOOK = h;
+}
 
 /// Collect the next build's statistics even when SC_BUILD_STATS is unset (the in-process benchmark
 /// reads them back through `last`).
@@ -165,6 +179,11 @@ const fn mem_index(b: usize) usize {
 /// Record that boundary `b` was reached now. Every boundary before it that was never reached
 /// (a skipped emission) is stamped with the same instant, so the phases stay a partition.
 pub fn mark(b: usize) {
+    let h = unsafe G_HOOK;
+    if h != null {
+        let f = unsafe (*h).at;
+        f(unsafe (*h).ctx, b);
+    }
     let g = unsafe G_STATS;
     if g == null {
         return;
@@ -257,7 +276,8 @@ pub fn finish(rc: i32) {
     }
 }
 
-const PHASE_NAMES: [str<'static>; 13] = [
+/// The name of the phase that ends at boundary `k + 1`.
+pub const PHASE_NAMES: [str<'static>; 13] = [
     "stamp",
     "load",
     "resolve",

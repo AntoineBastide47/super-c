@@ -57,6 +57,36 @@ struct ExtRow {
     pub enode: NodeId,
 }
 
+// What an extend's target syntax says about the instances it applies to, read once per `exts` row:
+// `ext_applies` and `bind_ext_keys` ask per record and per call site.
+struct ExtShape {
+    pub ident: bool, // `ext_is_identity`: applies to every instance, binding its parameters in order
+    pub inst: bool, // the target is an instance type
+    pub wide: bool, // more generic parameters than an application check tracks
+    pub np: u32, // `ext_arity`: the leading target arguments the extend constrains
+    pub pn: u32, // the target's argument count
+    pub xs: u32, // its first `XSlot` in `xslots` (`np` of them)
+    pub ss: u32, // its first `ESig` in `esigs`
+    pub sn: u32, // its `ESig` count
+}
+
+// A non-generic method of an extend with a recorded signature (`Package::item_sig`): the types a
+// target instance's signature propagation notes, `n` of them from `start` in the signature pool.
+struct ESig {
+    pub iid: NodeId,
+    pub start: u32,
+    pub n: u32,
+}
+
+// One constrained target argument of an extend: its classification, the argument type as written,
+// and for a parameter or a form, the parameter's declaration and value type.
+struct XSlot {
+    pub x: XArg,
+    pub ty: TypeId,
+    pub gid: NodeId,
+    pub bt: BuiltinType,
+}
+
 // One substitution frame entry: generic-param decl -> the argument's key (value included for
 // const params, so dependent const-exprs can fold).
 struct Subst {
@@ -73,6 +103,7 @@ struct WalkCache {
     pub tys: Vector<TypeId>, // unique local/rvalue types, first-occurrence order
     pub consts: Vector<u32>, // CK_ITEM constant ids carrying bound targs
     pub calls: Vector<u32>, // block ids whose terminator is a resolved TM_CALL
+    pub meths: Vector<bool>, // per call: a call with a receiver of a generic extend's method
     pub meas: Vector<u32>, // statement ids assigning a `sizeof`/`alignof`
 }
 
@@ -100,9 +131,19 @@ pub struct InstGraph {
     exts: Vector<ExtRow>, // every extend in the package with a resolved target declaration
     // Indexes over `exts`: expansion asks per call site and per aggregate record, so owner and
     // target lookups must not rescan the extend list.
-    ext_of: Map<u64, u64>, // (module << 32 | fnode) -> owning extend node (rows of `exts` only)
+    ext_of: Map<u64, u64>, // (module << 32 | fnode) -> the `exts` row of its owning extend
     ext_head: Map<u64, u32>, // (target module << 32 | decl) -> its first `exts` row
     ext_next: Vector<u32>, // per `exts` row: the next row with the same target (IG_NONE = last)
+    shapes: Vector<ExtShape>, // per `exts` row
+    xslots: Vector<XSlot>,
+    esigs: Vector<ESig>,
+    iface_of: Map<u64, u64>, // (module << 32 | member fnode) -> its interface node
+    // The const-generic steps per declaring item, so a record's check reads its own steps alone:
+    // (module << 32 | owner) -> the first step's global index, `step_next` chaining the rest in
+    // `Ast::csteps` order. A step's global index is its module's `step_base` plus its index there.
+    step_head: Map<u64, u32>,
+    step_next: Vector<u32>,
+    step_base: Vector<u32>,
     // Final ids already fully walked by note_type under an EMPTY frame: bodies name the same
     // interned types over and over, and a completed depth-0 walk covers every revisit.
     noted: Vector<bool>,
@@ -158,6 +199,9 @@ pub struct InstGraph {
     flags: Vector<u8>,
     in_spec: bool, // records added now are speculative
     redo: Vector<u32>, // promoted records to walk again
+    // Cleared frames for reuse (`take_frame`): every record expansion builds a frame, and a fresh
+    // one per record would be an allocation per record.
+    spool: Vector<Vector<Subst>>,
     // `check_ty`'s finding: the aggregate member holding the length (decl node NODE_NONE = the
     // checked type itself holds it).
     chk_decl: DefId,
@@ -168,6 +212,12 @@ const ORG_BODY: u64 = 1u64 << 63;
 const ORG_MEMBER: u64 = 1u64 << 62;
 const RF_SPEC: u8 = 1;
 const RF_WALKED: u8 = 2;
+// A speculative aggregate whose layout holds an out-of-range array: it can never be emitted, so its
+// method signatures are not expanded and it pairs with no method. A demand clears the bit, and the
+// record walks again and reports its fault.
+const RF_DEAD: u8 = 4;
+// The most cleared frames the graph keeps for reuse.
+const POOL_MAX: usize = 64;
 
 extend InstGraph {
     /// An empty graph over `pkg`; `keep` (null = lower on demand) supplies kept lowerings and `live`
@@ -185,6 +235,13 @@ extend InstGraph {
             ext_of: Map::<u64, u64>::new(),
             ext_head: Map::<u64, u32>::new(),
             ext_next: Vector::<u32>::new(),
+            shapes: Vector::<ExtShape>::new(),
+            xslots: Vector::<XSlot>::new(),
+            esigs: Vector::<ESig>::new(),
+            iface_of: Map::<u64, u64>::new(),
+            step_head: Map::<u64, u32>::new(),
+            step_next: Vector::<u32>::new(),
+            step_base: Vector::<u32>::new(),
             noted: Vector::<bool>::new(),
             pair_cur: Map::<u64, u64>::new(),
             dwalked: Set::<u64>::new(),
@@ -209,9 +266,24 @@ extend InstGraph {
             flags: Vector::<u8>::new(),
             in_spec: false,
             redo: Vector::<u32>::new(),
+            spool: Vector::<Vector<Subst>>::new(),
             chk_decl: DefId { module: 0, node: NODE_NONE },
             chk_span: tok::Span { start: 0, end: 0 },
         };
+    }
+
+    // An empty frame, reusing a returned one's allocation.
+    fn take_frame(self: &mut Self) Vector<Subst> {
+        return self.spool.pop().unwrap_or(Vector::<Subst>::new());
+    }
+
+    // Return frame `f` for reuse; the pool keeps at most POOL_MAX (the walk's nesting depth).
+    fn give_frame(self: &mut Self, f: Vector<Subst>) {
+        if self.spool.len() < POOL_MAX {
+            let mut v = f;
+            v.truncate(0);
+            self.spool.push(v);
+        }
     }
 
     /// Bytes the argument keys, records and index hold (SC_TYPE_STATS).
@@ -323,9 +395,13 @@ extend InstGraph {
                 if eq {
                     let fl = self.flags[cur as usize];
                     if !self.in_spec && (fl & RF_SPEC) != 0 {
-                        self.flags.set(cur as usize, fl & ~RF_SPEC);
+                        self.flags.set(cur as usize, fl & ~(RF_SPEC | RF_DEAD));
                         if (fl & RF_WALKED) != 0 {
                             self.redo.push(cur);
+                        }
+                        if (fl & RF_DEAD) != 0 {
+                            // The pairings skipped it: pair every group again from its start.
+                            self.pair_cur.clear();
                         }
                     }
                     *fresh = false;
@@ -519,6 +595,7 @@ extend InstGraph {
         let aname = p.modules.at(ai.module as usize).source.as_str().slice(an.start as usize, an.end as usize);
         let mut r = self.ext_first(d);
         while r != IG_NONE {
+            let ri = r;
             let row = *self.exts.at(r as usize);
             r = *self.ext_next.at(r as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
@@ -529,8 +606,7 @@ extend InstGraph {
             let ir = ea.resolution_def(ed.interface_type);
             let dt = ea.type_of(ed.interface_type);
             if ir.module != ai.module || ir.node != iface || dt == TYPE_NONE || !self.ext_applies(
-                ea,
-                row.enode,
+                ri,
                 &keys,
                 0,
                 keys.len() as u32,
@@ -538,7 +614,7 @@ extend InstGraph {
                 continue;
             }
             let mut frame = Vector::<Subst>::new();
-            let _ = self.bind_ext_keys(ea, row.enode, &keys, 0, keys.len() as u32, &mut frame);
+            let _ = self.bind_ext_keys(ri, &keys, 0, keys.len() as u32, &mut frame);
             if self.subst_intern(ea, dt, &frame, depth + 1) != want {
                 continue;
             }
@@ -773,14 +849,23 @@ extend InstGraph {
     // left to the type walks, which check the type that holds it. A failing step is a fault at its
     // written span.
     fn check_steps(self: &mut Self, m: ModuleId, owner: NodeId, frame: &Vector<Subst>) {
+        let mut g = switch self.step_head.get(&skey_mix(0, m as u64 << 32 | owner as u64)) {
+            Some(v) => *v,
+            None => IG_NONE,
+        };
+        if g == IG_NONE {
+            return;
+        }
         let a = unsafe &*(&*self.pkg).module_ast_const(m);
-        for i in 0..a.csteps.len() {
-            let s = *a.csteps.at(i);
+        let base = self.step_base[m as usize];
+        while g != IG_NONE {
+            let s = a.csteps.at((g - base) as usize);
+            g = self.step_next[g as usize];
             let mut sum = i128::zero();
-            if s.owner != owner || s.root || !self.lin_sum(&s.lin, frame, &mut sum) || s.holds(sum, self.ptr32()) {
+            if !self.lin_sum(&s.lin, frame, &mut sum) || s.holds(sum, self.ptr32()) {
                 continue;
             }
-            self.fault_msg = self.step_msg(&s, sum, frame);
+            self.fault_msg = self.step_msg(s, sum, frame);
             self.step_fault = true;
             self.take_fault(s.module, s.span);
         }
@@ -950,7 +1035,7 @@ extend InstGraph {
             return false;
         }
         // Bind the declaration's parameters to the argument VALUES (all a length reads).
-        let mut inner = Vector::<Subst>::new();
+        let mut inner = self.take_frame();
         let gs = dn.as_data.aggregate.generics;
         let mut ai: u32 = 0;
         for g in 0..gs.len {
@@ -964,7 +1049,9 @@ extend InstGraph {
             ai += 1;
         }
         let mut sp = tok::Span { start: 0, end: 0 };
-        return self.check_decl(da, it.decl, &inner, depth + 1, &mut sp);
+        let hit = self.check_decl(da, it.decl, &inner, depth + 1, &mut sp);
+        self.give_frame(inner);
+        return hit;
     }
 
     // `check_ty` over the member types (fields and variant payloads) of aggregate `decl` in `a`;
@@ -1383,9 +1470,13 @@ extend InstGraph {
     // the checker already selected the method.
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
         // Only a method of a generic extend.
-        if t.args_len == 0 || self.enclosing_extend(t.callee) == NODE_NONE {
-            return;
+        if t.args_len != 0 && self.enclosing_row(t.callee) != IG_NONE {
+            self.note_method_of(a, t, b, frame);
         }
+    }
+
+    // `note_method` for a call `t` with a receiver of a generic extend's method.
+    fn note_method_of(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
         // Peel the receiver to its instance.
         let recv_op = b.oper_pool[t.args_start as usize];
         let mut rt = b.operands.at(recv_op as usize).ty;
@@ -1432,9 +1523,15 @@ extend InstGraph {
     fn note_iface_call(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) bool {
         let p = unsafe &*self.pkg;
         let ca = unsafe &*p.module_ast_const(t.callee.module);
-        let inode = iface_of_member(ca, t.callee.node);
         let fg = ca.at_const(t.callee.node).as_data.function.generics;
-        if inode == NODE_NONE || fg.len == 0 || t.targs_len < fg.len {
+        if fg.len == 0 || t.targs_len < fg.len {
+            return false;
+        }
+        let inode = switch self.iface_of.get(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
+            Some(v) => (*v) as NodeId,
+            None => NODE_NONE,
+        };
+        if inode == NODE_NONE {
             return false;
         }
         let mut rt = t.recv;
@@ -1492,17 +1589,11 @@ extend InstGraph {
             let ea = unsafe &*p.module_ast_const(row.emod);
             let ed = ea.at_const(row.enode).as_data.extend_def;
             let ir = self.ext_interface(ea, row.enode);
-            if ir.module != t.callee.module || ir.node != inode || !self.ext_applies(
-                ea,
-                row.enode,
-                &keys,
-                0,
-                keys.len() as u32,
-            ) {
+            if ir.module != t.callee.module || ir.node != inode || !self.ext_applies(ri, &keys, 0, keys.len() as u32) {
                 continue;
             }
             let mut ef = Vector::<Subst>::new();
-            let _ = self.bind_ext_keys(ea, row.enode, &keys, 0, keys.len() as u32, &mut ef);
+            let _ = self.bind_ext_keys(ri, &keys, 0, keys.len() as u32, &mut ef);
             let dt = ea.type_of(ed.interface_type);
             if want != TYPE_NONE && (dt == TYPE_NONE || self.subst_intern(ea, dt, &ef, 1) != want) {
                 continue;
@@ -1601,13 +1692,12 @@ extend InstGraph {
             // A generic extend's constant is static data evaluated at compile time: no body emits,
             // but its written const-generic expressions compute under the instance its arguments
             // (the target's, in order) name.
-            let ext = self.enclosing_extend(callee);
-            if ext != NODE_NONE {
-                let ca = unsafe &*(&*self.pkg).module_ast_const(callee.module);
+            let x = self.enclosing_row(callee);
+            if x != IG_NONE {
                 let mut cf = Vector::<Subst>::new();
-                let _ = self.bind_ext_keys(ca, ext, &self.argbuf, 0, tn, &mut cf);
+                let _ = self.bind_ext_keys(x, &self.argbuf, 0, tn, &mut cf);
                 self.check_steps(callee.module, callee.node, &cf);
-                self.check_steps(callee.module, ext, &cf);
+                self.check_steps(callee.module, self.exts.at(x as usize).enode, &cf);
             }
             return;
         }
@@ -1718,8 +1808,8 @@ extend InstGraph {
         self.cross_defaults(&gk, &groups);
         for d in 0..dm.len() {
             let md = *dm.at(d);
-            let ext = self.enclosing_extend(md);
-            if ext == NODE_NONE {
+            let x = self.enclosing_row(md);
+            if x == IG_NONE {
                 continue;
             }
             let a = unsafe &*(&*self.pkg).module_ast_const(md.module);
@@ -1727,16 +1817,14 @@ extend InstGraph {
             if a.at_const(md.node).as_data.function.generics.len != 0 {
                 continue;
             }
-            let target = self.ext_target(a, ext);
-            if target.node != NODE_NONE {
-                let ck = skey_mix(skey_mix(0, md.module as u64 << 32 | md.node as u64), 1);
-                self.pair_group(&gk, &groups, target, ck, md, md.module, ext);
-            }
+            let row = *self.exts.at(x as usize);
+            let ck = skey_mix(skey_mix(0, md.module as u64 << 32 | md.node as u64), 1);
+            self.pair_group(&gk, &groups, DefId { module: row.dmod, node: row.ddecl }, ck, md, x);
         }
     }
 
     // Pair decl `def` with every instance of aggregate `target` that cross-product cursor `ck` has
-    // not paired yet and that extend `ext` (of module `em`) applies to.
+    // not paired yet and that the extend of `exts` row `x` applies to.
     fn pair_group(
         self: &mut Self,
         gk: &Map<u64, u64>,
@@ -1744,10 +1832,8 @@ extend InstGraph {
         target: DefId,
         ck: u64,
         def: DefId,
-        em: ModuleId,
-        ext: NodeId,
+        x: u32,
     ) {
-        let ea = unsafe &*(&*self.pkg).module_ast_const(em);
         let gi = switch gk.get(&skey_mix(0, target.module as u64 << 32 | target.node as u64)) {
             Some(v) => (*v) as i64,
             None => (-1) as i64,
@@ -1761,8 +1847,12 @@ extend InstGraph {
         };
         let glen = groups[gi as usize].len();
         for k9 in start..glen {
-            let rec = *self.recs.at(groups[gi as usize][k9] as usize);
-            if !self.ext_applies(ea, ext, &self.keys, rec.args_start, rec.args_len) {
+            let id = groups[gi as usize][k9];
+            if (self.flags[id as usize] & RF_DEAD) != 0 {
+                continue;
+            }
+            let rec = *self.recs.at(id as usize);
+            if !self.ext_applies(x, &self.keys, rec.args_start, rec.args_len) {
                 continue;
             }
             self.argbuf.truncate(0);
@@ -1821,8 +1911,8 @@ extend InstGraph {
                     // Pair with every instance of the extend's target.
                     let tg = self.ext_target(a, row.enode);
                     let ck = skey_mix(skey_mix(0, x as u64 << 32 | imid as u64), 2);
-                    self.pair_group(gk, groups, tg, ck, DefId { module: iface.module, node: imid }, row.emod, row.enode);
-                    self.walk_defaults(gk, groups, &row, iface, imid, ck);
+                    self.pair_group(gk, groups, tg, ck, DefId { module: iface.module, node: imid }, x as u32);
+                    self.walk_defaults(gk, groups, x as u32, iface, imid, ck);
                 }
             }
         }
@@ -1835,19 +1925,19 @@ extend InstGraph {
         self: &mut Self,
         gk: &Map<u64, u64>,
         groups: &Vector<Vector<u32>>,
-        row: &ExtRow,
+        x: u32,
         iface: DefId,
         imid: NodeId,
         ck: u64,
     ) {
-        let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
+        let row = *self.exts.at(x as usize);
         let da = unsafe &*(&*self.pkg).module_ast_const(row.dmod);
         let dn = da.at_const(row.ddecl);
         let generic = (dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM) && dn.as_data.aggregate.generics.len != 0;
         if !generic {
             if !self.dwalked.contains(&ck) {
                 self.dwalked.insert(ck);
-                self.walk_default(row, iface, imid, 0, 0, IG_NONE);
+                self.walk_default(x, iface, imid, 0, 0, IG_NONE);
             }
             return;
         }
@@ -1863,8 +1953,7 @@ extend InstGraph {
             let wk = skey_mix(ck, id);
             let rec = *self.recs.at(id as usize);
             if self.dwalked.contains(&wk) || (self.flags[id as usize] & RF_SPEC) != 0 || !self.ext_applies(
-                a,
-                row.enode,
+                x,
                 &self.keys,
                 rec.args_start,
                 rec.args_len,
@@ -1872,7 +1961,7 @@ extend InstGraph {
                 continue;
             }
             self.dwalked.insert(wk);
-            self.walk_default(row, iface, imid, rec.args_start, rec.args_len, id);
+            self.walk_default(x, iface, imid, rec.args_start, rec.args_len, id);
         }
     }
 
@@ -1880,12 +1969,13 @@ extend InstGraph {
     // arguments are the `n` keys from `start` (record `rec`, IG_NONE for a non-generic target): the
     // frame binds the extend's parameters, `Self` and the interface's parameters to the arguments
     // the conformance writes.
-    fn walk_default(self: &mut Self, row: &ExtRow, iface: DefId, imid: NodeId, start: u32, n: u32, rec: u32) {
+    fn walk_default(self: &mut Self, x: u32, iface: DefId, imid: NodeId, start: u32, n: u32, rec: u32) {
+        let row = *self.exts.at(x as usize);
         let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
         let ia = unsafe &*(&*self.pkg).module_ast_const(iface.module);
         let ed = a.at_const(row.enode).as_data.extend_def;
         let mut frame = Vector::<Subst>::new();
-        let _ = self.bind_ext_keys(a, row.enode, &self.keys, start, n, &mut frame);
+        let _ = self.bind_ext_keys(x, &self.keys, start, n, &mut frame);
         let mut pat = a.type_of(ed.target_type);
         if pat == TYPE_NONE && rec == IG_NONE {
             // A plain path is typed on its declaration.
@@ -1976,12 +2066,14 @@ extend InstGraph {
         self.step_fault = false;
         if r.kind == IG_AGG {
             self.expand_fields(&r);
-            self.expand_signatures(&r);
+            if (self.flags[id as usize] & RF_DEAD) == 0 {
+                self.expand_signatures(&r);
+            }
             return;
         }
         // An extend member reached as a plain call (assoc fns, turbofish method values) still
         // binds the extend's params through its leading argument keys.
-        if r.kind == IG_METHOD || r.kind == IG_FN && self.enclosing_extend(r.def) != NODE_NONE {
+        if r.kind == IG_METHOD || r.kind == IG_FN && self.enclosing_row(r.def) != IG_NONE {
             self.expand_method(&r);
             return;
         }
@@ -1993,13 +2085,13 @@ extend InstGraph {
             return;
         }
         let fd = da.at_const(r.def.node).as_data.function;
-        let mut frame = Vector::<Subst>::new();
+        let mut frame = self.take_frame();
         self.bind_generics(da, fd.generics, &r, 0, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
-        if fd.body == NODE_NONE || fd.is_extern() {
-            return;
+        if fd.body != NODE_NONE && !fd.is_extern() {
+            self.seed_body(r.def.module, r.def.node, da, &frame);
         }
-        self.seed_body(r.def.module, r.def.node, da, &frame);
+        self.give_frame(frame);
     }
 
     // The declaration an extend targets (the path node's resolution, else its last part's).
@@ -2017,7 +2109,7 @@ extend InstGraph {
     fn expand_fields(self: &mut Self, r: &InstRec) {
         let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
         let n = a.at_const(r.def.node);
-        let mut frame = Vector::<Subst>::new();
+        let mut frame = self.take_frame();
         self.bind_generics(a, n.as_data.aggregate.generics, r, 0, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
         let is_tuple = n.as_data.aggregate.is_tuple;
@@ -2034,6 +2126,7 @@ extend InstGraph {
                 let at = pick(tnode != NODE_NONE, tnode, mid);
                 self.cur_org = ORG_MEMBER | a.module as u64 << 32 | at as u64;
                 self.note_type(a, t, &frame, 0);
+                self.mark_dead(a, t, &frame);
                 if self.fault_hit {
                     self.take_type_fault(a.module, a.at_const(at).span);
                 }
@@ -2047,6 +2140,7 @@ extend InstGraph {
                     }
                     self.cur_org = ORG_MEMBER | a.module as u64 << 32 | pn as u64;
                     self.note_type(a, t, &frame, 0);
+                    self.mark_dead(a, t, &frame);
                     if self.fault_hit {
                         self.take_type_fault(a.module, a.at_const(pn).span);
                     }
@@ -2054,6 +2148,21 @@ extend InstGraph {
             }
         }
         self.cur_org = 0;
+        self.give_frame(frame);
+    }
+
+    // Mark the speculative record being expanded dead when its member type `t` under `frame` holds an
+    // out-of-range array: directly (the walk's pending fault) or inside an aggregate it instantiates.
+    fn mark_dead(self: &mut Self, a: &Ast, t: TypeId, frame: &Vector<Subst>) {
+        if !self.in_spec || (self.flags[self.cur_rec as usize] & RF_DEAD) != 0 {
+            return;
+        }
+        if self.fault_hit || self.check_ty(a, t, frame, 0) {
+            self.flags.set(self.cur_rec as usize, self.flags[self.cur_rec as usize] | RF_DEAD);
+        }
+        if !self.fault_hit {
+            self.fault_msg.clear();
+        }
     }
 
     // The interface an extend conforms to, resolved (module-qualified); node NODE_NONE when plain.
@@ -2073,128 +2182,149 @@ extend InstGraph {
         self.in_spec = true;
         let mut x = self.ext_first(r.def);
         while x != IG_NONE {
+            let xi = x;
             let row = *self.exts.at(x as usize);
             x = self.ext_next[x as usize];
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-            let ed = a.at_const(row.enode).as_data.extend_def;
-            if !self.ext_applies(a, row.enode, &self.keys, r.args_start, r.args_len) {
+            let sh = *self.shapes.at(xi as usize);
+            if sh.sn == 0 || !self.ext_applies(xi, &self.keys, r.args_start, r.args_len) {
                 continue;
             }
-            let mut frame = Vector::<Subst>::new();
-            let _ = self.bind_ext_params(a, row.enode, r, &mut frame);
-            for j in 0..ed.items.len {
-                let iid = unsafe a.list(ed.items)[j as usize];
-                // Signatures come from the package item metadata (params then returns, owner-pool
-                // TypeIds), not from re-walking the item's syntax; non-function items record none.
-                let sg = (unsafe &*self.pkg).item_sig(row.emod, iid);
-                if sg == null || unsafe (*sg).generic {
-                    // Generic methods substitute per explicit (instance, targs) pair.
-                    continue;
-                }
-                let sn = (unsafe (*sg).np) as u32 + (unsafe (*sg).nr) as u32;
-                for si in 0..sn {
-                    self.note_type(a, (unsafe &*self.pkg).sig_type(unsafe (*sg).start + si), &frame, 0);
+            let mut frame = self.take_frame();
+            let _ = self.bind_ext_keys(xi, &self.keys, r.args_start, r.args_len, &mut frame);
+            for j in sh.ss..sh.ss + sh.sn {
+                let es = *self.esigs.at(j as usize);
+                for si in 0..es.n {
+                    self.note_type(a, (unsafe &*self.pkg).sig_type(es.start + si), &frame, 0);
                 }
                 if self.fault_hit {
-                    self.take_fault(row.emod, a.at_const(iid).span);
+                    self.take_fault(row.emod, a.at_const(es.iid).span);
                 }
             }
+            self.give_frame(frame);
         }
         self.in_spec = spec0;
     }
 
-    // Bind extend `ext`'s generic params through its target's arguments to instance `r`'s keys, into
-    // `frame`; returns the target's argument count (where a method's own keys start).
-    fn bind_ext_params(self: &Self, a: &Ast, ext: NodeId, r: &InstRec, frame: &mut Vector<Subst>) u32 {
-        return self.bind_ext_keys(a, ext, &self.keys, r.args_start, r.args_len, frame);
+    // Read extend `ext` of `a` (the row `exts` just took) into its `ExtShape` and `XSlot`s.
+    fn push_shape(self: &mut Self, a: &Ast, ext: NodeId) {
+        let pat = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
+        let gens = a.at_const(ext).as_data.extend_def.generics;
+        let mut sh = ExtShape {
+            ident: ext_is_identity(a, pat, a, a.module, ext),
+            inst: pat != TYPE_NONE && a.type_at(pat).kind == TypeKind::TYPE_INSTANCE,
+            wide: gens.len > 8,
+            np: 0,
+            pn: 0,
+            xs: self.xslots.len() as u32,
+            ss: self.esigs.len() as u32,
+            sn: 0,
+        };
+        // Signatures come from the package item metadata (params then returns, owner-pool TypeIds),
+        // not from re-walking the item's syntax; non-function items record none, and generic methods
+        // substitute per explicit (instance, targs) pair.
+        let items = a.at_const(ext).as_data.extend_def.items;
+        for j in 0..items.len {
+            let iid = unsafe a.list(items)[j as usize];
+            let sg = (unsafe &*self.pkg).item_sig(a.module, iid);
+            if sg != null && !unsafe (*sg).generic {
+                let n = (unsafe (*sg).np) as u32 + (unsafe (*sg).nr) as u32;
+                self.esigs.push(ESig { iid: iid, start: unsafe (*sg).start, n: n });
+                sh.sn += 1;
+            }
+        }
+        if sh.inst {
+            let pi = *a.instance(a.type_at(pat).as_data.inst);
+            sh.pn = pi.n;
+            sh.np = ext_arity(a, ext, pi.n);
+            for j in 0..sh.np {
+                let ty = unsafe pi.args[j as usize];
+                let x = xarg_of(a, ty, a, a.module, gens);
+                let mut sl = XSlot { x: x, ty: ty, gid: NODE_NONE, bt: BuiltinType::BT_COUNT };
+                if x.kind == XA_PARAM || x.kind == XA_FORM {
+                    sl.gid = unsafe a.list(gens)[x.par as usize];
+                }
+                if x.kind == XA_FORM {
+                    sl.bt = (unsafe &*self.pkg).const_param_bt(a.module, sl.gid);
+                }
+                self.xslots.push(sl);
+            }
+        }
+        self.shapes.push(sh);
     }
 
-    // `bind_ext_params` over the `n` keys of `keys` from `start` on (the arguments of an instance of
-    // extend `ext`'s target, `a` its module): each argument the target constrains binds by its kind
-    // (`xarg_of`), a bare parameter to its key and a form's parameter to the value that inverts it.
-    fn bind_ext_keys(
-        self: &Self,
-        a: &Ast,
-        ext: NodeId,
-        keys: &Vector<ArgKey>,
-        start: u32,
-        n: u32,
-        frame: &mut Vector<Subst>,
-    ) u32 {
-        let pat = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
-        if pat == TYPE_NONE || a.type_at(pat).kind != TypeKind::TYPE_INSTANCE {
+    // Bind the generic params of the extend of `exts` row `x` through its target's arguments to the
+    // `n` keys of `keys` from `start` on (an instance of its target), into `frame`: each argument the
+    // target constrains binds by its kind (`xarg_of`), a bare parameter to its key and a form's
+    // parameter to the value that inverts it. Returns the target's argument count (where a method's
+    // own keys start).
+    fn bind_ext_keys(self: &Self, x: u32, keys: &Vector<ArgKey>, start: u32, n: u32, frame: &mut Vector<Subst>) u32 {
+        let sh = *self.shapes.at(x as usize);
+        if !sh.inst {
             return 0;
         }
-        let pi = *a.instance(a.type_at(pat).as_data.inst);
-        let gens = a.at_const(ext).as_data.extend_def.generics;
-        let np = ext_arity(a, ext, pi.n);
-        for j in 0..np {
+        let em = self.exts.at(x as usize).emod;
+        for j in 0..sh.np {
             if j >= n {
                 break;
             }
-            let x = xarg_of(a, unsafe pi.args[j as usize], a, a.module, gens);
+            let sl = self.xslots.at((sh.xs + j) as usize);
             let key = *keys.at((start + j) as usize);
-            let gid = unsafe a.list(gens)[x.par as usize];
-            if x.kind == XA_PARAM {
-                frame.push(Subst { pmod: a.module, pdecl: gid, key: key });
-            } else if x.kind == XA_FORM && key.has_val {
-                let bt = (unsafe &*self.pkg).const_param_bt(a.module, gid);
+            if sl.x.kind == XA_PARAM {
+                frame.push(Subst { pmod: em, pdecl: sl.gid, key: key });
+            } else if sl.x.kind == XA_FORM && key.has_val {
                 let mut q = i128::zero();
-                if xarg_solve(&x, cval_exact(key.val, key.bt), bt, self.ptr32(), &mut q) {
+                if xarg_solve(&sl.x, cval_exact(key.val, key.bt), sl.bt, self.ptr32(), &mut q) {
                     let bits = cval_bits(q);
                     frame.push(
                         Subst {
-                            pmod: a.module,
-                            pdecl: gid,
-                            key: ArgKey { ty: self.g().const_value_g(bits, bt), val: bits, has_val: true, bt: bt },
+                            pmod: em,
+                            pdecl: sl.gid,
+                            key: ArgKey { ty: self.g().const_value_g(bits, sl.bt), val: bits, has_val: true, bt: sl.bt },
                         },
                     );
                 }
             }
         }
-        return pi.n;
+        return sh.pn;
     }
 
-    // Whether extend `ext` (module `a`) applies to the instance of its target whose arguments are the
-    // `n` keys of `keys` from `start` on: every argument the target constrains matches (`xarg_of`), a
-    // form exactly and in its parameter's type, a parameter bound twice to one key.
-    fn ext_applies(self: &Self, a: &Ast, ext: NodeId, keys: &Vector<ArgKey>, start: u32, n: u32) bool {
-        let pat = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
-        if ext_is_identity(a, pat, a, a.module, ext) {
+    // Whether the extend of `exts` row `x` applies to the instance of its target whose arguments are
+    // the `n` keys of `keys` from `start` on: every argument the target constrains matches
+    // (`xarg_of`), a form exactly and in its parameter's type, a parameter bound twice to one key.
+    fn ext_applies(self: &Self, x: u32, keys: &Vector<ArgKey>, start: u32, n: u32) bool {
+        let sh = *self.shapes.at(x as usize);
+        if sh.ident {
             return true;
         }
-        let pi = *a.instance(a.type_at(pat).as_data.inst);
-        let gens = a.at_const(ext).as_data.extend_def.generics;
-        let np = ext_arity(a, ext, pi.n);
-        if np > n || gens.len > 8 {
+        if sh.np > n || sh.wide {
             return false;
         }
         let mut bound = [TYPE_NONE; 8];
-        for j in 0..np {
-            let x = xarg_of(a, unsafe pi.args[j as usize], a, a.module, gens);
+        for j in 0..sh.np {
+            let sl = self.xslots.at((sh.xs + j) as usize);
             let key = *keys.at((start + j) as usize);
             let mut v = key.ty;
-            if x.kind == XA_FIXED {
-                if key.ty != unsafe pi.args[j as usize] {
+            if sl.x.kind == XA_FIXED {
+                if key.ty != sl.ty {
                     return false;
                 }
                 continue;
             }
-            if x.kind == XA_FORM {
-                let bt = (unsafe &*self.pkg).const_param_bt(a.module, unsafe a.list(gens)[x.par as usize]);
+            if sl.x.kind == XA_FORM {
                 let mut q = i128::zero();
-                if !key.has_val || !xarg_solve(&x, cval_exact(key.val, key.bt), bt, self.ptr32(), &mut q) {
+                if !key.has_val || !xarg_solve(&sl.x, cval_exact(key.val, key.bt), sl.bt, self.ptr32(), &mut q) {
                     return false;
                 }
-                v = self.g().const_value_g(cval_bits(q), bt);
-            } else if x.kind != XA_PARAM {
+                v = self.g().const_value_g(cval_bits(q), sl.bt);
+            } else if sl.x.kind != XA_PARAM {
                 return false;
             }
-            let prev = unsafe bound[x.par as usize];
+            let prev = unsafe bound[sl.x.par as usize];
             if prev != TYPE_NONE && prev != v {
                 return false;
             }
-            unsafe bound[x.par as usize] = v;
+            unsafe bound[sl.x.par as usize] = v;
         }
         return true;
     }
@@ -2224,32 +2354,33 @@ extend InstGraph {
         };
     }
 
-    // The generic extend a method decl belongs to, or NODE_NONE.
-    fn enclosing_extend(self: &Self, d: DefId) NodeId {
-        let ext = switch self.ext_of.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
-            Some(v) => (*v) as NodeId,
-            None => NODE_NONE,
+    // The `exts` row of the generic extend a method decl belongs to, or IG_NONE.
+    fn enclosing_row(self: &Self, d: DefId) u32 {
+        let x = switch self.ext_of.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => (*v) as u32,
+            None => IG_NONE,
         };
-        if ext == NODE_NONE {
-            return NODE_NONE;
+        if x == IG_NONE {
+            return IG_NONE;
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
-        if a.at_const(ext).as_data.extend_def.generics.len == 0 {
-            return NODE_NONE;
+        if a.at_const(self.exts.at(x as usize).enode).as_data.extend_def.generics.len == 0 {
+            return IG_NONE;
         }
-        return ext;
+        return x;
     }
 
     // Walk a demanded method's body: the receiver-instance keys bind the extend's params (through
     // the target's argument positions), the trailing keys bind the method's own params.
     fn expand_method(self: &mut Self, r: &InstRec) {
         let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
-        let ext = self.enclosing_extend(r.def);
-        if ext == NODE_NONE {
+        let x = self.enclosing_row(r.def);
+        if x == IG_NONE {
             return;
         }
-        let mut frame = Vector::<Subst>::new();
-        let pos = self.bind_ext_params(a, ext, r, &mut frame);
+        let ext = self.exts.at(x as usize).enode;
+        let mut frame = self.take_frame();
+        let pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
         let fd = a.at_const(r.def.node).as_data.function;
         self.bind_generics(a, fd.generics, r, pos, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
@@ -2257,6 +2388,7 @@ extend InstGraph {
         if fd.body != NODE_NONE {
             self.seed_body(r.def.module, r.def.node, a, &frame);
         }
+        self.give_frame(frame);
     }
 
     // The `kept` index of `(m, node)`'s lowering, lowering it on first demand; -1 = cannot lower.
@@ -2346,6 +2478,8 @@ extend InstGraph {
                 let t = b.blocks.at(i).term;
                 if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
                     self.wcache[ki as usize].calls.push(i as u32);
+                    let meth = t.args_len != 0 && self.enclosing_row(t.callee) != IG_NONE;
+                    self.wcache[ki as usize].meths.push(meth);
                 }
             }
             self.wcache[ki as usize].built = true;
@@ -2374,7 +2508,9 @@ extend InstGraph {
             if t.targs_len != 0 && !self.note_iface_call(a, &t, b, frame) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
-            self.note_method(a, &t, b, frame);
+            if *(unsafe &*wp).meths.at(i) {
+                self.note_method_of(a, &t, b, frame);
+            }
         }
         self.cur_org = org0;
     }
@@ -2427,18 +2563,63 @@ extend InstGraph {
             let items = a.at_const(a.root).as_data.program.items;
             for i in 0..items.len {
                 let nid = unsafe a.list(items)[i as usize];
+                if a.at_const(nid).kind == NodeKind::NODE_INTERFACE {
+                    let ms = a.at_const(nid).as_data.interface_def.items;
+                    for j in 0..ms.len {
+                        let mid = unsafe a.list(ms)[j as usize];
+                        let key = skey_mix(0, m as u64 << 32 | mid as u64);
+                        // The first interface listing a member owns it, as `iface_of_member` finds.
+                        if !self.iface_of.contains_key(&key) {
+                            self.iface_of.insert(key, nid);
+                        }
+                    }
+                    continue;
+                }
                 if a.at_const(nid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
                 let d = self.ext_target(a, nid);
                 if d.node != NODE_NONE {
+                    let x = self.exts.len() as u64;
                     self.exts.push(ExtRow { dmod: d.module, ddecl: d.node, emod: m as ModuleId, enode: nid });
+                    self.push_shape(a, nid);
                     let ms = a.at_const(nid).as_data.extend_def.items;
                     for j in 0..ms.len {
                         let mid = unsafe a.list(ms)[j as usize];
-                        self.ext_of.insert(skey_mix(0, m as u64 << 32 | mid as u64), nid);
+                        self.ext_of.insert(skey_mix(0, m as u64 << 32 | mid as u64), x);
                     }
                 }
+            }
+        }
+        // Chain each item's steps back to front, so each chain lists its steps in `csteps` order.
+        let mut nsteps: usize = 0;
+        for m in 0..p.modules.len() {
+            self.step_base.push(nsteps as u32);
+            if p.modules.at(m).has_ast {
+                nsteps += (unsafe &*p.module_ast_const(m as ModuleId)).csteps.len();
+            }
+        }
+        self.step_next.resize_default(nsteps);
+        for m in 0..p.modules.len() {
+            if !p.modules.at(m).has_ast {
+                continue;
+            }
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            let base = self.step_base[m];
+            let mut i = a.csteps.len();
+            while i > 0 {
+                i -= 1;
+                let st = a.csteps.at(i);
+                if st.root {
+                    continue;
+                }
+                let key = skey_mix(0, m as u64 << 32 | st.owner as u64);
+                let next = switch self.step_head.get(&key) {
+                    Some(v) => *v,
+                    None => IG_NONE,
+                };
+                self.step_next.set(base as usize + i, next);
+                self.step_head.insert(key, base + i as u32);
             }
         }
         // Chain the rows per target back to front, so each chain lists its rows in `exts` order.

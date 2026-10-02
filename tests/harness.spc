@@ -506,7 +506,7 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         dirp,
         cli::binext(),
     );
-    let mut benv = cli::cache_env(str::from_cstr(dirp), "");
+    let mut benv = cli::fixture_cache_env(str::from_cstr(dirp));
     let brc = unsafe shim::sc_run(&cmd.b[0], null, null, null, benv.cstr());
     if brc != 0 {
         rm_dir(dirp);

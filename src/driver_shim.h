@@ -41,6 +41,7 @@ int sc_closedir(void *dir);
 
 long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 long long sc_mtime_ns(const char *path); /* mtime nanoseconds (100 ns steps on Windows); 0 if missing */
+int sc_touch(const char *path);         /* set the mtime to now; 0 on success */
 int sc_ncpu(void);                    /* online core count; >= 1 */
 /* One inherited process-tree worker budget. A process owns one implicit slot and can claim free extras. */
 int sc_jobserver_init(int capacity);
@@ -49,6 +50,7 @@ void sc_jobserver_release_claim(void);
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_peak_rss(void);          /* peak resident set size in bytes; 0 when unavailable */
 long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
+long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const char *cwd); /* sc_spawn_argv in directory cwd (NULL: ours); -1 where the libc cannot */
 int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1; a killing signal is named on stderr */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_try_wait(const int64_t *pids, int n, int *code); /* non-blocking sc_wait_any; -1 when none exited; never reaps outside `pids` */

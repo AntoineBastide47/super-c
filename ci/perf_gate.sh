@@ -55,12 +55,19 @@ rm -f "$record"
 SC_BENCH_OUT="$record" build/bench-bin --filter=self_transpile | tee "$out/self_transpile.txt" || fail "the benchmark reported a failure"
 [ -f "$record" ] || fail "no record written to $record"
 
-python3 - "$record" "$build_id" "$tol" "${SC_PERF_RECORD:-0}" "$cpu" "$ccver" "$ncpu" "$load" <<'EOF'
+python3 - "$record" "$build_id" "$tol" "${SC_PERF_RECORD:-0}" "$cpu" "$ccver" "$ncpu" "$load" "$CONTRACT_BENCH_V" <<'EOF'
 import json, sys
+# The self-transpile record schema this gate reads (CONTRACT_BENCH_V).
+BENCH_V = int(sys.argv[9])
+PHASES = ("stamp", "parse", "resolve", "typecheck", "borrowck", "checks", "prepare", "plan", "render", "publish")
+# Phases too short for a percentage gate: their cycles are reported, not gated.
+UNGATED = ("stamp", "prepare")
 rec = json.load(open(sys.argv[1]))
 build_id, tol, record_mode, cpu, ccver, ncpu, load = sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
 if not rec.get("ok"):
     sys.exit("perf: FAILED: the record reports failure")
+if rec.get("v") != BENCH_V:
+    sys.exit("perf: FAILED: the record has schema v%s, this gate reads v%d" % (rec.get("v"), BENCH_V))
 if rec["build_id"] != build_id:
     sys.exit("perf: FAILED: the measured binary carries build %s, the checkout is %s" % (rec["build_id"], build_id))
 b = rec["build"]
@@ -77,16 +84,10 @@ consts = [
     ("BASE_TRANSPILE_SERIAL_KALLOC", ph["total"]["kalloc"], True),
     ("BASE_TRANSPILE_SERIAL_HEAP_MIB", rec["heap_mib"], True),
     ("BASE_TRANSPILE_SERIAL_PEAK_RSS_MIB", rec["peak_rss_mib"], True),
-    ("BASE_PHASE_PARSE_MCYC", ph["parse"]["mcyc"], True),
-    ("BASE_PHASE_RESOLVE_MCYC", ph["resolve"]["mcyc"], True),
-    ("BASE_PHASE_TYPECHECK_MCYC", ph["typecheck"]["mcyc"], True),
-    ("BASE_PHASE_BORROWCK_MCYC", ph["borrowck"]["mcyc"], True),
-    ("BASE_PHASE_CODEGEN_MCYC", ph["codegen"]["mcyc"], True),
-    ("BASE_PHASE_PARSE_KALLOC", ph["parse"]["kalloc"], False),
-    ("BASE_PHASE_RESOLVE_KALLOC", ph["resolve"]["kalloc"], False),
-    ("BASE_PHASE_TYPECHECK_KALLOC", ph["typecheck"]["kalloc"], False),
-    ("BASE_PHASE_BORROWCK_KALLOC", ph["borrowck"]["kalloc"], False),
-    ("BASE_PHASE_CODEGEN_KALLOC", ph["codegen"]["kalloc"], False),
+]
+consts += [("BASE_PHASE_%s_MCYC" % k.upper(), ph[k]["mcyc"], k not in UNGATED) for k in PHASES]
+consts += [("BASE_PHASE_%s_KALLOC" % k.upper(), ph[k]["kalloc"], False) for k in PHASES]
+consts += [
     ("BASE_BUILD_PARALLEL_JOBS", b["jobs"], False),
     ("BASE_BUILD_PARALLEL_TRANSPILE_MS", sum(b["ms"][k] for k in ("stamp", "load", "resolve", "typecheck", "borrowck", "checks", "prepare", "plan", "render", "publish")), False),
 ]
@@ -99,7 +100,7 @@ if record_mode:
         f.write("# Accepted performance baseline: written by `SC_PERF_RECORD=1 ci/perf_gate.sh`, compared by ci/perf_gate.sh.\n")
         f.write("# In-process constants: 100 serial self-transpile rounds (CPU ms, on-core Mcyc, Kalloc = allocator calls in\n")
         f.write("# thousands); BUILD constants: one cold dev build of the compiler through the engine with every core.\n")
-        f.write("BASE_COMMIT=%s\nBASE_CPU=\"%s\"\nBASE_CC=\"%s\"\nBASE_CORES=%s\nBASE_ROUNDS=%d\nBASE_LOAD_1MIN=%s\n" % (build_id, cpu, ccver, ncpu, rec["rounds"], load))
+        f.write("BASE_COMMIT=%s\nBASE_BENCH_V=%d\nBASE_CPU=\"%s\"\nBASE_CC=\"%s\"\nBASE_CORES=%s\nBASE_ROUNDS=%d\nBASE_LOAD_1MIN=%s\n" % (build_id, BENCH_V, cpu, ccver, ncpu, rec["rounds"], load))
         for name, value, _ in consts:
             f.write("%s=%.3f\n" % (name, value))
     print("perf: recorded ci/baseline.env from build %s" % build_id)
@@ -113,6 +114,8 @@ try:
             base[k] = v.strip('"')
 except FileNotFoundError:
     sys.exit("perf: FAILED: no ci/baseline.env (record one with SC_PERF_RECORD=1)")
+if base.get("BASE_BENCH_V") != str(BENCH_V):
+    sys.exit("perf: FAILED: ci/baseline.env was recorded under bench schema v%s, this gate reads v%d (record a new one with SC_PERF_RECORD=1)" % (base.get("BASE_BENCH_V", "1"), BENCH_V))
 print("perf: baseline %s on %s (recorded at load %s, this run at %s)" % (base.get("BASE_COMMIT"), base.get("BASE_CPU"), base.get("BASE_LOAD_1MIN", "?"), load))
 if base.get("BASE_CPU") != cpu:
     print("perf: WARNING: the baseline was recorded on %s, this box is %s: wall and cycle constants do not transfer" % (base.get("BASE_CPU"), cpu))
@@ -128,14 +131,10 @@ LEDGER = {
     # BASE_TRANSPILE_SERIAL_PEAK_RSS_MIB keeps its baseline: the constant was recorded with the benchmark
     # binary as a child of the sanitizer compiler, whose allocator changes the peak, while the ledger runs
     # the binary directly (the two peaks of one binary differ by 2x), so no ratio between them holds.
-    "BASE_PHASE_PARSE_MCYC": "phase_parse_mcyc",
-    "BASE_PHASE_RESOLVE_MCYC": "phase_resolve_mcyc",
-    "BASE_PHASE_TYPECHECK_MCYC": "phase_typecheck_mcyc",
-    "BASE_PHASE_BORROWCK_MCYC": "phase_borrowck_mcyc",
-    "BASE_PHASE_CODEGEN_MCYC": "phase_codegen_mcyc",
     "BASE_BUILD_PARALLEL_TRANSPILE_MS": "parallel_transpile_ms",
     "BASE_FRONTEND_MCYC": "frontend_mcyc",
 }
+LEDGER.update({"BASE_PHASE_%s_MCYC" % k.upper(): "phase_%s_mcyc" % k for k in PHASES})
 ledger = {}  # metric -> [baseline value, sum of improvements, sum of regressions, changes]
 try:
     for line in open("ci/ledger.tsv"):

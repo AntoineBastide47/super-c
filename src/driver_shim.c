@@ -35,6 +35,7 @@
 #  include <direct.h>  /* _mkdir, _rmdir */
 #  include <io.h>      /* _access, _unlink */
 #  include <process.h> /* _getpid */
+#  include <sys/utime.h> /* _utime */
 #  define PSAPI_VERSION 2 /* GetProcessMemoryInfo resolves to K32... in kernel32: no -lpsapi needed */
 #  include <windows.h>
 #  include <psapi.h>
@@ -365,6 +366,15 @@ long long sc_mtime_ns(const char *path) {
 #endif
 }
 
+/* Set the modification time of `path` to now; 0 on success. */
+int sc_touch(const char *path) {
+#if defined(_WIN32)
+  return _utime(path, NULL);
+#else
+  return utimensat(AT_FDCWD, path, NULL, 0);
+#endif
+}
+
 /* Online core count; 4 when it cannot be determined. */
 int sc_ncpu(void) {
 #if defined(_WIN32)
@@ -639,9 +649,15 @@ static char *win_quote_into(char *w, const char *a) {
    the child's stdout+stderr truncate-redirect into it; NULL inherits the parent's. The returned
    pid/handle is claimed by sc_wait_any/sc_try_wait/sc_waitpid. -1 on spawn failure. */
 long long sc_spawn_argv(const char *const *argv, const char *out_path) {
+  return sc_spawn_argv_in(argv, out_path, NULL);
+}
+
+/* sc_spawn_argv with the child's working directory set to `cwd` (NULL: this process's). */
+long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const char *cwd) {
 #if defined(__wasi__)
   (void)argv;
   (void)out_path;
+  (void)cwd;
   return -1;
 #elif defined(_WIN32)
   size_t total = 1;
@@ -677,7 +693,7 @@ long long sc_spawn_argv(const char *const *argv, const char *out_path) {
     si.hStdOutput = h;
     si.hStdError = h;
   }
-  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, cwd, &si, &pi);
   free(line);
   if (h != INVALID_HANDLE_VALUE)
     CloseHandle(h);
@@ -690,11 +706,35 @@ long long sc_spawn_argv(const char *const *argv, const char *out_path) {
   pid_t pid;
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_t *pfa = NULL;
-  if (out_path) {
+  if (out_path || cwd) {
     posix_spawn_file_actions_init(&fa);
+    pfa = &fa;
+  }
+  if (out_path) {
     posix_spawn_file_actions_addopen(&fa, 1, out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     posix_spawn_file_actions_adddup2(&fa, 1, 2);
-    pfa = &fa;
+  }
+  if (cwd) {
+#if defined(__APPLE__) || defined(__GLIBC__)
+    /* macOS 26 deprecates the _np name for the POSIX 2024 one, which older systems lack; the _np
+       one exists on every supported version. */
+#  if defined(__APPLE__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#  endif
+    int crc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
+#  if defined(__APPLE__)
+#    pragma clang diagnostic pop
+#  endif
+    if (crc != 0) {
+      posix_spawn_file_actions_destroy(&fa);
+      return -1;
+    }
+#else
+    /* No chdir file action on this libc. */
+    posix_spawn_file_actions_destroy(&fa);
+    return -1;
+#endif
   }
   int rc = posix_spawnp(&pid, argv[0], pfa, NULL, (char *const *)argv, environ);
   if (pfa)

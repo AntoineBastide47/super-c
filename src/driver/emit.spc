@@ -9519,7 +9519,8 @@ fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, kind: i32) {
 /// then codegen of the live modules (headers first, then sources across `jobs` forked workers),
 /// pruning stale outputs afterwards. A non-empty `out_bin` also compiles + links the program there
 /// (`build`); `topts.enabled` synthesizes the test runner and, without a `sink`, builds and runs it
-/// too. `sink` (may be null) hears about every finished output file, which is what lets the build
+/// too. `cflags` are the profile's flags for the whole compile and link command, `ccflags` the part of
+/// them a separate compile takes (`test_build_and_run`). `sink` (may be null) hears about every finished output file, which is what lets the build
 /// engine compile a TU while later ones are still being emitted; the engine then owns the runner's
 /// compile, link and launch. `jobs` 0 means the online core count. Returns the
 /// process exit code (0 = success).
@@ -9539,6 +9540,7 @@ pub fn run_package(
     target: i32,
     lint: bool,
     cflags: str,
+    ccflags: str,
     sink: *mut EmitSink,
 ) i32 {
     // Safety net for every early-error return: parallel loading may have started the pool, and
@@ -10030,12 +10032,11 @@ pub fn run_package(
     if bn > 0 && bn as usize < 4096 && !fresh_tree {
         prune_orphans(&broot[0], &keep);
     }
-    bst::mark(bst::B_PUBLISH);
     syntax_stats_report(p, "emit");
     let mut rc: i32 = err as i32;
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(p, null, &keep, out_bin, cflags, target);
+            rc = test_build_and_run(p, null, &keep, out_bin, cflags, ccflags, target);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -10047,7 +10048,7 @@ pub fn run_package(
                     sink_notify(sink, &mut co.pr, runner.as_str(), 1);
                     keep.push(runner);
                     if sink == null {
-                        rc = test_build_and_run(p, topts, &keep, "", cflags, target);
+                        rc = test_build_and_run(p, topts, &keep, "", cflags, ccflags, target);
                     }
                 },
                 None => {

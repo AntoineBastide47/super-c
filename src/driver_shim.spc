@@ -60,6 +60,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_mtime(path: *const char) i64;
     /// Modification time in nanoseconds (100 ns steps on Windows); 0 when the file does not exist.
     pub fn sc_mtime_ns(path: *const char) i64;
+    /// Set the modification time of `path` to now; 0 on success.
+    pub fn sc_touch(path: *const char) i32;
     /// Online core count; 4 when it cannot be determined.
     pub fn sc_ncpu() i32;
     /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
@@ -77,6 +79,9 @@ extern "C" "driver_shim.h" {
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
     /// Returns a pid/handle for sc_wait_any/sc_try_wait/sc_waitpid, or -1 on spawn failure.
     pub fn sc_spawn_argv(argv: *const *const char, out_path: *const char) i64;
+    /// `sc_spawn_argv` with the child's working directory set to `cwd` (null: this process's); -1 also
+    /// where the C library has no way to set it at spawn.
+    pub fn sc_spawn_argv_in(argv: *const *const char, out_path: *const char, cwd: *const char) i64;
     /// Spawn through sc_spawn_argv and wait: the child's exit code, or -1 on spawn/wait failure. A child a
     /// signal ended returns 1 and is named on stderr with the signal.
     pub fn sc_exec_argv(argv: *const *const char, out_path: *const char) i32;

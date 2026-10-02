@@ -18,7 +18,9 @@ LINK_RE = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 FLAG_RE = re.compile(r"(?<![A-Za-z0-9_])--[a-z][a-z0-9-]*")
 ENV_RE = re.compile(r"\bSC_[A-Z0-9_]+\b")
 ATTRIBUTE_RE = re.compile(r"(?<![A-Za-z0-9_])@[a-z][a-z0-9_.]*(?:\([^\n)]*\))?")
-EXTERNAL_FLAGS = {"--rate"}
+# Flags of other tools the binary skill shows in their own command lines: samply's `--rate`,
+# wasmtime's `--argv0`.
+EXTERNAL_FLAGS = {"--rate", "--argv0"}
 
 SKILL_BY_PREFIX = {
     "src/build_system/": "super-c-binary",

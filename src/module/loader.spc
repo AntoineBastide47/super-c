@@ -2622,6 +2622,9 @@ extend Package {
         let mut imp = Vector::<u64>::new();
         let mut defs = Vector::<u64>::new(); // module << 32 | node
         self.co_dispatch(&mut ifm, &mut imp, &mut defs);
+        // `ifm` sorted: the methods of one name are one run, in `ifm` order (the index ascends).
+        let mut ifs = ifm.clone();
+        ifs.sort();
         for m in 0..nm {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             let src = self.modules.at(m).source.as_str();
@@ -2649,11 +2652,22 @@ extend Package {
                         continue;
                     }
                     let h = agg_op_name(a, n).hash() & 0xFFFFFFFFu64;
-                    for i in 0..ifm.len() {
-                        if ifm[i] >> 32 != h {
-                            continue;
+                    // The first entry of the name's run.
+                    let mut lo: usize = 0;
+                    let mut hi = ifs.len();
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if ifs[mid] >> 32 < h {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
                         }
-                        let dm = defs[(ifm[i] & 0xFFFFFFFFu64) as usize];
+                    }
+                    for i in lo..ifs.len() {
+                        if ifs[i] >> 32 != h {
+                            break;
+                        }
+                        let dm = defs[(ifs[i] & 0xFFFFFFFFu64) as usize];
                         let md = g.decl_of((dm >> 32) as ModuleId, (dm & 0xFFFFFFFFu64) as NodeId);
                         if md != CO_NONE {
                             r_decl.push(d);

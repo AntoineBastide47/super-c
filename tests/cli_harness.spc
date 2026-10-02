@@ -670,6 +670,17 @@ pub fn cache_env(root: str, env: str) String {
     return out;
 }
 
+/// `cache_env` for a fixture build in scratch directory `root`: the suite's shared fixture cache when
+/// `super-c test` named one (SC_TEST_CACHE_DIR), so the runtime and std units fixtures emit identically
+/// compile once per suite run; else the cache under `root`.
+pub fn fixture_cache_env(root: str) String {
+    let fx = stdlib::getenv("SC_TEST_CACHE_DIR");
+    if fx != null && unsafe *fx != 0 as char {
+        return format("SC_CACHE_DIR={}", str::from_cstr(fx));
+    }
+    return cache_env(root, "");
+}
+
 /// Run the compiler under test FROM `dir` with one environment variable set (and the build cache under
 /// `dir`, see `cache_env`): the shape the global object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,

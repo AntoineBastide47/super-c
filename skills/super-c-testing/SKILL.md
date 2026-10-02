@@ -170,7 +170,10 @@ unchanged suite skips straight to the cached link. Override the runner's flags w
 and exits 2 on any other argument. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run gets `SC_CACHE_DIR=<scratch dir>/.sccache`
 unless the test sets its own (`cli::cache_env`), so a test never writes into the user's
-global build cache.
+global build cache. The fixture builds of `compile_and_run` (and `expect_exit`) instead share
+the suite's object cache, `build/test/fixture-cache`, which `super-c test` names in
+`SC_TEST_CACHE_DIR` (`cli::fixture_cache_env`): the runtime and std units every fixture emits
+compile once per cache, not once per fixture.
 
 ### Fork isolation
 
