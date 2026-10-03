@@ -355,7 +355,7 @@ extend UniSt {
     }
 
     // Add region `r` to the walk's regions at the value's own level, or behind a reference.
-    fn mark(self: &mut Self, r: u32, behind: bool) {
+    const fn mark(self: &mut Self, r: u32, behind: bool) {
         if behind {
             self.m1 = self.m1 | 1u64 << r as u64;
         } else {
@@ -367,7 +367,7 @@ extend UniSt {
     // reference, `sa` either): `m0` and `m1` take the arriving own-level and behind regions, the
     // result is those at either level. A read through a reference drops the reference's own
     // regions and leaves the level of those behind it unknown; a store behind one puts all behind.
-    fn carry(self: &mut Self, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
+    const fn carry(self: &mut Self, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
         if delta == bfx::SD_DEREF {
             self.m0 = 0;
             self.m1 = 0;
@@ -385,7 +385,7 @@ extend UniSt {
 
     // The regions a value (`s0` own level, `s1` behind a reference, `sa` either) brings into a slot
     // in `mode` (UA_*) over an edge of kind `delta`: into `m0` and `m1`, returning those at either.
-    fn arrive(self: &mut Self, mode: u8, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
+    const fn arrive(self: &mut Self, mode: u8, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
         if mode == UA_KEEP {
             self.m0 = s0;
             self.m1 = s1;
@@ -1185,14 +1185,6 @@ extend tc::TypeChecker {
                         );
                     }
                 }
-                return;
-            }
-            // A RUNTIME local const (plain-fn initializer) is a scope-owned value: a copy of it
-            // would double-free at scope exit.
-            if bl.decl != NODE_NONE && unsafe (*self.mod_ast(body.module)).at_const(bl.decl).kind == NodeKind::NODE_CONST && self.tc_type_is_free(
-                pl.ty,
-            ) {
-                self.bc_ir_push(out, seen, CAT_F_CONST, sp, format("cannot move a value out of a 'const' binding"));
                 return;
             }
             if pl.base >= cap_lo && pl.base < cap_hi && self.tc_type_is_free(pl.ty) {

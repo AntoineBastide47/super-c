@@ -643,7 +643,7 @@ fn aliasing3() {
 
 // Self-contained scenario bodies (each a function body returning i32) with a known verdict, drawn from the
 // tricky valid cases and the closed-gap rejections. N_SNIPPET = 16.
-fn snippet_body(i: i32) str<'static> {
+const fn snippet_body(i: i32) str<'static> {
     return switch i {
         0 => "let mut x = 0; let a = &x; let b = &x; return *a + *b;",
         1 => "let mut x = 0; let r = &mut x; *r = 1; let y = x; return y;",
@@ -666,7 +666,7 @@ fn snippet_body(i: i32) str<'static> {
 }
 
 // The per-snippet verdict: only 5,6,7,13,14,15 are invalid.
-fn snippet_ok(i: i32) bool {
+const fn snippet_ok(i: i32) bool {
     return switch i {
         5 => false,
         6 => false,

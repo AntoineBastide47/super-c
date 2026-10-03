@@ -104,7 +104,7 @@ const fn memeq(p: *const u8, text: str) bool {
 // Keyword lookup bucketed by identifier length, then filtered on the first byte, so a miss costs at
 // most a few same-length memcmps. Safety: `lexeme` must point at >= `len` readable bytes; every
 // memeq compares exactly its bucket's length, never past it.
-fn keywords(lexeme: *const u8, len: usize) TokenType {
+const fn keywords(lexeme: *const u8, len: usize) TokenType {
     let first = unsafe lexeme[0];
     switch len {
         2 => {
@@ -272,7 +272,7 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
 }
 
 /// True when `s` is a reserved word: the lexer never scans it as an identifier.
-pub fn is_keyword(s: str) bool {
+pub const fn is_keyword(s: str) bool {
     return s.len() != 0 && keywords(s.ptr(), s.len()) != TokenType::Identifier;
 }
 

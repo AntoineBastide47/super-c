@@ -558,7 +558,7 @@ const CO_ESC: u32 = 0xFFFFFFFEu32;
 const CO_NO_SITE: u64 = 0xFFFFFFFFFFFFFFFFu64;
 
 // The name of function `n`, as written.
-fn fn_name<'s>(a: &Ast, src: str<'s>, n: NodeId) str<'s> {
+const fn fn_name<'s>(a: &Ast, src: str<'s>, n: NodeId) str<'s> {
     let sp = a.at_const(a.at_const(n).as_data.function.name).as_data.name.text;
     return src.slice(sp.start as usize, sp.end as usize);
 }
@@ -606,7 +606,7 @@ fn param_index(a: &Ast, d: NodeId, p: NodeId) i64 {
 
 // The argument node call `ni` passes for parameter `p` of its callee, or NODE_NONE: method-call
 // syntax passes parameter 0 as its receiver.
-fn site_arg(a: &Ast, ni: NodeId, p: u32) NodeId {
+const fn site_arg(a: &Ast, ni: NodeId, p: u32) NodeId {
     let cd = a.at_const(ni).as_data.call;
     let c = a.at_const(cd.callee);
     let mut i = p;
@@ -751,7 +751,7 @@ struct CoGraph {
 
 extend CoGraph {
     // The decl of module `m` declared at node `n`, or CO_NONE.
-    fn decl_of(self: &Self, m: ModuleId, n: NodeId) u32 {
+    const fn decl_of(self: &Self, m: ModuleId, n: NodeId) u32 {
         let mut k = n as usize;
         if (n & NODE_BODY) != 0 {
             k = self.nb[m as usize] + (n & NODE_BODY_MASK) as usize;
@@ -802,7 +802,7 @@ extend CoGraph {
     }
 
     // The module of decl `d`.
-    fn module_of(self: &Self, d: u32) usize {
+    const fn module_of(self: &Self, d: u32) usize {
         return self.dmod[d as usize] as usize;
     }
 
@@ -1702,7 +1702,7 @@ extend Package {
     }
 
     /// The build profile's name: `profile`, `dev` when the driver named none.
-    pub fn profile_name<'a>(self: &'a Self) str<'a> {
+    pub const fn profile_name<'a>(self: &'a Self) str<'a> {
         if self.profile.len() == 0 {
             return "dev";
         }
@@ -1711,7 +1711,7 @@ extend Package {
 
     /// The value build constant `k` (not PROFILE) has in this compilation, -1 when unknown: a
     /// platform or instruction set as its variant index, TEST as 0 or 1.
-    pub fn bc_value(self: &Self, k: i32) i64 {
+    pub const fn bc_value(self: &Self, k: i32) i64 {
         if k == BC_PLATFORM {
             return self.build_target;
         }

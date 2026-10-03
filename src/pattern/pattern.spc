@@ -758,7 +758,7 @@ extend PatCx {
     }
 
     // The last value of piece `i` of the `n` pieces at `cuts[wm..]` that end at `hi`.
-    fn piece_end(self: &Self, wm: usize, i: usize, n: usize, hi: i64) i64 {
+    const fn piece_end(self: &Self, wm: usize, i: usize, n: usize, hi: i64) i64 {
         if i + 1 < n {
             return iprev(self.cuts[wm + i + 1]);
         }
@@ -968,7 +968,7 @@ extend PatCx {
     }
 
     // Whether head constructors `a` and `b` cover each other.
-    fn same_ctor(self: &Self, a: u32, b: u32) bool {
+    const fn same_ctor(self: &Self, a: u32, b: u32) bool {
         return self.head_covers(a, b) && self.head_covers(b, a);
     }
 

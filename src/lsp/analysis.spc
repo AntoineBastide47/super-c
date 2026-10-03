@@ -343,7 +343,7 @@ fn same_shape(a: &Ast, b: &Ast) bool {
 const SLOT_NONE: u32 = 0xFFFFFFFF;
 
 // True when the item at `by_node` position `k` is a function with a body in the body arena.
-fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
+const fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
     let nd = p.modules[m].ast.at_const(slot_node(p, k as u32));
     return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body);
 }
@@ -617,7 +617,7 @@ const ST_FULL: u8 = 2; // its declaration changed: everything that names it is s
 // True when the item at position `k` of module `m` is a function or method that is not
 // `const fn`: only its body reads it, so a change of its body alone reaches no caller, and
 // only a signature or a compile-time evaluation reads anything else.
-fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
+const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
     let it = p.idx.items.at(p.sched.by_node[k as usize] as usize);
     if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
         return false;
@@ -745,7 +745,7 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
 }
 
 // Shift span `sp` by `delta` when it starts at or after `from`.
-fn shift_span(sp: &mut ltok::Span, from: u32, delta: i64) {
+const fn shift_span(sp: &mut ltok::Span, from: u32, delta: i64) {
     if sp.start >= from {
         sp.start = (sp.start as i64 + delta) as u32;
         sp.end = (sp.end as i64 + delta) as u32;

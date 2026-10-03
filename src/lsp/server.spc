@@ -317,7 +317,7 @@ struct KeyedHit {
     pub h: RefHit,
 }
 
-fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
+const fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
     let c = x.path.cmp(&y.path);
     if c != 0 {
         return c;
@@ -335,7 +335,7 @@ struct KeyedSym {
     pub sym: feat::WsSym,
 }
 
-fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
+const fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
     let c = x.path.cmp(&y.path);
     if c != 0 {
         return c;

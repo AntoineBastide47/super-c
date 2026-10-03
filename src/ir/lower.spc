@@ -543,7 +543,7 @@ extend Lowerer {
 
     /// Whether lowering stopped at a node the checker rejected (TYPE_ERROR): its diagnostic is
     /// already reported, so a caller refusing the body reports nothing more.
-    pub fn failed_on_error_type(self: &Self) bool {
+    pub const fn failed_on_error_type(self: &Self) bool {
         return self.err == ERR_TYPE_SLUG;
     }
 
@@ -783,7 +783,7 @@ extend Lowerer {
 
     /// A local slot with the declaration facts the emitter reads after the body syntax is
     /// released: the binding's name text and its declaration kind.
-    fn local_decl(self: &Self, ty: TypeId, storage: u8, is_mutable: bool, span: tok::Span, decl: NodeId) ir::LocalDecl {
+    const fn local_decl(self: &Self, ty: TypeId, storage: u8, is_mutable: bool, span: tok::Span, decl: NodeId) ir::LocalDecl {
         let mut name = tok::Span::empty();
         let mut dkind = ir::LK_NONE;
         if decl != NODE_NONE {
@@ -1067,45 +1067,9 @@ extend Lowerer {
             self.chk_close(cb);
         } else if k == NodeKind::NODE_ASM {
             self.lower_asm(id);
-        } else if k == NodeKind::NODE_CONST {
-            // A LOCAL const folds to static data only when its initializer is const-evaluable
-            // (a `const fn` call or a value expression). An initializer calling a PLAIN fn makes
-            // it a RUNTIME local: evaluated here, owned here, freed at scope exit.
-            let cdf = self.f.node(id).as_data.const_def;
-            let mut runtime = false;
-            if cdf.value != NODE_NONE && self.f.node(cdf.value).kind == NodeKind::NODE_CALL {
-                let cal = self.f.node(cdf.value).as_data.call;
-                let mut fd9 = self.f.res(cal.callee);
-                if fd9.node == NODE_NONE {
-                    fd9 = self.path_res(cal.callee);
-                }
-                if fd9.node != NODE_NONE {
-                    let fa9 = unsafe &*(&*self.pkg).module_ast_const(fd9.module);
-                    if fa9.at_const(fd9.node).kind == NodeKind::NODE_FUNCTION && !fa9.at_const(fd9.node).as_data.function.is_const() {
-                        runtime = true;
-                    }
-                }
-            }
-            // Runtime initializer: ordinary events flow (the replay sees the same helper sequence
-            // the walk produced). Folded initializer: no IR and no events -- the const domain's
-            // own CTFE rules (traps, use-after-free, budgets) police it.
-            if runtime {
-                self.tp(ir::TP_MARK_PUSH, 0, id);
-                let vop = self.lower_expr(cdf.value);
-                if vop != ir::IR_NONE {
-                    let ty9 = self.nty(cdf.value);
-                    let l9 = self.body.add_local(self.local_decl(ty9, ir::LS_USER, false, self.f.node(id).span, id));
-                    self.bind(id, l9);
-                    self.bind(cdf.name, l9);
-                    self.user_local_live(l9, self.f.node(id).span);
-                    let pl9 = self.place_of_local(l9);
-                    let rv9 = self.rv_use(vop, ty9);
-                    self.assign(pl9, rv9, self.f.node(id).span);
-                }
-                self.tp(ir::TP_MARK_POP, 0, id);
-            }
-        } else if k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
-            // Item statements: local consts fold at CTFE; nested items own their own bodies.
+        } else if k == NodeKind::NODE_CONST || k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
+            // Item statements: a local const is static data evaluated at compile time, like an item
+            // const; nested items own their own bodies.
         } else {
             // Everything else is an expression in statement position.
             let cb = self.chk_open(id, false);
@@ -3044,7 +3008,7 @@ extend Lowerer {
     }
 
     // Is `t` a builtin integer: a type whose loop index `IN_CHUNK` counts?
-    fn counted_ty(self: &Self, t: TypeId) bool {
+    const fn counted_ty(self: &Self, t: TypeId) bool {
         let y = self.f.ty(t);
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
@@ -3054,7 +3018,7 @@ extend Lowerer {
     }
 
     // Does a `for` binding name a mutable local (`for mut i in ..`), which the body may assign?
-    fn binding_mut(self: &Self, binding: NodeId) bool {
+    const fn binding_mut(self: &Self, binding: NodeId) bool {
         if binding == NODE_NONE {
             return false;
         }
@@ -4217,7 +4181,7 @@ extend Lowerer {
     }
 
     // Whether parameter `i` of function `f` is declared a reference.
-    fn param_is_ref(self: &Self, f: DefId, i: u32) bool {
+    const fn param_is_ref(self: &Self, f: DefId, i: u32) bool {
         let fa = unsafe (&*self.pkg).module_ast_const(f.module);
         let fnn = unsafe (*fa).at_const(f.node);
         if fnn.kind != NodeKind::NODE_FUNCTION || i >= fnn.as_data.function.params.len {
@@ -4231,7 +4195,7 @@ extend Lowerer {
     }
 
     // The element type of `f`'s by-reference parameter `i` (`&E` -> E), or TYPE_NONE.
-    fn ref_param_elem(self: &Self, f: DefId, i: u32) TypeId {
+    const fn ref_param_elem(self: &Self, f: DefId, i: u32) TypeId {
         let fa = unsafe (&*self.pkg).module_ast_const(f.module);
         let pn = unsafe (*fa).list(unsafe (*fa).at_const(f.node).as_data.function.params)[i as usize];
         let t = unsafe (*fa).type_of(pn);
@@ -4242,7 +4206,7 @@ extend Lowerer {
     }
 
     // True for a builtin integer or float type.
-    fn is_num_builtin(self: &Self, t: TypeId) bool {
+    const fn is_num_builtin(self: &Self, t: TypeId) bool {
         if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
@@ -5580,7 +5544,7 @@ extend Lowerer {
 
     // The destructuring pattern of `for` loop `id`, or NODE_NONE (another loop, or a binding that
     // is a lone name).
-    fn for_pattern(self: &Self, id: NodeId) NodeId {
+    const fn for_pattern(self: &Self, id: NodeId) NodeId {
         if self.f.node(id).kind != NodeKind::NODE_FOR {
             return NODE_NONE;
         }
@@ -6292,7 +6256,7 @@ extend Lowerer {
 
     /// The type of a place whose node the checker coerced to slice view `ty`: `natural`, the
     /// storage's own type, when it is an array (the view is built from the place's value).
-    fn storage_ty(self: &Self, ty: TypeId, natural: TypeId) TypeId {
+    const fn storage_ty(self: &Self, ty: TypeId, natural: TypeId) TypeId {
         if natural != TYPE_NONE && self.f.ty(natural).kind == TypeKind::TYPE_ARRAY {
             return natural;
         }

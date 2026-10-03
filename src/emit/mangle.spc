@@ -3426,7 +3426,7 @@ extend Mangler {
 
 // The parameter (`ret` false) or return (`ret` true) list length of function value type `y`: a closure's
 // from its recorded facts `cf` (its syntax may be released), anything else's from its declaration.
-fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 {
+const fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 {
     if y.fn_sig() {
         return unsafe (*fa).sig_len(y, ret);
     }
@@ -3442,7 +3442,7 @@ fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 {
 }
 
 // The declared parameter or return list of function or function type `y`.
-fn sig_list(fa: *const Ast, y: &Ty, ret: bool) NodeList {
+const fn sig_list(fa: *const Ast, y: &Ty, ret: bool) NodeList {
     let mut ps = NodeList { start: 0, len: 0 };
     let mut rs = NodeList { start: 0, len: 0 };
     let _ = unsafe (*fa).sig_lists(y.as_data.decl, &mut ps, &mut rs);

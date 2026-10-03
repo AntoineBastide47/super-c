@@ -377,17 +377,17 @@ struct OvfRes {
 }
 
 // non-trapping (wrapping) checked signed arithmetic; ovf = the result overflows i64
-fn add_ovf(a: i64, b: i64) OvfRes {
+const fn add_ovf(a: i64, b: i64) OvfRes {
     let (v, o) = a.overflowing_add(b);
     return OvfRes { ovf: o, v: v };
 }
 
-fn sub_ovf(a: i64, b: i64) OvfRes {
+const fn sub_ovf(a: i64, b: i64) OvfRes {
     let (v, o) = a.overflowing_sub(b);
     return OvfRes { ovf: o, v: v };
 }
 
-fn mul_ovf(a: i64, b: i64) OvfRes {
+const fn mul_ovf(a: i64, b: i64) OvfRes {
     let (v, o) = a.overflowing_mul(b);
     return OvfRes { ovf: o, v: v };
 }
@@ -729,6 +729,7 @@ pub struct Interp {
     pub fx_depth: u32,
     pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
     pub pending_consts: Vector<u64>, // deferred const decls
+    pub pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
     /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
     /// modules whose bodies this engine needed but refused (released, or not typed yet in the
     /// running pass: `body_missing`), and the refusal count (`body_miss_n`) an analysis pass
@@ -823,6 +824,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         fx_depth: 0,
         pending: Vector::<u64>::new(),
         pending_consts: Vector::<u64>::new(),
+        pending_strict: Vector::<bool>::new(),
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
         dyn_rec: false,
@@ -2138,7 +2140,7 @@ extend Interp {
 
     /// Name the reader of the evaluations that follow (under the engine lock): the item under
     /// check and its dependency components. ITEM_NONE sees everything.
-    pub fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
+    pub const fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
         self.cur_item = item;
         self.reach = r;
     }
@@ -2435,7 +2437,8 @@ extend Interp {
                     if k != NodeKind::NODE_FUNCTION {
                         return self.fail();
                     }
-                    is_extern = da.at_const(fnode).as_data.function.is_extern();
+                    // An `@unsafe(const)` extern function runs its body, the compile-time model.
+                    is_extern = da.at_const(fnode).as_data.function.is_extern() && da.at_const(fnode).as_data.function.body == NODE_NONE;
                 }
             }
         }
@@ -3080,7 +3083,7 @@ extend Interp {
     }
 
     // Whether `o`, reached through pointer `p`, holds 1-byte elements.
-    fn byte_block(self: &Self, o: *const IObj, p: IVal) bool {
+    const fn byte_block(self: &Self, o: *const IObj, p: IVal) bool {
         if unsafe (*o).heap != 0 {
             return unsafe (*o).esz == 1;
         }
@@ -6523,7 +6526,7 @@ extend Interp {
             return FX_MAYBE;
         }
         let fd = a.at_const(fn_id).as_data.function;
-        if fd.is_extern() || fd.body == NODE_NONE {
+        if fd.body == NODE_NONE {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
         }
         if !self.body_avail(m, fd.body) {
@@ -6971,7 +6974,7 @@ extend Interp {
             return FX_MAYBE; // fn value bound to a const/local
         }
         let cfd = fa.at_const(fd.node).as_data.function;
-        if cfd.is_extern() {
+        if cfd.is_extern() && cfd.body == NODE_NONE {
             let nm = fa.at_const(cfd.name).as_data.name.text;
             if self.intercept_name(fd.module, nm) {
                 return acc;
@@ -7391,25 +7394,12 @@ extend Interp {
     }
 
     /// Queue a const initializer undecidable in module order.
-    pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId) {
+    /// Defer const `decl` of module `m` to `flush_consts`; `strict`: a silent failure then is an error.
+    pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId, strict: bool) {
         self.eng_enter();
-        self.defer_const_g(m, decl);
-        self.eng_leave();
-    }
-
-    fn defer_const_g(self: &mut Self, m: ModuleId, decl: NodeId) {
         self.pending_consts.push(m as u64 << 32 | decl as u64);
-    }
-
-    const fn const_is_item(self: &Self, m: ModuleId, id: NodeId) bool {
-        let a = unsafe &*self.p().module_ast_const(m);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            if unsafe a.list(items)[i as usize] == id {
-                return true;
-            }
-        }
-        return false;
+        self.pending_strict.push(strict);
+        self.eng_leave();
     }
 
     /// Re-evaluate the deferred asserts: err() gets null detail for a proven-false condition, trap
@@ -7485,13 +7475,13 @@ extend Interp {
             if self.trap.len() != 0 {
                 let _ = self.trap_detail();
                 err(ctx, m, decl, self.dbuf.cstr());
-            } else if self.const_is_item(m, decl) {
-                // every module is typed now, so a top-level const has no legitimate silent failure
-                // left (only unsubstituted generics do, and those are local)
+            } else if self.pending_strict[i] {
+                // every module is typed now: only a per-instance local constant waits for generics
                 err(ctx, m, decl, "the initializer does not fold to a constant".ptr() as *const char);
             }
         }
         self.pending_consts.clear();
+        self.pending_strict.clear();
     }
 
     /// Evaluate expression `id` and capture its aggregate as static data; scalars and failures

@@ -1094,7 +1094,7 @@ extend InstGraph {
     }
 
     // Locate a `check_ty` finding at member `span` of aggregate `decl` unless a deeper member holds it.
-    fn chk_at(self: &mut Self, m: ModuleId, decl: NodeId, span: tok::Span) {
+    const fn chk_at(self: &mut Self, m: ModuleId, decl: NodeId, span: tok::Span) {
         if self.chk_decl.node == NODE_NONE {
             self.chk_decl = DefId { module: m, node: decl };
             self.chk_span = span;
@@ -1183,7 +1183,7 @@ extend InstGraph {
     }
 
     // Whether usize and isize are 32-bit on the target.
-    fn ptr32(self: &Self) bool {
+    const fn ptr32(self: &Self) bool {
         return lay::target_for(unsafe (&*self.pkg).arch).ptr == 4;
     }
 
@@ -2726,7 +2726,7 @@ fn ty_names(a: &Ast, t: TypeId, d: DefId, depth: i32) bool {
 }
 
 // The type `sizeof`/`alignof` rvalue `rv` measures (TYPE_NONE for any other rvalue).
-fn measured(rv: &ir::Rvalue) TypeId {
+const fn measured(rv: &ir::Rvalue) TypeId {
     if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF) {
         return rv.b;
     }

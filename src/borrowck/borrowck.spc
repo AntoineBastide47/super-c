@@ -362,7 +362,7 @@ extend tc::TypeChecker {
 
     /// True when type path `tyn` of module `m` is `Self`: its lifetimes are the ones the enclosing
     /// declaration names, so none of them is elided.
-    pub fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
+    pub const fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
         let sa = self.mod_ast(m);
         let parts = unsafe (*sa).at_const(tyn).as_data.type_path.parts;
         return parts.len == 1 && span_is(

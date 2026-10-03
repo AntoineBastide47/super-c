@@ -83,7 +83,13 @@ pub enum AttrKind {
     // the middle silently renumbers the rest.
     ATTR_BENCH,
     ATTR_NO_CONST,
+    ATTR_UNSAFE, // `@unsafe(safe, const)`: unverified claims about an extern function, in `arg`
 }
+
+/// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
+/// `const` gives it a body that models it at compile time.
+pub const UNSAFE_SAFE: u32 = 1;
+pub const UNSAFE_CONST: u32 = 2;
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather
 // than inline on the decl data, so `Node` keeps its tuned size: lifetimes are erased, rare, and only
@@ -373,7 +379,7 @@ extend FunctionData {
     }
 
     /// Set or clear the FN_* bit `bit`.
-    pub fn set(self: &mut Self, bit: u8, on: bool) {
+    pub const fn set(self: &mut Self, bit: u8, on: bool) {
         if on {
             self.flags = self.flags | bit;
         } else {
@@ -853,11 +859,11 @@ pub struct ConstLin {
 
 extend ConstLin {
     /// The empty form (the constant 0) computing in `ty`.
-    pub fn new(ty: BuiltinType) ConstLin {
+    pub const fn new(ty: BuiltinType) ConstLin {
         return ConstLin { k: i128::zero(), n: 0, div: i128::zero(), ty: ty, to: ty };
     }
 
-    pub fn div_of(self: &Self) i128 {
+    pub const fn div_of(self: &Self) i128 {
         let one = i128::one();
         if self.div <= one {
             return one;
@@ -1018,12 +1024,12 @@ pub fn cval_exact(bits: i64, bt: BuiltinType) i128 {
 }
 
 /// The 64-bit two's complement pattern of `v` (a value some 64-bit integer type holds).
-pub fn cval_bits(v: i128) i64 {
+pub const fn cval_bits(v: i128) i64 {
     return v.limb(0) as i64;
 }
 
 /// Array length `v` as an element count; -1 outside 0..=4294967295.
-pub fn len_count(v: i128) i64 {
+pub const fn len_count(v: i128) i64 {
     if v.is_negative() || v.limb(1) != 0 || v.limb(0) > 0xFFFFFFFFu64 {
         return -1;
     }
@@ -1049,7 +1055,7 @@ pub const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
 
 /// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
 /// other type.
-pub fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
+pub const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
     let w = bt_int_width(bt, ptr32);
     if w == 0 {
         return false;
@@ -1741,7 +1747,7 @@ extend Ty {
     }
 
     /// Point the payload at record `r` (the type must have one: see `rec`).
-    pub fn set_rec(self: &mut Self, r: u32) {
+    pub const fn set_rec(self: &mut Self, r: u32) {
         if self.fn_sig() {
             self.as_data.fnp.sig = r;
         } else {

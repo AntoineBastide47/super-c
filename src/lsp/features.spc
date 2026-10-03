@@ -642,7 +642,7 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, ou
 
 // The name of top-level item `iid` of module `mm` when it is one of the public declarations
 // `comp_module_publics` offers, else "".
-fn public_item_name(p: &loader::Package, mm: usize, iid: NodeId) str {
+const fn public_item_name(p: &loader::Package, mm: usize, iid: NodeId) str {
     let n = unsafe (*mod_ast(p, mm)).at_const(iid);
     if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public() {
         return name_str(p, mm, n.as_data.function.name);

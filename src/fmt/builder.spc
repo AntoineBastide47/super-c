@@ -1413,7 +1413,7 @@ extend Builder {
         }
     }
 
-    fn stmt_starts_with(self: &Self, id: NodeId, kw: str) bool {
+    const fn stmt_starts_with(self: &Self, id: NodeId, kw: str) bool {
         let s = self.nd(id).span;
         return self.src.slice(s.start as usize, s.end as usize).starts_with(kw);
     }

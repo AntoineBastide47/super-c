@@ -318,7 +318,7 @@ extend Solver {
 
     /// Open a session above the active one; returns the enclosing session's mark for
     /// `session_close`. The enclosing session's slots, evidence and conflicts stay untouched.
-    pub fn session_open(self: &mut Self) SessionMark {
+    pub const fn session_open(self: &mut Self) SessionMark {
         let outer = self.sess;
         self.sess = SessionMark {
             pd: self.s_pd.len() as u32,

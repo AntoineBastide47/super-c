@@ -130,7 +130,7 @@ const fn shape_area(shape: Shape) i32 {
     };
 }
 
-fn classify(value: i32) i32 {
+const fn classify(value: i32) i32 {
     return switch value {
         0 => 0,
         1 | 2 | 3 => 1,

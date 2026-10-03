@@ -96,7 +96,7 @@ fn is_sliceable(da: &Ast, sv: &SafeViews, ty0: TypeId) bool {
 }
 
 // The def-chain mark of operand `opid` when it copies a whole local; 3 (poisoned) otherwise.
-fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
+const fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
     let o = *b.operands.at(opid as usize);
     if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
         return 3;

@@ -55,7 +55,7 @@ pub struct Errors {
 }
 
 // A diagnostic at [at, at+len) with no notes.
-fn diagnostic(at: u32, len: u32, msg: String) Diagnostic {
+const fn diagnostic(at: u32, len: u32, msg: String) Diagnostic {
     return Diagnostic { start: at, len: len, msg: msg, note_head: NOTE_NONE, note_tail: NOTE_NONE };
 }
 
@@ -94,7 +94,7 @@ pub const fn span_str(src: str, start: u32, end: u32) str {
 
 extend Errors {
     /// An empty accumulator with no heap storage.
-    pub fn new() Errors {
+    pub const fn new() Errors {
         return Errors {};
     }
 

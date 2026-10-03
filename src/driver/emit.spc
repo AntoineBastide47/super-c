@@ -4467,6 +4467,30 @@ pub fn cemit_package(
                     1u32 << 20,
                 );
             };
+            if v.kind == iri::IV_NONE && cargs.len() != 0 {
+                // A per-instance constant first evaluates here, for the instance its reference named:
+                // its failure is the program's error, located at the constant.
+                let why = if cdit.trap_get().len() != 0 {
+                    cdit.trap_detail();
+                } else {
+                    "the initializer does not fold to a constant";
+                };
+                let csrc = p.modules[cdef.module as usize].source.as_str();
+                let mut errs = diag::Errors::new();
+                errs.emit(
+                    csp.start,
+                    csp.end - csp.start,
+                    format(
+                        "constant '{}' cannot be evaluated at compile time for an instance: {}",
+                        csrc.slice(csp.start as usize, csp.end as usize),
+                        why,
+                    ),
+                );
+                errs.finalize(csrc, p.modules[cdef.module as usize].file.as_str());
+                errs.log();
+                p.ok = false;
+                continue;
+            }
             if v.kind == iri::IV_PTR && v.i != 0 {
                 // A pointer serializes as the one slot of a cell of the constant's type.
                 v = cdit.cell_of(v, em2, cty);
@@ -8524,7 +8548,7 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
 
 // The name node of a candidate item of the unused-item lint (`lint_item_candidate`), NODE_NONE for
 // any other kind.
-fn lint_item_name(a: *const Ast, iid: NodeId) NodeId {
+const fn lint_item_name(a: *const Ast, iid: NodeId) NodeId {
     let it = unsafe (*a).at_const(iid);
     if it.kind == NodeKind::NODE_FUNCTION {
         return it.as_data.function.name;
@@ -8843,14 +8867,14 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
     }
 }
 
-// --lint: functions the deep (all-paths) CTFE scan proves always evaluable; declaring them
-// `const fn` passes the def-site check and unlocks folding. `const fn` is a semantic contract
-// (folds with known arguments must succeed), so the fix (insert `const ` before the `fn` keyword,
-// which lands AFTER any `pub`/`unsafe`, the canonical order) applies only under `--fix`.
+// --lint: functions the deep (all-paths) CTFE scan proves always evaluable, which pass the def-site
+// check as `const fn`. The fix (insert `const ` before the `fn` keyword, which lands AFTER any
+// `pub`/`unsafe`, the canonical order) applies only under `--fix`.
 // Conformance members are skipped (the interface fixes the signature), as are @test fns and `main`.
-// Prelude modules are ALWAYS excluded, even when linted in place: constifying a prelude helper
-// promotes failed folds to errors in every downstream program, a blast radius the per-package
-// `--fix` fixpoint cannot validate; prelude const adoption must be a deliberate manual change.
+// Prelude modules are ALWAYS excluded, even when linted in place: a panic the always-panics check
+// proves through a `const fn` frame is an error, so constifying a prelude helper can fail the build
+// of every downstream program, a blast radius the per-package `--fix` fixpoint cannot validate;
+// prelude const adoption must be a deliberate manual change.
 fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, in_iface: bool) {
     if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || is_test_item(a, fnode) {
         return;

@@ -1158,10 +1158,10 @@ fn names_that_are_standard_macros() {
 fn names_that_c_headers_declare() {
     // Root-module items spelled like functions and types the included C headers declare (stdlib.h
     // `malloc`, `abs`, `exit` and `free`, stdio.h `printf` and `FILE`, time.h `tm`) get escaped C
-    // names; an extern keeps its C name (`labs`).
+    // names; an extern keeps its C name (`llabs`).
     h::expect_exit(
         "C library names",
-        "extern \"C\" { fn labs(x: i64) i64; }\nstruct FILE { pub fd: i32 }\nstruct tm { pub h: i32 }\nfn malloc(n: usize) usize { return n + 1; }\nfn abs(x: i32) i32 { if x < 0 { return 0 - x; } return x; }\nfn printf(x: i32) i32 { return x * 2; }\nfn exit(code: i32) i32 { return code + 3; }\nfn free(f: FILE) i32 { return f.fd; }\nfn time() tm { return tm { h: 7 }; }\nfn main() i32 {\n    let f = FILE { fd: 4 };\n    let l = unsafe labs(-5) as i32;\n    return malloc(1) as i32 + abs(-3) + printf(5) + exit(1) + free(f) + time().h + l;\n}\n",
+        "extern \"C\" { fn llabs(x: i64) i64; }\nstruct FILE { pub fd: i32 }\nstruct tm { pub h: i32 }\nfn malloc(n: usize) usize { return n + 1; }\nfn abs(x: i32) i32 { if x < 0 { return 0 - x; } return x; }\nfn printf(x: i32) i32 { return x * 2; }\nfn exit(code: i32) i32 { return code + 3; }\nfn free(f: FILE) i32 { return f.fd; }\nfn time() tm { return tm { h: 7 }; }\nfn main() i32 {\n    let f = FILE { fd: 4 };\n    let l = unsafe llabs(-5) as i32;\n    return malloc(1) as i32 + abs(-3) + printf(5) + exit(1) + free(f) + time().h + l;\n}\n",
         35,
     );
 }

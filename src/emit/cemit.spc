@@ -1399,7 +1399,7 @@ extend CEmit {
     }
 
     // Whether module `m` belongs to the standard library.
-    fn is_std(self: &Self, m: ModuleId) bool {
+    const fn is_std(self: &Self, m: ModuleId) bool {
         let md = self.p().modules.at(m as usize);
         return md.prelude || md.path.as_str().starts_with("std::");
     }
@@ -6545,7 +6545,7 @@ extend CEmit {
     }
 
     // The width in bits of integer builtin `bt` on the target.
-    fn int_bits(self: &Self, bt: BuiltinType) i64 {
+    const fn int_bits(self: &Self, bt: BuiltinType) i64 {
         return switch bt {
             BT_I8 | BT_U8 => 8,
             BT_I16 | BT_U16 => 16,
@@ -6557,7 +6557,7 @@ extend CEmit {
 
     // Set `s` to every value of integer builtin `bt` and its C type after integer promotion (a type
     // narrower than `int` promotes to `int`); false when `bt` is no integer. `char` is unsigned.
-    fn cmp_side_ty(self: &Self, bt: BuiltinType, s: &mut CmpSide) bool {
+    const fn cmp_side_ty(self: &Self, bt: BuiltinType, s: &mut CmpSide) bool {
         let uns = bt_is_unsigned(bt) || bt == BuiltinType::BT_CHAR;
         if !uns && !int_signed(bt) {
             return false;
@@ -6778,7 +6778,7 @@ extend CEmit {
 
     // The source a constant's span indexes: an inlined constant's (item marks it) foreign module, else
     // the body's module.
-    fn const_src<'a>(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str<'a> {
+    const fn const_src<'a>(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str<'a> {
         let m = if c.item.node != NODE_NONE {
             c.item.module;
         } else {
@@ -7024,7 +7024,7 @@ extend CEmit {
     // the type's width: `x - 1` on a `u32` is `x - 1U` (a type narrower than `unsigned` has no
     // literal and takes `unsigned`; `usize` follows the target's pointer width). A signed literal
     // is `long long`, which holds every value, so an intermediate never overflows `int`.
-    fn int_suffix(self: &Self, bt: BuiltinType) str<'static> {
+    const fn int_suffix(self: &Self, bt: BuiltinType) str<'static> {
         if bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_USIZE && lay::target_for(
             self.p().arch,
         ).ptr == 4 {
@@ -9254,7 +9254,7 @@ extend CEmit {
         return true;
     }
 
-    fn std_module(self: &Self, m: ModuleId) bool {
+    const fn std_module(self: &Self, m: ModuleId) bool {
         let pth = self.p().modules.at(m as usize).path.as_str();
         return pth.starts_with("std::") || pth.starts_with("__std::");
     }
@@ -9540,7 +9540,7 @@ extend CEmit {
 
     // Whether `d` is an `extern "C"` function: C declares its pointers to arrays of aggregates as
     // pointers to the arrays, where the emitted C holds wrapper pointers (`Mangler::ptr_wraps`).
-    fn extern_fn(self: &Self, d: DefId) bool {
+    const fn extern_fn(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return false;
         }
@@ -9616,7 +9616,7 @@ extend CEmit {
     }
 
     // Whether function `f`'s first parameter is `self` (a method, not an associated function).
-    fn self_first(self: &Self, f: DefId) bool {
+    const fn self_first(self: &Self, f: DefId) bool {
         let ca0 = self.p().module_ast_const(f.module);
         let ps0 = unsafe (*ca0).at_const(f.node).as_data.function.params;
         if ps0.len == 0 {
@@ -12582,7 +12582,7 @@ fn float_marked(t: str) bool {
 }
 
 // The FNV-1a step over definition `d`: the seed of a demand fingerprint.
-fn def_fp(d: DefId) u64 {
+const fn def_fp(d: DefId) u64 {
     return (0xcbf29ce484222325u64 ^ (d.module as u64 << 32 | d.node as u64)).wrapping_mul(1099511628211u64);
 }
 
@@ -12644,7 +12644,7 @@ const fn fold_result(yes: bool, no: bool) i32 {
 // `l op r` over constants, as C computes it, into `s`: a shift in the promoted type of `l`, any other
 // operator in the usual arithmetic conversion of both. False for an operator this does not model
 // or a result C leaves undefined.
-fn c_const_op(t: tt::TokenType, l: &CmpSide, r: &CmpSide, s: &mut CmpSide) bool {
+const fn c_const_op(t: tt::TokenType, l: &CmpSide, r: &CmpSide, s: &mut CmpSide) bool {
     let shift = t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift;
     let uns = if shift || l.c_uns == r.c_uns {
         l.c_uns;
@@ -12725,7 +12725,7 @@ const fn wrap_to(v: i64, w: i64, uns: bool) i64 {
 
 extend CmpSide {
     // One value `v`, read in the signedness `uns` already holds, in the C type already set.
-    fn set_val(self: &mut Self, v: i64) {
+    const fn set_val(self: &mut Self, v: i64) {
         self.konst = true;
         self.lo = v;
         self.hi = v;
@@ -12734,7 +12734,7 @@ extend CmpSide {
     // One value, `v` read unsigned when `uns`, spelled as emit_place_base and emit_rvalue spell a
     // folded count or parameter: `ULL` past i64::MAX, a parenthesized long long MIN, or a bare
     // decimal, an `int` when it fits one (`long` or `long long` otherwise).
-    fn set_dec(self: &mut Self, v: i64, uns: bool) {
+    const fn set_dec(self: &mut Self, v: i64, uns: bool) {
         self.konst = true;
         self.lo = v;
         self.hi = v;

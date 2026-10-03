@@ -662,7 +662,7 @@ extend CExpr {
     }
 
     // Signed arithmetic traps on overflow; a result outside i64 makes the expression unknown instead.
-    fn add_checked(self: &mut Self, a: i64, b: i64) i64 {
+    const fn add_checked(self: &mut Self, a: i64, b: i64) i64 {
         if b > 0 && a > I64_MAX - b || b < 0 && a < I64_MIN - b {
             self.ok = false;
             return 0;
@@ -670,7 +670,7 @@ extend CExpr {
         return a + b;
     }
 
-    fn sub_checked(self: &mut Self, a: i64, b: i64) i64 {
+    const fn sub_checked(self: &mut Self, a: i64, b: i64) i64 {
         if b < 0 && a > I64_MAX + b || b > 0 && a < I64_MIN + b {
             self.ok = false;
             return 0;
@@ -678,7 +678,7 @@ extend CExpr {
         return a - b;
     }
 
-    fn mul_checked(self: &mut Self, a: i64, b: i64) i64 {
+    const fn mul_checked(self: &mut Self, a: i64, b: i64) i64 {
         let mut over = false;
         if a > 0 {
             if b > 0 {

@@ -456,7 +456,7 @@ const PROMOTE_BATCH: i32 = 1024; // due timers made runnable per lock hold (abou
 // only promises malloc alignment, so the record is placed inside an over-sized block and `base` keeps
 // what to free.
 const CO_ALIGN: usize = 128; // the largest line any supported core has (Apple M-series L2)
-fn co_bytes() usize {
+const fn co_bytes() usize {
     return (sizeof(Coroutine) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
 }
 
@@ -3218,7 +3218,7 @@ pub fn sched_stats() SchedStats {
 }
 
 // `t += w`, field by field.
-fn stats_add(t: &mut SchedStats, w: &SchedStats) {
+const fn stats_add(t: &mut SchedStats, w: &SchedStats) {
     t.pushes = t.pushes + w.pushes;
     t.spills = t.spills + w.spills;
     t.pops = t.pops + w.pops;

@@ -126,7 +126,7 @@ const fn span_is(src: str, s: tok::Span, lit: str) bool {
 }
 
 // Order a (label, start) key against a labeled flow: by label text, then by span start.
-fn label_flow_cmp(src: str, label: tok::Span, start: u32, f: &LabelFlow) i32 {
+const fn label_flow_cmp(src: str, label: tok::Span, start: u32, f: &LabelFlow) i32 {
     let other = diag::span_str(src, f.label.start, f.label.end);
     let c = diag::span_str(src, label.start, label.end).cmp(&other);
     if c != 0 {

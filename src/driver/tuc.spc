@@ -765,7 +765,7 @@ extend Rd {
         return lo | hi << 32;
     }
 
-    fn r128(self: &mut Self) i128 {
+    const fn r128(self: &mut Self) i128 {
         let mut v = i128::zero();
         v.set_limb(0, self.r64());
         v.set_limb(1, self.r64());

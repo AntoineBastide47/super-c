@@ -367,7 +367,7 @@ fn run_report(b: &mut bench::Bencher) bool {
         lx.scan_tokens();
         tokens += lx.tokens.len();
     }
-    unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
+    unsafe stdio::printf("\ntranspiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
     unsafe stdio::printf(
         "  %zu modules, %zu decls, %zu lines, %zu tokens, %.1f KiB source -> %.1f KiB C\n".ptr() as *const char,
         n,

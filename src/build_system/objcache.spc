@@ -302,7 +302,7 @@ pub fn records_dir(flags: &Vector<String>) bool {
 }
 
 // Whether path `p` is absolute (POSIX, a Windows drive, or a UNC or root-relative Windows path).
-fn abs_path(p: str) bool {
+const fn abs_path(p: str) bool {
     return p.len() > 0 && (p[0] == b'/' || p[0] == b'\\') || p.len() > 2 && p[1] == b':';
 }
 

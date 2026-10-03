@@ -1540,14 +1540,32 @@ extend Parser {
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(false, true);
-                if self.ast.at_const(f).as_data.function.body != NODE_NONE {
+                // The body of an `@unsafe(const)` function is its compile-time model; any other
+                // extern function is only a declaration.
+                let mut modeled = false;
+                for i in 0..attrs.len() {
+                    modeled = modeled || attrs[i].kind == AttrKind::ATTR_UNSAFE as u8 && (attrs[i].arg & UNSAFE_CONST) != 0;
+                }
+                let has_body = self.ast.at_const(f).as_data.function.body != NODE_NONE;
+                if has_body && !modeled {
                     let sp = self.node_span(f);
                     self.errors.emit_span(sp, format("extern function declarations cannot have a body"));
+                    self.errors.note(format("an '@unsafe(const)' extern function takes a body: its compile-time model"));
+                } else if modeled && !has_body {
+                    let sp = self.node_span(f);
+                    self.errors.emit_span(
+                        sp,
+                        format(
+                            "an '@unsafe(const)' extern function needs a body: the model compile-time evaluation runs",
+                        ),
+                    );
                 }
                 self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
                 self.ast.at(f).as_data.function.set(FN_EXTERN, true);
                 self.add_attrs_to(&mut attrs, f);
-                self.expect(TokenType::Semicolon, "';'");
+                if !has_body {
+                    self.expect(TokenType::Semicolon, "';'");
+                }
                 self.ast.push(f);
             } else if self.check(TokenType::Enum) {
                 // Same contract as an extern struct: C declares the enum, this only names its constants.
@@ -3618,7 +3636,7 @@ extend Parser {
     fn parse_attribute_syntax(self: &mut Self) AttrSyntax {
         self.advance();
         let empty = Token::new(TokenType::Eof, self.previous_end(), 0);
-        if !Parser::is_identifier_token(self.peek_type()) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::Unsafe) {
             self.error_here("expected an attribute path after '@'");
             return AttrSyntax { namespace: empty, name: empty, arg_start: self.current, arg_end: self.current };
         }
@@ -3904,6 +3922,56 @@ extend Parser {
                 );
             }
             return true;
+        }
+        if syntax.parts == 1 && ns.kind() == TokenType::Unsafe {
+            // `@unsafe(safe, const)`: claims about an extern function that the compiler cannot
+            // verify, so they are spelled as unsafe. Any order; each claim once.
+            let mut claims: u32 = 0;
+            let mut ok = syntax.has_args && argc != 0;
+            let mut i: usize = 0;
+            while ok && i < argc {
+                let arg = self.attr_arg(&syntax, i);
+                let bit = if arg.kind() == TokenType::Const {
+                    UNSAFE_CONST;
+                } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "safe") {
+                    UNSAFE_SAFE;
+                } else {
+                    0u32;
+                };
+                if bit == 0 {
+                    ok = false;
+                    break;
+                }
+                if (claims & bit) != 0 {
+                    self.errors.emit_span(
+                        arg.span(),
+                        format(
+                            "claim '{}' is listed twice in '@unsafe(...)'",
+                            diag::span_str(self.source, arg.start(), arg.end()),
+                        ),
+                    );
+                }
+                claims = claims | bit;
+                i = i + 1;
+                if i < argc {
+                    if self.attr_arg(&syntax, i).kind() != TokenType::Comma || i + 1 == argc {
+                        ok = false;
+                        break;
+                    }
+                    i = i + 1;
+                }
+            }
+            *out = Attr { kind: AttrKind::ATTR_UNSAFE as u8, arg: claims, str_span: Span::empty() };
+            if !ok {
+                self.errors.emit_span(
+                    ns.span(),
+                    format(
+                        "attribute '@unsafe' takes a list of the claims 'safe' and 'const', e.g. '@unsafe(safe, const)'",
+                    ),
+                );
+            }
+            // The valid claims stay: the declaration's other checks then report no follow-on errors.
+            return claims != 0;
         }
         if syntax.parts == 1 && self.text_is(ns, "bench") {
             // `arg` is 1 when the benchmark reports for itself: `@bench(log_results = false)` suppresses the
@@ -4219,6 +4287,15 @@ extend Parser {
                             diag::span_str(self.source, syntax.namespace.start(), syntax.name.end()),
                         ),
                     );
+                    if attr.kind == AttrKind::ATTR_UNSAFE as u8 {
+                        self.errors.note(format("list every claim in one '@unsafe(...)', e.g. '@unsafe(safe, const)'"));
+                        // Merged into the first, so no claim goes missing from the later checks.
+                        for k in 0..attrs.len() {
+                            if attrs[k].kind == attr.kind {
+                                attrs.index_mut(k).arg = attrs[k].arg | attr.arg;
+                            }
+                        }
+                    }
                     continue;
                 }
                 seen = seen | bit;
@@ -4247,6 +4324,24 @@ extend Parser {
     pub fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let mut attr = attrs[i];
+            if attr.kind == AttrKind::ATTR_UNSAFE as u8 {
+                // FN_EXTERN is set only on a function declared in an extern block.
+                let in_extern = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION && self.ast.at_const(
+                    owner,
+                ).as_data.function.is_extern();
+                if !in_extern {
+                    let sp = if owner != NODE_NONE {
+                        self.node_span(owner);
+                    } else {
+                        self.raw_peek().span();
+                    };
+                    self.errors.emit_span(
+                        sp,
+                        format("'@unsafe(...)' may only be applied to a function in an 'extern \"C\"' block"),
+                    );
+                    continue;
+                }
+            }
             attr.owner = owner;
             self.ast.add_attr(attr);
         }
@@ -4413,7 +4508,7 @@ extend Parser {
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list.
 pub fn known_attributes(out: &mut Vector<String>) {
-    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip";
+    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const)";
     let mut it = names.split(" ");
     loop {
         let w = it.next();
@@ -4480,7 +4575,7 @@ const PLATFORM_NAMES: [str<'static>; 6] = ["windows", "macos", "linux", "wasm", 
 const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
 
 /// The identifiers accepted inside `@arch(...)` (`is_arch`) or `@platform(...)`.
-pub fn axis_names(is_arch: bool) Slice<'static, str<'static>> {
+pub const fn axis_names(is_arch: bool) Slice<'static, str<'static>> {
     return if is_arch {
         ARCH_NAMES;
     } else {

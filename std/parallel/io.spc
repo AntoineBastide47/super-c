@@ -719,7 +719,7 @@ fn push_cmd(r: *mut Reactor, n: *mut IoWait, tag: usize, wake: bool) {
 }
 
 // The reactor record's allocation: the record rounded up to a line, plus a line of slack for alignment.
-fn reactor_bytes() usize {
+const fn reactor_bytes() usize {
     return (sizeof(Reactor) + R_ALIGN - 1) / R_ALIGN * R_ALIGN + R_ALIGN;
 }
 

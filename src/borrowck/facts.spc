@@ -1566,7 +1566,7 @@ extend Gen {
 
     // Type node `tyn` of module `m`, a `Self` of the callee's signature read as its extend's target
     // type, which spells the lifetimes `Self` stands for.
-    fn unself(self: &Self, m: ModuleId, tyn: NodeId) NodeId {
+    const fn unself(self: &Self, m: ModuleId, tyn: NodeId) NodeId {
         if self.ext == NODE_NONE || m != self.ext_mod {
             return tyn;
         }
@@ -3264,7 +3264,7 @@ extend Owner {
 
     // Close the entry at stack index `at` (`outer` is `low` from before the entry): true when its
     // verdict is final, so the caller may cache it.
-    fn busy_leave(self: &mut Self, at: i64, outer: i64) bool {
+    const fn busy_leave(self: &mut Self, at: i64, outer: i64) bool {
         let _ = self.busy.pop();
         let exact = self.low >= at;
         if exact || outer < self.low {

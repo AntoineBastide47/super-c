@@ -423,7 +423,7 @@ fn member_count(ow: &bf::Owner, mid: ModuleId, ty: TypeId) i64 {
 
 // The payload member count of the variant downcast path `d` names (its key's `sub` is the variant
 // declaration, in the module of the enum type's declaration), or -1.
-fn payload_count(ow: &bf::Owner, mid: ModuleId, forest: &mp::MoveForest, d: u32) i64 {
+const fn payload_count(ow: &bf::Owner, mid: ModuleId, forest: &mp::MoveForest, d: u32) i64 {
     let y = *ow.ast_of(mid).type_at(forest.paths.at(d as usize).ty);
     let mut om: ModuleId = 0;
     if y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_STRUCT {

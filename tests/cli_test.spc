@@ -1737,9 +1737,9 @@ fn raii_free_glue_untouched_fields() {
     assert_eq(p.run_bin(), 0);
 }
 
-// Local consts of owning types are runtime values freed at scope exit (a plain local, not a
-// `static const`); a global one is still rejected, and moving one out is rejected. A local VALUE
-// const with a `const fn` initializer folds to static data instead of emitting a bare call.
+// A local const is a compile-time value whatever its initializer calls: an owning one is
+// materialized into static data like a global one and never freed, a value one folds to static
+// data instead of a call, and moving an owning one out is rejected.
 @test
 fn local_const_lifecycle() {
     let p = cli::proj_new();
@@ -1749,17 +1749,17 @@ fn local_const_lifecycle() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "= build();"), "owning local const is a runtime local");
-    assert(p.gen_has("main.c", "Vector__u32__free(&"), "owning local const is freed at scope exit");
+    assert(!p.gen_has("main.c", "build()"), "owning local const is not computed at run time");
+    assert(p.gen_has("main__inst.c", "static const uint32_t L__"), "its buffer is static data");
+    assert(!p.gen_has("main.c", "Vector__u32__free(&"), "a materialized const is never freed");
     assert(!p.gen_has("main.c", "mk()"), "value const folds to static data instead of a call");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    // Runs, and the owning const is freed (no leak under the fatal gate).
+    // Runs with no leak under the fatal gate: static data is not a heap allocation.
     assert(lk.ok());
 
-    // A GLOBAL owning const is the other lifecycle: no scope exit, so it is materialized into the
-    // binary (buffer included) and never freed.
+    // A GLOBAL owning const is materialized the same way (buffer included) and never freed.
     p.mkfile(
         "g.spc",
         "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
@@ -7221,6 +7221,162 @@ fn main() i32 { return 0; }
 )",
     );
     p4.expect_fail("dang.spc", "freed compile-time memory");
+}
+
+// A local constant is a compile-time value like an item constant, whatever its initializer calls:
+// a plain function call folds to static data, a silent failure is an error, a read of a variable is
+// an error, and a per-instance constant's failure names the constant.
+@test
+fn local_consts_are_compile_time() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "fold.spc",
+        M"(fn sq(x: i32) i32 { return x * x; }
+fn main() i32 {
+    const LOC: i32 = sq(6);
+    return LOC - 36;
+}
+)",
+    );
+    let r = p.compile("fold.spc");
+    assert(r.ok());
+    assert(p.gen_has("fold.c", "LOC__"), "the local constant is static data");
+    assert(p.gen_has("fold__inst.c", " = 36;"), "its value is computed at compile time");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
+
+    let p2 = cli::proj_new();
+    p2.mkfile(
+        "silent.spc",
+        M"(import stdlib;
+fn noisy() i32 { return unsafe stdlib::rand(); }
+fn main() i32 {
+    const X: i32 = noisy();
+    return X * 0;
+}
+)",
+    );
+    p2.expect_fail("silent.spc", "constant cannot be evaluated at compile time");
+
+    let p3 = cli::proj_new();
+    p3.mkfile(
+        "var.spc",
+        M"(fn sq(x: i32) i32 { return x * x; }
+fn main(argv: Vector<str>) i32 {
+    let y = argv.len() as i32;
+    const Z: i32 = sq(y);
+    return Z - 1;
+}
+)",
+    );
+    p3.expect_fail("var.spc", "a constant cannot read the variable 'y'");
+
+    let p4 = cli::proj_new();
+    p4.mkfile(
+        "inst.spc",
+        M"(fn bad<T>(x: usize) usize {
+    if x > 3 {
+        const B: usize = 10 / (sizeof(T) - sizeof(T));
+        return B;
+    }
+    return x;
+}
+fn main(argv: Vector<str>) i32 { return bad::<u8>(argv.len()) as i32 - 1; }
+)",
+    );
+    p4.expect_fail("inst.spc", "constant 'B' cannot be evaluated at compile time for an instance: division by zero");
+}
+
+// `@unsafe(...)` lists claims about an extern function, in any order: `safe` makes it callable without
+// `unsafe`; `const` gives it a body that compile-time evaluation runs while run-time calls go to the C
+// symbol. It applies only to a function in an extern block, once, and the compiler rejects the claims it
+// can disprove.
+@test
+fn unsafe_extern_attributes() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "ok.spc",
+        M"(extern "C" {
+    @unsafe(safe) fn toupper(c: i32) i32;
+    @unsafe(safe, const) fn llabs(x: i64) i64 {
+        if x < 0 { return -x; }
+        return x;
+    }
+    @unsafe(const) fn imaxabs(x: i64) i64 { return llabs(x); }
+    @unsafe(const, safe) fn abs(x: i32) i32 { return llabs(x as i64) as i32; }
+}
+const A: i64 = llabs(-7);
+static_assert(A == 7, "a modeled extern folds");
+static_assert(unsafe imaxabs(-2) == 2, "an unsafe modeled extern folds");
+const fn twice(x: i64) i64 { return llabs(x) * 2; }
+static_assert(twice(-4) == 8, "a const fn calls a modeled extern");
+static_assert(abs(-3) == 3, "the claims list in any order");
+fn main(argv: Vector<str>) i32 {
+    let n = argv.len() as i32;
+    return toupper(97) - 65 + abs(-n) + llabs(-(n as i64)) as i32 + unsafe imaxabs(-1) as i32 - 3;
+}
+)",
+    );
+    let r = p.compile("ok.spc");
+    assert(r.ok());
+    assert(p.gen_has("ok.c", "llabs(_"), "a run-time call goes to the C symbol");
+    assert(!p.gen_has("ok.c", "int64_t llabs("), "the model body is never emitted");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
+
+    unsafe_attr_rejects(
+        "@unsafe(safe)\nfn f() i32 { return 1; }\nfn main() i32 { return f() - 1; }\n",
+        "may only be applied to a function in an 'extern \"C\"' block",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(fast) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
+        "attribute '@unsafe' takes a list of the claims 'safe' and 'const'",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(safe) @unsafe(const) fn llabs(x: i64) i64 { return x; }\n}\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@unsafe'",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(safe, safe) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
+        "claim 'safe' is listed twice in '@unsafe(...)'",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(safe) fn strlen(s: *const u8) usize;\n}\nfn main() i32 { return 0; }\n",
+        "cannot take a raw pointer",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(safe) fn printf(f: i32, ...) i32;\n}\nfn main() i32 { return 0; }\n",
+        "cannot be variadic",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(safe) fn get(x: &i32) &i32;\n}\nfn main() i32 { return 0; }\n",
+        "cannot return a borrow",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    fn abs(x: i32) i32 { return x; }\n}\nfn main() i32 { return 0; }\n",
+        "extern function declarations cannot have a body",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(const) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
+        "an '@unsafe(const)' extern function needs a body",
+    );
+    unsafe_attr_rejects(
+        "extern \"C\" {\n    @unsafe(const) fn llabs(x: i64) i64 { return x; }\n}\nfn main() i32 { return llabs(0) as i32; }\n",
+        "calling an extern \"C\" function requires an 'unsafe' block",
+    );
+    unsafe_attr_rejects(
+        "import stdlib;\nextern \"C\" {\n    @unsafe(const) fn r() i32 { return unsafe stdlib::rand(); }\n}\nfn main() i32 { return 0; }\n",
+        "is declared '@unsafe(const)' but calls an extern function",
+    );
+}
+
+// `src` as a one-file project fails to compile with a diagnostic containing `want`.
+fn unsafe_attr_rejects(src: str, want: str) {
+    let q = cli::proj_new();
+    q.mkfile("bad.spc", src);
+    q.expect_fail("bad.spc", want);
 }
 
 // Aggregate materialization: compile-time-computed structs, Vectors, strings, shared pointers, and

@@ -179,7 +179,7 @@ fn edge_unwinds_through_helper_frames_exactly_once(fx: &mut Base) {
     assert_eq(frees(), 2);
 }
 
-fn make_payload() Payload {
+const fn make_payload() Payload {
     return Payload { n: 5 };
 }
 
@@ -246,7 +246,7 @@ fn take_value(rx: &chan::Receiver<i64>) i64 {
     return v.unwrap_or(-1);
 }
 
-fn drop_value(_x: i64) {}
+const fn drop_value(_x: i64) {}
 
 // Operator and `Deref` methods that park: their calls are implicit.
 struct Gate {

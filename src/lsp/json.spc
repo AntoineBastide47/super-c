@@ -29,7 +29,7 @@ pub enum JSON {
 
 extend JSON {
     /// An integer, stored as f64 (exact below 2^53).
-    pub fn integer(value: i64) JSON {
+    pub const fn integer(value: i64) JSON {
         return JSON::Num(value as f64);
     }
 
@@ -39,7 +39,7 @@ extend JSON {
     }
 
     /// Takes ownership of `value` (no copy): the JSON(std::string&&) constructor.
-    pub fn string(value: String) JSON {
+    pub const fn string(value: String) JSON {
         return JSON::Str(value);
     }
 
@@ -235,7 +235,7 @@ extend JSON {
     }
 
     // The array elements. Panics: not an array.
-    fn items_mut(self: &mut Self) &mut Vector<JSON> {
+    const fn items_mut(self: &mut Self) &mut Vector<JSON> {
         return switch self {
             Arr(a) => a,
             _ => panic("JSON::items_mut called on a non-array type"),
@@ -243,7 +243,7 @@ extend JSON {
     }
 
     // The object members. Panics: not an object.
-    fn members_mut(self: &mut Self) &mut Vector<JSONPair> {
+    const fn members_mut(self: &mut Self) &mut Vector<JSONPair> {
         return switch self {
             Obj(o) => o,
             _ => panic("JSON::members_mut called on a non-object type"),

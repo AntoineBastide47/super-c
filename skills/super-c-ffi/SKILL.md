@@ -9,7 +9,7 @@ allowed-tools: Bash Read
 ## Agent checklist
 
 - Confirm the C symbol, header, ownership, and string termination contract.
-- Keep every extern call inside an explicit `unsafe` boundary.
+- Keep every extern call inside an explicit `unsafe` boundary, except a call of a function whose `@unsafe(...)` lists `safe`.
 - Check whether a backing source or link flag is already declared.
 - Validate opaque types against a real included C declaration.
 
@@ -31,7 +31,7 @@ extern "C" {
   header actually defines (`FILE` works headerless because `stdio.h` is auto-included;
   an invented name fails in the C compile).
 - `pub` inside an extern block exports the binding cross-module.
-- Calling any extern binding requires `unsafe` at the call site.
+- Calling an extern binding requires `unsafe` at the call site, unless its `@unsafe(...)` lists `safe`.
 - `char` is C `char`, and it is unsigned (0 to 255) everywhere: the build engine compiles
   every generated and `@c.source` TU with `-funsigned-char`, on every target, so
   `200 as char as i32` is 200 at compile time and at run time. A C file compiled apart
@@ -231,7 +231,7 @@ array of scalars (`*const [i32; 2]`) is `int32_t (*)[2]`, with no qualifier on t
 
 ## Unsafe Discipline at FFI Boundaries
 
-Every `extern "C"` call requires `unsafe`:
+Every `extern "C"` call requires `unsafe`, unless the function's `@unsafe(...)` lists `safe`:
 
 ```superc
 // Prefix form
@@ -248,6 +248,38 @@ unsafe {
 The `unsafe` marker delimits exactly where the compiler's guarantees stop. Raw-pointer
 operations (dereference, indexing, arithmetic, field access) also require `unsafe`.
 
+### `@unsafe(safe, const)`
+
+Two claims about an extern function that the compiler cannot verify, so they are spelled
+`@unsafe(...)` and the binding author answers for them. The attribute lists one or both claims,
+in any order (`@unsafe(safe, const)` = `@unsafe(const, safe)`), each once; a declaration takes
+one `@unsafe(...)`. It applies only to a function in an `extern "C"` block.
+
+```superc
+extern "C" {
+    @unsafe(safe) fn fabs(x: f64) f64;                // callable without `unsafe`
+    @unsafe(safe, const) fn llabs(x: i64) i64 {
+        if x < 0 { return -x; }                       // the compile-time model
+        return x;
+    }
+}
+const A: i64 = llabs(-7);                             // evaluates the model
+```
+
+- `safe`: a call needs no `unsafe`. The declaration is rejected when a safe call
+  could hand C an unchecked value: a variadic function, a parameter that is or names a raw
+  pointer (through a reference, slice, array or generic argument), or a returned borrow
+  (a reference, slice, or type with a lifetime parameter). Struct fields are the struct's
+  own contract and are not searched: a `str` or slice parameter is allowed.
+- `const`: the function takes a body, which compile-time evaluation runs. Run-time
+  calls still go to the C symbol and the body is never emitted. The body gets the
+  `const fn` definition-site check ("is declared '@unsafe(const)' but ..."). The claim is
+  that the body returns what the C function returns: annotate only functions whose results
+  are fully specified (correctly rounded IEEE operations, `strlen`, `memcmp`), never `sin`
+  or `exp`, whose libm results differ between platforms. Without `safe` a call
+  still needs `unsafe`.
+- Any other extern function takes no body.
+
 ## Attributes Summary
 
 | Attribute | Scope | Effect |
@@ -256,6 +288,7 @@ operations (dereference, indexing, arithmetic, field access) also require `unsaf
 | `@c.link("lib")` | extern block | Declare a link flag |
 | `@c.export("sym")` | function | Pin exact C symbol (external linkage) |
 | `@c.import("sym")` | extern fn | Import with exact C symbol |
+| `@unsafe(safe, const)` | extern fn | Claims, any order: `safe` = callable without `unsafe`, `const` = body is the compile-time model |
 
 ## bindgen
 

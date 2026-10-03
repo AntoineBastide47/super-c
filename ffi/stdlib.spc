@@ -54,8 +54,9 @@ extern "C" {
 
     /// Integer absolute value.
     pub fn abs(n: i32) i32;
-    /// Absolute value of an i64 (undefined for i64::MIN).
-    pub fn labs(n: i64) i64;
+    /// Absolute value of an i64 (undefined for i64::MIN). C `long long`: `labs` takes a C `long`, which
+    /// is 32 bits on Windows and wasm32.
+    pub fn llabs(n: i64) i64;
 }
 
 // A sandboxed iOS app has no shell to reach, and the SDK says so with __API_UNAVAILABLE: naming `system`

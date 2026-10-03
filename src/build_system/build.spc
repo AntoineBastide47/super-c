@@ -1617,7 +1617,7 @@ extend CcStream {
 }
 
 // Longest previous duration first; among equal durations the earliest queued.
-fn pend_before(a: &Pend, b: &Pend) bool {
+const fn pend_before(a: &Pend, b: &Pend) bool {
     return a.prev_ms > b.prev_ms || a.prev_ms == b.prev_ms && a.seq < b.seq;
 }
 

@@ -379,6 +379,9 @@ pub struct TypeChecker<'a> {
     pub icx: inf::InferenceContext,
     pub package: *mut loader::Package,
     pub alias_depth: u32,
+    // The local constant initializer being checked (start << 32 | end, 0 = none): a variable bound
+    // outside it has no compile-time value.
+    const_init: u64,
     // Extends by peeled target, built on the first lookup (see `ext_begin`): `ext_heads` maps
     // (target module << 32 | target decl) to (first << 32 | last) indices of a list in `ext_hits`.
     ext_hits: Vector<ExtHit>,
@@ -936,6 +939,7 @@ extend<'a> TypeChecker<'a> {
             icx: inf::InferenceContext::new(),
             package: package,
             alias_depth: 0,
+            const_init: 0,
             ext_hits: Vector::<ExtHit>::new(),
             ext_heads: Map::<u64, u64>::new(),
             ext_indexed: Vector::<u8>::new(),
@@ -1514,6 +1518,11 @@ extend<'a> TypeChecker<'a> {
     fn tc_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
         return unsafe (*self.mod_ast(m)).attr_of(owner, kind);
     }
+    // Whether `owner`'s `@unsafe(...)` lists `claim` (UNSAFE_SAFE or UNSAFE_CONST).
+    fn tc_unsafe_claim(self: &Self, m: ModuleId, owner: NodeId, claim: u32) bool {
+        let at = self.tc_attr(m, owner, AttrKind::ATTR_UNSAFE);
+        return at != null && (unsafe (*at).arg & claim) != 0;
+    }
     // Whether `t` mentions a '@no_const' declaration anywhere (through pointers, references,
     // slices, arrays and instance arguments). Used by the `const fn` def-site check: no value of
     // such a type can exist at compile time, so the signature cannot be part of a const contract.
@@ -1540,6 +1549,100 @@ extend<'a> TypeChecker<'a> {
             }
         }
         return false;
+    }
+
+    // Whether `t` is a raw pointer type or names one as an element type (reference, slice, array) or a
+    // generic argument. An `@unsafe(safe)` extern function cannot take one: only `unsafe` code can vouch
+    // for a raw pointer's target. A struct field is its type's own contract (`str` and slices are views
+    // the language treats as valid), so fields are not searched.
+    fn tc_ty_has_raw_ptr(self: &Self, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_POINTER {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_ty_has_raw_ptr(y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            for i in 0..it.n {
+                if self.tc_ty_has_raw_ptr(unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Whether `t` is a borrow: a reference or slice, an array of one, or a type with a lifetime
+    // parameter (`str<'a>`), directly or through a generic argument.
+    fn tc_ty_borrows(self: &Self, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_ty_borrows(y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return unsafe (*self.mod_ast(y.module)).lifetimes_of(y.as_data.decl).len != 0;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            if unsafe (*self.mod_ast(it.module)).lifetimes_of(it.decl).len != 0 {
+                return true;
+            }
+            for i in 0..it.n {
+                if self.tc_ty_borrows(unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // The `@unsafe(safe)` claim on extern function `fnd` is impossible when a safe call could hand C an
+    // unchecked value: variadic arguments, a raw pointer, or a returned borrow of unknown lifetime.
+    fn tc_check_safe_extern(self: &mut Self, fnd: FunctionData) {
+        let a = self.cur_ast();
+        if fnd.is_variadic() {
+            let sp = self.name_span(fnd.name);
+            self.errors.emit_span(
+                sp,
+                format("an '@unsafe(safe)' extern function cannot be variadic: its variadic arguments are unchecked"),
+            );
+        }
+        for i in 0..fnd.params.len {
+            let pid = unsafe (*a).list(fnd.params)[i as usize];
+            if unsafe (*a).at_const(pid).kind != NodeKind::NODE_PARAMETER {
+                continue;
+            }
+            let pt = self.resolve_type(unsafe (*a).at_const(pid).as_data.parameter.ty);
+            if self.tc_ty_has_raw_ptr(pt, 0) {
+                self.errors.emit_span(
+                    unsafe (*a).at_const(pid).span,
+                    format(
+                        "an '@unsafe(safe)' extern function cannot take a raw pointer: only 'unsafe' code can vouch for its target",
+                    ),
+                );
+            }
+        }
+        for i in 0..fnd.returns.len {
+            let rid = unsafe (*a).list(fnd.returns)[i as usize];
+            let rt = self.resolve_type(unsafe (*a).slot_type_node(rid));
+            if self.tc_ty_borrows(rt, 0) {
+                self.errors.emit_span(
+                    unsafe (*a).at_const(rid).span,
+                    format("an '@unsafe(safe)' extern function cannot return a borrow: its lifetime is unknown"),
+                );
+            }
+        }
     }
 
     fn through_raw_pointer(self: &Self, ty0: TypeId) bool {
@@ -3079,7 +3182,7 @@ extend<'a> TypeChecker<'a> {
 
     // The result count of function type `fid`: its signature's or declaration's result list, one for
     // an expression-bodied closure.
-    fn fn_nret(self: &Self, fid: TypeId) u32 {
+    const fn fn_nret(self: &Self, fid: TypeId) u32 {
         let fty = *self.type_at(fid);
         if fty.fn_sig() {
             return unsafe (*self.cur_ast()).sig_len(&fty, true);
@@ -3109,7 +3212,7 @@ extend<'a> TypeChecker<'a> {
         return self.node_type_in(m, unsafe (*fa).list(rs)[i as usize]);
     }
 
-    fn tc_dyn_fn_sig(self: &mut Self, ty: &Ty) TypeId {
+    const fn tc_dyn_fn_sig(self: &mut Self, ty: &Ty) TypeId {
         if ty.kind != TypeKind::TYPE_DYN {
             return TYPE_NONE;
         }
@@ -3611,7 +3714,7 @@ extend<'a> TypeChecker<'a> {
 
     /// `aggregate_of` without the generic arguments, for callers that only need the declaration: it
     /// skips the parameter/argument copy.
-    fn aggregate_decl(self: &Self, ty: TypeId, mod_out: &mut ModuleId, decl_out: &mut NodeId) bool {
+    const fn aggregate_decl(self: &Self, ty: TypeId, mod_out: &mut ModuleId, decl_out: &mut NodeId) bool {
         let mself = (self as *const TypeChecker) as *mut TypeChecker;
         unsafe (*mself).mark_recv = ty;
         unsafe (*mself).mark_n += 1;
@@ -4114,7 +4217,7 @@ extend<'a> TypeChecker<'a> {
 
     // The integer type evaluated leaf `lv` gives a form; BT_COUNT (the leaf takes the form's type)
     // for a value of any other type (an enum variant's discriminant).
-    fn tc_lin_leaf_bt(self: &Self, lv: &iri::IVal) BuiltinType {
+    const fn tc_lin_leaf_bt(self: &Self, lv: &iri::IVal) BuiltinType {
         if lv.ty >= Ast::builtin(BuiltinType::BT_BOOL) && lv.ty < Ast::builtin(BuiltinType::BT_COUNT) {
             return (lv.ty - Ast::builtin(BuiltinType::BT_BOOL)) as BuiltinType;
         }
@@ -4124,7 +4227,7 @@ extend<'a> TypeChecker<'a> {
     // Join typed leaf type `b` (at node `at`) into the form's type: the wider of two when one widens
     // to the other, else the first mismatch is kept for `tc_lin_top`. A leaf of a type that is no
     // integer (an enum constant) joins nothing.
-    fn tc_lin_join(self: &mut Self, b: BuiltinType, at: NodeId) {
+    const fn tc_lin_join(self: &mut Self, b: BuiltinType, at: NodeId) {
         if !bt_is_int(b) || self.lin_mis != NODE_NONE || self.lin_ty == b {
             return;
         }
@@ -5059,11 +5162,7 @@ extend<'a> TypeChecker<'a> {
             NodeList { start: 0, len: 0 };
         };
         let n = xg.len + fg.len;
-        if n == 0 || n > 8 || self.type_at(ty).concrete && !self.tc_mentions_generic(
-            d.module,
-            cn.as_data.const_def.value,
-            0,
-        ) {
+        if !self.tc_local_const_per_inst(d.node, ty) {
             return;
         }
         let mut ga = Tys8 {};
@@ -5078,6 +5177,49 @@ extend<'a> TypeChecker<'a> {
             );
         }
         unsafe (*a).set_type_args(id, &ga[0], n as u8);
+    }
+
+    // A local constant's initializer reads `id`, resolved to `d`: a variable bound outside the
+    // initializer is a run-time value, so the read is an error.
+    fn tc_const_init_read(self: &mut Self, id: NodeId, d: DefId) {
+        if d.node == NODE_NONE || d.module != self.cur_module() {
+            return;
+        }
+        let dn = unsafe (*self.cur_ast()).at_const(d.node);
+        let dk = dn.kind;
+        let var = dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_FOR;
+        let lo = (self.const_init >> 32) as u32;
+        let hi = self.const_init as u32;
+        if !var || dn.span.start >= lo && dn.span.end <= hi {
+            return;
+        }
+        let sp = unsafe (*self.cur_ast()).at_const(id).span;
+        self.errors.emit_span(
+            sp,
+            format(
+                "a constant cannot read the variable '{}': its value exists only at run time",
+                diag::span_str(self.source, sp.start, sp.end),
+            ),
+        );
+        self.errors.note(format("use 'let' for a value computed at run time"));
+    }
+
+    // Local constant `decl` of type `ty` in the current function has a value per instance: the
+    // function or its extend is generic, and the type or the initializer uses a generic parameter.
+    fn tc_local_const_per_inst(self: &mut Self, decl: NodeId, ty: TypeId) bool {
+        let f = self.icx.current_fn;
+        let a = self.cur_ast();
+        let fg = unsafe (*a).at_const(f).as_data.function.generics;
+        let ext = self.enclosing(self.cur_module(), f, NodeKind::NODE_EXTEND);
+        let mut n = fg.len;
+        if ext != NODE_NONE {
+            n += unsafe (*a).at_const(ext).as_data.extend_def.generics.len;
+        }
+        return n != 0 && n <= 8 && !(self.type_at(ty).concrete && !self.tc_mentions_generic(
+            self.cur_module(),
+            unsafe (*a).at_const(decl).as_data.const_def.value,
+            0,
+        ));
     }
 
     // Is this generic argument a const VALUE rather than a type? A bare integer literal always is; that is
@@ -8129,7 +8271,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Whether path member `id` is the callee of the call under check, turbofished or not.
-    fn tc_is_callee(self: &Self, id: NodeId) bool {
+    const fn tc_is_callee(self: &Self, id: NodeId) bool {
         let c = self.icx.callee_node;
         if c == id || c == NODE_NONE {
             return c == id;
@@ -8139,7 +8281,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Whether path member `id` (`X::f`) is qualified by `Self`.
-    fn tc_self_path(self: &Self, id: NodeId) bool {
+    const fn tc_self_path(self: &Self, id: NodeId) bool {
         let a = self.cur_ast();
         let o = unsafe (*a).at_const(id).as_data.member.object;
         return unsafe (*a).at_const(o).kind == NodeKind::NODE_IDENTIFIER && span_is(
@@ -10215,7 +10357,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // The side effects a memoized verdict must not skip: diagnostics and deferred obligations.
-    fn sat_fx(self: &Self) usize {
+    const fn sat_fx(self: &Self) usize {
         let e = &self.errors;
         return e.errors.len() + e.warns.len() + e.note_pool.len() + e.fixes.len() + (unsafe (*self.cur_ast()).proj_obs).len();
     }
@@ -10430,7 +10572,7 @@ extend<'a> TypeChecker<'a> {
     }
     // True while checking a method of the prelude `UnsafeCell`: the one place `&T as *mut T` is allowed
     // (its `get` is the sanctioned interior-mutability hole).
-    fn in_unsafe_cell(self: &Self) bool {
+    const fn in_unsafe_cell(self: &Self) bool {
         if self.current_self == NODE_NONE {
             return false;
         }
@@ -10441,7 +10583,7 @@ extend<'a> TypeChecker<'a> {
         return self.iface_named(tr, "Sync");
     }
     // Is this aggregate the prelude `UnsafeCell`? See the `Sync` rule in `tc_thread_marker`.
-    fn is_unsafe_cell_decl(self: &Self, om: ModuleId, od: NodeId) bool {
+    const fn is_unsafe_cell_decl(self: &Self, om: ModuleId, od: NodeId) bool {
         let hit = self.ph_unsafecell;
         return hit.node != NODE_NONE && hit.mid == om && hit.node == od;
     }
@@ -10582,7 +10724,7 @@ extend<'a> TypeChecker<'a> {
         }
         return true;
     }
-    fn marker_iface(self: &mut Self, sync: bool) DefId {
+    const fn marker_iface(self: &mut Self, sync: bool) DefId {
         let h = if sync {
             self.ph_sync;
         } else {
@@ -12664,7 +12806,7 @@ extend<'a> TypeChecker<'a> {
         return true;
     }
 
-    fn tc_type_is_union(self: &Self, ty: TypeId) bool {
+    const fn tc_type_is_union(self: &Self, ty: TypeId) bool {
         let mut m: ModuleId = 0;
         let mut d = NODE_NONE;
         if ty == TYPE_NONE || !self.aggregate_decl(ty, &mut m, &mut d) {
@@ -13771,7 +13913,7 @@ extend<'a> TypeChecker<'a> {
     // Whether module `a` comes before module `b` for a definition on a type of module `home`: the
     // prelude, then `home`, then module order, so the module that extends another's type carries the
     // error.
-    fn tc_module_before(self: &Self, a: ModuleId, b: ModuleId, home: ModuleId) bool {
+    const fn tc_module_before(self: &Self, a: ModuleId, b: ModuleId, home: ModuleId) bool {
         let ra = pick(unsafe (*self.package).modules[a as usize].prelude, 0, pick(a == home, 1, 2));
         let rb = pick(unsafe (*self.package).modules[b as usize].prelude, 0, pick(b == home, 1, 2));
         return ra < rb || ra == rb && a < b;
@@ -15349,7 +15491,7 @@ extend TypeChecker {
     // element: an array literal takes its element type from it and the length stays evidence. A
     // function type always can: a closure argument takes its shape, and waits for the call's
     // inference while a parameter it gives is still open (`tc_infer_ty_open`).
-    fn tc_expected_known(self: &Self, pt: TypeId) bool {
+    const fn tc_expected_known(self: &Self, pt: TypeId) bool {
         if pt == TYPE_NONE {
             return false;
         }
@@ -17033,7 +17175,11 @@ extend TypeChecker {
         let fa = self.mod_ast(fmod);
         let fk = unsafe (*fa).at_const(fdecl).kind;
         let named = fk == NodeKind::NODE_FUNCTION;
-        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern() && self.tc_needs_unsafe() {
+        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern() && !self.tc_unsafe_claim(
+            fmod,
+            fdecl,
+            UNSAFE_SAFE,
+        ) && self.tc_needs_unsafe() {
             self.err_unsafe(sp, "calling an extern \"C\" function");
         } else if named && unsafe (*fa).at_const(fdecl).as_data.function.is_unsafe() && self.tc_needs_unsafe() {
             self.err_unsafe(sp, "calling an unsafe function");
@@ -19497,7 +19643,7 @@ extend TypeChecker {
     }
 
     // Is `ty` an instance of aggregate `decl` of module `m`?
-    fn tc_instance_of(self: &Self, ty: TypeId, m: ModuleId, decl: NodeId) bool {
+    const fn tc_instance_of(self: &Self, ty: TypeId, m: ModuleId, decl: NodeId) bool {
         if ty == TYPE_NONE || self.type_at(ty).kind != TypeKind::TYPE_INSTANCE {
             return false;
         }
@@ -19553,7 +19699,7 @@ extend TypeChecker {
     }
 
     // Is `ty` a generic struct named without its type arguments (`Pair` for `Pair<A, B>`)?
-    fn tc_open_generic_struct(self: &Self, ty: TypeId) bool {
+    const fn tc_open_generic_struct(self: &Self, ty: TypeId) bool {
         if ty == TYPE_NONE || self.type_at(ty).kind != TypeKind::TYPE_STRUCT {
             return false;
         }
@@ -20363,6 +20509,9 @@ extend TypeChecker {
             },
             NODE_IDENTIFIER => {
                 let d = unsafe (*a).resolution_def(id);
+                if self.const_init != 0 {
+                    self.tc_const_init_read(id, d);
+                }
                 result = self.decl_type_in(d.module, d.node);
                 if d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_FUNCTION {
                     self.tc_check_test_ref(d, unsafe (*a).at_const(id).span);
@@ -21818,13 +21967,13 @@ extend TypeChecker {
 
     // Mandatory evaluation of a const initializer: failure with a trap is an error, undecidable in
     // module order defers to flush_consts (mirrors check_static_assert).
-    fn tc_mandatory_const(self: &mut Self, id: NodeId, value: NodeId) {
+    fn tc_mandatory_const(self: &mut Self, id: NodeId, value: NodeId, ty: TypeId) {
         self.eng_hold(true);
-        self.tc_mandatory_const_i(id, value);
+        self.tc_mandatory_const_i(id, value, ty);
         self.eng_hold(false);
     }
 
-    fn tc_mandatory_const_i(self: &mut Self, id: NodeId, value: NodeId) {
+    fn tc_mandatory_const_i(self: &mut Self, id: NodeId, value: NodeId, ty: TypeId) {
         let ceptr = self.cir();
         if ceptr == null {
             return;
@@ -21862,7 +22011,16 @@ extend TypeChecker {
                 ),
             );
         } else {
-            unsafe (*ceptr).defer_const(m, id);
+            // Once every module is typed, a top-level constant and a local constant with one value
+            // have no reason left to fail silently; a member of an extend or interface, or a local
+            // constant with a value per instance, waits for the instance's arguments.
+            let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
+            let strict = if cd.is_local {
+                !self.tc_local_const_per_inst(id, ty);
+            } else {
+                unsafe (*self.cur_ast()).container_of(id) == NODE_NONE;
+            };
+            unsafe (*ceptr).defer_const(m, id, strict);
         }
     }
 
@@ -22923,6 +23081,9 @@ extend TypeChecker {
                         format("a variadic function needs at least one fixed parameter before '...'"),
                     );
                 }
+                if fnd.is_extern() && self.tc_unsafe_claim(self.cur_module(), id, UNSAFE_SAFE) {
+                    self.tc_check_safe_extern(fnd);
+                }
                 // ISO C has no portable by-value zero-sized object: an extern boundary cannot
                 // carry one. Layout decides (extern fns are never generic), never syntax.
                 if fnd.is_extern() {
@@ -23037,7 +23198,10 @@ extend TypeChecker {
                 // Def-site `const fn` validation, AFTER the body walk: type-based disqualifiers
                 // ('@no_const' mentions) only exist once the body is typed, so a pre-body verdict
                 // would be blind to them (fn_recheck also overwrites any blind memoized verdict).
-                if fnd.is_const() && fnd.body != NODE_NONE && !fnd.is_extern() {
+                // The body of an `@unsafe(const)` extern function is a compile-time model: the same
+                // check applies to it.
+                let modeled = fnd.is_extern() && fnd.body != NODE_NONE;
+                if (fnd.is_const() || modeled) && fnd.body != NODE_NONE {
                     let ceptr = self.cir();
                     self.ev_err = false;
                     if ceptr != null && self.fn_recheck_as(self.cur_module(), id) == iri::FX_NO && !self.ev_err {
@@ -23069,8 +23233,13 @@ extend TypeChecker {
                             cstart,
                             cend - cstart,
                             format(
-                                "function '{}' is declared 'const fn' but {}",
+                                "function '{}' is declared '{}' but {}",
                                 diag::span_str(self.source, sp.start, sp.end),
+                                if modeled {
+                                    "@unsafe(const)";
+                                } else {
+                                    "const fn";
+                                },
                                 why,
                             ),
                         );
@@ -23248,13 +23417,19 @@ extend TypeChecker {
             }
         }
         if cd.value != NODE_NONE {
+            let init0 = self.const_init;
+            if cd.is_local && !cd.is_static_mut {
+                let vsp = unsafe (*self.cur_ast()).at_const(cd.value).span;
+                self.const_init = vsp.start as u64 << 32 | vsp.end as u64;
+            }
             // `[..].into()` and `[]` take their type from here.
             self.check_expr_w(cd.value, declared);
+            self.const_init = init0;
             if !self.compatible(declared, cd.value) {
                 self.err_mismatch(cd.value, declared);
             }
             if !cd.is_extern && !cd.is_static_mut {
-                self.tc_mandatory_const(id, cd.value);
+                self.tc_mandatory_const(id, cd.value, declared);
             }
         }
         // A raw pointer / reference never owns its pointee (`tc_type_is_free` peels them via

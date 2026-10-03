@@ -386,11 +386,12 @@ moves like its element and frees nothing.
 
 ## Compile-Time Evaluation
 
-Always on, in constant contexts: `const` and `static` initializers, array lengths, const
-generic arguments, `static_assert`, enum discriminants and `type_info`. A failed evaluation
-there is an error. Outside a constant context every call runs at run time, `const fn` calls
-with known arguments included. `const fn` marks a function that constant contexts can call:
-the declaration is checked for operations compile-time evaluation cannot run.
+Always on, in constant contexts: `const` and `static` initializers (local constants too),
+array lengths, const generic arguments, `static_assert`, enum discriminants and `type_info`.
+A failed evaluation there is an error, and a local constant's initializer cannot read a
+variable. A constant context can call any function. Outside one, every call runs at run
+time, `const fn` calls with known arguments included. `const fn` adds a declaration check
+that rejects a function certain to fail at compile time.
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
@@ -547,6 +548,7 @@ source text, values, and file:line on failure.
 | `@test` / `@test_init` / `@test_free` | Test harness |
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time |
+| `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 
 `@no_const` does not pass through fields: the type author tags each type. std tags its OS and
 runtime handles (`Atomic`, `Arc`, locks, channels, threads, sockets, the scheduler); value
