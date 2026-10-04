@@ -8477,24 +8477,33 @@ extend CEmit {
         self.out.push_str("(void *__genv) {\n  (void)__genv;\n");
         let mut ok = true;
         let mut fxt = TYPE_NONE;
+        // The fixture's address: a zero-sized fixture has no storage (its init returns void), so it is the
+        // ZST sentinel.
+        let mut fxref = String::from_str("&__fx");
         if (wants & 1) != 0 {
             fxt = self.fn_ret_ty(tm, fx_init);
             if fxt == TYPE_NONE {
                 ok = self.fail("test-fx");
             }
-            if ok {
-                let mut dl = String::new();
+            let zst = ok && self.mg.is_zst(tm, fxt);
+            let mut dl = String::new();
+            if zst {
+                fxref.clear();
+                ok = self.zst_sentinel_ref(tm, fxt, &mut fxref);
+            } else if ok {
                 ok = self.mg.ctype(tm, fxt, "__fx", &mut dl);
+            }
+            if ok {
+                let mut isym = String::new();
+                ok = self.mg.fn_sym(tm, fx_init, self.mg.method_target(tm, fx_init), &mut isym);
                 if ok {
-                    let mut isym = String::new();
-                    ok = self.mg.fn_sym(tm, fx_init, self.mg.method_target(tm, fx_init), &mut isym);
-                    if ok {
-                        self.out.push_str("  ");
+                    self.out.push_str("  ");
+                    if !zst {
                         self.out.push_string(&dl);
                         self.out.push_str(" = ");
-                        self.out.push_string(&isym);
-                        self.out.push_str("();\n");
                     }
+                    self.out.push_string(&isym);
+                    self.out.push_str("();\n");
                 }
             }
         }
@@ -8503,7 +8512,7 @@ extend CEmit {
             self.out.push_string(&fname);
             self.out.push_str("(");
             if (wants & 1) != 0 {
-                self.out.push_str("&__fx");
+                self.out.push_string(&fxref);
             }
             if (wants & 2) != 0 {
                 if (wants & 1) != 0 {
@@ -8528,7 +8537,9 @@ extend CEmit {
             if ok {
                 self.out.push_str("  ");
                 self.out.push_string(&fsym);
-                self.out.push_str("(&__fx);\n");
+                self.out.push_str("(");
+                self.out.push_string(&fxref);
+                self.out.push_str(");\n");
             }
         }
         if ok && (wants & 1) != 0 && self.is_destructible(tm, fxt) {
@@ -8537,7 +8548,9 @@ extend CEmit {
             if ok {
                 self.out.push_str("  ");
                 self.out.push_string(&fe);
-                self.out.push_str("(&__fx);\n");
+                self.out.push_str("(");
+                self.out.push_string(&fxref);
+                self.out.push_str(");\n");
             }
         }
         self.out.push_str("}\n");
@@ -8555,18 +8568,34 @@ extend CEmit {
         let mut gdecl = String::new();
         let mut gc = String::new();
         let mut isym = String::new();
-        let mut ok = self.mg.ctype(gm, gt, "__sc_genv", &mut gdecl) && self.mg.ctype(gm, gt, "", &mut gc) && self.mg.fn_sym(
+        let mut ok = self.mg.ctype(gm, gt, "", &mut gc) && self.mg.fn_sym(
             gm,
             ginit,
             self.mg.method_target(gm, ginit),
             &mut isym,
         );
+        // A zero-sized env has no storage (its init returns void): its address is the ZST sentinel.
+        let zst = ok && self.mg.is_zst(gm, gt);
+        let mut gref = String::new();
+        if zst {
+            ok = self.zst_sentinel_ref(gm, gt, &mut gref);
+        } else if ok {
+            ok = self.mg.ctype(gm, gt, "__sc_genv", &mut gdecl);
+        }
         if ok {
-            self.out.push_str("void *__sc_test_genv_init(void) { static ");
-            self.out.push_string(&gdecl);
-            self.out.push_str("; __sc_genv = ");
-            self.out.push_string(&isym);
-            self.out.push_str("(); return &__sc_genv; }\n");
+            self.out.push_str("void *__sc_test_genv_init(void) { ");
+            if zst {
+                self.out.push_string(&isym);
+                self.out.push_str("(); return ");
+                self.out.push_string(&gref);
+                self.out.push_str("; }\n");
+            } else {
+                self.out.push_str("static ");
+                self.out.push_string(&gdecl);
+                self.out.push_str("; __sc_genv = ");
+                self.out.push_string(&isym);
+                self.out.push_str("(); return &__sc_genv; }\n");
+            }
             self.out.push_str("void __sc_test_genv_free(void *__p) {\n  (void)__p;\n");
             if gfree != NODE_NONE {
                 let mut fsym = String::new();

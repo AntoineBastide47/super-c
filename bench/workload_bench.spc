@@ -6,7 +6,6 @@
 
 import atomic;
 import stdio;
-import unistd;
 import sc_runtime;
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
@@ -1135,7 +1134,7 @@ fn flood_once(lat: &LatSink) i64 {
             let t0 = platform::now_ns();
             let got = blocking::call(
                 fn() i64 {
-                    let _ = unistd::usleep(FLOOD_SLEEP_US);
+                    sc_runtime::sc_rt_sleep_ns(FLOOD_SLEEP_US as i64 * 1000);
                     return id;
                 },
             );

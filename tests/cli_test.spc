@@ -2128,7 +2128,7 @@ fn main() i32 { return 0; }
         assert(r.out_shows(": read waiters 1"), "the waiting descriptor is listed");
     }
     // --test-timeout=0 turns the global timeout off; a test's own still applies.
-    let off = p.compile_flags("--test --quiet --test-timeout=0 --test-filter=waits", "main.spc");
+    let off = p.compile_flags("--test --quiet --test-timeout=0 --filter=waits", "main.spc");
     assert(off.out_has("test main::waits_on_a_socket ... FAILED (timed out)"), "its own timeout without a global one");
     let bad = p.compile_flags("--test --test-timeout=soon", "main.spc");
     assert(!bad.ok(), "a malformed timeout is rejected");
@@ -2253,7 +2253,7 @@ fn main() i32 { return 0; }
     assert(q.out_shows("---- main::fails ----"), "quiet keeps the failure section");
     assert(q.out_has("3 passed, 1 failed"), "quiet keeps the tally");
     // Shards partition the filtered test order without overlap; each adjacent pair is split.
-    let s1 = p.compile_flags("--test --test-filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc");
+    let s1 = p.compile_flags("--test --filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc");
     assert(s1.ok());
     assert(s1.out_has("running 2 tests (shard 1/2)"), "first shard selected two tests");
     assert(s1.out_has("test main::drains ... ok"), "first shard contains test zero");
@@ -2266,16 +2266,16 @@ fn main() i32 { return 0; }
     assert(s2.out_has("test main::Counter::bumps ... ok"), "second shard contains test three");
     assert(!s2.out_has("main::drains"), "second shard excludes test zero");
     // --test-no-fork runs in-process and skips should_panic tests.
-    let nf = p.compile_flags("--test --test-no-fork --test-filter=boom", "main.spc");
+    let nf = p.compile_flags("--test --test-no-fork --filter=boom", "main.spc");
     assert(nf.ok());
     assert(nf.out_has("skipped (should_panic needs fork)"), "no-fork skips should_panic");
     // The runner rejects an argument it does not know (a driver flag given to it directly) instead of
     // running the whole suite.
     let mut runner = String::new();
     runner.format_into("{}/build/dev/raw/__tests{}", str::from_cstr(p.rootp()), str::from_cstr(cli::binext()));
-    let ua = cli::exe_env_in(runner.as_str(), str::from_cstr(p.rootp()), "SC_UNUSED", "1", "--test-filter=boom");
+    let ua = cli::exe_env_in(runner.as_str(), str::from_cstr(p.rootp()), "SC_UNUSED", "1", "--test-jobs=2");
     assert_eq(ua.exit, 2);
-    assert(ua.out_has("unknown test runner argument '--test-filter=boom'"), "the runner names the argument");
+    assert(ua.out_has("unknown test runner argument '--test-jobs=2'"), "the runner names the argument");
     assert(!ua.out_has("running"), "the runner runs nothing");
     // A normal (non---test) build still compiles and runs its own main (tests not emitted).
     let nb = p.compile("main.spc");
@@ -2287,6 +2287,41 @@ fn main() i32 { return 0; }
 
 // A generic defined in one module, instantiated over a user struct held BY VALUE in another: the instance is
 // re-homed to the user module and full-monomorphized there. -Werror is the placement proof.
+// A zero-sized fixture, suite receiver or global env has no storage: the wrappers pass its address as the
+// zero-sized sentinel, and the init and teardown still run.
+@test
+fn test_zero_sized_fixtures() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct S {}
+extend S {
+  @test_init
+  fn init() S { println("suite init"); return S {}; }
+  @test_free
+  fn fin(self: &mut S) { panic("suite free ran"); }
+  @test
+  fn method(self: &mut S) { println("method ran"); }
+}
+struct M {}
+@test_init
+fn module_fx() M { return M {}; }
+struct G {}
+@test_init(global)
+fn genv() G { return G {}; }
+@test
+fn uses_both(m: &mut M, g: &G) { panic("uses_both ran"); }
+fn main() i32 { return 0; }
+)",
+    );
+    let r = p.compile_flags("--test --quiet", "main.spc");
+    assert_eq(r.exit, 2);
+    assert(r.out_shows("suite init"), "the suite init ran");
+    assert(r.out_shows("method ran"), "the suite test ran with its receiver");
+    assert(r.out_shows("suite free ran"), "the suite teardown ran");
+    assert(r.out_shows("uses_both ran"), "the module fixture and global env test ran");
+}
+
 @test
 fn cross_module_generic_by_value() {
     let p = cli::proj_new();
@@ -7472,6 +7507,10 @@ fn main(argv: Vector<str>) i32 {
         "import stdlib;\nextern \"C\" {\n    @unsafe(const) fn r() i32 { return unsafe stdlib::rand(); }\n}\nfn main() i32 { return 0; }\n",
         "is declared '@unsafe(const)' but calls an extern function",
     );
+    unsafe_attr_rejects(
+        "import stdlib;\nfn main() i32 {\n    let f: fn(i32) void = stdlib::exit;\n    f(0);\n    return 0;\n}\n",
+        "naming an extern \"C\" function as a value requires an 'unsafe' block",
+    );
 }
 
 // `src` as a one-file project fails to compile with a diagnostic containing `want`.
@@ -8688,8 +8727,8 @@ fn cache_restored_object_relinks() {
     assert_eq(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "run").exit, 3);
 }
 
-// `super-c bench --bench-filter=S` selects benchmarks by substring at run time: the generated root is the
-// same for every filter, a miss is an error, and the tally counts only what ran.
+// `super-c bench --filter=S` selects benchmarks by substring at build time: a miss is an error, and the
+// tally counts only what ran. A benchmark the target gates out is not discovered.
 @test
 fn bench_filter_selects_by_substring() {
     let p = cli::proj_new();
@@ -8708,6 +8747,11 @@ pub fn mul_loop(b: &mut bench::Bencher) {
     b.set_rounds(2);
     while b.running() { let mut s = 1; for i in 1..50 { s = s * i % 1000003; } assert(s > 0); }
 }
+@arch(wasm32)
+@bench
+pub fn wasm_loop(b: &mut bench::Bencher) {
+    while b.running() {}
+}
 )",
     );
     let root = str::from_cstr(p.rootp());
@@ -8716,14 +8760,45 @@ pub fn mul_loop(b: &mut bench::Bencher) {
     assert(all.out_shows("micro::add_loop"), "unfiltered run reports the first benchmark");
     assert(all.out_shows("micro::mul_loop"), "unfiltered run reports the second benchmark");
     assert(all.out_has("2 benchmark(s)"), "unfiltered tally");
-    let one = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --bench-filter=mul");
+    let one = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --filter=mul");
     assert(one.ok());
     assert(!one.out_has("micro::add_loop"), "filter excludes a non-matching benchmark");
     assert(one.out_shows("micro::mul_loop"), "filter keeps the matching benchmark");
     assert(one.out_has("1 benchmark(s)"), "tally counts only what ran");
-    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --bench-filter=zzz");
+    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --filter=zzz");
     assert_eq(none.exit, 1);
     assert(none.out_shows("bench: no benchmark name contains 'zzz'"), "a filter that selects nothing is an error");
+}
+
+// `super-c test --filter=S` builds only the test files with a test whose name contains S: a file without
+// one is not compiled, a test taking a suite fixture matches by `<module>::<Type>::<fn>`, and a miss is an
+// error.
+@test
+fn test_filter_builds_only_matching_files() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile("tests/a.spc", "@test\nfn alpha() {}\n@test\nfn alpha_two() {}\n");
+    p.mkfile(
+        "tests/b.spc",
+        "struct S {}\nextend S {\n    @test_init\n    fn init() S {\n        return S {};\n    }\n    @test\n    fn beta(self: &mut S) {}\n    @test\n    fn delta() {}\n}\n",
+    );
+    p.mkfile("tests/c.spc", "@test\nfn gamma() { let x: i32 = \"no\"; }\n");
+    let root = str::from_cstr(p.rootp());
+    let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet");
+    assert(!all.ok(), "the unfiltered suite builds the file that does not compile");
+    let a = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=a::alpha_");
+    assert(a.ok());
+    assert(a.out_has("1 passed, 0 failed"), "the runner selects among the built file's tests");
+    let b = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=b::S::be");
+    assert(b.ok());
+    assert(b.out_has("1 passed, 0 failed"), "a fixture test matches by its suite type's name");
+    let d = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=b::delta");
+    assert(d.ok());
+    assert(d.out_has("1 passed, 0 failed"), "a method without the fixture matches without the type's name");
+    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=zzz");
+    assert_eq(none.exit, 1);
+    assert(none.out_shows("test: no test name contains 'zzz'"), "a filter that selects nothing is an error");
 }
 
 // `format` is rewritten at typecheck into `sugar_fmt_*` shim calls, so it folds under CTFE like

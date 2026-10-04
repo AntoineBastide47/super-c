@@ -47,12 +47,12 @@ fi
 printf 'perf: contract v%s, build %s, %s, %s, %s cores, load %s\n' "$CONTRACT_VERSION" "$build_id" "$cpu" "$ccver" "$ncpu" "$load"
 
 # The benchmark binary, fresh from this checkout; the generated runner must carry the checkout's identity.
-./super-c bench --no-run || fail "the benchmark binary does not build"
+./super-c bench --no-run --filter=self_transpile || fail "the benchmark binary does not build"
 grep -q "__bench::begin(\"$build_id\", " build/bench_root.spc || fail "build/bench_root.spc does not carry build id $build_id"
 
 record="$out/self_transpile.json"
 rm -f "$record"
-SC_BENCH_OUT="$record" build/bench-bin --filter=self_transpile | tee "$out/self_transpile.txt" || fail "the benchmark reported a failure"
+SC_BENCH_OUT="$record" build/bench-bin | tee "$out/self_transpile.txt" || fail "the benchmark reported a failure"
 [ -f "$record" ] || fail "no record written to $record"
 
 python3 - "$record" "$build_id" "$tol" "${SC_PERF_RECORD:-0}" "$cpu" "$ccver" "$ncpu" "$load" "$CONTRACT_BENCH_V" <<'EOF'

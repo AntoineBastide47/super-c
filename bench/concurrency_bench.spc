@@ -95,9 +95,20 @@ fn durable(fd: i32) i32 {
     return unsafe fcntl::fcntl(fd, 51);
 }
 
-@platform(!macos)
+@platform(linux | wasm | ios | android)
 fn durable(fd: i32) i32 {
     return unsafe unistd::fsync(fd);
+}
+
+// The Windows CRT has no `fsync`; `_commit` is its flush to the device.
+@platform(windows)
+extern "C" "io.h" {
+    fn _commit(fd: i32) i32;
+}
+
+@platform(windows)
+fn durable(fd: i32) i32 {
+    return unsafe _commit(fd);
 }
 
 // The directory the durable lane writes into: created by this process under the temporary directory,

@@ -610,7 +610,7 @@ fn rejects_bad_input() { panic("boom"); }
 
 ```sh
 super-c --test app.spc                      # find the @test functions, build, run them in parallel
-super-c --test --test-filter=drains app.spc # only tests whose name contains "drains"
+super-c --test --filter=drains app.spc      # only tests whose name contains "drains"
 super-c --test --test-shard=1/2 app.spc     # run half of the tests (for CI)
 super-c --test --test-jobs=4 app.spc        # at most 4 test processes at once
 super-c --test --test-timeout=120 app.spc   # fail a test that runs past 120 s (default 90, 0: none)

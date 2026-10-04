@@ -133,8 +133,8 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
         topts.no_fork = true;
     } else if arg == "--quiet" {
         topts.quiet = true;
-    } else if arg.starts_with("--test-filter=") {
-        topts.filter = (&arg[14]) as *const char;
+    } else if arg.starts_with("--filter=") {
+        topts.filter = (&arg[9]) as *const char;
     } else if arg.starts_with("--test-shard=") {
         if !parse_test_shard((&arg[13]) as *const char, topts) {
             *bad = true;
@@ -849,7 +849,7 @@ fn main(argv: Vector<str>) i32 {
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
-    let mut bench_filter: str = ""; // bench --bench-filter=S: run only benchmarks whose name contains S
+    let mut bench_filter: str = ""; // bench --filter=S: build and run only benchmarks whose name contains S
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
     let mut topts = TestOpts {
         enabled: false,
@@ -1037,8 +1037,8 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if arg == "--no-run" {
                     bench_norun = true;
-                } else if arg.starts_with("--bench-filter=") {
-                    bench_filter = arg[15..];
+                } else if arg.starts_with("--filter=") {
+                    bench_filter = arg[9..];
                 } else {
                     let common = co.common_flag(arg);
                     if !common && !bo.build_flag(&mut co, arg) {
@@ -1203,12 +1203,12 @@ OPTIONS:
     --fix                  lint: apply machine-applicable fixes and re-lint
     --const        lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
-    --bench-filter=S       bench: run only benchmarks whose name contains S
     --dir=D                vendor: project root vendored into (default: the current directory)
     --ref=R                vendor: branch, tag or commit to pin (git sources)
     --force                vendor: replace an existing vendor/<name>
     --test                 script: collect @test functions, build, and run
-    --test-filter=S        run only tests whose name contains S
+    --filter=S             test, bench: run only tests or benchmarks whose name contains S (the
+                           test and bench subcommands also build only the files that hold them)
     --test-shard=K/N       run shard K of N (one-based, stable round-robin)
     --test-jobs=N          bound the test process pool (default: one per core)
     --test-timeout=S       fail a test that runs longer than S seconds (default 90, 0: none)

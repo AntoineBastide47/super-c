@@ -105,13 +105,13 @@ under `--test-no-fork`.
 
 ```sh
 super-c test --quiet                   # the standard form: discover tests/**/*.spc, build, run
-super-c test --quiet --test-filter=parse  # substring match on test name
+super-c test --quiet --filter=parse  # substring match on test name; builds only the matching files
 super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
 super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per core)
 super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; should_panic skipped)
-super-c --test --quiet app.spc         # single-file form (same --test-* flags apply)
+super-c --test --quiet app.spc         # single-file form (same --test-* and --filter flags apply)
 ```
 
 Each `@test` function runs in a forked child. `@test_init` provides fixtures;
@@ -128,12 +128,16 @@ failed test, its output, how the process ended, then the list of failed names).
 ```sh
 super-c bench                # generate a runner over bench/'s @bench fns, build, run
 super-c bench --no-run       # build only (for profiler attachment; binary: build/bench-bin)
-super-c bench --bench-filter=S  # run only benchmarks whose name contains S
+super-c bench --filter=S     # build and run only benchmarks whose name contains S
 super-c command profile      # build then run under samply (if [command.profile] defined)
 ```
 
 `super-c bench` writes an import-only root covering every `.spc` under `bench/` and
-collects `pub @bench` functions. `tests/` and `bench/` sit beside `src/` at the project
+collects the `pub @bench` functions that `@platform` and `@arch` keep for the target
+(`@bench` applies to top-level functions only). `--filter=S` keeps in the generated runner
+only the benchmarks whose name (`<module>::<fn>` without the `bench::` prefix) contains S,
+so only their files build; `build/bench-bin --filter=S` selects among the built ones at
+run time. `tests/` and `bench/` sit beside `src/` at the project
 root. A bench file that imports the program's root module links a second `main`
 (duplicate `__sc_user_main`): put the code under benchmark in a module other than the
 root. The generated runner carries the checkout's identity

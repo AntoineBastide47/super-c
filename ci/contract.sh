@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 18.
+# Super-C compatibility contract, version 19.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=18
+CONTRACT_VERSION=19
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -124,6 +124,7 @@ tests/parser_test.spc
 tests/pattern_test.spc
 tests/raii_gen_test.spc
 tests/resolver_test.spc
+tests/simd_baseline_test.spc
 tests/queue_test.spc
 tests/thread_test.spc
 tests/timer_test.spc

@@ -1,5 +1,6 @@
 // FFI bindings for <unistd.h>. Import with `import unistd;`. Every call site requires `unsafe` except
-// `getpid`, `getppid`, `sleep` and `usleep`.
+// `getpid`, `getppid` and `sleep`. No `usleep`: POSIX 2008 removed it, so glibc and musl do not declare it
+// under `_POSIX_C_SOURCE=200809L`; `sc_runtime::sc_rt_sleep_ns` sleeps an OS thread to the nanosecond.
 // The block names its backing header, which is what gets `<unistd.h>` included in the emitted C: it is not
 // one of the standard headers the runtime prologue carries, so without this the declarations are missing
 // and every call compiles as an implicit declaration (an error under C99 and later).
@@ -39,7 +40,4 @@ extern "C" "unistd.h" {
     /// Sleep whole seconds; the seconds left if interrupted.
     @unsafe(safe)
     pub fn sleep(seconds: u32) u32;
-    /// Sleep microseconds; 0 or -1.
-    @unsafe(safe)
-    pub fn usleep(usec: u32) i32;
 }

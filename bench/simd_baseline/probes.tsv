@@ -1,0 +1,81 @@
+version	triple	compiler	probe	result
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	add-overflow	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	fp-contract-off	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	target-attr-x86_64	avx2
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	target-attr-aarch64	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	march-x86-64-v2	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	march-x86-64-v3	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	march-x86-64-v4	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	wasm-simd128	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	wasm-relaxed-simd	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	cas16	library call
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	thread-local	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	cpuid-count	accepted
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	getauxval	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	at-hwcap2	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	at-hwcap3	not applicable
+cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	x86_64-linux-gnu	cc	thin-lto	auto: the compiler rejects -flto=thin
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	add-overflow	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	fp-contract-off	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	target-attr-x86_64	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	target-attr-aarch64	+i8mm
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	march-x86-64-v2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	march-x86-64-v3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	march-x86-64-v4	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	wasm-simd128	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	wasm-relaxed-simd	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	cas16	inline
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	thread-local	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	cpuid-count	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	getauxval	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	at-hwcap2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	at-hwcap3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin25.6.0	cc	thin-lto	thin 1
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	add-overflow	accepted
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	fp-contract-off	accepted
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	target-attr-x86_64	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	target-attr-aarch64	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	march-x86-64-v2	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	march-x86-64-v3	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	march-x86-64-v4	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	wasm-simd128	accepted
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	wasm-relaxed-simd	accepted
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	cas16	unknown
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	thread-local	accepted
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	cpuid-count	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	getauxval	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	at-hwcap2	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	at-hwcap3	not applicable
+clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	thin-lto	thin 2
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	add-overflow	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	fp-contract-off	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-x86_64	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-aarch64	+i8mm
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v4	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-simd128	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-relaxed-simd	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cas16	inline
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thread-local	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cpuid-count	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	getauxval	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thin-lto	thin 1
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	add-overflow	accepted
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	fp-contract-off	accepted
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	target-attr-x86_64	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	target-attr-aarch64	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	march-x86-64-v2	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	march-x86-64-v3	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	march-x86-64-v4	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	wasm-simd128	accepted
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	wasm-relaxed-simd	accepted
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	cas16	unknown
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	thread-local	accepted
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	cpuid-count	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	getauxval	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	at-hwcap2	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	at-hwcap3	not applicable
+Homebrew clang version 22.1.8	wasm32-wasip1	clang	thin-lto	thin 2

@@ -35,7 +35,7 @@ Before any optimization work, understand these non-negotiable constraints:
    checkpoint before implementing. If a target shows ~0 samples under LTO, the
    optimization will not produce a corpus-level win.
 
-3. **Benchmark protocol.** Measure with `super-c bench --bench-filter=self_transpile`
+3. **Benchmark protocol.** Measure with `super-c bench --filter=self_transpile`
    (100 serial rounds of the build's own transpile step, timed per build phase from
    stamp to publish, then one cold real build through the engine for sync, compile and
    link).
@@ -374,6 +374,35 @@ allocation tracker's counts, requested and live bytes, and the survivors of each
 phase (slower: only for memory questions). `sh ci/bench_matrix.sh` runs the clean /
 unchanged / body-edit / signature-edit / layout-edit / release-relink matrix with
 those records and writes `build/matrix/report.md`.
+
+### SIMD baselines
+
+`bench/simd_baseline/` holds the reference numbers for vector code. `kernels.spc` has eleven
+kernels as plain scalar loops (`saxpy_f32`, `dot_f32_ordered`, `dot_f32_tree`, `count_eq_u8`,
+`sum_i32`, `min_max_f32`, `filter_gt_f32`, `gather_sum_f32`, `tail_load_f32`, `mix_width`,
+`abs_diff_u8`); each instruction set has the same kernels in C intrinsics (`sse2.c`, `avx2.c`,
+`avx512.c`, `neon.c`, `simd128.c`), each behind an `@arch`-gated `extern "C" "<name>.h"` block
+that returns its table (`sb.h`). The AVX2 and AVX-512 tables are null on a CPU without the
+features. The scalar loop defines each result: every implementation gives its bits (any NaN
+counts as one value). `first_mismatch` checks that on inputs of every tail length, in modes that
+put NaNs, zeros of both signs in both orders and all-equal bytes into every lane; the
+`simd_baseline` benchmark runs it before it times anything, so the wasm run checks SIMD128,
+and `tests/simd_baseline_test.spc` runs it on the host's instruction sets. Every round
+repeats one input: at 4 KiB and 64 KiB its branches fit the branch predictor, so a
+scalar loop that compiles to a data-dependent branch (`filter_gt_f32`, and `mix_width` and
+`min_max_f32` under gcc) reads faster there than at 4 MiB.
+
+- `baseline.tsv`: the median ns per element of each kernel, instruction set and input size
+  (4 KiB, 64 KiB, 4 MiB), per machine and C compiler, under the `bench` profile.
+- `probes.tsv`: the `super-c build --print-probes` table of each C compiler of the CI matrix
+  and of the development machine.
+
+`sh bench/simd_baseline/record.sh` measures the current machine and C compiler and replaces
+their rows in both files; its arguments go to `super-c bench` and `super-c build`
+(`--target=wasm` for SIMD128 under wasmtime, the `--cstd=` flag on Windows). Run it with
+`./super-c` built from the measured commit. The SIMD workflow (`.github/workflows/simd.yml`)
+runs only on dispatch from the Actions tab: it runs it on every CI platform and uploads both
+files per platform; merge their rows into the committed files.
 
 ### Borrow-check probe and budget
 

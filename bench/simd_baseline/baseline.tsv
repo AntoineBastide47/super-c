@@ -1,0 +1,397 @@
+machine	compiler	profile	kernel	isa	bytes	ns_per_element
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	scalar	4096	0.26502
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	sse2	4096	0.0659313
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx2	4096	0.0504107
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx512	4096	0.0370483
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	scalar	4096	0.457976
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	sse2	4096	0.44129
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx2	4096	0.438106
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx512	4096	0.439295
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	scalar	4096	0.384328
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	sse2	4096	0.0666189
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx2	4096	0.0421348
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx512	4096	0.0381947
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	scalar	4096	0.148886
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	sse2	4096	0.0147768
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx2	4096	0.0050025
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx512	4096	0.00836074
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	scalar	4096	0.271557
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	sse2	4096	0.0336728
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx2	4096	0.0178895
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx512	4096	0.0133715
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	scalar	4096	0.79411
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	sse2	4096	0.164514
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx2	4096	0.0987439
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx512	4096	0.095005
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	scalar	4096	0.330407
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	sse2	4096	0.287962
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx2	4096	0.11872
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx512	4096	0.0726271
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	scalar	4096	0.382804
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	sse2	4096	0.15246
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx2	4096	0.368999
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx512	4096	0.30215
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	scalar	4096	0.387501
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	sse2	4096	0.0715395
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx2	4096	0.042362
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx512	4096	0.0392084
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	scalar	4096	0.306343
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	sse2	4096	0.0563087
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx2	4096	0.0351772
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx512	4096	0.0296755
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	scalar	4096	0.473088
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	sse2	4096	0.0241381
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx2	4096	0.0166811
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx512	4096	0.0164088
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	scalar	65536	0.248582
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	sse2	65536	0.0662608
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx2	65536	0.0554156
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx512	65536	0.0418339
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	scalar	65536	0.463488
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	sse2	65536	0.463449
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx2	65536	0.463694
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx512	65536	0.46204
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	scalar	65536	0.347847
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	sse2	65536	0.0570869
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx2	65536	0.0370774
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx512	65536	0.0330467
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	scalar	65536	0.141685
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	sse2	65536	0.014452
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx2	65536	0.00513148
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx512	65536	0.00760746
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	scalar	65536	0.261104
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	sse2	65536	0.0456448
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx2	65536	0.0249434
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx512	65536	0.0221682
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	scalar	65536	0.948594
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	sse2	65536	0.147584
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx2	65536	0.0689545
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx512	65536	0.0385151
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	scalar	65536	0.315183
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	sse2	65536	0.27608
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx2	65536	0.11447
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx512	65536	0.073195
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	scalar	65536	0.355927
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	sse2	65536	0.16011
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx2	65536	0.377862
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx512	65536	0.288845
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	scalar	65536	0.380185
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	sse2	65536	0.0721907
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx2	65536	0.0450926
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx512	65536	0.0439742
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	scalar	65536	0.320746
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	sse2	65536	0.054914
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx2	65536	0.0424261
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx512	65536	0.035635
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	scalar	65536	0.468705
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	sse2	65536	0.0234134
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx2	65536	0.0188683
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx512	65536	0.0193529
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	scalar	4194304	0.250516
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	sse2	4194304	0.0790262
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx2	4194304	0.0795088
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	saxpy_f32	avx512	4194304	0.0784769
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	scalar	4194304	0.465484
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	sse2	4194304	0.46918
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx2	4194304	0.4714
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_ordered	avx512	4194304	0.469462
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	scalar	4194304	0.355894
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	sse2	4194304	0.07586
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx2	4194304	0.075726
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	dot_f32_tree	avx512	4194304	0.0747375
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	scalar	4194304	0.148417
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	sse2	4194304	0.0149021
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx2	4194304	0.00820565
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	count_eq_u8	avx512	4194304	0.00956059
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	scalar	4194304	0.237728
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	sse2	4194304	0.0387678
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx2	4194304	0.032445
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	sum_i32	avx512	4194304	0.034193
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	scalar	4194304	1.5891
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	sse2	4194304	0.147106
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx2	4194304	0.0675836
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	min_max_f32	avx512	4194304	0.0393314
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	scalar	4194304	3.06347
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	sse2	4194304	0.281969
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx2	4194304	0.118663
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	filter_gt_f32	avx512	4194304	0.0880852
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	scalar	4194304	0.650371
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	sse2	4194304	0.507767
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx2	4194304	0.552141
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	gather_sum_f32	avx512	4194304	0.547475
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	scalar	4194304	0.387316
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	sse2	4194304	0.0840881
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx2	4194304	0.0841606
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	tail_load_f32	avx512	4194304	0.0791318
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	scalar	4194304	4.12994
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	sse2	4194304	0.0729375
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx2	4194304	0.068224
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	mix_width	avx512	4194304	0.0538349
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	scalar	4194304	0.475028
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	sse2	4194304	0.0300465
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx2	4194304	0.0233026
+Linux x86_64 AMD EPYC 9V45 96-Core Processor	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0	bench	abs_diff_u8	avx512	4194304	0.024587
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	4096	0.0841622
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	4096	0.0986452
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	4096	0.962972
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	4096	0.959178
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	4096	0.680467
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	4096	0.0662208
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	4096	0.18474
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	4096	0.0161279
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	4096	0.400047
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	4096	0.0388622
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	4096	2.14573
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	4096	0.132481
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	4096	0.549694
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	4096	0.234107
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	4096	0.713646
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	4096	0.189583
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	4096	0.678249
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	4096	0.0760428
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	4096	0.45226
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	4096	0.0574985
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	4096	0.0336418
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	4096	0.0211647
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	65536	0.095109
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	65536	0.0963411
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	65536	1.04006
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	65536	1.0555
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	65536	0.547111
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	65536	0.0621476
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	65536	0.178556
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	65536	0.0144442
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	65536	0.388105
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	65536	0.0440879
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	65536	2.23442
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	65536	0.110865
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	65536	1.86259
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	65536	0.213623
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	65536	0.573436
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	65536	0.202378
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	65536	0.663125
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	65536	0.123968
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	65536	0.434915
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	65536	0.0530481
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	65536	0.034839
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	65536	0.0207474
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	4194304	0.147084
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	4194304	0.151952
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	4194304	1.03881
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	4194304	1.04326
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	4194304	0.561139
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	4194304	0.125766
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	4194304	0.17937
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	4194304	0.0144143
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	4194304	0.351211
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	4194304	0.0519753
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	4194304	2.19387
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	4194304	0.111779
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	4194304	3.38239
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	4194304	0.221869
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	4194304	0.880837
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	4194304	0.727395
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	4194304	0.665214
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	4194304	0.14188
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	4194304	0.455002
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	4194304	0.082056
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	4194304	0.0464668
+Darwin arm64 Apple M1 (Virtual)	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	4194304	0.0381618
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	scalar	4096	1.73145
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	simd128	4096	0.113919
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	scalar	4096	0.538599
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	simd128	4096	0.503118
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	scalar	4096	1.01668
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	simd128	4096	0.115308
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	scalar	4096	0.317743
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	simd128	4096	0.0200657
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	scalar	4096	0.735321
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	simd128	4096	0.0429926
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	scalar	4096	2.09984
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	simd128	4096	0.306852
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	scalar	4096	1.55056
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	simd128	4096	0.182301
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	scalar	4096	1.01922
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	simd128	4096	0.306322
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	scalar	4096	1.48547
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	simd128	4096	0.0655968
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	scalar	4096	1.76074
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	simd128	4096	0.0780816
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	scalar	4096	0.823738
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	simd128	4096	0.0275296
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	scalar	65536	1.7238
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	simd128	65536	0.110503
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	scalar	65536	0.483502
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	simd128	65536	0.48169
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	scalar	65536	0.968642
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	simd128	65536	0.119083
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	scalar	65536	0.314803
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	simd128	65536	0.0182881
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	scalar	65536	0.725634
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	simd128	65536	0.0439482
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	scalar	65536	2.28128
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	simd128	65536	0.263659
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	scalar	65536	3.51455
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	simd128	65536	0.187882
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	scalar	65536	0.969076
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	simd128	65536	0.318012
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	scalar	65536	1.66274
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	simd128	65536	0.0952181
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	scalar	65536	1.77793
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	simd128	65536	0.0827723
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	scalar	65536	0.814403
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	simd128	65536	0.0308627
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	scalar	4194304	1.76295
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	saxpy_f32	simd128	4194304	0.275619
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	scalar	4194304	0.522606
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_ordered	simd128	4194304	0.489459
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	scalar	4194304	0.998648
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	dot_f32_tree	simd128	4194304	0.267907
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	scalar	4194304	0.316691
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	count_eq_u8	simd128	4194304	0.0291483
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	scalar	4194304	0.735951
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	sum_i32	simd128	4194304	0.129936
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	scalar	4194304	2.49437
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	min_max_f32	simd128	4194304	0.350045
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	scalar	4194304	4.4023
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	filter_gt_f32	simd128	4194304	0.198612
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	scalar	4194304	1.98114
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	gather_sum_f32	simd128	4194304	1.30061
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	scalar	4194304	1.50624
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	tail_load_f32	simd128	4194304	0.297357
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	scalar	4194304	1.80091
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	mix_width	simd128	4194304	0.233833
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	scalar	4194304	0.848726
+wasmtime 47.0.3, Linux x86_64 Intel(R) Xeon(R) 6973P-C	clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	bench	abs_diff_u8	simd128	4194304	0.100535
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	4096	0.0621481
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	4096	0.0667963
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	4096	0.601947
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	4096	0.591874
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	4096	0.361145
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	4096	0.0498295
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	4096	0.133475
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	4096	0.0105302
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	4096	0.279347
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	4096	0.0287294
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	4096	1.53263
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	4096	0.115811
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	4096	0.537773
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	4096	0.158946
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	4096	0.42655
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	4096	0.140945
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	4096	0.511175
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	4096	0.0621591
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	4096	0.317732
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	4096	0.0395374
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	4096	0.0237126
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	4096	0.016888
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	65536	0.082016
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	65536	0.0657835
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	65536	0.681062
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	65536	0.665109
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	65536	0.333766
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	65536	0.0485182
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	65536	0.133425
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	65536	0.00962615
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	65536	0.270009
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	65536	0.0331802
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	65536	1.62303
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	65536	0.0879369
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	65536	1.0555
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	65536	0.151317
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	65536	0.41461
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	65536	0.15088
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	65536	0.497641
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	65536	0.0730135
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	65536	0.303706
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	65536	0.0368752
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	65536	0.025923
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	65536	0.0141114
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	scalar	4194304	0.113527
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	saxpy_f32	neon	4194304	0.0874596
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	scalar	4194304	0.681539
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_ordered	neon	4194304	0.719468
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	scalar	4194304	0.334263
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	dot_f32_tree	neon	4194304	0.0708895
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	scalar	4194304	0.136361
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	count_eq_u8	neon	4194304	0.00973547
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	scalar	4194304	0.269016
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	sum_i32	neon	4194304	0.0377893
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	scalar	4194304	1.60468
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	min_max_f32	neon	4194304	0.0863867
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	scalar	4194304	2.58611
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	filter_gt_f32	neon	4194304	0.15831
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	scalar	4194304	0.745416
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	gather_sum_f32	neon	4194304	0.577986
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	scalar	4194304	0.497246
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	tail_load_f32	neon	4194304	0.0990242
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	scalar	4194304	0.309368
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	mix_width	neon	4194304	0.0539618
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	scalar	4194304	0.0329117
+Darwin arm64 Apple M3 Max	Apple clang version 21.0.0 (clang-2100.1.1.101)	bench	abs_diff_u8	neon	4194304	0.0267427
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	scalar	4096	0.981212
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	simd128	4096	0.0779228
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	scalar	4096	0.684937
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	simd128	4096	0.635128
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	scalar	4096	0.502765
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	simd128	4096	0.0668764
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	scalar	4096	0.269701
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	simd128	4096	0.0148218
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	scalar	4096	0.53978
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	simd128	4096	0.0329018
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	scalar	4096	1.80141
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	simd128	4096	0.213027
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	scalar	4096	1.20598
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	simd128	4096	0.18549
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	scalar	4096	0.621398
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	simd128	4096	0.32421
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	scalar	4096	1.54225
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	simd128	4096	0.0711475
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	scalar	4096	1.05673
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	simd128	4096	0.0561476
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	scalar	4096	0.498504
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	simd128	4096	0.0226994
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	scalar	65536	0.988265
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	simd128	65536	0.075181
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	scalar	65536	0.73419
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	simd128	65536	0.712434
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	scalar	65536	0.475526
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	simd128	65536	0.0616312
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	scalar	65536	0.267992
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	simd128	65536	0.0137887
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	scalar	65536	0.532866
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	simd128	65536	0.0333786
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	scalar	65536	1.76907
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	simd128	65536	0.188947
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	scalar	65536	1.20537
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	simd128	65536	0.177184
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	scalar	65536	0.595291
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	simd128	65536	0.320435
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	scalar	65536	1.57273
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	simd128	65536	0.0701718
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	scalar	65536	1.05772
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	simd128	65536	0.0520945
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	scalar	65536	0.500426
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	simd128	65536	0.0222325
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	scalar	4194304	1.01231
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	saxpy_f32	simd128	4194304	0.0882149
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	scalar	4194304	0.740111
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_ordered	simd128	4194304	0.717402
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	scalar	4194304	0.474553
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	dot_f32_tree	simd128	4194304	0.0707703
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	scalar	4194304	0.268087
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	count_eq_u8	simd128	4194304	0.0136893
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	scalar	4194304	0.532587
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	sum_i32	simd128	4194304	0.0379877
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	scalar	4194304	1.76438
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	min_max_f32	simd128	4194304	0.187655
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	scalar	4194304	3.87351
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	filter_gt_f32	simd128	4194304	0.182589
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	scalar	4194304	0.79616
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	gather_sum_f32	simd128	4194304	0.693957
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	scalar	4194304	1.58721
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	tail_load_f32	simd128	4194304	0.0998982
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	scalar	4194304	1.06599
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	mix_width	simd128	4194304	0.0611944
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	scalar	4194304	0.50353
+wasmtime 47.0.3, Darwin arm64 Apple M3 Max	Homebrew clang version 22.1.8	bench	abs_diff_u8	simd128	4194304	0.0267327

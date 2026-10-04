@@ -94,7 +94,7 @@ jobs:
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           for i in 1 2 3; do
             echo "### probe $i"
-            SC_LEAK_CHECK=fatal timeout 180 "./super-c${BINEXT:-}" test --test-no-fork --test-filter=idle_descriptors_do_not_delay ${cstd:+"$cstd"} || echo "### probe $i exit $?"
+            SC_LEAK_CHECK=fatal timeout 180 "./super-c${BINEXT:-}" test --test-no-fork --filter=idle_descriptors_do_not_delay ${cstd:+"$cstd"} || echo "### probe $i exit $?"
           done
 
       - name: Run the test suite (leak-gated, bounded)

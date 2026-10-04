@@ -1,0 +1,71 @@
+# The SIMD baselines of every CI platform's C compiler: the kernel parity test, then
+# bench/simd_baseline/record.sh, whose baseline.tsv and probes.tsv each job uploads. Run on demand
+# from the Actions tab.
+name: SIMD
+on: workflow_dispatch
+permissions:
+  contents: read
+concurrency:
+  group: simd-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  baseline:
+    if: github.actor == github.repository_owner
+    name: baseline (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            boot: linux
+          - os: macos-latest
+            target: macos
+            boot: macos
+          - os: windows-latest
+            target: windows
+            boot: windows
+          - os: ubuntu-latest
+            target: wasm
+            boot: linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-build
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: ${{ matrix.boot }}
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
+
+      # The wasm test runner is native: the benchmark's own parity check covers SIMD128.
+      - name: Check the kernels and record the baselines
+        run: |
+          set -eu
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          if [ "${{ matrix.target }}" = wasm ]; then
+            sh bench/simd_baseline/record.sh --target=wasm
+          else
+            "./super-c${BINEXT:-}" test --quiet --filter=simd_baseline ${cstd:+"$cstd"}
+            sh bench/simd_baseline/record.sh ${cstd:+"$cstd"}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simd-baseline-${{ matrix.target }}
+          path: bench/simd_baseline/*.tsv
+          if-no-files-found: error

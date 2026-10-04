@@ -157,7 +157,7 @@ separate `SC_BUILD_MEM=1` run). Bodies: 4,369 lowered (closures included), 3,762
 | RSS at the borrowck / plan / publish boundaries | 141 / 180 / 185 MiB | 143 / 180 / 183 MiB |
 | inline splices | 14,383 | 14,479 (the compiler's own sources grew) |
 
-Bench lane (`super-c bench --bench-filter=self_transpile`, the benchmark binary built from
+Bench lane (`super-c bench --filter=self_transpile`, the benchmark binary built from
 a checkout of the previous commit with its own compiler against the current one, three
 interleaved runs each, medians):
 

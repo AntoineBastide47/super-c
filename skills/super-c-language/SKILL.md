@@ -227,6 +227,8 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
   ("slicing an array of unknown length"). A field of a concrete instance has the instance's
   length (`Buf<i32, 4>.d` is `[i32; 4]`)
 - Every call to an `extern "C"` function
+- Naming an `unsafe fn`, or an `extern "C"` function without `@unsafe(safe)`, as a value
+  outside a call: a `fn` pointer is called without `unsafe`
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
 A `&mut` reference is exclusive also for unsafe code: reaching its referent through any

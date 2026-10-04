@@ -12757,6 +12757,29 @@ extend<'a> TypeChecker<'a> {
             self.err_unsafe(unsafe (*self.cur_ast()).at_const(id).span, "accessing a 'static mut'");
         }
     }
+    // A call of an `unsafe fn`, or of an extern "C" function without `@unsafe(safe)`, needs `unsafe`, and a
+    // `fn` pointer type cannot carry that: naming one as a value outside a call needs `unsafe` too, or a call
+    // through the pointer would skip it.
+    fn tc_fn_value_use(self: &mut Self, id: NodeId, d: DefId) {
+        if d.node == NODE_NONE || self.tc_is_callee(id) {
+            return;
+        }
+        let f = unsafe (*self.mod_ast(d.module)).at_const(d.node);
+        if f.kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        let ext = f.as_data.function.is_extern() && !self.tc_unsafe_claim(d.module, d.node, UNSAFE_SAFE);
+        if (ext || f.as_data.function.is_unsafe()) && self.tc_needs_unsafe() {
+            self.err_unsafe(
+                unsafe (*self.cur_ast()).at_const(id).span,
+                if ext {
+                    "naming an extern \"C\" function as a value";
+                } else {
+                    "naming an unsafe function as a value";
+                },
+            );
+        }
+    }
     const fn tc_path_static_mut(self: &Self, id: NodeId) bool {
         let d = self.tc_path_def(id);
         return self.tc_path_const(id) && unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.const_def.is_static_mut;
@@ -20792,6 +20815,7 @@ extend TypeChecker {
                 }
                 self.tc_local_const_env(id, d, result);
                 self.tc_static_mut_use(id, d);
+                self.tc_fn_value_use(id, d);
             },
             NODE_UNARY => {
                 // `-(2 * 3)` and `-5` are literal-only arithmetic; a negative literal expecting Int<N> is
@@ -20829,6 +20853,7 @@ extend TypeChecker {
                 self.icx.addr_ctx = addr_ctx;
                 if unsafe (*a).at_const(id).as_data.member.path {
                     result = self.check_path_member(id, expected);
+                    self.tc_fn_value_use(id, unsafe (*a).resolution_def(unsafe (*a).at_const(id).as_data.member.member));
                 } else {
                     result = self.check_member(id, false, expected);
                     // A method has no value form: `v.m` names no bound receiver, so it must be called.

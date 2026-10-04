@@ -25,4 +25,4 @@ run = ["sh ci/bench_matrix.sh"]
 
 [command.gen]
 env = { SC_GEN_RUNS = "200" }
-run = ["./super-c test --quiet --test-filter=gen_random_run"]
+run = ["./super-c test --quiet --filter=gen_random_run"]

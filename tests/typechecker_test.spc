@@ -1960,6 +1960,40 @@ fn static_mut() {
     );
 }
 
+// A `fn` pointer is called without `unsafe`, so naming a function whose calls need it as a value needs it.
+@test
+fn unsafe_function_values() {
+    let ext = "extern \"C\" { fn abs(x: i32) i32; @unsafe(safe) fn labs(x: i64) i64; }\nstruct T { pub f: fn(i32) i32 }\n";
+    h::expect_err_msg(
+        "an extern function as a value needs unsafe",
+        format("{}const K: T = T {{ f: abs }};\nfn main() i32 {{ return (K.f)(0); }}\n", ext).as_str(),
+        "naming an extern \"C\" function as a value requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "with unsafe it is accepted",
+        format("{}const K: T = T {{ f: unsafe abs }};\nfn main() i32 {{ return (K.f)(0); }}\n", ext).as_str(),
+    );
+    h::expect_ok(
+        "a safe extern function needs none, nor does a call",
+        format("{}fn main() i32 {{ let g: fn(i64) i64 = labs; return unsafe abs(g(0) as i32); }}\n", ext).as_str(),
+    );
+    let uns = "unsafe fn u<X>(x: X) X { return x; }\n";
+    h::expect_err_msg(
+        "an unsafe function as a value needs unsafe",
+        format("{}fn main() i32 {{ let f: fn(i32) i32 = u::<i32>; return 0; }}\n", uns).as_str(),
+        "naming an unsafe function as a value requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "an unsafe method as a value needs unsafe",
+        "struct S { pub v: i32 }\nextend S { pub unsafe fn peek(self: &S) i32 { return self.v; } }\nfn main() i32 { let f: fn(&S) i32 = S::peek; return 0; }\n",
+        "naming an unsafe function as a value requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "a turbofished call is no value",
+        format("{}fn main() i32 {{ return unsafe u::<i32>(0); }}\n", uns).as_str(),
+    );
+}
+
 // An interface whose contract the compiler cannot check: a raw pointer that must outlive the call, a lock
 // the caller must already hold: has nowhere to say so unless the REQUIREMENT itself can be `unsafe`. The
 // mark then rides through the bound: a generic caller has to make the same promise the concrete one does.

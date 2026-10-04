@@ -48,7 +48,7 @@ pub fn run_seed<M: Model + Clone>(m: &mut M, seed: u64) String {
         let prog = m.render(k);
         r.push_string(&prog);
         r.format_into(
-            "replay: SC_GEN_MODEL={} SC_GEN_SEED={} SC_GEN_RUNS=1 ./super-c test --quiet --test-filter=gen_random_run\n",
+            "replay: SC_GEN_MODEL={} SC_GEN_SEED={} SC_GEN_RUNS=1 ./super-c test --quiet --filter=gen_random_run\n",
             m.name(),
             seed,
         );

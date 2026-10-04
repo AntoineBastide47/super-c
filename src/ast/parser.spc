@@ -1462,12 +1462,14 @@ extend Parser {
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true, false);
                 self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                self.reject_method_bench(&attrs, f);
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
             } else if self.check(TokenType::Unsafe) {
                 let f = self.parse_unsafe_fn();
                 if f != NODE_NONE {
                     self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                    self.reject_method_bench(&attrs, f);
                     self.add_attrs_to(&mut attrs, f);
                     self.ast.push(f);
                 }
@@ -1479,6 +1481,7 @@ extend Parser {
                 if cn != NODE_NONE {
                     if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
                         self.ast.at(cn).as_data.function.set(FN_PUBLIC, is_public);
+                        self.reject_method_bench(&attrs, cn);
                         self.add_attrs_to(&mut attrs, cn);
                     } else {
                         self.ast.at(cn).as_data.const_def.is_public = is_public;
@@ -4461,6 +4464,18 @@ extend Parser {
         self.pending_metas.clear();
     }
 
+    // The generated benchmark runner calls a `@bench` function by its module path, which a method has not.
+    fn reject_method_bench(self: &mut Self, attrs: &Vector<Attr>, f: NodeId) {
+        for i in 0..attrs.len() {
+            if attrs.at(i).kind == AttrKind::ATTR_BENCH as u8 {
+                self.errors.emit_span(
+                    self.ast.at_const(f).span,
+                    format("'@bench' may only be applied to a top-level function"),
+                );
+            }
+        }
+    }
+
     pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let attr = attrs.at(i);
@@ -4475,6 +4490,9 @@ extend Parser {
             }
             if attr.kind == AttrKind::ATTR_BENCH as u8 && !valid_test {
                 self.errors.emit_span(sp, format("'@bench' may only be applied to a non-generic function"));
+            } else if attr.kind == AttrKind::ATTR_BENCH as u8 && self.ast.at_const(owner).as_data.function.is_unsafe() {
+                // The generated runner names it as a value, which an `unsafe fn` cannot be without `unsafe`.
+                self.errors.emit_span(sp, format("'@bench' may not be applied to an 'unsafe fn'"));
             }
             if (attr.kind == AttrKind::ATTR_TEST as u8 || attr.kind == AttrKind::ATTR_TEST_INIT as u8 || attr.kind == AttrKind::ATTR_TEST_FREE as u8) && !valid_test {
                 self.errors.emit_span(

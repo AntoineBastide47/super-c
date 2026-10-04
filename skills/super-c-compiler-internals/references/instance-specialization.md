@@ -187,10 +187,11 @@ with `, budget exhausted` appended when the walk budget (64 million units) stopp
 SC_CEMIT_STATS=1 SC_BUILD_STATS=- SC_BUILD_MEM=1 SC_NO_CACHE=1 SC_NO_TU_CACHE=1 \
   build/sc-rel build --jobs=1 --cc=true --out-dir=build/m1 -o build/m1_bin
 SC_CEMIT_STATS=1 SC_BUILD_STATS=- SC_BUILD_MEM=1 SC_NO_CACHE=1 SC_NO_TU_CACHE=1 SC_LEAK_CHECK=fatal \
-  build/sc-rel test --quiet --jobs=1 --out-dir=build/m2 --test-filter=no_such_test
+  build/sc-rel test --quiet --jobs=1 --out-dir=build/m2 --test-shard=100000/100000
 ```
 
-The test run builds the compiler first and the test target second; the second
+The test run builds the compiler first and the test target second, and its shard holds no
+test, so it runs none (a `--filter` would also drop test files from the build); the second
 `emit-probe` table and the second build record are the corpus. `SC_TYPE_STATS=1` adds the
 graph's `add` and hit counts and the type table's probe steps. Byte identity is the old
 binary against the new one over the same sources; the test corpus includes the compiler's

@@ -190,7 +190,7 @@ agents and CI logs stay readable. Drop it only when a PASSING test's output is n
 
 ```sh
 super-c test --quiet                   # the standard form: only the failures and the tally
-super-c test --quiet --test-filter=parse  # substring match on test name
+super-c test --quiet --filter=parse    # substring match on test name
 super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
 super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per CPU)
@@ -205,7 +205,11 @@ default: `-O1` + ASan/UBSan) and exports it as `$SUPERC` for the CLI tests. The 
 runner itself is a separate engine build of the generated test root under the built-in
 `test` profile (`-O1`, no sanitizers): parallel per-TU compiles with the object cache and
 emit stamp, linked to `build/test/__tests`, emitted C under `build/test/raw/`. An
-unchanged suite skips straight to the cached link. Override the runner's flags with a
+unchanged suite skips straight to the cached link. `--filter=S` acts at build time too: the
+generated root imports only the test files with a test whose name (`<module>::<fn>`, or
+`<module>::<Type>::<fn>` for a suite method) contains S, after a parse-only scan of the
+suite, and a filter no test matches is an error. The runner then runs only the matching
+tests of those files. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. Run directly, the runner takes `--filter=S`,
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. Every compiler the CLI harnesses
@@ -309,7 +313,7 @@ or every compile fails with "cannot find type 'str'". The wrapper forwards every
 variable into the guest except its own plumbing (`SC_WASM_MODULE`, `SC_WASM_NATIVE`,
 `SC_TEST_SUPERC`); a new plumbing variable for the wrapper must join that exclusion. Run
 one test locally with `SC_TEST_SUPERC=$PWD/ci/wasm-superc.sh ./super-c test --quiet
---test-filter=NAME`. To find a wasm-only miscompile, bisect at object level: compile every
+--filter=NAME`. To find a wasm-only miscompile, bisect at object level: compile every
 TU with both toolchains, link mixed sets, and binary-search the TU set.
 `-fsanitize=undefined -fsanitize-trap=undefined` needs no runtime on wasm, and
 `WASMTIME_BACKTRACE_DETAILS=1` gives file and line in traps. A single-flag fix
@@ -414,7 +418,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
 scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
 `SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops] ./super-c test --quiet
---test-filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four
+--filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four
 programs (scalar) or two (loops).
 
 ## Test Design Rules

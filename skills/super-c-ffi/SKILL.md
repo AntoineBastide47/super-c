@@ -32,6 +32,8 @@ extern "C" {
   an invented name fails in the C compile).
 - `pub` inside an extern block exports the binding cross-module.
 - Calling an extern binding requires `unsafe` at the call site, unless its `@unsafe(...)` lists `safe`.
+  So does naming it as a value (`let f: fn(i32) i32 = unsafe abs;`): a call through the `fn`
+  pointer needs no `unsafe`.
 - `char` is C `char`, and it is unsigned (0 to 255) everywhere: the build engine compiles
   every generated and `@c.source` TU with `-funsigned-char`, on every target, so
   `200 as char as i32` is 200 at compile time and at run time. A C file compiled apart
@@ -184,7 +186,7 @@ The raw bindings carry the `@unsafe` claims their C contract supports (rules bel
 
 | Claim | Bindings |
 |-------|----------|
-| `safe` | every `math` function except `lgamma`/`lgammaf` (they write the global `signgam`); `stdlib::abort`; `time::clock`, `difftime`; `unistd::getpid`, `getppid`, `sleep`, `usleep`; `stdio::getchar`, `putchar`; `pthread::pthread_self`; the `sc_runtime` queries and hints (`sc_rt_now_ns`, `cycles`, `page_size`, `ncpu`, `widx_get`, `cpu_relax`, `thread_yield`, `parked`, `sleep_ns`, `stack_bytes`, `ctx_inline_size`); `sc_io_errno`, `sc_io_would_block` |
+| `safe` | every `math` function except `lgamma`/`lgammaf` (they write the global `signgam`); `stdlib::abort`; `time::clock`, `difftime`; `unistd::getpid`, `getppid`, `sleep`; `stdio::getchar`, `putchar`; `pthread::pthread_self`; the `sc_runtime` queries and hints (`sc_rt_now_ns`, `cycles`, `page_size`, `ncpu`, `widx_get`, `cpu_relax`, `thread_yield`, `parked`, `sleep_ns`, `stack_bytes`, `ctx_inline_size`); `sc_io_errno`, `sc_io_would_block` |
 | `const` | `stdlib::abs`, `llabs`; `string::strlen`, `memchr`, `strchr`, `strrchr`, `strstr` |
 
 A binding is `safe` only when every argument value is defined behavior in C, the call is

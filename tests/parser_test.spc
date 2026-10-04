@@ -935,6 +935,17 @@ fn bug_regressions() {
     }
     // P4: `@bench()` at end of input reads no argument past the token stream.
     assert(h::parse_has_error("@bench()"), "empty @bench arguments rejected");
+    // The benchmark runner calls a `@bench` function by module path, which a method has not.
+    assert(
+        h::parse_has_error("struct S {}\nextend S {\n    @bench\n    pub fn m() {}\n}\n"),
+        "@bench on a method rejected",
+    );
+    assert(
+        h::parse_has_error("struct S {}\nextend S {\n    @bench\n    pub const fn m() {}\n}\n"),
+        "@bench on a const method rejected",
+    );
+    assert(h::parse_has_error("@bench\npub unsafe fn f() {}\n"), "@bench on an unsafe fn rejected");
+    assert(!h::parse_has_error("@bench\npub fn f() {}\n"), "@bench on a top-level function accepted");
     // P5: a struct-literal path deeper than 16 segments keeps every segment.
     {
         let c = h::parse_ast("fn f() { let x = a::b::c::d::e::f::g::h::i::j::k::l::m::n::o::p::q::T { }; }\n");

@@ -691,12 +691,14 @@ pub fn black_box(v: u64) {
 
 /// `rounds` iterations of a dependent multiply-add chain: arithmetic a task can be given so it is not pure
 /// scheduling. The chain starts from the barrier's last value (a volatile load), so the result is unknown
-/// at compile time however constant `rounds` is; the caller feeds the result to `black_box`. Unsigned, so
-/// it wraps at width where the signed form would trap.
+/// at compile time however constant `rounds` is; the caller feeds the result to `black_box`. The multiplier
+/// is that value too: with a constant one, LLVM 22 folds eight steps into one multiply-add by the eighth
+/// power. Unsigned, so it wraps at width where the signed form would trap.
 pub fn burn(rounds: i64) u64 {
-    let mut acc: u64 = unsafe sys::sc_bs_sunk() | 1;
+    let k: u64 = unsafe sys::sc_bs_sunk() | 1;
+    let mut acc = k;
     for i in 0..rounds {
-        acc = acc.wrapping_mul(6364136223846793005).wrapping_add(i as u64);
+        acc = acc.wrapping_mul(k).wrapping_add(i as u64);
     }
     return acc;
 }
