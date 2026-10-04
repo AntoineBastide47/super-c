@@ -252,7 +252,7 @@ fn sqrt_fma_convert_match_libm() {
     ];
     for i in 0..14 {
         let a = unsafe vs[i];
-        assert(same64(Float::<11, 52>::from_f64(a).sqrt().to_f64(), unsafe math::sqrt(a)));
+        assert(same64(Float::<11, 52>::from_f64(a).sqrt().to_f64(), math::sqrt(a)));
         for j in 0..14 {
             for k in 0..14 {
                 let b = unsafe vs[j];
@@ -260,7 +260,7 @@ fn sqrt_fma_convert_match_libm() {
                 let fa = Float::<11, 52>::from_f64(a);
                 let fb = Float::<11, 52>::from_f64(b);
                 let fc = Float::<11, 52>::from_f64(c);
-                assert(same64(fa.fma(&fb, &fc).to_f64(), unsafe math::fma(a, b, c)));
+                assert(same64(fa.fma(&fb, &fc).to_f64(), math::fma(a, b, c)));
             }
         }
         // Widening then narrowing through f128 is the identity; direct narrowing agrees with from_f64.
@@ -360,14 +360,14 @@ fn rem_and_rounding_match_libm() {
     for i in 0..22 {
         let a = unsafe vs[i];
         let fa = Float::<11, 52>::from_f64(a);
-        assert(same64(fa.trunc().to_f64(), unsafe math::trunc(a)));
-        assert(same64(fa.floor().to_f64(), unsafe math::floor(a)));
-        assert(same64(fa.ceil().to_f64(), unsafe math::ceil(a)));
-        assert(same64(fa.round().to_f64(), unsafe math::round(a)));
+        assert(same64(fa.trunc().to_f64(), math::trunc(a)));
+        assert(same64(fa.floor().to_f64(), math::floor(a)));
+        assert(same64(fa.ceil().to_f64(), math::ceil(a)));
+        assert(same64(fa.round().to_f64(), math::round(a)));
         for j in 0..22 {
             let b = unsafe vs[j];
             let fb = Float::<11, 52>::from_f64(b);
-            assert(same64((fa % fb).to_f64(), unsafe math::fmod(a, b)));
+            assert(same64((fa % fb).to_f64(), math::fmod(a, b)));
             if a == 0.0 && b == 0.0 {
                 // C leaves fmin/fmax's zero sign unspecified; ours is IEEE-2019's -0 < +0.
                 let na = fa.signum().to_f64() < 0.0;
@@ -375,10 +375,10 @@ fn rem_and_rounding_match_libm() {
                 assert(fa.min(&fb).signum().to_f64() < 0.0 == (na || nb));
                 assert(fa.max(&fb).signum().to_f64() < 0.0 == (na && nb));
             } else {
-                assert(same64(fa.min(&fb).to_f64(), unsafe math::fmin(a, b)));
-                assert(same64(fa.max(&fb).to_f64(), unsafe math::fmax(a, b)));
+                assert(same64(fa.min(&fb).to_f64(), math::fmin(a, b)));
+                assert(same64(fa.max(&fb).to_f64(), math::fmax(a, b)));
             }
-            assert(same64(fa.copysign(&fb).to_f64(), unsafe math::copysign(a, b)));
+            assert(same64(fa.copysign(&fb).to_f64(), math::copysign(a, b)));
         }
     }
     // Ties: away for round, even for round_ties_even; fract is the exact complement.
@@ -502,16 +502,16 @@ fn finite_only_family_new_surface() {
             let r = x % y;
             // Every e4m3 value is exact in f64 and fmod is exact, so f64's fmod is the truth:
             // except that this family calls x % 0 NaN, which fmod also does.
-            let want = unsafe math::fmod(xf, yf);
+            let want = math::fmod(xf, yf);
             if r.is_nan() {
                 assert(want != want || x.is_nan() || y.is_nan() || y.is_zero());
             } else {
                 assert(same64(r.to_f64(), want));
             }
         }
-        assert(same64(x.trunc().to_f64(), unsafe math::trunc(xf)));
-        assert(same64(x.floor().to_f64(), unsafe math::floor(xf)));
-        assert(same64(x.ceil().to_f64(), unsafe math::ceil(xf)));
+        assert(same64(x.trunc().to_f64(), math::trunc(xf)));
+        assert(same64(x.floor().to_f64(), math::floor(xf)));
+        assert(same64(x.ceil().to_f64(), math::ceil(xf)));
     }
 }
 

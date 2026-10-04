@@ -165,7 +165,11 @@ with `static_assert(sizeof(T) == N, "...")`.
 | `alignof(T)` | Alignment |
 
 Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` lowers to
-`const T*` in C; `&mut T` lowers to `T*`. `&&T` and `&&x` are two references (`& &T`,
+`const T*` in C; `&mut T` lowers to `T*`, and a `&mut T` parameter to `T *restrict`: the
+C compiler assumes nothing else reaches the referent during the call. Unsafe code that
+reaches a live `&mut` referent through another path (a raw pointer, a second reference)
+while the call runs is undefined behavior. `&T` parameters stay plain `const T*`, because
+writing through a const-cast `&Self` is allowed. `&&T` and `&&x` are two references (`& &T`,
 `&(&x)`). Indexing a reference to an array (`r[i]` for `r: &[T; N]`) indexes the array, with
 the array's rules; it assigns only through `&mut`.
 

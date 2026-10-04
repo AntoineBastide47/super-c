@@ -916,7 +916,7 @@ pub fn cancel_membership(b: &mut bench::Bencher) {
         // `done` runs inside each task, before the runtime counts its completion: wait, bounded, for the count.
         let deadline = platform::now_ns() + SETTLE_NS;
         while rt::completed_tasks() - base < MEMB_TASKS as usize && platform::now_ns() <= deadline {
-            unsafe sc_runtime::sc_rt_cpu_relax();
+            sc_runtime::sc_rt_cpu_relax();
         }
         b.tally(MEMB_TASKS, (rt::completed_tasks() - base) as i64);
     }
@@ -1135,7 +1135,7 @@ fn flood_once(lat: &LatSink) i64 {
             let t0 = platform::now_ns();
             let got = blocking::call(
                 fn() i64 {
-                    let _ = unsafe unistd::usleep(FLOOD_SLEEP_US);
+                    let _ = unistd::usleep(FLOOD_SLEEP_US);
                     return id;
                 },
             );

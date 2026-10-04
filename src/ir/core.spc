@@ -348,6 +348,9 @@ pub const IN_SAFEPOINT_C: u8 = 20;
 /// iteration; the chunk's other `lim - i - 1` iterations fit the tick budget left and are charged
 /// to it here, so the chunk's backedges run without a tick. Where no tick prints, `lim` is `end`.
 pub const IN_CHUNK: u8 = 21;
+/// IN_LIKELY(cond): returns the bool `cond` unchanged; the C emitter tells the C compiler that it
+/// is usually true (the success test of `?`, whose failure path returns early).
+pub const IN_LIKELY: u8 = 22;
 
 /// True for the five safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {

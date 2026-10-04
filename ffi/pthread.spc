@@ -2,7 +2,7 @@
 // Mutexes, condition variables and read/write locks are not bound: their storage size is platform-defined
 // and Super-C cannot allocate it, so a binding could only be called on storage of a guessed size. Use
 // `std::parallel::sync` (Mutex, Condvar, RwLock) instead.
-// Carries `@c.link("pthread")` off Android; every call site requires `unsafe`.
+// Carries `@c.link("pthread")` off Android. Every call site except `pthread_self` requires `unsafe`.
 
 // The `-l` rides on its own gated block rather than on the declarations, which every target needs: bionic
 // keeps the pthread entry points in libc itself and ships no libpthread at all, so the NDK's linker fails
@@ -16,6 +16,7 @@ extern "C" {
     pub type pthread_t;
 
     /// The calling thread's handle.
+    @unsafe(safe)
     pub fn pthread_self() pthread_t;
     /// Nonzero when two handles name the same thread.
     pub fn pthread_equal(a: pthread_t, b: pthread_t) i32;

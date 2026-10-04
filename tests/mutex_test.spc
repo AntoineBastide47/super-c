@@ -65,7 +65,7 @@ fn count(c: &arc::Arc<atomics::Atomic<i64>>) i64 {
 // back, so any overlap of two holders loses an increment.
 fn bump(v: &mut i64) {
     let seen = *v;
-    unsafe sc_runtime::sc_rt_cpu_relax();
+    sc_runtime::sc_rt_cpu_relax();
     *v = seen + 1;
 }
 
@@ -367,7 +367,7 @@ fn a_cancel_after_the_wake_claim_passes_the_release_on(fx: &mut Base) {
             launch || {
                 b.get().store(1, atomics::MemoryOrder::Release);
                 while gt.get().load(atomics::MemoryOrder::Acquire) == 0 {
-                    unsafe sc_runtime::sc_rt_cpu_relax();
+                    sc_runtime::sc_rt_cpu_relax();
                 }
             };
         }
@@ -627,7 +627,7 @@ fn a_cancel_after_a_condvar_notify_keeps_the_notify(fx: &mut Base) {
         launch || {
             b.get().store(1, atomics::MemoryOrder::Release);
             while gt.get().load(atomics::MemoryOrder::Acquire) == 0 {
-                unsafe sc_runtime::sc_rt_cpu_relax();
+                sc_runtime::sc_rt_cpu_relax();
             }
         };
     }

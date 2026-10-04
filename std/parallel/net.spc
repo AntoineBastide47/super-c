@@ -115,7 +115,7 @@ pub enum IoErrorKind {
 extend IoError {
     /// Classify the current errno. `pub` for linkage.
     pub fn last() IoError {
-        let e = unsafe sc_io::sc_io_errno();
+        let e = sc_io::sc_io_errno();
         return IoError { kind: kind_of(e), code: e };
     }
     /// A wait that ended without readiness: its deadline passed, it was cancelled, the reactor is stopping,
@@ -169,7 +169,7 @@ extend TcpListener {
             if fd >= 0 {
                 return Result::<TcpStream, IoError>::Ok(TcpStream { fd: fd });
             }
-            if unsafe sc_io::sc_io_would_block() == 0 {
+            if sc_io::sc_io_would_block() == 0 {
                 return Result::<TcpStream, IoError>::Err(IoError::last());
             }
             if !io::wait_readable(self.fd) {
@@ -185,7 +185,7 @@ extend TcpListener {
             if fd >= 0 {
                 return Result::<TcpStream, IoError>::Ok(TcpStream { fd: fd });
             }
-            if unsafe sc_io::sc_io_would_block() == 0 {
+            if sc_io::sc_io_would_block() == 0 {
                 return Result::<TcpStream, IoError>::Err(IoError::last());
             }
             if !io::wait_until(self.fd, false, deadline) {
@@ -282,7 +282,7 @@ extend UdpSocket {
             if n >= 0 {
                 return Result::<usize, IoError>::Ok(n as usize);
             }
-            if unsafe sc_io::sc_io_would_block() == 0 {
+            if sc_io::sc_io_would_block() == 0 {
                 let e = IoError::last();
                 return Result::<usize, IoError>::Err(e);
             }
@@ -299,7 +299,7 @@ extend UdpSocket {
             if n >= 0 {
                 return Result::<usize, IoError>::Ok(n as usize);
             }
-            if unsafe sc_io::sc_io_would_block() == 0 {
+            if sc_io::sc_io_would_block() == 0 {
                 return Result::<usize, IoError>::Err(IoError::last());
             }
             if !io::wait_readable(self.fd) {

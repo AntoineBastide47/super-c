@@ -180,9 +180,30 @@ The loader resolves `import X;` by searching: project root → `std/` → `ffi/X
 FFI modules include safe wrappers alongside raw bindings (e.g., `stdio` has an RAII
 `File` type, `stdlib` has `get_env() Option<String>`).
 
+The raw bindings carry the `@unsafe` claims their C contract supports (rules below):
+
+| Claim | Bindings |
+|-------|----------|
+| `safe` | every `math` function except `lgamma`/`lgammaf` (they write the global `signgam`); `stdlib::abort`; `time::clock`, `difftime`; `unistd::getpid`, `getppid`, `sleep`, `usleep`; `stdio::getchar`, `putchar`; `pthread::pthread_self`; the `sc_runtime` queries and hints (`sc_rt_now_ns`, `cycles`, `page_size`, `ncpu`, `widx_get`, `cpu_relax`, `thread_yield`, `parked`, `sleep_ns`, `stack_bytes`, `ctx_inline_size`); `sc_io_errno`, `sc_io_would_block` |
+| `const` | `stdlib::abs`, `llabs`; `string::strlen`, `memchr`, `strchr`, `strrchr`, `strstr` |
+
+A binding is `safe` only when every argument value is defined behavior in C, the call is
+thread-safe, and it touches no resource another owner holds: `abs` (undefined at
+`i32::MIN`), the `ctype` classifiers (undefined outside `unsigned char` and `EOF`),
+`rand` (shared state), `close`/`dup2` (a descriptor someone else owns) and
+`pthread_equal` (undefined on a joined handle) stay unsafe. A binding is `const` only
+when C fully specifies its result: `strcmp`, `strncmp` and `memcmp` fix only the sign,
+and locale-dependent functions differ by process. The evaluator computes libm,
+`memcmp`, `memcpy`, `memset`, `malloc`, `realloc` and `free` itself (`Interp::intercept`),
+so those take no model.
+
 ## str vs NUL-Terminated Strings
 
 **`str` is NOT NUL-terminated.** `str` and `String::as_str()` are `{ptr, len}` views.
+The one exception is a string literal: the emitter spells it as a C literal, so a NUL
+follows its `len` bytes, and `"lit".ptr() as *const char` is a C string. Compile-time
+evaluation stores that NUL too, and reads a literal's bytes through `*const char` as
+through `*const u8`, so a `const` model (`strlen`) sees what the C call sees.
 
 | Operation | Correct | Wrong |
 |-----------|---------|-------|
@@ -258,13 +279,15 @@ one `@unsafe(...)`. It applies only to a function in an `extern "C"` block.
 ```superc
 extern "C" {
     @unsafe(safe) fn fabs(x: f64) f64;                // callable without `unsafe`
-    @unsafe(safe, const) fn llabs(x: i64) i64 {
-        if x < 0 { return -x; }                       // the compile-time model
+    @unsafe(const) fn llabs(x: i64) i64 {
+        if x < 0 { return -x; }                       // the compile-time model; i64::MIN traps
         return x;
     }
 }
-const A: i64 = llabs(-7);                             // evaluates the model
+const A: i64 = unsafe llabs(-7);                      // evaluates the model
 ```
+
+`llabs` is not `safe`: `llabs(i64::MIN)` is undefined behavior in C.
 
 - `safe`: a call needs no `unsafe`. The declaration is rejected when a safe call
   could hand C an unchecked value: a variadic function, a parameter that is or names a raw

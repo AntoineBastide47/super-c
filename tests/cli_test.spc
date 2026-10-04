@@ -353,6 +353,22 @@ fn hex_shift_counts_reach_the_checked_helper() {
     assert(r.exit != 0 && r.out_shows("attempt to shift right with overflow"));
 }
 
+// A `&mut` parameter is exclusive for the call, so its C parameter is `restrict`; a `&` one is not. The
+// success test of `?` reaches C as a likely branch, at run time and in constant evaluation alike.
+@test
+fn mut_refs_restrict_and_question_success_is_likely() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn bump(n: &mut i32, by: &i32) { *n = *n + *by; }\nconst fn half(x: i32) Option<i32> {\n    if x % 2 == 0 {\n        return Option::<i32>::Some(x / 2);\n    }\n    return Option::<i32>::None;\n}\nconst fn quarter(x: i32) Option<i32> {\n    let h = half(x)?;\n    return half(h);\n}\nconst Q: i32 = quarter(8).unwrap_or(0);\nfn main() i32 {\n    let mut n = 1;\n    let k = 2;\n    bump(&mut n, &k);\n    return switch quarter(4 * n) {\n        Some(q) => q - 3 + Q - 2,\n        None => 1,\n    };\n}\n",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "int32_t *restrict n, const int32_t *by"), "only the &mut parameter is restrict");
+    assert(p.gen_has("main.c", "__builtin_expect("), "the success test of `?` is likely");
+    assert(p.cc_build("-pedantic-errors ").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
 // A literal pattern and both ends of a range pattern take the matched value's type, read through a
 // reference, at every width: the emitted C spells each in that type (a u64 bound past i64::MAX is no
 // signed literal) and compiles under -Werror, and compile time and run time agree. A literal the type
@@ -2804,7 +2820,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(
-        p.gen_has("main.c", "if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();"),
+        p.gen_has("main.c", "if (__builtin_expect(--__sc_spc == 0, 0)) __sc_spc = __sc_preempt_check();"),
         "a loop in a program that never cancels gets the plain safepoint",
     );
     assert(!p.gen_has("main.c", "__sc_cancel_tick"), "no cancellation tick without a cancellation requester");
@@ -7377,6 +7393,41 @@ fn unsafe_attr_rejects(src: str, want: str) {
     let q = cli::proj_new();
     q.mkfile("bad.spc", src);
     q.expect_fail("bad.spc", want);
+}
+
+// The ffi/ bindings carry the claims: libm and the pointer-free queries are callable without `unsafe`, and
+// the fully specified string and integer functions fold through their models. A string literal reads as a
+// C string at compile time as at run time: its storage ends in a NUL and `char` views its bytes.
+@test
+fn ffi_bindings_carry_unsafe_claims() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import math;
+import stdlib;
+import string as cstring;
+import unistd;
+const fn clen(s: str) usize { return unsafe cstring::strlen(s.ptr() as *const char); }
+const fn tail(p: *mut char) usize { return unsafe cstring::strlen(p); }
+const L: usize = clen("hello");
+static_assert(L == 5, "strlen folds over a literal");
+static_assert(tail(unsafe cstring::strchr("a/b/c".ptr() as *const char, 47)) == 4, "strchr");
+static_assert(tail(unsafe cstring::strrchr("a/b/c".ptr() as *const char, 47)) == 2, "strrchr");
+static_assert(tail(unsafe cstring::strstr("abcdef".ptr() as *const char, "cd".ptr() as *const char)) == 4, "strstr");
+static_assert(unsafe cstring::strstr("abc".ptr() as *const char, "x".ptr() as *const char) == null, "strstr miss");
+static_assert(tail(unsafe cstring::memchr("hello".ptr() as *const void, 108, 5) as *mut char) == 3, "memchr");
+static_assert(unsafe stdlib::abs(-4) == 4 && unsafe stdlib::llabs(-9) == 9, "abs and llabs");
+fn main() i32 {
+    if unistd::getpid() <= 0 {
+        return 1;
+    }
+    return math::sqrt(16.0) as i32 - 4 + (unsafe cstring::strlen("hello".ptr() as *const char) - L) as i32;
+}
+)",
+    );
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
 
 // Aggregate materialization: compile-time-computed structs, Vectors, strings, shared pointers, and

@@ -2,7 +2,9 @@
 // These are the raw, unsafe building blocks the Super-C scheduler is built on: monotonic clock, CPU count,
 // the current-coroutine TLS slot, address-based parking, guard-paged stacks and a stackful context switch.
 // Prefer `std/parallel/platform.spc` for the safe pieces; the rest are used only by the runtime internals.
-// Import with `import sc_runtime;`. Every call requires `unsafe`.
+// Import with `import sc_runtime;`. Every call requires `unsafe` except the `@unsafe(safe)` queries
+// (clock, cycle counter, page size, CPU count, worker index, parked count, stack bytes, inline
+// context size), the spin and yield hints, and `sc_rt_sleep_ns`.
 
 // Parking is the one piece with a per-OS backing LIBRARY, and only the library differs: the declarations
 // are identical everywhere, so the `-l` rides on gated, otherwise-empty blocks and the functions are
@@ -29,12 +31,16 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_unpark_all(word: *mut i32) void;
 
     /// Monotonic clock in nanoseconds.
+    @unsafe(safe)
     pub fn sc_rt_now_ns() u64;
     /// A cheap per-thread cycle counter for the scheduler's compile-gated statistics.
+    @unsafe(safe)
     pub fn sc_rt_cycles() u64;
     /// The page size, bytes.
+    @unsafe(safe)
     pub fn sc_rt_page_size() usize;
     /// Online core count (at least 1).
+    @unsafe(safe)
     pub fn sc_rt_ncpu() usize;
 
     /// Store this thread's runtime pointer.
@@ -45,12 +51,15 @@ extern "C" "sc_rt.h" {
     /// Which pool worker this thread is (-1 off the pool): how a push finds its own run deque.
     pub fn sc_rt_widx_set(i: i32) void;
     /// This thread's worker index, -1 off the pool.
+    @unsafe(safe)
     pub fn sc_rt_widx_get() i32;
 
     /// One spin hint: what a worker runs between look-again attempts before it parks. It stays runnable.
+    @unsafe(safe)
     pub fn sc_rt_cpu_relax() void;
 
     /// Yield this thread to the scheduler: the backoff a spin loop takes so a descheduled holder can run.
+    @unsafe(safe)
     pub fn sc_rt_thread_yield() void;
 
     /// A spinlock over a plain i32 (0 free, 1 held), for critical sections too short to be worth a mutex:
@@ -63,6 +72,7 @@ extern "C" "sc_rt.h" {
     /// may touch it after the mutex itself was freed; the queue discipline lives in std/parallel/sync.spc.
     pub fn sc_rt_lot_bucket(addr: *mut void) *mut void;
     /// Threads parked in the POSIX parking lot; zero on a backend that keeps no records.
+    @unsafe(safe)
     pub fn sc_rt_parked() usize;
     /// Record the lock whose identity word is `id` as held by this thread (lock-order checking builds only).
     pub fn sc_rt_lockdep_acquire(id: *mut u32) void;
@@ -73,6 +83,7 @@ extern "C" "sc_rt.h" {
 
     /// Sleep the calling OS thread. Only for a non-coroutine thread: a coroutine must park on the
     /// scheduler's timer list instead, or it would take its worker down with it.
+    @unsafe(safe)
     pub fn sc_rt_sleep_ns(ns: i64) void;
 
     /// OS threads and their locks, as opaque handles: pthreads on POSIX, Win32 on Windows, one call site
@@ -112,6 +123,7 @@ extern "C" "sc_rt.h" {
     /// Release a coroutine stack from sc_rt_stack_alloc (`usable` and `size` as returned).
     pub fn sc_rt_stack_free(usable: *mut void, size: usize) void;
     /// Bytes currently mapped for task stacks, guard pages included.
+    @unsafe(safe)
     pub fn sc_rt_stack_bytes() usize;
     /// Arm this thread to report a stack overflow instead of dying on a bare fault; `note_size` supplies
     /// the size the message quotes. No-op on Windows builds other than x86-64 and on wasm.
@@ -131,6 +143,7 @@ extern "C" "sc_rt.h" {
     /// Release a context's platform resources.
     pub fn sc_rt_ctx_free(ctx: *mut void) void;
     /// Bytes an inline context needs (0: this platform keeps contexts on the heap).
+    @unsafe(safe)
     pub fn sc_rt_ctx_inline_size() usize;
     /// Release what an inline context holds besides its bytes; frees nothing.
     pub fn sc_rt_ctx_drop(ctx: *mut void) void;

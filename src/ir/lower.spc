@@ -3906,7 +3906,12 @@ extend Lowerer {
         let ut = Ast::builtin(BuiltinType::BT_U32);
         let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, vpl, 0, 0, ut), sp);
         let oop = self.kop(ir::CK_INT, ut, ok_ord, sp);
-        let cond = self.eq_test(dp, oop, sp);
+        let eq = self.eq_test(dp, oop, sp);
+        let start = self.body.oper_pool.len() as u32;
+        self.body.oper_pool.push(eq);
+        let cond = self.copy_op(
+            self.rv_temp(ir::rv(ir::RV_INTRINSIC, start, 1, ir::IN_LIKELY, Ast::builtin(BuiltinType::BT_BOOL)), sp),
+        );
         let ok_b = self.open_block();
         let err_b = self.open_block();
         // true -> ok_b, otherwise err_b; keep writing the ERROR path first, then seal into ok_b.

@@ -1,7 +1,8 @@
 // FFI bindings for the readiness poller and socket calls in ffi/sc_io.c (auto-discovered from "sc_io.h").
 // One interface over three backends (kqueue on macOS/BSD, epoll on Linux, select() on Windows) so
 // nothing here is platform-gated. These are the raw pieces `std/parallel/io.spc` (the reactor) and
-// `std/parallel/net.spc` (TCP) are built from; prefer those. Import with `import sc_io;`.
+// `std/parallel/net.spc` (TCP) are built from; prefer those. Import with `import sc_io;`. Every call
+// requires `unsafe` except `sc_io_errno` and `sc_io_would_block`.
 //
 // On Windows the poller watches SOCKETS ONLY: a socket is not a CRT file descriptor there, so `sc_io_read`
 // and `sc_io_write` are recv/send and no file or pipe can be parked on. POSIX takes any descriptor.
@@ -38,9 +39,11 @@ extern "C" "sc_io.h" {
     /// close(2); 0 or -1.
     pub fn sc_io_close(fd: i32) i32;
     /// Did the last call fail only for want of readiness? Check it immediately after a -1 return.
+    @unsafe(safe)
     pub fn sc_io_would_block() i32;
     /// The raw errno (the WSA error code on Windows) of the last failing call, so a failure can say
     /// which one it was.
+    @unsafe(safe)
     pub fn sc_io_errno() i32;
     /// read(2): bytes read, 0 at EOF, -1 and errno (see sc_io_would_block).
     pub fn sc_io_read(fd: i32, buf: *mut void, n: usize) isize;

@@ -148,7 +148,7 @@ pub fn wait_os_parked(want: usize) bool {
         return true;
     }
     let deadline = platform::now_ns() + BOUND_NS;
-    while unsafe sc_runtime::sc_rt_parked() < want {
+    while sc_runtime::sc_rt_parked() < want {
         if platform::now_ns() > deadline {
             return false;
         }

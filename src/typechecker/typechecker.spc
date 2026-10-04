@@ -2541,7 +2541,7 @@ extend<'a> TypeChecker<'a> {
             } else if op == TokenType::Slash {
                 v / c;
             } else {
-                unsafe math::fmod(v, c);
+                math::fmod(v, c);
             };
             if r - r != 0.0 {
                 if v - v == 0.0 && c - c == 0.0 && !(op == TokenType::Slash && c == 0.0) {

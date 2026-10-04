@@ -1,7 +1,8 @@
 // FFI bindings for <stdlib.h>: allocation, process control, environment, numeric parsing, randomness,
 // and sort/search. Import with `import stdlib;`. Raw `pub` bindings expose the C API directly; the safe
 // wrappers add null checks and `String`/`Option` ergonomics where they help. Calling the raw bindings
-// requires `unsafe`; the safe wrappers do not.
+// requires `unsafe` except `abort`; the safe wrappers do not. `abs`/`llabs` carry their compile-time
+// models (`@unsafe(const)`).
 
 extern "C" {
     /// Allocation. Sizes in bytes; all may return null on failure.
@@ -16,6 +17,7 @@ extern "C" {
     /// Process control. `exit`/`abort` do not return; `atexit` registers a callback (0 on success).
     pub fn exit(code: i32) void;
     /// Terminate abnormally without running atexit handlers.
+    @unsafe(safe)
     pub fn abort() void;
     /// Register a handler to run at normal exit; 0 on success.
     pub fn atexit(handler: fn() void) i32;
@@ -52,11 +54,23 @@ extern "C" {
         cmp: fn(*const void, *const void) i32,
     ) *mut void;
 
-    /// Integer absolute value.
-    pub fn abs(n: i32) i32;
+    /// Integer absolute value (undefined for i32::MIN, which traps at compile time).
+    @unsafe(const)
+    pub fn abs(n: i32) i32 {
+        if n < 0 {
+            return -n;
+        }
+        return n;
+    }
     /// Absolute value of an i64 (undefined for i64::MIN). C `long long`: `labs` takes a C `long`, which
     /// is 32 bits on Windows and wasm32.
-    pub fn llabs(n: i64) i64;
+    @unsafe(const)
+    pub fn llabs(n: i64) i64 {
+        if n < 0 {
+            return -n;
+        }
+        return n;
+    }
 }
 
 // A sandboxed iOS app has no shell to reach, and the SDK says so with __API_UNAVAILABLE: naming `system`

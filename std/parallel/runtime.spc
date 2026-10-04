@@ -369,7 +369,7 @@ pub fn hook_delay(point: i32) {
     }
     let until = platform::now_ns() + unsafe atomic::load_u64(&mut unsafe G_HOOK_NS, 0);
     while platform::now_ns() < until {
-        unsafe sc_runtime::sc_rt_cpu_relax();
+        sc_runtime::sc_rt_cpu_relax();
     }
 }
 
@@ -1235,7 +1235,7 @@ fn enqueue_runnable(s: *mut Scheduler, co: *mut Coroutine) {
 
 // The header form of `enqueue_runnable`: a job has no lifecycle state to publish.
 fn enqueue_run(s: *mut Scheduler, co: *mut Runnable) {
-    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    let wi = sc_runtime::sc_rt_widx_get();
     if wi >= 0 && wi as usize < unsafe (*s).nw {
         let w = unsafe ((*s).deques + wi as usize);
         if dq_push(w, co) {
@@ -1560,7 +1560,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
     let mut spinning = false; // do we hold `s.spinning`?
     let mut t0: u64 = 0;
     if sched_stats_on() {
-        t0 = unsafe sc_runtime::sc_rt_cycles();
+        t0 = sc_runtime::sc_rt_cycles();
     }
     // Replay mode: the nearest armed timer deadline as of this worker's last look, so the gate wait can end on
     // it and not only on a release. Zero means nothing is armed: always true on the first pass, because
@@ -1594,7 +1594,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
                 }
             }
             if sched_stats_on() {
-                unsafe (*w).st.search_cycles = unsafe (*w).st.search_cycles + (unsafe sc_runtime::sc_rt_cycles() - t0);
+                unsafe (*w).st.search_cycles = unsafe (*w).st.search_cycles + (sc_runtime::sc_rt_cycles() - t0);
             }
             return co;
         }
@@ -1613,7 +1613,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
             if sched_stats_on() {
                 unsafe (*w).st.spin_iters = unsafe (*w).st.spin_iters + 1;
             }
-            unsafe sc_runtime::sc_rt_cpu_relax();
+            sc_runtime::sc_rt_cpu_relax();
             continue;
         }
         unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
@@ -1712,7 +1712,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         let mut park_t0: u64 = 0;
         if sched_stats_on() {
             unsafe (*w).st.parks = unsafe (*w).st.parks + 1;
-            park_t0 = unsafe sc_runtime::sc_rt_cycles();
+            park_t0 = sc_runtime::sc_rt_cycles();
         }
         while unsafe (*pk).notified == 0 {
             if timed {
@@ -1734,7 +1734,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         unsafe sc_runtime::sc_rt_mutex_unlock((*pk).mtx);
         if sched_stats_on() {
             // Asleep is not searching: move the search clock past the park.
-            t0 = t0 + (unsafe sc_runtime::sc_rt_cycles() - park_t0);
+            t0 = t0 + (sc_runtime::sc_rt_cycles() - park_t0);
         }
         if timed {
             unsafe atomic::store_i32(&mut unsafe (*s).timer_waiter, -1, 2);
@@ -2018,7 +2018,7 @@ fn pool_put_chain(s: *mut Scheduler, head: *mut Coroutine) {
 
 // This thread's worker, or null off the pool. The stash is owner-only, so everything below needs this first.
 fn my_worker(s: *mut Scheduler) *mut Worker {
-    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    let wi = sc_runtime::sc_rt_widx_get();
     if wi < 0 || wi as usize >= unsafe (*s).nw {
         return null;
     }
@@ -2103,7 +2103,7 @@ fn worker_main(arg: *mut void) *mut void {
     // The worker's own context: inline in this frame where the platform's context fits, a heap block
     // where it does not (the fallback switches).
     let mut sched_mem = Array::<u64, 2>::new();
-    let ctx_inline = unsafe sc_runtime::sc_rt_ctx_inline_size() != 0;
+    let ctx_inline = sc_runtime::sc_rt_ctx_inline_size() != 0;
     let sched_ctx = if ctx_inline {
         (&mut sched_mem[0]) as *mut void;
     } else {
@@ -2164,7 +2164,7 @@ fn worker_main(arg: *mut void) *mut void {
             // flight and this waits for every one; a flag was measured to lose the second tail to the
             // first tail's clear. Bounded by those workers' dozen remaining instructions each.
             while unsafe atomic::load_i32(&mut unsafe (*co).handoff, 1) != 0 {
-                unsafe sc_runtime::sc_rt_cpu_relax();
+                sc_runtime::sc_rt_cpu_relax();
             }
             // Memberships go before the identity does: a source must not reach a recycled block.
             if unsafe (*co).memb.head != null {
@@ -2522,7 +2522,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
         }
         // The context lives in the record where it fits: zeroed here, armed by the first worker to run
         // the task (`inited`). The fallback platforms keep a heap block.
-        let cs = unsafe sc_runtime::sc_rt_ctx_inline_size();
+        let cs = sc_runtime::sc_rt_ctx_inline_size();
         if cs != 0 && cs <= sizeof(Array<u64, 2>) {
             unsafe (*co).ctx_mem = Array::<u64, 2>::new();
             ctx = &mut unsafe (*co).ctx_mem[0];
@@ -2616,7 +2616,7 @@ pub fn submit_jobs(first: *mut Runnable, stride: usize, n: usize) {
     }
     let s = ensure_started();
     let base = unsafe atomic::add_u64(&mut unsafe G_NEXT_ID, n as u64, 0) + 1;
-    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    let wi = sc_runtime::sc_rt_widx_get();
     let on_pool = wi >= 0 && wi as usize < unsafe (*s).nw;
     // The batch is counted where it is created, like a coroutine spawn.
     if on_pool {
@@ -3147,7 +3147,7 @@ pub fn sleep_ns(ns: i64) {
         // CPU: without this the gate stays shut, whatever the sleeper waits for never runs, and a timed
         // wait times out: a program that behaves differently under replay, which defeats the point.
         replay_release();
-        unsafe sc_runtime::sc_rt_sleep_ns(ns);
+        sc_runtime::sc_rt_sleep_ns(ns);
         return;
     }
     wait_note(WK_SLEEP, 0);
@@ -3392,7 +3392,7 @@ fn preempt_yield() {
     if s == null {
         return;
     }
-    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    let wi = sc_runtime::sc_rt_widx_get();
     if wi < 0 || wi as usize >= unsafe (*s).nw {
         return;
     }
@@ -3656,7 +3656,7 @@ pub fn try_shutdown(opts: ShutdownOptions) ShutdownResult {
         report_unresponsive(&mut stuck);
     }
     if opts.abort_on_unresponsive {
-        unsafe stdlib::abort();
+        stdlib::abort();
     }
     return res;
 }

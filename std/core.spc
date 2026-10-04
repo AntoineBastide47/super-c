@@ -121,6 +121,7 @@ extern "C" "bits.h" {
 /// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
 /// with value-producing siblings (`None => panic("empty")`).
 @c.noreturn
+@c.cold
 pub fn panic(msg: str) {
     unsafe __sc_panic_str(msg.ptr(), msg.len());
 }

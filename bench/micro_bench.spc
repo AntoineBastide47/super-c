@@ -64,7 +64,7 @@ fn wait_retired(base: usize, n: usize) bool {
         if platform::now_ns() > deadline {
             return false;
         }
-        unsafe sc_runtime::sc_rt_cpu_relax();
+        sc_runtime::sc_rt_cpu_relax();
     }
     return true;
 }
@@ -874,7 +874,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
                 expected = expected + 1;
                 // Each unpark is acknowledged before the next: the figure is one wake's round trip.
                 while acks.get().load(atomics::MemoryOrder::Acquire) < expected {
-                    unsafe sc_runtime::sc_rt_cpu_relax();
+                    sc_runtime::sc_rt_cpu_relax();
                 }
             }
         }

@@ -1,4 +1,5 @@
-// FFI bindings for <unistd.h>. Import with `import unistd;`. Every call site requires `unsafe`.
+// FFI bindings for <unistd.h>. Import with `import unistd;`. Every call site requires `unsafe` except
+// `getpid`, `getppid`, `sleep` and `usleep`.
 // The block names its backing header, which is what gets `<unistd.h>` included in the emitted C: it is not
 // one of the standard headers the runtime prologue carries, so without this the declarations are missing
 // and every call compiles as an implicit declaration (an error under C99 and later).
@@ -21,8 +22,10 @@ extern "C" "unistd.h" {
     pub fn dup2(oldfd: i32, newfd: i32) i32;
 
     /// This process's id.
+    @unsafe(safe)
     pub fn getpid() i32;
     /// The parent process's id.
+    @unsafe(safe)
     pub fn getppid() i32;
     /// Fork: 0 in the child, the child's pid in the parent, -1 on failure.
     pub fn fork() i32;
@@ -34,7 +37,9 @@ extern "C" "unistd.h" {
     /// Working directory into `buf`; `buf`, or null when `size` is too small.
     pub fn getcwd(buf: *mut char, size: usize) *mut char;
     /// Sleep whole seconds; the seconds left if interrupted.
+    @unsafe(safe)
     pub fn sleep(seconds: u32) u32;
     /// Sleep microseconds; 0 or -1.
+    @unsafe(safe)
     pub fn usleep(usec: u32) i32;
 }

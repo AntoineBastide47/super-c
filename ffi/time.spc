@@ -5,14 +5,16 @@
 // `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access should provide
 // platform-specific layout glue. `CLOCKS_PER_SEC` binds to the real macro (1000000 on POSIX, 1000 on
 // Windows), so it is a runtime value, not a Super-C constant expression. Calling the raw bindings requires
-// `unsafe`; `now`/`cpu_seconds` do not.
+// `unsafe` except `clock` and `difftime`; `now`/`cpu_seconds` do not.
 
 extern "C" {
     /// Seconds since the Unix epoch. Pass `null` to ignore the out-parameter.
     pub fn time(out: *mut void) i64;
     /// Processor time consumed so far, in clock ticks (divide by CLOCKS_PER_SEC for seconds).
+    @unsafe(safe)
     pub fn clock() i64;
     /// Difference `end - start` in seconds.
+    @unsafe(safe)
     pub fn difftime(end: i64, start: i64) f64;
 
     /// Break a Unix time into local calendar fields (a platform tm, owned by libc); null on failure.
@@ -36,5 +38,5 @@ pub fn now() i64 {
 
 /// Processor time consumed by the program so far, in seconds.
 pub fn cpu_seconds() f64 {
-    return (unsafe clock()) as f64 / CLOCKS_PER_SEC as f64;
+    return clock() as f64 / CLOCKS_PER_SEC as f64;
 }

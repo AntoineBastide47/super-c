@@ -3,7 +3,8 @@
 //
 // The raw bindings are unbounded (the length or NUL terminator is the caller's responsibility). The helper
 // functions below operate over Super-C slices. Calling the raw bindings requires `unsafe`; the slice
-// helpers do not.
+// helpers do not. `strlen`, `memchr`, `strchr`, `strrchr` and `strstr` carry their compile-time models
+// (`@unsafe(const)`); `memcmp`, `memcpy` and `memset` are evaluated by the compiler itself.
 
 extern "C" {
     /// Raw memory (sizes in bytes). `memset`'s fill value is an `int` truncated to `unsigned char`.
@@ -15,20 +16,82 @@ extern "C" {
     /// Compare `n` bytes; negative, zero, or positive by the first differing byte.
     pub fn memcmp(a: *const void, b: *const void, n: usize) i32;
     /// First occurrence of the low byte of `value` in `n` bytes, or null.
-    pub fn memchr(s: *const void, value: i32, n: usize) *mut void;
+    @unsafe(const)
+    pub fn memchr(s: *const void, value: i32, n: usize) *mut void {
+        let p = s as *const u8;
+        let b = value as u8;
+        for i in 0..n {
+            if unsafe p[i] == b {
+                return (unsafe (p + i)) as *mut void;
+            }
+        }
+        return null;
+    }
 
     /// NUL-terminated C strings.
-    pub fn strlen(s: *const char) usize;
+    @unsafe(const)
+    pub fn strlen(s: *const char) usize {
+        let mut n: usize = 0;
+        while (unsafe s[n]) as u8 != 0 {
+            n += 1;
+        }
+        return n;
+    }
     /// Compare NUL-terminated strings; negative, zero, or positive.
     pub fn strcmp(a: *const char, b: *const char) i32;
     /// strcmp over at most `n` bytes.
     pub fn strncmp(a: *const char, b: *const char, n: usize) i32;
     /// First occurrence of `c` (or the terminator when `c` is 0), or null.
-    pub fn strchr(s: *const char, c: i32) *mut char;
+    @unsafe(const)
+    pub fn strchr(s: *const char, c: i32) *mut char {
+        let want = c as u8;
+        let mut i: usize = 0;
+        loop {
+            let ch = (unsafe s[i]) as u8;
+            if ch == want {
+                return (unsafe (s + i)) as *mut char;
+            }
+            if ch == 0 {
+                return null;
+            }
+            i += 1;
+        }
+    }
     /// Last occurrence of `c`, or null.
-    pub fn strrchr(s: *const char, c: i32) *mut char;
+    @unsafe(const)
+    pub fn strrchr(s: *const char, c: i32) *mut char {
+        let want = c as u8;
+        let mut last: *const char = null;
+        let mut i: usize = 0;
+        loop {
+            let ch = (unsafe s[i]) as u8;
+            if ch == want {
+                last = unsafe (s + i);
+            }
+            if ch == 0 {
+                return last as *mut char;
+            }
+            i += 1;
+        }
+    }
     /// First occurrence of `needle`, or null.
-    pub fn strstr(haystack: *const char, needle: *const char) *mut char;
+    @unsafe(const)
+    pub fn strstr(haystack: *const char, needle: *const char) *mut char {
+        let mut i: usize = 0;
+        loop {
+            let mut j: usize = 0;
+            while (unsafe needle[j]) as u8 != 0 && unsafe haystack[i + j] == unsafe needle[j] {
+                j += 1;
+            }
+            if (unsafe needle[j]) as u8 == 0 {
+                return (unsafe (haystack + i)) as *mut char;
+            }
+            if (unsafe haystack[i]) as u8 == 0 {
+                return null;
+            }
+            i += 1;
+        }
+    }
 }
 
 /// Copy `min(dst.len, src.len)` bytes (non-overlapping) and return the count.

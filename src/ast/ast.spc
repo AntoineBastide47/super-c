@@ -1578,7 +1578,7 @@ pub fn ts_get(i: usize) u64 {
 }
 
 pub fn ts_now() u64 {
-    return unsafe sc_runtime::sc_rt_now_ns();
+    return sc_runtime::sc_rt_now_ns();
 }
 
 /// Print the counters' change since the previous phase line (SC_TYPE_STATS): the identity work each

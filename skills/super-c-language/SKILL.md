@@ -225,6 +225,10 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
 - Every call to an `extern "C"` function
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
+A `&mut` reference is exclusive also for unsafe code: reaching its referent through any
+other path while it is live is undefined behavior (its C parameter is `restrict`, see
+`types.md`).
+
 There is no auto-dereference through a raw pointer (the Rust rule): for `p: *mut T`,
 `p.f` and `p.m()` are errors; write `unsafe (*p).f` and `unsafe (*p).m()`. A method whose
 `self` is the raw pointer type itself applies to `p` directly. The explicit form keeps the
@@ -571,7 +575,7 @@ enforced at spawn boundaries.
 | Type | Description |
 |------|-------------|
 | `String` | Owned growable UTF-8 string |
-| `str` | Borrowed string view (non-NUL-terminated; print via `%.*s`, or `.to_string()` then `String::cstr()`) |
+| `str` | Borrowed string view (non-NUL-terminated except a literal, whose C spelling ends in a NUL; print via `%.*s`, or `.to_string()` then `String::cstr()`) |
 | `Vector<T>` | Growable array |
 | `Box<T>` | Heap-allocated single value |
 | `Option<T>` | `Option::Some(x)` / `Option::None` in values; bare `Some(..)`/`None` in patterns only |

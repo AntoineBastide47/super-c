@@ -285,7 +285,7 @@ What to look for:
 - **Branch misprediction**: a hot branch with poor prediction (reorder to put the common
   case first, or convert to branchless with conditional moves)
 - **Redundant loads**: the same memory loaded repeatedly because the C compiler cannot
-  prove no aliasing (cache the value in a local, use `restrict` via the emitter)
+  prove no aliasing (cache the value in a local; `&mut` parameters are already `restrict`)
 - **Unnecessary sign/zero extensions**: type mismatches between 32-bit and 64-bit values
   causing extension instructions on every use
 - **Unaligned accesses**: struct fields crossing cache lines (fix with field reordering

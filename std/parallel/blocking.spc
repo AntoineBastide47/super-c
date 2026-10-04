@@ -293,7 +293,7 @@ fn head_store(p: *mut Pool, j: *mut Job) {
 }
 
 fn on_pool_thread() bool {
-    return unsafe sc_runtime::sc_rt_widx_get() == POOL_THREAD;
+    return sc_runtime::sc_rt_widx_get() == POOL_THREAD;
 }
 
 // Something a shutdown waits for changed. Caller holds the lock.
@@ -324,7 +324,7 @@ fn reap(p: *mut Pool) {
         // held off between releasing the pool lock and taking this one); the thread has exited, but its
         // lock and condition must outlive that signal. Bounded by that submitter's few instructions.
         while unsafe atomic::load_i32(&mut unsafe (*t).wakes, 1) != 0 {
-            unsafe sc_runtime::sc_rt_thread_yield();
+            sc_runtime::sc_rt_thread_yield();
         }
         unsafe sc_runtime::sc_rt_cond_free((*t).cv);
         unsafe sc_runtime::sc_rt_mutex_free((*t).mtx);
@@ -432,7 +432,7 @@ fn spawn_thread(p: *mut Pool) {
     }
     let delay = unsafe atomic::load_i64(&mut unsafe G_PUBLISH_DELAY_NS, 0);
     if rc == 0 && delay > 0 {
-        unsafe sc_runtime::sc_rt_sleep_ns(delay);
+        sc_runtime::sc_rt_sleep_ns(delay);
     }
     lock(p);
     if rc == 0 {
@@ -606,7 +606,7 @@ fn spin_for_work(p: *mut Pool) bool {
             found = true;
             break;
         }
-        unsafe sc_runtime::sc_rt_cpu_relax();
+        sc_runtime::sc_rt_cpu_relax();
         spins = spins + 1;
     }
     lock(p);
@@ -1302,7 +1302,7 @@ pub fn try_shutdown(grace_ns: u64) ShutdownReport {
             r.released = false;
             return r;
         }
-        unsafe sc_runtime::sc_rt_sleep_ns(200000);
+        sc_runtime::sc_rt_sleep_ns(200000);
     }
     cache_drain(p);
     let mut g = Global {};
@@ -1327,5 +1327,5 @@ pub fn shutdown() {
         r.running,
         r.threads,
     );
-    unsafe stdlib::abort();
+    stdlib::abort();
 }

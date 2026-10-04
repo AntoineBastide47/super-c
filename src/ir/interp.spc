@@ -368,7 +368,7 @@ pub const fn pv_off(v: IVal) u32 {
 }
 
 const fn it_isfinite(x: f64) bool {
-    return unsafe math::fabs(x) <= F64_MAX;
+    return math::fabs(x) <= F64_MAX;
 }
 
 struct OvfRes {
@@ -449,107 +449,107 @@ struct DblRes {
 
 const fn libm1(name: str, x: f64) DblRes {
     if name == "sqrt" {
-        return DblRes { ok: true, v: unsafe math::sqrt(x) };
+        return DblRes { ok: true, v: math::sqrt(x) };
     }
     if name == "cbrt" {
-        return DblRes { ok: true, v: unsafe math::cbrt(x) };
+        return DblRes { ok: true, v: math::cbrt(x) };
     }
     if name == "exp" {
-        return DblRes { ok: true, v: unsafe math::exp(x) };
+        return DblRes { ok: true, v: math::exp(x) };
     }
     if name == "exp2" {
-        return DblRes { ok: true, v: unsafe math::exp2(x) };
+        return DblRes { ok: true, v: math::exp2(x) };
     }
     if name == "expm1" {
-        return DblRes { ok: true, v: unsafe math::expm1(x) };
+        return DblRes { ok: true, v: math::expm1(x) };
     }
     if name == "log" {
-        return DblRes { ok: true, v: unsafe math::log(x) };
+        return DblRes { ok: true, v: math::log(x) };
     }
     if name == "log2" {
-        return DblRes { ok: true, v: unsafe math::log2(x) };
+        return DblRes { ok: true, v: math::log2(x) };
     }
     if name == "log10" {
-        return DblRes { ok: true, v: unsafe math::log10(x) };
+        return DblRes { ok: true, v: math::log10(x) };
     }
     if name == "log1p" {
-        return DblRes { ok: true, v: unsafe math::log1p(x) };
+        return DblRes { ok: true, v: math::log1p(x) };
     }
     if name == "sin" {
-        return DblRes { ok: true, v: unsafe math::sin(x) };
+        return DblRes { ok: true, v: math::sin(x) };
     }
     if name == "cos" {
-        return DblRes { ok: true, v: unsafe math::cos(x) };
+        return DblRes { ok: true, v: math::cos(x) };
     }
     if name == "tan" {
-        return DblRes { ok: true, v: unsafe math::tan(x) };
+        return DblRes { ok: true, v: math::tan(x) };
     }
     if name == "asin" {
-        return DblRes { ok: true, v: unsafe math::asin(x) };
+        return DblRes { ok: true, v: math::asin(x) };
     }
     if name == "acos" {
-        return DblRes { ok: true, v: unsafe math::acos(x) };
+        return DblRes { ok: true, v: math::acos(x) };
     }
     if name == "atan" {
-        return DblRes { ok: true, v: unsafe math::atan(x) };
+        return DblRes { ok: true, v: math::atan(x) };
     }
     if name == "sinh" {
-        return DblRes { ok: true, v: unsafe math::sinh(x) };
+        return DblRes { ok: true, v: math::sinh(x) };
     }
     if name == "cosh" {
-        return DblRes { ok: true, v: unsafe math::cosh(x) };
+        return DblRes { ok: true, v: math::cosh(x) };
     }
     if name == "tanh" {
-        return DblRes { ok: true, v: unsafe math::tanh(x) };
+        return DblRes { ok: true, v: math::tanh(x) };
     }
     if name == "asinh" {
-        return DblRes { ok: true, v: unsafe math::asinh(x) };
+        return DblRes { ok: true, v: math::asinh(x) };
     }
     if name == "acosh" {
-        return DblRes { ok: true, v: unsafe math::acosh(x) };
+        return DblRes { ok: true, v: math::acosh(x) };
     }
     if name == "atanh" {
-        return DblRes { ok: true, v: unsafe math::atanh(x) };
+        return DblRes { ok: true, v: math::atanh(x) };
     }
     if name == "floor" {
-        return DblRes { ok: true, v: unsafe math::floor(x) };
+        return DblRes { ok: true, v: math::floor(x) };
     }
     if name == "ceil" {
-        return DblRes { ok: true, v: unsafe math::ceil(x) };
+        return DblRes { ok: true, v: math::ceil(x) };
     }
     if name == "round" {
-        return DblRes { ok: true, v: unsafe math::round(x) };
+        return DblRes { ok: true, v: math::round(x) };
     }
     if name == "trunc" {
-        return DblRes { ok: true, v: unsafe math::trunc(x) };
+        return DblRes { ok: true, v: math::trunc(x) };
     }
     if name == "fabs" {
-        return DblRes { ok: true, v: unsafe math::fabs(x) };
+        return DblRes { ok: true, v: math::fabs(x) };
     }
     return DblRes { ok: false, v: 0.0 };
 }
 
 const fn libm2(name: str, x: f64, y: f64) DblRes {
     if name == "pow" {
-        return DblRes { ok: true, v: unsafe math::pow(x, y) };
+        return DblRes { ok: true, v: math::pow(x, y) };
     }
     if name == "hypot" {
-        return DblRes { ok: true, v: unsafe math::hypot(x, y) };
+        return DblRes { ok: true, v: math::hypot(x, y) };
     }
     if name == "atan2" {
-        return DblRes { ok: true, v: unsafe math::atan2(x, y) };
+        return DblRes { ok: true, v: math::atan2(x, y) };
     }
     if name == "fmod" {
-        return DblRes { ok: true, v: unsafe math::fmod(x, y) };
+        return DblRes { ok: true, v: math::fmod(x, y) };
     }
     if name == "copysign" {
-        return DblRes { ok: true, v: unsafe math::copysign(x, y) };
+        return DblRes { ok: true, v: math::copysign(x, y) };
     }
     if name == "fmin" {
-        return DblRes { ok: true, v: unsafe math::fmin(x, y) };
+        return DblRes { ok: true, v: math::fmin(x, y) };
     }
     if name == "fmax" {
-        return DblRes { ok: true, v: unsafe math::fmax(x, y) };
+        return DblRes { ok: true, v: math::fmax(x, y) };
     }
     return DblRes { ok: false, v: 0.0 };
 }
@@ -2911,7 +2911,7 @@ extend Interp {
                 okm = r.ok;
                 v = r.v;
             } else if name == "fma" {
-                v = unsafe math::fma(inv[0], inv[1], inv[2]);
+                v = math::fma(inv[0], inv[1], inv[2]);
                 okm = true;
             }
             if !okm {
@@ -3816,24 +3816,25 @@ extend Interp {
         if dn == NODE_NONE {
             return self.bail();
         }
+        // The C literal the emitter spells ends in a NUL past `len`, which code that hands a literal's
+        // `ptr()` to a C string API reads: the block holds it too, so compile time agrees.
         let nb = bytes.len() as u32;
-        let block = self.obj_new(nb);
-        if block == 0 && nb != 0 {
+        bytes.push(0);
+        let block = self.obj_new(nb + 1);
+        if block == 0 {
             return none();
         }
-        if nb != 0 {
-            let bo = self.obj_ptr(block);
-            unsafe (*bo).heap = 1;
-            unsafe (*bo).bytes = nb;
-            unsafe (*bo).em = 0;
-            unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe (*bo).esz = 1;
-            for k in 0..nb {
-                unsafe (*self.obj_ptr(block)).slots.set(
-                    k as usize,
-                    iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes[k as usize]),
-                );
-            }
+        let bo = self.obj_ptr(block);
+        unsafe (*bo).heap = 1;
+        unsafe (*bo).bytes = nb + 1;
+        unsafe (*bo).em = 0;
+        unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
+        unsafe (*bo).esz = 1;
+        for k in 0..nb + 1 {
+            unsafe (*self.obj_ptr(block)).slots.set(
+                k as usize,
+                iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes[k as usize]),
+            );
         }
         let so = self.obj_decl(self.field_count(dm, dn), dm, dn);
         if so == 0 {
@@ -4657,6 +4658,9 @@ extend Interp {
                 // no tick budget at compile time: one chunk runs to the loop's end
                 return self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
             }
+            if rv.c == ir::IN_LIKELY {
+                return self.operand(b, env, b.oper_pool[rv.a as usize]);
+            }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
                 // PROVEN keeps the identical check here: CTFE catches a false proof as a trap
                 let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
@@ -5168,7 +5172,7 @@ extend Interp {
             v = a / c;
         } else if t == TokenType::Percent {
             // the sign of the dividend, like C's fmod the emitted `%` calls
-            v = unsafe math::fmod(a, c);
+            v = math::fmod(a, c);
         } else {
             return self.bail();
         }
@@ -5459,10 +5463,20 @@ extend Interp {
             unsafe (*b2).esz = l.size;
             return out;
         }
-        if unsafe (*blk).et != TYPE_NONE && !self.teq(unsafe (*blk).em, unsafe (*blk).et, em, et) {
+        if unsafe (*blk).et != TYPE_NONE && !self.teq(unsafe (*blk).em, unsafe (*blk).et, em, et) && !(self.is_ubyte(
+            unsafe (*blk).em,
+            unsafe (*blk).et,
+        ) && self.is_ubyte(em, et)) {
             return self.bail();
         }
         return out;
+    }
+
+    // `u8` or `char`: the two unsigned byte types (C's `char` is unsigned here), which view each
+    // other's storage with the same values.
+    fn is_ubyte(self: &Self, m: ModuleId, t: TypeId) bool {
+        let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
+        return y.kind == TypeKind::TYPE_BUILTIN && (y.as_data.builtin == BuiltinType::BT_U8 || y.as_data.builtin == BuiltinType::BT_CHAR);
     }
 
     // Structural type equality across module pools.
@@ -5553,7 +5567,7 @@ extend Interp {
         if v.kind == IV_FLOAT {
             // saturating: NaN is 0, a value past either end of the target is that end
             let bits = bt_bits(tb, self.pw());
-            let t = unsafe math::trunc(v.f);
+            let t = math::trunc(v.f);
             if v.f != v.f || bt_unsigned(tb) && t <= 0.0 {
                 return iv_int(m, target, 0);
             }
@@ -7609,25 +7623,23 @@ extend Interp {
     // str_materialize builds. (sm, sn) is the `str` decl; (stym, sty) its type.
     fn ti_str(self: &mut Self, sm: ModuleId, sn: NodeId, stym: ModuleId, sty: TypeId, bytes: str) IVal {
         let nb = bytes.len() as u32;
-        let mut block: u32 = 0;
-        if nb != 0 {
-            block = self.obj_new(nb);
-            if block == 0 {
-                return none();
-            }
-            let bo = self.obj_ptr(block);
-            unsafe (*bo).heap = 1;
-            unsafe (*bo).bytes = nb;
-            unsafe (*bo).em = 0;
-            unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe (*bo).esz = 1;
-            for k in 0..nb {
-                unsafe (*self.obj_ptr(block)).slots.set(
-                    k as usize,
-                    iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes.byte_at(k as usize)),
-                );
-            }
+        let block = self.obj_new(nb + 1);
+        if block == 0 {
+            return none();
         }
+        let bo = self.obj_ptr(block);
+        unsafe (*bo).heap = 1;
+        unsafe (*bo).bytes = nb + 1;
+        unsafe (*bo).em = 0;
+        unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
+        unsafe (*bo).esz = 1;
+        for k in 0..nb {
+            unsafe (*self.obj_ptr(block)).slots.set(
+                k as usize,
+                iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes.byte_at(k as usize)),
+            );
+        }
+        unsafe (*self.obj_ptr(block)).slots.set(nb as usize, iv_int(0, Ast::builtin(BuiltinType::BT_U8), 0));
         let dv = self.decl_view(sm, sn);
         let ptr_i = dv.fp;
         let len_i = dv.fl;

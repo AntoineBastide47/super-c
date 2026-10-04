@@ -398,7 +398,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
             if sync_stats_on() {
                 stat_add(&mut unsafe G_SYNC.lock_spins);
             }
-            unsafe sc_runtime::sc_rt_cpu_relax();
+            sc_runtime::sc_rt_cpu_relax();
             continue;
         }
         if c != 3 && !unsafe atomic::cas_i32(w, 1, 3, false, 0, 0) {

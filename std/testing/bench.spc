@@ -101,7 +101,7 @@ pub fn summarize(samples: &mut Vector<f64>) Summary {
             NO_P99;
         },
         mean: mean,
-        sd: unsafe math::sqrt(var / n as f64),
+        sd: math::sqrt(var / n as f64),
     };
 }
 

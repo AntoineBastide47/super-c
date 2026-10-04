@@ -670,7 +670,7 @@ fn a_cancel_after_a_select_wake_keeps_the_wake(fx: &mut Base) {
         launch || {
             b.get().store(1, atomics::MemoryOrder::Release);
             while gt.get().load(atomics::MemoryOrder::Acquire) == 0 {
-                unsafe sc_runtime::sc_rt_cpu_relax();
+                sc_runtime::sc_rt_cpu_relax();
             }
         };
     }
@@ -883,7 +883,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
             let deadline = platform::now_ns() + 5000000000;
             while count(&acks) < expected {
                 assert(platform::now_ns() < deadline, "the parked thread is woken");
-                unsafe sc_runtime::sc_rt_cpu_relax();
+                sc_runtime::sc_rt_cpu_relax();
             }
         }
     }

@@ -144,13 +144,13 @@ extern _Thread_local uint64_t __sc_task_id;
 void __sc_set_task_id(uint64_t __id);
 /* abort() does not flush, and stderr is only guaranteed unbuffered when it is a terminal -- captured into
    a pipe it is block-buffered, and the diagnostic these print is exactly what is then lost. Flush first. */
-static _Noreturn __attribute__((unused)) void __sc_panic(const char *__m) {
+static _Noreturn __attribute__((unused, cold)) void __sc_panic(const char *__m) {
   if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
   else fprintf(stderr, "super-c: %s\n", __m);
   fflush(stderr);
   abort();
 }
-static _Noreturn __attribute__((unused)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
+static _Noreturn __attribute__((unused, cold)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
   if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
   else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
   fflush(stderr);
@@ -226,7 +226,7 @@ SC_F2I_UNSIGNED(size_t, usize, SIZE_MAX) SC_F2I_UNSIGNED(char, char, UCHAR_MAX)
 #undef SC_F2I_SIGNED
 #undef SC_F2I_UNSIGNED
 /* Pointer distance over a zero-sized element type: bytes cannot encode an element count. */
-static _Noreturn __attribute__((unused)) void __sc_zst_ptrdiff(void) {
+static _Noreturn __attribute__((unused, cold)) void __sc_zst_ptrdiff(void) {
   __sc_panic("pointer distance on a zero-sized element type");
 }
 /* Preemption hook, installed by the scheduler BEFORE it starts any worker, so every read of it

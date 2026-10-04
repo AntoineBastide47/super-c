@@ -88,7 +88,7 @@ fn hold(m: &Lock, w: &sync::WaitGroup) chan::Sender<i64> {
 fn spin_for(ns: u64) {
     let until = platform::now_ns() + ns;
     while platform::now_ns() < until {
-        unsafe sc_runtime::sc_rt_cpu_relax();
+        sc_runtime::sc_rt_cpu_relax();
     }
 }
 

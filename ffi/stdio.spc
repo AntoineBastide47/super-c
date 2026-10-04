@@ -3,8 +3,8 @@
 // `FILE` is an opaque C handle (its layout lives in <stdio.h>); the raw `pub` bindings expose the C API,
 // and the `File` struct adds a safe, owning wrapper: `open` returns `None` instead of a null handle, and
 // `Free` closes the handle automatically. The standard streams stdin/stdout/stderr are exposed through
-// helper functions. Calling the raw bindings requires `unsafe`; the `File` methods and the wrapper
-// functions do not.
+// helper functions. Calling the raw bindings requires `unsafe` except `getchar`/`putchar`; the `File`
+// methods and the wrapper functions do not.
 
 extern "C" {
     /// A C stream.
@@ -34,8 +34,10 @@ extern "C" {
     /// Read up to `size - 1` bytes through a newline into `buf`, NUL-terminated; null at EOF or error.
     pub fn fgets(buf: *mut char, size: i32, stream: *mut FILE) *mut char;
     /// Next byte of stdin, or EOF.
+    @unsafe(safe)
     pub fn getchar() i32;
     /// Write one byte to stdout; the byte, or EOF.
+    @unsafe(safe)
     pub fn putchar(c: i32) i32;
     /// Write a string plus newline to stdout; non-negative on success.
     pub fn puts(s: *const char) i32;

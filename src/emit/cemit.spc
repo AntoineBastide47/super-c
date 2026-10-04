@@ -1542,6 +1542,12 @@ extend CEmit {
             }
             np9 += 1;
             let mut nm = self.sget();
+            // A `&mut T` is exclusive for the whole call: `restrict` lets C keep its referent's
+            // fields in registers across stores through other pointers.
+            let py = self.rty_y(b, b.locals.at(l).ty);
+            if py.kind == TypeKind::TYPE_REFERENCE && py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                nm.push_str("restrict ");
+            }
             self.lspell(l as u32, &mut nm);
             // A `mut` fixed-array VALUE param: C hands a pointer to the caller's array, so the
             // body works on an entry copy (writes must not reach the caller).
@@ -2288,6 +2294,12 @@ extend CEmit {
         return k == ir::RV_USE || k == ir::RV_UNARY || k == ir::RV_BINARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT;
     }
 
+    // `IN_LIKELY(x)`: pure, one operand, spelled as one call expression. It must fold into the
+    // branch that tests it: clang drops a `__builtin_expect` whose result passes through a variable.
+    const fn is_likely(rv: &ir::Rvalue) bool {
+        return rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_LIKELY;
+    }
+
     // Whether operand `opid` reads local `l` through no projection (a whole-local copy/move).
     const fn op_is_bare_local(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
         if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
@@ -2328,6 +2340,9 @@ extend CEmit {
         }
         if rv.kind == ir::RV_BINARY {
             return self.op_is_bare_local(b, rv.a, l) || self.op_is_bare_local(b, rv.b, l);
+        }
+        if CEmit::is_likely(&rv) {
+            return self.op_is_bare_local(b, b.oper_pool[rv.a as usize], l);
         }
         if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE {
             // B is a genuine operand count here (RV_INTRINSIC overloads b as a TypeId, so it is
@@ -2376,6 +2391,9 @@ extend CEmit {
         if rv.kind == ir::RV_BINARY {
             return self.op_reads_base(b, rv.a, base) || self.op_reads_base(b, rv.b, base);
         }
+        if CEmit::is_likely(&rv) {
+            return self.op_reads_base(b, b.oper_pool[rv.a as usize], base);
+        }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
             return b.places.at(rv.a as usize).base == base;
         }
@@ -2413,6 +2431,9 @@ extend CEmit {
         if rv.kind == ir::RV_BINARY {
             return self.op_is_projected(b, rv.a) || self.op_is_projected(b, rv.b);
         }
+        if CEmit::is_likely(&rv) {
+            return self.op_is_projected(b, b.oper_pool[rv.a as usize]);
+        }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
             return b.places.at(rv.a as usize).proj_len > 0;
         }
@@ -2449,6 +2470,9 @@ extend CEmit {
         }
         if rv.kind == ir::RV_BINARY {
             return self.op_taints(b, rv.a, taint) || self.op_taints(b, rv.b, taint);
+        }
+        if CEmit::is_likely(&rv) {
+            return self.op_taints(b, b.oper_pool[rv.a as usize], taint);
         }
         if rv.kind == ir::RV_AGGREGATE {
             for i in 0..rv.b {
@@ -2539,7 +2563,7 @@ extend CEmit {
                             b,
                             &rv,
                         );
-                        if CEmit::inlinable_def_kind(rv.kind) || agg_ok {
+                        if CEmit::inlinable_def_kind(rv.kind) || agg_ok || CEmit::is_likely(&rv) {
                             ndef.set(pl.base as usize, *ndef.at(pl.base as usize) + 1);
                             def_rv.set(pl.base as usize, s.rvalue);
                             def_blk.set(pl.base as usize, bi as u32);
@@ -5446,7 +5470,7 @@ extend CEmit {
             }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.ticks_on(b) {
-                    o.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
+                    o.push_str("  if (__builtin_expect(--__sc_spc == 0, 0)) __sc_spc = __sc_preempt_check();\n");
                 }
                 return true;
             }
@@ -5460,7 +5484,7 @@ extend CEmit {
                     o.push_string(&cp);
                     o.push_str(" = 0;\n");
                     if self.ticks_on(b) {
-                        o.push_str("  if (--__sc_spc == 0) { __sc_spc = __sc_preempt_check(); ");
+                        o.push_str("  if (__builtin_expect(--__sc_spc == 0, 0)) { __sc_spc = __sc_preempt_check(); ");
                         o.push_string(&cp);
                         o.push_str(" = __sc_cancel_tick(); }\n");
                     }
@@ -10572,6 +10596,12 @@ extend CEmit {
             if k == ir::IN_RANGE_BOUNDS_PROVEN as u32 {
                 // Only the validated exclusive end remains.
                 return self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst);
+            }
+            if k == ir::IN_LIKELY as u32 {
+                dst.push_str("__builtin_expect(");
+                let ok = self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
+                dst.push_str(", 1)");
+                return ok;
             }
             if k == ir::IN_CHUNK as u32 {
                 // A strip-mined loop's chunk end, through the tick budget; the loop's own end where

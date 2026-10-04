@@ -305,7 +305,7 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
 // Count this thread into its registration slot, backing off while a close is pending (see `G_CLOSING`).
 // Returns the slot to leave through `reg_leave`.
 fn reg_enter(r: *mut Reactor) *mut i32 {
-    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    let wi = sc_runtime::sc_rt_widx_get();
     let slot = if wi < 0 {
         0usize;
     } else {
@@ -319,7 +319,7 @@ fn reg_enter(r: *mut Reactor) *mut i32 {
         }
         let _ = unsafe atomic::sub_i32(f, 1, 4);
         while unsafe atomic::load_i32(&mut unsafe G_CLOSING, 4) != 0 {
-            unsafe sc_runtime::sc_rt_cpu_relax();
+            sc_runtime::sc_rt_cpu_relax();
         }
     }
 }
@@ -993,7 +993,7 @@ pub fn close(fd: i32) i32 {
     for slot in 0..REG_SLOTS + 1 {
         let f = unsafe ((*r).regs + slot * (R_ALIGN / 4));
         while unsafe atomic::load_i32(f, 4) != 0 {
-            unsafe sc_runtime::sc_rt_cpu_relax();
+            sc_runtime::sc_rt_cpu_relax();
         }
     }
     let rc = unsafe sc_io::sc_io_close(fd);
@@ -1051,7 +1051,7 @@ pub fn read(fd: i32, buf: []mut u8) isize {
         if n >= 0 {
             return n;
         }
-        if unsafe sc_io::sc_io_would_block() == 0 {
+        if sc_io::sc_io_would_block() == 0 {
             return n;
         }
         if !wait_until(fd, false, 0) {
@@ -1073,7 +1073,7 @@ pub fn write(fd: i32, buf: []u8) isize {
         if n == 0 {
             break;
         }
-        if unsafe sc_io::sc_io_would_block() == 0 {
+        if sc_io::sc_io_would_block() == 0 {
             return n;
         }
         if !wait_until(fd, true, 0) {
@@ -1097,7 +1097,7 @@ pub fn shutdown() {
         if st != 1 && st != 2 {
             return;
         }
-        unsafe sc_runtime::sc_rt_thread_yield();
+        sc_runtime::sc_rt_thread_yield();
     }
     let r = unsafe G_REACTOR;
     // The reactor re-reads the state after every wake.

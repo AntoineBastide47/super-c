@@ -114,7 +114,7 @@ Each `Projection` carries the type **after** it applies.
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
-| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc) |
+| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
 | `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
 
 ## Statements
