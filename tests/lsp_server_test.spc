@@ -555,7 +555,9 @@ fn run_lsp_session(root: str, ses: &String) String {
     return loader::read_file(op.as_str()).unwrap();
 }
 
-@test
+// The inside case indexes this whole repository with the dev (ASan, UBSan) compiler: past 90 s on a loaded
+// 4-vCPU CI runner.
+@test(timeout = 300)
 fn lsp_rename_workspace_relative() {
     // Outside: a temp workspace does not contain the installed std -> refused.
     let p = cli::proj_new();

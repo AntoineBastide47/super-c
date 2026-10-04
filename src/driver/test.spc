@@ -26,13 +26,20 @@ pub struct TestOpts {
     pub filter: *const char,
     pub shard: i32,
     pub shards: i32,
+    pub timeout: i32, // seconds a test may run before it fails as timed out; 0: none; -1: DEFAULT_TEST_TIMEOUT
+    pub durations: *const char, // the suite's duration file (`super-c test`: <test dir>/durations.tsv); null: none
+    pub record: bool, // --test-record-durations: merge this run's durations into `durations`
 }
+
+/// The seconds a test may run when neither `--test-timeout` nor its `@test(timeout = N)` says otherwise.
+pub const DEFAULT_TEST_TIMEOUT: i32 = 90;
 /// One runnable @test. `wants` is a bitmask of the wrapper's arguments: 1 = fixture/receiver param,
 /// 2 = global-env param. The suite fields are set only for suite-method tests taking `self`.
 pub struct TestCase {
     pub mod: ModuleId,
     pub func: NodeId,
     pub should_panic: bool,
+    pub timeout: u32, // `@test(timeout = N)` seconds; 0: the run's global timeout
     pub wants: u8,
     pub suite: DefId,
     pub suite_init: NodeId,
@@ -514,7 +521,8 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 TestCase {
                     mod: m as ModuleId,
                     func: at.owner,
-                    should_panic: at.arg != 0,
+                    should_panic: (at.arg & TEST_SHOULD_PANIC) != 0,
+                    timeout: at.arg >> TEST_TIMEOUT_SHIFT,
                     wants: wants,
                     suite: case_suite,
                     suite_init: suite_init,
@@ -563,8 +571,15 @@ static int sc_runner_jobserver_release(void) {
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#elif defined(__linux__)
+#include <dirent.h>
+#endif
 extern char **environ;
 #define sc_environ environ
 #define sc_getcwd getcwd
@@ -592,6 +607,135 @@ static int sc_runner_jobserver_try_acquire(void) {
 static int sc_runner_jobserver_release(void) {
   const char token = '+';
   return sc_runner_jobserver_active() && write(sc_runner_js_write, &token, 1) == 1;
+}
+/* Timeout diagnostics. Each test's capture file is a named file, and the test's process carries its path in
+   SC_TEST_DIAG, which every process it starts inherits: the runtime of every Super-C program in the tree
+   answers SIGURG by appending its own threads' stacks there (__sc_diag_install, super_rt), and a library
+   chains its state dump in front (std's reactor). Past a test's deadline the runner asks each process
+   of the test's tree in turn, adds the kernel's view of each thread on Linux, then kills the whole tree
+   SC_DIAG_GRACE seconds later. SIGURG is ignored by default: cc, ld and the like are left running. */
+#define SC_DIAG_GRACE 3
+#define SC_DIAG_TREE 64
+void __sc_diag_install(void);
+/* A named capture file in $TMPDIR (else /tmp), opened for reading and writing; its path in `path`. */
+static FILE *sc_cap_open(char *path, size_t n) {
+  const char *d = getenv("TMPDIR");
+  snprintf(path, n, "%s/sc-test-XXXXXX", d != NULL && d[0] != 0 ? d : "/tmp");
+  const int fd = mkstemp(path);
+  if (fd < 0) return NULL;
+  /* Every writer appends (the test, and the dumps the runner asks for), so none overwrites another. */
+  (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_APPEND);
+  FILE *f = fdopen(fd, "w+b");
+  if (f == NULL) {
+    close(fd);
+    remove(path);
+  }
+  return f;
+}
+/* The process tree under `root`, root first, breadth first: at most SC_DIAG_TREE processes. */
+static int sc_tree(pid_t root, pid_t *out) {
+  int n = 0;
+  out[n++] = root;
+  for (int k = 0; k < n && n < SC_DIAG_TREE; k++) {
+#if defined(__APPLE__)
+    pid_t kids[SC_DIAG_TREE];
+    const int nk = proc_listchildpids(out[k], kids, (int)sizeof kids); /* a count of pids, not bytes */
+    for (int i = 0; i < nk && i < SC_DIAG_TREE && n < SC_DIAG_TREE; i++) out[n++] = kids[i];
+#elif defined(__linux__)
+    DIR *d = opendir("/proc");
+    if (d == NULL) break;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < SC_DIAG_TREE) {
+      const pid_t p = (pid_t)atoi(e->d_name);
+      if (p <= 0) continue;
+      char sp[64], buf[512];
+      snprintf(sp, sizeof sp, "/proc/%d/stat", (int)p);
+      FILE *f = fopen(sp, "rb");
+      if (f == NULL) continue;
+      const size_t got = fread(buf, 1, sizeof buf - 1, f);
+      fclose(f);
+      buf[got] = 0;
+      const char *rp = strrchr(buf, 41); /* the last close paren: the command name may hold spaces and parens */
+      int ppid = 0;
+      if (rp != NULL && sscanf(rp + 1, " %*c %d", &ppid) == 1 && ppid == (int)out[k]) out[n++] = p;
+    }
+    closedir(d);
+#endif
+  }
+  return n;
+}
+/* Ask every process of the test's tree for its dump, one after the other, into the capture file at
+   `path`; on Linux append each thread's state and kernel wait channel too. */
+static void sc_diag_request(pid_t root, const char *path, unsigned limit) {
+  FILE *cap = fopen(path, "ab");
+  if (cap != NULL) {
+    fprintf(cap, "\n--- the test ran past its timeout (%u s): the state of each of its processes\n", limit);
+    fclose(cap);
+  }
+  pid_t tree[SC_DIAG_TREE];
+  const int n = sc_tree(root, tree);
+  struct timespec pause = { 0, 400000000 };
+  for (int k = 0; k < n; k++) {
+    kill(tree[k], SIGURG);
+    nanosleep(&pause, NULL);
+  }
+#if defined(__linux__)
+  cap = fopen(path, "ab");
+  if (cap == NULL) return;
+  for (int k = 0; k < n; k++) {
+    char tp[64], comm[64] = "";
+    snprintf(tp, sizeof tp, "/proc/%d/comm", (int)tree[k]);
+    FILE *f = fopen(tp, "rb");
+    if (f != NULL) {
+      if (fgets(comm, sizeof comm, f) == NULL) comm[0] = 0;
+      fclose(f);
+      comm[strcspn(comm, "\n")] = 0;
+    }
+    fprintf(cap, "--- kernel: process %d (%s), thread state and wait channel\n", (int)tree[k], comm);
+    snprintf(tp, sizeof tp, "/proc/%d/task", (int)tree[k]);
+    DIR *d = opendir(tp);
+    if (d == NULL) continue;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+      const int tid = atoi(e->d_name);
+      if (tid <= 0) continue;
+      char sp[96], st[512] = "", wc[96] = "";
+      snprintf(sp, sizeof sp, "/proc/%d/task/%d/stat", (int)tree[k], tid);
+      f = fopen(sp, "rb");
+      if (f != NULL) {
+        if (fgets(st, sizeof st, f) == NULL) st[0] = 0;
+        fclose(f);
+      }
+      snprintf(sp, sizeof sp, "/proc/%d/task/%d/wchan", (int)tree[k], tid);
+      f = fopen(sp, "rb");
+      if (f != NULL) {
+        if (fgets(wc, sizeof wc, f) == NULL) wc[0] = 0;
+        fclose(f);
+      }
+      const char *rp = strrchr(st, 41); /* the last close paren, as above */
+      fprintf(cap, "  %d %c %s\n", tid, rp != NULL && rp[1] == ' ' ? rp[2] : '?', wc[0] ? wc : "-");
+    }
+    closedir(d);
+  }
+  fclose(cap);
+#endif
+}
+/* Kill the test's whole tree: a hung grandchild would otherwise outlive the run. */
+static void sc_kill_tree(pid_t root) {
+  pid_t tree[SC_DIAG_TREE];
+  const int n = sc_tree(root, tree);
+  for (int k = n - 1; k >= 0; k--) kill(tree[k], SIGKILL);
+}
+/* The parent's tick: SIGALRM every second while a timeout applies, without SA_RESTART, so wait(2) returns
+   and the runner checks the deadlines. */
+static void sc_runner_tick(int sig) {
+  (void)sig;
+  alarm(1);
+}
+static double sc_runner_now(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 #endif
 /* A token the runner cannot hand back would shrink the process tree's budget for good: stop, and say why. */
@@ -670,6 +814,139 @@ static char *sc_slurp(FILE *f) {
   buf[got] = 0;
   return buf;
 }
+/* Test durations, one `<seconds>\t<name>` line per test (`#` starts a comment): read by `--weights` to
+   balance the shards, merged by `--record` with what this run measured (sc_dur, -1: not run). */
+static double sc_dur[SC_NTESTS > 0 ? SC_NTESTS : 1];
+static double sc_known[SC_NTESTS > 0 ? SC_NTESTS : 1];
+static int sc_index_cmp(const void *a, const void *b) {
+  return strcmp(SC_TESTS[*(const int *)a].name, SC_TESTS[*(const int *)b].name);
+}
+/* Fill sc_known from `path` (-1 for a test the file does not name); 0 when the file cannot be read. */
+static int sc_read_durations(const char *path) {
+  for (int i = 0; i < SC_NTESTS; i++) sc_known[i] = -1;
+  FILE *f = path ? fopen(path, "rb") : NULL;
+  if (!f) return 0;
+  static int by_name[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  for (int i = 0; i < SC_NTESTS; i++) by_name[i] = i;
+  qsort(by_name, (size_t)SC_NTESTS, sizeof by_name[0], sc_index_cmp);
+  char line[1024];
+  while (fgets(line, sizeof line, f)) {
+    if (line[0] == '#') continue;
+    char *tab = strchr(line, '\t');
+    if (!tab) continue;
+    *tab = 0;
+    char *name = tab + 1;
+    name[strcspn(name, "\r\n")] = 0;
+    int lo = 0, hi = SC_NTESTS - 1;
+    while (lo <= hi) {
+      const int mid = (lo + hi) / 2;
+      const int c = strcmp(SC_TESTS[by_name[mid]].name, name);
+      if (c == 0) { sc_known[by_name[mid]] = atof(line); break; }
+      if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+  }
+  fclose(f);
+  return 1;
+}
+static int sc_weight_cmp_desc(const void *a, const void *b) {
+  const int x = *(const int *)a, y = *(const int *)b;
+  if (sc_known[x] != sc_known[y]) return sc_known[x] < sc_known[y] ? 1 : -1;
+  return x - y;
+}
+/* The tests of shard `shard` of `shards` among those `filter` matches, in table order. Without durations
+   the matches are dealt round-robin; with them (`weights`, a file sc_read_durations reads) each match, the
+   longest first, goes to the shard with the least time so far (ties: the lowest shard), and a test the
+   file does not name counts as the median known duration. Every shard computes the same assignment. */
+static int sc_select(const char *filter, int shard, int shards, const char *weights, int *sel) {
+  static int m[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  int nm = 0;
+  for (int i = 0; i < SC_NTESTS; i++)
+    if (sc_match(SC_TESTS[i].name, filter)) m[nm++] = i;
+  int nsel = 0;
+  if (shards <= 1 || !sc_read_durations(weights)) {
+    for (int k = 0; k < nm; k++)
+      if (k % shards == shard - 1) sel[nsel++] = m[k];
+    return nsel;
+  }
+  static double known[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  int nk = 0;
+  for (int k = 0; k < nm; k++)
+    if (sc_known[m[k]] >= 0) known[nk++] = sc_known[m[k]];
+  double median = 1;
+  if (nk > 0) {
+    for (int a = 1; a < nk; a++) /* insertion sort: at most one pass per run */
+      for (int b = a; b > 0 && known[b - 1] > known[b]; b--) {
+        const double t = known[b];
+        known[b] = known[b - 1];
+        known[b - 1] = t;
+      }
+    median = known[nk / 2];
+  }
+  for (int k = 0; k < nm; k++)
+    if (sc_known[m[k]] < 0) sc_known[m[k]] = median;
+  qsort(m, (size_t)nm, sizeof m[0], sc_weight_cmp_desc);
+  double *load = calloc((size_t)shards, sizeof *load);
+  if (!load) { perror("calloc"); exit(101); }
+  static unsigned char mine[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  for (int k = 0; k < nm; k++) {
+    int best = 0;
+    for (int s = 1; s < shards; s++)
+      if (load[s] < load[best]) best = s;
+    load[best] += sc_known[m[k]];
+    mine[m[k]] = best == shard - 1;
+  }
+  free(load);
+  for (int i = 0; i < SC_NTESTS; i++)
+    if (sc_match(SC_TESTS[i].name, filter) && mine[i]) sel[nsel++] = i;
+  return nsel;
+}
+/* Merge this run's durations into `path`: a test that ran gets its new time, one that did not keeps its
+   old one, and a name the suite no longer has is dropped. Written whole through a temp file, sorted by
+   name so the file diffs line by line. */
+static void sc_write_durations(const char *path) {
+  sc_read_durations(path);
+  static int by_name[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  for (int i = 0; i < SC_NTESTS; i++) by_name[i] = i;
+  qsort(by_name, (size_t)SC_NTESTS, sizeof by_name[0], sc_index_cmp);
+  char tmp[4096];
+  snprintf(tmp, sizeof tmp, "%s.tmp", path);
+  FILE *f = fopen(tmp, "wb");
+  if (!f) { perror(tmp); return; }
+  fprintf(f, "# super-c test --test-record-durations: seconds per test, read to balance --test-shard\n");
+  for (int k = 0; k < SC_NTESTS; k++) {
+    const int i = by_name[k];
+    const double s = sc_dur[i] >= 0 ? sc_dur[i] : sc_known[i];
+    if (s >= 0) fprintf(f, "%.2f\t%s\n", s, SC_TESTS[i].name);
+  }
+  if (fclose(f) != 0) { perror(tmp); remove(tmp); return; }
+  remove(path); /* rename over an existing file fails on Windows */
+  if (rename(tmp, path) != 0) perror(path);
+}
+/* The slowest tests of a forked run, longest first: what a timeout (`--timeout`, `@test(timeout = N)`)
+   must leave room for on the machine that ran them. */
+#define SC_SLOWEST 5
+static int sc_slow_test[SC_SLOWEST];
+static double sc_slow_secs[SC_SLOWEST];
+static int sc_slow_n;
+static void sc_note_duration(int ti, double secs) {
+  sc_dur[ti] = secs;
+  int k;
+  if (sc_slow_n < SC_SLOWEST) k = sc_slow_n++;
+  else if (secs <= sc_slow_secs[SC_SLOWEST - 1]) return;
+  else k = SC_SLOWEST - 1;
+  while (k > 0 && sc_slow_secs[k - 1] < secs) {
+    sc_slow_test[k] = sc_slow_test[k - 1];
+    sc_slow_secs[k] = sc_slow_secs[k - 1];
+    k--;
+  }
+  sc_slow_test[k] = ti;
+  sc_slow_secs[k] = secs;
+}
+static void sc_report_slowest(void) {
+  if (sc_slow_n == 0) return;
+  printf("\nslowest tests:\n");
+  for (int k = 0; k < sc_slow_n; k++) printf("  %7.2f s  %s\n", sc_slow_secs[k], SC_TESTS[sc_slow_test[k]].name);
+}
 /* The failures, together, after the run: each test's captured output under its own header, how the
    process ended, then the bare list of names. */
 static void sc_report_failures(int nfail, const int *fail_test, char **fail_out, char **fail_why) {
@@ -723,12 +1000,15 @@ static int sc_runner_ncpu(void) {
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */
-  int jobs = 0, no_fork = 0, quiet = 0, shard = 1, shards = 1;
-  const char *filter = NULL;
+  int jobs = 0, no_fork = 0, quiet = 0, shard = 1, shards = 1, timeout = 0;
+  const char *filter = NULL, *weights = NULL, *record = NULL;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strcmp(argv[i], "--quiet")) quiet = 1;
+    else if (!strncmp(argv[i], "--timeout=", 10)) timeout = atoi(argv[i] + 10);
+    else if (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;
+    else if (!strncmp(argv[i], "--record=", 9)) record = argv[i] + 9;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
     else if (!strncmp(argv[i], "--shard=", 8)) {
       char tail;
@@ -737,22 +1017,21 @@ int main(int argc, char **argv) {
         return 2;
       }
     } else { /* a misspelled option must not quietly run the whole suite */
-      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --quiet or --no-fork\n", argv[i]);
+      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --timeout=S, --weights=F, --record=F, --quiet or --no-fork\n", argv[i]);
       return 2;
     }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  int nsel = 0, matched = 0;
-  for (int i = 0; i < SC_NTESTS; i++)
-    if (sc_match(SC_TESTS[i].name, filter) && matched++ % shards == shard - 1) sel[nsel++] = i;
+  for (int i = 0; i < SC_NTESTS; i++) sc_dur[i] = -1;
+  const int nsel = sc_select(filter, shard, shards, weights, sel);
   if (shards > 1)
     printf("running %d test%s (shard %d/%d)\n", nsel, nsel == 1 ? "" : "s", shard, shards);
   else
     printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
   void *genv = NULL;
   if (nsel > 0) genv = sc_genv_init();
-  int passed = 0, failed = 0, skipped = 0;
+  int passed = 0, failed = 0, skipped = 0, ticking = 0;
   int fail_test[SC_NTESTS > 0 ? SC_NTESTS : 1];
   char *fail_out[SC_NTESTS > 0 ? SC_NTESTS : 1];
   char *fail_why[SC_NTESTS > 0 ? SC_NTESTS : 1];
@@ -777,6 +1056,11 @@ int main(int argc, char **argv) {
     pid_t pid_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
     FILE *cap_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
     int token_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    /* Each child's deadline: its own `@test(timeout = N)`, else the run's --timeout (0: none). */
+    double start_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    char *cpath_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    double diag_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    unsigned limit_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
     int shared = sc_runner_jobserver_active();
     int implicit_available = 1;
     int active = 0, next = 0;
@@ -790,15 +1074,23 @@ int main(int argc, char **argv) {
             if (!token) break;
           }
         }
-        FILE *cap = tmpfile();
+        char cpath[1024];
+        FILE *cap = sc_cap_open(cpath, sizeof cpath);
         if (!cap) {
           if (token) sc_runner_give_back();
-          perror("tmpfile");
+          perror("mkstemp");
           return 101;
         }
         const pid_t pid = fork();
         if (pid == 0) {
           if (dup2(fileno(cap), 1) < 0 || dup2(fileno(cap), 2) < 0) { perror("dup2"); _exit(101); }
+          struct sigaction dfl;
+          memset(&dfl, 0, sizeof dfl);
+          sigemptyset(&dfl.sa_mask);
+          dfl.sa_handler = SIG_DFL;
+          sigaction(SIGALRM, &dfl, NULL); /* the parent's tick */
+          sc_setenv("SC_TEST_DIAG", cpath);
+          __sc_diag_install();
           sc_lk_fork_child_reset();
           SC_TESTS[sel[next]].fn(genv);
           fflush(NULL);
@@ -813,9 +1105,35 @@ int main(int argc, char **argv) {
         }
         pid_of[next] = pid;
         cap_of[next] = cap;
+        cpath_of[next] = sc_strdup(cpath);
         token_of[next] = token;
+        start_of[next] = sc_runner_now();
+        diag_of[next] = 0;
+        limit_of[next] = SC_TESTS[sel[next]].timeout ? SC_TESTS[sel[next]].timeout : (unsigned)(timeout > 0 ? timeout : 0);
+        if (limit_of[next] && !ticking) {
+          struct sigaction sa;
+          memset(&sa, 0, sizeof sa);
+          sigemptyset(&sa.sa_mask);
+          sa.sa_handler = sc_runner_tick; /* no SA_RESTART: the tick interrupts wait(2) */
+          sigaction(SIGALRM, &sa, NULL);
+          alarm(1);
+          ticking = 1;
+        }
         next++;
         active++;
+      }
+      /* Past its deadline a child is asked for its state (diag_of > 0), then killed SC_DIAG_GRACE seconds
+         later (diag_of < 0); either way it has timed out, also when it ends inside the grace. */
+      const double now = sc_runner_now();
+      for (int k = 0; k < next; k++) {
+        if (pid_of[k] < 0 || !limit_of[k] || diag_of[k] < 0) continue;
+        if (diag_of[k] == 0 && now - start_of[k] >= limit_of[k]) {
+          sc_diag_request(pid_of[k], cpath_of[k], limit_of[k]);
+          diag_of[k] = sc_runner_now();
+        } else if (diag_of[k] > 0 && now - diag_of[k] >= SC_DIAG_GRACE) {
+          sc_kill_tree(pid_of[k]);
+          diag_of[k] = -1;
+        }
       }
       int st = 0;
       const pid_t done = wait(&st);
@@ -827,8 +1145,20 @@ int main(int argc, char **argv) {
       int ti = -1;
       FILE *cap = NULL;
       int token = 0;
+      unsigned timed_out = 0;
+      double began = 0;
+      char *cpath = NULL;
       for (int k = 0; k < next; k++)
-        if (pid_of[k] == done) { ti = sel[k]; cap = cap_of[k]; token = token_of[k]; pid_of[k] = -1; break; }
+        if (pid_of[k] == done) {
+          ti = sel[k];
+          began = start_of[k];
+          cpath = cpath_of[k];
+          cap = cap_of[k];
+          token = token_of[k];
+          timed_out = diag_of[k] != 0 ? limit_of[k] : 0; /* past its deadline, killed or not */
+          pid_of[k] = -1;
+          break;
+        }
       if (ti < 0) continue; /* a child the global env started, not a test */
       active--;
       if (shared) {
@@ -838,8 +1168,17 @@ int main(int argc, char **argv) {
           implicit_available = 1;
         }
       }
+      sc_note_duration(ti, sc_runner_now() - began);
       const int crashed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
-      if (crashed == SC_TESTS[ti].should_panic) {
+      if (timed_out) {
+        printf("test %s ... FAILED (timed out)\n", SC_TESTS[ti].name);
+        char why[64];
+        snprintf(why, sizeof why, "timed out after %u s", timed_out);
+        fail_test[failed] = ti;
+        fail_out[failed] = sc_slurp(cap);
+        fail_why[failed] = sc_strdup(why);
+        failed++;
+      } else if (crashed == SC_TESTS[ti].should_panic) {
         if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
       } else {
@@ -850,11 +1189,16 @@ int main(int argc, char **argv) {
         failed++;
       }
       fclose(cap);
+      remove(cpath);
+      free(cpath);
       fflush(stdout);
     }
   }
+  if (ticking) alarm(0);
   if (genv) sc_genv_free(genv);
   if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
+  sc_report_slowest();
+  if (record) sc_write_durations(record);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else
@@ -898,14 +1242,17 @@ static int sc_runner_ncpu(void) {
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOFBF, BUFSIZ); /* keep each child's flushed diagnostic in one append */
-  const char *filter = NULL, *capture = NULL;
-  int run_one = -1, no_fork = 0, quiet = 0, jobs = 0, shard = 1, shards = 1;
+  const char *filter = NULL, *capture = NULL, *weights = NULL, *record = NULL;
+  int run_one = -1, no_fork = 0, quiet = 0, jobs = 0, shard = 1, shards = 1, timeout = 0;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--run-one=", 10)) run_one = atoi(argv[i] + 10);
     else if (!strncmp(argv[i], "--capture=", 10)) capture = argv[i] + 10;
     else if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strcmp(argv[i], "--quiet")) quiet = 1;
+    else if (!strncmp(argv[i], "--timeout=", 10)) timeout = atoi(argv[i] + 10);
+    else if (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;
+    else if (!strncmp(argv[i], "--record=", 9)) record = argv[i] + 9;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
     else if (!strncmp(argv[i], "--shard=", 8)) {
       char tail;
@@ -914,7 +1261,7 @@ int main(int argc, char **argv) {
         return 2;
       }
     } else { /* a misspelled option must not quietly run the whole suite */
-      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --quiet or --no-fork\n", argv[i]);
+      fprintf(stderr, "unknown test runner argument '%s': expected --filter=S, --shard=K/N, --jobs=N, --timeout=S, --weights=F, --record=F, --quiet or --no-fork\n", argv[i]);
       return 2;
     }
   }
@@ -936,9 +1283,8 @@ int main(int argc, char **argv) {
     return 0;
   }
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  int nsel = 0, matched = 0;
-  for (int i = 0; i < SC_NTESTS; i++)
-    if (sc_match(SC_TESTS[i].name, filter) && matched++ % shards == shard - 1) sel[nsel++] = i;
+  for (int i = 0; i < SC_NTESTS; i++) sc_dur[i] = -1;
+  const int nsel = sc_select(filter, shard, shards, weights, sel);
   if (shards > 1)
     printf("running %d test%s (shard %d/%d)\n", nsel, nsel == 1 ? "" : "s", shard, shards);
   else
@@ -978,6 +1324,10 @@ int main(int argc, char **argv) {
     HANDLE running[MAXIMUM_WAIT_OBJECTS];
     int running_test[MAXIMUM_WAIT_OBJECTS];
     int running_token[MAXIMUM_WAIT_OBJECTS];
+    /* Each child's deadline, as on POSIX; a late child is terminated (no state dump: no signals here). */
+    ULONGLONG running_start[MAXIMUM_WAIT_OBJECTS];
+    unsigned running_limit[MAXIMUM_WAIT_OBJECTS];
+    int running_late[MAXIMUM_WAIT_OBJECTS];
     int shared = sc_runner_jobserver_active();
     int implicit_available = 1;
     int active = 0, next = 0;
@@ -1016,10 +1366,24 @@ int main(int argc, char **argv) {
         running[active] = (HANDLE)ph;
         running_test[active] = i;
         running_token[active] = token;
+        running_start[active] = GetTickCount64();
+        running_limit[active] = SC_TESTS[i].timeout ? SC_TESTS[i].timeout : (unsigned)(timeout > 0 ? timeout : 0);
+        running_late[active] = 0;
         active++;
       }
       if (active == 0) continue;
-      const DWORD w = WaitForMultipleObjects((DWORD)active, running, FALSE, INFINITE);
+      int limited = 0;
+      for (int k = 0; k < active; k++) limited |= running_limit[k] != 0;
+      const DWORD w = WaitForMultipleObjects((DWORD)active, running, FALSE, limited ? 1000 : INFINITE);
+      if (w == WAIT_TIMEOUT) {
+        const ULONGLONG now = GetTickCount64();
+        for (int k = 0; k < active; k++)
+          if (running_limit[k] && !running_late[k] && now - running_start[k] >= (ULONGLONG)running_limit[k] * 1000) {
+            TerminateProcess(running[k], 1);
+            running_late[k] = 1;
+          }
+        continue;
+      }
       const DWORD slot = w - WAIT_OBJECT_0;
       if (w == WAIT_FAILED || slot >= (DWORD)active) {
         fprintf(stderr, "WaitForMultipleObjects failed (error %lu)\n", (unsigned long)GetLastError());
@@ -1030,9 +1394,14 @@ int main(int argc, char **argv) {
       CloseHandle(running[slot]);
       const int ti = running_test[slot];
       const int token = running_token[slot];
+      const unsigned timed_out = running_late[slot] ? running_limit[slot] : 0;
+      sc_note_duration(ti, (double)(GetTickCount64() - running_start[slot]) / 1000.0);
       running[slot] = running[active - 1]; /* the pool is unordered: backfill from the end */
       running_test[slot] = running_test[active - 1];
       running_token[slot] = running_token[active - 1];
+      running_start[slot] = running_start[active - 1];
+      running_limit[slot] = running_limit[active - 1];
+      running_late[slot] = running_late[active - 1];
       active--;
       if (shared) {
         if (token) {
@@ -1044,15 +1413,21 @@ int main(int argc, char **argv) {
       const int crashed = (code != 0);
       char cappath[MAX_PATH];
       sc_cap_path(cappath, sizeof cappath, tmpdir, ti);
-      if (crashed == SC_TESTS[ti].should_panic) {
+      if (!timed_out && crashed == SC_TESTS[ti].should_panic) {
         if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
       } else {
-        printf("test %s ... FAILED%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (expected a panic)" : "");
+        printf("test %s ... FAILED%s\n", SC_TESTS[ti].name, timed_out ? " (timed out)" : SC_TESTS[ti].should_panic ? " (expected a panic)" : "");
         FILE *cap = fopen(cappath, "rb");
         fail_test[failed] = ti;
         fail_out[failed] = sc_slurp(cap);
-        fail_why[failed] = sc_why_win(code, SC_TESTS[ti].should_panic);
+        if (timed_out) {
+          char why[64];
+          snprintf(why, sizeof why, "timed out after %u s", timed_out);
+          fail_why[failed] = sc_strdup(why);
+        } else {
+          fail_why[failed] = sc_why_win(code, SC_TESTS[ti].should_panic);
+        }
         if (cap) fclose(cap);
         failed++;
       }
@@ -1062,6 +1437,8 @@ int main(int argc, char **argv) {
   }
   if (genv) sc_genv_free(genv);
   if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
+  sc_report_slowest();
+  if (record) sc_write_durations(record);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else
@@ -1082,7 +1459,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
         return Option::<String>::None;
     }
     unsafe stdio::fputs(
-        "/* generated by super-c --test */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n".ptr() as *const char,
+        "/* generated by super-c --test */\n#if defined(__linux__) && !defined(_GNU_SOURCE)\n#define _GNU_SOURCE\n#endif\n#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)\n#define _DARWIN_C_SOURCE\n#endif\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n".ptr() as *const char,
         f,
     );
     unsafe stdio::fputs(test_runner_includes(), f);
@@ -1096,7 +1473,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
         );
     }
     unsafe stdio::fputs(
-        "\ntypedef void (*sc_test_fn)(void *);\nstatic const struct { const char *name; sc_test_fn fn; int should_panic; } SC_TESTS[] = {\n".ptr() as *const char,
+        "\ntypedef void (*sc_test_fn)(void *);\nstatic const struct { const char *name; sc_test_fn fn; int should_panic; unsigned timeout; } SC_TESTS[] = {\n".ptr() as *const char,
         f,
     );
     for ci in 0..plan.cases.len() {
@@ -1126,12 +1503,13 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
         };
         unsafe stdio::fprintf(
             f,
-            "%.*s\", __sc_test_w_%u_%u, %d },\n".ptr() as *const char,
+            "%.*s\", __sc_test_w_%u_%u, %d, %uu },\n".ptr() as *const char,
             (nm.end - nm.start) as i32,
             unsafe (msrc + nm.start as usize),
             tc.mod as u32,
             tc.func,
             spflag,
+            tc.timeout,
         );
     }
     unsafe stdio::fprintf(f, "};\nenum { SC_NTESTS = %zu };\n\n".ptr() as *const char, plan.cases.len());
@@ -1301,6 +1679,28 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
         let mut fs = String::from_str("--filter=");
         fs.push_str(str::from_cstr(unsafe (*topts).filter));
         run.push(fs);
+    }
+    let mut tb = Buf64 {};
+    let tsec = if unsafe (*topts).timeout < 0 {
+        DEFAULT_TEST_TIMEOUT;
+    } else {
+        unsafe (*topts).timeout;
+    };
+    unsafe stdio::snprintf(&mut tb[0], 64, "--timeout=%d".ptr() as *const char, tsec);
+    run.push(String::from_cstr(&tb[0]));
+    let dur = unsafe (*topts).durations;
+    if dur != null {
+        // The shards balance by the recorded durations when the file exists; a recording run writes it.
+        if unsafe shim::sc_mtime(dur) != 0 {
+            let mut w = String::from_str("--weights=");
+            w.push_str(str::from_cstr(dur));
+            run.push(w);
+        }
+        if unsafe (*topts).record {
+            let mut r = String::from_str("--record=");
+            r.push_str(str::from_cstr(dur));
+            run.push(r);
+        }
     }
     if unsafe (*topts).shards > 0 {
         let mut sb = Buf64 {};

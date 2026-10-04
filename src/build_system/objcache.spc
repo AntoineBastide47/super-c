@@ -280,8 +280,13 @@ pub fn take_first_line(path: str) Option<String> {
 /// not the tree's path, so a unit of the same text in another tree reuses its object (`records_dir`
 /// names the flags that make the object depend on the tree's path).
 pub fn script_ns(root: str) String {
-    return loader::join2(root, "o/script");
+    let mut out = loader::join2(root, "o/");
+    out.push_str(SCRIPT_NS);
+    return out;
 }
+
+/// The directory name of the script namespace below `<root>/o`.
+pub const SCRIPT_NS: str<'static> = "script";
 
 /// Whether `flags` make an object depend on the directory it was compiled in or on the object's path:
 /// debug information (`-g` other than `-g0`, which records the compile directory) and coverage or

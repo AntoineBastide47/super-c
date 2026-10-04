@@ -93,6 +93,11 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_thread_join(handle: *mut void) i32;
     /// Detach: the thread runs on and the OS releases it at exit; the handle is consumed. 0 on success.
     pub fn sc_rt_thread_detach(handle: *mut void) i32;
+    /// Test-timeout diagnostics: in a test's process tree, run `dump` when the runner asks for the state
+    /// after a timeout (it runs in a signal handler: relaxed loads, `sc_rt_diag_write` only); a no-op elsewhere.
+    pub fn sc_rt_diag_chain(dump: fn() void) void;
+    /// Write `n` bytes to the test's capture file, from a `sc_rt_diag_chain` dump.
+    pub fn sc_rt_diag_write(p: *const u8, n: usize) void;
     /// Failure injection for tests: the `nth` call of the operation `kind` (the `FAIL_*` constants) fails.
     pub fn sc_rt_fail_arm(kind: i32, nth: u32) void;
 

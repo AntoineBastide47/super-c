@@ -55,7 +55,7 @@ fixpoint, the worker-count identity under every seed, and the strict C warnings 
 a warm object cache). The targets, profiles and benchmark steps (about 130 s) run in the
 release workflow (`sh ci/gate.sh --no-check`, macOS and Linux).
 
-The wasm leg of the release and debug workflows checks the fixpoint for the wasm compiler with
+The wasm leg of the release workflow checks the fixpoint for the wasm compiler with
 the CLI only: in one project copy, the native engine builds gen2 with gen1 (the `super-c.wasm`
 artifact, under wasmtime) as its `--transpiler`, then gen3 with gen2 as its transpiler, and the
 two emitted trees at the same path (`build/release/raw`) must be byte-identical. No diff against

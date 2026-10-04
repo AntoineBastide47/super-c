@@ -613,6 +613,7 @@ super-c --test app.spc                      # find the @test functions, build, r
 super-c --test --test-filter=drains app.spc # only tests whose name contains "drains"
 super-c --test --test-shard=1/2 app.spc     # run half of the tests (for CI)
 super-c --test --test-jobs=4 app.spc        # at most 4 test processes at once
+super-c --test --test-timeout=120 app.spc   # fail a test that runs past 120 s (default 90, 0: none)
 super-c --test --test-no-fork app.spc       # run in one process, for a debugger
 super-c --test --quiet app.spc              # print only failures and the totals
 ```

@@ -316,6 +316,13 @@ static inline __attribute__((unused, always_inline)) void *__sc_new(size_t __n) 
 /// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
 pub const fn super_rt_source() *const char {
     return M"(/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
+/* The test-timeout dump below enumerates threads (mach on macOS, /proc and tgkill on Linux). */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -665,6 +672,132 @@ void sc_lk_fork_child_reset(void) {
 void sc_lk_report_now(void) {
   if (sc_lk_on()) sc_lk_report();
 }
+#if !defined(_WIN32) && !defined(__wasm__)
+/* Test-timeout diagnostics. A process whose environment names a file in SC_TEST_DIAG (the test runner sets
+   it in each test's process; every process the test starts inherits it) answers SIGURG by appending
+   to that file a header naming itself and the stack of each of its threads, one thread at a time, each
+   asked with SIGUSR2. SIGURG is ignored by default, so the runner can ask every process of a test's tree:
+   one that is not a Super-C program (cc, ld) ignores it. The handlers use only open/write/close,
+   backtrace and short sleeps: the process is killed after it. Elsewhere SIGURG keeps its default. */
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <dirent.h>
+#include <sys/syscall.h>
+#endif
+static char sc_diag_path[1024];
+static int sc_diag_fd = -1;
+static volatile sig_atomic_t sc_diag_ack;
+static void sc_diag_say(const char *s) {
+  ssize_t r = write(sc_diag_fd, s, strlen(s));
+  (void)r;
+}
+static void sc_diag_num(long v) {
+  char b[24];
+  int i = 23;
+  b[i] = 0;
+  do {
+    b[--i] = (char)('0' + v % 10);
+    v /= 10;
+  } while (v > 0 && i > 0);
+  sc_diag_say(b + i);
+}
+static void sc_diag_stack(int sig) {
+  (void)sig;
+#ifdef SC_LK_SYMS
+  void *f[64];
+  const int n = backtrace(f, 64);
+  sc_diag_say("--- thread\n");
+  backtrace_symbols_fd(f, n, sc_diag_fd);
+#else
+  sc_diag_say("--- thread (no backtrace on this platform)\n");
+#endif
+  sc_diag_ack = 1;
+}
+#if defined(__APPLE__) || defined(__linux__)
+/* Ask one other thread for its stack and wait for it, at most half a second. */
+static void sc_diag_ask(int (*send)(void *), void *t) {
+  sc_diag_ack = 0;
+  if (send(t) != 0) return;
+  struct timespec ms = { 0, 1000000 };
+  for (int i = 0; i < 500 && !sc_diag_ack; i++) nanosleep(&ms, NULL);
+  if (!sc_diag_ack) sc_diag_say("--- thread (did not answer: it blocks the signal)\n");
+}
+#if defined(__APPLE__)
+static int sc_diag_send(void *t) { return pthread_kill((pthread_t)t, SIGUSR2); }
+#else
+static int sc_diag_send(void *t) { return (int)syscall(SYS_tgkill, getpid(), (pid_t)(intptr_t)t, SIGUSR2); }
+#endif
+#endif
+static void sc_diag_dump(int sig) {
+  (void)sig;
+  sc_diag_fd = open(sc_diag_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+  if (sc_diag_fd < 0) return;
+  sc_diag_say("\n--- process ");
+  sc_diag_num((long)getpid());
+#if defined(__APPLE__) || defined(__ANDROID__)
+  sc_diag_say(" ");
+  sc_diag_say(getprogname());
+#elif defined(__linux__)
+  sc_diag_say(" ");
+  sc_diag_say(program_invocation_short_name);
+#endif
+  sc_diag_say(": the stack of every thread\n");
+  sc_diag_stack(0);
+#if defined(__APPLE__)
+  thread_act_array_t th;
+  mach_msg_type_number_t nth = 0;
+  if (task_threads(mach_task_self(), &th, &nth) == KERN_SUCCESS) {
+    for (mach_msg_type_number_t i = 0; i < nth; i++) {
+      pthread_t t = pthread_from_mach_thread_np(th[i]);
+      if (t != NULL && !pthread_equal(t, pthread_self())) sc_diag_ask(sc_diag_send, (void *)t);
+      mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)th, nth * sizeof th[0]);
+  }
+#elif defined(__linux__)
+  DIR *d = opendir("/proc/self/task");
+  if (d != NULL) {
+    const pid_t self = (pid_t)syscall(SYS_gettid);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+      const pid_t tid = (pid_t)atoi(e->d_name);
+      if (tid > 0 && tid != self) sc_diag_ask(sc_diag_send, (void *)(intptr_t)tid);
+    }
+    closedir(d);
+  }
+#endif
+  close(sc_diag_fd);
+  sc_diag_fd = -1;
+}
+/* Install the dump when SC_TEST_DIAG names a file: at startup, and again by the test runner once it has
+   set the variable in a test's process. */
+void __sc_diag_install(void) {
+  const char *p = getenv("SC_TEST_DIAG");
+  if (p == NULL || p[0] == 0 || strlen(p) >= sizeof sc_diag_path) return;
+  memcpy(sc_diag_path, p, strlen(p) + 1);
+#ifdef SC_LK_SYMS
+  void *f[1];
+  (void)backtrace(f, 1); /* the first call loads the unwinder, which allocates: never in a handler */
+#endif
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sa.sa_handler = sc_diag_stack;
+  sigaction(SIGUSR2, &sa, NULL);
+  sa.sa_handler = sc_diag_dump;
+  sigaction(SIGURG, &sa, NULL);
+}
+__attribute__((constructor)) static void __sc_diag_boot(void) { __sc_diag_install(); }
+#else
+void __sc_diag_install(void) {}
+#endif
 /* Track from here on without an exit report (SC_LEAK_CHECK, when set, keeps its own state). Returns 1:
    the tracker counts (a runtime without one reports 0 through the driver's stand-in). */
 int sc_lk_stats_enable(void) {

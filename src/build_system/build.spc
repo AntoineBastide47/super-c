@@ -137,7 +137,7 @@ pub fn rm_rf(path: str) {
 // Retention: each local object tree (a profile directory such as build/dev) owns the namespace
 // `<root>/o/<hash of its real path>`. A successful build writes the key set of its units as a
 // generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
-// every object and dependency list no kept generation names (`obj_cache_commit`). A daily sweep
+// every object and dependency list no kept generation names (`obj_cache_commit`). A sweep every two hours
 // removes dead namespaces and idle linker caches (`cache_sweep`).
 // The key, the cache root and the namespace that script builds share live in build_system::objcache.
 
@@ -148,6 +148,8 @@ const OBJ_GENS: usize = 4;
 const OBJ_NS_IDLE: i64 = 30 * 86400;
 /// A linker cache namespace is removed after this many seconds with no entry written or used.
 const LTO_NS_IDLE: i64 = 7 * 86400;
+/// The cache sweep (`cache_sweep`) runs at most once per this many seconds.
+const SWEEP_EVERY: i64 = 2 * 3600;
 
 /// The object cache namespace of the local object tree `pdir` below cache root `root`:
 /// `<root>/o/<hash of pdir's real path>`. Empty when `root` is empty (caching disabled).
@@ -222,9 +224,10 @@ fn add_keys(live: &mut Set<String>, text: str) {
 /// directory and one file. The trim keeps the newest OBJ_GENS generations and deletes each object
 /// and dependency list none of them names. Only builds of this object tree write the namespace, and
 /// every object this build installed is in `keys`. A restore that loses a race with the trim cannot
-/// open the file and compiles instead. A failed step leaves its files to the next trim. `src_dir`
-/// is the source directory recorded as the namespace owner.
-fn obj_cache_commit(ns: str, keys: &mut Vector<String>, src_dir: str, now: i64) {
+/// open the file and compiles instead. A failed step leaves its files to the next trim. `tree`
+/// is the object tree (the profile directory) recorded as the namespace owner: the sweep removes the
+/// namespace once that directory is gone.
+fn obj_cache_commit(ns: str, keys: &mut Vector<String>, tree: str, now: i64) {
     let lo = list_dir(ns, false);
     if lo.is_none() {
         return;
@@ -271,10 +274,11 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, src_dir: str, now: i64) 
     if !write_file_atomic(gp.as_str(), text.as_str()) {
         return;
     }
-    if !has_owner {
-        let own = real_path(src_dir);
-        if own.len() != 0 {
-            let op = loader::join2(ns, "owner");
+    let own = real_path(tree);
+    if own.len() != 0 {
+        let op = loader::join2(ns, "owner");
+        // An owner an older compiler wrote names the source directory: replace it.
+        if !has_owner || loader::read_file(op.as_str()).unwrap_or(String::new()).as_str() != own.as_str() {
             let _ = write_file_atomic(op.as_str(), own.as_str());
         }
     }
@@ -308,22 +312,32 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, src_dir: str, now: i64) 
     }
 }
 
-/// An object namespace no build reads again: its owner directory is gone, or nothing in it
-/// (generations, owner record, objects) changed for OBJ_NS_IDLE.
-fn ns_dead(ns: str, now: i64) bool {
+/// An object namespace `name` (directory `ns`) no build reads again: its owner object tree is gone;
+/// its owner record names another directory (an older compiler recorded the source directory); it has
+/// no owner record and nothing in it changed for TMP_IDLE (a build that stopped before its first
+/// commit); or nothing in it (generations, owner record, objects) changed for OBJ_NS_IDLE. The
+/// script namespace has no owner and goes only when idle.
+fn ns_dead(name: str, ns: str, now: i64) bool {
+    let idle = now - newest_mtime(ns);
+    if name == SCRIPT_NS {
+        return idle >= OBJ_NS_IDLE;
+    }
     let op = loader::join2(ns, "owner");
     let own = loader::read_file(op.as_str());
-    if !own.is_none() {
-        let ob = own.unwrap();
-        let mut od = String::from_str(ob.as_str());
-        if unsafe shim::sc_mtime(od.cstr()) == 0 {
-            return true;
-        }
+    if own.is_none() {
+        return idle >= TMP_IDLE;
     }
-    return now - newest_mtime(ns) >= OBJ_NS_IDLE;
+    let ob = own.unwrap();
+    let mut od = String::from_str(ob.as_str());
+    if unsafe shim::sc_mtime(od.cstr()) == 0 {
+        return true;
+    }
+    let mut want = String::new();
+    hex64(fnv_cont(FNV_BASIS, ob.as_str()), &mut want);
+    return want.as_str() != name || idle >= OBJ_NS_IDLE;
 }
 
-/// At most once a day (the mtime of `<root>/o/.sweep`), delete what no build reads again: dead object
+/// At most once per SWEEP_EVERY (the mtime of `<root>/o/.sweep`), delete what no build reads again: dead object
 /// namespaces (`ns_dead`), linker cache namespaces with no entry written or used for LTO_NS_IDLE (a
 /// toolchain upgrade leaves the old one behind), and the flat `<key>.o`/`<key>.d` files that
 /// compilers before namespaces installed directly in the root.
@@ -331,7 +345,7 @@ fn cache_sweep(root: str, now: i64) {
     let od = loader::join2(root, "o");
     let mut stamp = loader::join2(od.as_str(), ".sweep");
     let last = unsafe shim::sc_mtime(stamp.cstr());
-    if last != 0 && now - last < 86400 {
+    if last != 0 && now - last < SWEEP_EVERY {
         return;
     }
     mkdir_p(od.as_str());
@@ -342,8 +356,12 @@ fn cache_sweep(root: str, now: i64) {
     }
     let nss = list_dir(od.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..nss.len() {
-        let ns = loader::join2(od.as_str(), nss.at(i).as_str());
-        if ns_dead(ns.as_str(), now) {
+        let name = nss.at(i).as_str();
+        if name.starts_with(".") {
+            continue; // the sweep stamp
+        }
+        let ns = loader::join2(od.as_str(), name);
+        if ns_dead(name, ns.as_str(), now) {
             rm_rf(ns.as_str());
         }
     }
@@ -2655,7 +2673,7 @@ fn engine_build_i(
         if ret == 0 {
             let now = time::now();
             if stream.cache.len() != 0 {
-                obj_cache_commit(stream.cache.as_str(), &mut stream.keys, root_dir, now);
+                obj_cache_commit(stream.cache.as_str(), &mut stream.keys, pdir.as_str(), now);
             }
             let croot = cache_root();
             if croot.len() != 0 {
@@ -3310,7 +3328,12 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     if brc != 0 {
         return brc;
     }
-    return test_run_runner(topts, tbin.as_str());
+    // The suite's recorded durations balance the shards (`<test dir>/durations.tsv`, written by
+    // --test-record-durations).
+    let mut durp = loader::join2(tdir.as_str(), "durations.tsv");
+    let mut o = unsafe *topts;
+    o.durations = durp.cstr();
+    return test_run_runner(&o, tbin.as_str());
 }
 
 // Every .spc under the suite directory `bdir` of `super-c <cmd>` (test or bench), as

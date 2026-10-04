@@ -3771,6 +3771,49 @@ extend Parser {
         return v as u32;
     }
 
+    // The `@test(...)` list: `should_panic` and `timeout = N` (seconds, at least 1), each at most once, in
+    // any order, separated by commas. Encoded in `out.arg`: TEST_SHOULD_PANIC, and the timeout shifted by
+    // TEST_TIMEOUT_SHIFT (0: the run's global timeout).
+    fn parse_test_args(self: &mut Self, syntax: &AttrSyntax, ns: Token, out: &mut Attr) {
+        let argc = Parser::attr_arg_count(syntax);
+        let mut panic_seen = false;
+        let mut timeout: u32 = 0;
+        let mut i: usize = 0;
+        let mut bad = argc == 0;
+        while i < argc && !bad {
+            let t = self.attr_arg(syntax, i);
+            if t.kind() == TokenType::Identifier && self.text_is(t, "should_panic") && !panic_seen {
+                panic_seen = true;
+                i = i + 1;
+            } else if t.kind() == TokenType::Identifier && self.text_is(t, "timeout") && timeout == 0 && i + 2 < argc && self.attr_arg(
+                syntax,
+                i + 1,
+            ).kind() == TokenType::Equal && self.attr_arg(syntax, i + 2).kind() == TokenType::IntegerLiteral {
+                timeout = self.parse_attr_int(self.attr_arg(syntax, i + 2));
+                if timeout == 0 || timeout > 0x7FFFFFFF {
+                    bad = true;
+                }
+                i = i + 3;
+            } else {
+                bad = true;
+            }
+            if !bad && i < argc {
+                bad = self.attr_arg(syntax, i).kind() != TokenType::Comma || i + 1 == argc;
+                i = i + 1;
+            }
+        }
+        if bad {
+            self.errors.emit_span(
+                ns.span(),
+                String::from_str(
+                    "attribute '@test' accepts 'should_panic' and 'timeout = N' (N seconds, at least 1), each at most once",
+                ),
+            );
+            return;
+        }
+        out.arg = pick(panic_seen, TEST_SHOULD_PANIC, 0u32) | timeout << TEST_TIMEOUT_SHIFT;
+    }
+
     // `@platform(...)` (is_arch false) or `@arch(...)`, its sibling on the instruction-set axis: the list
     // grammar is identical, only the axis's names differ.
     fn parse_axis_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr, is_arch: bool) {
@@ -4050,24 +4093,19 @@ extend Parser {
         };
         if syntax.parts == 1 && test_kind >= 0 {
             *out = Attr { kind: test_kind as u8, str_span: Span::empty() };
-            if syntax.has_args {
-                let valid = argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && if test_kind == AttrKind::ATTR_TEST as i32 {
-                    self.text_is(self.attr_arg(&syntax, 0), "should_panic");
-                } else {
-                    self.text_is(self.attr_arg(&syntax, 0), "global");
-                };
+            if syntax.has_args && test_kind == AttrKind::ATTR_TEST as i32 {
+                self.parse_test_args(&syntax, ns, out);
+            } else if syntax.has_args {
+                let valid = argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && self.text_is(
+                    self.attr_arg(&syntax, 0),
+                    "global",
+                );
                 if valid {
                     out.arg = 1;
                 } else {
                     self.errors.emit_span(
                         ns.span(),
-                        String::from_str(
-                            if test_kind == AttrKind::ATTR_TEST as i32 {
-                                "attribute '@test' accepts only '(should_panic)'";
-                            } else {
-                                "'@test_init' / '@test_free' accept only '(global)'";
-                            },
-                        ),
+                        String::from_str("'@test_init' / '@test_free' accept only '(global)'"),
                     );
                 }
             }

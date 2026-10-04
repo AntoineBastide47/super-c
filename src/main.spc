@@ -118,6 +118,17 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
         if topts.jobs < 1 {
             *bad = true;
         }
+    } else if arg.starts_with("--test-timeout=") {
+        let digits = (unsafe (arg.ptr() + 15)) as *const char; // argv text: NUL-terminated
+        let mut endp: *mut char = null;
+        let v = unsafe stdlib::strtoul(digits, &mut endp, 10);
+        if endp as usize == digits as usize || unsafe *endp != 0 as char || v > 2147483647 {
+            *bad = true;
+        } else {
+            topts.timeout = v as i32;
+        }
+    } else if arg == "--test-record-durations" {
+        topts.record = true;
     } else if arg == "--test-no-fork" {
         topts.no_fork = true;
     } else if arg == "--quiet" {
@@ -848,6 +859,9 @@ fn main(argv: Vector<str>) i32 {
         filter: null,
         shard: 0,
         shards: 0,
+        timeout: -1,
+        durations: null,
+        record: false,
     };
     let mut co = CommonOpts {
         ce_steps: 0,
@@ -1197,6 +1211,8 @@ OPTIONS:
     --test-filter=S        run only tests whose name contains S
     --test-shard=K/N       run shard K of N (one-based, stable round-robin)
     --test-jobs=N          bound the test process pool (default: one per core)
+    --test-timeout=S       fail a test that runs longer than S seconds (default 90, 0: none)
+    --test-record-durations  test: merge each test's time into tests/durations.tsv (balances --test-shard)
     --test-no-fork         run tests in-process (for a debugger)
     --quiet                test: print only the failures and the tally
 )".ptr() as *const char,

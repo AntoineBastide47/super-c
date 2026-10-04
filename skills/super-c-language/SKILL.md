@@ -530,6 +530,9 @@ fn drains(fx: &mut Fx) {
 
 @test(should_panic)
 fn rejects_bad() { panic("boom"); }
+
+@test(should_panic, timeout = 5) // a list: should_panic and timeout = N seconds, each at most once
+fn rejects_quickly() { panic("boom"); }
 ```
 
 `assert(cond)`, `assert_eq(a, b)`, `assert_ne(a, b)` are compiler builtins that print
@@ -553,7 +556,7 @@ source text, values, and file:line on failure.
 | `@emit_macro` | Export generic as reusable C macro |
 | `@fmt.skip` | Exempt from formatter |
 | `@platform(P)` | Platform gate |
-| `@test` / `@test_init` / `@test_free` | Test harness |
+| `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |

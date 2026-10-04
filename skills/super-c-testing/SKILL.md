@@ -87,6 +87,38 @@ signal). The runner counts any nonzero exit as the panic, so under `SC_LEAK_CHEC
 leak (exit 23) alone can make it pass. Run it once without that variable to confirm the
 intended panic.
 
+### Timeouts
+
+```superc
+@test(timeout = 600)
+fn builds_the_whole_corpus() { /* ... */ }
+
+@test(should_panic, timeout = 5)
+fn rejects_quickly() { panic("boom"); }
+```
+
+A test that runs longer than its timeout fails as `FAILED (timed out)`, "timed out after N
+s". The run's timeout is `--test-timeout=S` (default 90 s, `0` turns it off); a test's own
+`@test(timeout = N)` (seconds, at least 1) overrides it in either direction. The arguments of
+`@test` are a list: `should_panic` and `timeout = N`, in any order, each at most once.
+`--test-no-fork` applies no timeout. A forked run ends with its five slowest tests and their wall
+times (`slowest tests:`), so a CI log shows the margin a timeout leaves. Until a release parses the list form, the repository's
+own tests use it only inside string literals (super-c-self-hosting, "New Syntax Cadence").
+
+On POSIX the runner then dumps the state of the test's whole process tree into the test's
+replayed output, and kills the tree 3 s later. Each test's capture file is a named file, and
+the test's process carries its path in `SC_TEST_DIAG`, which every process it starts inherits.
+The runner walks the tree (`proc_listchildpids` on macOS, `/proc` on Linux) and sends each
+process SIGURG, one at a time. Every Super-C program answers from its compiler-emitted runtime
+(`__sc_diag_install`): a `--- process <pid> <name>` header, then every thread's stack
+(`backtrace`; threads found with `task_threads` on macOS and `/proc/self/task` on Linux), the
+thread blocked in a syscall included; std's reactor then adds its state when the process started
+it (state, queued commands, and per descriptor the read and write waiters, stale bits and last
+event). A library chains its own dump the same way with `sc_rt_diag_chain` (`ffi/sc_rt.h`). A
+process that is not a Super-C program (`cc`, `ld`, a shell) ignores SIGURG, its default action. On
+Linux the runner adds the kernel's view of every process: each thread's state and wait channel.
+Windows terminates the child with no dump.
+
 ### Global fixtures
 
 ```superc
@@ -159,8 +191,10 @@ agents and CI logs stay readable. Drop it only when a PASSING test's output is n
 ```sh
 super-c test --quiet                   # the standard form: only the failures and the tally
 super-c test --quiet --test-filter=parse  # substring match on test name
-super-c test --quiet --test-shard=1/4  # stable one-based CI sharding
+super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
+super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per CPU)
+super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; shows passing output)
 ```
 
@@ -173,7 +207,7 @@ runner itself is a separate engine build of the generated test root under the bu
 emit stamp, linked to `build/test/__tests`, emitted C under `build/test/raw/`. An
 unchanged suite skips straight to the cached link. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. Run directly, the runner takes `--filter=S`,
-`--shard=K/N`, `--jobs=N`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
+`--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run gets `SC_CACHE_DIR=<scratch dir>/.sccache`
 unless the test sets its own (`cli::cache_env`), so a test never writes into the user's
@@ -197,7 +231,12 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 0xC0000409) and flushes nothing, so atexit handlers and the leak report do not run;
 `freopen` resets to full buffering and `_IOLBF` acts as `_IOFBF`, so a capture child sets
 `_IONBF` on both streams. Diagnose a Windows-only failure on the real `windows-latest`
-runner: edit the job in `.github/workflows/debug.yml`, which runs on dispatch only. An
+runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
+In both workflows, Linux, Windows and wasm build their compiler once (`compile`,
+`windows-compile`, `wasm-compile`: an artifact) and run the two test shards in parallel on it;
+in the release workflow the Linux correctness gate runs beside the shards and the release
+binary is built after all of them pass, while macOS keeps one job with the same steps in
+sequence. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
 
@@ -213,9 +252,16 @@ use it to see a passing test's output.
 
 ### Sharding for CI
 
-`--test-shard=K/N` splits the test list into N shards and runs shard K. Tests are dealt
-round-robin over the filter-matched list, so the assignment is deterministic for a fixed
-test list and filter; adding, removing or reordering tests moves tests between shards.
+`--test-shard=K/N` splits the test list into N shards and runs shard K. `super-c test` balances
+the shards by the suite's recorded durations, `tests/durations.tsv` (one `<seconds>\t<name>` line
+per test, sorted by name): the filter-matched tests, the longest first, each go to the shard with
+the least time so far, ties to the lowest shard, and a test the file does not name counts as the
+median recorded duration. Every shard computes the same assignment from the same file, test list
+and filter, so the shards are disjoint and cover the list. Without the file (and in the script form
+`super-c --test app.spc`) tests are dealt round-robin. `super-c test --test-record-durations` merges
+the run's times into the file: a test that ran gets its new time, one that did not (another shard)
+keeps its old one, and a name the suite no longer has is dropped. Refresh it with an unsharded run
+after adding or removing slow tests; a stale file only makes the split less even.
 
 ## Leak Detection
 

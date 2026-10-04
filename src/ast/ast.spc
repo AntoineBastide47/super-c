@@ -207,6 +207,11 @@ pub struct Attr {
     pub str_span: tok::Span,
 }
 
+/// `@test` arguments in `Attr.arg`: the `should_panic` bit, and the `timeout = N` seconds above
+/// TEST_TIMEOUT_SHIFT (0: the run's global timeout).
+pub const TEST_SHOULD_PANIC: u32 = 1;
+pub const TEST_TIMEOUT_SHIFT: u32 = 1;
+
 /// The attribute kinds whose argument may be a constant expression, and the type each argument
 /// checks against.
 pub const ATTR_EXPR_KINDS: [AttrKind; 1] = [AttrKind::ATTR_ALIGN];

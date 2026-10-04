@@ -595,6 +595,13 @@ int sc_rt_thread_detach(void *handle) {
   return CloseHandle((HANDLE)handle) ? 0 : -1; /* the thread keeps running; the OS drops it at exit */
 }
 
+/* Test-timeout diagnostics (see the POSIX section): no signals here, so nothing to chain. */
+void sc_rt_diag_chain(void (*dump)(void)) { (void)dump; }
+void sc_rt_diag_write(const uint8_t *p, size_t n) {
+  (void)p;
+  (void)n;
+}
+
 /* SRWLOCK + CONDITION_VARIABLE: the pair Windows pairs natively (SleepConditionVariableSRW), both
    allocation-free to initialise and with no destroy call to make. */
 void *sc_rt_mutex_new(void) {
@@ -906,6 +913,13 @@ int sc_rt_thread_detach(void *handle) {
   return -1;
 }
 
+/* Test-timeout diagnostics (see the POSIX section): no signals here, so nothing to chain. */
+void sc_rt_diag_chain(void (*dump)(void)) { (void)dump; }
+void sc_rt_diag_write(const uint8_t *p, size_t n) {
+  (void)p;
+  (void)n;
+}
+
 /* A lock is never contended with one thread. The flag is kept so locking twice still traps rather than
    quietly succeeding, which is the bug that flag would otherwise hide. */
 void *sc_rt_mutex_new(void) { return sc_rt_alloc(sizeof(int32_t), 1); }
@@ -969,6 +983,7 @@ void sc_rt_ctx_free(void *ctx) { free(ctx); }
 #else
 /* ================================ POSIX ============================================================ */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
@@ -1408,6 +1423,59 @@ int sc_rt_thread_detach(void *handle) {
   int rc = sc_rt_fail_hit(SC_RT_FAIL_THREAD_DETACH) ? EINVAL : pthread_detach(*(pthread_t *)handle);
   free(handle); /* the pthread_t is consumed either way: a rejected detach names no joinable thread */
   return rc;
+}
+
+/* Test-timeout diagnostics. In a test's process tree (SC_TEST_DIAG names the test's capture file) the
+   runner asks each process for its state with SIGURG: the compiler-emitted runtime of every Super-C program
+   appends its threads' stacks to that file, and a library adds its own state after them with
+   `sc_rt_diag_chain` (std's reactor does), through `sc_rt_diag_write`. Any other process keeps SIGURG as
+   it was. The dumps run in the handler, so they read with relaxed loads and only write. */
+#define SC_RT_DIAG_MAX 4
+static void (*sc_rt_diag_fns[SC_RT_DIAG_MAX])(void);
+static int32_t sc_rt_diag_n;
+static int32_t sc_rt_diag_lock;
+static struct sigaction sc_rt_diag_prev;
+static char sc_rt_diag_path[1024];
+static int sc_rt_diag_fd = -1;
+
+static void sc_rt_diag_run(int sig) {
+  /* The runtime's own dump first: the process header and every thread's stack. */
+  if (sc_rt_diag_prev.sa_handler != SIG_DFL && sc_rt_diag_prev.sa_handler != SIG_IGN) sc_rt_diag_prev.sa_handler(sig);
+  sc_rt_diag_fd = open(sc_rt_diag_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+  if (sc_rt_diag_fd < 0) return;
+  const int32_t n = __atomic_load_n(&sc_rt_diag_n, __ATOMIC_ACQUIRE);
+  for (int32_t i = 0; i < n; i++) sc_rt_diag_fns[i]();
+  close(sc_rt_diag_fd);
+  sc_rt_diag_fd = -1;
+}
+
+void sc_rt_diag_chain(void (*dump)(void)) {
+  const char *on = getenv("SC_TEST_DIAG");
+  if (on == NULL || *on == 0 || strlen(on) >= sizeof sc_rt_diag_path) return;
+  while (__atomic_exchange_n(&sc_rt_diag_lock, 1, __ATOMIC_ACQUIRE)) sc_rt_cpu_relax();
+  const int32_t n = sc_rt_diag_n;
+  int32_t known = 0;
+  for (int32_t i = 0; i < n; i++) known |= sc_rt_diag_fns[i] == dump;
+  if (!known && n < SC_RT_DIAG_MAX) {
+    sc_rt_diag_fns[n] = dump;
+    __atomic_store_n(&sc_rt_diag_n, n + 1, __ATOMIC_RELEASE);
+    if (n == 0) {
+      memcpy(sc_rt_diag_path, on, strlen(on) + 1);
+      struct sigaction sa;
+      memset(&sa, 0, sizeof sa);
+      sigemptyset(&sa.sa_mask);
+      sa.sa_flags = SA_RESTART;
+      sa.sa_handler = sc_rt_diag_run;
+      sigaction(SIGURG, &sa, &sc_rt_diag_prev);
+    }
+  }
+  __atomic_store_n(&sc_rt_diag_lock, 0, __ATOMIC_RELEASE);
+}
+
+void sc_rt_diag_write(const uint8_t *p, size_t n) {
+  if (sc_rt_diag_fd < 0) return;
+  ssize_t r = write(sc_rt_diag_fd, p, n);
+  (void)r;
 }
 
 void *sc_rt_mutex_new(void) {

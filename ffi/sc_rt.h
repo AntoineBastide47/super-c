@@ -116,6 +116,12 @@ int sc_rt_thread_join(void *handle);
    a programmer error the caller must treat as fatal. */
 int sc_rt_thread_detach(void *handle);
 
+/* Test-timeout diagnostics: in a test's process tree (SC_TEST_DIAG names the test's capture file), run
+   `dump` when the test runner asks for the state after a timeout, after the runtime's stack dump; no-op
+   elsewhere. `dump` runs in a signal handler and writes only through `sc_rt_diag_write` (to that file). */
+void sc_rt_diag_chain(void (*dump)(void));
+void sc_rt_diag_write(const uint8_t *p, size_t n);
+
 /* Failure injection for the substrate's tests: the `nth` call (1-based) of the operation `kind` names
    fails the way the OS would (a null handle, a nonzero code), then the hook disarms itself; `nth` 0
    disarms. One relaxed load on each operation's slow path, nothing on any switch or park path. */

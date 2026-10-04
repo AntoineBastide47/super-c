@@ -782,7 +782,128 @@ fn build_reactor() *mut Reactor {
         panic("reactor: cannot create the poller thread");
     }
     unsafe (*r).thread = h;
+    unsafe sc_runtime::sc_rt_diag_chain(io_diag);
     return r;
+}
+
+// One line of the timeout dump, built without allocating (it runs in a signal handler).
+@no_const
+struct DiagLine {
+    pub b: [u8; 160],
+    pub n: usize,
+}
+
+extend DiagLine {
+    fn put(self: &mut Self, s: str) {
+        for i in 0..s.len() {
+            if self.n < 160 {
+                unsafe self.b[self.n] = s[i];
+                self.n = self.n + 1;
+            }
+        }
+    }
+    fn num(self: &mut Self, v: u64) {
+        let mut d: [u8; 20] = [[0] = 0u8];
+        let mut k: usize = 0;
+        let mut x = v;
+        loop {
+            unsafe d[k] = (x % 10) as u8 + b'0';
+            k = k + 1;
+            x = x / 10;
+            if x == 0 || k == 20 {
+                break;
+            }
+        }
+        while k > 0 && self.n < 160 {
+            k = k - 1;
+            unsafe self.b[self.n] = unsafe d[k];
+            self.n = self.n + 1;
+        }
+    }
+    fn snum(self: &mut Self, v: i64) {
+        if v < 0 {
+            self.put("-");
+            self.num((0 - (v + 1)) as u64 + 1);
+        } else {
+            self.num(v as u64);
+        }
+    }
+    fn end(self: &mut Self) {
+        self.put("\n");
+        unsafe sc_runtime::sc_rt_diag_write(&self.b[0], self.n);
+        self.n = 0;
+    }
+}
+
+// The length of a waiter list, read without the reactor's ownership: bounded, since it may be changing.
+fn diag_len(head: usize) u64 {
+    let mut n: u64 = 0;
+    let mut w = head as *mut IoWait;
+    while w != null && n < 100000 {
+        n = n + 1;
+        w = (unsafe atomic::load_usize((&mut (*w).lnext) as *mut usize, 0)) as *mut IoWait;
+    }
+    return n;
+}
+
+// The reactor's state, for a test that ran past its timeout (`sc_rt_diag_chain`): the reactor thread's
+// own fields read with relaxed loads, so a value may be torn between fields but never undefined.
+fn io_diag() {
+    let r = unsafe G_REACTOR;
+    let mut l = DiagLine { b: [[0] = 0u8], n: 0 };
+    l.put("--- reactor: state ");
+    l.snum(unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 0));
+    if r == null {
+        l.end();
+        return;
+    }
+    l.put(" sleeping ");
+    l.snum(unsafe atomic::load_i32(&mut unsafe (*r).sleeping, 0));
+    l.put(" events ");
+    l.num(unsafe atomic::load_u64(&mut unsafe (*r).events, 0));
+    l.put(" commands queued ");
+    l.num(
+        if unsafe atomic::load_usize(&mut unsafe (*r).cmds, 0) != 0 {
+            1u64;
+        } else {
+            0u64;
+        },
+    );
+    l.put(" deferred acks ");
+    l.snum(unsafe atomic::load_i32(&mut unsafe (*r).deferred, 0));
+    l.put(" closing ");
+    l.snum(unsafe atomic::load_i32(&mut unsafe G_CLOSING, 0));
+    l.put(" closers ");
+    l.snum(unsafe atomic::load_i32(&mut unsafe G_CLOSERS, 0));
+    l.put(" closes ");
+    l.num(unsafe atomic::load_u64(&mut unsafe G_CLOSES, 0));
+    l.end();
+    let recs = (unsafe atomic::load_usize((&mut (*r).recs) as *mut usize, 0)) as *mut FdRec;
+    let nrec = unsafe atomic::load_usize(&mut unsafe (*r).nrec, 0);
+    for i in 0..nrec {
+        let rec = unsafe (recs + i);
+        let rd = unsafe atomic::load_usize((&mut (*rec).rd) as *mut usize, 0);
+        let wr = unsafe atomic::load_usize((&mut (*rec).wr) as *mut usize, 0);
+        let stale = unsafe atomic::load_u8(&mut unsafe (*rec).stale, 0);
+        if rd == 0 && wr == 0 && stale == 0 {
+            continue;
+        }
+        l.put("fd ");
+        l.num(i as u64);
+        l.put(": read waiters ");
+        l.num(diag_len(rd));
+        l.put(" write waiters ");
+        l.num(diag_len(wr));
+        l.put(" stale ");
+        l.num(stale);
+        l.put(" known ");
+        l.num(unsafe atomic::load_u8(&mut unsafe (*rec).known, 0));
+        l.put(" gen ");
+        l.num(unsafe atomic::load_u32(&mut unsafe (*rec).gen, 0));
+        l.put(" last event ");
+        l.num(unsafe atomic::load_u64(&mut unsafe (*rec).evt, 0));
+        l.end();
+    }
 }
 
 /// Start the reactor if it is not running and return it; null while a shutdown is in progress (a wait

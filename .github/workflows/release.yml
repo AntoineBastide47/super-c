@@ -53,42 +53,23 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Releasing $sha ($(git log -1 --format=%s "$sha"))"
 
-  build:
+  # The pipeline of Linux, Windows and wasm: one job builds the compiler, the two test shards and (on
+  # Linux) the correctness gate run in parallel on that binary, and the release binary is built only
+  # after all of them pass:
+  #
+  #   compile --+--> test 1/2 -----------+
+  #             +--> test 2/2 -----------+--> package --> release
+  #             +--> gate (Linux only) --+
+  #
+  # Jobs share no files: `compile` uploads the compiler it built, and every later job downloads it (an
+  # artifact keeps no file modes, hence the chmod). macOS keeps one job with the same steps in sequence.
+
+  # --- macOS: build, suite, gate, release binary, package in one job ---------------------------------
+  macos:
     needs: resolve
     if: github.actor == github.repository_owner
-    name: build (${{ matrix.target }}, tests ${{ matrix.test_shard }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: linux
-            test_shard: "1/2"
-            cache_shard: 1
-            artifact: true
-          - os: ubuntu-latest
-            target: linux
-            test_shard: "2/2"
-            cache_shard: 2
-            artifact: false
-          - os: macos-latest
-            target: macos
-            test_shard: "1/1"
-            cache_shard: 1
-            artifact: true
-          - os: windows-latest
-            target: windows
-            test_shard: "1/2"
-            cache_shard: 1
-            artifact: true
-          - os: windows-latest
-            target: windows
-            test_shard: "2/2"
-            cache_shard: 2
-            artifact: false
-    runs-on: ${{ matrix.os }}
-    # Run every step in bash so the shared build steps behave identically on the Windows runner
-    # (Git Bash), not just on Linux/macOS.
+    name: macos (build, tests, gate, release binary)
+    runs-on: macos-latest
     defaults:
       run:
         shell: bash
@@ -97,192 +78,247 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
-      # --- Toolchain cache -------------------------------------------------------------------------------
-      # Cache the package-manager download areas so re-runs never re-fetch the C toolchain / any deps.
-      # GitHub runners already ship a working `cc`, so nothing is installed by default -- these caches pay
-      # off the moment a compiler/dep install is added below, and cost nothing otherwise. NOTE: only the
-      # *installation* is cached; build OUTPUTS are never cached (see the Clean step).
-      # Each test shard keeps its own ccache so parallel jobs can save all compiled test inputs.
-      # CCACHE_DIR pins one workspace path on all OSes.
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - uses: ./.github/actions/toolchain
         with:
-          path: .ccache
-          key: ccache-${{ matrix.target }}-${{ matrix.cache_shard }}-${{ needs.resolve.outputs.sha }}
-          restore-keys: |
-            ccache-${{ matrix.target }}-${{ matrix.cache_shard }}-
-            ccache-${{ matrix.target }}-
+          target: macos
+          cache: ccache-macos-1
+          sha: ${{ needs.resolve.outputs.sha }}
 
-      - name: Configure ccache dir
-        run: |
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
-          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
-          # Debug builds in per-test scratch directories record their directory, which would key every
-          # such compile apart: without the directory in the hash they hit each other's entries.
-          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
+      - name: Clean release outputs
+        run: rm -rf build src/build ci/build super-c super-c-boot* smoke*
 
-      - name: Cache Homebrew downloads (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
+      - uses: ./.github/actions/bootstrap
         with:
-          path: |
-            ~/Library/Caches/Homebrew
-            ~/Library/Caches/Homebrew/downloads
-          key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
-          restore-keys: cc-brew-${{ runner.os }}-
+          target: macos
 
-      - name: Cache apt archives (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/cache@v4
+      # Every step goes through the build engine (parallel compile + ccache). `build` and `release` INSTALL
+      # their result as `super-c`, over the binary running the build: each profile links its own copy
+      # under <out-dir>/<profile>/ and the install renames a fresh file onto the name. `test` does not
+      # install: it runs the profile's copy where it lies, so a run of the suite never leaves a dev binary
+      # where the release artifact was.
+      - name: Build the compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+
+      # The full suite with the binary this commit just produced, so a failure is a failure of this code,
+      # not of the bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or
+      # double-frees.
+      - name: Run the test suite
+        run: SC_LEAK_CHECK=fatal ./super-c test --quiet
+
+      # ci/gate.sh without its check.sh step, which the steps above replace: the two-generation fixpoint,
+      # the worker-count identity under each task-delay seed, the strict C warnings, and every built-in
+      # profile but dev.
+      - name: Run the correctness gate
+        run: sh ci/gate.sh --no-check
+
+      - name: Build the release binary
+        run: |
+          set -eu
+          SC_LEAK_CHECK=fatal ./super-c release
+          test -x ./super-c
+          file ./super-c
+
+      # The concurrency runtime end to end, built and run by the release binary, so the artifact that
+      # ships is the one that was exercised.
+      - name: Run the concurrency smoke test
+        run: |
+          set -eu
+          ./super-c build ci/parallel_smoke.spc -o smoke
+          SC_LEAK_CHECK=fatal ./smoke
+
+      - name: Package
+        run: |
+          set -eu
+          name="super-c-macos-$(uname -m)"
+          mkdir -p "dist/${name}"
+          cp super-c "dist/${name}/super-c"
+          cp -R std ffi "dist/${name}/"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
+          echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
         with:
-          path: /var/cache/apt/archives
-          key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
-          restore-keys: cc-apt-${{ runner.os }}-
+          name: asset-macos
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
 
-      - name: Set up C compiler + ccache (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          if ! command -v cc >/dev/null 2>&1; then
-            brew install llvm
-            echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-            echo "CC=clang" >> "$GITHUB_ENV"
-          fi
-          command -v ccache >/dev/null 2>&1 || brew install ccache
-
-      - name: Set up C compiler + ccache (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          if ! command -v cc >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential
-          fi
-          if ! command -v ccache >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ccache
-          fi
-
-      - name: Cache mingw-w64 install (Windows)
-        if: runner.os == 'Windows'
-        id: cache-mingw
-        uses: actions/cache@v4
+  # --- Linux and Windows ------------------------------------------------------------------------------
+  compile:
+    needs: resolve
+    if: github.actor == github.repository_owner
+    name: compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    # Every step in bash, so the shared steps behave identically on the Windows runner (Git Bash).
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
         with:
-          path: |
-            C:\ProgramData\chocolatey\lib\mingw
-            C:\ProgramData\chocolatey\lib\ccache
-            C:\ProgramData\mingw64
-            C:\tools\mingw64
-          key: mingw-w64-${{ runner.os }}-choco-v2
-          restore-keys: mingw-w64-${{ runner.os }}-
+          ref: ${{ needs.resolve.outputs.sha }}
 
-      # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
-      # land in the caches above. The default build needs only the preinstalled `cc`.
-      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
-      # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
-      - name: Set up mingw-w64 (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          find_mingw_bin() {
-            { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
-              while read -r dir; do
-                if [ -x "$dir/gcc.exe" ] || [ -x "$dir/gcc" ]; then
-                  echo "$dir"
-                  break
-                fi
-              done
-          }
-          mingw_bin="$(find_mingw_bin)"
-          if [ -z "$mingw_bin" ]; then
-            choco install -y --no-progress mingw
-            mingw_bin="$(find_mingw_bin)"
-          fi
-          test -n "$mingw_bin"
-          cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
-          echo "CC=gcc" >> "$GITHUB_ENV"
-          echo "BINEXT=.exe" >> "$GITHUB_ENV"
-          command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-build
+          sha: ${{ needs.resolve.outputs.sha }}
 
-      # --- Clean outputs only ---------------------------------------------------------------------------
       - name: Clean release outputs
         run: rm -rf build src/build ci/build super-c super-c.exe* super-c-boot* smoke*
 
-      # --- Bootstrap ------------------------------------------------------------------------------------
-      # The fetched binary lands beside the checkout under its own name, never as `super-c`: it resolves
-      # std/ffi relative to its OWN executable, so at the repo root it picks up the current std/ffi (which
-      # is the point of --bootstrap-tags), and a distinct name keeps it intact instead of having the first
-      # build replace the very binary that is producing it.
-      - name: Fetch bootstrap super-c from the latest release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          arch="$(uname -m)"
-          name="super-c-${{ matrix.target }}-${arch}"
-          boot="super-c-boot${BINEXT:-}"
-          if [ "${{ matrix.target }}" = windows ]; then
-            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
-            7z x -y "${name}.zip" >/dev/null
-            if [ -f "${name}/super-c.exe" ]; then cp "${name}/super-c.exe" "$boot"; else cp "${name}.exe" "$boot"; fi
-          else
-            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
-            tar xzf "${name}.tar.gz"
-            if [ -f "${name}/super-c" ]; then cp "${name}/super-c" "$boot"; else cp "${name}" "$boot"; fi
-            chmod +x "$boot"
-          fi
-          test -x "./$boot"
-          # mingw hides the POSIX prototypes under -std=c11's __STRICT_ANSI__, so the Windows leg overrides
-          # the manifest's base C flags. Empty elsewhere, which leaves the manifest's own value alone.
-          if [ "${{ runner.os }}" = Windows ]; then
-            echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L" >> "$GITHUB_ENV"
-          fi
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: ${{ matrix.target }}
 
-      # --- Build: debug from the bootstrap, then the suite, then release over the same binary ------------
-      # Every step goes through the build engine (parallel compile + ccache) on every platform -- no
-      # hand-written compiler invocation, which is what used to make the Windows leg three times slower.
-      # `build` and `release` also INSTALL their result as `super-c`, over the binary running the build:
-      # each profile links its own copy under <out-dir>/<profile>/ and the install renames a fresh file onto
-      # the name (sc_rename parks a running Windows image aside; Windows forbids deleting a live image but
-      # permits renaming one). `test` deliberately does not install -- it runs the profile's copy where it
-      # lies, so a run of the suite can never leave a dev binary where the release artifact was.
       - name: Build the compiler
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          boot="./super-c-boot${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "$boot" build --bootstrap-tags ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
           # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
-          # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Every step
-          # after this one is built by the compiler we just made, which names it correctly. Drop this once
+          # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Drop this once
           # a release has shipped with the fix.
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
-      # The full suite, on every platform, with the binary this commit just produced -- so a failure is a
-      # failure of this code, not of the bootstrap. Leak-gated: every process in the run exits nonzero if it
-      # leaks, double-frees or uses freed memory. `test` rebuilds the project first and so relinks `super-c`
-      # while `super-c` is the process running: see sc_rename for why that is allowed even on Windows.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-${{ matrix.target }}
+          path: super-c${{ env.BINEXT }}
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: test (${{ matrix.target }}, ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            test_shard: "1/2"
+            cache_shard: 1
+          - os: ubuntu-latest
+            target: linux
+            test_shard: "2/2"
+            cache_shard: 2
+          - os: windows-latest
+            target: windows
+            test_shard: "1/2"
+            cache_shard: 1
+          - os: windows-latest
+            target: windows
+            test_shard: "2/2"
+            cache_shard: 2
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-${{ matrix.cache_shard }}
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.target }}
+
+      # The suite with the binary `compile` produced, so a failure is a failure of this code, not of the
+      # bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or double-frees. `test`
+      # rebuilds the project first and so relinks `super-c` while `super-c` is the process running: see
+      # sc_rename for why that is allowed even on Windows.
       - name: Run the test suite
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
-      # The correctness gate after the suite (ci/gate.sh without its check.sh step, which the steps above
-      # replace): the two-generation fixpoint, the worker-count identity under each task-delay seed, the
-      # strict C warnings, and every built-in profile but dev. One leg per POSIX host.
+  # The correctness gate beside the shards: it needs only the compiler, not their results.
+  gate:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: gate (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          cache: ccache-linux-gate
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-linux
+
+      # ci/gate.sh without its check.sh step, which `compile` and `test` replace: the two-generation
+      # fixpoint, the worker-count identity under each task-delay seed, the strict C warnings, and every
+      # built-in profile but dev.
       - name: Run the correctness gate
-        if: runner.os != 'Windows' && matrix.cache_shard == 1
-        run: sh ci/gate.sh --no-check
+        run: |
+          chmod +x ./super-c
+          sh ci/gate.sh --no-check
+
+  # The release binary, built by the compiler the suite and the gate passed with.
+  package:
+    needs: [resolve, compile, test, gate]
+    if: github.actor == github.repository_owner
+    name: package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-release
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.target }}
 
       - name: Build the release binary
-        if: matrix.artifact
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          # 2) release build, by the binary step 1 produced, over itself
           SC_LEAK_CHECK=fatal "./$bin" release ${cstd:+"$cstd"}
           test -x "./$bin"
           if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
@@ -291,7 +327,6 @@ jobs:
       # on the worker pool, channels, `select`, the data-parallel API and the timer list -- built and run by
       # the release binary, so the artifact that ships is the one that was exercised.
       - name: Run the concurrency smoke test
-        if: matrix.artifact
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
@@ -300,14 +335,11 @@ jobs:
           "./$bin" build ci/parallel_smoke.spc -o "$smoke" ${cstd:+"$cstd"}
           SC_LEAK_CHECK=fatal "./$smoke"
 
-      # --- Package one archive per platform -------------------------------------------------------------
       - name: Package
-        if: matrix.artifact
         run: |
           set -eu
-          arch="$(uname -m)"
-          name="super-c-${{ matrix.target }}-${arch}"
-          bin="super-c${BINEXT:-}" # the release build -- the one the suite and the smoke test just ran
+          name="super-c-${{ matrix.target }}-$(uname -m)"
+          bin="super-c${BINEXT:-}"
           mkdir -p "dist/${name}"
           if [ "${{ matrix.target }}" = windows ]; then
             cp "$bin" "dist/${name}/super-c.exe"
@@ -321,100 +353,44 @@ jobs:
             echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
           fi
 
-      - if: matrix.artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: asset-${{ matrix.target }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
-  # The wasm leg: the compiler cross-built to wasm32-wasip1 and put through the SAME suite -- every
-  # transpile-class invocation runs inside wasmtime (via ci/wasm-superc.sh), the emitted C compiles
-  # with the host cc, and the test binaries run natively. WASI has no processes, so the engine's cc
-  # and the test runner stay native; the split lives in the wrapper. The self-transpile byte-diff
-  # against the native binary is the exactness oracle on top.
-  wasm:
+  # --- wasm ------------------------------------------------------------------------------------------
+  # The compiler cross-built to wasm32-wasip1 and put through the SAME suite: every transpile-class
+  # invocation runs inside wasmtime (via ci/wasm-superc.sh), the emitted C compiles with the host cc,
+  # and the test binaries run natively. WASI has no processes, so the engine's cc and the test runner
+  # stay native; the split lives in the wrapper. The self-hosting fixpoint under wasmtime is the
+  # exactness oracle on top.
+  wasm-compile:
     needs: resolve
     if: github.actor == github.repository_owner
-    name: wasm (tests ${{ matrix.test_shard }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - test_shard: "1/2"
-            cache_shard: 1
-            artifact: true
-          - test_shard: "2/2"
-            cache_shard: 2
-            artifact: false
+    name: wasm compile
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - uses: ./.github/actions/toolchain
         with:
-          path: .ccache
-          key: ccache-wasm-${{ matrix.cache_shard }}-${{ needs.resolve.outputs.sha }}
-          restore-keys: |
-            ccache-wasm-${{ matrix.cache_shard }}-
-            ccache-wasm-
-            ccache-linux-
+          target: wasm
+          cache: ccache-wasm-build
+          sha: ${{ needs.resolve.outputs.sha }}
 
-      - name: Configure ccache dir
-        run: |
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
-          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
-          # Debug builds in per-test scratch directories record their directory, which would key every
-          # such compile apart: without the directory in the hash they hit each other's entries.
-          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
-          command -v ccache >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y ccache; }
-
-      - name: Cache wasi toolchain
-        uses: actions/cache@v4
+      - uses: ./.github/actions/bootstrap
         with:
-          path: |
-            ~/wasi-sdk
-            ~/.wasmtime
-          key: wasi-toolchain-sdk25-v1
-
-      - name: Set up wasi-sdk + wasmtime
-        run: |
-          set -eu
-          if [ ! -x "$HOME/wasi-sdk/bin/clang" ]; then
-            curl -sSfL -o /tmp/wasi-sdk.tar.gz \
-              https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
-            mkdir -p "$HOME/wasi-sdk"
-            tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
-          fi
-          if [ ! -x "$HOME/.wasmtime/bin/wasmtime" ]; then
-            curl -sSf https://wasmtime.dev/install.sh | bash
-          fi
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
-
-      - name: Fetch bootstrap super-c from the latest release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          name="super-c-linux-x86_64"
-          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
-          tar xzf "${name}.tar.gz"
-          if [ -f "${name}/super-c" ]; then cp "${name}/super-c" super-c-boot; else cp "${name}" super-c-boot; fi
-          chmod +x ./super-c-boot
+          target: linux
 
       - name: Build the native compiler
         run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
 
       # The build engine cross-compiles with the wasi-sdk (sysroot, emulation libraries, stack size).
       - name: Build the wasm compiler
-        run: WASI_SDK_PATH="$HOME/wasi-sdk" ./super-c build --target=wasm --profile=release -o super-c.wasm
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
 
       # The self-hosting fixpoint, on wasm: the build engine builds gen2 from the whole compiler with gen1
       # (the artifact) as its transpiler under wasmtime, then gen3 with gen2 as its transpiler, and
@@ -433,7 +409,7 @@ jobs:
           cp super-c.wasm "$w/gen1.wasm"
           cd "$w"
           gen() {
-            WASI_SDK_PATH="$HOME/wasi-sdk" "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
               --transpiler="wasmtime run --dir=/ --argv0 $w/$1 -- $w/$1" -o "$2"
           }
           gen gen1.wasm gen2.wasm
@@ -441,11 +417,64 @@ jobs:
           gen gen2.wasm gen3.wasm
           diff -r /tmp/wasm-gen1 build/release/raw
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm-test:
+    needs: [resolve, wasm-compile]
+    if: github.actor == github.repository_owner
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_shard: "1/2"
+            cache_shard: 1
+          - test_shard: "2/2"
+            cache_shard: 2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          cache: ccache-wasm-${{ matrix.cache_shard }}
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-wasm
+
       - name: Run the test suite against the wasm compiler
-        run: WASI_SDK_PATH="$HOME/wasi-sdk" SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
+        run: |
+          chmod +x ./super-c
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
+
+  # The wasm compiler ships only after both shards passed with it.
+  wasm-package:
+    needs: [resolve, wasm-test]
+    if: github.actor == github.repository_owner
+    name: wasm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-wasm
 
       - name: Package
-        if: matrix.artifact
         run: |
           set -eu
           name="super-c-wasm32-wasip1"
@@ -454,21 +483,22 @@ jobs:
           cp -R std ffi "dist/${name}/"
           tar -C dist -czf "${name}.tar.gz" "${name}"
 
-      - if: matrix.artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: wasm
+          name: asset-wasm
           path: super-c-wasm32-wasip1.tar.gz
           if-no-files-found: error
 
   release:
-    needs: [resolve, build, wasm]
+    needs: [resolve, macos, package, wasm-package]
     if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     steps:
+      # Only the archives: the compiler artifacts the jobs above pass along are not part of a release.
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: asset-*
           merge-multiple: true
 
       - name: Create GitHub release
@@ -476,7 +506,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          # The SHA the matrix actually built and tested, never a branch name: a tag is only worth anything
+          # The SHA the jobs actually built and tested, never a branch name: a tag is only worth anything
           # if it names the commit the suite passed on.
           gh release create "${{ github.event.inputs.tag }}" \
             --repo "${{ github.repository }}" \

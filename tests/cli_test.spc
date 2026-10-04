@@ -2083,6 +2083,89 @@ fn main() i32 {
     assert_eq(p.run_bin(), 0);
 }
 
+// Test timeouts: a test that runs past the run's `--test-timeout` fails as timed out, `@test(timeout = N)`
+// overrides it either way (and combines with should_panic), and on POSIX the timed-out test's replayed
+// output holds the reactor's state and the stack of every thread.
+@test
+fn test_timeouts() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::io as io;
+import std::parallel::net as net;
+import std::parallel::time as time;
+@test
+fn stuck() { time::sleep(time::Duration::from_secs(60)); }
+@test(timeout = 30)
+fn slow_but_allowed() { time::sleep(time::Duration::from_millis(1500)); }
+@test(should_panic, timeout = 30)
+fn panics() { panic("on purpose"); }
+@test(timeout = 1)
+fn waits_on_a_socket() {
+  let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+  let a = net::TcpStream::connect("127.0.0.1", l.port()).unwrap();
+  let b = l.accept().unwrap();
+  let fd = b.fd;
+  launch || { let _ = io::wait_until(fd, false, 0); };
+  let mut buf: [u8; 1] = [0u8];
+  let _ = a.read(buf);
+}
+fn main() i32 { return 0; }
+)",
+    );
+    let r = p.compile_flags("--test --quiet --test-timeout=1", "main.spc");
+    assert_eq(r.exit, 2);
+    assert(r.out_has("test main::stuck ... FAILED (timed out)"), "the global timeout fails a stuck test");
+    assert(r.out_has("test main::waits_on_a_socket ... FAILED (timed out)"), "its own timeout fails it");
+    assert(r.out_shows("timed out after 1 s"), "the failure says how long it ran");
+    assert(r.out_has("2 passed, 2 failed"), "the longer own timeout and should_panic pass");
+    assert(r.out_has("slowest tests:") && r.out_has(" s  main::slow_but_allowed"), "the run lists its slowest tests");
+    if !cli::on_windows() {
+        assert(r.out_shows("--- the test ran past its timeout (1 s): the state of each of its processes"), "the dump");
+        assert(r.out_shows(": the stack of every thread"), "the test's process names itself");
+        assert(r.out_shows("--- thread"), "each thread prints its stack");
+        assert(r.out_shows("--- reactor: state 2"), "the reactor's state follows the stacks");
+        assert(r.out_shows(": read waiters 1"), "the waiting descriptor is listed");
+    }
+    // --test-timeout=0 turns the global timeout off; a test's own still applies.
+    let off = p.compile_flags("--test --quiet --test-timeout=0 --test-filter=waits", "main.spc");
+    assert(off.out_has("test main::waits_on_a_socket ... FAILED (timed out)"), "its own timeout without a global one");
+    let bad = p.compile_flags("--test --test-timeout=soon", "main.spc");
+    assert(!bad.ok(), "a malformed timeout is rejected");
+}
+
+// A timed-out test's dump reaches the processes it started: a compiled child program hung in a sleep, run
+// through a shell, prints its own threads' stacks into the test's report (the shell, not a Super-C program,
+// ignores the request), and the whole tree is killed. POSIX only: Windows has no dump.
+@test
+fn test_timeout_dumps_child_processes() {
+    if cli::on_windows() {
+        return;
+    }
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    p.mkfile(
+        "sleeper.spc",
+        "import std::parallel::time as time;\nfn main() i32 {\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
+    );
+    let mut out = String::from_str("build -o ");
+    out.push_str(root);
+    out.push_str("/sleeper");
+    assert(p.compile_flags(out.as_str(), "sleeper.spc").ok(), "the child program builds");
+    let mut main = String::from_str(
+        "import stdlib;\n@test(timeout = 2)\nfn runs_a_hung_child() {\n  let _ = stdlib::system(\"",
+    );
+    main.push_str(root);
+    main.push_str("/sleeper\");\n}\nfn main() i32 { return 0; }\n");
+    p.mkfile("main.spc", main.as_str());
+    let r = p.compile_flags("--test --quiet", "main.spc");
+    assert(r.out_has("test main::runs_a_hung_child ... FAILED (timed out)"), "the test times out");
+    assert(r.out_shows(" sleeper: the stack of every thread"), "the child program prints its stacks");
+    if PLATFORM == Platform::Linux {
+        assert(r.out_shows("--- kernel: process"), "the kernel's view of each process follows");
+    }
+}
+
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
@@ -8454,12 +8537,14 @@ fn rewritten_header_restales_units() {
     assert(mt != 0 && mt < 1850000000, "the unit compiled again (its object is no longer dated 2030)");
 }
 
-// The daily cache sweep. With the sweep stamp dated back, the next successful build removes the flat
-// objects older compilers installed in the root, a namespace whose owner directory is gone, a namespace
-// idle for 30 days and a linker cache idle for a week; the live namespace and a used linker cache
-// stay. A fresh stamp skips the sweep.
+// The cache sweep (every two hours). With the sweep stamp dated back, the next successful build removes the
+// flat objects older compilers installed in the root, a namespace whose owner object tree is gone, one whose
+// owner names another directory (an older compiler recorded the source directory), one with no owner idle
+// for an hour (a build that stopped before its first commit), a namespace idle for 30 days and a linker
+// cache idle for a week; the live namespace (owned by its object tree), a fresh ownerless one, the script
+// namespace and a used linker cache stay. A fresh stamp skips the sweep.
 @test
-fn object_cache_daily_sweep() {
+fn object_cache_sweep() {
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
     }
@@ -8480,8 +8565,16 @@ fn object_cache_daily_sweep() {
     p.mkfile("ocache/o/00000000000000aa/g1", "");
     p.mkfile("ocache/o/00000000000000bb/owner", root);
     p.mkfile("ocache/o/00000000000000bb/g1", "");
+    p.mkfile("ocache/o/00000000000000ee/owner", root);
+    p.mkfile("ocache/o/00000000000000ee/g1", "");
+    p.mkfile("ocache/o/00000000000000ff/k.o", "x");
+    p.mkfile("ocache/o/00000000000000ab/k.o", "x");
+    p.mkfile("ocache/o/script/k.o", "x");
     p.mkfile("ocache/lto/00000000000000cc/llvmcache-1", "x");
     p.mkfile("ocache/lto/00000000000000dd/llvmcache-1", "x");
+    let mut stopped = String::new();
+    stopped.format_into("{}/o/00000000000000ff", cache.as_str());
+    age_tree(stopped.as_str());
     let mut idle_ns = String::new();
     idle_ns.format_into("{}/o/00000000000000bb", cache.as_str());
     age_tree(idle_ns.as_str());
@@ -8497,16 +8590,24 @@ fn object_cache_daily_sweep() {
     age_tree(stamp.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under an old stamp");
     assert(unsafe shim::sc_mtime(flat_p.cstr()) == 0, "the flat objects of older compilers go");
-    let mut ns_names = String::new();
     let mut od = String::new();
     od.format_into("{}/o", cache.as_str());
     let nss = dir_names(od.as_str());
+    let live_name = live.as_str().slice(od.len() + 1, live.len());
+    let mut kept = 0;
     for i in 0..nss.len() {
-        ns_names.format_into("{} ", nss.at(i).as_str());
+        let n = nss.at(i).as_str();
+        if n == live_name || n == "00000000000000ab" || n == "script" {
+            kept += 1;
+        }
     }
-    let mut want = String::new();
-    want.format_into("{} ", live.as_str().slice(od.len() + 1, live.len()));
-    assert(ns_names.as_str() == want.as_str(), "only the live namespace stays");
+    assert(nss.len() == 3 && kept == 3, "the live, the fresh ownerless and the script namespaces stay");
+    let mut ownp = String::new();
+    ownp.format_into("{}/owner", live.as_str());
+    let mut tree = String::new();
+    tree.format_into("{}/build/dev", root);
+    let own = loader::read_file(ownp.as_str()).unwrap_or(String::new());
+    assert(own.as_str() == ocache::real_path(tree.as_str()).as_str(), "the object tree owns its namespace");
     let mut ld = String::new();
     ld.format_into("{}/lto", cache.as_str());
     let ltos = dir_names(ld.as_str());

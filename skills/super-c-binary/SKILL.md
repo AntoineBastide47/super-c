@@ -106,14 +106,19 @@ under `--test-no-fork`.
 ```sh
 super-c test --quiet                   # the standard form: discover tests/**/*.spc, build, run
 super-c test --quiet --test-filter=parse  # substring match on test name
-super-c test --quiet --test-shard=1/4  # stable one-based CI sharding
+super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
+super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per core)
+super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; should_panic skipped)
 super-c --test --quiet app.spc         # single-file form (same --test-* flags apply)
 ```
 
 Each `@test` function runs in a forked child. `@test_init` provides fixtures;
-`@test(should_panic)` passes only when the body aborts. Each child's output is captured
+`@test(should_panic)` passes only when the body aborts; `@test(timeout = N)` overrides the
+run's `--test-timeout` for one test (the two combine: `@test(should_panic, timeout = 5)`), and a
+test past its timeout fails as timed out with a dump of every thread's stack (super-c-testing,
+"Timeouts"). Each child's output is captured
 and replayed only for failed tests, in a `failures:` section after the run (one header per
 failed test, its output, how the process ended, then the list of failed names).
 `--test-no-fork` captures nothing.
@@ -385,7 +390,7 @@ path and mtime, the target, the compile and link flags, the schema and the linke
 `SC_NO_LTO_CACHE=1` links
 without it. The linker owns the entries and prunes them itself (entries unused for a
 week, the cache under a tenth of the disk and, with lld or gold, under 1 GiB; checked at
-most hourly); the engine creates the directory. The daily sweep (below) removes a
+most hourly); the engine creates the directory. The cache sweep (below) removes a
 namespace with no entry written or used for a week, such as the one a toolchain upgrade
 leaves behind.
 
@@ -399,10 +404,13 @@ After a successful build, the engine writes the key set of all units as generati
 three older), and deletes each object and dependency list that no kept generation names
 and that is older than the start of the build. A version inside that window rebuilds
 with no compile; an older one compiles again. An unchanged build reads one directory
-and one file. At most once a day (`o/.sweep`), a successful build also removes the
-namespaces whose owner source directory (`owner`) is gone or that did not change for 30
-days, the idle linker caches, and the flat `<key>.o`/`<key>.d` files that compilers
-before namespaces installed in the root. `super-c clean --cache` removes the whole root.
+and one file. The namespace's `owner` file records its object tree (the profile directory).
+At most once every two hours (`o/.sweep`), a successful build also removes the namespaces
+whose owner object tree is gone, whose `owner` names another directory (an older compiler
+recorded the source directory), that have no `owner` and did not change for an hour (a build
+that stopped before its first commit), or that did not change for 30 days (the shared `script`
+namespace only by this rule); the idle linker caches; and the flat `<key>.o`/`<key>.d` files
+that compilers before namespaces installed in the root. `super-c clean --cache` removes the whole root.
 
 Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
 namespace, `o/script`, keyed per unit by the compiler version line, the compile flags, the

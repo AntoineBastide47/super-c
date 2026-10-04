@@ -1,0 +1,152 @@
+name: Toolchain
+description: >
+  The C toolchain and ccache of one CI job: a ccache directory restored under `cache`, the platform's C
+  compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc on Windows), and for `target: wasm` the
+  wasi-sdk and wasmtime. Only installations are cached, never build outputs.
+inputs:
+  target:
+    description: "linux, macos, windows or wasm"
+    required: true
+  cache:
+    description: "ccache key prefix of this job, e.g. ccache-linux-1 (the commit is appended)"
+    required: true
+  sha:
+    description: "the commit under test, the last part of the ccache key"
+    required: true
+  cstd:
+    description: "the C standard flags of the Windows leg (mingw hides POSIX prototypes under -std=c11)"
+    required: false
+    default: "-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+runs:
+  using: composite
+  steps:
+    # Each job keeps its own ccache so parallel jobs can save all their compiled inputs; a job without a
+    # cache of its own starts from its platform's newest one. CCACHE_DIR pins one workspace path on all OSes.
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: .ccache
+        key: ${{ inputs.cache }}-${{ inputs.sha }}
+        restore-keys: |
+          ${{ inputs.cache }}-
+          ccache-${{ inputs.target }}-
+          ccache-linux-
+
+    - name: Configure ccache dir
+      shell: bash
+      run: |
+        echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+        # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
+        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+        # Debug builds in per-test scratch directories record their directory, which would key every
+        # such compile apart: without the directory in the hash they hit each other's entries.
+        echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
+
+    - name: Cache Homebrew downloads (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/Homebrew
+          ~/Library/Caches/Homebrew/downloads
+        key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
+        restore-keys: cc-brew-${{ runner.os }}-
+
+    - name: Cache apt archives (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives
+        key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
+        restore-keys: cc-apt-${{ runner.os }}-
+
+    - name: Set up C compiler + ccache (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        if ! command -v cc >/dev/null 2>&1; then
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CC=clang" >> "$GITHUB_ENV"
+        fi
+        command -v ccache >/dev/null 2>&1 || brew install ccache
+
+    - name: Set up C compiler + ccache (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        if ! command -v cc >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+        fi
+        if ! command -v ccache >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y ccache
+        fi
+
+    - name: Cache mingw-w64 install (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: |
+          C:\ProgramData\chocolatey\lib\mingw
+          C:\ProgramData\chocolatey\lib\ccache
+          C:\ProgramData\mingw64
+          C:\tools\mingw64
+        key: mingw-w64-${{ runner.os }}-choco-v2
+        restore-keys: mingw-w64-${{ runner.os }}-
+
+    # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
+    # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
+    - name: Set up mingw-w64 (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      env:
+        CSTD: ${{ inputs.cstd }}
+      run: |
+        find_mingw_bin() {
+          { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
+            while read -r dir; do
+              if [ -x "$dir/gcc.exe" ] || [ -x "$dir/gcc" ]; then
+                echo "$dir"
+                break
+              fi
+            done
+        }
+        mingw_bin="$(find_mingw_bin)"
+        if [ -z "$mingw_bin" ]; then
+          choco install -y --no-progress mingw
+          mingw_bin="$(find_mingw_bin)"
+        fi
+        test -n "$mingw_bin"
+        cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
+        echo "CC=gcc" >> "$GITHUB_ENV"
+        echo "BINEXT=.exe" >> "$GITHUB_ENV"
+        echo "SC_CSTD=$CSTD" >> "$GITHUB_ENV"
+        command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
+
+    - name: Cache wasi toolchain
+      if: inputs.target == 'wasm'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/wasi-sdk
+          ~/.wasmtime
+        key: wasi-toolchain-sdk25-v1
+
+    - name: Set up wasi-sdk + wasmtime
+      if: inputs.target == 'wasm'
+      shell: bash
+      run: |
+        set -eu
+        if [ ! -x "$HOME/wasi-sdk/bin/clang" ]; then
+          curl -sSfL -o /tmp/wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+          mkdir -p "$HOME/wasi-sdk"
+          tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
+        fi
+        if [ ! -x "$HOME/.wasmtime/bin/wasmtime" ]; then
+          curl -sSf https://wasmtime.dev/install.sh | bash
+        fi
+        echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+        echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> "$GITHUB_ENV"

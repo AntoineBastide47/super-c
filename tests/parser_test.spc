@@ -693,6 +693,39 @@ fn attributes() {
     }
 }
 
+// `@test` takes a list of `should_panic` and `timeout = N` in any order, each at most once, N at least 1:
+// the record holds the should_panic bit and the timeout above it.
+@test
+fn test_attribute_list() {
+    let c = h::parse_ast(
+        "@test(timeout = 7, should_panic)\nfn a() {}\n@test(timeout = 0x10)\nfn b() {}\n@test\nfn c() {}\n",
+    );
+    assert(c.errors == 0, "the list forms parse");
+    assert_eq(c.ast.attrs.len(), 3);
+    assert_eq(c.ast.attrs[0].arg, TEST_SHOULD_PANIC | 7u32 << TEST_TIMEOUT_SHIFT);
+    assert_eq(c.ast.attrs[1].arg, 16u32 << TEST_TIMEOUT_SHIFT);
+    assert_eq(c.ast.attrs[2].arg, 0);
+    for bad in [
+        "timeout",
+        "timeout = 0",
+        "timeout = 3, timeout = 4",
+        "should_panic, should_panic",
+        "timeout = 3,",
+        "should_panic timeout = 2",
+        "slow",
+    ] {
+        let mut src = String::from_str("@test(");
+        src.push_str(bad);
+        src.push_str(")\nfn t() {}\n");
+        assert(h::parse_has_error(src.as_str()), bad);
+    }
+    h::expect_err_msg(
+        "unknown test argument",
+        "@test(slow)\nfn t() {}\n",
+        "attribute '@test' accepts 'should_panic' and 'timeout = N' (N seconds, at least 1), each at most once",
+    );
+}
+
 // `@c.align` takes a constant expression besides an integer literal: the record keeps the
 // expression's module-arena node and the text between the parentheses; a lone integer literal keeps
 // the literal form and adds no node. The record stays 20 bytes.
