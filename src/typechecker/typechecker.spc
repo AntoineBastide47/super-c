@@ -444,6 +444,18 @@ pub struct TypeChecker<'a> {
     /// An evaluation (`ev`, `ev_static`, `fn_recheck_as`) since the caller cleared it failed over a
     /// node this or another check rejected: that diagnostic stands, so the failure reports nothing.
     ev_err: bool,
+    /// Constant-trap errors reported so far (`tc_ct_report`): a mandatory evaluation whose
+    /// initializer reported one reports nothing more.
+    ct_n: u32,
+    /// Nesting of `if` branches a closed condition makes dead: the constant-trap scan skips them.
+    ct_dead: u32,
+    /// The `const` or `static mut` whose initializer is under check (NODE_NONE: none), at closure
+    /// depth `ct_cd`: a constant trap in it names the item.
+    ct_item: NodeId,
+    ct_cd: u32,
+    /// The diagnostic of the compile-time-only expression under check (a static_assert, an enum
+    /// discriminant, an array length; empty: none): a constant trap in it is reported under it.
+    ct_ctx: str<'static>,
     /// Set by `tc_lin` when a constant or coefficient of the form leaves i128.
     lin_ovf: bool,
     /// The type a const-generic argument under check expects (TYPE_NONE outside one): among the
@@ -599,9 +611,7 @@ pub struct TypeChecker<'a> {
     pub ph_int: loader::LookupHit,
 }
 
-// Takes the package pointer as usize: a *mut Package value is move-tracked (Package is Free).
-fn ph_lookup(pkg: usize, name: str) loader::LookupHit {
-    let package = pkg as *mut loader::Package;
+fn ph_lookup(package: *mut loader::Package, name: str) loader::LookupHit {
     return unsafe (*package).prelude_lookup(name, true);
 }
 
@@ -634,6 +644,14 @@ pub const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
         return false;
     }
     return unsafe cstring::memcmp(sa.ptr() + a.start as usize, sb.ptr() + b.start as usize, la as usize) == 0;
+}
+
+// The qualifier of a raw-pointer type written with qualifier `q`: a bare `*T` is `*const T`.
+const fn ptr_qual(q: TypeQualifier) TypeQualifier {
+    if q == TypeQualifier::TYPE_QUAL_NONE {
+        return TypeQualifier::TYPE_QUAL_CONST;
+    }
+    return q;
 }
 
 const fn bt_is_int(b: BuiltinType) bool {
@@ -930,7 +948,6 @@ extend<'a> TypeChecker<'a> {
     /// Ownership: borrows `ast` (the module keeps it); `package` is a borrowed raw pointer.
     pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
         assert(package != null, "a type checker reads through its package");
-        let pkg = package as usize; // read the address before the literal's `package:` field moves it
         let mut t = TypeChecker {
             ast: ast,
             source: source,
@@ -964,6 +981,11 @@ extend<'a> TypeChecker<'a> {
             dflt_conf: Map::<NodeId, TypeId>::new(),
             err_exprs: 0,
             ev_err: false,
+            ct_n: 0,
+            ct_dead: 0,
+            ct_item: NODE_NONE,
+            ct_cd: 0,
+            ct_ctx: "",
             lin_ovf: false,
             vm_want: TYPE_NONE,
             lin_err: false,
@@ -1021,24 +1043,24 @@ extend<'a> TypeChecker<'a> {
             dup_heads: Map::<ConfKey, u32>::new(),
             dup_next: Vector::<u32>::new(),
             dup_built: false,
-            ph_str: ph_lookup(pkg, "str"),
-            ph_string: ph_lookup(pkg, "String"),
-            ph_unsafecell: ph_lookup(pkg, "UnsafeCell"),
-            ph_send: ph_lookup(pkg, "Send"),
-            ph_sync: ph_lookup(pkg, "Sync"),
-            ph_allocator: ph_lookup(pkg, "Allocator"),
-            ph_slice: ph_lookup(pkg, "Slice"),
-            ph_slicemut: ph_lookup(pkg, "SliceMut"),
-            ph_range: ph_lookup(pkg, "Range"),
-            ph_box: ph_lookup(pkg, "Box"),
-            ph_global: ph_lookup(pkg, "Global"),
-            ph_t2: ph_lookup(pkg, "Tuple2"),
-            ph_t3: ph_lookup(pkg, "Tuple3"),
-            ph_t4: ph_lookup(pkg, "Tuple4"),
-            ph_option: ph_lookup(pkg, "Option"),
-            ph_result: ph_lookup(pkg, "Result"),
-            ph_uint: ph_lookup(pkg, "UInt"),
-            ph_int: ph_lookup(pkg, "Int"),
+            ph_str: ph_lookup(package, "str"),
+            ph_string: ph_lookup(package, "String"),
+            ph_unsafecell: ph_lookup(package, "UnsafeCell"),
+            ph_send: ph_lookup(package, "Send"),
+            ph_sync: ph_lookup(package, "Sync"),
+            ph_allocator: ph_lookup(package, "Allocator"),
+            ph_slice: ph_lookup(package, "Slice"),
+            ph_slicemut: ph_lookup(package, "SliceMut"),
+            ph_range: ph_lookup(package, "Range"),
+            ph_box: ph_lookup(package, "Box"),
+            ph_global: ph_lookup(package, "Global"),
+            ph_t2: ph_lookup(package, "Tuple2"),
+            ph_t3: ph_lookup(package, "Tuple3"),
+            ph_t4: ph_lookup(package, "Tuple4"),
+            ph_option: ph_lookup(package, "Option"),
+            ph_result: ph_lookup(package, "Result"),
+            ph_uint: ph_lookup(package, "UInt"),
+            ph_int: ph_lookup(package, "Int"),
         };
         t.icx.sv.ast = ast;
         if unsafe (&*ast).last_use.len() != 0 {
@@ -1345,6 +1367,204 @@ extend<'a> TypeChecker<'a> {
             return !dn.as_data.const_def.is_static_mut && !dn.as_data.const_def.is_extern;
         }
         return dn.kind == NodeKind::NODE_VARIANT;
+    }
+
+    // The constant-trap scan (operations.md): an integer operation that traps on
+    // every execution is an error at the operation. That is a closed operation the engine traps on
+    // (overflow, division by zero, a shift count out of range), or a division by a closed zero or a
+    // shift by a closed count out of range, whatever the other operand. A test function (it may trap
+    // on purpose) and a branch a closed condition makes dead are not scanned; code the platform filter
+    // removed is never checked.
+    fn tc_ct_check(self: &mut Self, id: NodeId) {
+        if self.ct_dead != 0 || self.cir() == null || self.icx.current_fn != NODE_NONE && self.tc_is_test_fn(
+            self.cur_module(),
+            self.icx.current_fn,
+        ) {
+            return;
+        }
+        let generic = self.tc_ct_generic();
+        let _ = self.tc_ct_scan(id, generic, 0);
+    }
+
+    // Whether the body under check can name type parameters: a generic function, a member of a generic
+    // extend, or an interface member (its `Self`).
+    fn tc_ct_generic(self: &mut Self) bool {
+        let m = self.cur_module();
+        let f = self.icx.current_fn;
+        if f != NODE_NONE {
+            return self.tc_fn_is_generic(m, f) || self.enclosing(m, f, NodeKind::NODE_INTERFACE) != NODE_NONE;
+        }
+        let e = self.current_extend;
+        return e != NODE_NONE && unsafe (*self.cur_ast()).at_const(e).as_data.extend_def.generics.len != 0;
+    }
+
+    // The constant-trap scan of expression `id`: 0 when it reads a run-time value (or a value that
+    // depends on a type parameter, in a generic body), 1 when it is closed and evaluates, 2 when a
+    // trap in it is reported.
+    fn tc_ct_scan(self: &mut Self, id: NodeId, generic: bool, depth: u32) u8 {
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(id);
+        let ty = unsafe (*a).type_of(id);
+        if depth > 64 || generic && (ty == TYPE_NONE || self.type_at(ty).kind != TypeKind::TYPE_BUILTIN) {
+            return 0;
+        }
+        switch n.kind {
+            NODE_BINARY => {
+                let bd = n.as_data.binary;
+                let sl = self.tc_ct_scan(bd.left, generic, depth + 1);
+                if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe {
+                    // The right operand runs conditionally: its own check scanned it (check_binary_ops).
+                    return pick(sl == 2, 2u8, 0u8);
+                }
+                let sr = self.tc_ct_scan(bd.right, generic, depth + 1);
+                if sl == 2 || sr == 2 {
+                    return 2;
+                }
+                return self.tc_ct_op(id, bd.op, bd.left, bd.right, sl == 1, sr == 1, generic);
+            },
+            NODE_ASSIGNMENT => {
+                let bd = n.as_data.binary;
+                let sr = self.tc_ct_scan(bd.right, generic, depth + 1);
+                if sr == 2 {
+                    return 2;
+                }
+                let _ = self.tc_ct_op(id, bd.op, bd.left, bd.right, false, sr == 1, generic);
+                return 0;
+            },
+            NODE_UNARY => {
+                let op = n.as_data.unary.op;
+                let s = self.tc_ct_scan(n.as_data.unary.operand, generic, depth + 1);
+                if s != 1 || op != TokenType::Minus {
+                    return pick(
+                        s == 2 || s == 1 && (op == TokenType::Bang || op == TokenType::Tilde || op == TokenType::Unsafe),
+                        s,
+                        0u8,
+                    );
+                }
+                return self.tc_ct_op(id, op, NODE_NONE, n.as_data.unary.operand, true, true, generic);
+            },
+            NODE_CAST => {
+                return self.tc_ct_scan(n.as_data.cast.expression, generic, depth + 1);
+            },
+            NODE_LITERAL | NODE_IDENTIFIER | NODE_MEMBER | NODE_SIZEOF | NODE_ALIGNOF => {
+                return pick(self.tc_ct_leaf(id, generic), 1u8, 0u8);
+            },
+            _ => {},
+        };
+        return 0;
+    }
+
+    // Whether leaf `n` has one value on every execution: a closed leaf; in a generic body also not a
+    // `sizeof` or `alignof` and no constant that can name the body's parameters (a local constant, a
+    // member of an extend or an interface). A builtin limit (`i32::MAX`) is concrete.
+    fn tc_ct_leaf(self: &Self, n: NodeId, generic: bool) bool {
+        if self.tc_lim(n) != 0 {
+            return true;
+        }
+        if !self.tc_expr_closed(n, 0) {
+            return false;
+        }
+        let a = self.cur_ast();
+        let k = unsafe (*a).at_const(n).kind;
+        if !generic || k == NodeKind::NODE_LITERAL {
+            return true;
+        }
+        if k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
+            return false;
+        }
+        let d = unsafe (*a).resolution_def(n);
+        let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node);
+        return dn.kind == NodeKind::NODE_VARIANT || !dn.as_data.const_def.is_local && unsafe (*self.mod_ast(d.module)).container_of(
+            d.node,
+        ) == NODE_NONE;
+    }
+
+    // The trap check of integer operation `id` (`op` over `l` and `r`; `l` is NODE_NONE for a
+    // negation), whose operands are closed as `lc` and `rc` say; the answer as tc_ct_scan's.
+    fn tc_ct_op(self: &mut Self, id: NodeId, op: TokenType, l: NodeId, r: NodeId, lc: bool, rc: bool, generic: bool) u8 {
+        let a = self.cur_ast();
+        let lt = pick(l == NODE_NONE, unsafe (*a).type_of(id), unsafe (*a).type_of(l));
+        let lb = self.bt_of(lt);
+        if lt == TYPE_NONE || !bt_is_int(lb) || !bt_is_int(self.bt_of(unsafe (*a).type_of(r))) {
+            return pick(lc && rc, 1u8, 0u8);
+        }
+        let div = op == TokenType::Slash || op == TokenType::Percent || op == TokenType::SlashEqual || op == TokenType::PercentEqual;
+        let shift = op == TokenType::LeftShift || op == TokenType::RightShift || op == TokenType::LeftShiftEqual || op == TokenType::RightShiftEqual;
+        if lc && rc {
+            if !div && !shift && op != TokenType::Plus && op != TokenType::Minus && op != TokenType::Star {
+                return 1;
+            }
+            let ce = self.cir();
+            let err0 = self.ev_err;
+            self.ev_err = false;
+            let v = self.ev(self.cur_module(), id);
+            let refused = self.ev_err;
+            self.ev_err = err0;
+            if v.kind != iri::IV_NONE {
+                return 1;
+            }
+            let tk = unsafe (*ce).trap_kind_get();
+            if refused || unsafe (*ce).trap_in_item() || tk != iri::IT_TRAP_UB_OVERFLOW && tk != iri::IT_TRAP_UB_DIV_ZERO && tk != iri::IT_TRAP_UB_SHIFT {
+                return 0;
+            }
+            self.tc_ct_report(id, unsafe (*ce).trap_get(), generic);
+            return 2;
+        }
+        if !rc || !div && !shift {
+            return 0;
+        }
+        // A decimal literal count or divisor (the common `x >> 3`, `x / 2`) needs no evaluation.
+        let rn = unsafe (*a).at_const(r);
+        let mut cv: i64 = -1;
+        if rn.kind == NodeKind::NODE_LITERAL {
+            cv = bc_decimal(self.source, rn.as_data.literal.raw);
+        }
+        if cv < 0 {
+            let v = self.ev(self.cur_module(), r);
+            if v.kind != iri::IV_INT {
+                return 0;
+            }
+            cv = v.i;
+        }
+        if div && cv == 0 {
+            self.tc_ct_report(id, "division by zero", generic);
+            return 2;
+        }
+        if shift && (cv < 0 || cv >= bt_int_width(lb, self.tc_ptr32()) as i64) {
+            self.tc_ct_report(id, "shift out of range", generic);
+            return 2;
+        }
+        return 0;
+    }
+
+    // A constant trap at operation `id`; in a constant initializer the message names the item, as a
+    // trap through a call does at the item's name (tc_mandatory_const).
+    @c.cold
+    fn tc_ct_report(self: &mut Self, id: NodeId, why: str, generic: bool) {
+        self.ct_n += 1;
+        let sp = unsafe (*self.cur_ast()).at_const(id).span;
+        if self.ct_item != NODE_NONE && self.icx.closure_depth == self.ct_cd {
+            let cd = unsafe (*self.cur_ast()).at_const(self.ct_item).as_data.const_def;
+            let nsp = self.name_span(cd.name);
+            self.errors.emit_span(
+                sp,
+                format(
+                    "{} '{}' cannot be evaluated at compile time: {}",
+                    pick(cd.is_static_mut, "static", "constant"),
+                    diag::span_str(self.source, nsp.start, nsp.end),
+                    why,
+                ),
+            );
+            return;
+        }
+        if self.ct_ctx.len() != 0 {
+            self.errors.emit_span(sp, format("{}: {}", self.ct_ctx, why));
+            return;
+        }
+        self.errors.emit_span(sp, format("this operation is undefined behavior when executed: {}", why));
+        if generic {
+            self.errors.note(format("its operands do not depend on a type parameter: every instantiation traps"));
+        }
     }
 
     /// The constant-condition lint: a closed `if` or `while` condition the engine folds is
@@ -2479,12 +2699,24 @@ extend<'a> TypeChecker<'a> {
         return n;
     }
 
-    // The value of float literal `lit` (no suffix); false when its spelling does not parse here.
+    // Is `node` an unsuffixed float literal, or its negation? It takes its context's float type
+    // instead of widening from f32, so its value rounds once, at the context's width.
+    fn tc_float_lit_unpinned(self: &Self, node: NodeId) bool {
+        let mut v = unsafe (*self.cur_ast()).at_const(node);
+        let mut vid = node;
+        if v.kind == NodeKind::NODE_UNARY && v.as_data.unary.op == TokenType::Minus {
+            vid = v.as_data.unary.operand;
+            v = unsafe (*self.cur_ast()).at_const(vid);
+        }
+        return v.kind == NodeKind::NODE_LITERAL && v.as_data.literal.token_type == TokenType::FloatLiteral && !self.tc_literal_pinned(
+            vid,
+        );
+    }
+
+    // The value of float literal `lit` (suffix, separators, hex form); false when the spelling does not parse.
     fn tc_flit_value(self: &Self, lit: NodeId, out: &mut f64) bool {
         let lr = unsafe (*self.cur_ast()).at_const(lit).as_data.literal.raw;
-        let mut sfx = lr.end;
-        let _ = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
-        return switch self.source.slice(lr.start as usize, sfx as usize).parse_f64() {
+        return switch float_literal_value(self.source, lr, false) {
             Some(v) => {
                 *out = v;
                 true;
@@ -6690,11 +6922,13 @@ extend<'a> TypeChecker<'a> {
         if nk == NodeKind::NODE_POINTER_TYPE || nk == NodeKind::NODE_REFERENCE_TYPE {
             let it = unsafe (*a).at_const(id).as_data.indirect_type;
             let mut k = TypeKind::TYPE_REFERENCE;
+            let mut q = it.qualifier;
             if nk == NodeKind::NODE_POINTER_TYPE {
                 k = TypeKind::TYPE_POINTER;
+                q = ptr_qual(q);
             }
             return unsafe (*self.cur_ast()).intern_type(
-                Ty { kind: k, qualifier: it.qualifier as u8, as_data: TyAs { elem: self.lower_type_in(m, it.ty) } },
+                Ty { kind: k, qualifier: q as u8, as_data: TyAs { elem: self.lower_type_in(m, it.ty) } },
             );
         }
         if nk == NodeKind::NODE_ARRAY_TYPE {
@@ -6882,17 +7116,27 @@ extend<'a> TypeChecker<'a> {
             NODE_POINTER_TYPE | NODE_REFERENCE_TYPE => {
                 let it = unsafe (*a).at_const(id).as_data.indirect_type;
                 let mut k = TypeKind::TYPE_REFERENCE;
+                let mut q = it.qualifier;
                 if nk == NodeKind::NODE_POINTER_TYPE {
                     k = TypeKind::TYPE_POINTER;
+                    q = ptr_qual(q);
                 }
                 result = unsafe (*self.cur_ast()).intern_type(
-                    Ty { kind: k, qualifier: it.qualifier as u8, as_data: TyAs { elem: self.resolve_type(it.ty) } },
+                    Ty { kind: k, qualifier: q as u8, as_data: TyAs { elem: self.resolve_type(it.ty) } },
                 );
             },
             NODE_ARRAY_TYPE => {
                 let at = unsafe (*a).at_const(id).as_data.array_type;
+                let ct0 = self.ct_n;
+                let cx0 = self.ct_ctx;
+                self.ct_ctx = "array length cannot be evaluated";
                 self.check_expr(at.length);
-                result = self.tc_array_type(self.cur_module(), at.length, self.resolve_type(at.element));
+                self.ct_ctx = cx0;
+                result = if self.ct_n != ct0 {
+                    TYPE_ERROR;
+                } else {
+                    self.tc_array_type(self.cur_module(), at.length, self.resolve_type(at.element));
+                };
             },
             NODE_FUNCTION_TYPE => {
                 result = self.tc_fn_type(self.cur_module(), id);
@@ -12053,9 +12297,8 @@ extend<'a> TypeChecker<'a> {
         }
         // A reference coalesces to its raw-pointer form (`&T` -> `*const T`, `&mut T` -> `*mut T`).
         // Normalizing it here lets the single pointer rule below apply transitively, so `&T` reaches
-        // `*const void` via `*const T` (ref -> ptr -> void) with no special case. A BARE `*T` accepts
-        // references of either mutability (`&T`/`&mut T` -> `*T`); the reverse (pointer -> reference)
-        // is never implicit: it needs an explicit cast inside `unsafe`.
+        // `*const void` via `*const T` (ref -> ptr -> void) with no special case. The reverse (pointer ->
+        // reference) is never implicit: it needs an explicit cast inside `unsafe`.
         let mut acp = ac;
         if ac.kind == TypeKind::TYPE_REFERENCE && ex.kind == TypeKind::TYPE_POINTER {
             // Coercing a reference into a RAW POINTER ERASES the borrow. A raw pointer carries no
@@ -12067,9 +12310,6 @@ extend<'a> TypeChecker<'a> {
             acp.kind = TypeKind::TYPE_POINTER;
             if acp.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                 acp.qualifier = TypeQualifier::TYPE_QUAL_CONST as u8;
-            }
-            if ex.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-                acp.qualifier = TypeQualifier::TYPE_QUAL_NONE as u8;
             }
         }
         if ex.kind == TypeKind::TYPE_REFERENCE && ac.kind == TypeKind::TYPE_REFERENCE && ex.as_data.elem == ac.as_data.elem && ex.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && ac.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
@@ -12323,7 +12563,7 @@ extend<'a> TypeChecker<'a> {
         if ex.kind == TypeKind::TYPE_BUILTIN && ac.kind == TypeKind::TYPE_BUILTIN && bt_widens(
             ac.as_data.builtin,
             ex.as_data.builtin,
-        ) {
+        ) && !self.tc_float_lit_unpinned(node) {
             return true;
         }
         // An unsuffixed literal under `&`/`&mut` adopts the expected pointee type, at every depth
@@ -12429,6 +12669,7 @@ extend<'a> TypeChecker<'a> {
             // `f64_bits(0.1)` at single precision.
             if okf && !probe && !bt_is_complex(et.as_data.builtin) {
                 unsafe (*self.cur_ast()).set_type(node, expected);
+                unsafe (*self.cur_ast()).set_type(vid, expected);
             }
             return okf;
         }
@@ -14323,6 +14564,17 @@ extend TypeChecker {
                     return unsafe (*self.cur_ast()).type_of(id);
                 }
             }
+            // `-128i8`: the magnitude of a suffixed signed MIN is past its type's MAX, the negation is not.
+            let mut sfx = lr.end;
+            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
+            let mut mag: u64 = 0;
+            if sb != BuiltinType::BT_COUNT && bt_is_int(sb) && !bt_is_uint(sb) && self.lit_mag(operand, &mut mag) && mag == bt_int_max(
+                sb,
+                self.tc_ptr32(),
+            ) + 1 {
+                unsafe (*a).set_type(operand, Ast::builtin(sb));
+                return Ast::builtin(sb);
+            }
         }
         if op == TokenType::Ampersand {
             self.icx.addr_ctx = true;
@@ -14944,7 +15196,13 @@ extend TypeChecker {
         if eq && l != TYPE_NONE && self.tc_bare_generic_variant(rn) {
             rwant = self.strip(l);
         }
+        // A right operand a closed left operand short-circuits never runs: the constant-trap scan
+        // skips it, as it skips a dead branch.
+        let mut lv = false;
+        let skip = logic && self.tc_fold_bool(ln, &mut lv) && lv == (op == TokenType::PipePipe);
+        self.ct_dead += skip as u32;
         let r = self.check_expr_w(rn, rwant);
+        self.ct_dead -= skip as u32;
         if eq {
             self.tc_profile_check(ln, rn);
             self.tc_profile_check(rn, ln);
@@ -19786,8 +20044,24 @@ extend TypeChecker {
         let ifd = unsafe (*a).at_const(id).as_data.if_stmt;
         self.check_cond(ifd.condition, "if");
         self.lint_const_cond(id, ifd.condition, false, true);
+        let dead = self.tc_dead_branch(ifd.condition);
+        self.ct_dead += (dead == 1) as u32;
         self.check_stmt(ifd.then_branch);
+        self.ct_dead -= (dead == 1) as u32;
+        self.ct_dead += (dead == 2) as u32;
         self.check_stmt(ifd.else_branch);
+        self.ct_dead -= (dead == 2) as u32;
+    }
+
+    // The branch of an `if` over `cond` that never runs: 1 the then branch, 2 the else branch, 0
+    // neither (the condition is not closed). The constant-trap scan skips it; the lint reports it
+    // unreachable.
+    fn tc_dead_branch(self: &mut Self, cond: NodeId) u8 {
+        let mut v = false;
+        if !self.tc_fold_bool(cond, &mut v) {
+            return 0;
+        }
+        return pick(v, 2u8, 1u8);
     }
 
     // Does this pattern match every value (wildcard or pure binding, through or-alternatives)?
@@ -20900,6 +21174,9 @@ extend TypeChecker {
             self.err_exprs += 1;
         }
         unsafe (*self.cur_ast()).set_type(id, result);
+        if (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_ASSIGNMENT) && self.err_exprs == nx0 {
+            self.tc_ct_check(id);
+        }
         return result;
     }
 
@@ -21548,10 +21825,12 @@ extend TypeChecker {
 
     // Give every element that is itself a (non-repeat) array literal the adopted element type
     // `we`, at every depth: a nested literal is stored into its slot, so it must have the slot's
-    // length (a designated inner literal zero-fills the rest of it).
+    // length (a designated inner literal zero-fills the rest of it). An unsuffixed float literal
+    // element takes a float `we`.
     fn tc_retype_array_elems(self: &mut Self, elements: NodeList, we: TypeId) {
         let wy = *self.type_at(we);
-        if wy.kind != TypeKind::TYPE_ARRAY {
+        let flt = wy.kind == TypeKind::TYPE_BUILTIN && bt_is_float(wy.as_data.builtin);
+        if wy.kind != TypeKind::TYPE_ARRAY && !flt {
             return;
         }
         for i in 0..elements.len {
@@ -21560,7 +21839,11 @@ extend TypeChecker {
                 v = unsafe (*self.cur_ast()).at_const(v).as_data.field_initializer.value;
             }
             let vn = unsafe (*self.cur_ast()).at_const(v);
-            if vn.kind == NodeKind::NODE_ARRAY_LITERAL && !vn.as_data.array_literal.repeat {
+            if flt {
+                if self.tc_float_lit_unpinned(v) {
+                    let _ = self.compatible(we, v); // a float literal takes the element type
+                }
+            } else if vn.kind == NodeKind::NODE_ARRAY_LITERAL && !vn.as_data.array_literal.repeat {
                 unsafe (*self.cur_ast()).set_type(v, we);
                 self.tc_retype_array_elems(vn.as_data.array_literal.elements, wy.as_data.arr.elem);
             }
@@ -21576,14 +21859,16 @@ extend TypeChecker {
         let mut elem = self.check_expr(vid);
         let we = self.wanted_elem(expected); // same widening as the element-list form above
         if we != TYPE_NONE && we != elem && elem != TYPE_NONE && self.compatible_in(we, vid, true) {
-            if self.type_at(elem).kind == TypeKind::TYPE_ARRAY {
-                let _ = self.compatible(we, vid); // record the slice coercion, as for element lists
+            if self.type_at(elem).kind == TypeKind::TYPE_ARRAY || self.tc_float_lit_unpinned(vid) {
+                // record the slice coercion, as for element lists; a float literal takes the type
+                let _ = self.compatible(we, vid);
             }
             elem = we;
         }
+        let ct0 = self.ct_n;
         let cnt = self.check_expr(nid);
         let sp = unsafe (*a).at_const(nid).span;
-        if cnt == TYPE_ERROR {
+        if cnt == TYPE_ERROR || self.ct_n != ct0 {
             return TYPE_ERROR;
         }
         if cnt != TYPE_NONE {
@@ -21714,13 +21999,18 @@ extend TypeChecker {
         let ifd = unsafe (*a).at_const(id).as_data.if_stmt;
         self.check_cond(ifd.condition, "if");
         self.lint_const_cond(id, ifd.condition, false, false);
+        let dead = self.tc_dead_branch(ifd.condition);
+        self.ct_dead += (dead == 1) as u32;
         let then_ty = self.check_expr_w(ifd.then_branch, expected);
+        self.ct_dead -= (dead == 1) as u32;
         if ifd.else_branch == NODE_NONE {
             let sp = unsafe (*a).at_const(id).span;
             self.errors.emit_span(sp, format("an 'if' used as a value must have an 'else' branch"));
             return TYPE_NONE;
         }
+        self.ct_dead += (dead == 2) as u32;
         let else_ty = self.check_expr_w(ifd.else_branch, expected);
+        self.ct_dead -= (dead == 2) as u32;
         let then_never = then_ty != TYPE_NONE && self.type_at(then_ty).kind == TypeKind::TYPE_NEVER;
         let else_never = else_ty != TYPE_NONE && self.type_at(else_ty).kind == TypeKind::TYPE_NEVER;
         if then_never || else_never {
@@ -22005,7 +22295,8 @@ extend TypeChecker {
             self.errors.emit_span(
                 sp,
                 format(
-                    "constant '{}' cannot be evaluated at compile time: {}",
+                    "{} '{}' cannot be evaluated at compile time: {}",
+                    pick(cd.is_static_mut, "static", "constant"),
                     diag::span_str(self.source, sp.start, sp.end),
                     unsafe (*ceptr).trap_detail(),
                 ),
@@ -22022,6 +22313,65 @@ extend TypeChecker {
             };
             unsafe (*ceptr).defer_const(m, id, strict);
         }
+    }
+
+    // The constant-expression arguments of `owner`'s attributes: each is checked against the type
+    // its attribute declares (`attr_expr_type`), must fold like a constant initializer, and its
+    // value is recorded for the readers after the check (`Ast::attr_value`).
+    fn tc_attr_exprs(self: &mut Self, owner: NodeId) {
+        let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
+        for i in 0..ks.len() {
+            let at = unsafe (*self.cur_ast()).attr_expr_at(owner, i);
+            if at == null {
+                continue;
+            }
+            let arg = unsafe (*at).arg;
+            let want = Ast::builtin(attr_expr_type(unsafe (*at).kind));
+            let mut v: i64 = 0;
+            let ok = self.tc_attr_arg(arg, want, &mut v) && self.tc_attr_value(ks[i], arg, v as u64);
+            unsafe (*self.cur_ast()).set_attr_value(owner, ks[i], ok, v as u64);
+        }
+    }
+
+    // Check attribute argument `arg` against `want` and fold it into `out`; false after an error.
+    fn tc_attr_arg(self: &mut Self, arg: NodeId, want: TypeId, out: &mut i64) bool {
+        let ne = self.errors.errors.len();
+        let cx0 = self.ct_ctx;
+        self.ct_ctx = "attribute argument cannot be evaluated at compile time";
+        self.check_expr_w(arg, want);
+        self.ct_ctx = cx0;
+        if !self.compatible(want, arg) {
+            self.err_mismatch(arg, want);
+        }
+        let ceptr = self.cir();
+        if self.errors.errors.len() != ne || ceptr == null {
+            return false;
+        }
+        self.eng_hold(true);
+        self.ev_err = false;
+        let v = self.ev(self.cur_module(), arg);
+        if v.kind == iri::IV_INT {
+            *out = v.i;
+        } else if !self.ev_err {
+            let why = if unsafe (*ceptr).trap_get().len() != 0 {
+                unsafe (*ceptr).trap_detail();
+            } else {
+                "it does not fold to a constant";
+            };
+            let sp = unsafe (*self.cur_ast()).at_const(arg).span;
+            self.errors.emit_span(sp, format("attribute argument cannot be evaluated at compile time: {}", why));
+        }
+        self.eng_hold(false);
+        return v.kind == iri::IV_INT;
+    }
+
+    // Whether `v` is a valid value of attribute `kind`'s argument `arg`; reports the error otherwise.
+    fn tc_attr_value(self: &mut Self, kind: AttrKind, arg: NodeId, v: u64) bool {
+        if kind == AttrKind::ATTR_ALIGN && !c_align_ok(v) {
+            self.errors.emit_span(unsafe (*self.cur_ast()).at_const(arg).span, c_align_error(v));
+            return false;
+        }
+        return true;
     }
 
     // An explicit enum discriminant must fold: the C tag and every cast and switch take its value.
@@ -22164,7 +22514,12 @@ extend TypeChecker {
     fn check_static_assert_i(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let left = unsafe (*a).at_const(id).as_data.binary.left;
-        if !self.check_cond(left, "static_assert") {
+        let ct0 = self.ct_n;
+        let cx0 = self.ct_ctx;
+        self.ct_ctx = "static assertion cannot be evaluated";
+        let ok = self.check_cond(left, "static_assert");
+        self.ct_ctx = cx0;
+        if !ok || self.ct_n != ct0 {
             return;
         }
         let sp = unsafe (*a).at_const(left).span;
@@ -23050,6 +23405,7 @@ extend TypeChecker {
     }
 
     fn check_item(self: &mut Self, id: NodeId) {
+        self.tc_attr_exprs(id);
         let a = self.cur_ast();
         let nk = unsafe (*a).at_const(id).kind;
         switch nk {
@@ -23245,12 +23601,7 @@ extend TypeChecker {
                         );
                         if r != null && unsafe (*r).site != NODE_NONE {
                             let ss = unsafe (*self.cur_ast()).at_const(unsafe (*r).site).span;
-                            let mut line: u32 = 1;
-                            for k in 0..ss.start as usize {
-                                if self.source[k] == b'\n' {
-                                    line = line + 1;
-                                }
-                            }
+                            let line = diag::line_of(self.source, ss.start);
                             self.errors.note(
                                 format(
                                     "disqualified at '{}' (line {})",
@@ -23282,11 +23633,15 @@ extend TypeChecker {
                             self.decl_type(mid);
                         } else {
                             if mn.as_data.variant.value != NODE_NONE {
+                                let ct0 = self.ct_n;
+                                let cx0 = self.ct_ctx;
+                                self.ct_ctx = "enum discriminant cannot be evaluated at compile time";
                                 let vt = self.check_expr(mn.as_data.variant.value);
+                                self.ct_ctx = cx0;
                                 if vt != TYPE_NONE && !self.is_int(vt) {
                                     let sp = unsafe (*self.cur_ast()).at_const(mn.as_data.variant.value).span;
                                     self.errors.emit_span(sp, format("enum discriminant must be an integer"));
-                                } else if vt != TYPE_NONE {
+                                } else if vt != TYPE_NONE && self.ct_n == ct0 {
                                     self.tc_discriminant(mn.as_data.variant.value);
                                 }
                             }
@@ -23423,12 +23778,20 @@ extend TypeChecker {
                 self.const_init = vsp.start as u64 << 32 | vsp.end as u64;
             }
             // `[..].into()` and `[]` take their type from here.
+            let ct0 = self.ct_n;
+            let item0 = self.ct_item;
+            let cd0 = self.ct_cd;
+            self.ct_item = id;
+            self.ct_cd = self.icx.closure_depth;
             self.check_expr_w(cd.value, declared);
+            self.ct_item = item0;
+            self.ct_cd = cd0;
             self.const_init = init0;
             if !self.compatible(declared, cd.value) {
                 self.err_mismatch(cd.value, declared);
             }
-            if !cd.is_extern && !cd.is_static_mut {
+            // A `static mut` starts as static data too, so its initializer is evaluated as a constant's.
+            if !cd.is_extern && self.ct_n == ct0 {
                 self.tc_mandatory_const(id, cd.value, declared);
             }
         }

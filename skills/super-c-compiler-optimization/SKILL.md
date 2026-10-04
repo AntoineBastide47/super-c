@@ -388,7 +388,8 @@ Budget for the analyses, gate the row before accepting a change: analysis time <
 analysis allocations <= 20k, retained scratch <= `BC_SCRATCH_BUDGET` after any body,
 the borrow probe's `drops` region (the elaboration of every kept body) <= 10 ms and
 <= 2k allocations, the emission `drops` region (bounds-check elimination plus the
-elaboration of the bodies emission lowers itself) <= 20 ms serial, and
+elaboration of the bodies emission lowers itself, with the `ir/facts.spc` effect and version
+service) <= 36 ms and <= 600 allocations serial (35 ms and 570 measured), and
 `SC_BC_VALIDATE=1` builds (serial and every core) clean. The parallel path adds slot pooling, so its allocation count sits
 near the serial one plus one stack per worker.
 

@@ -2755,6 +2755,12 @@ extend Interp {
         let da = unsafe &*self.p().module_ast_const(fm);
         let nm = da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
         let nargs = args.len();
+        // The memory routines dispatch on the lowering's verified tag; a call through a function
+        // value carries none and names the routine.
+        let mut ci = t.intr;
+        if t.callee.node == NODE_NONE {
+            ci = ir::ci_of_name(self.src_of(fm).slice(nm.start as usize, nm.end as usize));
+        }
         let mut out = none();
         let rt = if t.dests_len >= 1 {
             b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
@@ -2816,12 +2822,12 @@ extend Interp {
                 unsafe (*blk).dead = 1;
             }
             out = iv_unit();
-        } else if self.span_is(fm, nm, "memset") {
+        } else if ci == ir::CI_MEMSET {
             if !self.mem_set(args, &mut out) {
                 return false;
             }
-        } else if self.span_is(fm, nm, "memcpy") {
-            if !self.mem_cpy(args, &mut out) {
+        } else if ci == ir::CI_MEMCPY || ci == ir::CI_MEMMOVE {
+            if !self.mem_cpy(args, ci == ir::CI_MEMMOVE, &mut out) {
                 return false;
             }
         } else if self.span_is(fm, nm, "memcmp") {
@@ -3004,7 +3010,9 @@ extend Interp {
         return e.kind == TypeKind::TYPE_BUILTIN && (e.as_data.builtin == BuiltinType::BT_U8 || e.as_data.builtin == BuiltinType::BT_I8 || e.as_data.builtin == BuiltinType::BT_CHAR);
     }
 
-    fn mem_cpy(self: &mut Self, args: &Vector<IVal>, out: &mut IVal) bool {
+    // memcpy, or memmove when `mv`: an overlapping move copies from the end down when the
+    // destination starts after the source, so every source slot is read before it is written.
+    fn mem_cpy(self: &mut Self, args: &Vector<IVal>, mv: bool, out: &mut IVal) bool {
         if args.len() != 3 || args.at(0).kind != IV_PTR || args.at(1).kind != IV_PTR || args.at(2).kind != IV_INT || args.at(
             2,
         ).i < 0 {
@@ -3067,7 +3075,13 @@ extend Interp {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
-        for i in 0..count {
+        let down = mv && did == sid && doff > soff;
+        for k in 0..count {
+            let i = if down {
+                count - 1 - k;
+            } else {
+                k;
+            };
             let sv = unsafe (*self.obj_ptr(sid)).slots[(soff + i) as usize];
             if sv.kind == IV_NONE {
                 return self.fail();
@@ -4375,25 +4389,17 @@ extend Interp {
         }
         if c.kind == ir::CK_FLOAT {
             let sp = c.raw;
-            let mut fv: f64 = 0.0;
-            let mut okf = false;
-            {
-                let s0 = self.src_of(b.module);
-                if sp.end > sp.start && sp.end as usize <= s0.len() {
-                    let txt = s0.slice(sp.start as usize, sp.end as usize);
-                    switch txt.parse_f64() {
-                        Some(v) => {
-                            fv = v;
-                            okf = true;
-                        },
-                        None => {},
-                    };
-                }
-            }
-            if !okf {
+            let s0 = self.src_of(b.module);
+            if sp.end <= sp.start || sp.end as usize > s0.len() {
                 return self.bail();
             }
-            return iv_float(b.module, c.ty, fv);
+            // An f32 literal rounds once from its text, as the emitted `f`-suffixed C literal does.
+            let mut tb = BuiltinType::BT_F64;
+            let _ = self.bt_of(b.module, c.ty, &mut tb);
+            return switch float_literal_value(s0, sp, tb == BuiltinType::BT_F32) {
+                Some(v) => iv_float(b.module, c.ty, v),
+                None => self.bail(),
+            };
         }
         if c.kind == ir::CK_STR {
             let sp = c.raw;
@@ -4700,7 +4706,7 @@ extend Interp {
                 }
                 return iv_int(b.module, rv.target, ev.i);
             }
-            if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF {
+            if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_DANGLING {
                 let mut lm: ModuleId = 0;
                 let mut lt = TYPE_NONE;
                 if !self.rty(b.module, rv.b, &mut lm, &mut lt) {
@@ -4711,8 +4717,12 @@ extend Interp {
                     return self.bail();
                 }
                 let mut v = l.size;
-                if rv.c == ir::IN_ALIGNOF {
+                if rv.c != ir::IN_SIZEOF {
                     v = l.align;
+                }
+                if rv.c == ir::IN_DANGLING {
+                    // `dangling::<T>()` is `alignof(T) as *mut T`: the storage-free sentinel cast_pointer folds
+                    return iv_ptr(b.module, rv.target, 0, v as u32);
                 }
                 return iv_int(b.module, rv.target, v as i64);
             }
@@ -5445,6 +5455,34 @@ extend Interp {
         if blk == null {
             return out;
         }
+        // A pointer to an array cast to a pointer to its element type addresses the first element:
+        // the array object, not the slot that holds it.
+        let mut sm: ModuleId = 0;
+        let mut st = TYPE_NONE;
+        if v.ty != TYPE_NONE && self.rty(v.tm, v.ty, &mut sm, &mut st) {
+            let sy = *(unsafe &*self.p().module_ast_const(sm)).type_at(st);
+            let mut am: ModuleId = 0;
+            let mut at = TYPE_NONE;
+            if (sy.kind == TypeKind::TYPE_POINTER || sy.kind == TypeKind::TYPE_REFERENCE) && self.rty(
+                sm,
+                sy.as_data.elem,
+                &mut am,
+                &mut at,
+            ) {
+                let ay = *(unsafe &*self.p().module_ast_const(am)).type_at(at);
+                if ay.kind == TypeKind::TYPE_ARRAY && self.teq(am, ay.as_data.arr.elem, em, et) {
+                    let off = pv_off(v) as usize;
+                    if off >= unsafe (*blk).slots.len() {
+                        return self.bail();
+                    }
+                    let av = unsafe (*blk).slots[off];
+                    if av.kind != IV_OBJ {
+                        return self.bail();
+                    }
+                    return iv_ptr(m, target, av.i as u32, 0);
+                }
+            }
+        }
         if unsafe (*blk).heap != 0 && unsafe (*blk).et == TYPE_NONE && pv_off(v) == 0 {
             let l = self.lsvc.layout(em, et);
             if !l.ok || l.size == 0 {
@@ -5549,9 +5587,12 @@ extend Interp {
             if v.kind == IV_FLOAT {
                 fv = v.f;
             } else if v.kind == IV_INT {
+                // Straight to the target width: an f32 through f64 would round twice.
                 let mut ob = BuiltinType::BT_I64;
                 let _ = self.bt_of(v.tm, v.ty, &mut ob);
-                if bt_unsigned(ob) {
+                if tb == BuiltinType::BT_F32 {
+                    fv = pick(bt_unsigned(ob), (v.i as u64) as f32, v.i as f32);
+                } else if bt_unsigned(ob) {
                     fv = (v.i as u64) as f64;
                 } else {
                     fv = v.i as f64;
@@ -6889,18 +6930,19 @@ extend Interp {
             fm,
             nm,
             "memset",
-        ) || self.span_is(fm, nm, "memcpy") || self.span_is(fm, nm, "memcmp") || self.span_is(fm, nm, "abort") || self.span_is(
+        ) || self.span_is(fm, nm, "memcpy") || self.span_is(fm, nm, "memmove") || self.span_is(fm, nm, "memcmp") || self.span_is(
             fm,
             nm,
-            "__sc_panic_str",
-        ) || self.span_is(fm, nm, "__sc_panic") || self.span_is(fm, nm, "sc_int_overflow") || self.span_is(
+            "abort",
+        ) || self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic") || self.span_is(
             fm,
             nm,
-            "sc_int_div_zero",
-        ) || self.span_is(fm, nm, "sc_int_div_overflow") || self.span_is(fm, nm, "sc_has_i128") || self.bits_name(
+            "sc_int_overflow",
+        ) || self.span_is(fm, nm, "sc_int_div_zero") || self.span_is(fm, nm, "sc_int_div_overflow") || self.span_is(
             fm,
             nm,
-        ) || self.wrap_name(fm, nm) {
+            "sc_has_i128",
+        ) || self.bits_name(fm, nm) || self.wrap_name(fm, nm) {
             return true;
         }
         let mut f32suf = false;

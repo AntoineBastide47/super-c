@@ -15,6 +15,9 @@ import atomic;
 /// - `Release` (stores/RMW): earlier reads/writes can't move after this store.
 /// - `AcqRel` (RMW): both, in one operation.
 /// - `SeqCst`: a single total order across all `SeqCst` operations (the safe default).
+///
+/// An order the operation cannot take panics with "invalid memory order": `Release` or `AcqRel` on a load
+/// or a compare-exchange failure, `Acquire` or `AcqRel` on a store.
 pub enum MemoryOrder {
     Relaxed,
     Acquire,
@@ -274,7 +277,8 @@ extend<T: AtomicOps> Atomic<T> {
     }
     /// If the value equals `expected`, replace it with `desired`; returns whether the swap happened. Strong:
     /// never fails spuriously. `success` orders the read-modify-write when it swaps; `failure` orders the
-    /// load when it does not (`failure` may not be `Release`/`AcqRel`).
+    /// load when it does not (`failure` may not be `Release`/`AcqRel`). A `failure` stronger than `success`
+    /// strengthens `success` to cover it.
     pub fn compare_exchange(self: &Atomic<T>, expected: T, desired: T, success: MemoryOrder, failure: MemoryOrder) bool {
         return T::atomic_cas(self.cell.get(), expected, desired, false, success as i32, failure as i32);
     }

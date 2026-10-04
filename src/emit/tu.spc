@@ -46,7 +46,7 @@ pub struct TuEmit {
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
     // Per module, the layout attributes by owner, indexed on the module's first query:
-    // (module << 32 | owner) -> the last `@c.align` argument << 1 | packed.
+    // (module << 32 | owner) -> the `@c.align` value << 1 | packed.
     lay_built: Vector<bool>,
     lay_attrs: Map<u64, u64>,
 }
@@ -291,7 +291,7 @@ extend TuEmit {
         return true;
     }
 
-    // The layout attributes of declaration `decl` in module `m`: the last `@c.align` argument
+    // The layout attributes of declaration `decl` in module `m`: the `@c.align` value
     // (0 when none) << 1 | whether it is `@c.packed`.
     fn layout_attrs(self: &mut Self, m: ModuleId, decl: NodeId) u64 {
         if self.lay_built.len() == 0 {
@@ -307,6 +307,15 @@ extend TuEmit {
                     continue;
                 }
                 let k = m as u64 << 32 | at.owner as u64;
+                let mut al = at.arg as u64;
+                if !packed && at.expr {
+                    // Unevaluated only on an owner the platform filter removed: it never emits.
+                    let av = a.attr_value(at.owner, AttrKind::ATTR_ALIGN);
+                    if !av.ok {
+                        continue;
+                    }
+                    al = av.v;
+                }
                 let old = switch self.lay_attrs.get(&k) {
                     Some(v) => *v,
                     None => 0u64,
@@ -316,7 +325,7 @@ extend TuEmit {
                     if packed {
                         old | 1;
                     } else {
-                        at.arg as u64 << 1 | old & 1;
+                        al << 1 | old & 1;
                     },
                 );
             }

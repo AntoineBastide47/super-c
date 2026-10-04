@@ -177,13 +177,34 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
     return String::from_str(src.slice(s as usize, e as usize).trim());
 }
 
-// Start of the line containing `pos` (the byte after the previous newline).
+// A line ends at `\n`, `\r\n` or a lone `\r` (text::line_starts).
+fn is_eol(b: u8) bool {
+    return b == b'\n' || b == b'\r';
+}
+
+// Start of the line containing `pos` (the byte after the previous line end).
 fn line_start_of(src: str, pos: usize) usize {
     let mut i = pos;
-    while i > 0 && src[i - 1] != b'\n' {
+    while i > 0 && !is_eol(src[i - 1]) {
         i -= 1;
     }
     return i;
+}
+
+// The line end before the line starting at `ls` (> 0): the first byte of its terminator.
+fn prev_line_end(src: str, ls: usize) usize {
+    if ls >= 2 && src[ls - 1] == b'\n' && src[ls - 2] == b'\r' {
+        return ls - 2;
+    }
+    return ls - 1;
+}
+
+// Start of the line after the line end at `le`.
+fn next_line_start(src: str, le: usize) usize {
+    if le + 1 < src.len() && src[le] == b'\r' && src[le + 1] == b'\n' {
+        return le + 2;
+    }
+    return le + 1;
 }
 
 // The contiguous `//`/`///` comment block sitting directly above the declaration (attribute lines
@@ -207,8 +228,9 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
     let mut top = decl_ls;
     let mut cur = decl_ls;
     while cur > 0 {
-        let pls = line_start_of(src, cur - 1);
-        let line = src.slice(pls, cur - 1).trim();
+        let ple = prev_line_end(src, cur);
+        let pls = line_start_of(src, ple);
+        let line = src.slice(pls, ple).trim();
         if line.starts_with("//") {
             top = pls;
             cur = pls;
@@ -223,7 +245,7 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
     let mut i = top;
     while i < decl_ls {
         let mut le = i;
-        while le < src.len() && src[le] != b'\n' {
+        while le < src.len() && !is_eol(src[le]) {
             le += 1;
         }
         let line = src.slice(i, le).trim();
@@ -233,7 +255,7 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
         } else if line.starts_with("//") {
             body = line.slice(2, line.len());
         } else {
-            i = le + 1;
+            i = next_line_start(src, le);
             // A skipped attribute line.
             continue;
         }
@@ -244,13 +266,13 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
             out.push_byte(b'\n');
         }
         out.push_str(body);
-        i = le + 1;
+        i = next_line_start(src, le);
     }
     // A trailing comment on the declaration's own line documents it too (the house style for
     // fields: `pub obj: Vector<JSONPair>, // JT_OBJECT members`). Scanning AFTER the span end keeps
     // string literals containing "//" out of reach.
     let mut j = sp.end as usize;
-    while j < src.len() && src[j] != b'\n' {
+    while j < src.len() && !is_eol(src[j]) {
         j += 1;
     }
     if sp.end as usize < j {
@@ -1534,7 +1556,7 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
             let mut multiline = false;
             let mut q = nd.span.start as usize;
             while q < nd.span.end as usize && q < src.len() {
-                if src[q] == b'\n' {
+                if is_eol(src[q]) {
                     multiline = true;
                     break;
                 }
@@ -1552,7 +1574,7 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
     let mut last_end: usize = 0;
     while i < src.len() {
         let mut le = i;
-        while le < src.len() && src[le] != b'\n' {
+        while le < src.len() && !is_eol(src[le]) {
             le += 1;
         }
         let line = src.slice(i, le).trim();
@@ -1569,7 +1591,7 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
             }
             run_start = -1;
         }
-        i = le + 1;
+        i = next_line_start(src, le);
     }
     if run_start >= 0 && run_lines >= 2 {
         out.push(Loc { module: mi as u32, start: run_start as u32, end: last_end as u32 });
@@ -2233,17 +2255,17 @@ pub fn import_insert_at(p: &loader::Package, mi: usize) u32 {
     let mut i: usize = 0;
     while i < src.len() {
         let mut e = i;
-        while e < src.len() && src[e] != b'\n' {
+        while e < src.len() && !is_eol(src[e]) {
             e += 1;
         }
         if src.slice(i, e).trim().starts_with("import ") {
             at = if e < src.len() {
-                (e + 1) as u32;
+                next_line_start(src, e) as u32;
             } else {
                 e as u32;
             };
         }
-        i = e + 1;
+        i = next_line_start(src, e);
     }
     return at;
 }

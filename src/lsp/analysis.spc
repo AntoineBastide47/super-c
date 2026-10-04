@@ -1242,6 +1242,10 @@ fn typecheck_set(
         p.cir = &mut cirv;
         let mut again = Vector::<bool>::new();
         again.resize_default(n);
+        // A module with a type error skips the always-panics phase, as the driver's build does: a
+        // constant trap the checker reported would be reported again at its statement.
+        let mut tc_bad = Vector::<bool>::new();
+        tc_bad.resize_default(n);
         for k in 0..order.len() {
             let i = order[k];
             let lw = lint && lsp_lint_wanted(p, i, root_file, lint_dir);
@@ -1253,7 +1257,7 @@ fn typecheck_set(
                 }
             }
             let miss0 = cirv.body_miss_n;
-            lsp_typecheck_module(p, i, lw, nd);
+            tc_bad.set(i, !lsp_typecheck_module(p, i, lw, nd));
             record_refs(p, i);
             if cirv.body_miss_n != miss0 {
                 again.set(i, true);
@@ -1265,7 +1269,7 @@ fn typecheck_set(
             cirv.all_typed = true;
             for k in 0..order.len() {
                 let i = order[k];
-                if lint && lsp_lint_wanted(p, i, root_file, lint_dir) {
+                if lint && !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
                     let miss0 = cirv.body_miss_n;
                     let mut errs = diag::Errors::new();
                     emit::check_always_panics_module(p, i, &mut errs);

@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 17.
+# Super-C compatibility contract, version 18.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=17
+CONTRACT_VERSION=18
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -45,10 +45,10 @@ CONTRACT_DELAY_SEEDS="1 2 3"
 
 # ---- C compilation --------------------------------------------------------------------------------------
 # The manifest's base C flags (build.toml `cstd` default) and the strict set the warnings gate adds when it
-# compiles every emitted translation unit with `-fsyntax-only` (with -funsigned-char, which the build
-# engine passes to every compile: the language's char is unsigned).
+# compiles every emitted translation unit with `-fsyntax-only` (with -funsigned-char and -ffp-contract=off,
+# which the build engine passes to every compile: the language's char is unsigned, floats never fuse).
 CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L"
-CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char"
+CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off"
 
 # ---- readability of the emitted C tree (build/dev/raw) --------------------------------------------------
 # Checked by the gate on the gen1 tree:
@@ -94,12 +94,14 @@ tests/codegen_test.spc
 tests/core_ir_test.spc
 tests/cross_target_helpers_test.spc
 tests/ctfe_reflect_test.spc
+tests/differential_test.spc
 tests/dispatch_test.spc
 tests/doc_test.spc
 tests/drops_test.spc
 tests/errors_test.spc
 tests/float_test.spc
 tests/fmt_test.spc
+tests/gen_test.spc
 tests/harness.spc
 tests/infer_test.spc
 tests/io_test.spc

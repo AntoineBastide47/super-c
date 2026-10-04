@@ -111,6 +111,46 @@ fn literal_arithmetic_types() {
     );
 }
 
+// Literal-only arithmetic takes the type of every context form; a negated literal reaches its type's
+// minimum, suffixed or not, and the C form of the i64 minimum is a valid C expression.
+@test
+fn literal_contexts_and_signed_minimum() {
+    h::expect_exit(
+        "every context types literal arithmetic",
+        "struct P { pub a: i64, pub b: u64 }\nfn take(x: i64) i64 { return x; }\nfn ret() i64 { return 2147483647 + 1; }\nfn main() i32 {\n    let a: i64 = 2147483647 + 1;\n    let p = P { a: 2147483647 + 1, b: 1 << 40 };\n    let x: i64 = 5;\n    let mut f: i64 = 0;\n    f += 2147483647 + 1;\n    let g: [u64; 2] = [1 << 40, 1 << 33];\n    if a != 2147483648 || take(2147483647 + 1) != a || ret() != a || p.a != a || p.b != 1099511627776 { return 1; }\n    if x + (2147483647 + 1) != a + 5 || (2147483647 + 1) + x != a + 5 || f != a || g[1] != 8589934592 { return 2; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a u64 constant shifts past 32 bits",
+        "const S: u64 = 1 << 40;\nfn main() i32 { return (S >> 40) as i32 - 1; }\n",
+        0,
+    );
+    h::expect_exit(
+        "negated literals reach the signed minimum",
+        "fn main() i32 {\n    let a = -128i8;\n    let b = -32768i16;\n    let c = -2147483648i32;\n    let d = -9223372036854775808i64;\n    let e = -2147483648;\n    let f = -9223372036854775808;\n    static_assert(sizeof(e) == 4 && sizeof(f) == 8, \"i32, i64\");\n    let g: i8 = -128;\n    if a != i8::MIN || g != a || b != i16::MIN || c != i32::MIN || e != c || d != i64::MIN || f != d { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_c(
+        "the i64 minimum is a valid C expression",
+        "fn main() i32 { let d = -9223372036854775808i64; return (d + 9223372036854775807 + 1) as i32; }\n",
+        "(-9223372036854775807LL - 1)",
+    );
+    h::expect_err_msg(
+        "past the minimum",
+        "fn main() i32 { let a = -129i8; return 0; }\n",
+        "integer literal does not fit in its suffixed type",
+    );
+    h::expect_err_msg(
+        "a float operand in an integer context",
+        "fn main() i32 { let a: i32 = 2.5 + 1; return a; }\n",
+        "mismatched types",
+    );
+    h::expect_ok(
+        "an array of tuples holding a function pointer",
+        "fn p(x: []u8) usize { return x.len(); }\nfn main() i32 { let u: [(i32, fn([]u8) usize); 1] = [(1, p)]; return u[0].0 - 1; }\n",
+    );
+}
+
 @test
 fn repeated_generic_params() {
     h::expect_ok(

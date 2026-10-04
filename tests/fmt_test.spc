@@ -48,6 +48,17 @@ fn golden_reflect() {
     );
 }
 
+// A constant-expression attribute argument prints as an expression, the rest of the attribute line
+// verbatim; an `@fmt.skip` declaration keeps its argument text.
+@test
+fn golden_attribute_expression() {
+    expect_fmt(
+        "const N: u32 = 8;\n@c.inline @c.align(  N*2 )\nstruct P{x:i32,}\n@fmt.skip\n@c.align(N*2)\nstruct Q{x:i32,}\n",
+        "const N: u32 = 8;\n@c.inline @c.align(N * 2)\nstruct P {\n    x: i32,\n}\n@fmt.skip\n@c.align(N*2)\nstruct Q{x:i32,}\n",
+    );
+    expect_fmt("@c.align(16)\nstruct P{x:i32,}\n", "@c.align(16)\nstruct P {\n    x: i32,\n}\n");
+}
+
 @test
 fn golden_derive() {
     // `@derive` prints as attribute trivia, verbatim; the synthesized extends never reach the

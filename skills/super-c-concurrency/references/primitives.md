@@ -40,6 +40,12 @@ let swapped = counter.compare_exchange(42, 100, MemoryOrder::SeqCst, MemoryOrder
 | `AcqRel` | Both Acquire and Release |
 | `SeqCst` | Total order across all SeqCst operations |
 
+An order the operation cannot take panics at run time with "invalid memory order": a load
+and a compare-exchange failure take `Relaxed`, `Acquire` or `SeqCst`; a store takes
+`Relaxed`, `Release` or `SeqCst`; a read-modify-write, a compare-exchange success and
+`fence` take all five. A failure order stronger than the success order strengthens the
+success order. The codes and the C mapping are in the `super-c-ffi` skill.
+
 ## Threads
 
 ```superc

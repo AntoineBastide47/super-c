@@ -1,19 +1,20 @@
 // Bounds-check elimination: a local, near-linear proof pass over one final elaborated CoreBody. It rewrites IN_BOUNDS / IN_RANGE_BOUNDS operations to their
 // PROVEN twins ONLY when the proof holds at the exact operation site; anything unknown, mutated,
-// called-past, joined-away, or over-limit keeps its check. The pass owns its (tiny) control-flow
-// facts -- it never imports the C emitter.
+// called-past, joined-away, or over-limit keeps its check. The pass is the first client of the
+// Core fact service (`ir::facts`): the versions, generations, effects and integer facts come from
+// there; it never imports the C emitter.
 //
-// Fact model (dense, per body): every value fact is keyed by (local, version) where the version
-// bumps on any assignment to that local, so facts die with redefinition instead of a body-wide
-// clear. Collection-length facts additionally key on (place structure, heap generation, base
-// generation): any call, deref write, or asm bumps the heap generation, any direct write through a
-// base local bumps that base's generation, and a stale generation silently misses. Facts flow only
-// along edges into single-predecessor blocks (a join keeps nothing), which is exactly enough for
-// the canonical indexed loop: the header's `index < length` branch fact reaches the loop body.
+// Fact model (dense, per body): a value fact is keyed by (local, version) (`fx::VKey`), and a
+// collection-length fact additionally by (place structure, heap generation, base generation). Facts
+// flow along edges into blocks with one forward predecessor, loop headers included (the header's
+// entry bumps everything the loop can write), which is enough for the canonical indexed loop: the
+// header's `index < length` branch fact reaches the loop body. The solved integer facts (intervals,
+// strides) are the second proof source.
 import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import ir::core as ir;
+import ir::facts as fx;
 import module::loader as loader;
 import stdlib;
 
@@ -23,7 +24,8 @@ pub const BR_UNKNOWN_LENGTH: u8 = 1;
 pub const BR_OVERFLOW_UNKNOWN: u8 = 2;
 pub const BR_JOIN_LOST_FACT: u8 = 3;
 pub const BR_RESOURCE_LIMIT: u8 = 4;
-pub const BR_COUNT: usize = 5;
+pub const BR_WIDENED: u8 = 5; // the index's interval was lost to loop-header widening
+pub const BR_COUNT: usize = 6;
 
 pub struct BceStats {
     pub total: u32,
@@ -33,7 +35,7 @@ pub struct BceStats {
     pub coalesced: u32,
     pub folded: u32,
     pub sig_kept: u32, // calls crossed without discarding collection facts (signature transparency)
-    pub reasons: [u32; 5],
+    pub reasons: [u32; 6],
 }
 
 extend BceStats {
@@ -67,39 +69,25 @@ struct Fact {
     pub lp: u32,
     pub lp_hg: u32,
     pub lp_bg: u32,
+    pub lp_pg: u32,
+    pub lp_fg: u32,
     pub kind: u8,
     pub iconst: bool,
     pub ln_ok: bool,
     pub lp_ok: bool,
 }
 
-// A resolved operand key: constant, or (local, version) + affine constant offset, or opaque.
-// Two local keys with equal (l, v, off) name the SAME runtime value (identical expressions over
-// the same definition), which stays true even when the addition wrapped -- the basis for every
-// affine match below. No ordering is ever derived from two different offsets.
-struct VKey {
-    pub c: i64,
-    pub off: i64,
-    pub l: u32,
-    pub v: u32,
-    pub is_const: bool,
-    pub is_local: bool,
-}
-
 const MAX_EDGE_FACTS: usize = 96;
 const MAX_TOTAL_FACTS: usize = 16384;
 
-/// LenBind.pl values with this bit set are SYNTHETIC identities: the low bits name the reference
-/// LOCAL a `[r, deref, .len]` read routed through (no place for the collection exists in the
-/// pool). Two synthetic identities match on equal ids; a synthetic never matches a real place.
-const SYNTH_PL: u32 = 0x80000000u32;
-
-// Per-local bindings, each stamped with the version of its OWNER local at definition time so a
-// redefinition invalidates it without any sweep.
+// Per-local length bindings, stamped with the version of the OWNER local at definition time so a
+// redefinition invalidates them without any sweep.
 struct LenBind {
     pub pl: u32, // the measured place (structural identity)
     pub hg: u32,
     pub bg: u32,
+    pub pg: u32,
+    pub fg: u32, // the buffer generation; compared only for a place that heap memory may hold
     pub my_v: u32,
     pub ok: bool,
 }
@@ -108,30 +96,11 @@ struct LenBind {
 // captured AT THE COMPARISON (a still-current length local, or a direct prelude len-field read),
 // so a later fold proof can match the side against a recorded length fact.
 struct CmpBind {
-    pub a: VKey,
-    pub b: VKey,
+    pub a: fx::VKey,
+    pub b: fx::VKey,
     pub a_lp: LenBind,
     pub b_lp: LenBind,
     pub le: bool, // true: a <= b, false: a < b
-    pub my_v: u32,
-    pub ok: bool,
-}
-struct CopyBind {
-    pub src: u32,
-    pub src_v: u32,
-    pub my_v: u32,
-    pub ok: bool,
-}
-// dest = src + c (usize width only; c may be negative for a Minus form)
-struct AffBind {
-    pub src: u32,
-    pub src_v: u32,
-    pub c: i64,
-    pub my_v: u32,
-    pub ok: bool,
-}
-struct RefBind {
-    pub pl: u32,
     pub my_v: u32,
     pub ok: bool,
 }
@@ -139,55 +108,62 @@ struct RefBind {
 // holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
 // its index bound through this.
 struct ChunkBind {
-    pub e: VKey,
+    pub e: fx::VKey,
     pub e_lp: LenBind,
     pub l: u32,
     pub my_v: u32,
 }
+// `l = x % c` (usize, c > 0) at version `my_v`: `x - l` is at most `x` and a multiple of `c`.
+struct RemBind {
+    pub x: fx::VKey,
+    pub x_lp: LenBind,
+    pub c: i64,
+    pub my_v: u32,
+    pub ok: bool,
+}
+// The value of a local at version `my_v` is a multiple of `st` (0: no binding).
+struct AlBind {
+    pub st: u64,
+    pub my_v: u32,
+}
+// Local `l` at version `v` holds the length `lb` names: its solved interval bounds that length.
+struct LRead {
+    pub lb: LenBind,
+    pub l: u32,
+    pub v: u32,
+}
+const LREADS_MAX: usize = 16;
 
 pub struct Bce {
-    pub pkg: *const loader::Package,
-    pub lver: Vector<u32>,
-    pub basegen: Vector<u32>,
-    pub heapgen: u32,
+    pub fx: fx::Facts,
     pub lenof: Vector<LenBind>,
     pub cmpof: Vector<CmpBind>,
-    pub copyof: Vector<CopyBind>,
-    pub affof: Vector<AffBind>,
-    pub refof: Vector<RefBind>,
+    pub remof: Vector<RemBind>,
+    pub alof: Vector<AlBind>,
     pub chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
+    pub lreads: Vector<LRead>, // the latest length reads, at most LREADS_MAX
+    // Integer facts solve on demand: `iwant` when the body could use them, `itried` once solved,
+    // `clens` the length identities compared with a constant of 2 or more, `ialign` when a
+    // remainder alignment was bound, and the walk's position for the replay.
+    pub iwant: bool,
+    pub itried: bool,
+    pub ialign: bool,
+    pub clens: Vector<LenBind>,
+    pub cur_blk: u32,
+    pub cur_sid: u32,
     pub facts: Vector<Fact>, // facts of the block being processed
-    // Facts entering each block, filled by its single predecessor: block k's facts are
+    // Facts entering each block, filled by its single forward predecessor: block k's facts are
     // in_facts[in_start[k] .. in_start[k] + in_len[k]] (one pool per pass, no per-block vectors).
     pub in_facts: Vector<Fact>,
     pub in_start: Vector<u32>,
     pub in_len: Vector<u32>,
     pub in_set: Vector<bool>,
-    pub preds: Vector<u32>,
-    pub rpo: Vector<u32>,
-    // RPO construction scratch (kept for capacity): visited marks and the DFS stack.
-    pub seen: Vector<u8>,
-    pub stack: Vector<u64>, // block << 1 | phase
     pub total_facts: usize,
     pub limited: bool,
     pub off: bool, // SC_BCE=0
     pub no_fold: bool, // SC_BCE_DISABLE rule switches
     pub no_sig: bool,
-    // Signature transparency state: a call keeps collection facts unless it can reach the
-    // collection's header. `escroot`/`esclist` hold roots whose &mut or raw address escaped into
-    // memory (killed at every kept boundary); `statics` holds LS_STATIC_REF locals (callees reach
-    // statics freely); `pend_*` hold &mut borrow temps not yet consumed by a call terminator.
-    // `escall` disables transparency for the rest of the body when provenance cannot be named.
-    pub escall: bool,
-    // Escape-collection pass marker: escapes in a loop body must be known before a transparency
-    // decision in an earlier block that a later iteration reaches, so the walk runs twice and the
-    // first pass only collects (no rewrites, no stats, no transparency).
-    pub collecting: bool,
-    pub escroot: Vector<bool>,
-    pub esclist: Vector<u32>,
-    pub statics: Vector<u32>,
-    pub pend_t: Vector<u32>,
-    pub pend_r: Vector<u32>,
+    pub no_int: bool,
     // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten[l] ==
     // cstamp` marks a local reassigned inside the current window, whose recorded binds describe its
     // OLD value; each window takes a fresh stamp, so no per-window reset touches every local.
@@ -199,12 +175,31 @@ pub struct Bce {
     pub ll_pl: Vector<u32>,
 }
 
-const fn vkey_none() VKey {
-    return VKey { is_const: false, c: 0, is_local: false, l: 0, v: 0, off: 0 };
+// The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
+// (`switch t [1 -> x] otherwise y` and `switch t [0 -> y] otherwise x` both branch to x on true).
+fn bool_target(b: &ir::CoreBody, t: &ir::Terminator, v: bool) u32 {
+    if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE {
+        return ir::IR_NONE;
+    }
+    let pair = b.switch_pool[t.sw_start as usize];
+    let pv = pair >> 32;
+    let target = (pair & 0xFFFFFFFFu64) as u32;
+    if pv > 1 || target == t.t0 {
+        return ir::IR_NONE;
+    }
+    if pv == 1 == v {
+        return target;
+    }
+    return t.t0;
+}
+
+// The length-place identity a fact captured.
+const fn fact_lp(f: &Fact) LenBind {
+    return LenBind { pl: f.lp, hg: f.lp_hg, bg: f.lp_bg, pg: f.lp_pg, fg: f.lp_fg, my_v: 0, ok: f.lp_ok };
 }
 
 const fn lenbind_none() LenBind {
-    return LenBind { pl: 0, hg: 0, bg: 0, my_v: 0, ok: false };
+    return LenBind { pl: 0, hg: 0, bg: 0, pg: 0, fg: 0, my_v: 0, ok: false };
 }
 
 // `lb` bound to local version `my_v`.
@@ -225,37 +220,30 @@ extend Bce {
         }
         let e = stdlib::getenv("SC_BCE");
         return Bce {
-            pkg: null,
-            lver: Vector::<u32>::new(),
-            basegen: Vector::<u32>::new(),
-            heapgen: 0,
+            fx: fx::Facts::new(d.contains("sig")),
             lenof: Vector::<LenBind>::new(),
             cmpof: Vector::<CmpBind>::new(),
-            copyof: Vector::<CopyBind>::new(),
-            affof: Vector::<AffBind>::new(),
-            refof: Vector::<RefBind>::new(),
+            remof: Vector::<RemBind>::new(),
+            alof: Vector::<AlBind>::new(),
             chunks: Vector::<ChunkBind>::new(),
+            lreads: Vector::<LRead>::new(),
+            iwant: false,
+            itried: false,
+            ialign: false,
+            clens: Vector::<LenBind>::new(),
+            cur_blk: 0,
+            cur_sid: 0,
             facts: Vector::<Fact>::new(),
             in_facts: Vector::<Fact>::new(),
             in_start: Vector::<u32>::new(),
             in_len: Vector::<u32>::new(),
             in_set: Vector::<bool>::new(),
-            preds: Vector::<u32>::new(),
-            rpo: Vector::<u32>::new(),
-            seen: Vector::<u8>::new(),
-            stack: Vector::<u64>::new(),
             total_facts: 0,
             limited: false,
             off: e != null && str::from_cstr(e) == "0",
             no_fold: d.contains("fold"),
             no_sig: d.contains("sig"),
-            escall: false,
-            collecting: false,
-            escroot: Vector::<bool>::new(),
-            esclist: Vector::<u32>::new(),
-            statics: Vector::<u32>::new(),
-            pend_t: Vector::<u32>::new(),
-            pend_r: Vector::<u32>::new(),
+            no_int: d.contains("int"),
             cwritten: Vector::<u32>::new(),
             cstamp: 0,
             la_dest: Vector::<u32>::new(),
@@ -265,99 +253,41 @@ extend Bce {
         };
     }
 
-    // ---- structural identity -------------------------------------------------------------------
-
-    /// Exact structural place equality (base + full projection content). PJ_INDEX_OP compares its
-    /// OperandId, so distinct dynamic indexes never merge -- conservative and sound.
-    fn places_eq(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
-        if p1 == p2 {
-            return true;
-        }
-        if (p1 & SYNTH_PL) != 0 || (p2 & SYNTH_PL) != 0 {
-            return false; // synthetic identities match only on equal ids (handled above)
-        }
-        let a = *b.places.at(p1 as usize);
-        let c = *b.places.at(p2 as usize);
-        if a.base != c.base || a.proj_len != c.proj_len {
-            return false;
-        }
-        for i in 0..a.proj_len {
-            let x = *b.projections.at((a.proj_start + i) as usize);
-            let y = *b.projections.at((c.proj_start + i) as usize);
-            if x.kind != y.kind || x.data != y.data || x.sub != y.sub {
-                return false;
-            }
-        }
-        return true;
-    }
-
     // ---- operand resolution --------------------------------------------------------------------
 
-    /// A whole-local place (no projections), or IR_NONE.
-    const fn whole_local(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
-        let p = *b.places.at(pl as usize);
-        if p.proj_len != 0 {
-            return ir::IR_NONE;
-        }
-        return p.base;
+    /// Do two length-place identities name one length: the same place, heap and base generations,
+    /// and no write into the place between their path generations?
+    fn lp_same(self: &Self, b: &ir::CoreBody, x: &LenBind, y: &LenBind) bool {
+        return (x.hg == y.hg || !self.fx.reachable(b, x.pl)) && x.bg == y.bg && self.fx.places_eq(b, x.pl, y.pl) && self.fx.path_alive(
+            b,
+            x.pl,
+            x.pg,
+            y.pg,
+        ) && (x.fg == y.fg || !self.fx.resident(b, x.pl));
     }
 
-    /// Resolve an operand to a value key, following at most six whole-local copy or affine steps. With
-    /// `clean`, any resolution step through a local marked in `cwritten` (reassigned inside a
-    /// coalescing lookahead window, so its recorded binds describe its OLD value) is refused.
-    fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, clean: bool) VKey {
-        let op = *b.operands.at(opid as usize);
-        if op.kind == ir::OP_CONST {
-            let cn = *b.constants.at(op.data as usize);
-            if cn.kind == ir::CK_INT {
-                return VKey { is_const: true, c: cn.val, is_local: false, l: 0, v: 0, off: 0 };
-            }
-            return vkey_none();
-        }
-        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
-            return vkey_none();
-        }
-        let mut l = self.whole_local(b, op.data);
-        if l == ir::IR_NONE || clean && self.cwritten[l as usize] == self.cstamp {
-            return vkey_none();
-        }
-        let mut off: i64 = 0;
-        let mut guard = 0;
-        while guard < 6 {
-            let cb = *self.copyof.at(l as usize);
-            if cb.ok && cb.my_v == self.lver[l as usize] && self.lver[cb.src as usize] == cb.src_v && (!clean || self.cwritten[cb.src as usize] != self.cstamp) {
-                l = cb.src;
-                guard += 1;
-                continue;
-            }
-            let ab = *self.affof.at(l as usize);
-            if ab.ok && ab.my_v == self.lver[l as usize] && self.lver[ab.src as usize] == ab.src_v && (!clean || self.cwritten[ab.src as usize] != self.cstamp) {
-                off = off + ab.c;
-                l = ab.src;
-                guard += 1;
-                continue;
-            }
-            break;
-        }
-        return VKey { is_const: false, c: 0, is_local: true, l: l, v: self.lver[l as usize], off: off };
+    fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
+        return self.fx.vkey(b, opid);
     }
 
-    fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
-        return self.vkey_w(b, opid, false);
+    /// `vkey` refusing any resolution step through a local reassigned inside the current coalescing
+    /// window (its recorded binds describe its OLD value).
+    fn vkey_c(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
+        return self.fx.vkey_w(b, opid, &self.cwritten, self.cstamp, true);
     }
 
     /// A compile-time length for the measured place of a still-current length binding: the fixed
     /// extent of a raw array, or -1 when unknown.
     const fn const_len_of(self: &Self, b: &ir::CoreBody, l: u32) i64 {
         let lb = *self.lenof.at(l as usize);
-        if !lb.ok || lb.my_v != self.lver[l as usize] || (lb.pl & SYNTH_PL) != 0 {
+        if !lb.ok || lb.my_v != self.fx.ver(l) || (lb.pl & fx::SYNTH_PL) != 0 {
             return 0 - 1;
         }
         let ty = b.places.at(lb.pl as usize).ty;
         if ty == TYPE_NONE {
             return 0 - 1;
         }
-        let pk = unsafe &*self.pkg;
+        let pk = unsafe &*self.fx.pkg;
         let y = *(unsafe &*pk.module_ast_const(b.module)).type_at(ty);
         if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && y.as_data.arr.len != 0 {
             return y.as_data.arr.len;
@@ -368,57 +298,10 @@ extend Bce {
     /// The len-place identity carried by a resolved local, when its binding is still current.
     const fn len_place_of(self: &Self, l: u32) LenBind {
         let lb = *self.lenof.at(l as usize);
-        if lb.ok && lb.my_v == self.lver[l as usize] {
+        if lb.ok && lb.my_v == self.fx.ver(l) {
             return lb;
         }
         return lenbind_none();
-    }
-
-    /// The base local behind up to four still-current whole-local copies.
-    fn copy_root(self: &Self, l0: u32) u32 {
-        let mut l = l0;
-        let mut guard = 0;
-        while guard < 4 {
-            let cb = *self.copyof.at(l as usize);
-            if cb.ok && cb.my_v == self.lver[l as usize] && self.lver[cb.src as usize] == cb.src_v {
-                l = cb.src;
-                guard += 1;
-                continue;
-            }
-            break;
-        }
-        return l;
-    }
-
-    /// Is `sub` the `len` field of the prelude view `view_ty` names? Sound because a place-identity
-    /// match still requires the SAME place: the same place has one type, and every prelude view's
-    /// `len()` returns exactly its `len` field.
-    const fn is_prelude_len_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId) bool {
-        if view_ty == TYPE_NONE || sub == NODE_NONE {
-            return false;
-        }
-        let pk = unsafe &*self.pkg;
-        let da = unsafe &*pk.module_ast_const(b.module);
-        let y = *da.type_at(view_ty);
-        let mut m9: ModuleId = 0;
-        if y.kind == TypeKind::TYPE_STRUCT {
-            m9 = y.module;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            m9 = da.instance(y.as_data.inst).module;
-        } else {
-            return false;
-        }
-        if m9 as usize >= pk.modules.len() || !pk.modules.at(m9 as usize).prelude {
-            return false;
-        }
-        let fa = unsafe &*pk.module_ast_const(m9);
-        let fnode = fa.at_const(sub);
-        if fnode.kind != NodeKind::NODE_FIELD {
-            return false;
-        }
-        let ns = fa.at_const(fnode.as_data.field.name).as_data.name.text;
-        let src = pk.modules.at(m9 as usize).source.as_str();
-        return src.slice(ns.start as usize, ns.end as usize) == "len";
     }
 
     /// The length identity of place `pl` read now (current generations), bound to local version
@@ -426,8 +309,10 @@ extend Bce {
     const fn len_capture(self: &Self, b: &ir::CoreBody, pl: u32, my_v: u32) LenBind {
         return LenBind {
             pl: pl,
-            hg: self.heapgen,
-            bg: self.basegen[b.places.at(pl as usize).base as usize],
+            hg: self.fx.heapgen,
+            bg: self.fx.bgen(b.places.at(pl as usize).base),
+            pg: self.fx.pgen[b.places.at(pl as usize).base as usize],
+            fg: self.fx.bufgen,
             my_v: my_v,
             ok: true,
         };
@@ -442,9 +327,9 @@ extend Bce {
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
             return lenbind_none();
         }
-        let l = self.whole_local(b, op.data);
+        let l = self.fx.whole_local(b, op.data);
         if l != ir::IR_NONE {
-            return self.len_place_of(self.copy_root(l));
+            return self.len_place_of(self.fx.copy_root(l));
         }
         let p = *b.places.at(op.data as usize);
         if p.proj_len != 2 {
@@ -455,23 +340,31 @@ extend Bce {
         if pj0.kind != ir::PJ_DEREF || pj1.kind != ir::PJ_FIELD || pj1.data == ir::PJ_UNION_FIELD {
             return lenbind_none();
         }
-        if !self.is_prelude_len_field(b, pj0.ty, pj1.sub) {
+        if !self.fx.is_prelude_field(b, pj0.ty, pj1.sub, "len") {
             return lenbind_none();
         }
-        let rl = self.copy_root(p.base);
-        let rb = *self.refof.at(rl as usize);
-        if rb.ok && rb.my_v == self.lver[rl as usize] {
+        let rl = self.fx.copy_root(p.base);
+        let rb = *self.fx.refof.at(rl as usize);
+        if rb.ok && rb.my_v == self.fx.ver(rl) {
             return self.len_capture(b, rb.pl, 0);
         }
         // No reference binding (a &view parameter): the reference VALUE is the collection
         // identity. A synthetic id keys it; `bg` carries the root local's version so a reassign
         // of the reference kills the match.
-        return LenBind { pl: SYNTH_PL | rl, hg: self.heapgen, bg: self.lver[rl as usize], my_v: 0, ok: true };
+        return LenBind {
+            pl: fx::SYNTH_PL | rl,
+            hg: self.fx.heapgen,
+            bg: self.fx.ver(rl),
+            pg: 0,
+            fg: self.fx.bufgen,
+            my_v: 0,
+            ok: true,
+        };
     }
 
     /// Prove `ik OP lk` (OP is < unless `need_le`, then <=) from the standing facts. The length
     /// side matches by value identity or by the captured place identity `l_lp`.
-    fn fold_proved(self: &Self, b: &ir::CoreBody, ik: &VKey, lk: &VKey, l_lp: &LenBind, need_le: bool) bool {
+    fn fold_proved(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, need_le: bool) bool {
         if !ik.is_const && !ik.is_local {
             return false;
         }
@@ -486,7 +379,8 @@ extend Bce {
             if lk.is_local && f.ln_ok && f.ln_l == lk.l && f.ln_v == lk.v && f.ln_off == lk.off {
                 return true;
             }
-            if f.lp_ok && l_lp.ok && l_lp.hg == f.lp_hg && l_lp.bg == f.lp_bg && self.places_eq(b, l_lp.pl, f.lp) {
+            let flp = fact_lp(&f);
+            if f.lp_ok && l_lp.ok && self.lp_same(b, l_lp, &flp) {
                 return true;
             }
         }
@@ -495,7 +389,7 @@ extend Bce {
 
     /// `@c.noreturn` on the callee decl: the call is a trap terminator.
     fn callee_noreturn(self: &Self, d: DefId) bool {
-        let pk = unsafe &*self.pkg;
+        let pk = unsafe &*self.fx.pkg;
         if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
             return false;
         }
@@ -554,7 +448,7 @@ extend Bce {
         self.facts.push(f);
     }
 
-    fn fact_from_check(self: &mut Self, b: &ir::CoreBody, kind: u8, ik: VKey, lop: u32) {
+    fn fact_from_check(self: &mut Self, b: &ir::CoreBody, kind: u8, ik: fx::VKey, lop: u32) {
         if !ik.is_const && !ik.is_local {
             return;
         }
@@ -583,13 +477,15 @@ extend Bce {
                 lp: lp.pl,
                 lp_hg: lp.hg,
                 lp_bg: lp.bg,
+                lp_pg: lp.pg,
+                lp_fg: lp.fg,
             },
         );
     }
 
     // ---- proofs --------------------------------------------------------------------------------
 
-    const fn idx_matches(self: &Self, f: &Fact, ik: &VKey, allow_smaller_const: bool) bool {
+    const fn idx_matches(self: &Self, f: &Fact, ik: &fx::VKey, allow_smaller_const: bool) bool {
         if ik.is_const && f.iconst {
             if allow_smaller_const {
                 return ik.c >= 0 && ik.c <= f.ic;
@@ -613,7 +509,8 @@ extend Bce {
         }
         if lk.is_local && lk.off == 0 && f.lp_ok {
             let lp = self.len_place_of(lk.l);
-            if lp.ok && lp.hg == f.lp_hg && lp.bg == f.lp_bg && self.places_eq(b, lp.pl, f.lp) {
+            let flp = fact_lp(f);
+            if lp.ok && self.lp_same(b, &lp, &flp) {
                 return true;
             }
         }
@@ -645,7 +542,20 @@ extend Bce {
                 return true;
             }
         }
-        if self.limited {
+        // the second source: the solved integer facts
+        if self.prove_aligned(b, &ik, lop) {
+            return true; // a relational chain, with the strides known so far
+        }
+        if !self.ints_for(b, lop) {
+            // nothing to solve
+        } else if self.int_le(b, iop, lop, true) {
+            return true;
+        } else if self.int_len_bound(b, iop, lop, true) {
+            return true;
+        } else if self.prove_aligned(b, &ik, lop) {
+            return true;
+        }
+        if self.limited || self.fx.ilimited {
             *reason = BR_RESOURCE_LIMIT;
             return false;
         }
@@ -656,6 +566,9 @@ extend Bce {
         *reason = BR_UNKNOWN_INDEX;
         if ik.is_local {
             *reason = BR_JOIN_LOST_FACT;
+        }
+        if self.int_widened(b, iop) {
+            *reason = BR_WIDENED;
         }
         return false;
     }
@@ -675,7 +588,7 @@ extend Bce {
             // both carry the same still-current length-place identity
             let ep = self.len_place_of(ek.l);
             let lp = self.len_place_of(lk.l);
-            if ep.ok && lp.ok && ep.hg == lp.hg && ep.bg == lp.bg && self.places_eq(b, ep.pl, lp.pl) {
+            if ep.ok && lp.ok && self.lp_same(b, &ep, &lp) {
                 e_le_l = true;
             }
         } else if ek.is_const && lk.is_local && lk.off == 0 {
@@ -695,7 +608,13 @@ extend Bce {
                 }
             }
         }
-        if !e_le_l {
+        if !e_le_l {}
+        if !e_le_l && !(self.ints_for(b, lop) && (self.int_le(b, eop, lop, false) || self.int_len_bound(
+            b,
+            eop,
+            lop,
+            false,
+        ))) {
             *reason = BR_UNKNOWN_LENGTH;
             return false;
         }
@@ -707,306 +626,113 @@ extend Bce {
         } else if sk.is_local && ek.is_local && sk.l == ek.l && sk.v == ek.v && sk.off == ek.off {
             s_le_e = true;
         }
-        if !s_le_e {
+        if !s_le_e && !(self.ints_for(b, lop) && self.int_le(b, sop, eop, false)) {
             *reason = BR_UNKNOWN_INDEX;
             return false;
         }
         return true;
     }
 
-    // ---- invalidation --------------------------------------------------------------------------
-
-    fn bump_local(self: &mut Self, l: u32) {
-        self.lver.set(l as usize, self.lver[l as usize] + 1);
+    /// Do the solved integer facts prove `x < y` (`strict`) or `x <= y` here?
+    fn int_le(self: &Self, b: &ir::CoreBody, xop: u32, yop: u32, strict: bool) bool {
+        let mut xw: u32 = 0;
+        let mut xs = false;
+        let mut yw: u32 = 0;
+        let mut ys = false;
+        let x = self.fx.ival(b, xop, &mut xw, &mut xs);
+        let y = self.fx.ival(b, yop, &mut yw, &mut ys);
+        if xw == 0 || yw == 0 || xs || ys || x.hn || y.ln {
+            return false;
+        }
+        if strict {
+            return x.hi < y.lo;
+        }
+        return x.hi <= y.lo;
     }
 
-    fn write_place(self: &mut Self, b: &ir::CoreBody, pl: u32) {
-        let p = *b.places.at(pl as usize);
-        if p.proj_len == 0 {
-            self.bump_local(p.base);
-            return;
-        }
-        if b.place_has_deref(pl) {
-            // a write through a reference can alias any collection
-            self.heapgen += 1;
-            return;
-        }
-        // an interior write (field/index) through the base local
-        self.basegen.set(p.base as usize, self.basegen[p.base as usize] + 1);
+    /// Did a loop-header widening change the index's interval?
+    fn int_widened(self: &Self, b: &ir::CoreBody, iop: u32) bool {
+        let mut w: u32 = 0;
+        let mut sg = false;
+        let f = self.fx.ival(b, iop, &mut w, &mut sg);
+        return w != 0 && f.wid;
     }
 
-    // ---- signature transparency ----------------------------------------------------------------
+    /// The stride and phase of the value (local `l`, version `v`): the solved facts when the version
+    /// is current, or an alignment binding. (1, 0) when nothing is known.
+    fn stride_of(self: &Self, l: u32, v: u32, st: &mut u64, ph: &mut u64) {
+        *st = 1;
+        *ph = 0;
+        let ab = *self.alof.at(l as usize);
+        if ab.st > 1 && ab.my_v == v {
+            *st = ab.st;
+            return;
+        }
+        if self.fx.ver(l) != v {
+            return;
+        }
+        let f = self.fx.ilocal(l);
+        let s = fx::istride(&f);
+        if s == 1 {
+            return;
+        }
+        *st = s;
+        if s == 0 {
+            *ph = f.lo; // exact: the phase is the value (a non-negative index)
+            if f.ln {
+                *st = 1;
+            }
+            return;
+        }
+        *ph = f.ph;
+    }
 
-    /// The root local behind a place, through at most two current reference bindings: no deref
-    /// resolves to the copy-rooted base local; a leading deref resolves through `refof`, and a
-    /// reference with no binding (a parameter) is itself the root -- the identity the synthetic
-    /// length path keys on. False when a deref sits behind other projections (a reference loaded
-    /// from memory has no nameable owner here).
-    fn root_of_place(self: &Self, b: &ir::CoreBody, pl0: u32, out: &mut u32) bool {
-        let mut pl = pl0;
-        let mut guard = 0;
-        while guard < 3 {
-            guard += 1;
-            let p = *b.places.at(pl as usize);
-            let mut deref = false;
-            for i in 0..p.proj_len {
-                if b.projections.at((p.proj_start + i) as usize).kind == ir::PJ_DEREF {
-                    if i != 0 {
-                        return false;
-                    }
-                    deref = true;
-                }
-            }
-            if !deref {
-                // place identity keys on the base local itself (generations and places_eq use
-                // the base index); a value-copy chain must not redirect the identity
-                *out = p.base;
-                return true;
-            }
-            let r = self.copy_root(p.base);
-            let rb = *self.refof.at(r as usize);
-            if rb.ok && rb.my_v == self.lver[r as usize] && (rb.pl & SYNTH_PL) == 0 {
-                pl = rb.pl;
+    /// Prove `l + c < len` (the index key `ik`) from a fact `l < y` (or `l <= y`) and a fact `y <= len`
+    /// (or `y < len`): `l` and `y` are multiples of a common stride A with the same phase, so `l < y`
+    /// gives `l + c < y` for every `c < A`, with no wrap of `l + c`.
+    fn prove_aligned(self: &mut Self, b: &ir::CoreBody, ik: &fx::VKey, lop: u32) bool {
+        if !ik.is_local || ik.off < 0 {
+            return false;
+        }
+        for i in 0..self.facts.len() {
+            let f1 = *self.facts.at(i);
+            if f1.iconst || f1.il != ik.l || f1.iv != ik.v || f1.ioff != 0 || !f1.ln_ok || f1.ln_off != 0 {
                 continue;
             }
-            *out = r;
-            return true;
-        }
-        return false;
-    }
-
-    /// Kill every fact identity rooted at `l`: the version stamp covers value binds and synthetic
-    /// length identities, the base generation covers real length places.
-    fn kill_root(self: &mut Self, l: u32) {
-        self.bump_local(l);
-        self.basegen.set(l as usize, self.basegen[l as usize] + 1);
-    }
-
-    fn kill_ambient(self: &mut Self) {
-        for i in 0..self.statics.len() {
-            self.kill_root(self.statics[i]);
-        }
-        for i in 0..self.esclist.len() {
-            self.kill_root(self.esclist[i]);
-        }
-    }
-
-    fn mark_escaped(self: &mut Self, r: u32) {
-        if self.escroot[r as usize] {
-            return;
-        }
-        if self.esclist.len() >= 16 {
-            self.escall = true;
-            return;
-        }
-        self.escroot.set(r as usize, true);
-        self.esclist.push(r);
-    }
-
-    /// A raw pointer (or stored &mut) to `pl`'s root left the tracked borrow discipline: kill the
-    /// root at every kept boundary from here on. Unresolvable provenance disables transparency
-    /// for the rest of the body.
-    fn note_escape_place(self: &mut Self, b: &ir::CoreBody, pl: u32) {
-        let mut r: u32 = 0;
-        if !self.root_of_place(b, pl, &mut r) {
-            self.escall = true;
-            return;
-        }
-        self.mark_escaped(r);
-    }
-
-    /// A mutable borrow bound to whole local `dest` is benign only when a call terminator consumes
-    /// it as a direct argument (the argument classification kills its root there). Any other fate
-    /// escapes the root at the next terminator.
-    fn note_mut_borrow(self: &mut Self, b: &ir::CoreBody, pl: u32, dest: u32) {
-        let mut r: u32 = 0;
-        if !self.root_of_place(b, pl, &mut r) {
-            self.escall = true;
-            return;
-        }
-        if self.pend_t.len() >= 8 {
-            self.escall = true;
-            return;
-        }
-        self.pend_t.push(dest);
-        self.pend_r.push(r);
-    }
-
-    /// Settle pending mutable borrows at a terminator: a temp consumed as a direct call argument
-    /// is accounted for by the argument classification; every other pending borrow escapes.
-    fn flush_pending(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) {
-        if self.pend_t.len() == 0 {
-            return;
-        }
-        for j in 0..self.pend_t.len() {
-            let tl = self.pend_t[j];
-            let mut consumed = false;
-            if t.kind == ir::TM_CALL {
-                for i in 0..t.args_len {
-                    let op = *b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize);
-                    if op.kind == ir::OP_CONST {
+            let mut need_strict = false; // f2 must be y < len
+            if f1.kind == 0 {
+                if ik.off > 0 {
+                    let mut sl: u64 = 1;
+                    let mut pl: u64 = 0;
+                    let mut sy: u64 = 1;
+                    let mut py: u64 = 0;
+                    self.stride_of(ik.l, ik.v, &mut sl, &mut pl);
+                    self.stride_of(f1.ln_l, f1.ln_v, &mut sy, &mut py);
+                    let mut a = fx::gcd(sl, sy);
+                    if a == 0 || pl % a != py % a {
+                        a = 1;
+                    }
+                    if ik.off as u64 >= a {
                         continue;
                     }
-                    let l = self.whole_local(b, op.data);
-                    if l != ir::IR_NONE && self.copy_root(l) == tl {
-                        consumed = true;
-                    }
                 }
-            }
-            if !consumed {
-                self.mark_escaped(self.pend_r[j]);
-            }
-        }
-        self.pend_t.clear();
-        self.pend_r.clear();
-    }
-
-    /// True when the callee is a local Super-C function body (not extern, not a fn value): the
-    /// argument classification then bounds everything it can reach.
-    const fn callee_defined(self: &Self, d: DefId) bool {
-        let pk = unsafe &*self.pkg;
-        if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
-            return false;
-        }
-        let a = unsafe &*pk.module_ast_const(d.module);
-        let n = a.at_const(d.node);
-        if n.kind != NodeKind::NODE_FUNCTION {
-            return false;
-        }
-        return !n.as_data.function.is_extern();
-    }
-
-    /// `rv` casts a reference to a raw pointer: its target leaves the borrow discipline.
-    const fn is_ref_to_ptr_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
-        let op = *b.operands.at(rv.a as usize);
-        if op.kind == ir::OP_CONST {
-            return false;
-        }
-        let pk = unsafe &*self.pkg;
-        let da = unsafe &*pk.module_ast_const(b.module);
-        if da.type_at(op.ty).kind != TypeKind::TYPE_REFERENCE {
-            return false;
-        }
-        return da.type_at(rv.target).kind == TypeKind::TYPE_POINTER;
-    }
-
-    /// Signature transparency for one call: keep collection facts when every argument is a
-    /// constant, a shared reference, or a by-value datum. Kills exactly the roots handed out
-    /// mutably or by move, plus statics and escaped roots (any callee can reach those). A raw
-    /// pointer, fn value, dyn value, variadic tail, fn-value callee, or extern callee keeps the
-    /// old kill-everything behavior. A &mut loaded from memory kills nothing extra: it can alias
-    /// only an escaped root (killed here anyway) or state no tracked fact roots -- a second live
-    /// mutable alias of a tracked collection would break the reference rules.
-    fn call_transparent(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
-        if self.collecting || self.no_sig || self.escall || t.is_variadic || !self.callee_defined(t.callee) {
-            return false;
-        }
-        let pk = unsafe &*self.pkg;
-        let da = unsafe &*pk.module_ast_const(b.module);
-        let mut kills: [u32; 16] = [[0] = 0u32];
-        let mut nk: usize = 0;
-        for i in 0..t.args_len {
-            let op = *b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize);
-            if op.kind == ir::OP_CONST {
-                continue;
-            }
-            let y = *da.type_at(op.ty);
-            if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_OPAQUE {
-                return false;
-            }
-            let mut victim = ir::IR_NONE;
-            let mut victim2 = ir::IR_NONE;
-            if y.kind == TypeKind::TYPE_REFERENCE {
-                if y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
-                    continue; // a shared reference cannot mutate the header it points at
+            } else {
+                if ik.off != 0 {
+                    continue;
                 }
-                let l = self.whole_local(b, op.data);
-                if l == ir::IR_NONE {
-                    // a projected operand place is an elided autoref of a projected collection
-                    // (s.field): kill its base. A deref inside is a loaded &mut: it can alias
-                    // only an escaped root (killed below) or state no tracked fact roots.
-                    if !b.place_has_deref(op.data) {
-                        victim = b.places.at(op.data as usize).base;
-                    }
-                } else {
-                    let r = self.copy_root(l);
-                    let rb = *self.refof.at(r as usize);
-                    let mut rt: u32 = 0;
-                    if rb.ok && rb.my_v == self.lver[r as usize] && (rb.pl & SYNTH_PL) == 0 && self.root_of_place(
-                        b,
-                        rb.pl,
-                        &mut rt,
-                    ) {
-                        victim = rt;
-                    } else {
-                        // an elided autoref (the local IS the collection), a &mut parameter, or
-                        // an expired binding: kill both ends of the value chain
-                        victim = l;
-                        victim2 = r;
-                    }
-                }
-            } else if op.kind == ir::OP_MOVE {
-                // ownership leaves the caller: kill the moved-from base
-                if b.place_has_deref(op.data) {
-                    return false;
-                }
-                victim = b.places.at(op.data as usize).base;
+                need_strict = true;
             }
-            if victim != ir::IR_NONE {
-                if nk >= 15 {
-                    return false;
+            for j in 0..self.facts.len() {
+                let f2 = *self.facts.at(j);
+                if f2.iconst || f2.il != f1.ln_l || f2.iv != f1.ln_v || f2.ioff != 0 || need_strict && f2.kind != 0 {
+                    continue;
                 }
-                unsafe kills[nk] = victim;
-                nk += 1;
-                if victim2 != ir::IR_NONE && victim2 != victim {
-                    unsafe kills[nk] = victim2;
-                    nk += 1;
+                if self.len_matches(b, &f2, lop) {
+                    return true;
                 }
             }
         }
-        for i in 0..nk {
-            self.kill_root(unsafe kills[i]);
-        }
-        self.kill_ambient();
-        return true;
-    }
-
-    /// A drop reaches only the dropped value's ownership tree (its `free` takes `&mut self`),
-    /// plus statics and escaped roots like any call.
-    fn drop_transparent(self: &mut Self, b: &ir::CoreBody, pl: u32) bool {
-        if self.collecting || self.no_sig || self.escall {
-            return false;
-        }
-        let mut r: u32 = 0;
-        if !self.root_of_place(b, pl, &mut r) {
-            return false;
-        }
-        self.kill_root(r);
-        self.kill_ambient();
-        return true;
-    }
-
-    // ---- statement walk ------------------------------------------------------------------------
-
-    /// True when `t` is a call of the borrow-pure prelude length getter: `fn len(&self)` on a
-    /// prelude view. Its shared receiver cannot mutate the collection, so it both yields a
-    /// length fact and preserves standing facts.
-    const fn is_prelude_len_call(self: &Self, t: &ir::Terminator) bool {
-        if t.callee.node == NODE_NONE || t.args_len != 1 || t.dests_len != 1 {
-            return false;
-        }
-        let pk = unsafe &*self.pkg;
-        if !pk.modules.at(t.callee.module as usize).prelude {
-            return false;
-        }
-        let da = unsafe &*pk.module_ast_const(t.callee.module);
-        let nd = da.at_const(t.callee.node);
-        if nd.kind != NodeKind::NODE_FUNCTION {
-            return false;
-        }
-        let ns = da.at_const(nd.as_data.function.name).as_data.name.text;
-        let src = pk.modules.at(t.callee.module as usize).source.as_str();
-        return src.slice(ns.start as usize, ns.end as usize) == "len";
+        return false;
     }
 
     /// The receiver place behind the single `&self` argument of a len call, or IR_NONE. The
@@ -1017,10 +743,10 @@ extend Bce {
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
             return ir::IR_NONE;
         }
-        let l = self.whole_local(b, op.data);
+        let l = self.fx.whole_local(b, op.data);
         if l != ir::IR_NONE {
-            let rb = *self.refof.at(l as usize);
-            if rb.ok && rb.my_v == self.lver[l as usize] {
+            let rb = *self.fx.refof.at(l as usize);
+            if rb.ok && rb.my_v == self.fx.ver(l) {
                 return rb.pl;
             }
         }
@@ -1033,7 +759,7 @@ extend Bce {
 
     // The absolute offset from coalescing root `ik` of operand `opid` (whole local `x`, IR_NONE
     // when it is none): an in-window alias of `x` first, else the operand's own clean chain.
-    fn root_off(self: &mut Self, b: &ir::CoreBody, x: u32, opid: u32, ik: &VKey, off: &mut i64) bool {
+    fn root_off(self: &mut Self, b: &ir::CoreBody, x: u32, opid: u32, ik: &fx::VKey, off: &mut i64) bool {
         if x != ir::IR_NONE {
             let mut q = self.la_dest.len();
             while q > 0 {
@@ -1044,7 +770,7 @@ extend Bce {
                 }
             }
         }
-        let k = self.vkey_w(b, opid, true);
+        let k = self.vkey_c(b, opid);
         if k.is_local && k.l == ik.l && k.v == ik.v {
             *off = k.off;
             return true;
@@ -1125,12 +851,12 @@ extend Bce {
                 let o2 = *b.operands.at(iop2 as usize);
                 let mut x = ir::IR_NONE;
                 if o2.kind == ir::OP_COPY || o2.kind == ir::OP_MOVE {
-                    x = self.whole_local(b, o2.data);
+                    x = self.fx.whole_local(b, o2.data);
                 }
                 let have2 = self.root_off(b, x, iop2, &ik, &mut off2);
                 // length identity: same value key, or an in-window copy of the same length place
                 let mut same_len = false;
-                let k3 = self.vkey_w(b, lop2, true);
+                let k3 = self.vkey_c(b, lop2);
                 if lk.is_const {
                     same_len = k3.is_const && k3.c == lk.c;
                 } else if k3.is_local && k3.l == lk.l && k3.v == lk.v && k3.off == lk.off {
@@ -1138,12 +864,12 @@ extend Bce {
                 } else if lb.ok {
                     let o3 = *b.operands.at(lop2 as usize);
                     if o3.kind == ir::OP_COPY || o3.kind == ir::OP_MOVE {
-                        let xl = self.whole_local(b, o3.data);
+                        let xl = self.fx.whole_local(b, o3.data);
                         if xl != ir::IR_NONE {
                             let mut q = self.ll_dest.len();
                             while q > 0 && !same_len {
                                 q -= 1;
-                                if self.ll_dest[q] == xl && self.places_eq(b, self.ll_pl[q], lb.pl) {
+                                if self.ll_dest[q] == xl && self.fx.places_eq(b, self.ll_pl[q], lb.pl) {
                                     same_len = true;
                                 }
                             }
@@ -1162,7 +888,7 @@ extend Bce {
             } else if k2 == ir::RV_USE {
                 let o2 = *b.operands.at(rv2.a as usize);
                 if o2.kind == ir::OP_COPY || o2.kind == ir::OP_MOVE {
-                    let x = self.whole_local(b, o2.data);
+                    let x = self.fx.whole_local(b, o2.data);
                     if x != ir::IR_NONE {
                         bind_aff = self.root_off(b, x, rv2.a, &ik, &mut bind_off);
                         let mut q3 = self.ll_dest.len();
@@ -1176,15 +902,15 @@ extend Bce {
                     }
                 }
             } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::Plus as u8 || rv2.c == tt::TokenType::Minus as u8) {
-                let ka = self.vkey_w(b, rv2.a, true);
-                let kb = self.vkey_w(b, rv2.b, true);
+                let ka = self.vkey_c(b, rv2.a);
+                let kb = self.vkey_c(b, rv2.b);
                 let ao = *b.operands.at(rv2.a as usize);
                 let bo = *b.operands.at(rv2.b as usize);
                 let mut basex = ir::IR_NONE;
                 let mut ck: i64 = 0;
                 let mut aside = false;
                 if (ao.kind == ir::OP_COPY || ao.kind == ir::OP_MOVE) && kb.is_const {
-                    basex = self.whole_local(b, ao.data);
+                    basex = self.fx.whole_local(b, ao.data);
                     ck = if rv2.c == tt::TokenType::Plus as u8 {
                         kb.c;
                     } else {
@@ -1192,7 +918,7 @@ extend Bce {
                     };
                     aside = true;
                 } else if ka.is_const && rv2.c == tt::TokenType::Plus as u8 && (bo.kind == ir::OP_COPY || bo.kind == ir::OP_MOVE) {
-                    basex = self.whole_local(b, bo.data);
+                    basex = self.fx.whole_local(b, bo.data);
                     ck = ka.c;
                 }
                 if basex != ir::IR_NONE {
@@ -1212,7 +938,7 @@ extend Bce {
             } else if k2 == ir::RV_INTRINSIC && rv2.c == ir::IN_BOUNDS_PROVEN {
                 // cannot panic
             } else if k2 == ir::RV_LEN {
-                if lb.ok && self.places_eq(b, rv2.a, lb.pl) {
+                if lb.ok && self.fx.places_eq(b, rv2.a, lb.pl) {
                     bind_len = true;
                     bind_pl = rv2.a;
                 }
@@ -1273,12 +999,10 @@ extend Bce {
         }
         return members;
     }
-
-    /// Reset every per-body table for a fresh body; capacity persists across the bodies one
     /// DropCtx emits.
     // Push the true-edge fact of comparison `cb` with its right side read as `rk` (length place
     // `lp`), within the edge's fact budget (the edge's facts start at `st0`).
-    fn edge_fact(self: &mut Self, cb: &CmpBind, rk: VKey, lp: LenBind, st0: usize) {
+    fn edge_fact(self: &mut Self, cb: &CmpBind, rk: fx::VKey, lp: LenBind, st0: usize) {
         if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
             return;
         }
@@ -1302,30 +1026,140 @@ extend Bce {
                 lp: lp.pl,
                 lp_hg: lp.hg,
                 lp_bg: lp.bg,
+                lp_pg: lp.pg,
+                lp_fg: lp.fg,
             },
         );
     }
 
-    fn begin_body(self: &mut Self, b: &ir::CoreBody) {
+    /// The short-circuit join `j` of `a && b` entered from `blk` (which computed `t = b`): `j` (and
+    /// the single-predecessor gotos after it) only copy `t` and branch on it, and every other
+    /// predecessor enters `j` on the false edge of a branch on `t`. Then the branch's true successor
+    /// runs only after `blk` with `b` true: returns that successor (one predecessor, not yet filled)
+    /// and sets `*tl` to `t`; IR_NONE else.
+    fn and_join(self: &Self, b: &ir::CoreBody, blk: u32, j: u32, tl: &mut u32) u32 {
+        if self.fx.fwd[j as usize] < 2 || self.fx.npred[j as usize] != self.fx.fwd[j as usize] {
+            return ir::IR_NONE;
+        }
+        // the chain j -> k1 -> .. -> the branch block, through single-predecessor gotos
+        let mut chain: [u32; 4] = [[0] = ir::IR_NONE];
+        let mut nc: usize = 0;
+        let mut cur = j;
+        let mut found = false;
+        for _h in 0..4 {
+            unsafe chain[nc] = cur;
+            nc += 1;
+            let ct = b.blocks.at(cur as usize).term;
+            if ct.kind != ir::TM_GOTO {
+                found = true;
+                break;
+            }
+            if self.fx.npred[ct.t0 as usize] != 1 {
+                return ir::IR_NONE;
+            }
+            cur = ct.t0;
+        }
+        if !found {
+            return ir::IR_NONE;
+        }
+        let jt = b.blocks.at(cur as usize).term;
+        let tt9 = bool_target(b, &jt, true);
+        if tt9 == ir::IR_NONE || self.fx.npred[tt9 as usize] != 1 || self.in_set[tt9 as usize] {
+            return ir::IR_NONE;
+        }
+        let op = *b.operands.at(jt.a as usize);
+        if op.kind == ir::OP_CONST {
+            return ir::IR_NONE;
+        }
+        let mut u = self.fx.whole_local(b, op.data);
+        if u == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        // back through the chain's copies; it writes no projected place and nothing but copies
+        let mut ci = nc;
+        while ci > 0 {
+            ci -= 1;
+            let jb = *b.blocks.at((unsafe chain[ci]) as usize);
+            let mut si = jb.stmt_len;
+            while si > 0 {
+                si -= 1;
+                let st = *b.statements.at((jb.stmt_start + si) as usize);
+                if st.kind == ir::ST_STORAGE_LIVE || st.kind == ir::ST_STORAGE_DEAD && st.a != u {
+                    continue;
+                }
+                if st.kind != ir::ST_ASSIGN || b.places.at(st.place as usize).proj_len != 0 {
+                    return ir::IR_NONE;
+                }
+                let rv = *b.rvalues.at(st.rvalue as usize);
+                if rv.kind != ir::RV_USE {
+                    return ir::IR_NONE;
+                }
+                if b.places.at(st.place as usize).base != u {
+                    continue; // another local's copy
+                }
+                let so = *b.operands.at(rv.a as usize);
+                if so.kind == ir::OP_CONST || self.fx.whole_local(b, so.data) == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                u = self.fx.whole_local(b, so.data);
+            }
+        }
+        // the chain must not write the branched-on local `u` itself
+        for c2 in 0..nc {
+            let jb = *b.blocks.at((unsafe chain[c2]) as usize);
+            for k in 0..jb.stmt_len {
+                let st = *b.statements.at((jb.stmt_start + k) as usize);
+                if st.kind == ir::ST_ASSIGN && b.places.at(st.place as usize).base == u {
+                    return ir::IR_NONE;
+                }
+            }
+        }
+        let fx9 = &self.fx;
+        let mut n9 = 0;
+        for k in fx9.pstart[j as usize]..fx9.pstart[j as usize + 1] {
+            let p = fx9.plist[k as usize];
+            if p == blk {
+                n9 += 1;
+                continue;
+            }
+            let pt = b.blocks.at(p as usize).term;
+            if bool_target(b, &pt, false) != j || bool_target(b, &pt, true) == j {
+                return ir::IR_NONE;
+            }
+            let po = *b.operands.at(pt.a as usize);
+            if po.kind == ir::OP_CONST || self.fx.whole_local(b, po.data) != u {
+                return ir::IR_NONE;
+            }
+        }
+        if n9 != 1 {
+            return ir::IR_NONE; // `blk` reaches the join once, by its goto
+        }
+        *tl = u;
+        return tt9;
+    }
+
+    /// Do the facts at the end of `blk` flow into successor `s`: its only forward predecessor edge,
+    /// not yet filled?
+    const fn flows(self: &Self, blk: u32, s: u32) bool {
+        return !self.in_set[s as usize] && self.fx.fwd[s as usize] == 1 && self.fx.rpo_of[blk as usize] < self.fx.rpo_of[s as usize];
+    }
+
+    /// Reset every per-body table for a fresh body; capacity persists across the bodies one
+    /// DropCtx emits.
+    fn begin_body(self: &mut Self, b: &ir::CoreBody, pkg: *const loader::Package) {
         let nl = b.locals.len();
         let nb = b.blocks.len();
-        self.lver.clear();
-        self.lver.resize_default(nl);
-        self.basegen.clear();
-        self.basegen.resize_default(nl);
-        self.heapgen = 0;
-        self.lenof.clear();
-        self.cmpof.clear();
-        self.copyof.clear();
-        self.affof.clear();
-        self.refof.clear();
+        self.fx.begin(b, pkg);
+        // the per-local bindings carry over: each names the version it was made at, below the floor
+        // of every later body
         self.chunks.clear();
-        for _i in 0..nl {
+        self.lreads.clear();
+        while self.lenof.len() < nl {
             self.lenof.push(lenbind_none());
             self.cmpof.push(
                 CmpBind {
-                    a: vkey_none(),
-                    b: vkey_none(),
+                    a: fx::vkey_none(),
+                    b: fx::vkey_none(),
                     a_lp: lenbind_none(),
                     b_lp: lenbind_none(),
                     le: false,
@@ -1333,9 +1167,8 @@ extend Bce {
                     ok: false,
                 },
             );
-            self.copyof.push(CopyBind { src: 0, src_v: 0, my_v: 0, ok: false });
-            self.affof.push(AffBind { src: 0, src_v: 0, c: 0, my_v: 0, ok: false });
-            self.refof.push(RefBind { pl: 0, my_v: 0, ok: false });
+            self.remof.push(RemBind { x: fx::vkey_none(), x_lp: lenbind_none(), c: 0, my_v: 0, ok: false });
+            self.alof.push(AlBind { st: 0, my_v: 0 });
         }
         self.facts.clear();
         self.in_facts.clear();
@@ -1345,52 +1178,315 @@ extend Bce {
         self.in_len.resize_default(nb);
         self.in_set.clear();
         self.in_set.resize_default(nb);
-        self.preds.clear();
-        self.preds.resize_default(nb);
-        self.rpo.clear();
         self.total_facts = 0;
         self.limited = false;
-        self.escall = false;
-        self.collecting = false;
-        self.escroot.clear();
-        self.escroot.resize_default(nl);
         self.cwritten.clear();
         self.cwritten.resize_default(nl);
         self.cstamp = 0;
-        self.esclist.clear();
-        self.statics.clear();
-        for i in 0..nl {
-            if b.locals.at(i).storage == ir::LS_STATIC_REF {
-                self.statics.push(i as u32);
-            }
-        }
-        self.pend_t.clear();
-        self.pend_r.clear();
     }
 
-    /// Clear every per-walk table for the main pass; the collected escape set persists.
-    fn reset_for_main_pass(self: &mut Self, nb: usize) {
-        for i in 0..self.lver.len() {
-            self.lver.set(i, 0);
-            self.basegen.set(i, 0);
-            self.lenof[i].ok = false;
-            self.cmpof[i].ok = false;
-            self.copyof[i].ok = false;
-            self.affof[i].ok = false;
-            self.refof[i].ok = false;
+    /// Record that local `l` (its current version) holds the length its binding names.
+    fn note_read(self: &mut Self, l: u32) {
+        if !self.iwant {
+            return; // only an interval proof reads them
         }
-        self.heapgen = 0;
-        self.chunks.clear();
-        self.facts.clear();
-        self.in_facts.clear();
-        for i in 0..nb {
-            self.in_len.set(i, 0);
-            self.in_set.set(i, false);
+        if self.lreads.len() >= LREADS_MAX {
+            let _ = self.lreads.remove(0);
         }
-        self.total_facts = 0;
-        self.limited = false;
-        self.pend_t.clear();
-        self.pend_r.clear();
+        self.lreads.push(LRead { lb: *self.lenof.at(l as usize), l: l, v: self.fx.ver(l) });
+    }
+
+    /// Solve the integer facts now when a check with length operand `lop` could use them: its
+    /// length is a fixed array's, or a length compared with a constant, or an alignment is bound.
+    /// The scratch then holds the facts at the current statement.
+    fn ints_for(self: &mut Self, b: &ir::CoreBody, lop: u32) bool {
+        if self.fx.ion {
+            return true;
+        }
+        if !self.iwant || self.itried {
+            return false;
+        }
+        let mut go = self.ialign || self.fx.fixed_len(b, lop);
+        if !go {
+            let lk = self.vkey(b, lop);
+            if lk.is_local && lk.off == 0 {
+                let lp = self.len_place_of(lk.l);
+                for i in 0..self.clens.len() {
+                    if lp.ok && self.lp_same(b, &self.clens[i], &lp) {
+                        go = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !go {
+            return false;
+        }
+        self.itried = true;
+        self.fx.solve(b);
+        if self.fx.ion {
+            self.fx.ireplay(b, self.cur_blk, self.cur_sid);
+        }
+        return self.fx.ion;
+    }
+
+    /// Prove `x < len` (`strict`) or `x <= len` from the solved interval of `x` and of an earlier
+    /// read of the same length (same place, same generations, its local unchanged).
+    fn int_len_bound(self: &Self, b: &ir::CoreBody, xop: u32, lop: u32, strict: bool) bool {
+        let mut xw: u32 = 0;
+        let mut xs = false;
+        let x = self.fx.ival(b, xop, &mut xw, &mut xs);
+        if xw == 0 || xs || x.hn {
+            return false;
+        }
+        let lk = self.vkey(b, lop);
+        if !lk.is_local || lk.off != 0 {
+            return false;
+        }
+        let lp = self.len_place_of(lk.l);
+        if !lp.ok {
+            return false;
+        }
+        for i in 0..self.lreads.len() {
+            let r = self.lreads[i];
+            if self.fx.ver(r.l) != r.v || !self.lp_same(b, &r.lb, &lp) {
+                continue;
+            }
+            let f = self.fx.ilocal(r.l);
+            if !f.ln && (x.hi < f.lo || !strict && x.hi == f.lo) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Two reads of one value: the same key, or the same length place at the same generations.
+    fn same_value(self: &Self, b: &ir::CoreBody, x: &fx::VKey, xlp: &LenBind, a: &fx::VKey, alp: &LenBind) bool {
+        if x.is_local && a.is_local && x.l == a.l && x.v == a.v && x.off == a.off {
+            return true;
+        }
+        return xlp.ok && alp.ok && self.lp_same(b, xlp, alp);
+    }
+
+    /// Process statement `stm` (index `si` of block `bb`): prove its check, record what it binds,
+    /// and apply its effect to the versions and the integer facts.
+    fn statement(
+        self: &mut Self,
+        b: &mut ir::CoreBody,
+        bb: &ir::BasicBlock,
+        si: u32,
+        st: &mut BceStats,
+        check_only: bool,
+        err: &mut str<'static>,
+    ) {
+        let sid = (bb.stmt_start + si) as usize;
+        let stm = *b.statements.at(sid);
+        if stm.kind != ir::ST_ASSIGN {
+            self.fx.apply_stmt(b, &stm);
+            self.fx.istep(b, sid);
+            return;
+        }
+        let rid = stm.rvalue as usize;
+        let rv = *b.rvalues.at(rid);
+        let dest = self.fx.whole_local(b, stm.place);
+        if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_BOUNDS_GROUP {
+            let iop = b.oper_pool[rv.a as usize];
+            let lop = b.oper_pool[(rv.a + 1) as usize];
+            let wo = *b.operands.at(b.oper_pool[(rv.a + 2) as usize] as usize);
+            let ik = self.vkey(b, iop);
+            if ik.is_local && wo.kind == ir::OP_CONST {
+                let wc = *b.constants.at(wo.data as usize);
+                if wc.kind == ir::CK_INT && wc.val > 0 && wc.val <= 8 {
+                    for k in 0..wc.val {
+                        let mut ikk = ik;
+                        ikk.off = ik.off + k;
+                        self.fact_from_check(b, 0, ikk, lop);
+                    }
+                }
+            }
+        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN) {
+            let iop = b.oper_pool[rv.a as usize];
+            let lop = b.oper_pool[(rv.a + 1) as usize];
+            let mut reason: u8 = BR_UNKNOWN_INDEX;
+            let proven = self.prove_elem(b, iop, lop, &mut reason);
+            if check_only {
+                if rv.c == ir::IN_BOUNDS_PROVEN && !proven {
+                    *err = "bce: unprovable IN_BOUNDS_PROVEN";
+                }
+            } else {
+                st.total += 1;
+                if proven {
+                    st.removed += 1;
+                    b.rvalues[rid].c = ir::IN_BOUNDS_PROVEN;
+                } else {
+                    let mut grouped: u32 = 0;
+                    if rv.c == ir::IN_BOUNDS {
+                        grouped = self.try_coalesce(b, bb, si, rid, iop, lop, stm.span);
+                    }
+                    if grouped != 0 {
+                        st.coalesced += grouped;
+                    } else {
+                        unsafe {
+                            st.reasons[reason as usize] = st.reasons[reason as usize] + 1;
+                        }
+                    }
+                }
+            }
+            // success establishes idx < len for later identical sites
+            let ik = self.vkey(b, iop);
+            self.fact_from_check(b, 0, ik, lop);
+        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN) {
+            let sop = b.oper_pool[rv.a as usize];
+            let eop = b.oper_pool[(rv.a + 1) as usize];
+            let lop = b.oper_pool[(rv.a + 2) as usize];
+            let mut reason: u8 = BR_UNKNOWN_INDEX;
+            let proven = self.prove_range(b, sop, eop, lop, &mut reason);
+            if check_only {
+                if rv.c == ir::IN_RANGE_BOUNDS_PROVEN && !proven {
+                    *err = "bce: unprovable IN_RANGE_BOUNDS_PROVEN";
+                }
+            } else {
+                st.ranges_total += 1;
+                if proven {
+                    st.ranges_removed += 1;
+                    b.rvalues[rid].c = ir::IN_RANGE_BOUNDS_PROVEN;
+                } else {
+                    unsafe {
+                        st.reasons[reason as usize] = st.reasons[reason as usize] + 1;
+                    }
+                }
+            }
+            // success establishes end <= len
+            let ek = self.vkey(b, eop);
+            self.fact_from_check(b, 1, ek, lop);
+        }
+        // what the statement binds, read before its write
+        let usz = rv.target == Ast::builtin(BuiltinType::BT_USIZE);
+        let op9 = tt::TokenType::Percent as u8;
+        let mut ck = fx::vkey_none(); // chunk end / comparison or remainder left side
+        let mut ck2 = fx::vkey_none(); // comparison right side
+        let mut lp1 = lenbind_none();
+        let mut lp2 = lenbind_none();
+        let mut le = false;
+        let is_cmp = rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::LessThan as u8 || rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8);
+        // the alignment pattern `a - a % c` exists only in a body with a remainder by a constant
+        let is_rem = self.fx.grem && rv.kind == ir::RV_BINARY && (rv.c == op9 || rv.c == tt::TokenType::PercentEqual as u8) && usz;
+        let is_sub = self.fx.grem && rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::Minus as u8 || rv.c == tt::TokenType::MinusEqual as u8) && usz;
+        let mut flp = lenbind_none();
+        if dest != ir::IR_NONE {
+            if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK {
+                let eop = b.oper_pool[(rv.a + 1) as usize];
+                ck = self.vkey(b, eop);
+                lp1 = self.oper_len_lp(b, eop);
+            } else if is_cmp {
+                // canonical form: > and >= swap operands (a > b == b < a; a >= b == b <= a)
+                let swap = rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
+                let aop = if swap {
+                    rv.b;
+                } else {
+                    rv.a;
+                };
+                let bop = if swap {
+                    rv.a;
+                } else {
+                    rv.b;
+                };
+                ck = self.vkey(b, aop);
+                ck2 = self.vkey(b, bop);
+                lp1 = self.oper_len_lp(b, aop);
+                lp2 = self.oper_len_lp(b, bop);
+                if self.iwant && self.clens.len() < LREADS_MAX {
+                    if lp1.ok && self.fx.const_ge2(b, bop) {
+                        self.clens.push(lp1);
+                    } else if lp2.ok && self.fx.const_ge2(b, aop) {
+                        self.clens.push(lp2);
+                    }
+                }
+                le = rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
+            } else if is_rem || is_sub {
+                ck = self.vkey(b, rv.a);
+                ck2 = self.vkey(b, rv.b);
+                lp1 = self.oper_len_lp(b, rv.a);
+            } else if rv.kind == ir::RV_USE {
+                // a direct `[r, deref, .len]` read of a prelude view is a length capture: the
+                // inlined std `len()` body reads the field where the call read the method
+                let op = *b.operands.at(rv.a as usize);
+                if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && self.fx.whole_local(b, op.data) == ir::IR_NONE {
+                    flp = self.oper_len_lp(b, rv.a);
+                }
+            }
+        }
+        // the write
+        self.fx.apply_stmt(b, &stm);
+        self.fx.istep(b, sid);
+        if dest == ir::IR_NONE {
+            return;
+        }
+        let dv = self.fx.ver(dest);
+        if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK {
+            self.chunks.push(ChunkBind { e: ck, e_lp: lp1, l: dest, my_v: dv });
+        } else if rv.kind == ir::RV_LEN {
+            self.lenof.set(dest as usize, self.len_capture(b, rv.a, dv));
+            self.note_read(dest);
+        } else if is_cmp {
+            self.cmpof.set(dest as usize, CmpBind { a: ck, b: ck2, a_lp: lp1, b_lp: lp2, le: le, my_v: dv, ok: true });
+        } else if is_rem {
+            if ck2.is_const && ck2.c > 0 {
+                self.remof.set(dest as usize, RemBind { x: ck, x_lp: lp1, c: ck2.c, my_v: dv, ok: true });
+            }
+        } else if is_sub {
+            // `d = a - a % c`: d <= a and d is a multiple of c
+            if ck2.is_local && ck2.off == 0 && ck.is_local {
+                let rb = *self.remof.at(ck2.l as usize);
+                if rb.ok && rb.my_v == ck2.v && self.same_value(b, &rb.x, &rb.x_lp, &ck, &lp1) {
+                    self.alof.set(dest as usize, AlBind { st: rb.c as u64, my_v: dv });
+                    self.ialign = true;
+                    let mut lp = lenbind_none();
+                    if ck.off == 0 {
+                        lp = lp1;
+                    }
+                    self.push_fact(
+                        Fact {
+                            kind: 1,
+                            iconst: false,
+                            ic: 0,
+                            il: dest,
+                            iv: dv,
+                            ioff: 0,
+                            ln_ok: true,
+                            ln_l: ck.l,
+                            ln_v: ck.v,
+                            ln_off: ck.off,
+                            lp_ok: lp.ok,
+                            lp: lp.pl,
+                            lp_hg: lp.hg,
+                            lp_bg: lp.bg,
+                            lp_pg: lp.pg,
+                            lp_fg: lp.fg,
+                            lp_fg: lp.fg,
+                        },
+                    );
+                }
+            }
+        } else if rv.kind == ir::RV_USE {
+            if flp.ok {
+                self.lenof.set(dest as usize, lenbind_at(flp, dv));
+                self.note_read(dest);
+                return;
+            }
+            let op = *b.operands.at(rv.a as usize);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let srcl = self.fx.whole_local(b, op.data);
+                if srcl != ir::IR_NONE {
+                    // a copy of a length keeps its place identity
+                    let slb = self.len_place_of(srcl);
+                    if slb.ok {
+                        self.lenof.set(dest as usize, lenbind_at(slb, dv));
+                        self.note_read(dest);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1430,16 +1526,17 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     if nb == 0 {
         return "";
     }
-    z.pkg = pkg;
+    z.fx.pkg = pkg;
     // most bodies carry no checks at all: skip every allocation for them
-    let mut any = false;
+    let mut checks = false;
     for i in 0..b.rvalues.len() {
         let k = b.rvalues.at(i);
         if k.kind == ir::RV_INTRINSIC && ir::is_check(k.c) {
-            any = true;
+            checks = true;
             break;
         }
     }
+    let mut any = checks;
     if !any {
         // a fold candidate exists only where a panic sits: a direct @c.noreturn call terminator
         // (checked here so check-free bodies still skip the walk outright)
@@ -1454,435 +1551,183 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     if !any {
         return "";
     }
-    z.begin_body(b);
-    // predecessor counts + RPO over the reachable blocks (iterative DFS, dense vectors)
-    {
-        z.seen.clear();
-        z.seen.resize_default(nb);
-        z.stack.clear();
-        z.stack.push(b.entry as u64 << 1);
-        z.seen.set(b.entry as usize, 1);
-        while z.stack.len() != 0 {
-            let top = z.stack[z.stack.len() - 1];
-            let _ = z.stack.pop();
-            let blk = (top >> 1) as usize;
-            if (top & 1) != 0 {
-                z.rpo.push(blk as u32);
-                continue;
-            }
-            z.stack.push(top | 1);
-            let t = &b.blocks.at(blk).term;
-            // successors without allocation: switch targets first, then the shared t0 edge
-            let mut nsw: u32 = 0;
-            if t.kind == ir::TM_SWITCH {
-                nsw = t.sw_len;
-            }
-            for i in 0..nsw + 1 {
-                let mut s = ir::IR_NONE;
-                if i < nsw {
-                    s = (b.switch_pool[(t.sw_start + i) as usize] & 0xFFFFFFFFu64) as u32;
-                } else if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT || t.kind == ir::TM_SWITCH {
-                    s = t.t0;
-                }
-                if s == ir::IR_NONE {
-                    continue;
-                }
-                z.preds.set(s as usize, z.preds[s as usize] + 1);
-                if z.seen[s as usize] == 0 {
-                    z.seen.set(s as usize, 1);
-                    z.stack.push(s as u64 << 1);
-                }
-            }
-        }
-        // rpo currently holds a POST order (children pushed after the phase-1 marker); reverse it
-        z.rpo.reverse();
-    }
+    z.begin_body(b, pkg);
+    // the integer facts serve only the checks, solved on demand: a body with no check allocates no
+    // solver state
+    z.iwant = checks && !z.no_int && z.fx.want_ints(b);
+    z.itried = false;
+    z.ialign = false;
+    z.clens.clear();
     let mut err: str<'static> = "";
-    // the escape-collection pass exists only for signature transparency
-    let pass0: usize = if z.no_sig {
-        1;
-    } else {
-        0;
-    };
-    for pass9 in pass0..2 {
-        z.collecting = pass9 == 0;
-        for bi in 0..z.rpo.len() {
-            let blk = z.rpo[bi] as usize;
-            z.facts.clear();
-            if z.in_set[blk] {
-                let s0 = z.in_start[blk] as usize;
-                for i in s0..s0 + z.in_len[blk] as usize {
-                    let f0 = z.in_facts[i];
-                    z.facts.push(f0);
-                }
-            }
-            let bb = *b.blocks.at(blk);
-            for si in 0..bb.stmt_len {
-                let sid = (bb.stmt_start + si) as usize;
-                let stm = *b.statements.at(sid);
-                if stm.kind == ir::ST_ASSIGN {
-                    let rid = stm.rvalue as usize;
-                    let rv = *b.rvalues.at(rid);
-                    let dest = z.whole_local(b, stm.place);
-                    if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_BOUNDS_GROUP {
-                        let iop = b.oper_pool[rv.a as usize];
-                        let lop = b.oper_pool[(rv.a + 1) as usize];
-                        let wo = *b.operands.at(b.oper_pool[(rv.a + 2) as usize] as usize);
-                        let ik = z.vkey(b, iop);
-                        if ik.is_local && wo.kind == ir::OP_CONST {
-                            let wc = *b.constants.at(wo.data as usize);
-                            if wc.kind == ir::CK_INT && wc.val > 0 && wc.val <= 8 {
-                                for k in 0..wc.val {
-                                    let mut ikk = ik;
-                                    ikk.off = ik.off + k;
-                                    z.fact_from_check(b, 0, ikk, lop);
-                                }
-                            }
-                        }
-                    } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN) {
-                        let iop = b.oper_pool[rv.a as usize];
-                        let lop = b.oper_pool[(rv.a + 1) as usize];
-                        if !z.collecting {
-                            let mut reason: u8 = BR_UNKNOWN_INDEX;
-                            let proven = z.prove_elem(b, iop, lop, &mut reason);
-                            if check_only {
-                                if rv.c == ir::IN_BOUNDS_PROVEN && !proven {
-                                    err = "bce: unprovable IN_BOUNDS_PROVEN";
-                                }
-                            } else {
-                                st.total += 1;
-                                if proven {
-                                    st.removed += 1;
-                                    b.rvalues[rid].c = ir::IN_BOUNDS_PROVEN;
-                                } else {
-                                    let mut grouped: u32 = 0;
-                                    if rv.c == ir::IN_BOUNDS {
-                                        grouped = z.try_coalesce(b, &bb, si, rid, iop, lop, stm.span);
-                                    }
-                                    if grouped != 0 {
-                                        st.coalesced += grouped;
-                                    } else {
-                                        unsafe {
-                                            st.reasons[reason as usize] = st.reasons[reason as usize] + 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // success establishes idx < len for later identical sites
-                        let ik = z.vkey(b, iop);
-                        z.fact_from_check(b, 0, ik, lop);
-                    } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN) {
-                        let sop = b.oper_pool[rv.a as usize];
-                        let eop = b.oper_pool[(rv.a + 1) as usize];
-                        let lop = b.oper_pool[(rv.a + 2) as usize];
-                        if !z.collecting {
-                            let mut reason: u8 = BR_UNKNOWN_INDEX;
-                            let proven = z.prove_range(b, sop, eop, lop, &mut reason);
-                            if check_only {
-                                if rv.c == ir::IN_RANGE_BOUNDS_PROVEN && !proven {
-                                    err = "bce: unprovable IN_RANGE_BOUNDS_PROVEN";
-                                }
-                            } else {
-                                st.ranges_total += 1;
-                                if proven {
-                                    st.ranges_removed += 1;
-                                    b.rvalues[rid].c = ir::IN_RANGE_BOUNDS_PROVEN;
-                                } else {
-                                    unsafe {
-                                        st.reasons[reason as usize] = st.reasons[reason as usize] + 1;
-                                    }
-                                }
-                            }
-                        }
-                        // success establishes end <= len
-                        let ek = z.vkey(b, eop);
-                        z.fact_from_check(b, 1, ek, lop);
-                    } else if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK && dest != ir::IR_NONE {
-                        let eop = b.oper_pool[(rv.a + 1) as usize];
-                        let ek = z.vkey(b, eop);
-                        let elp = z.oper_len_lp(b, eop);
-                        z.write_place(b, stm.place);
-                        z.chunks.push(ChunkBind { e: ek, e_lp: elp, l: dest, my_v: z.lver[dest as usize] });
-                        continue;
-                    } else if rv.kind == ir::RV_LEN && dest != ir::IR_NONE {
-                        z.write_place(b, stm.place);
-                        z.lenof.set(dest as usize, z.len_capture(b, rv.a, z.lver[dest as usize]));
-                        continue;
-                    } else if rv.kind == ir::RV_BINARY && dest != ir::IR_NONE && (rv.c == tt::TokenType::Plus as u8 || rv.c == tt::TokenType::Minus as u8) && rv.target == Ast::builtin(
-                        BuiltinType::BT_USIZE,
-                    ) {
-                        // dest = src +- c: an affine alias of src, matched by exact offset only
-                        let ka = z.vkey(b, rv.a);
-                        let kb = z.vkey(b, rv.b);
-                        let mut srcl = ir::IR_NONE;
-                        let mut c0: i64 = 0;
-                        if ka.is_local && kb.is_const {
-                            srcl = ka.l;
-                            c0 = ka.off + if rv.c == tt::TokenType::Plus as u8 {
-                                kb.c;
-                            } else {
-                                0 - kb.c;
-                            };
-                        } else if kb.is_local && ka.is_const && rv.c == tt::TokenType::Plus as u8 {
-                            srcl = kb.l;
-                            c0 = kb.off + ka.c;
-                        }
-                        z.write_place(b, stm.place);
-                        if srcl != ir::IR_NONE && srcl != dest && c0 > 0 - 1048576 && c0 < 1048576 {
-                            z.affof.set(
-                                dest as usize,
-                                AffBind {
-                                    src: srcl,
-                                    src_v: z.lver[srcl as usize],
-                                    c: c0,
-                                    my_v: z.lver[dest as usize],
-                                    ok: true,
-                                },
-                            );
-                        }
-                        continue;
-                    } else if rv.kind == ir::RV_BINARY && dest != ir::IR_NONE && (rv.c == tt::TokenType::LessThan as u8 || rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8) {
-                        // canonical form: > and >= swap operands (a > b == b < a; a >= b == b <= a)
-                        let swap = rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
-                        let aop = if swap {
-                            rv.b;
-                        } else {
-                            rv.a;
-                        };
-                        let bop = if swap {
-                            rv.a;
-                        } else {
-                            rv.b;
-                        };
-                        let ak = z.vkey(b, aop);
-                        let bk = z.vkey(b, bop);
-                        let alp = z.oper_len_lp(b, aop);
-                        let blp = z.oper_len_lp(b, bop);
-                        z.write_place(b, stm.place);
-                        z.cmpof.set(
-                            dest as usize,
-                            CmpBind {
-                                a: ak,
-                                b: bk,
-                                a_lp: alp,
-                                b_lp: blp,
-                                le: rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8,
-                                my_v: z.lver[dest as usize],
-                                ok: true,
-                            },
-                        );
-                        continue;
-                    } else if rv.kind == ir::RV_USE && dest != ir::IR_NONE {
-                        // a direct `[r, deref, .len]` read of a prelude view is a length capture: the
-                        // inlined std `len()` body reads the field where the call read the method
-                        let flp = z.oper_len_lp(b, rv.a);
-                        let op = *b.operands.at(rv.a as usize);
-                        if flp.ok && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && z.whole_local(b, op.data) == ir::IR_NONE {
-                            z.write_place(b, stm.place);
-                            z.lenof.set(dest as usize, lenbind_at(flp, z.lver[dest as usize]));
-                            continue;
-                        }
-                        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                            let srcl = z.whole_local(b, op.data);
-                            if srcl != ir::IR_NONE {
-                                z.write_place(b, stm.place);
-                                z.copyof.set(
-                                    dest as usize,
-                                    CopyBind {
-                                        src: srcl,
-                                        src_v: z.lver[srcl as usize],
-                                        my_v: z.lver[dest as usize],
-                                        ok: true,
-                                    },
-                                );
-                                // a copy of a length keeps its place identity
-                                let slb = z.len_place_of(srcl);
-                                if slb.ok {
-                                    z.lenof.set(dest as usize, lenbind_at(slb, z.lver[dest as usize]));
-                                }
-                                continue;
-                            }
-                        }
-                    } else if rv.kind == ir::RV_REF && dest != ir::IR_NONE {
-                        z.write_place(b, stm.place);
-                        z.refof.set(dest as usize, RefBind { pl: rv.a, my_v: z.lver[dest as usize], ok: true });
-                        if rv.b == 1 {
-                            z.note_mut_borrow(b, rv.a, dest);
-                        }
-                        continue;
-                    }
-                    if rv.kind == ir::RV_REF && rv.b == 1 || rv.kind == ir::RV_ADDR {
-                        z.note_escape_place(b, rv.a);
-                    } else if rv.kind == ir::RV_CAST && z.is_ref_to_ptr_cast(b, &rv) {
-                        // resolve through the reference binding so the BORROWED collection
-                        // escapes, not the reference temp
-                        let cl = z.whole_local(b, b.operands.at(rv.a as usize).data);
-                        if cl == ir::IR_NONE {
-                            z.escall = true;
-                        } else {
-                            let cr = z.copy_root(cl);
-                            let rb = *z.refof.at(cr as usize);
-                            if rb.ok && rb.my_v == z.lver[cr as usize] && (rb.pl & SYNTH_PL) == 0 {
-                                z.note_escape_place(b, rb.pl);
-                            } else {
-                                z.mark_escaped(cr);
-                            }
-                        }
-                    }
-                    z.write_place(b, stm.place);
-                } else if stm.kind == ir::ST_STORAGE_DEAD {
-                    z.bump_local(stm.a);
-                }
-            }
-            // terminator: panic-guard folding, then effects, then single-pred fact propagation
-            let mut t = bb.term;
-            if t.kind == ir::TM_SWITCH && t.sw_len == 1 && b.switch_pool[t.sw_start as usize] >> 32 == 1 && t.a != ir::IR_NONE {
-                let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
-                let ft9 = t.t0;
-                let ck = z.vkey(b, t.a);
-                if ck.is_local && ck.off == 0 {
-                    let cb = *z.cmpof.at(ck.l as usize);
-                    if cb.ok && cb.my_v == ck.v {
-                        // the condition is a canonical `a OP b`; a proof of it (or of its negation)
-                        // whose doomed successor is a pure panic shape folds the branch away
-                        let mut dir: u32 = 0;
-                        if check_only || z.collecting || z.no_fold {
-                            // no fold here: skip the proof
-                        } else if z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le) {
-                            dir = 1; // always true
-                        } else if z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le) {
-                            dir = 2; // always false (the negation swaps sides and flips strictness)
-                        }
-                        if dir != 0 {
-                            let doomed = if dir == 1 {
-                                ft9;
-                            } else {
-                                tt9;
-                            };
-                            let survivor = if dir == 1 {
-                                tt9;
-                            } else {
-                                ft9;
-                            };
-                            if z.doomed_panic(b, doomed) {
-                                // the folded goto keeps the condition operand in `a`, the doomed block
-                                // in args_start and the proof direction in args_len so SC_CORE_IR mode
-                                // can re-prove the fold like a PROVEN check
-                                t.kind = ir::TM_GOTO;
-                                t.t0 = survivor;
-                                t.args_start = doomed;
-                                t.args_len = dir;
-                                t.sw_len = 0;
-                                b.blocks[blk].term = t;
-                                st.folded += 1;
-                            }
-                        }
-                    }
-                }
-            } else if check_only && !z.collecting && t.kind == ir::TM_GOTO && (t.args_len == 1 || t.args_len == 2) && t.a != ir::IR_NONE {
-                // SC_CORE_IR re-proof of a folded site
-                let ck = z.vkey(b, t.a);
-                let mut ok9 = false;
-                if ck.is_local && ck.off == 0 {
-                    let cb = *z.cmpof.at(ck.l as usize);
-                    if cb.ok && cb.my_v == ck.v {
-                        ok9 = if t.args_len == 1 {
-                            z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le);
-                        } else {
-                            z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le);
-                        };
-                    }
-                }
-                if !ok9 {
-                    err = "bce: unprovable fold";
-                }
-            }
-            z.flush_pending(b, &t);
-            if t.kind == ir::TM_CALL {
-                let mut pure_len = z.is_prelude_len_call(&t);
-                let mut recv = ir::IR_NONE;
-                if pure_len {
-                    recv = z.len_call_receiver(b, &t);
-                    pure_len = recv != ir::IR_NONE;
-                }
-                if !pure_len {
-                    if z.call_transparent(b, &t) {
-                        if !check_only {
-                            st.sig_kept += 1;
-                        }
-                    } else {
-                        z.heapgen += 1;
-                    }
-                }
-                for i in 0..t.dests_len {
-                    let dpl = b.dest_pool[(t.dests_start + i) as usize];
-                    z.write_place(b, dpl);
-                }
-                if pure_len && t.dests_len == 1 {
-                    let dl = z.whole_local(b, b.dest_pool[t.dests_start as usize]);
-                    if dl != ir::IR_NONE {
-                        z.lenof.set(dl as usize, z.len_capture(b, recv, z.lver[dl as usize]));
-                    }
-                }
-            } else if t.kind == ir::TM_DROP {
-                if !z.drop_transparent(b, t.a) {
-                    z.heapgen += 1;
-                }
-            }
-            let mut succ0 = ir::IR_NONE;
-            let mut succ_true = ir::IR_NONE;
-            if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT {
-                succ0 = t.t0;
-            } else if t.kind == ir::TM_SWITCH {
-                succ0 = t.t0;
-                if t.sw_len == 1 && b.switch_pool[t.sw_start as usize] >> 32 == 1 {
-                    succ_true = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
-                }
-            }
-            if succ0 != ir::IR_NONE && z.preds[succ0 as usize] == 1 && !z.in_set[succ0 as usize] {
-                z.in_start.set(succ0 as usize, z.in_facts.len() as u32);
-                for i in 0..z.facts.len() {
-                    let f0 = *z.facts.at(i);
-                    z.in_facts.push(f0);
-                }
-                z.in_len.set(succ0 as usize, z.facts.len() as u32);
-                z.in_set.set(succ0 as usize, true);
-            }
-            if succ_true != ir::IR_NONE && z.preds[succ_true as usize] == 1 && !z.in_set[succ_true as usize] {
-                let st0 = z.in_facts.len();
-                for i in 0..z.facts.len() {
-                    let f0 = *z.facts.at(i);
-                    z.in_facts.push(f0);
-                }
-                let st_i = succ_true as usize;
-                // the branch condition itself, on its true edge: `a < b` (or `a <= b`)
-                if t.kind == ir::TM_SWITCH {
-                    let ck = z.vkey(b, t.a);
-                    if ck.is_local {
-                        let cb = *z.cmpof.at(ck.l as usize);
-                        if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
-                            let lp = cb.b_lp; // captured at the comparison, so never stale here
-                            z.edge_fact(&cb, cb.b, lp, st0);
-                            if cb.b.off == 0 {
-                                // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
-                                for ci in 0..z.chunks.len() {
-                                    let ch = z.chunks[ci];
-                                    if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
-                                        z.edge_fact(&cb, ch.e, ch.e_lp, st0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                z.in_start.set(st_i, st0 as u32);
-                z.in_len.set(st_i, (z.in_facts.len() - st0) as u32);
-                z.in_set.set(st_i, true);
+    for bi in 0..z.fx.rpo.len() {
+        let blk = z.fx.rpo[bi] as usize;
+        z.facts.clear();
+        if z.in_set[blk] {
+            let s0 = z.in_start[blk] as usize;
+            for i in s0..s0 + z.in_len[blk] as usize {
+                let f0 = z.in_facts[i];
+                z.facts.push(f0);
             }
         }
-        if pass9 == 0 {
-            z.reset_for_main_pass(nb);
+        z.fx.enter_block(b, blk as u32);
+        z.fx.ienter(b, blk as u32);
+        let bb = *b.blocks.at(blk);
+        z.cur_blk = blk as u32;
+        for si in 0..bb.stmt_len {
+            z.cur_sid = bb.stmt_start + si;
+            z.statement(b, &bb, si, st, check_only, &mut err);
+        }
+        // terminator: panic-guard folding, then effects, then fact propagation
+        let mut t = bb.term;
+        if t.kind == ir::TM_SWITCH && t.sw_len == 1 && b.switch_pool[t.sw_start as usize] >> 32 == 1 && t.a != ir::IR_NONE {
+            let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+            let ft9 = t.t0;
+            let ck = z.vkey(b, t.a);
+            if ck.is_local && ck.off == 0 {
+                let cb = *z.cmpof.at(ck.l as usize);
+                if cb.ok && cb.my_v == ck.v {
+                    // the condition is a canonical `a OP b`; a proof of it (or of its negation)
+                    // whose doomed successor is a pure panic shape folds the branch away
+                    let mut dir: u32 = 0;
+                    if check_only || z.no_fold {
+                        // no fold here: skip the proof
+                    } else if z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le) {
+                        dir = 1; // always true
+                    } else if z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le) {
+                        dir = 2; // always false (the negation swaps sides and flips strictness)
+                    }
+                    if dir != 0 {
+                        let doomed = if dir == 1 {
+                            ft9;
+                        } else {
+                            tt9;
+                        };
+                        let survivor = if dir == 1 {
+                            tt9;
+                        } else {
+                            ft9;
+                        };
+                        if z.doomed_panic(b, doomed) {
+                            // the folded goto keeps the condition operand in `a`, the doomed block
+                            // in args_start and the proof direction in args_len so SC_CORE_IR mode
+                            // can re-prove the fold like a PROVEN check
+                            t.kind = ir::TM_GOTO;
+                            t.t0 = survivor;
+                            t.args_start = doomed;
+                            t.args_len = dir;
+                            t.sw_len = 0;
+                            b.blocks[blk].term = t;
+                            st.folded += 1;
+                        }
+                    }
+                }
+            }
+        } else if check_only && t.kind == ir::TM_GOTO && (t.args_len == 1 || t.args_len == 2) && t.a != ir::IR_NONE {
+            // SC_CORE_IR re-proof of a folded site
+            let ck = z.vkey(b, t.a);
+            let mut ok9 = false;
+            if ck.is_local && ck.off == 0 {
+                let cb = *z.cmpof.at(ck.l as usize);
+                if cb.ok && cb.my_v == ck.v {
+                    ok9 = if t.args_len == 1 {
+                        z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le);
+                    } else {
+                        z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le);
+                    };
+                }
+            }
+            if !ok9 {
+                err = "bce: unprovable fold";
+            }
+        }
+        let mut recv = ir::IR_NONE;
+        let pure = t.kind == ir::TM_CALL && t.intr == ir::CI_NONE && fx::is_prelude_len_call(pkg, b, &t);
+        if pure {
+            recv = z.len_call_receiver(b, &t);
+        }
+        if z.fx.apply_term(b, &t, pure) && !check_only {
+            st.sig_kept += 1;
+        }
+        if recv != ir::IR_NONE {
+            let dl = z.fx.whole_local(b, b.dest_pool[t.dests_start as usize]);
+            if dl != ir::IR_NONE {
+                z.lenof.set(dl as usize, z.len_capture(b, recv, z.fx.ver(dl)));
+                z.note_read(dl);
+            }
+        }
+        z.fx.leave_block(blk as u32);
+        // facts flow along the edge into a block with one forward predecessor
+        let mut succ0 = ir::IR_NONE;
+        let mut succ_true = ir::IR_NONE;
+        if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT {
+            succ0 = t.t0;
+        } else if t.kind == ir::TM_SWITCH {
+            succ0 = t.t0;
+            succ_true = bool_target(b, &t, true);
+            if succ_true == t.t0 {
+                // `switch t [0 -> f] otherwise x`: the shared edge is the true one
+                succ0 = bool_target(b, &t, false);
+            }
+        }
+        if succ0 != ir::IR_NONE && z.flows(blk as u32, succ0) {
+            z.in_start.set(succ0 as usize, z.in_facts.len() as u32);
+            for i in 0..z.facts.len() {
+                let f0 = *z.facts.at(i);
+                z.in_facts.push(f0);
+            }
+            z.in_len.set(succ0 as usize, z.facts.len() as u32);
+            z.in_set.set(succ0 as usize, true);
+        }
+        if succ_true != ir::IR_NONE && z.flows(blk as u32, succ_true) {
+            let st0 = z.in_facts.len();
+            for i in 0..z.facts.len() {
+                let f0 = *z.facts.at(i);
+                z.in_facts.push(f0);
+            }
+            let st_i = succ_true as usize;
+            // the branch condition itself, on its true edge: `a < b` (or `a <= b`)
+            let ck = z.vkey(b, t.a);
+            if ck.is_local {
+                let cb = *z.cmpof.at(ck.l as usize);
+                if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
+                    let lp = cb.b_lp; // captured at the comparison, so never stale here
+                    z.edge_fact(&cb, cb.b, lp, st0);
+                    if cb.b.off == 0 {
+                        // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
+                        for ci in 0..z.chunks.len() {
+                            let ch = z.chunks[ci];
+                            if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
+                                z.edge_fact(&cb, ch.e, ch.e_lp, st0);
+                            }
+                        }
+                    }
+                }
+            }
+            z.in_start.set(st_i, st0 as u32);
+            z.in_len.set(st_i, (z.in_facts.len() - st0) as u32);
+            z.in_set.set(st_i, true);
+        }
+        // `a && b`: the join's true edge is reachable with a true condition from this block only
+        let mut tl = ir::IR_NONE;
+        let tj = if t.kind == ir::TM_GOTO {
+            z.and_join(b, blk as u32, t.t0, &mut tl);
+        } else {
+            ir::IR_NONE;
+        };
+        if tj != ir::IR_NONE {
+            let st0 = z.in_facts.len();
+            for i in 0..z.facts.len() {
+                let f0 = *z.facts.at(i);
+                z.in_facts.push(f0);
+            }
+            let tr = z.fx.copy_root(tl);
+            let cb = *z.cmpof.at(tr as usize);
+            if cb.ok && cb.my_v == z.fx.ver(tr) && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
+                z.edge_fact(&cb, cb.b, cb.b_lp, st0);
+            }
+            z.in_start.set(tj as usize, st0 as u32);
+            z.in_len.set(tj as usize, (z.in_facts.len() - st0) as u32);
+            z.in_set.set(tj as usize, true);
         }
     }
     return err;

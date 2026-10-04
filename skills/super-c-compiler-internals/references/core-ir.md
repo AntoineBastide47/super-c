@@ -108,13 +108,13 @@ Each `Projection` carries the type **after** it applies.
 | `RV_REF` | `&place`; `b` = 1 when mutable |
 | `RV_ADDR` | Raw address of place; `b` = 1 when `*mut` |
 | `RV_UNARY` / `RV_BINARY` | Operand(s) + token op |
-| `RV_CAST` | `b` = CastKind: `CAST_NUMERIC`, `CAST_POINTER`, `CAST_COERCE_FROM` (library `from`; `item` = selected method), `CAST_NEVER`, `CAST_ARRAY_SLICE` |
+| `RV_CAST` | `b` = CastKind: `CAST_NUMERIC` (every `as` cast and every coercion with no library method: numeric, pointer, reference) or `CAST_COERCE_FROM` (library `from`; `item` = selected method) |
 | `RV_AGGREGATE` | Operand range; `c` = `AGG_STRUCT`/`AGG_TUPLE`/`AGG_ARRAY`/`AGG_VARIANT` |
 | `RV_REPEAT` | `[elem; count]`: `a` = element OperandId, `b` = count OperandId |
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
-| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
+| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc through `__sc_new`, which panics "out of memory" on a null result; a zero-sized `T` allocates 1 byte and stores nothing), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
 | `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
 
 ## Statements
@@ -125,15 +125,12 @@ Each `Projection` carries the type **after** it applies.
 |------|---------|
 | `ST_ASSIGN` | place = rvalue |
 | `ST_STORAGE_LIVE` / `ST_STORAGE_DEAD` | `a` = LocalId; the DEAD markers at scope exits are the lexical drop points drop elaboration classifies |
-| `ST_SET_DISCR` | Set enum discriminant (`a` = variant index) |
-| `ST_DEINIT` | Deinitialize a place |
-| `ST_ASM` | Inline assembly |
-| `ST_NOP` | Placeholder |
 
 ## Terminators and Blocks
 
 `BasicBlock { stmt_start, stmt_len, term, sealed }`: a statement range plus exactly one
-terminator; the verifier rejects unsealed blocks. `Terminator` is 64 bytes:
+terminator; the verifier rejects unsealed blocks. `Terminator` is 68 bytes and `BasicBlock` 80
+(`static_assert`s in `core.spc`):
 
 | Kind | Meaning |
 |------|---------|
@@ -144,6 +141,64 @@ terminator; the verifier rejects unsealed blocks. `Terminator` is 64 bytes:
 | `TM_DROP` | Drop a place; `t0` = successor (inserted by drop elaboration) |
 | `TM_ASSERT` | `a` = condition OperandId; `t0` = success |
 | `TM_UNREACHABLE` | Unreachable |
+
+`Terminator.intr` (in the tail padding) tags a `TM_CALL` of a verified intrinsic: the lowering
+(`Lowerer::call_intr`) sets it when the callee is an extern function `ir::ci_of_name` names, the
+argument count is `ir::ci_arity` of the kind, and the first argument is a pointer (`CI_FENCE` has
+no pointer). The kinds are append-only: `CI_NONE`, `CI_MEMCPY`, `CI_MEMMOVE`, `CI_MEMSET`,
+`CI_ATOMIC_LOAD`, `CI_ATOMIC_STORE`, `CI_ATOMIC_RMW` (swap, add, sub, and, or, xor),
+`CI_ATOMIC_CAS`, `CI_FENCE`. The call stays an ordinary call for the borrow replay, the inliner and
+the C renderer. CTFE dispatches `memcpy`, `memmove` (overlap-safe) and `memset` on the tag (a call
+through a function value names the routine); atomics are not evaluable. The verifier rejects a
+tag on an unresolved call, with another arity, of an unknown kind, or on another terminator. The
+printer writes ` intrinsic <kind>` after the call's arguments.
+
+## Effects and Facts (`src/ir/facts.spc`)
+
+The fact service over one final elaborated body; bounds-check elimination (`ir/bce.spc`) is its
+first client and keeps only its proof rules (affine index facts, length identities, coalescing,
+panic-guard folding).
+
+- **Memory effects.** `stmt_effect` and `term_effect` are pure functions of the body:
+  `EF_WRITE` (a place, through a deref or not), `EF_PTR` (a write through a pointer operand: a
+  memory intrinsic, an atomic store, read-modify-write or compare-exchange), `EF_SYNC` (an atomic
+  load or fence with a non-relaxed order: other threads' writes become visible), `EF_CALL` (an
+  unknown call, with the locals it receives by mutable reference), `EF_DROP` (a drop whose type
+  has glue), `EF_ASM` (inline assembly: an unknown heap write plus its output places), `EF_NONE`
+  (a relaxed atomic load or fence, the prelude `len(&self)`, a drop without glue).
+- **Versions and generations.** A value fact keys on (local, version); a length identity on
+  (place, heap generation, base generation, path generation, buffer generation). A write into one
+  subtree of a base logs a path kill; a place survives the logged kills that do not overlap it
+  (different fields, different constant indexes). A write into a prelude view's element buffer
+  (`ptr` field then index or deref) bumps only the buffer generation, which only places heap
+  memory may hold compare. An unknown write cannot reach the deref-free storage of a local whose
+  address never escaped (`reachable`). Versions and generations come from one clock that runs
+  across bodies; each body and each `kill_all` raises a floor every older value reads as, so no
+  per-local table is cleared. Entering a block gives a fresh version to every local written since
+  its immediate dominator was left (a log of writes; the dominators come from the forward
+  predecessors in the same pass as the predecessor lists); entering a loop header does the same
+  for everything the loop's blocks can write (a summary per block, made once per body from single
+  definitions and the same transparency rules), so one version names one value on every path.
+- **Escapes.** The escape set (raw addresses, mutable borrows stored or used past derefs, copies
+  and calls, references cast to raw pointers) comes from one scan of the body before the walk,
+  resolved through single definitions; an unresolved one disables call transparency for the body.
+  BCE walks each body once.
+- **Integer facts.** Per tracked integer local: an interval in exact sign-magnitude arithmetic
+  at the target width (a possible wrap gives the type's range), a stride and phase (the value is
+  `phase + k * stride`), known-zero and known-one bits. Transfer functions cover `+ - * / %`,
+  masks, shifts by a constant, numeric casts, lengths of fixed arrays, the checks and `IN_CHUNK`;
+  a comparison refines both operands on each branch edge. One worklist in reverse postorder solves
+  block-entry states (sparse, sorted lists of tracked locals) with a dense scratch per visit, joins
+  keep the hull, a loop header widens a bound that grows after two back-edge changes, and one
+  narrowing pass follows the fixed point. The facts solve on demand: only in a body with a fixed
+  array checked, a length compared with a constant of 2 or more, or a remainder by a constant
+  (`want_ints`), at the first check the earlier rules leave unproven whose length is such a length
+  (or an alignment is bound); the walk then replays the current block. The tracked locals are the
+  checks' operands, what their definitions read, and the sides of comparisons with a tracked side.
+- **Limits.** Every table is bounded (64 exposed scalars, 16 escaped roots, 256 path kills, 64
+  facts per block-entry state, a pool of 65536 entries, 8 visits per block plus 64, the loop-scan
+  work); past a bound the fact becomes unknown, `ilimited` is set and BCE records
+  `BR_RESOURCE_LIMIT`. A body with no check, or none that needs them, allocates no solver state.
 
 ## The Borrowck Replay Tape (`TP_*`)
 
@@ -190,7 +245,8 @@ need.
 | CTFE (`ir/interp.spc`) | Executes bodies directly (the only evaluator) |
 | Instance graph | Walks bodies from concrete roots to discover instantiations |
 | C emitter | Renders bodies to readable C |
-| Verifier (`ir/verify.spc`) | Structural rules (sealed blocks, type agreement) |
+| Verifier (`ir/verify.spc`) | Structural rules (sealed blocks, type agreement, intrinsic tags) |
+| Fact service (`ir/facts.spc`) and BCE (`ir/bce.spc`) | Effects, versions, integer facts; check proofs |
 | Printer (`ir/print.spc`) | The IR expected-output tests |
 
 The checked inventory (every consumer, the fields it reads, what it still reads outside the

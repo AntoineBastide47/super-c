@@ -54,7 +54,7 @@ unary `-` and parentheses) is computed in one type, at compile time and at run t
   every operand takes it: `let z: i64 = 2000000000 * 2;` is 4000000000, `let b: u8 = 2 + 3;` is a
   `u8`. A literal outside that type is an error (`let x: i32 = 0x80000000;`: "integer literal is out
   of range for 'i32'"); an overflowing step is the error of any integer overflow (`let i: i32 =
-  2147483647 + 1;` and `let x: u32 = 0 - 231;`: "this statement is undefined behavior when executed:
+  2147483647 + 1;` and `let x: u32 = 0 - 231;`: "this operation is undefined behavior when executed:
   arithmetic overflow"), and a negation typed unsigned is rejected (`let x: u32 = -1;`: "cannot apply
   unary operator '-' to type 'u32'"). A suffix pins its literal the same way (`2000000000i32 * 2` is an
   error).
@@ -62,7 +62,8 @@ unary `-` and parentheses) is computed in one type, at compile time and at run t
   (`2000000000 * 2` and `2147483647 + 1` are `i64`, `9223372036854775807 + 1` is `u64`, `1 << 40` is
   `i64`, `1 << 31` stays the `i32` -2147483648); a value none holds is an error ("integer constant
   expression does not fit in 'i32', 'i64' or 'u64'"). `-9223372036854775807 - 1` and
-  `-9223372036854775808` are the `i64` minimum. Library integers (`Int<N>`, `UInt<N>`) are never
+  `-9223372036854775808` are the `i64` minimum, `-2147483648` the `i32` one; a negated suffixed
+  literal reaches its type's minimum too (`-128i8`, `-9223372036854775808i64`). Library integers (`Int<N>`, `UInt<N>`) are never
   selected; a declared one converts the builtin result.
 - A float expression is `f32`, or `f64` when a step passes the f32 range (`1e39`, `1e30 * 1e10`); past
   the f64 range, or past a declared or suffixed type's, it is an error ("float literal is out of
@@ -89,61 +90,9 @@ is a byte scan with no UTF-8 validation. `format()` and `print` arguments are no
 
 ## Arithmetic Semantics
 
-Compile-time evaluation and the compiled program give the same result; where the program
-traps, a constant is an error ("arithmetic overflow", "division by zero", "shift out of
-range").
-
-- Integer overflow (`+ - *` of every built-in integer, signed and unsigned, unary `-` and `abs()`
-  of MIN, `+=` and the other compound forms, a loop step, at the type's own width, `i8`/`u8`/`i16`/
-  `u16` too, `+ - *` and `pow()` of std's `Int<N>` and `UInt<N>`, and `Int<N>`'s `abs()`) **traps**
-  ("attempt to add with overflow", "attempt to subtract with overflow", "attempt to multiply with
-  overflow") in a profile with overflow checks and **wraps** modulo the width without them (Rust's
-  rule). `dev`, `debug`,
-  `test` and `race` check; `release`, `bench` and `pgogen` wrap; a custom profile checks at
-  `opt-level` 0 or 1 (or no `opt-level`) and wraps at 2, 3, `"s"` and `"z"`, and
-  `overflow-checks = true/false` overrides that (super-c-binary, "Built-in profiles"). The
-  `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` methods never trap.
-- Unary `-` on an unsigned type is an error ("cannot apply unary operator '-' to type 'u32'"),
-  `-0` too; `x.wrapping_neg()` is the two's complement negation.
-- An operand the checker widens (`u8 + u64`, `u32 + i64`) computes at the result's type; a shift
-  computes at its left operand's type.
-- Division and remainder by zero, signed `MIN / -1` and `MIN % -1`, and a shift by a
-  negative count or by the width or more **trap** in every profile, with the same messages for
-  std's `Int<N>`/`UInt<N>` ("attempt to divide with overflow") and the same compile-time errors
-  ("arithmetic overflow", "division by zero"). A signed `<<` shifts
-  the two's complement bits (`-1 << 1` is -2; bits shifted out are lost); `>>` is
-  arithmetic on signed types.
-- Float `Eq`, `Ord` and `Hash` use the IEEE-754 total order (`total_cmp`, std/core.spc): NaN
-  equals itself and `-0.0` differs from `0.0`, so floats sort and work as `Map`/`Set` keys. The
-  `==` and `<` operators stay IEEE. There is no PartialEq/PartialOrd split.
-- A float `%` is the C `fmod` remainder: the result has the sign of the dividend
-  (`-7.5 % 2.0` is -1.5).
-- A float-to-integer `as` truncates toward zero and **saturates**: a value past either end
-  of the target is that end, NaN is 0 (`1e20 as i32` is 2147483647).
-- Division uses explicit rounding operations when the rule matters.
-- `usize`/`isize` have the target's pointer width (32 bits on wasm32), in compile-time evaluation
-  too.
-
-Every built-in integer has `trailing_zeros()`, `leading_zeros()` and `count_ones()`, returning
-`usize` (the `UInt`/`Int` convention); a zero input gives the bit width, and a signed value counts
-its two's complement pattern. They lower to the C compiler's bit-count builtins (`std/bits.h`) and
-evaluate at compile time, also inside a `const fn`.
-
-Every built-in integer (`i8` to `i64`, `isize`, `u8` to `u64`, `usize`) has Rust's explicit
-overflow methods, with the same results in every profile:
-
-| Methods | Result |
-|---------|--------|
-| `wrapping_add/sub/mul(rhs)`, `wrapping_neg()` | modulo 2^N (`u8::MAX.wrapping_add(1)` is 0, `i8::MIN.wrapping_neg()` is MIN) |
-| `wrapping_shl/shr(n: u32)` | the count modulo the width (`1u8.wrapping_shl(9)` is 2); `shr` is arithmetic on signed types |
-| `overflowing_add/sub/mul(rhs)` | the wrapped value and whether it overflowed, a pair: `let (r, o) = a.overflowing_add(b);` |
-| `checked_add/sub/mul/div/rem(rhs)`, `checked_neg()`, `checked_shl/shr(n: u32)` | `Option`: `None` on overflow, a zero divisor, MIN / -1, a count of the width or more, or an unsigned negation of a nonzero value |
-| `saturating_add/sub/mul(rhs)` | clamped to the type's range |
-
-They are plain std source (`std/core.spc`) over the `sc_w*64`/`sc_mulo_*64` helpers of `std/bits.h`
-(C's unsigned operators and `__builtin_mul_overflow`, no trap), and evaluate at compile time, also
-inside a `const fn`. Use them for every intentional wraparound: hashes (FNV, multiplicative mixes),
-random number generators, checksums, and two's complement bit tricks (`x & x.wrapping_neg()`).
+[operations.md](operations.md) is the normative table of every scalar, conversion, float, pointer,
+atomic and control operation: whether it wraps, traps, gives a defined value, or is undefined, and
+the explicit `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` methods.
 
 ## Struct Layout
 
@@ -157,15 +106,16 @@ with `static_assert(sizeof(T) == N, "...")`.
 |--------|---------|
 | `*const T` | Immutable raw pointer |
 | `*mut T` | Mutable raw pointer |
+| `*T` | The same type as `*const T` |
 | `&T` | Shared reference (borrow-checked) |
 | `&mut T` | Exclusive reference (borrow-checked) |
-| `new T(expr)` | Heap allocate |
+| `new T(expr)` | Heap allocate (`*mut T`); "out of memory" panics on a failed allocation |
 | `new T { .. }` | Heap allocate with struct literal |
 | `sizeof(T)` | Byte size |
 | `alignof(T)` | Alignment |
 
-Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` lowers to
-`const T*` in C; `&mut T` lowers to `T*`, and a `&mut T` parameter to `T *restrict`: the
+Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` and `*const T`
+lower to `const T*` in C; `&mut T` and `*mut T` lower to `T*`, and a `&mut T` parameter to `T *restrict`: the
 C compiler assumes nothing else reaches the referent during the call. Unsafe code that
 reaches a live `&mut` referent through another path (a raw pointer, a second reference)
 while the call runs is undefined behavior. `&T` parameters stay plain `const T*`, because

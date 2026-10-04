@@ -306,12 +306,12 @@ fn always_panics_lint() {
     assert(u.exit != 0);
     assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"));
     // Through a closure: the call stack names the closure frame (its syntax may be released by then).
-    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a / 0;\n    return f(1);\n}\n");
+    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a + 2147483647;\n    return f(1);\n}\n");
     let cl = p.compile("clos.spc");
     assert(cl.exit != 0);
     assert(
         cl.out_has(
-            "error: this statement is undefined behavior when executed: division by zero (call stack: <closure>;",
+            "error: this statement is undefined behavior when executed: arithmetic overflow (call stack: <closure>;",
         ),
     );
 
@@ -326,6 +326,87 @@ fn always_panics_lint() {
     let q = p.run_raw(qargs.as_str());
     assert_eq(q.exit, 0);
     assert(!q.out_has("always panics"));
+}
+
+// A constant operation that traps on every execution is an error at the operation: an ordinary body,
+// a closure, a generic body (once, with a note, not at the call), and an initializer, used or not,
+// whose message names the item. A trap through a call stays at the item's name; a branch a closed
+// condition makes dead is not checked.
+@test
+fn constant_traps_at_the_operation() {
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    p.mkfile(
+        "body.spc",
+        "fn main() i32 {\n    let x: i32 = 5;\n    let a = x / (1 - 1);\n    let b = x << 40;\n    let c: i8 = -(-128i8);\n    let d: i32 = 2147483647 + 1;\n    return a + b + c as i32 + d;\n}\n",
+    );
+    let b = p.compile("body.spc");
+    assert(b.exit != 0);
+    let op = "error: this operation is undefined behavior when executed:";
+    assert(b.out_shows(format("{} division by zero\n--> {}/body.spc:3:13", op, root).as_str()));
+    assert(b.out_shows(format("{} shift out of range\n--> {}/body.spc:4:13", op, root).as_str()));
+    assert(b.out_shows(format("{} arithmetic overflow\n--> {}/body.spc:5:17", op, root).as_str()));
+    assert(b.out_shows(format("{} arithmetic overflow\n--> {}/body.spc:6:18", op, root).as_str()));
+    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a + (2147483647 + 1);\n    return f(1);\n}\n");
+    let c = p.compile("clos.spc");
+    assert(c.exit != 0);
+    assert(c.out_shows(format("{} arithmetic overflow\n--> {}/clos.spc:2:27", op, root).as_str()));
+    p.mkfile(
+        "gen.spc",
+        "fn g<T>(x: T) i32 {\n    return 2147483647 + 1;\n}\n\nfn main() i32 {\n    return g::<i32>(1) + g::<u8>(2);\n}\n",
+    );
+    let g = p.compile("gen.spc");
+    assert(g.exit != 0);
+    assert(g.out_shows(format("{} arithmetic overflow\n--> {}/gen.spc:2:12", op, root).as_str()));
+    assert(g.out_shows("= note: its operands do not depend on a type parameter: every instantiation traps"));
+    assert(!g.out_has("call stack"));
+    p.mkfile("unused.spc", "static mut S: i32 = 2147483647 + 1;\n\nfn main() i32 {\n    return 0;\n}\n");
+    let un = p.compile("unused.spc");
+    assert(un.exit != 0);
+    assert(
+        un.out_shows(
+            format(
+                "error: static 'S' cannot be evaluated at compile time: arithmetic overflow\n--> {}/unused.spc:1:21",
+                root,
+            ).as_str(),
+        ),
+    );
+    p.mkfile("used.spc", "static mut U: i32 = 7 / 0;\n\nfn main() i32 {\n    return unsafe U;\n}\n");
+    let us = p.compile("used.spc");
+    assert(us.exit != 0);
+    assert(
+        us.out_shows(
+            format(
+                "error: static 'U' cannot be evaluated at compile time: division by zero\n--> {}/used.spc:1:21",
+                root,
+            ).as_str(),
+        ),
+    );
+    assert(!us.out_has("internal"));
+    p.mkfile("cst.spc", "const C: u8 = 255 + 1;\n\nfn main() i32 {\n    return 0;\n}\n");
+    let k = p.compile("cst.spc");
+    assert(k.exit != 0);
+    assert(
+        k.out_shows(
+            format(
+                "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow\n--> {}/cst.spc:1:15",
+                root,
+            ).as_str(),
+        ),
+    );
+    p.mkfile(
+        "call.spc",
+        "const fn f(x: i32) i32 {\n    return x + 2147483647;\n}\n\nstatic mut S: i32 = f(1);\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    let cl = p.compile("call.spc");
+    assert(cl.exit != 0);
+    assert(cl.out_shows("error: static 'S' cannot be evaluated at compile time: arithmetic overflow (call stack: f;"));
+    assert(cl.out_shows(format("\n--> {}/call.spc:5:12", root).as_str()));
+    p.mkfile(
+        "dead.spc",
+        "fn main() i32 {\n    let x: i32 = 5;\n    if false {\n        return x / 0;\n    }\n    if 1 > 2 {\n        return 2147483647i32 + 1;\n    } else {\n        return 0;\n    }\n}\n",
+    );
+    assert(p.compile("dead.spc").ok());
 }
 
 // Linting a standalone file from a directory with no `src/` layout takes the per-path `run_lint`

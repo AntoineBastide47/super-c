@@ -337,15 +337,18 @@ character of each profile, not the verbatim flags. **Never profile the `dev` bui
 sanitizer frames dominate the samples.
 
 Integer overflow (signed and unsigned) traps under `dev`, `debug`, `test` and `race` and wraps under
-`release`, `bench` and `pgogen` (language skill, `types.md` "Arithmetic Semantics"). The
+`release`, `bench` and `pgogen` (language skill, `operations.md`). The
 emitted C is the same under every profile: it calls the arithmetic helpers of `super_rt.h`
 (std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` from std's `int128.h`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
 (`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
 `push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
 foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
 gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.c` fails to compile
-without the flag. It also gets `-Werror=incompatible-pointer-types`, so clang rejects the
-incompatible pointer arguments gcc 14 already rejects (`@c.source` files included).
+without the flag. It also gets `-ffp-contract=off`, so the C compiler never fuses a float
+multiply and add (only an explicit `fma` fuses) and run-time float results equal the constant
+evaluator's on every target, and `-Werror=incompatible-pointer-types`, so clang rejects the
+incompatible pointer arguments gcc 14 already rejects (`@c.source` files included). The `cstd`
+key and `--cstd` replace only the standard and feature-macro flags, never these three.
 
 ### Link-time optimization
 
@@ -359,12 +362,12 @@ The mode and the linker cache options are part of every object and link fingerpr
 changing either relinks; the transpiler never sees them, so the emitted C is identical
 under every mode.
 
-`thin` is a request. The engine settles it once per profile directory with a toolchain
-probe (`<out-dir>/<profile>/.lto`): the record's key line holds the compiler version,
-path and mtime, the target, the compile tail and the link flags; its second line the
-linker the `-v` link log named and that executable's mtime; its third the verdict. A
-build whose record matches every input runs no probe, so only the first build under a
-toolchain and flag set pays for it (about 0.2 s here). The probe compiles and links a one-function program in the argv
+`thin` is a request. The engine settles it once per profile directory with the `thin-lto`
+probe of the toolchain probe table (below): its line in `<out-dir>/<profile>/.probes`
+holds the verdict (`thin <cache form>` or `auto: <reason>`), then the linker the `-v` link
+log named and that executable's mtime. A build whose record matches every input runs no
+probe, so only the first build under a toolchain and flag set pays for it (about 0.2 s
+here). The probe compiles and links a one-function program in the argv
 form real builds use (`.ltoprobe`, removed afterwards): `-flto=thin` must compile and
 link (exit code and output file, never version text), then the link is retried with each
 linker cache form (Apple ld's cache path with its prune options, lld's ThinLTO cache
@@ -377,8 +380,9 @@ ThinLTO but no cache directory with a pruning policy links with `-flto=thin` and
 cache (`"lto":"thin"`).
 
 The linker cache lives under the build cache root (`$SC_CACHE_DIR`, else
-`~/.super-c/cache`) at `lto/<namespace>`, one namespace per hash of the record's key and
-linker lines (compiler, linker, target, flags, schema); `SC_NO_LTO_CACHE=1` links
+`~/.super-c/cache`) at `lto/<namespace>`, one namespace per hash of the compiler version,
+path and mtime, the target, the compile and link flags, the schema and the linker line;
+`SC_NO_LTO_CACHE=1` links
 without it. The linker owns the entries and prunes them itself (entries unused for a
 week, the cache under a tenth of the disk and, with lld or gold, under 1 GiB; checked at
 most hourly); the engine creates the directory. The daily sweep (below) removes a
@@ -441,6 +445,56 @@ the compiler users run, and `ci/perf_gate.sh` holds its runtime within 3%. Scrip
 (`super-c release foo.spc`) links once with no link record to relink against, so a `thin`
 profile keeps `auto` there.
 
+### Toolchain probes
+
+The probe table (`src/build_system/probe.spc`) records what the C compiler and linker
+accept under a build's target and flags. Each probe has an id, a C snippet or a flag, a
+step (`compile` with `-c`, `link` with the build's link flags, `asm` with `-S`, or the
+engine's `lto` procedure) and a result kind: `accepted`/`rejected`, the first accepted
+spelling of a list, the form of a 16-byte compare-exchange (`inline` when the assembly
+holds `cmpxchg16b`, `casp*` or an `ldxp`/`stxp` loop; `outline call` for libgcc's
+`__aarch64_cas16_*`; `library call` for libatomic's `__atomic_compare_exchange_16`), or the
+ThinLTO verdict. A probe the target or instruction set does not take reports `not
+applicable` and never runs. Each step is an argv child of the compiler driver with the
+build's compile flags (no shell); exit codes, output files and assembly text decide,
+never version text.
+
+| Id | Applies to | Result |
+|----|------------|--------|
+| `add-overflow` | all | `__builtin_add/sub/mul_overflow` accepted |
+| `fp-contract-off` | all | `-ffp-contract=off` accepted |
+| `target-attr-x86_64` | x86_64 | the `target("...")` spelling that enables AVX2: `avx2` or `arch=haswell` |
+| `target-attr-aarch64` | aarch64 | the spelling that enables i8mm: `+i8mm`, `arch=armv8.6-a` or `i8mm` |
+| `march-x86-64-v2`, `-v3`, `-v4` | x86_64 | `-march=x86-64-vN` accepted |
+| `wasm-simd128`, `wasm-relaxed-simd` | wasm32 | `-msimd128` (`-mrelaxed-simd`) with `<wasm_simd128.h>` accepted |
+| `cas16` | all | the 16-byte `__atomic_compare_exchange_n` form |
+| `thread-local` | all | `_Thread_local` accepted |
+| `cpuid-count` | x86_64 | `<cpuid.h>` `__get_cpuid_count` accepted |
+| `getauxval`, `at-hwcap2`, `at-hwcap3` | Linux and Android aarch64 | `getauxval` links; each `AT_HWCAP*` constant compiles |
+| `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
+
+The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
+its first line holds the schema, a hash of the compiler path and mtime, the target, the
+instruction set and the compile and link flags, then the compiler version line; each
+other line is `<id>\t<result>` (the `thin-lto` line adds the linker path and mtime). A
+record of another key holds nothing; one of another compiler version loses its results
+once the version probe answers. A probe runs only when a build needs its result and the
+record does not hold it: the needed probes start beside the compiler version probe,
+before the transpile, one child per spelling, all at once. A build that measured nothing
+leaves the record unchanged. The results a build used end every object and link
+fingerprint (` | probes <id>=<result>;`). Today a build uses the `thin-lto` verdict alone,
+under `lto = "thin"`; the emitted C uses no probe result, so the emit stamp holds none.
+
+```sh
+super-c build --print-probes                    # the table for the dev profile and the host target
+super-c build --print-probes --profile=release  # under the release flags
+```
+
+`--print-probes` (`build` and `release` from build.toml) prints `compiler: <version line>`,
+`target: <platform> <arch>`, then one `<id> <result>` row per probe in table order, with the
+ids padded to 24 columns. It runs every applicable probe the record does not hold, the
+ThinLTO procedure included, adds the results to the record, and builds nothing.
+
 ### Common flags
 
 | Flag | Effect |
@@ -453,6 +507,7 @@ profile keeps `auto` there.
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above) |
+| `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above) |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
@@ -495,7 +550,9 @@ profile keeps `auto` there.
 | `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core under each delay seed |
 | `SC_CEMIT_STATS` | Per-phase wall times (the unused-item lint as its own phase), the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes; printed after borrow checking and after the always-panics check) and the instance graph's collect line (records by kind, bodies walked, rounds, a budget stop), the re-lowering census (one line per template: instances, re-lowerings, identical re-lowerings, retained KiB) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, the instance discovery total, re-lowering templates and instances by reason, bodies taken from the keep or lowered, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
-| `SC_BCE_STATS` | Per-body bounds-check elimination counters |
+| `SC_BCE_STATS` | Per-body bounds-check elimination counters (`BceStats`): checks and range checks seen and removed, coalesced, folded, signature crossings, and the kept checks per reason (six reason columns, `BR_WIDENED` the last) |
+| `SC_BCE` | `0` turns bounds-check elimination off: every check stays (the generator's BCE differential oracle) |
+| `SC_BCE_DISABLE` | A list of BCE rules to turn off, matched by substring: `fold` (folded panic guards), `sig` (signature facts), `int` (the interval facts of `ir/facts.spc`) |
 | `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module-level schedule the type check ran before, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs). Keeps every body arena until emission planning (its final graph reads the bodies) |
 
 ### LSP
@@ -510,7 +567,7 @@ profile keeps `auto` there.
 
 | Variable | Effect |
 |----------|--------|
-| `SC_LEAK_CHECK` | Leak/double-free/UAF tracker: any non-`0` value reports at exit; a value starting `f`/`F` (e.g. `fatal`) exits 23 on findings |
+| `SC_LEAK_CHECK` | Leak and double-free tracker (also reports a `realloc` of a freed pointer; no other use-after-free check): any non-`0` value reports at exit; a value starting `f`/`F` (e.g. `fatal`) exits 23 on findings |
 | `SC_TASK_TRACE` | Coroutine/task tracing for the life of the process |
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
 | `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_rt.c`): non-`0` reports; `f`/`F` prefix aborts |
@@ -563,7 +620,7 @@ profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAM
 per-TU cache and `__sc_manifest` with it), the emitted C is content-synced into `gen/`
 (unchanged files keep their mtime), objects compile into `obj/` with `-MMD` dep tracking,
 and `compile_commands.json` and the emit stamp `.emit_stamp` land beside them, with the
-ThinLTO probe record `.lto` for a profile that requests `lto = "thin"`. `super-c test`
+toolchain probe record `.probes` once a build or `--print-probes` measured a probe. `super-c test`
 runs the same engine on the generated test root under the `test` profile in
 `<out-dir>/test/` (`raw/`, `gen/`, `obj/`, the runner `__tests`), with the emit
 stamp and object cache making an unchanged suite a link check; `super-c bench` uses
@@ -578,6 +635,6 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative: `cc -funsigned-char build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)`
+Includes are relative: `cc -funsigned-char -ffp-contract=off build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)`
 builds the whole tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`;
 add `-DSC_ARITH_WRAP` for wrapping integer overflow).

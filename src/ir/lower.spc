@@ -4267,10 +4267,38 @@ extend Lowerer {
         tm.targs_len = targs_len;
         tm.iface = iface;
         tm.recv = recv;
+        tm.intr = self.call_intr(callee, start, n);
         let cont = self.open_block();
         tm.t0 = cont;
         self.seal(tm, cont);
         return self.copy_op(dst);
+    }
+
+    // The verified intrinsic kind of a call of `callee` with the `n` arguments at `start`: the callee
+    // is the extern routine `ir::ci_of_name` names, the arity matches, and the first argument is a
+    // pointer (a fence takes none). CI_NONE otherwise.
+    fn call_intr(self: &Self, callee: DefId, start: u32, n: u32) u8 {
+        if callee.node == NODE_NONE {
+            return ir::CI_NONE;
+        }
+        let a = unsafe &*(&*self.pkg).module_ast_const(callee.module);
+        let nd = a.at_const(callee.node);
+        if nd.kind != NodeKind::NODE_FUNCTION || !nd.as_data.function.is_extern() {
+            return ir::CI_NONE;
+        }
+        let nsp = a.at_const(nd.as_data.function.name).as_data.name.text;
+        let src = unsafe (&*self.pkg).modules.at(callee.module as usize).source.as_str();
+        let k = ir::ci_of_name(src.slice(nsp.start as usize, nsp.end as usize));
+        if k == ir::CI_NONE || ir::ci_arity(k) != n {
+            return ir::CI_NONE;
+        }
+        if k != ir::CI_FENCE {
+            let op = *self.body.operands.at(self.body.oper_pool[start as usize] as usize);
+            if self.f.ty(op.ty).kind != TypeKind::TYPE_POINTER {
+                return ir::CI_NONE;
+            }
+        }
+        return k;
     }
 
     fn lower_call(self: &mut Self, id: NodeId) ir::OperandId {

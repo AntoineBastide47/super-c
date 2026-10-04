@@ -9,10 +9,12 @@ import ast::facts as facts;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
+import ir::core as ir;
 import ir::interp as iri;
 import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
+import lexer::token as tok;
 import tests::harness as h;
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
@@ -486,6 +488,96 @@ fn large_alignment_layout_is_stable() {
     run_leak_checked(
         "large alignment layout",
         "@c.align(512)\nstruct Big { pub x: u8 }\nconst A: usize = sizeof(Big);\nconst B: usize = sizeof(Big);\nconst C: usize = alignof(Big);\nfn main() i32 { return (A + B + C) as i32 - 1536; }\n",
+        0,
+    );
+}
+
+// The memory and atomic externs of the snippet, called with their arity and a pointer first argument.
+const INTR_SRC: str = "extern \"C\" {\n    fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;\n    fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;\n    fn memset(dst: *mut void, value: i32, n: usize) *mut void;\n    fn memcmp(a: *const void, b: *const void, n: usize) i32;\n    fn __sc_atomic_load_u32(p: *const u32, mo: i32) u32;\n    fn __sc_atomic_add_u32(p: *mut u32, v: u32, mo: i32) u32;\n    fn __sc_atomic_fence(mo: i32);\n}\nfn f(d: *mut u8, s: *const u8, c: *mut u32) u32 {\n    unsafe memcpy(d, s, 4);\n    unsafe memmove(d, s, 4);\n    unsafe memset(d, 0, 4);\n    let _ = unsafe memcmp(d, s, 4);\n    unsafe __sc_atomic_fence(4);\n    let _ = unsafe __sc_atomic_add_u32(c, 1, 0);\n    return unsafe __sc_atomic_load_u32(c, 2);\n}\nfn main() i32 { return 0; }\n";
+
+@test
+fn intrinsic_calls_are_tagged() {
+    let p = typed_package(INTR_SRC);
+    let out = lowered(&p, "f");
+    assert(has(&out, ") intrinsic memcpy -> bb"), "memcpy is tagged after the call");
+    assert(has(&out, "intrinsic memmove"), "memmove is tagged");
+    assert(has(&out, "intrinsic memset"), "memset is tagged");
+    assert(has(&out, "intrinsic fence"), "the fence is tagged");
+    assert(has(&out, "intrinsic atomic_rmw"), "the fetch-add is tagged");
+    assert(has(&out, "intrinsic atomic_load"), "the load is tagged");
+    assert(!has(&out, "intrinsic none"), "memcmp is no intrinsic");
+    assert(ir::ci_of_name("__sc_atomic_cas_u64") == ir::CI_ATOMIC_CAS, "compare-exchange kind");
+    assert(ir::ci_of_name("__sc_atomic_store_bool") == ir::CI_ATOMIC_STORE, "store kind");
+    assert(ir::ci_of_name("memcmp") == ir::CI_NONE, "memcmp has no kind");
+    assert(ir::ci_arity(ir::CI_ATOMIC_CAS) == 6, "compare-exchange arity");
+}
+
+@test
+fn verifier_rejects_malformed_intrinsic_tags() {
+    let p = typed_package(INTR_SRC);
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
+    assert_eq(irv::verify(&lw.body, tp, &p), "");
+    let mut bi: usize = 0;
+    while lw.body.blocks.at(bi).term.intr != ir::CI_MEMCPY {
+        bi += 1;
+    }
+    // Another arity.
+    lw.body.blocks[bi].term.args_len = 2;
+    assert_eq(irv::verify(&lw.body, tp, &p), "intrinsic-arity");
+    lw.body.blocks[bi].term.args_len = 3;
+    // An unresolved call.
+    let callee = lw.body.blocks.at(bi).term.callee;
+    lw.body.blocks[bi].term.callee = DefId { module: 0, node: NODE_NONE };
+    lw.body.blocks[bi].term.a = lw.body.oper_pool[lw.body.blocks.at(bi).term.args_start as usize];
+    assert_eq(irv::verify(&lw.body, tp, &p), "intrinsic-unresolved");
+    lw.body.blocks[bi].term.callee = callee;
+    lw.body.blocks[bi].term.a = ir::IR_NONE;
+    // A tag on another terminator kind.
+    let last = lw.body.blocks.len() - 1;
+    lw.body.blocks[last].term.intr = ir::CI_FENCE;
+    assert_eq(irv::verify(&lw.body, tp, &p), "intrinsic-not-call");
+}
+
+@test
+fn printer_shows_omitted_aggregate_members() {
+    // A designated array literal leaves the members it does not name out of the operand pool.
+    let ut = Ast::builtin(BuiltinType::BT_I32);
+    let sp = tok::Span { start: 0, end: 0 };
+    let none = DefId { module: 0, node: NODE_NONE };
+    let mut b = ir::CoreBody::new(DefId { module: 0, node: 0 }, 0);
+    let l = b.add_local(ir::LocalDecl::anon(ut, ir::LS_TEMP, sp));
+    b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ut });
+    b.constants.push(ir::Constant { kind: ir::CK_INT, ty: ut, val: 7, raw: sp, item: none });
+    b.operands.push(ir::Operand { kind: ir::OP_CONST, data: 0, ty: ut });
+    b.oper_pool.push(0);
+    b.oper_pool.push(ir::IR_NONE);
+    b.rvalues.push(ir::Rvalue { kind: ir::RV_AGGREGATE, a: 0, b: 2, c: ir::AGG_ARRAY, target: ut, item: none });
+    b.statements.push(ir::Statement { kind: ir::ST_ASSIGN, place: 0, rvalue: 0, a: 0, span: sp });
+    let blk = b.add_block();
+    b.blocks[blk as usize].stmt_len = 1;
+    b.blocks[blk as usize].term.kind = ir::TM_RETURN;
+    b.blocks[blk as usize].sealed = true;
+    let out = irp::print_body(&b);
+    assert(has(&out, "[const 7, _]"), "an omitted member prints as `_`");
+}
+
+@test
+fn terminator_and_block_sizes_are_fixed() {
+    assert(sizeof(ir::Terminator) == 68, "the intrinsic tag sits in the terminator's tail padding");
+    assert(sizeof(ir::BasicBlock) == 80, "blocks keep their size");
+}
+
+@test
+fn memory_intrinsics_evaluate_at_compile_time() {
+    // memmove copies overlapping bytes of an array in both directions; memset and memcpy fill and
+    // copy a heap buffer. The constants and the run-time calls agree.
+    run_leak_checked(
+        "memory intrinsics in constants",
+        "import string;\nconst fn moved(right: bool) u32 {\n    let mut a: [u8; 6] = [1, 2, 3, 4, 5, 6];\n    let p = &mut a as *mut [u8; 6] as *mut u8;\n    if right {\n        unsafe string::memmove(unsafe (p + 1), p, 4);\n    } else {\n        unsafe string::memmove(p, unsafe (p + 1), 4);\n    }\n    let mut r: u32 = 0;\n    for x in a {\n        r = r * 10 + x as u32;\n    }\n    return r;\n}\nconst fn filled() u32 {\n    let mut a = Vector::<u8>::new();\n    let mut b = Vector::<u8>::new();\n    for i in 1..5 {\n        a.push(i as u8);\n        b.push(0);\n    }\n    let q = b.as_ptr() as *mut u8;\n    unsafe string::memset(q, 7, 2);\n    unsafe string::memcpy(unsafe (q + 2), a.as_ptr(), 2);\n    let mut r: u32 = 0;\n    for x in b.iter() {\n        r = r * 10 + *x as u32;\n    }\n    return r;\n}\nconst R: u32 = moved(true);\nconst L: u32 = moved(false);\nconst F: u32 = filled();\nstatic_assert(R == 112346, \"memmove to a higher address\");\nstatic_assert(L == 234556, \"memmove to a lower address\");\nstatic_assert(F == 7712, \"memset then memcpy\");\nfn main(argv: Vector<str>) i32 {\n    let right = argv.len() == 1;\n    if moved(right) != R || moved(!right) != L || filled() != F {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
 }

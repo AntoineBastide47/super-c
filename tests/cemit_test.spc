@@ -127,7 +127,7 @@ fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     let mut cmd = String::new();
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
-    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -I");
+    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I");
     cmd.push_string(&rt);
     cmd.push_str(" -o build/cemit_probe_");
     cmd.push_str(tag);
@@ -301,4 +301,16 @@ fn far_read_stays_declared() {
     emit_tu(&p, &names[0], 1, &mut em);
     assert(em.out.contains(".f0 = _"), "the far-read field value stays a declared temporary");
     assert(em.out.contains(".f299 = __sc_add_i64(y, 299LL)"), "the near-read field value folds");
+}
+
+// The emitted assert location counts the line ends the diagnostics count: `\n`, `\r\n`, and a lone `\r`.
+@test
+fn assert_line_counts_every_line_end() {
+    let p = typed_package(
+        "pub fn f(a: i32) i32 {\r\n    let b = a + 1;\r    let c = b * 2;\n    assert(c > 0, \"pos\");\r    return c;\r}\rfn main() i32 { return 0; }",
+    );
+    let mut em = cb::CEmit::new(&p);
+    let names: [str; 1] = ["f"];
+    emit_tu(&p, &names[0], 1, &mut em);
+    assert(em.out.contains("<harness>:4\\n"), "the assert reports line 4");
 }

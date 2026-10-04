@@ -4,7 +4,8 @@
 # that must spawn processes (the build engine's cc, bindgen's preprocessor, the test runner) fall
 # back to the native binary -- WASI has no processes, so this split IS the wasm lane. Used through
 # SC_TEST_SUPERC, which `super-c test` installs as the harness's compiler under test.
-R="$(cd "$(dirname "$0")/.." && pwd)"
+# The physical path: the guest finds std/ beside the module and does not resolve a symlinked directory.
+R="$(cd "$(dirname "$0")/.." && pwd -P)"
 WASM="${SC_WASM_MODULE:-$R/super-c.wasm}"
 NATIVE="${SC_WASM_NATIVE:-$R/super-c}"
 case "$1" in

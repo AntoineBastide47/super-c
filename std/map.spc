@@ -77,12 +77,12 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let oldcap = self.cap;
         // Zero-sized keys or values occupy no bytes: the aligned sentinel, no allocator call.
         if sizeof(K) == 0 {
-            self.keys = zst_dangling::<K>();
+            self.keys = dangling::<K>();
         } else {
             self.keys = (unsafe self.alloc.alloc(newcap * sizeof(K), alignof(K))) as *mut K;
         }
         if sizeof(V) == 0 {
-            self.vals = zst_dangling::<V>();
+            self.vals = dangling::<V>();
         } else {
             self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
         }
@@ -321,10 +321,4 @@ extend<V> MapValues<V> as Iterator<&V> {
         }
         return Option::<&V>::None;
     }
-}
-
-// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
-// duplicated privately so the prelude module needs no self-import).
-const fn zst_dangling<T>() *mut T {
-    return alignof(T) as *mut T;
 }

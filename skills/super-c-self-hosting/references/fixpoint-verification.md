@@ -36,7 +36,7 @@ export SC_NO_TU_CACHE=1
 mv "$fix_dir/src/build" "$fix_dir/gen1"
 
 # Compile gen-1's emitted C directly.
-cc -O1 -std=gnu11 -funsigned-char -Wall -Wextra -Werror \
+cc -O1 -std=gnu11 -funsigned-char -ffp-contract=off -Wall -Wextra -Werror \
    $(find "$fix_dir/gen1/dev/raw" -name '*.c') \
    $(cat "$fix_dir/gen1/dev/raw/__ldflags") -o "$fix_dir/gen2-bin"
 

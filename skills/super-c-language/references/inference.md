@@ -37,8 +37,8 @@ Never inferred (the signature barrier):
   the `i32` integer default; do not change it to `f64`.
 - Literal-only arithmetic (unsuffixed literals under `+ - * / %`, `& | ^ << >>`, unary `-`
   and parentheses) is typed as one expression. An expected builtin type of its kind (from a
-  declaration, a parameter, a return, or the other operand of an enclosing operator) types every
-  operand: `let z: i64 = 2000000000 * 2;` computes in `i64`. Without one it takes the first of
+  declaration, a parameter, a return, a struct field, an array element, a compound assignment, or
+  the other operand of an enclosing operator) types every operand: `let z: i64 = 2000000000 * 2;` computes in `i64`. Without one it takes the first of
   `i32`, `i64` and `u64` in which no step overflows (`2000000000 * 2` and `1 + 3000000000` are
   `i64`), never a library integer; a float expression takes `f32`, or `f64` past the f32 range.
   Integer and float literals never mix: an integer literal never takes a float type (`1 + 2.0`,
@@ -54,7 +54,9 @@ Never inferred (the signature barrier):
 - A literal that does not fit its selected type is an error, whether the type came
   from a suffix or from context; so is a float literal that meets an integer type.
   A negated literal never takes an unsigned type (`let x: u32 = -1;` and `z - -1` with
-  `z: usize` are "cannot apply unary operator '-'" errors).
+  `z: usize` are "cannot apply unary operator '-'" errors). A negated literal reaches its signed
+  type's minimum: `-128i8` and `let x: i8 = -128;` are accepted, `-2147483648` is an `i32` and
+  `-9223372036854775808` an `i64`.
 - A literal wider than 64 bits requires a wide expected type (`u128`, `Int<N>`,
   `UInt<N>`) or a width suffix; it never defaults.
 

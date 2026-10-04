@@ -843,7 +843,7 @@ Every setting is an environment variable starting with `SC_`. None is needed for
 
 | Variable | Effect |
 | --- | --- |
-| `SC_LEAK_CHECK` | the leak, double-free and use-after-free checker: any value except `0` reports at exit; a value starting with `f`/`F` (like `fatal`) also exits with code 23 |
+| `SC_LEAK_CHECK` | the leak and double-free checker (it also reports a `realloc` of a freed pointer; other reads and writes of freed memory are not checked): any value except `0` reports at exit; a value starting with `f`/`F` (like `fatal`) also exits with code 23 |
 | `SC_TASK_TRACE` | trace coroutines and tasks |
 | `SC_SCHED_SEED` | fix the scheduler's random seed, to replay a race without rebuilding |
 | `SC_LOCK_ORDER` | check lock ordering: any value except `0` reports violations; `f...`/`F...` aborts |

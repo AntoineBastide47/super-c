@@ -4,6 +4,7 @@
 // suite with the pure-computation families; the remaining families (slices, strings, closures, generics,
 // I/O via putchar) extend it the same way with run_exit / h::expect_run.
 import tests::harness as h;
+import tests::cli_harness as cli;
 import stdio;
 import string as cstring;
 
@@ -210,6 +211,17 @@ fn main() i32 {
     unsafe exit(bad);
 }
 )",
+        0,
+    );
+}
+
+// An empty string literal inside a constant aggregate that the engine evaluates (a field names a
+// constant) is static data: a pointer to a byte array and length 0.
+@test
+fn constant_aggregate_holds_empty_string() {
+    h::expect_exit(
+        "empty string in an evaluated constant aggregate",
+        "struct S { pub a: str<'static>, pub n: u32 }\nconst K: u32 = 0xFF;\nconst T: [S; 2] = [S { a: \"\", n: K }, S { a: \"z\", n: K + 1 }];\nfn main() i32 {\n  let t: []S = T;\n  if t[0].a.len() != 0 || t[0].n != 255 || t[1].a != \"z\" || t[1].n != 256 {\n    return 1;\n  }\n  return 0;\n}\n",
         0,
     );
 }
@@ -458,6 +470,12 @@ fn structs_and_methods() {
         "heap struct via new",
         "extern \"C\" { fn free(pt: *mut void) void; }\nstruct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; let r = unsafe (*b).v; unsafe free(b as *mut void); unsafe exit(r); }\n",
         9,
+    );
+    // A zero-sized `new` allocates a distinct block that `free` takes.
+    run_exit(
+        "heap zero-sized value via new",
+        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct E {}\nfn main() i32 { let a: *mut E = new E {}; let b: *mut E = new E {}; let d = a != b; unsafe free(a); unsafe free(b); unsafe exit(d as i32); }\n",
+        1,
     );
 }
 
@@ -3607,6 +3625,156 @@ fn method_on_a_turbofished_call() {
     run_leak_free(
         "a call on a turbofished call's result",
         "struct N { pub s: String }\nextend N { pub fn get(self: &Self) i64 { return self.s.len() as i64; } }\nstruct X { pub k: i32 }\nextend X { pub fn m<U>(self: &Self, u: U) N { return N { s: String::from_str(\"abc\") }; } }\nfn main() i32 { let x = X { k: 1 }; return x.m::<u8>(1).get() as i32 - 3; }\n",
+        0,
+    );
+}
+
+// An ordered comparison of raw pointers to two objects compiles and orders them; a bare `*T` takes `&T`.
+@test
+fn pointer_order_across_objects() {
+    run_exit(
+        "pointer order across objects",
+        "fn lt(p: *i32, q: *i32) bool { return p < q; }\nfn main() i32 { let x = 1; let y = 2; let a = [3, 4]; let mut r = 0; if lt(&a[0], &a[1]) { r += 1; } if lt(&x, &y) != lt(&y, &x) { r += 2; } unsafe exit(r); }\n",
+        3,
+    );
+}
+
+// Operation OP (0 load, 1 store, 2 read-modify-write, 3 compare-exchange success, 4 compare-exchange
+// failure, 5 fence, 6 bool load, 7 compare-exchange with success order SO) with memory-order code MO.
+const ATOMIC_ORDERS: str = M"(import atomic;
+import stdlib;
+
+fn arg(name: str) i32 {
+    return unsafe stdlib::atoi(stdlib::getenv(name));
+}
+
+fn main() i32 {
+    let op = arg("OP");
+    let mo = arg("MO");
+    let mut x: i32 = 5;
+    let b = false;
+    if op == 0 {
+        return unsafe atomic::load_i32(&x, mo) - 5;
+    } else if op == 1 {
+        unsafe atomic::store_i32(&mut x, 6, mo);
+        return x - 6;
+    } else if op == 2 {
+        return unsafe atomic::add_i32(&mut x, 1, mo) + x - 11;
+    } else if op == 3 {
+        if unsafe atomic::cas_i32(&mut x, 5, 7, false, mo, 0) {
+            return x - 7;
+        }
+    } else if op == 4 {
+        if unsafe atomic::cas_i32(&mut x, 5, 7, false, 4, mo) {
+            return x - 7;
+        }
+    } else if op == 5 {
+        atomic::fence(mo);
+        return 0;
+    } else if op == 6 {
+        return unsafe atomic::load_bool(&b, mo) as i32;
+    } else if op == 7 {
+        let so = arg("SO");
+        let hit = unsafe atomic::cas_i32(&mut x, 5, 7, false, so, mo);
+        let miss = unsafe atomic::cas_i32(&mut x, 5, 9, true, so, mo);
+        if hit && !miss && x == 7 {
+            return 0;
+        }
+    }
+    return 1;
+}
+)";
+
+// Every memory-order code an operation cannot take traps with "invalid memory order"; every code it
+// takes runs; a failure order stronger than the success order strengthens the success order.
+@test
+fn atomic_memory_orders_are_checked() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ATOMIC_ORDERS);
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
+    assert(p.run_raw(args.as_str()).ok());
+    // Per operation, its valid codes, then (OP=7) each failure order stronger than its success order:
+    // Relaxed + Acquire, Release + Acquire, and each weaker success with SeqCst.
+    let valid: []str = [
+        "OP=0 MO=0 ",
+        "OP=0 MO=1 ",
+        "OP=0 MO=4 ",
+        "OP=1 MO=0 ",
+        "OP=1 MO=2 ",
+        "OP=1 MO=4 ",
+        "OP=2 MO=0 ",
+        "OP=2 MO=1 ",
+        "OP=2 MO=2 ",
+        "OP=2 MO=3 ",
+        "OP=2 MO=4 ",
+        "OP=3 MO=0 ",
+        "OP=3 MO=1 ",
+        "OP=3 MO=2 ",
+        "OP=3 MO=3 ",
+        "OP=3 MO=4 ",
+        "OP=4 MO=0 ",
+        "OP=4 MO=1 ",
+        "OP=4 MO=4 ",
+        "OP=5 MO=0 ",
+        "OP=5 MO=1 ",
+        "OP=5 MO=2 ",
+        "OP=5 MO=3 ",
+        "OP=5 MO=4 ",
+        "OP=6 MO=0 ",
+        "OP=6 MO=1 ",
+        "OP=6 MO=4 ",
+        "OP=7 SO=0 MO=1 ",
+        "OP=7 SO=2 MO=1 ",
+        "OP=7 SO=0 MO=4 ",
+        "OP=7 SO=1 MO=4 ",
+        "OP=7 SO=2 MO=4 ",
+        "OP=7 SO=3 MO=4 ",
+    ];
+    // The codes between 0 and 4 each operation cannot take, one past the end, and a negative one.
+    let invalid: []str = [
+        "OP=0 MO=2 ",
+        "OP=0 MO=3 ",
+        "OP=0 MO=5 ",
+        "OP=0 MO=-1 ",
+        "OP=1 MO=1 ",
+        "OP=1 MO=3 ",
+        "OP=1 MO=5 ",
+        "OP=1 MO=-1 ",
+        "OP=2 MO=5 ",
+        "OP=2 MO=-1 ",
+        "OP=3 MO=5 ",
+        "OP=3 MO=-1 ",
+        "OP=4 MO=2 ",
+        "OP=4 MO=3 ",
+        "OP=4 MO=5 ",
+        "OP=4 MO=-1 ",
+        "OP=5 MO=5 ",
+        "OP=5 MO=-1 ",
+        "OP=6 MO=2 ",
+        "OP=6 MO=3 ",
+        "OP=6 MO=5 ",
+        "OP=6 MO=-1 ",
+    ];
+    for i in 0..valid.len() {
+        assert(p.run_bin_env(valid[i]).ok());
+    }
+    for i in 0..invalid.len() {
+        let r = p.run_bin_env(invalid[i]);
+        assert(r.exit != 0 && r.out_shows("invalid memory order"));
+    }
+}
+
+// `memmove` copies overlapping ranges in both directions as if through a temporary buffer.
+@test
+fn memmove_overlap_both_directions() {
+    run_exit(
+        "memmove overlap",
+        "extern \"C\" { fn memmove(d: *mut void, s: *const void, n: usize) *mut void; }\nfn main() i32 {\n    let mut a: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let p = &mut a[0] as *mut u8;\n    unsafe memmove(unsafe (p + 2), p, 5);\n    let mut b: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let q = &mut b[0] as *mut u8;\n    unsafe memmove(q, unsafe (q + 2), 5);\n    let wa: [u8; 8] = [1, 2, 1, 2, 3, 4, 5, 8];\n    let wb: [u8; 8] = [3, 4, 5, 6, 7, 6, 7, 8];\n    let mut r = 0;\n    for i in 0..8 {\n        unsafe {\n            if a[i] != wa[i] {\n                r |= 1;\n            }\n            if b[i] != wb[i] {\n                r |= 2;\n            }\n        }\n    }\n    unsafe exit(r);\n}\n",
         0,
     );
 }

@@ -302,9 +302,74 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `compile_c(src)` | Compile to C through the production backend; the returned text is every TU's part heads, buffer and tail plus the shared headers and instance TU, so a needle search sees every byte |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
+| `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
+| `expect_const_runtime_parity(label, decls, expr, ty)` | Require `expr` to give the same value or trap as a `const` and at run time |
+| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` |
 
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
-filtering for the host like a real build.
+filtering for the host like a real build, except the three differential oracles, which build
+through the compiler under test (below).
+
+### Differential oracles
+
+`tests/harness.spc` builds each program as `main.spc` of a scratch manifest project
+(`diff_build`, `diff_run`). An option is a build flag (`--profile=release`, `--target=wasm`,
+`--cc=cc -target x86_64-apple-macos11`, one argument even with spaces) or, as `NAME=VALUE`, an
+environment variable of the build (`SC_BCE=0` keeps every bounds check). On the wasm lane each build
+passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
+compiler under wasmtime; the C compile and the program stay native.
+
+- `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
+  command-line arguments of one run) and returns the first difference, empty when none. The trap
+  text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a sanitizer
+  report on either side or a build failure is a difference.
+- `const_runtime_parity(decls, exprs, tys, opts)` puts every case in one program: `const
+  PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`. Write inputs as `opq::<T>(v)`: the
+  constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@c.noinline`
+  identity that writes a static, so the compiler cannot fold it (a call of a plain or `const fn`
+  identity with constant arguments is folded, and a certain trap becomes the compile error "this
+  statement is undefined behavior when executed"). A trapping constant is a compile error; the
+  helper maps it to its case by line, drops it, rebuilds, and requires the run time to trap with a
+  message of the same class (`const_trap_class`, `runtime_trap_class`: "arithmetic overflow" for
+  `attempt to add/subtract/multiply/negate/divide with overflow` and the remainder form, "division
+  by zero" for `attempt to divide by zero` and `... a divisor of zero`, "shift out of range" for
+  `attempt to shift left/right with overflow`). Floats compare by bits, any NaN as `nan`. It runs
+  under `dev` (overflow checks on); `decls` must not trap. `parity_program` prints the program.
+- `asm_check(src, opts, function, contains, absent)` builds, reads
+  `build/<profile>/compile_commands.json`, finds the unit that defines `function`, reruns its
+  command with `-S` (without `-c`, `-MMD` and `-flto*`, which would print IR), and matches
+  substrings of instruction mnemonics only (`asm_mnemonics`: the first word of each body line,
+  without labels, directives and comments; Mach-O `_name:` labels too), so `x0` or `rax` never
+  match. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
+  `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
+  which the wasm lane sets (`asm_wasm32` in `tests/differential_test.spc` returns early without it).
+
+### The program generator
+
+`tests/gen/` generates small seeded programs. `driver.spc` holds `Rng` (splitmix64), the `Model`
+interface (`name`, `generate`, `oracles`, `check(k)`, `render(k)`, `candidates`, `reduce(i)`) and
+`run_seed`: generate, run each oracle, and on a failure reduce the program by delta steps (take the
+first candidate that still fails the same oracle and still builds, at most `REDUCE_CHECKS_MAX` oracle
+runs), then report the model, seed, failure, reduced program and a replay line. A new model is a
+`Clone` struct conforming to `Model`, called through `run_seed`; the driver does not change.
+
+- `scalar.spc`: integer and float expressions over every builtin width with boundary-biased inputs,
+  shift counts from -1 to the width + 1, and casts. Oracle 0 is `const_runtime_parity`; oracle 1
+  compares `dev` and `release` on a program that evaluates the plain operators under `release` and
+  the `wrapping_*` methods otherwise (`if PROFILE == "release"`), so both follow their profile's
+  overflow rule and must agree. Inputs are typed by the turbofish (`opq::<f64>(0.1)`), never by a
+  float suffix or a hex float: a constant that uses one does not fold ("the initializer does not
+  fold to a constant"). isize/usize literals stay in the 32-bit range.
+- `loops.spc`: loops with affine and strided indexes, guards and sub-slices over a Vector and a
+  slice of it; one oracle, `same_output` with BCE on against `SC_BCE=0`.
+
+`tests/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
+(`-DSC_ARITH_WRAP` through `--cstd` under `dev`: the runtime wraps, the constant traps), which the
+scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
+(200 seeds from the clock); replay or extend with
+`SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops] ./super-c test --quiet
+--test-filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four
+programs (scalar) or two (loops).
 
 ## Test Design Rules
 

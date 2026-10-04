@@ -37,6 +37,7 @@ struct AttrSyntax {
     pub has_args: bool,
     pub arg_start: usize,
     pub arg_end: usize,
+    pub expr: NodeId, // a constant-expression argument (`attr_expr_type`), NODE_NONE otherwise
 }
 
 // The lexer only ever emits single '>' tokens (so nested generics can close); the parser glues
@@ -3653,6 +3654,15 @@ extend Parser {
         }
         let has_args = self.match(TokenType::LeftParen);
         let arg_start = self.current;
+        let mut expr = NODE_NONE;
+        if has_args && parts == 2 && self.text_is(namespace, "c") && !self.check(TokenType::RightParen) {
+            let mut ws = false;
+            let mut wi = false;
+            let k = self.attr_kind_of(name, &mut ws, &mut wi);
+            if k >= 0 && attr_expr_type(k as u8) != BuiltinType::BT_COUNT {
+                expr = self.parse_attr_expr();
+            }
+        }
         if has_args {
             let mut depth: u32 = 1;
             while depth > 0 && !self.at_end() {
@@ -3678,7 +3688,38 @@ extend Parser {
             has_args: has_args,
             arg_start: arg_start,
             arg_end: arg_end,
+            expr: expr,
         };
+    }
+
+    // The argument of an attribute that takes a constant expression: NODE_NONE for a lone integer
+    // literal (the literal form, read from its token), else the expression, parsed into the module
+    // arena (it is checked with its owner). Stops before the closing ')'.
+    fn parse_attr_expr(self: &mut Self) NodeId {
+        let outer_sink = self.ast.sink_body;
+        self.ast.sink_body = false;
+        let mut expr = NODE_NONE;
+        if self.check(TokenType::IntegerLiteral) {
+            let lit = self.advance();
+            if !self.check(TokenType::RightParen) {
+                let head = self.mk(
+                    NodeKind::NODE_LITERAL,
+                    lit.span(),
+                    NodeAs { literal: LiteralData { raw: lit.span(), token_type: lit.kind() } },
+                );
+                expr = self.parse_expression_from_mode(
+                    self.parse_cast_after(self.parse_postfix_after_mode(head, ExpressionGrammar::EXPR_FULL)),
+                    ExpressionGrammar::EXPR_FULL,
+                );
+            }
+        } else {
+            expr = self.parse_expression();
+        }
+        self.ast.sink_body = outer_sink;
+        if !self.check(TokenType::RightParen) {
+            self.error_here("expected ')' after the attribute argument");
+        }
+        return expr;
     }
 
     const fn attr_arg(self: &Self, syntax: &AttrSyntax, offset: usize) Token {
@@ -4207,7 +4248,12 @@ extend Parser {
             return false;
         }
         *out = Attr { kind: kind as u8, str_span: Span::empty() };
-        if wants_str || wants_int {
+        if syntax.expr != NODE_NONE {
+            out.expr = true;
+            out.arg = syntax.expr;
+            // The text between the parentheses: the formatter replaces it whole.
+            out.str_span = Span::new(self.tokens[syntax.arg_start - 1].end(), self.tokens[syntax.arg_end].start());
+        } else if wants_str || wants_int {
             if !syntax.has_args {
                 self.errors.emit_span(
                     syntax.name.span(),
@@ -4238,7 +4284,11 @@ extend Parser {
             } else {
                 let arg = self.attr_arg(&syntax, 0);
                 if wants_int {
+                    let ne = self.errors.errors.len();
                     out.arg = self.parse_attr_int(arg);
+                    if self.errors.errors.len() == ne && !c_align_ok(out.arg) {
+                        self.errors.emit_span(arg.span(), c_align_error(out.arg));
+                    }
                 } else {
                     out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
                 }
@@ -4526,7 +4576,7 @@ pub fn known_attributes(out: &mut Vector<String>) {
 }
 
 // The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
-// `align` takes an integer, the rest take a string.
+// `align` takes an integer or a constant expression (`attr_expr_type`), the rest take a string.
 const C_ATTR_NAMES: [str<'static>; 14] = [
     "inline",
     "always_inline",

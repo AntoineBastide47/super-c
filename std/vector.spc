@@ -34,7 +34,7 @@ extend<T, A: Allocator> Vector<T, A> {
         if sizeof(T) == 0 {
             // Zero-sized elements occupy no bytes: an aligned sentinel and unbounded logical
             // capacity, with no allocator call (the branch folds away per instantiation).
-            v.ptr = zst_dangling::<T>();
+            v.ptr = dangling::<T>();
             v.cap = ~(0 as usize);
             return v;
         }
@@ -67,7 +67,7 @@ extend<T, A: Allocator> Vector<T, A> {
     pub const fn reserve(self: &mut Vector<T, A>, additional: usize) {
         if sizeof(T) == 0 {
             assert(additional <= ~(0 as usize) - self.len, "Vector<ZST> length overflow");
-            self.ptr = zst_dangling::<T>();
+            self.ptr = dangling::<T>();
             self.cap = ~(0 as usize);
             return;
         }
@@ -716,10 +716,4 @@ extend<T: Format, A: Allocator> Vector<T, A> as Format {
         s.push_str("]");
         return s;
     }
-}
-
-// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
-// duplicated privately so the prelude module needs no self-import).
-const fn zst_dangling<T>() *mut T {
-    return alignof(T) as *mut T;
 }

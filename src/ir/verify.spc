@@ -226,6 +226,9 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             return "block-stmts-out-of-range";
         }
         let t = &blk.term;
+        if t.intr != ir::CI_NONE && t.kind != ir::TM_CALL {
+            return "intrinsic-not-call";
+        }
         if t.kind == ir::TM_GOTO || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT {
             if t.t0 as usize >= b.blocks.len() {
                 return "successor-out-of-range";
@@ -263,6 +266,13 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
                 if b.dest_pool[(t.dests_start + k) as usize] as usize >= b.places.len() {
                     return "call-dest-place";
                 }
+            }
+            // A verified intrinsic names a resolved extern with the kind's arity.
+            if t.intr != ir::CI_NONE && t.callee.node == NODE_NONE {
+                return "intrinsic-unresolved";
+            }
+            if t.intr != ir::CI_NONE && (t.intr > ir::CI_FENCE || ir::ci_arity(t.intr) != t.args_len) {
+                return "intrinsic-arity";
             }
         } else if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE {
             return "terminator-kind";

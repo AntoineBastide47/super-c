@@ -139,14 +139,20 @@ fn removal_keeps_unproved() {
         "fn get(v: &mut Vector<i32>, i: usize) i32 {\n    if i < v.len() {\n        v.push(0);\n        return (*v)[i];\n    }\n    return 0;\n}\n",
         "__sc_bounds(",
     );
-    // an unclassifiable call (a fn value) between guard and access keeps the check; a direct
-    // call of a harmless local fn is transparent and does not retain it.
+    // an unclassifiable call (a fn value) between guard and access keeps the check of a view it can
+    // reach (behind a reference); a view in the frame's own storage, whose address never escaped,
+    // is out of the callee's reach.
     {
         let c = h::compile_c_user(
-            "fn poke() {}\nfn get(s: []i32, i: usize) i32 {\n    if i < s.len() {\n        let f: fn() = poke;\n        f();\n        return s[i];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let s: []i32 = v[0..1];\n    return get(s, argv.len() - 1) - 3;\n}\n",
+            "struct W<'a> { pub s: []'a i32 }\nfn poke() {}\nfn get(w: &mut W, i: usize) i32 {\n    if i < w.s.len() {\n        let f: fn() = poke;\n        f();\n        return w.s[i];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let mut w = W { s: v[0..1] };\n    return get(&mut w, argv.len() - 1) - 3;\n}\n",
         );
         assert(c.ok(), "fn-value call snippet compiles");
         assert(c.code_has("__sc_bounds("), "a fn-value call between guard and access keeps the check");
+        expect_c_user_absent(
+            "a fn-value call cannot reach a local view",
+            "fn poke() {}\nfn get(s: []i32, i: usize) i32 {\n    if i < s.len() {\n        let f: fn() = poke;\n        f();\n        return s[i];\n    }\n    return 0;\n}\n",
+            "__sc_bounds(",
+        );
     }
     // A dynamic range keeps its range check.
     h::expect_c(
@@ -489,9 +495,10 @@ fn sig_mut_call_kills() {
 
 @test
 fn sig_raw_arg_kills() {
-    // A raw-pointer argument is unclassifiable: the call keeps the old kill-everything behavior.
+    // A raw-pointer argument is unclassifiable: the call writes anything the pointer reaches. A
+    // pointer to the vector itself reaches its length.
     let c = h::compile_c_user(
-        "@c.noinline\nfn taker(p: *const i32) i32 {\n    return unsafe *p;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = v.as_ptr();\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
+        "@c.noinline\nfn taker(p: *mut Vector<i32>) i32 {\n    return unsafe (*p).len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = &mut v as *mut Vector<i32>;\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "raw-arg snippet compiles");
     assert(c.code_has("__sc_bounds("), "a raw-pointer argument keeps the check");
@@ -535,4 +542,74 @@ fn sig_disable_and_inline_parity() {
     h::expect_exit("sig on, inline off", SRC, 0);
     expect_panics("sig on inline off, oob panics", BAD);
     let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "".ptr() as *const char);
+}
+
+@test
+fn asm_write_kills_bounds_facts() {
+    // An assembly output that rewrites the guarded index keeps the access check.
+    expect_c_user_present(
+        "asm output rewrites the index",
+        "fn get(s: []i32, k0: usize) i32 {\n    let mut k = k0 * 2;\n    if k < s.len() {\n        unsafe { asm(\"\" : \"=r\"(k) : \"0\"(100usize)); }\n        return s[k];\n    }\n    return 0;\n}\n",
+        "__sc_bounds(",
+    );
+    // Assembly with a pointer to the vector and a memory clobber may write its length.
+    expect_c_user_present(
+        "asm writes the length through a pointer",
+        "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let k = argv.len() + 3;\n    let p = &mut v as *mut Vector<i32>;\n    if k < v.len() {\n        unsafe { asm(\"\" : : \"r\"(p) : \"memory\"); }\n        return v[k];\n    }\n    return 0;\n}\n",
+        "__sc_bounds(",
+    );
+}
+
+@test
+fn join_versions_are_path_sound() {
+    // After a join, the guard on `x` says nothing about `big`, whatever branch the walk saw last.
+    let SRC: str = "fn get(v: []i32, s0: usize, c: bool) i32 {\n    let big = s0 + 100;\n    let mut x = s0;\n    if c {\n        x = s0;\n    } else {\n        x = big;\n    }\n    if x < v.len() {\n        return v[big];\n    }\n    return 7;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = Vector::<i32>::new();\n    w.push(1);\n    w.push(2);\n    return get(w[0..2], argv.len() - 1, true);\n}\n";
+    expect_c_user_present("the unrelated access keeps its check", SRC, "__sc_bounds(");
+    expect_panics("the unrelated access panics", SRC);
+    // `c || i < len` does not bound `i` on its true edge.
+    expect_c_user_present(
+        "an or-condition keeps the check",
+        "fn get(s: []i32, i: usize, c: bool) i32 {\n    if c || i < s.len() {\n        return s[i];\n    }\n    return 0;\n}\n",
+        "__sc_bounds(",
+    );
+    // `c && i < len` bounds `i` on its true edge.
+    expect_c_user_absent(
+        "an and-condition proves the access",
+        "fn get(s: []i32, i: usize, c: bool) i32 {\n    if c && i < s.len() {\n        return s[i];\n    }\n    return 0;\n}\n",
+        "__sc_bounds(",
+    );
+}
+
+@test
+fn loop_header_kills_lengths_the_loop_writes() {
+    // The bound read before the loop is stale on the second iteration once the body pops.
+    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 2 {\n        v.push(k as i32);\n    }\n    let n = v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += v[i];\n        let _ = v.pop();\n        i += 1;\n    }\n    return x;\n}\n";
+    expect_c_user_present("the popped vector keeps its check", SRC, "__sc_bounds(");
+    expect_panics("the stale bound panics", SRC);
+}
+
+@test
+fn interval_facts_remove_strided_checks() {
+    // `n = len - len % 4` is a multiple of 4 below the length and `i` steps by 4 from 0, so
+    // `i + 3 < n <= len` for every access of the unrolled body.
+    let SRC: str = "fn sum4(s: []i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < n {\n        t += s[i] + s[i + 1] + s[i + 2] + s[i + 3];\n        i += 4;\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    return sum4(v[0..v.len()]) - 28;\n}\n";
+    expect_c_user_absent("no element check", SRC, "__sc_bounds(");
+    expect_c_user_absent("no group check", SRC, "__sc_bounds_group(");
+    h::expect_exit("strided sum", SRC, 0);
+}
+
+@test
+fn interval_join_keeps_the_hull() {
+    // `k` is 2 or 5 after the join and the length is at least 8 past the guard.
+    let SRC: str = "fn hull(s: []i32, c: bool) i32 {\n    if s.len() < 8 {\n        return 0;\n    }\n    let k: usize = if c {\n        2;\n    } else {\n        5;\n    };\n    return s[k];\n}\nfn masked(s: []i32, k: usize) i32 {\n    if s.len() >= 8 {\n        return s[k & 7] + s[k % 8];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..8 {\n        v.push(k);\n    }\n    let s: []i32 = v[0..8];\n    return hull(s, argv.len() == 1) + masked(s, argv.len() + 8) - 4;\n}\n";
+    expect_c_user_absent("hull and mask bounds prove the accesses", SRC, "__sc_bounds(");
+    h::expect_exit("hull behavior", SRC, 0);
+}
+
+@test
+fn interval_widening_terminates_on_nested_loops() {
+    // Both headers widen; the branch bounds `j < i < 64` still prove the inner access.
+    let SRC: str = "fn nested(s: []i32) i32 {\n    if s.len() < 64 {\n        return 0;\n    }\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < 64 {\n        let mut j: usize = 0;\n        while j < i {\n            t += s[j];\n            j += 1;\n        }\n        i += 1;\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for _k in 0..64 {\n        v.push(1);\n    }\n    return nested(v[0..64]) - 2016 + argv.len() as i32 - 1;\n}\n";
+    expect_c_user_absent("the inner access is proven", SRC, "__sc_bounds(");
+    h::expect_exit("nested behavior", SRC, 0);
 }

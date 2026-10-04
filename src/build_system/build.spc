@@ -24,6 +24,7 @@ import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
 import build_system::objcache as *;
+import build_system::probe as pr;
 import ast::parser as par;
 import lsp::json as json;
 
@@ -575,18 +576,6 @@ fn push_all(cmd: &mut String, flags: &Vector<String>) {
     }
 }
 
-fn clone_args(src: &Vector<String>) Vector<String> {
-    let mut out = Vector::<String>::with_capacity(src.len());
-    for i in 0..src.len() {
-        out.push(src.at(i).clone());
-    }
-    return out;
-}
-
-fn push_arg(out: &mut Vector<String>, s: str) {
-    out.push(String::from_str(s));
-}
-
 // One display/fingerprint line for an argv (arguments containing whitespace render quoted). Feeds
 // the .cmd fingerprints and error reporting; never executed, so no escaping subtleties matter.
 fn render_cmd(args: &Vector<String>) String {
@@ -613,19 +602,10 @@ fn render_cmd(args: &Vector<String>) String {
     return out;
 }
 
-// Spawn `args` without a shell; `log` (may be null) captures the child's stdout+stderr.
-fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
-    }
-    ptrs.push(0);
-    return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
-}
-
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
 // dev/debug profiles' `-fsanitize*` would fail the link on Windows: there they are dropped instead
-// (SC_LEAK_CHECK, being self-hosted, still covers leaks, double-frees and use-after-free there).
+// (SC_LEAK_CHECK, being self-hosted, still covers leaks, double frees and a realloc of a freed pointer
+// there; no other use after free).
 fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32) {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
@@ -705,8 +685,9 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool) Strin
     return out;
 }
 
-/// The linker cache namespace and probe record schema: bump when the emitted C changes shape in a
-/// way that must not share a namespace with, or reuse the verdict of, an older compiler.
+/// The linker cache namespace schema, also part of the probe record's key: bump when the emitted C
+/// changes shape in a way that must not share a namespace with, or reuse the verdict of, an older
+/// compiler.
 const LTO_SCHEMA: u32 = 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
@@ -869,6 +850,14 @@ fn lto_cache_args(form: i32, dir: str, out: &mut Vector<String>) {
             out,
             "-Wl,-plugin-opt,cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%:cache_size_bytes=1g",
         );
+    }
+}
+
+// A command fingerprint ends with the toolchain probe results the build used (`Probes::mark_used`), if any.
+fn push_used(fp: &mut String, used: &String) {
+    if used.len() != 0 {
+        fp.push_str(" | probes ");
+        fp.push_string(used);
     }
 }
 
@@ -1064,6 +1053,7 @@ struct CcStream {
     pub probe_ver_pid: i64, // background `<cc> --version` probe; -1 = resolve synchronously
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
     pub ccprobe_path: String, // <pdir>/.ccprobe, the ccache probe's discarded output
+    pub probes: pr::Probes, // the toolchain probe record and the probes this build needs
     pub cc_args: Vector<String>, // resolved compiler argv ([ccache] + cc tokens); empty until ensure_cc
     pub prefix_args: Vector<String>, // cc_args + cc_tail tokens; empty until ensure_cc
     pub ccver: String,
@@ -1138,7 +1128,9 @@ extend CcStream {
             push_arg(&mut va, "--version");
             self.ccver = cc_version_argv(&mut va, self.pdir.as_str());
         }
+        self.probes.settle(&self.ccver);
         self.lto_resolve();
+        self.probes.save();
         let lf = mf::lto_flag(self.lto);
         if lf.len() != 0 {
             self.cc_tail.push_byte(b' ');
@@ -1152,13 +1144,13 @@ extend CcStream {
         }
     }
 
-    /// Settle the LTO mode. A ThinLTO request needs the toolchain's answer: the record `<pdir>/.lto`
-    /// (the key line: schema, compiler version, path and mtime, target, compile tail and link flags;
-    /// the linker's path and mtime; the verdict) gives it without a process when every input still
-    /// matches, else `lto_probe` measures it. A rejected request keeps `-flto=auto`, the mode the
-    /// profiles used before ThinLTO, and `lto_reason` names why. The linker cache directory is
-    /// `<cache root>/lto/<hash of the record's key and linker lines>`: one namespace per compiler,
-    /// linker, target, flag set and schema, pruned by the linker itself (`lto_cache_args`).
+    /// Settle the LTO mode. A ThinLTO request needs the toolchain's answer: the probe record's `thin-lto`
+    /// result (the verdict, then the linker's path and mtime; the record's key holds the compiler, the
+    /// target and the flags) gives it without a process while the linker is unchanged, else `lto_probe`
+    /// measures it. A rejected request keeps `-flto=auto`, the mode the profiles used before ThinLTO,
+    /// and `lto_reason` names why. The verdict joins the build's used probe results. The linker cache
+    /// directory is `<cache root>/lto/<hash of the key below and the linker line>`: one namespace per
+    /// compiler, linker, target, flag set and schema, pruned by the linker itself (`lto_cache_args`).
     fn lto_resolve(self: &mut Self) {
         self.lto = self.lto_req;
         if self.lto_req != mf::LTO_THIN {
@@ -1180,34 +1172,28 @@ extend CcStream {
         key.push_string(&self.cc_tail);
         key.push_byte(b'\t');
         key.push_string(&self.ldbase);
-        let recp = loader::join2(self.pdir.as_str(), ".lto");
-        let mut form: i32 = -2; // -2 no valid record, -1 rejected, 0 no cache, else a `lto_cache_args` form
+        let mut form: i32 = -2; // -2 no valid result, -1 rejected, 0 no cache, else a `lto_cache_args` form
         let mut ld = String::new();
-        let old = loader::read_file(recp.as_str());
-        if !old.is_none() {
-            let ob = old.unwrap();
-            let s = ob.as_str();
-            let l1 = field_of(s, b'\n', 1);
-            let mut ldp = String::from_str(stamp_field(l1, 1));
-            let ldmt = stamp_field(l1, 2).parse_i64();
-            let same_ld = ldp.as_str() == "-" || !ldmt.is_none() && unsafe shim::sc_mtime(ldp.cstr()) == ldmt.unwrap();
-            if field_of(s, b'\n', 0) == key.as_str() && same_ld {
-                let l2 = field_of(s, b'\n', 2);
-                if stamp_field(l2, 0) == "thin" {
-                    let f = stamp_field(l2, 1).parse_i64();
-                    if !f.is_none() && f.unwrap() >= 0 && f.unwrap() <= 3 {
-                        form = f.unwrap() as i32;
-                        ld.push_str(l1);
-                    }
-                } else if stamp_field(l2, 0) == "auto" {
-                    form = -1;
-                    self.lto_reason.push_str(stamp_field(l2, 1));
+        let rec = self.probes.res.at(pr::LTO).as_str();
+        let l1 = self.probes.aux.at(pr::LTO).as_str();
+        let mut ldp = String::from_str(stamp_field(l1, 1));
+        let ldmt = stamp_field(l1, 2).parse_i64();
+        if ldp.as_str() == "-" || !ldmt.is_none() && unsafe shim::sc_mtime(ldp.cstr()) == ldmt.unwrap() {
+            if rec.starts_with("thin ") {
+                let f = rec.slice(5, rec.len()).parse_i64();
+                if !f.is_none() && f.unwrap() >= 0 && f.unwrap() <= 3 {
+                    form = f.unwrap() as i32;
+                    ld.push_str(l1);
                 }
+            } else if rec.starts_with("auto: ") {
+                form = -1;
+                self.lto_reason.push_str(rec.slice(6, rec.len()));
             }
         }
         if form == -2 {
-            form = self.lto_probe(&key, recp.as_str(), &mut ld);
+            form = self.lto_probe(&mut ld);
         }
+        self.probes.mark_used(pr::LTO);
         if form < 0 {
             self.lto = mf::LTO_AUTO;
             return;
@@ -1230,9 +1216,10 @@ extend CcStream {
     /// form a real build uses: the compile with the profile's compile tail and `-flto=thin`, the link
     /// with the fixed link flags (its `-v` log names the linker, recorded in `ld`), then the link
     /// again with each linker cache form until one produces a cache entry. Exit codes and output
-    /// files decide, never version text. Writes the record and returns the cache form (0 none, 1
-    /// Apple ld, 2 lld, 3 the gold plugin), or -1 when ThinLTO is rejected, with `lto_reason` set.
-    fn lto_probe(self: &mut Self, key: &String, recp: str, ld: &mut String) i32 {
+    /// files decide, never version text. Records the result in the probe table and returns the cache
+    /// form (0 none, 1 Apple ld, 2 lld, 3 the gold plugin), or -1 when ThinLTO is rejected, with
+    /// `lto_reason` set.
+    fn lto_probe(self: &mut Self, ld: &mut String) i32 {
         let dir = loader::join2(self.pdir.as_str(), ".ltoprobe");
         rm_rf(dir.as_str());
         mkdir_p(dir.as_str());
@@ -1293,19 +1280,12 @@ extend CcStream {
             }
         }
         rm_rf(dir.as_str());
-        let mut rec = key.clone();
-        rec.push_byte(b'\n');
-        rec.push_string(ld);
-        rec.push_byte(b'\n');
-        if form < 0 {
-            rec.push_str("auto\t");
-            rec.push_string(&self.lto_reason);
+        let verdict = if form < 0 {
+            format("auto: {}", self.lto_reason.as_str());
         } else {
-            rec.push_str("thin\t");
-            rec.push_i64(form);
-        }
-        rec.push_byte(b'\n');
-        let _ = write_file_atomic(recp, rec.as_str());
+            format("thin {}", form);
+        };
+        self.probes.set(pr::LTO, verdict.as_str(), ld.as_str());
         return form;
     }
 
@@ -1364,6 +1344,7 @@ extend CcStream {
         fp.push_str(" | ");
         let rendered = render_cmd(&args);
         fp.push_string(&rendered);
+        push_used(&mut fp, &self.probes.used);
         // compile_commands.json row (every unit, stale or not): tooling attaches to the generated
         // tree through it, so it reflects the exact argv this build would run.
         {
@@ -1497,6 +1478,7 @@ extend CcStream {
         unsafe shim::sc_unlink(pp.cstr());
         let mut vp = String::from_str(self.ccver_path.as_str());
         unsafe shim::sc_unlink(vp.cstr());
+        self.probes.abandon();
     }
 
     /// Fill free slots (longest-known-first) and reap whatever already exited; never blocks.
@@ -2237,6 +2219,139 @@ pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mu
     ).rc;
 }
 
+// The compile side of an engine build in profile directory `pdir` under `prof`: the C compiler, its
+// compile and link flags, and the background probes (ccache, the compiler version, and the toolchain
+// probes of `need` the record does not hold), started before the transpile. `pending` is the link
+// record's pending marker; `cache` the object cache namespace (empty: none).
+fn cc_stream(
+    m: &mf::Manifest,
+    prof: &mf::Profile,
+    pdir: &String,
+    cx: &BuildCtx,
+    jobs: u32,
+    lto_req: i32,
+    need: u64,
+    pending: String,
+    cache: String,
+) CcStream {
+    let cc_raw = resolve_cc(m.cc.as_str(), m.sdk);
+    let mut flags = String::new();
+    flags.push_byte(b' ');
+    flags.push_string(&m.cstd);
+    // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
+    flags.push_str(" -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types");
+    if m.lib_shared && cx.target != 0 {
+        // Shared-library objects need it; harmless for the exe targets.
+        flags.push_str(" -fPIC");
+    }
+    // The cross triple comes first; manifest flags can override.
+    push_sdk_flags(&mut flags, m.sdk, m.arch);
+    push_all(&mut flags, &m.cflags);
+    push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target, m.sdk);
+    if prof.pgo_use {
+        // Clang hard-errors on a missing profile file, so the flag appears only when the file exists.
+        let mut pgo = loader::join2(m.out_dir.as_str(), "pgo.profdata");
+        if unsafe shim::sc_mtime(pgo.cstr()) != 0 {
+            flags.push_str(" -fprofile-use=");
+            flags.push_string(&pgo);
+            flags.push_str(" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin");
+        }
+    }
+    let mut tail = flags.clone();
+    tail.push_str(" -MMD -c");
+    // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
+    let mut ldbase = String::new();
+    push_sdk_flags(&mut ldbase, m.sdk, m.arch);
+    push_sdk_libs(&mut ldbase, m.sdk);
+    // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
+    if prof.strip && (m.sdk == 2 || m.sdk == 3) {
+        ldbase.push_str(" -Wl,--strip-all");
+    }
+    push_all(&mut ldbase, &m.ldflags);
+    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
+    // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
+    // children (no shell, on every platform) resolve both while the transpile runs: ensure_cc
+    // collects the exit code and the captured version line at first use.
+    let mut ccver_path = loader::join2(pdir.as_str(), ".ccver");
+    let mut ccprobe_path = loader::join2(pdir.as_str(), ".ccprobe");
+    let mut pa = Vector::<String>::new();
+    push_arg(&mut pa, "ccache");
+    push_arg(&mut pa, "-V");
+    let probe_cc_pid = spawn_args(&mut pa, ccprobe_path.cstr());
+    let mut va = Vector::<String>::new();
+    split_args(&mut va, cc_raw.as_str());
+    push_arg(&mut va, "--version");
+    let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
+    // The toolchain probes of `need` the record does not hold start beside it. The record's key: the
+    // schema, the compiler's path and mtime, the target and the flags; `settle` checks the version.
+    let mut ccpath = String::new();
+    let ccmt = which_path(cc_raw.as_str(), &mut ccpath);
+    let key = format(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        LTO_SCHEMA,
+        ccpath.as_str(),
+        ccmt,
+        cx.target,
+        m.arch,
+        flags.as_str(),
+        ldbase.as_str(),
+    );
+    let mut pargv = Vector::<String>::new();
+    split_args(&mut pargv, cc_raw.as_str());
+    split_args(&mut pargv, flags.as_str());
+    let probes = pr::Probes::start(pdir.as_str(), key.as_str(), pargv, ldbase.as_str(), cx.target, m.arch, need);
+    // The compile argv runs from the process working directory; record it for compile_commands.json.
+    let mut cwdb = PathBuf {};
+    let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
+        String::from_cstr(&cwdb[0]);
+    } else {
+        String::from_str(".");
+    };
+    return CcStream {
+        src_len: pdir.len() + 4, // <pdir>/raw
+        gen: loader::join2(pdir.as_str(), "gen"),
+        obj: loader::join2(pdir.as_str(), "obj"),
+        pdir: pdir.clone(),
+        cc_raw: cc_raw,
+        cc_tail: tail,
+        ldbase: ldbase,
+        target: cx.target,
+        lto_req: lto_req,
+        lto: lto_req,
+        lto_cache: false,
+        lto_reason: String::new(),
+        lto_ld: Vector::<String>::new(),
+        probe_cc_pid: probe_cc_pid,
+        probe_ver_pid: probe_ver_pid,
+        ccver_path: ccver_path,
+        ccprobe_path: ccprobe_path,
+        probes: probes,
+        cc_args: Vector::<String>::new(),
+        prefix_args: Vector::<String>::new(),
+        ccver: String::new(),
+        cc_ready: false,
+        jobs: jobs,
+        objs: Vector::<String>::new(),
+        pend: Vector::<Pend>::new(),
+        window: Vector::<Job>::new(),
+        total_c: 0,
+        stale_n: 0,
+        pending: pending,
+        marked: false,
+        ret: 0,
+        cache: cache,
+        keys: Vector::<String>::new(),
+        rewritten: Set::<String>::new(),
+        mtimes: Map::<String, i64>::new(),
+        synced: Set::<String>::new(),
+        made_dirs: Set::<String>::new(),
+        ccdb: Vector::<String>::new(),
+        hmemo: Map::<u64, u64>::new(),
+        hpool: Vector::<u64>::new(),
+        ccdb_dir: ccdb_dir,
+    };
+}
+
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
 // the transpiled C lands in <out-dir>/<sub>/raw first (PROFILE makes it depend on the profile).
 // link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
@@ -2295,40 +2410,6 @@ fn engine_build_i(
         g.bin.push_str(bin);
         g.jobs = jobs;
     }
-    let cc_raw = resolve_cc(m.cc.as_str(), m.sdk);
-    let mut tail = String::new();
-    tail.push_byte(b' ');
-    tail.push_string(&m.cstd);
-    // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
-    tail.push_str(" -funsigned-char -Werror=incompatible-pointer-types");
-    if m.lib_shared && cx.target != 0 {
-        // Shared-library objects need it; harmless for the exe targets.
-        tail.push_str(" -fPIC");
-    }
-    // The cross triple comes first; manifest flags can override.
-    push_sdk_flags(&mut tail, m.sdk, m.arch);
-    push_all(&mut tail, &m.cflags);
-    push_profile_side(&mut tail, prof, &prof.cflags, false, cx.target, m.sdk);
-    if prof.pgo_use {
-        // Clang hard-errors on a missing profile file, so the flag appears only when the file exists.
-        let mut pgo = loader::join2(m.out_dir.as_str(), "pgo.profdata");
-        if unsafe shim::sc_mtime(pgo.cstr()) != 0 {
-            tail.push_str(" -fprofile-use=");
-            tail.push_string(&pgo);
-            tail.push_str(" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin");
-        }
-    }
-    tail.push_str(" -MMD -c");
-    // The fixed part of the link line, once: the link, the ThinLTO probe and its record key share it.
-    let mut ldbase = String::new();
-    push_sdk_flags(&mut ldbase, m.sdk, m.arch);
-    push_sdk_libs(&mut ldbase, m.sdk);
-    // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
-    if prof.strip && (m.sdk == 2 || m.sdk == 3) {
-        ldbase.push_str(" -Wl,--strip-all");
-    }
-    push_all(&mut ldbase, &m.ldflags);
-    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
     let mut lto_req = prof.lto;
     let lenv = stdlib::getenv("SC_LTO");
     if lenv != null {
@@ -2338,26 +2419,6 @@ fn engine_build_i(
             return 1;
         }
     }
-    // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
-    // children (no shell, on every platform) resolve both while the transpile runs: ensure_cc
-    // collects the exit code and the captured version line at first use.
-    let mut ccver_path = loader::join2(pdir.as_str(), ".ccver");
-    let mut ccprobe_path = loader::join2(pdir.as_str(), ".ccprobe");
-    let mut pa = Vector::<String>::new();
-    push_arg(&mut pa, "ccache");
-    push_arg(&mut pa, "-V");
-    let probe_cc_pid = spawn_args(&mut pa, ccprobe_path.cstr());
-    let mut va = Vector::<String>::new();
-    split_args(&mut va, cc_raw.as_str());
-    push_arg(&mut va, "--version");
-    let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
-    // The compile argv runs from the process working directory; record it for compile_commands.json.
-    let mut cwdb = PathBuf {};
-    let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
-        String::from_cstr(&cwdb[0]);
-    } else {
-        String::from_str(".");
-    };
     // The link record: per-binary and profile-agnostic (out-dir root), since profiles share bin paths
     // and a dev binary left behind by a release link must read as out of date.
     let mut fpname = String::from_str("__link-");
@@ -2374,48 +2435,9 @@ fn engine_build_i(
     let fppath = loader::join2(m.out_dir.as_str(), fpname.as_str());
     let mut pending = fppath.clone();
     pending.push_str(".pending");
-    let mut stream = CcStream {
-        src_len: srcgen.len(),
-        gen: gen.clone(),
-        obj: obj.clone(),
-        pdir: pdir.clone(),
-        cc_raw: cc_raw,
-        cc_tail: tail,
-        ldbase: ldbase,
-        target: cx.target,
-        lto_req: lto_req,
-        lto: lto_req,
-        lto_cache: false,
-        lto_reason: String::new(),
-        lto_ld: Vector::<String>::new(),
-        probe_cc_pid: probe_cc_pid,
-        probe_ver_pid: probe_ver_pid,
-        ccver_path: ccver_path,
-        ccprobe_path: ccprobe_path,
-        cc_args: Vector::<String>::new(),
-        prefix_args: Vector::<String>::new(),
-        ccver: String::new(),
-        cc_ready: false,
-        jobs: jobs,
-        objs: Vector::<String>::new(),
-        pend: Vector::<Pend>::new(),
-        window: Vector::<Job>::new(),
-        total_c: 0,
-        stale_n: 0,
-        pending: pending,
-        marked: false,
-        ret: 0,
-        cache: obj_cache_ns(object_cache_dir().as_str(), pdir.as_str()),
-        keys: Vector::<String>::new(),
-        rewritten: Set::<String>::new(),
-        mtimes: Map::<String, i64>::new(),
-        synced: Set::<String>::new(),
-        made_dirs: Set::<String>::new(),
-        ccdb: Vector::<String>::new(),
-        hmemo: Map::<u64, u64>::new(),
-        hpool: Vector::<u64>::new(),
-        ccdb_dir: ccdb_dir,
-    };
+    let cache = obj_cache_ns(object_cache_dir().as_str(), pdir.as_str());
+    // No toolchain probe result shapes a build yet but the ThinLTO verdict (`lto_resolve`).
+    let mut stream = cc_stream(m, prof, &pdir, cx, jobs, lto_req, 0, pending, cache);
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
 
     // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool:
@@ -2575,6 +2597,7 @@ fn engine_build_i(
             fp.push_str(" | ");
             let lrendered = render_cmd(&largs);
             fp.push_string(&lrendered);
+            push_used(&mut fp, &stream.probes.used);
             if prof.strip {
                 fp.push_str(" +strip");
             }
@@ -2668,6 +2691,43 @@ fn engine_build_i(
         );
     }
     return ret;
+}
+
+/// `super-c build --print-probes`: the toolchain probe table for the target and `profile`'s flags, one
+/// `<id> <result>` line per probe after the compiler version and the target. The probes the record
+/// `<out-dir>/<profile>/.probes` does not hold run first, beside the version probe, and join it.
+pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 {
+    let prof_name = resolve_profile(m, profile);
+    let pi = m.profile_index(prof_name);
+    if pi < 0 {
+        eprintln("build: unknown profile '{}'", prof_name);
+        return 1;
+    }
+    let pdir = loader::join2(m.out_dir.as_str(), prof_name);
+    mkdir_p(pdir.as_str());
+    let mut stream = cc_stream(
+        m,
+        m.profiles.at(pi as usize),
+        &pdir,
+        cx,
+        1,
+        mf::LTO_THIN,
+        pr::ALL,
+        String::new(),
+        String::new(),
+    );
+    stream.ensure_cc();
+    println("compiler: {}", stream.ccver.as_str());
+    println("target: {} {}", par::axis_names(false)[cx.target as usize], par::axis_names(true)[m.arch as usize]);
+    for i in 0..pr::table().len() {
+        let mut line = String::from_str(pr::table()[i].id);
+        while line.len() < 24 {
+            line.push_byte(b' ');
+        }
+        line.push_string(stream.probes.res.at(i));
+        println("{}", line.as_str());
+    }
+    return 0;
 }
 
 /// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile

@@ -29,6 +29,7 @@ pub struct Builder<'a> {
     pub src: str<'a>,
     pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
     pub skipped: Vector<NodeId>, // owners of @fmt.skip, sorted
+    pub attr_args: Vector<u64>, // constant-expression attribute arguments: `attrs` index by source start, sorted
     // Scratch stack of child docs shared by every b_* call: a call records the stack length as its mark,
     // pushes its parts, and `cat(mark)` concatenates and pops them, so one vector serves the whole file.
     pub st: Vector<d::DocId>,
@@ -50,20 +51,26 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
     let root = unsafe (*ast).root;
     // The @fmt.skip owners, collected once: one attribute scan per file, a binary search per item.
     let mut skipped = Vector::<NodeId>::new();
+    let mut attr_args = Vector::<u64>::new();
     let na = unsafe (*ast).attrs.len();
     for i in 0..na {
         let a = *unsafe (*ast).attrs.at(i);
         if a.kind == AttrKind::ATTR_FMT_SKIP as u8 {
             skipped.push(a.owner);
         }
+        if a.expr {
+            attr_args.push(a.str_span.start as u64 << 32 | i as u64);
+        }
     }
     skipped.sort();
+    attr_args.sort();
     let mut b = Builder {
         p: d::DocPool::new(source.ptr()),
         ast: ast,
         src: source,
         emitted_trivia: 0,
         skipped: skipped,
+        attr_args: attr_args,
         st: Vector::<d::DocId>::with_capacity(256),
         bin_spine: Vector::<NodeId>::new(),
         cond_lits: Vector::<NodeId>::new(),
@@ -234,12 +241,31 @@ extend Builder {
         self.push_leading(&segs, 0, to);
     }
 
-    // Push trivia segment `sg`; a comment (not an attribute) counts toward `emitted_trivia`.
+    // Push trivia segment `sg`; a comment (not an attribute) counts toward `emitted_trivia`. An
+    // attribute line prints verbatim except its constant-expression arguments, which print as
+    // expressions (unless their owner is `@fmt.skip`).
     fn push_seg(self: &mut Self, sg: &TriviaSeg) {
-        self.st.push(self.p.span(sg.start, sg.end));
         if !sg.is_attr {
+            self.st.push(self.p.span(sg.start, sg.end));
             self.emitted_trivia = self.emitted_trivia + 1;
+            return;
         }
+        let mut cur = sg.start;
+        let mut k = switch self.attr_args.binary_search(&(sg.start as u64 << 32)) {
+            Ok(x) => x,
+            Err(x) => x,
+        };
+        while k < self.attr_args.len() && self.attr_args[k] >> 32 < sg.end as u64 {
+            let at = *unsafe (*self.ast).attrs.at((self.attr_args[k] & 0xFFFFFFFFu64) as usize);
+            k += 1;
+            if self.fmt_skipped(at.owner) {
+                continue;
+            }
+            self.st.push(self.p.span(cur, at.str_span.start));
+            self.st.push(self.b_expr(at.arg));
+            cur = at.str_span.end;
+        }
+        self.st.push(self.p.span(cur, sg.end));
     }
 
     // Push the trailing segments that open `segs`, each after a space; the index of the first other one.

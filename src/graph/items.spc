@@ -226,11 +226,17 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             prev = end + 1;
         }
     }
-    let first_span = if rs.len() != 0 {
-        a.at_const(p.idx.items.at(rs.at(0).o as usize).node).span.start;
-    } else {
-        0u32;
-    };
+    // The leading imports' nodes (paths included) precede every item's, the first item's
+    // attribute arguments too.
+    let mut imp_hi: u32 = 0;
+    let prog = a.at_const(a.root).as_data.program.items;
+    for k in 0..prog.len {
+        let iid = unsafe a.list(prog)[k as usize];
+        if a.at_const(iid).kind != NodeKind::NODE_IMPORT {
+            break;
+        }
+        imp_hi = iid;
+    }
     let mut oc = cache_none();
     let mut tc = cache_none();
     // Targets repeat (a hot callee, a field owner): a direct-mapped memo over (module, node).
@@ -282,7 +288,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             let mut owner = NONE;
             if r < nr && x as u32 >= rng.at(r).s {
                 owner = rng.at(r).o;
-                if !body && r == 0 && (unsafe &*nv.ptr_at(x)).span.start < first_span {
+                if !body && r == 0 && x as u32 <= imp_hi {
                     continue; // an import path, before the first item
                 }
             } else {
@@ -925,8 +931,15 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
         Err(x) => x,
     };
     while k < akeys.len() && akeys[k] >> 32 == it.node as u64 {
-        let at = a.attrs.at((akeys[k] & 0xFFFFFFFFu64) as usize);
-        h = mix(mix(h, at.kind), at.arg);
+        let ai = (akeys[k] & 0xFFFFFFFFu64) as u32;
+        let at = a.attrs.at(ai as usize);
+        // A constant-expression argument hashes as its value: `arg` is a node id.
+        let v = if at.expr {
+            a.attr_value_of(ai).v;
+        } else {
+            at.arg as u64;
+        };
+        h = mix(mix(h, at.kind), v);
         k += 1;
     }
     if !a.valid(it.node) {

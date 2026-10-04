@@ -448,7 +448,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "%s %s -funsigned-char%s".ptr() as *const char,
+            "%s %s -funsigned-char -ffp-contract=off%s".ptr() as *const char,
             cc_name(),
             cstd(),
             if strict {

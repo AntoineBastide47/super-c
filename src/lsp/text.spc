@@ -8,12 +8,12 @@ pub struct Pos {
     pub character: u32,
 }
 
-/// Byte offset of each line start (line 0 starts at 0; a new line after every '\n').
+/// Byte offset of each line start (line 0 starts at 0; a new line after every '\n', '\r\n', or lone '\r').
 pub fn line_starts(src: str) Vector<u32> {
     let mut ls = Vector::<u32>::new();
     ls.push(0);
     for i in 0..src.len() {
-        if src[i] == b'\n' {
+        if src[i] == b'\n' || src[i] == b'\r' && (i + 1 == src.len() || src[i + 1] != b'\n') {
             ls.push((i + 1) as u32);
         }
     }

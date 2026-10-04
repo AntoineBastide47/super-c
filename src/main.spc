@@ -824,6 +824,7 @@ fn main(argv: Vector<str>) i32 {
     let mut vendor_force = false; // vendor: --force, replace an existing vendor/<name>
     let mut clean_cache = false; // clean: --cache, also drop the machine-global object cache
     let mut transpiler = ""; // build/release: --transpiler=CMD, the command that runs the transpile step
+    let mut print_probes = false; // build/release: --print-probes, print the toolchain probe table
     let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
     let mut manifest_dir = ""; // transpile form: --manifest-dir=DIR, the project directory
     let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
@@ -907,6 +908,8 @@ fn main(argv: Vector<str>) i32 {
                     }
                 } else if arg.starts_with("--transpiler=") && arg.len() > 13 {
                     transpiler = arg[13..];
+                } else if arg == "--print-probes" {
+                    print_probes = true;
                 } else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
@@ -916,8 +919,9 @@ fn main(argv: Vector<str>) i32 {
                 }
                 i = i + 1;
             }
-            // The transpiler replaces the manifest engine's frontend: a bare build has no engine.
-            if transpiler.len() != 0 && file.len() != 0 {
+            // The transpiler replaces the manifest engine's frontend: a bare build has no engine. The probe
+            // table belongs to a manifest profile and builds nothing.
+            if transpiler.len() != 0 && file.len() != 0 || print_probes && (file.len() != 0 || out_bin.len() != 0) {
                 co.bad = true;
             }
             if file.len() != 0 && out_bin.len() == 0 {
@@ -1169,6 +1173,7 @@ OPTIONS:
     --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
     --bin=NAME             build/run only that binary target
     --transpiler=CMD       build/release: run CMD (words, no shell) as the transpile step
+    --print-probes         build/release: print the C toolchain probe results for the target and profile
     --lib                  build only the [lib] target
     --link=NAME            bindgen: library the generated bindings link against
     --header=SPELLING      bindgen: how the generated module spells the #include
@@ -1429,6 +1434,8 @@ OPTIONS:
             } else if mode == Mode::MODE_RUN {
                 // Cargo run: build the manifest binary and exec it.
                 rc = bsys::manifest_run_bin(&man, bo.profile, out_bin, bo.bin_sel, &cx);
+            } else if print_probes {
+                rc = bsys::manifest_print_probes(&man, bo.profile, &cx);
             } else if out_bin.len() != 0 {
                 rc = bsys::manifest_build(&man, bo.profile, out_bin, &cx);
             } else {

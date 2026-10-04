@@ -195,7 +195,7 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
     }
     let mut g = Global {};
     let p = (unsafe g.alloc(bytes, block_align::<T>())) as *mut ChannelInner<T>;
-    let mut slots = zst_dangling::<T>();
+    let mut slots = dangling::<T>();
     if sizeof(T) != 0 {
         slots = (unsafe (p as *mut u8 + ring_offset::<T>())) as *mut T;
     }
@@ -629,10 +629,4 @@ extend<T> Receiver<T> as sync::Selectable {
         let s = unsafe self.get().state.locked_ref();
         return s.count > 0 || s.closed || s.senders == 0;
     }
-}
-
-// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
-// duplicated privately so the prelude module needs no self-import).
-const fn zst_dangling<T>() *mut T {
-    return alignof(T) as *mut T;
 }

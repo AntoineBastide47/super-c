@@ -16,6 +16,7 @@ import ir::lower as irl;
 import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
 import driver_shim as shim;
+import lsp::json as json;
 import tests::cli_harness as cli;
 
 import stdio;
@@ -574,6 +575,549 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_RESOLVE);
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
+}
+
+// Differential oracles: one source under two option lists, a constant against its run-time twin, and
+// the assembly of one function. Each program is the root of a scratch manifest project built by the
+// compiler under test. On the wasm lane the build runs its transpile step in the wasm compiler
+// (`--transpiler`), so the guest does the constant evaluation.
+
+/// The build of one differential program: its scratch project, whether it built, and the build output.
+pub struct DiffBuild {
+    pub proj: cli::Proj,
+    pub built: bool,
+    pub diag: String,
+}
+
+/// One run of a differential program: exit code, stdout and stderr.
+pub struct DiffRun {
+    pub exit: i32,
+    pub out: String,
+    pub err: String,
+}
+
+/// Build `src` as main.spc of a scratch project. An option of the form NAME=VALUE sets that
+/// environment variable for the build (`SC_BCE=0`); any other option is one build flag.
+pub fn diff_build(src: str, opts: []str) DiffBuild {
+    let exe = cli::superc_path(); // resolved before the chdir below
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"prog\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", src);
+    let mut root = String::from_str(str::from_cstr(p.rootp()));
+    let mut cmd = String::new();
+    cmd.format_into("\"{}\" build", exe);
+    let mut env = cli::fixture_cache_env(root.as_str());
+    for o in opts {
+        if o.starts_with("-") {
+            cmd.format_into(" \"{}\"", o);
+        } else {
+            env.push_byte(b' ');
+            env.push_str(o);
+        }
+    }
+    if cli::on_wasm() {
+        cmd.format_into(" \"--transpiler={}\"", exe);
+    }
+    cmd.format_into(" -o prog{}", str::from_cstr(cli::binext()));
+    let mut outp = String::new();
+    outp.format_into("{}/.build", root.as_str());
+    // The engine reads build.toml from its working directory.
+    let mut rc = -1;
+    if unsafe shim::sc_chdir(root.cstr()) == 0 {
+        rc = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), null, env.cstr());
+    }
+    return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()) };
+}
+
+/// Run the program `b` built with `args` (a command-line fragment) and capture its output.
+pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
+    let root = str::from_cstr(b.proj.rootp());
+    let mut cmd = String::new();
+    cmd.format_into("\"{}/prog{}\" {}", root, str::from_cstr(cli::binext()), args);
+    let mut outp = String::new();
+    outp.format_into("{}/.out", root);
+    let mut errp = String::new();
+    errp.format_into("{}/.err", root);
+    let exit = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), errp.cstr(), null);
+    return DiffRun { exit: exit, out: cli::read_text(outp.as_str()), err: cli::read_text(errp.as_str()) };
+}
+
+/// The trap lines of a run's stderr: the runtime's `super-c: ...` and std's `panic: ...` messages.
+/// Backtraces and other diagnostics are not part of the trap text.
+pub fn trap_text(err: str) String {
+    let mut t = String::new();
+    for line in err.lines() {
+        if line.starts_with("super-c: ") || line.starts_with("panic: ") {
+            t.push_str(line);
+            t.push_byte(b'\n');
+        }
+    }
+    return t;
+}
+
+// A sanitizer finding is a defect on its own, whatever the other side of a comparison printed.
+fn sanitizer_report(err: str) bool {
+    return err.contains("runtime error:") || err.contains("Sanitizer");
+}
+
+/// Build `src` under `opts_a` and under `opts_b`, run both once per entry of `runs` (each entry is the
+/// command-line arguments of one run), and describe the first difference in exit code, stdout or trap
+/// text. Empty when every run agrees. A build failure or a sanitizer report is a difference.
+pub fn same_output(src: str, opts_a: []str, opts_b: []str, runs: []str) String {
+    let mut r = String::new();
+    let a = diff_build(src, opts_a);
+    if !a.built {
+        r.format_into("the program does not build with options A:\n{}", a.diag.as_str());
+        return r;
+    }
+    let b = diff_build(src, opts_b);
+    if !b.built {
+        r.format_into("the program does not build with options B:\n{}", b.diag.as_str());
+        return r;
+    }
+    for args in runs {
+        let ra = diff_run(&a, args);
+        let rb = diff_run(&b, args);
+        if sanitizer_report(ra.err.as_str()) || sanitizer_report(rb.err.as_str()) {
+            r.format_into(
+                "run '{}': sanitizer report\nA stderr:\n{}B stderr:\n{}",
+                args,
+                ra.err.as_str(),
+                rb.err.as_str(),
+            );
+            return r;
+        }
+        let ta = trap_text(ra.err.as_str());
+        let tb = trap_text(rb.err.as_str());
+        if ra.exit != rb.exit || !ra.out.equals(&rb.out) || !ta.equals(&tb) {
+            r.format_into(
+                "run '{}' differs\nA: exit {}, stdout:\n{}A trap: {}\nB: exit {}, stdout:\n{}B trap: {}\n",
+                args,
+                ra.exit,
+                ra.out.as_str(),
+                ta.as_str(),
+                rb.exit,
+                rb.out.as_str(),
+                tb.as_str(),
+            );
+            return r;
+        }
+    }
+    return r;
+}
+
+/// Assert that `src` gives the same exit code, stdout and trap text built with `opts_a` and with
+/// `opts_b` (see `diff_build` for the option forms).
+pub fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
+    let d = same_output(src, opts_a, opts_b, [""]);
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
+}
+
+/// The trap class a compile-time error names for a trap ("arithmetic overflow", "division by zero",
+/// "shift out of range"); empty for any other error.
+pub fn const_trap_class(msg: str) str<'static> {
+    if msg.contains("arithmetic overflow") {
+        return "arithmetic overflow";
+    }
+    if msg.contains("division by zero") {
+        return "division by zero";
+    }
+    if msg.contains("shift out of range") {
+        return "shift out of range";
+    }
+    return "";
+}
+
+/// The trap class of a run-time trap message (`rt_c.spc` arithmetic helpers), in the words a constant
+/// reports for the same trap; empty for any other trap.
+pub fn runtime_trap_class(trap: str) str<'static> {
+    if trap.contains("attempt to shift") {
+        return "shift out of range";
+    }
+    if trap.contains("attempt to divide by zero") || trap.contains("with a divisor of zero") {
+        return "division by zero";
+    }
+    if trap.contains("with overflow") {
+        return "arithmetic overflow";
+    }
+    return "";
+}
+
+// The parity program: every case as a constant `PARITY_C<k>` (one line each, from line `first`)
+// unless `omit[k]`, and as the run-time function `parity_r<k>`; `prog <k>` prints the constant as
+// `c <value>`, then the run-time value as `r <value>`. A float prints its bits, a NaN as `nan`.
+fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, first: &mut usize) String {
+    let mut s = String::from_str(decls);
+    if s.len() != 0 && !s.ends_with("\n") {
+        s.push_byte(b'\n');
+    }
+    s.push_str("@c.noinline\nconst fn opq<T>(x: T) T {\n    return x;\n}\n");
+    // A write to a static is a side effect no constant evaluation performs: the compiler cannot see
+    // through `opr`, so the run-time copy computes at run time and its traps are not compile errors.
+    s.push_str("static mut PARITY_SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n");
+    s.push_str("    unsafe PARITY_SINK += 1;\n    return x;\n}\n");
+    for t in tys {
+        if t == "f64" || t == "f32" {
+            s.push_str("union ParityF64 {\n    pub f: f64,\n    pub u: u64,\n}\n");
+            s.push_str("union ParityF32 {\n    pub f: f32,\n    pub u: u32,\n}\n");
+            s.push_str("fn parity_f64(tag: str, v: f64) {\n    if v.is_nan() {\n        println(\"{} nan\", tag);\n");
+            s.push_str("    } else {\n        println(\"{} {}\", tag, ParityF64 { f: v }.u);\n    }\n}\n");
+            s.push_str("fn parity_f32(tag: str, v: f32) {\n    if v.is_nan() {\n        println(\"{} nan\", tag);\n");
+            s.push_str("    } else {\n        println(\"{} {}\", tag, ParityF32 { f: v }.u);\n    }\n}\n");
+            break;
+        }
+    }
+    *first = s.count_byte(b'\n') + 1;
+    for k in 0..exprs.len() {
+        if omit[k] {
+            s.push_str("\n"); // keeps every constant on its line
+        } else {
+            s.format_into("const PARITY_C{}: {} = {};\n", k, tys[k], exprs[k]);
+        }
+    }
+    for k in 0..exprs.len() {
+        let rt = String::from_str(exprs[k]).replace("opq::", "opr::").replace("opq(", "opr(");
+        s.format_into("@c.noinline\nfn parity_r{}() {} {{\n    return {};\n}}\n", k, tys[k], rt.as_str());
+    }
+    s.push_str("fn main(args: Vector<str>) i32 {\n    let k = args.at(1).parse_i64().unwrap();\n");
+    for k in 0..exprs.len() {
+        s.format_into("    if k == {} {{\n", k);
+        let t = tys[k];
+        if !omit[k] {
+            if t == "f64" || t == "f32" {
+                s.format_into("        parity_{}(\"c\", PARITY_C{});\n", t, k);
+            } else {
+                s.format_into("        println(\"c {{}}\", PARITY_C{});\n", k);
+            }
+        }
+        if t == "f64" || t == "f32" {
+            s.format_into("        parity_{}(\"r\", parity_r{}());\n", t, k);
+        } else {
+            s.format_into("        println(\"r {{}}\", parity_r{}());\n", k);
+        }
+        s.push_str("    }\n");
+    }
+    s.push_str("    return 0;\n}\n");
+    return s;
+}
+
+// Mark every case whose constant failed to evaluate in build output `diag` with the trap class its
+// error names; false when an error is not a trap of one constant.
+fn parity_attribute(diag: str, first: usize, ct: &mut Vector<String>, omit: &mut Vector<bool>) bool {
+    let mut msg = "";
+    let mut any = false;
+    for line in diag.lines() {
+        if line.starts_with("error:") {
+            msg = line;
+            continue;
+        }
+        let at = line.find("main.spc:");
+        if msg.len() == 0 || at < 0 {
+            continue;
+        }
+        let rest = line.slice(at as usize + 9, line.len());
+        let colon = rest.find(":");
+        let ln = rest.slice(
+            0,
+            if colon < 0 {
+                rest.len();
+            } else {
+                colon as usize;
+            },
+        ).parse_usize();
+        let class = const_trap_class(msg);
+        msg = "";
+        if ln.is_none() || class.len() == 0 {
+            return false;
+        }
+        let l = ln.unwrap();
+        if l < first || l - first >= ct.len() {
+            return false;
+        }
+        let k = l - first;
+        ct[k] = String::from_str(class);
+        omit[k] = true;
+        any = true;
+    }
+    return any;
+}
+
+// The value a parity run printed under `tag` ("c" or "r"); empty when it printed none.
+fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
+    for line in out.lines() {
+        if line.len() > tag.len() && line.starts_with(tag) && line.byte_at(tag.len()) == b' ' {
+            return line.slice(tag.len() + 1, line.len()).trim();
+        }
+    }
+    return "";
+}
+
+/// Evaluate each `exprs[k]` of type `tys[k]` once as a constant and once at run time in one program
+/// built with `opts` (`diff_build` forms) under `decls`, and describe every case where the value or
+/// the trap differs; empty when all agree. A constant that traps is a compile error naming the class
+/// of the trap ("arithmetic overflow"); the run time must trap with a message of that class
+/// (`runtime_trap_class`). Inputs are written `opq::<T>(v)`: the constant calls the identity
+/// `const fn opq`, the run-time copy calls `@c.noinline fn opr`, which the compiler cannot see
+/// through. The program defines `opq`, `opr` and names starting with `parity_`, `Parity` and `PARITY_`.
+pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts: []str) String {
+    assert(exprs.len() == tys.len());
+    let n = exprs.len();
+    let mut ct = Vector::<String>::new();
+    let mut omit = Vector::<bool>::new();
+    for _ in 0..n {
+        ct.push(String::new());
+        omit.push(false);
+    }
+    let mut first: usize = 0;
+    let mut r = String::new();
+    let mut b = diff_build(parity_source(decls, exprs, tys, &omit, &mut first).as_str(), opts);
+    if !b.built {
+        if !parity_attribute(b.diag.as_str(), first, &mut ct, &mut omit) {
+            r.format_into("the parity program does not build:\n{}", b.diag.as_str());
+            return r;
+        }
+        b = diff_build(parity_source(decls, exprs, tys, &omit, &mut first).as_str(), opts);
+        if !b.built {
+            r.format_into("the parity program without its trapping constants does not build:\n{}", b.diag.as_str());
+            return r;
+        }
+    }
+    for k in 0..n {
+        let mut arg = String::new();
+        arg.push_u64(k as u64);
+        let run = diff_run(&b, arg.as_str());
+        let trap = trap_text(run.err.as_str());
+        let mut want = String::new();
+        if omit[k] {
+            want.format_into("trap: {}", ct.at(k).as_str());
+        } else {
+            want.format_into("value {}", parity_value(run.out.as_str(), "c"));
+        }
+        let mut got = String::new();
+        if sanitizer_report(run.err.as_str()) {
+            got.format_into("sanitizer report:\n{}", run.err.as_str());
+        } else if run.exit == 0 {
+            got.format_into("value {}", parity_value(run.out.as_str(), "r"));
+        } else {
+            got.format_into("trap: {}", runtime_trap_class(trap.as_str()));
+            if runtime_trap_class(trap.as_str()).len() == 0 {
+                got.format_into("(exit {}) {}", run.exit, run.err.as_str());
+            }
+        }
+        if !want.equals(&got) {
+            r.format_into(
+                "case {}: {}: {}\n  const:    {}\n  run time: {}\n",
+                k,
+                exprs[k],
+                tys[k],
+                want.as_str(),
+                got.as_str(),
+            );
+        }
+    }
+    return r;
+}
+
+/// The program `const_runtime_parity` builds first, with every constant.
+pub fn parity_program(decls: str, exprs: []str, tys: []str) String {
+    let mut omit = Vector::<bool>::new();
+    for _ in 0..exprs.len() {
+        omit.push(false);
+    }
+    let mut first: usize = 0;
+    return parity_source(decls, exprs, tys, &omit, &mut first);
+}
+
+/// Assert that `expr` of type `ty` under `decls` has the same value or trap as a constant and at run
+/// time (see `const_runtime_parity`).
+pub fn expect_const_runtime_parity(label: str, decls: str, expr: str, ty: str) {
+    let d = const_runtime_parity(decls, [expr], [ty], []);
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
+}
+
+// True when C file `path` defines `function`: a line naming ` function(` that opens its body.
+fn c_defines(path: str, function: str) bool {
+    let text = cli::read_text(path);
+    let mut head = String::from_str(" ");
+    head.push_str(function);
+    head.push_str("(");
+    for line in text.as_str().lines() {
+        if line.contains(head.as_str()) && line.trim().ends_with("{") {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn asm_label_is(line: str, function: str) bool {
+    return line.starts_with(function) && line.slice(function.len(), line.len()).starts_with(":");
+}
+
+/// The instruction mnemonics of `function` in assembly text `text`: the first word of each line from
+/// the function's label (`name:` or Mach-O `_name:`) to the end of its body, without directives,
+/// labels and comments. Empty when the label is absent.
+pub fn asm_mnemonics(text: str, function: str) Vector<String> {
+    let mut names = Vector::<String>::new();
+    let mut inside = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if !inside {
+            inside = asm_label_is(line, function) || line.starts_with("_") && asm_label_is(
+                line.slice(1, line.len()),
+                function,
+            );
+            continue;
+        }
+        if line.starts_with(".cfi_endproc") || line.starts_with(".seh_endproc") || line.starts_with("end_function") || line.starts_with(
+            ".Lfunc_end",
+        ) || line.starts_with("Lfunc_end") || line.starts_with(".size") {
+            break;
+        }
+        if line.len() == 0 || line.starts_with(".") || line.starts_with(";") || line.starts_with("#") || line.starts_with(
+            "//",
+        ) || line.starts_with("@") {
+            continue;
+        }
+        let mut w: usize = 0;
+        while w < line.len() && line.byte_at(w) != b' ' && line.byte_at(w) != b'\t' {
+            w += 1;
+        }
+        let word = line.slice(0, w);
+        if !word.ends_with(":") {
+            names.push(String::from_str(word));
+        }
+    }
+    return names;
+}
+
+/// Build `src` with `opts` (`diff_build` forms), compile the translation unit that defines C function
+/// `function` with the build's own C command plus `-S` (without `-c`, `-MMD` and LTO, which would
+/// print IR), and check its instruction mnemonics: every `contains` entry is a substring of one, no
+/// `absent` entry is a substring of any. Mnemonics only: register names never match. Describes every
+/// failed check; empty when all hold.
+pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
+    let mut r = String::new();
+    let b = diff_build(src, opts);
+    if !b.built {
+        r.format_into("the program does not build:\n{}", b.diag.as_str());
+        return r;
+    }
+    let mut prof = "dev";
+    for o in opts {
+        if o.starts_with("--profile=") {
+            prof = o.slice(10, o.len());
+        }
+    }
+    let root = str::from_cstr(b.proj.rootp());
+    let mut dbp = String::new();
+    dbp.format_into("{}/build/{}/compile_commands.json", root, prof);
+    let text = cli::read_text(dbp.as_str());
+    let parsed = json::parse(text.as_str());
+    if parsed.is_err() {
+        r.format_into("cannot read {}", dbp.as_str());
+        return r;
+    }
+    let db = parsed.unwrap();
+    let mut cmd = String::new();
+    let mut dir = String::new();
+    let mut asmp = String::new();
+    asmp.format_into("{}/function.s", root);
+    for i in 0..db.size() {
+        let row = db.at(i);
+        let file = row.value_str("file");
+        let mut path = String::new();
+        if !file.starts_with("/") && !(file.len() > 1 && file.byte_at(1) == b':') {
+            path.push_str(row.value_str("directory"));
+            path.push_byte(b'/');
+        }
+        path.push_str(file);
+        if !c_defines(path.as_str(), function) {
+            continue;
+        }
+        dir.push_str(row.value_str("directory"));
+        let args = row.at_key("arguments");
+        let mut skip_next = false;
+        for j in 0..args.size() {
+            let a = args.at(j).get_str();
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if a == "-o" {
+                skip_next = true;
+                continue;
+            }
+            if a == "-c" || a == "-MMD" || a.starts_with("-flto") {
+                continue;
+            }
+            if cmd.len() != 0 {
+                cmd.push_byte(b' ');
+            }
+            cmd.format_into("\"{}\"", a);
+        }
+        cmd.format_into(" -S -o \"{}\"", asmp.as_str());
+        break;
+    }
+    if cmd.len() == 0 {
+        r.format_into("no translation unit defines '{}'", function);
+        return r;
+    }
+    let mut outp = String::new();
+    outp.format_into("{}/.asm", root);
+    let mut rc = -1;
+    if unsafe shim::sc_chdir(dir.cstr()) == 0 {
+        rc = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), null, null);
+    }
+    if rc != 0 {
+        r.format_into("'{}' failed:\n{}", cmd.as_str(), cli::read_text(outp.as_str()).as_str());
+        return r;
+    }
+    let names = asm_mnemonics(cli::read_text(asmp.as_str()).as_str(), function);
+    if names.len() == 0 {
+        r.format_into("no instructions of '{}' in the assembly", function);
+        return r;
+    }
+    for want in contains {
+        let mut found = false;
+        for i in 0..names.len() {
+            found = found || names.at(i).contains(want);
+        }
+        if !found {
+            r.format_into("no instruction of '{}' contains '{}'\n", function, want);
+        }
+    }
+    for bad in absent {
+        for i in 0..names.len() {
+            if names.at(i).contains(bad) {
+                r.format_into("instruction '{}' of '{}' contains '{}'\n", names.at(i).as_str(), function, bad);
+                break;
+            }
+        }
+    }
+    if r.len() != 0 {
+        r.push_str("mnemonics:");
+        for i in 0..names.len() {
+            r.push_byte(b' ');
+            r.push_string(names.at(i));
+        }
+        r.push_byte(b'\n');
+    }
+    return r;
+}
+
+/// Assert the instruction checks of `asm_check` on `function` of `src` built with `opts`.
+pub fn expect_asm(label: str, src: str, opts: []str, function: str, contains: []str, absent: []str) {
+    let d = asm_check(src, opts, function, contains, absent);
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
 }
 
 // Mirror main.spc's resolve_module, capturing module `i`'s diagnostics when it is the user module (cap).

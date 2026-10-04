@@ -323,9 +323,37 @@ Generates `.spc` bindings from C headers (`src/bindgen/bindgen.spc`). Use it for
 APIs where hand-writing bindings is impractical. The generated output follows the `ffi/`
 conventions.
 
+## Atomics and Memory-Order Codes
+
+`ffi/atomic.spc` binds the `__sc_atomic_*` helpers of `super_rt.h` (`src/driver/rt_c.spc`),
+which lower to the C `__atomic_*` builtins. Each operation takes the order as an `i32` code;
+`MemoryOrder as i32` in `std/parallel/atomics.spc` gives it:
+
+| Code | Order | C constant |
+|------|-------|------------|
+| 0 | `Relaxed` | `__ATOMIC_RELAXED` |
+| 1 | `Acquire` | `__ATOMIC_ACQUIRE` |
+| 2 | `Release` | `__ATOMIC_RELEASE` |
+| 3 | `AcqRel` | `__ATOMIC_ACQ_REL` |
+| 4 | `SeqCst` | `__ATOMIC_SEQ_CST` |
+
+| Operation | Valid codes |
+|-----------|-------------|
+| load, `cas` failure | 0, 1, 4 |
+| store | 0, 2, 4 |
+| swap, add, sub, and, or, xor, `cas` success, `fence` | 0 to 4 |
+
+Any other code calls `__sc_trap_order`, which panics with "invalid memory order" (the
+`__sc_panic` path: message on stderr, then `abort`). `SC_MO_CAS(so, fo)` strengthens the
+success order to at least the failure order before the C call, as the C builtin requires:
+`Relaxed` + `Acquire` runs as `Acquire`, `Release` + `Acquire` as `AcqRel`, and a `SeqCst`
+failure as `SeqCst`. The checks are ternaries over the code, so a constant valid order
+still folds to the one instruction at `-O1` and above.
+
 ## Platform C Pitfalls
 
-The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L`.
+The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L` (the `cstd` value), plus
+`-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` on every compile.
 
 - macOS: strict `_POSIX_C_SOURCE` breaks `<sys/sysctl.h>` and hides `ru_maxrss`.
   src/driver_shim.c declares `sysctlbyname` locally and defines `_DARWIN_C_SOURCE` before

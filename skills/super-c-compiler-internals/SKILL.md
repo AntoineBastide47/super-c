@@ -467,9 +467,16 @@ checks is [ownership-analysis.md](references/ownership-analysis.md).
 ## CTFE (Compile-Time Function Evaluation)
 
 `src/ir/interp.spc` is the Core IR interpreter, the only evaluator (the AST-based one
-was deleted). It serves typechecker folds (array lengths, const args, static_assert),
-`const`/`static` emission, `type_info` rendering, the `fx` scanner (const-fn
-eligibility, always-panics), and lint probes.
+was deleted). It serves typechecker folds (array lengths, const args, static_assert,
+`const`/`static mut` initializers, the constant-trap scan), `const`/`static` emission,
+`type_info` rendering, the `fx` scanner (const-fn eligibility, always-panics), and lint probes.
+
+The constant-trap scan (`tc_ct_check`, after each binary, unary and assignment node in
+`check_expr_w`) folds the integer operations over closed operands and reports a trap at the
+operation (operations.md); a mandatory evaluation (`tc_mandatory_const`,
+static_assert, a discriminant, an array length or repeat count) whose expression it reported
+(`ct_n` moved) reports nothing more. The always-panics pass runs only when type checking passed,
+so it never repeats one.
 
 Driver protocol: `cir.all_typed` and `record_folds` are set **before the first body
 lowers** (the constant contexts lowering evaluates, such as build conditions, repeat counts
@@ -493,8 +500,13 @@ Nesting the stack cannot see (through function bodies, lowering-time folds) stop
 
 Every const initializer evaluates during the type check: a trap is an error at the
 constant (a call-free initializer leaves a trap raised in a referenced constant to that
-constant, except a cycle), and a refusal defers to `flush_consts`. An explicit enum
-discriminant must fold there too; `Interp::discr` is the one discriminant rule the
+constant, except a cycle), and a refusal defers to `flush_consts`. A constant-expression
+attribute argument (`Attr.expr`: the attribute table `ATTR_EXPR_KINDS` / `attr_expr_type` in
+`src/ast/ast.spc` names the attributes and each argument's type) is checked and folded by its
+owner's `check_item` (`tc_attr_exprs`); a failure, a refusal included, is an error at the
+argument, and the value goes to `Ast.attr_vals` (`Ast::attr_value`). The layout service reads
+`@c.align` from there: before the owner's check it answers not-ok and caches nothing
+(`Svc.pending`). An explicit enum discriminant must fold there too; `Interp::discr` is the one discriminant rule the
 lowering, the emitted C enum, constant evaluation, static data and `type_info` share, for
 payload enums as for bare ones. The checker rejects a duplicate value or one outside the
 i32 range in a non-extern enum. A discriminant read has type i32 when a tag of the enum is

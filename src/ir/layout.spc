@@ -95,6 +95,7 @@ pub struct Svc {
     cache: Map<u64, Layout>, // (module << 32 | type) -> layout (env-free concrete only)
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
     steps: Vector<ConstStep>, // `steps_hold` scratch
+    pending: u32, // answers that read a constant-expression attribute not evaluated yet: never cached
 }
 
 extend Svc {
@@ -286,11 +287,12 @@ extend Svc {
             ts_add(TS_LAY_RAW, 1);
             t0 = ts_now();
         }
+        let pending = self.pending;
         let r = self.layout_raw(m, t, env, depth);
         if t0 != 0 {
             ts_add(TS_LAY_NS, ts_now() - t0);
         }
-        if cacheable {
+        if cacheable && self.pending == pending {
             self.cache.insert(key, r);
             if unsafe TS_ON {
                 ts_add(TS_LAY_INS, 1);
@@ -468,9 +470,19 @@ extend Svc {
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
-        if al != null && unsafe (*al).arg != 0 {
-            if (unsafe (*al).arg) as u64 > acc.align {
-                acc.align = unsafe (*al).arg;
+        if al != null {
+            let mut v = (unsafe (*al).arg) as u64;
+            if unsafe (*al).expr {
+                // Evaluated by the declaration's own check: before it, the layout is not known yet.
+                let av = ast.attr_value(dn, AttrKind::ATTR_ALIGN);
+                if !av.ok {
+                    self.pending += 1;
+                    return Layout { ok: false };
+                }
+                v = av.v;
+            }
+            if v > acc.align {
+                acc.align = v;
             }
         }
         if acc.align == 0 {

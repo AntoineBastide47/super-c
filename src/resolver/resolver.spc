@@ -1108,6 +1108,7 @@ extend Resolver {
     fn resolve_associated_items(self: &mut Self, items: NodeList) {
         for i in 0..items.len {
             let iid = self.child(items, i);
+            self.resolve_attr_exprs(iid);
             switch self.ast.at_const(iid).kind {
                 NODE_FUNCTION => {
                     self.resolve_function(iid);
@@ -1125,7 +1126,19 @@ extend Resolver {
         }
     }
 
+    // The constant-expression arguments of `owner`'s attributes, in the caller's scope.
+    fn resolve_attr_exprs(self: &mut Self, owner: NodeId) {
+        let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
+        for i in 0..ks.len() {
+            let at = self.ast.attr_expr_at(owner, i);
+            if at != null {
+                self.resolve_expr(unsafe (*at).arg);
+            }
+        }
+    }
+
     fn resolve_item(self: &mut Self, id: NodeId) {
+        self.resolve_attr_exprs(id);
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_FUNCTION => {

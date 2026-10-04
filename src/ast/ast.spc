@@ -196,11 +196,54 @@ pub struct BcCut {
     pub span: tok::Span,
 }
 
+/// `expr`: the argument is a constant expression (`attr_expr_type`): `arg` is its node in the
+/// module arena, `str_span` the source text between the parentheses, and its value is in
+/// `Ast.attr_vals`.
 pub struct Attr {
     pub owner: NodeId,
     pub kind: u8,
+    pub expr: bool,
     pub arg: u32,
     pub str_span: tok::Span,
+}
+
+/// The attribute kinds whose argument may be a constant expression, and the type each argument
+/// checks against.
+pub const ATTR_EXPR_KINDS: [AttrKind; 1] = [AttrKind::ATTR_ALIGN];
+const ATTR_EXPR_TYPES: [BuiltinType; 1] = [BuiltinType::BT_U32];
+
+/// The type a constant-expression argument of attribute `kind` checks against; BT_COUNT when the
+/// attribute takes none.
+pub const fn attr_expr_type(kind: u8) BuiltinType {
+    let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
+    let ts: Slice<'static, BuiltinType> = ATTR_EXPR_TYPES;
+    for i in 0..ks.len() {
+        if ks[i] as u8 == kind {
+            return ts[i];
+        }
+    }
+    return BuiltinType::BT_COUNT;
+}
+
+/// The largest `@c.align` value: GCC's limit for every target, and clang ignores a larger one.
+pub const C_ALIGN_MAX: u64 = 268435456;
+
+/// Whether `v` is a valid `@c.align` value: a power of two, at most `C_ALIGN_MAX`.
+pub const fn c_align_ok(v: u64) bool {
+    return v != 0 && (v & v - 1) == 0 && v <= C_ALIGN_MAX;
+}
+
+/// The error for an invalid `@c.align` value `v`, literal or evaluated.
+pub fn c_align_error(v: u64) String {
+    return format("'@c.align' needs a power of two from 1 to {}, found {}", C_ALIGN_MAX, v);
+}
+
+/// The value of the constant-expression attribute `attrs[attr]`. The parser adds the record; the
+/// owner's type check evaluates the argument and sets `ok`.
+pub struct AttrVal {
+    pub attr: u32,
+    pub ok: bool,
+    pub v: u64,
 }
 
 /// One `@reflect(key = value)` entry, in its own side table: the key/value payload does not fit
@@ -2643,6 +2686,7 @@ pub struct Ast {
     pub deref_at: Vector<u32>,
     pub attrs: Vector<Attr>,
     attr_ix: Map<u64, u32>, // owner << 8 | kind -> its first `attrs` index
+    attr_vals: Vector<AttrVal>, // one per constant-expression attribute, by ascending `attr`
     pub metas: Vector<MetaAttr>,
     pub lifetime_decls: Vector<LifetimeDecl>,
     pub lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
@@ -2734,6 +2778,7 @@ extend Ast as Free {
         self.lifetime_decls.free();
         self.lifetime_at.free();
         self.attr_ix.free();
+        self.attr_vals.free();
         self.member_of.free();
         self.where_bounds.free();
         self.call_info.free();
@@ -3644,7 +3689,58 @@ extend Ast {
         if !self.attr_ix.contains_key(&key) {
             self.attr_ix.insert(key, self.attrs.len() as u32);
         }
+        if attr.expr {
+            self.attr_vals.push(AttrVal { attr: self.attrs.len() as u32 });
+        }
         self.attrs.push(attr);
+    }
+
+    // The `attr_vals` index of attribute `attrs[i]` (a constant-expression one).
+    const fn attr_val_ix(self: &Self, i: u32) usize {
+        let mut lo: usize = 0;
+        let mut hi = self.attr_vals.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.attr_vals[mid].attr < i {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        assert(
+            lo < self.attr_vals.len() && self.attr_vals[lo].attr == i,
+            "a constant-expression attribute has a value record",
+        );
+        return lo;
+    }
+
+    /// `owner`'s attribute of the `i`th constant-expression kind (`ATTR_EXPR_KINDS`) when its
+    /// argument is an expression; null otherwise.
+    pub const fn attr_expr_at(self: &Self, owner: NodeId, i: usize) *const Attr {
+        let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
+        let at = self.attr_of(owner, ks[i]);
+        if at != null && unsafe (*at).expr {
+            return at;
+        }
+        return null;
+    }
+
+    /// The value of `owner`'s constant-expression attribute `kind` (`Attr.expr`); `ok` false
+    /// until the owner's type check evaluated it.
+    pub const fn attr_value(self: &Self, owner: NodeId, kind: AttrKind) AttrVal {
+        return self.attr_value_of(*self.attr_ix.get(&(owner as u64 << 8 | kind as u64)).unwrap());
+    }
+
+    /// The value of the constant-expression attribute `attrs[i]`.
+    pub const fn attr_value_of(self: &Self, i: u32) AttrVal {
+        return self.attr_vals[self.attr_val_ix(i)];
+    }
+
+    /// Record the evaluated value of `owner`'s constant-expression attribute `kind`.
+    pub fn set_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, ok: bool, v: u64) {
+        let i = *self.attr_ix.get(&(owner as u64 << 8 | kind as u64)).unwrap();
+        let k = self.attr_val_ix(i);
+        self.attr_vals.set(k, AttrVal { attr: i, ok: ok, v: v });
     }
 
     pub fn add_meta(self: &mut Self, m: MetaAttr) {
@@ -4283,7 +4379,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
@@ -4398,6 +4494,160 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) B
         }
     }
     return BuiltinType::BT_COUNT;
+}
+
+/// The value of float literal text `raw`, decimal or hex (`0x1.8p3`), with `_` separators and an
+/// `f32`/`f64` suffix allowed, rounded once to f32 when `single` (the C compiler rounds an `f`-suffixed
+/// literal once). None when the text is not a float literal.
+pub fn float_literal_value(src: str, raw: tok::Span, single: bool) Option<f64> {
+    let mut end = raw.end;
+    let _ = ast_numeric_suffix(src, raw.start, raw.end, &mut end);
+    let mut txt = src.slice(raw.start as usize, end as usize);
+    let mut clean = String::new();
+    if txt.contains("_") {
+        for i in 0..txt.len() {
+            if txt[i] != b'_' {
+                clean.push_byte(txt[i]);
+            }
+        }
+        txt = clean.as_str();
+    }
+    if txt.len() > 2 && txt[0] == b'0' && (txt[1] | 0x20u8) == b'x' {
+        return hex_float_value(txt.slice(2, txt.len()), single);
+    }
+    if single {
+        return switch txt.parse_f32() {
+            Some(v) => Option::<f64>::Some(v),
+            None => Option::<f64>::None,
+        };
+    }
+    return txt.parse_f64();
+}
+
+// The value of hex float digits `t` (after `0x`: hex digits, an optional fraction, a `p` exponent),
+// rounded once, to nearest even, to f32 (`single`) or f64, subnormals included.
+fn hex_float_value(t: str, single: bool) Option<f64> {
+    let mut mant: u64 = 0;
+    let mut e: i64 = 0;
+    let mut sticky = false;
+    let mut dot = false;
+    let mut any = false;
+    let mut i: usize = 0;
+    while i < t.len() && (t[i] | 0x20u8) != b'p' {
+        let c = t[i];
+        i += 1;
+        if c == b'.' && !dot {
+            dot = true;
+            continue;
+        }
+        let lc = c | 0x20u8;
+        let d: u64 = if c >= b'0' && c <= b'9' {
+            c - b'0';
+        } else if lc >= b'a' && lc <= b'f' {
+            (lc - b'a') as u64 + 10;
+        } else {
+            return Option::<f64>::None;
+        };
+        any = true;
+        if mant < 1u64 << 60 {
+            mant = mant * 16 + d;
+            if dot {
+                e -= 4;
+            }
+        } else {
+            // Past 60 bits a digit only marks the bits below the rounding point.
+            sticky = sticky || d != 0;
+            if !dot {
+                e += 4;
+            }
+        }
+    }
+    if !any || i + 1 >= t.len() {
+        return Option::<f64>::None;
+    }
+    i += 1;
+    let neg = t[i] == b'-';
+    if t[i] == b'-' || t[i] == b'+' {
+        i += 1;
+    }
+    if i >= t.len() {
+        return Option::<f64>::None;
+    }
+    let mut pe: i64 = 0;
+    while i < t.len() {
+        if t[i] < b'0' || t[i] > b'9' {
+            return Option::<f64>::None;
+        }
+        // Past 100000 the value is zero or infinite in every float format.
+        if pe < 100000 {
+            pe = pe * 10 + (t[i] - b'0') as i64;
+        }
+        i += 1;
+    }
+    e += if neg {
+        0 - pe;
+    } else {
+        pe;
+    };
+    if mant == 0 {
+        return Option::<f64>::Some(0.0);
+    }
+    if sticky {
+        mant |= 1; // mant has 61 or more bits: bit 0 lies below every rounding point
+    }
+    let prec: i64 = pick(single, 24, 53);
+    let emin: i64 = pick(single, -126, -1022);
+    let emax: i64 = pick(single, 127, 1023);
+    let bits = 64 - mant.leading_zeros() as i64;
+    let lead = e + bits - 1; // the exponent of the leading bit
+    let mut keep = prec;
+    if lead < emin {
+        keep = prec - (emin - lead); // a subnormal keeps fewer bits
+    }
+    let drop = bits - keep;
+    if drop > 64 {
+        return Option::<f64>::Some(0.0);
+    }
+    if drop > 0 {
+        let q = if drop == 64 {
+            0u64;
+        } else {
+            mant >> drop as u64;
+        };
+        let rem = mant - if drop == 64 {
+            0u64;
+        } else {
+            q << drop as u64;
+        };
+        let half = 1u64 << (drop - 1) as u64;
+        mant = q;
+        if rem > half || rem == half && (q & 1) == 1 {
+            mant += 1;
+        }
+        e += drop;
+    }
+    if mant == 0 {
+        return Option::<f64>::Some(0.0);
+    }
+    if e + (64 - mant.leading_zeros() as i64) - 1 > emax {
+        return Option::<f64>::Some(1.0 as f64 / 0.0 as f64);
+    }
+    // mant * 2^e is a value of the format, so every scaling step below is exact.
+    let mut v = mant as f64;
+    while e >= 60 {
+        v = v * 1152921504606846976.0;
+        e -= 60;
+    }
+    while e <= -60 {
+        v = v / 1152921504606846976.0;
+        e += 60;
+    }
+    if e < 0 {
+        v = v / (1u64 << (0 - e) as u64) as f64;
+    } else {
+        v = v * (1u64 << e as u64) as f64;
+    }
+    return Option::<f64>::Some(v);
 }
 
 /// The value of a decimal integer literal (`_` separators and an integer suffix allowed), -1 for

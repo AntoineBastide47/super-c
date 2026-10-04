@@ -23,7 +23,7 @@ extend<T, A: Allocator> Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc };
         if sizeof(T) == 0 {
             // A zero-sized value occupies no bytes: the aligned sentinel, no allocator call.
-            b.ptr = zst_dangling::<T>();
+            b.ptr = dangling::<T>();
             unsafe b.ptr[0] = value;
             return b;
         }
@@ -135,10 +135,4 @@ extend<T: Default, A: Allocator + Default> Box<T, A> as Default {
     pub const fn default() Box<T, A> {
         return Box::<T, A>::new(T::default());
     }
-}
-
-// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
-// duplicated privately so the prelude module needs no self-import).
-const fn zst_dangling<T>() *mut T {
-    return alignof(T) as *mut T;
 }

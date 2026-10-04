@@ -131,6 +131,11 @@ fn errors() {
         "by-ref-self method call does not consume the receiver",
         "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
     );
+    // A raw pointer copies, also to a Free type: a struct field takes it and the parameter stays usable.
+    h::expect_ok(
+        "raw pointer to a Free type copies",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nstruct H { pub p: *mut R, pub t: i32 }\nfn mk(p: *mut R) H { return H { p: p, t: unsafe (*p).t }; }\n",
+    );
     h::expect_err_msg(
         "read of uninitialized binding",
         "fn main() i32 { let mut x: i32; return x; }\n",

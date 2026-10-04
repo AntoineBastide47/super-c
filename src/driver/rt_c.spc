@@ -107,10 +107,16 @@ pub const fn super_rt_includes() *const char {
 #pragma GCC diagnostic ignored "-Wunused-function"
 /* Memory order: the enum value (Relaxed=0,Acquire=1,Release=2,AcqRel=3,SeqCst=4) maps to the matching
    __ATOMIC_* constant. A ternary rather than a runtime order argument so a constant order folds to a
-   single instruction at -O1+; orders illegal for an op (e.g. Release on a load) clamp to SeqCst. */
-#define SC_MO_RMW(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==2?__ATOMIC_RELEASE:(mo)==3?__ATOMIC_ACQ_REL:__ATOMIC_SEQ_CST)
-#define SC_MO_LD(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:__ATOMIC_SEQ_CST)
-#define SC_MO_ST(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==2?__ATOMIC_RELEASE:__ATOMIC_SEQ_CST)
+   single instruction at -O1+. An order the operation cannot take traps: a load and a compare-exchange
+   failure take Relaxed, Acquire or SeqCst; a store takes Relaxed, Release or SeqCst; a read-modify-write,
+   a compare-exchange success and a fence take all five. SC_MO_CAS strengthens the success order to at
+   least the failure order, as the C builtin requires. */
+static _Noreturn void __sc_trap_order(void);
+#define SC_MO_BAD (__sc_trap_order(), __ATOMIC_SEQ_CST)
+#define SC_MO_RMW(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==2?__ATOMIC_RELEASE:(mo)==3?__ATOMIC_ACQ_REL:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
+#define SC_MO_LD(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
+#define SC_MO_ST(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==2?__ATOMIC_RELEASE:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
+#define SC_MO_CAS(so,fo) ((unsigned)(so)>4u?SC_MO_BAD:SC_MO_RMW((fo)==4?4:(fo)==1&&(so)==0?1:(fo)==1&&(so)==2?3:(so)))
 #define SC_AT(T,S) \
 static inline T __sc_atomic_load_##S(const T*p,int mo){return __atomic_load_n(p,SC_MO_LD(mo));} \
 static inline void __sc_atomic_store_##S(T*p,T v,int mo){__atomic_store_n(p,v,SC_MO_ST(mo));} \
@@ -120,18 +126,20 @@ static inline T __sc_atomic_sub_##S(T*p,T v,int mo){return __atomic_fetch_sub(p,
 static inline T __sc_atomic_and_##S(T*p,T v,int mo){return __atomic_fetch_and(p,v,SC_MO_RMW(mo));} \
 static inline T __sc_atomic_or_##S(T*p,T v,int mo){return __atomic_fetch_or(p,v,SC_MO_RMW(mo));} \
 static inline T __sc_atomic_xor_##S(T*p,T v,int mo){return __atomic_fetch_xor(p,v,SC_MO_RMW(mo));} \
-static inline bool __sc_atomic_cas_##S(T*p,T e,T d,bool wk,int so,int fo){return __atomic_compare_exchange_n(p,&e,d,wk,SC_MO_RMW(so),SC_MO_LD(fo));}
+static inline bool __sc_atomic_cas_##S(T*p,T e,T d,bool wk,int so,int fo){return __atomic_compare_exchange_n(p,&e,d,wk,SC_MO_CAS(so,fo),SC_MO_LD(fo));}
 SC_AT(int8_t,i8) SC_AT(int16_t,i16) SC_AT(int32_t,i32) SC_AT(int64_t,i64) SC_AT(intptr_t,isize)
 SC_AT(uint8_t,u8) SC_AT(uint16_t,u16) SC_AT(uint32_t,u32) SC_AT(uint64_t,u64) SC_AT(size_t,usize)
 #undef SC_AT
 static inline bool __sc_atomic_load_bool(const bool*p,int mo){return __atomic_load_n(p,SC_MO_LD(mo));}
 static inline void __sc_atomic_store_bool(bool*p,bool v,int mo){__atomic_store_n(p,v,SC_MO_ST(mo));}
 static inline bool __sc_atomic_swap_bool(bool*p,bool v,int mo){return __atomic_exchange_n(p,v,SC_MO_RMW(mo));}
-static inline bool __sc_atomic_cas_bool(bool*p,bool e,bool d,bool wk,int so,int fo){return __atomic_compare_exchange_n(p,&e,d,wk,SC_MO_RMW(so),SC_MO_LD(fo));}
+static inline bool __sc_atomic_cas_bool(bool*p,bool e,bool d,bool wk,int so,int fo){return __atomic_compare_exchange_n(p,&e,d,wk,SC_MO_CAS(so,fo),SC_MO_LD(fo));}
 static inline void __sc_atomic_fence(int mo){__atomic_thread_fence(SC_MO_RMW(mo));}
+#undef SC_MO_BAD
 #undef SC_MO_RMW
 #undef SC_MO_LD
 #undef SC_MO_ST
+#undef SC_MO_CAS
 #pragma GCC diagnostic pop
 #endif
 static inline __attribute__((unused)) FILE* __sc_stdin(void){return stdin;}
@@ -156,6 +164,9 @@ static _Noreturn __attribute__((unused, cold)) void __sc_panic_str(const uint8_t
   fflush(stderr);
   abort();
 }
+static _Noreturn __attribute__((unused)) void __sc_trap_order(void) {
+  __sc_panic("invalid memory order");
+}
 static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {
   if (__i >= __n) __sc_panic("index out of bounds");
   return __i;
@@ -171,7 +182,7 @@ static __attribute__((unused)) inline size_t __sc_bounds_group(size_t __i, size_
   if (__i > __n || __w > __n - __i) __sc_panic("index out of bounds");
   return __i;
 }
-/* Integer arithmetic the C operators do not give (types.md "Arithmetic Semantics"). + - * and signed
+/* Integer arithmetic the C operators do not give (language skill, operations.md). + - * and signed
    negation trap on overflow, or wrap modulo the width when the build defines SC_ARITH_WRAP (a profile
    without overflow checks). Division and remainder by zero, signed MIN / -1 and MIN % -1, and shifts by a
    negative count or by the width or more trap in every build. Narrow unsigned results truncate to their
@@ -288,6 +299,12 @@ void sc_lk_bt_resume(void);
 /* std/alloc.h routes its over-aligned blocks through sc_lk_aligned_* when this is defined. */
 #define SC_LK_ALIGNED 1
 #endif
+/* `new T`: traps on a null result. Always inlined, so the leak tracker records the caller's site. */
+static inline __attribute__((unused, always_inline)) void *__sc_new(size_t __n) {
+  void *__p = malloc(__n);
+  if (!__p) __sc_panic("out of memory");
+  return __p;
+}
 )".ptr() as *const char;
 }
 

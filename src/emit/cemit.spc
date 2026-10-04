@@ -579,7 +579,8 @@ extend CEmit {
         self.ti_memo2.insert(key, ei as u64);
     }
 
-    // 1-based line of byte offset `pos` in module `m`'s source (newlines strictly before `pos`).
+    // 1-based line of byte offset `pos` in module `m`'s source (line ends strictly before `pos`: `\n`,
+    // `\r\n` at its `\n`, or a lone `\r`, as the diagnostics count them).
     fn src_line(self: &mut Self, m: ModuleId, pos: u64) u64 {
         if self.line_off.len() == 0 {
             // Slots for every module; a module's newline table fills on its first lookup (most
@@ -593,7 +594,8 @@ extend CEmit {
             let start = self.line_pool.len() as u64;
             let src = self.p().modules.at(m as usize).source.as_str();
             for k in 0..src.len() {
-                if src.byte_at(k) == 10 {
+                let c = src.byte_at(k);
+                if c == 10 || c == 13 && (k + 1 == src.len() || src.byte_at(k + 1) != 10) {
                     self.line_pool.push(k as u32);
                 }
             }
@@ -868,6 +870,19 @@ extend CEmit {
             return false;
         }
         return self.agg_name(y.module, y.as_data.decl) == "str";
+    }
+
+    // The cast that prefixes each operand of comparison `t` over operand type `rt`: an ordered raw-pointer
+    // comparison compares addresses as `uintptr_t`, because C defines `<` only within one object.
+    const fn ptr_order_cast(self: &Self, rm: ModuleId, rt: TypeId, t: tt::TokenType) str<'static> {
+        if rt == TYPE_NONE || t != tt::TokenType::LessThan && t != tt::TokenType::LessThanEqual && t != tt::TokenType::GreaterThan && t != tt::TokenType::GreaterThanEqual {
+            return "";
+        }
+        return mbe::if_s(
+            unsafe (*self.p().module_ast_const(rm)).type_at(rt).kind == TypeKind::TYPE_POINTER,
+            "(uintptr_t)",
+            "",
+        );
     }
 
     // The C-visible fixed-array length of the value a place denotes, or -1: the recorded types may
@@ -5620,8 +5635,19 @@ extend CEmit {
                 let mut es = self.sget();
                 let mut lhs = self.sget();
                 let mut iv = self.sget();
-                let mut okn = self.ty_c(rmN, yN.as_data.elem, "", &mut es) && self.emit_place(b, s.place, &mut lhs);
-                if okn && rv0.b != 0 {
+                // A zero-sized `T` has no C storage: one byte gives a distinct block to free, and the
+                // initializer stores nothing.
+                let zN = self.mg.is_zst(rmN, yN.as_data.elem);
+                let mut okn = true;
+                if zN {
+                    es.push_str("1");
+                } else {
+                    es.push_str("sizeof(");
+                    okn = self.ty_c(rmN, yN.as_data.elem, "", &mut es);
+                    es.push_str(")");
+                }
+                okn = okn && self.emit_place(b, s.place, &mut lhs);
+                if okn && rv0.b != 0 && !zN {
                     okn = self.emit_operand(b, b.oper_pool[rv0.a as usize], &mut iv);
                 }
                 if okn {
@@ -5636,14 +5662,14 @@ extend CEmit {
         return self.emit_stmt_tail(o, b, s);
     }
 
-    // `Box`-style allocation: `[T ]lhs = malloc(sizeof(es)); *lhs = iv;` with the pieces spelled by
-    // the caller (`iv` empty = no initializer).
+    // `Box`-style allocation: `[T ]lhs = __sc_new(size); *lhs = iv;` with the pieces spelled by the
+    // caller (`iv` empty = no initializer).
     fn emit_new_store(
         self: &mut Self,
         o: &mut String,
         b: &ir::CoreBody,
         s: &ir::Statement,
-        es: &String,
+        size: &String,
         lhs: &String,
         iv: &String,
     ) bool {
@@ -5659,9 +5685,9 @@ extend CEmit {
         } else {
             o.push_string(lhs);
         }
-        o.push_str(" = malloc(sizeof(");
-        o.push_string(es);
-        o.push_str("));\n");
+        o.push_str(" = __sc_new(");
+        o.push_string(size);
+        o.push_str(");\n");
         if iv.len() != 0 {
             o.push_str("  *");
             o.push_string(lhs);
@@ -6833,19 +6859,9 @@ extend CEmit {
             return self.emit_int(b, &c, dst);
         }
         if c.kind == ir::CK_FLOAT {
-            // The exact source spelling, with the language width suffix mapped to C's; an inlined
-            // constant spans a FOREIGN module's source (item marks it, the CK_STR convention).
+            // An inlined constant spans a FOREIGN module's source (item marks it, the CK_STR convention).
             let srcf = self.const_src(b, &c);
-            let txt = srcf.slice(c.raw.start as usize, c.raw.end as usize);
-            let n = txt.len();
-            if n > 3 && txt.slice(n - 3, n) == "f32" {
-                dst.push_str(txt.slice(0, n - 3));
-                dst.push_str("f");
-            } else if n > 3 && txt.slice(n - 3, n) == "f64" {
-                dst.push_str(txt.slice(0, n - 3));
-            } else {
-                dst.push_str(txt);
-            }
+            push_c_float_lit(srcf.slice(c.raw.start as usize, c.raw.end as usize), self.is_f32(b, c.ty), dst);
             return true;
         }
         if c.kind == ir::CK_STR {
@@ -7078,16 +7094,16 @@ extend CEmit {
 
     // Close unsuffixed float literal operand `opid` (just spelled) as a C `float` when its peer
     // operand `(pm, pt)` is `f32`: a `double` literal computes the operation at double precision,
-    // which rounds differently from the `f32` operation. The literal's recorded type cannot decide
-    // it: an unsuffixed literal records `f32` in an `f64` context too.
+    // which rounds differently from the `f32` operation. A literal recorded `f32` has its suffix
+    // already (push_c_float_lit).
     fn f32_lit_sfx(self: &Self, b: &ir::CoreBody, opid: ir::OperandId, pm: ModuleId, pt: TypeId, dst: &mut String) {
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_CONST || pt == TYPE_NONE {
             return;
         }
         let c = *b.constants.at(op.data as usize);
-        if c.kind != ir::CK_FLOAT {
-            return;
+        if c.kind != ir::CK_FLOAT || self.is_f32(b, c.ty) {
+            return; // an f32 literal is spelled with its suffix already
         }
         let py = *unsafe (*self.p().module_ast_const(pm)).type_at(pt);
         if py.kind != TypeKind::TYPE_BUILTIN || py.as_data.builtin != BuiltinType::BT_F32 {
@@ -7102,6 +7118,10 @@ extend CEmit {
             dst.push_str(".0");
         }
         dst.push_str("f");
+    }
+
+    fn is_f32(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        return self.int_builtin(b, t) == BuiltinType::BT_F32;
     }
 
     // The builtin behind integer type `t`; BT_VOID when `t` is absent or not a builtin.
@@ -9125,10 +9145,13 @@ extend CEmit {
                             let mut bm = b.module;
                             let mut bt = TYPE_NONE;
                             let bref = self.bin_op_ty(b, rv.b, &mut bm, &mut bt);
+                            let pc = self.ptr_order_cast(rm, rt, t);
+                            dst.push_str(pc);
                             let mut ok = self.emit_op_d(b, rv.a, aref, dst);
                             dst.push_str(" ");
                             dst.push_str(fop);
                             dst.push_str(" ");
+                            dst.push_str(pc);
                             if ok {
                                 ok = self.emit_op_d(b, rv.b, bref, dst);
                             }
@@ -10319,13 +10342,16 @@ extend CEmit {
             if op.len() == 0 {
                 return self.fail("binary");
             }
+            let pc = self.ptr_order_cast(rm4, rt4, t);
             dst.push_str("(");
+            dst.push_str(pc);
             let mut ok = self.emit_op_d(b, rv.a, aref, dst);
             self.f32_lit_sfx(b, rv.a, bm4, bt4, dst);
             if ok {
                 dst.push_str(" ");
                 dst.push_str(op);
                 dst.push_str(" ");
+                dst.push_str(pc);
                 ok = self.emit_op_d(b, rv.b, bref, dst);
                 self.f32_lit_sfx(b, rv.b, rm4, rt4, dst);
             }
@@ -12407,6 +12433,29 @@ pub fn str_const_bytes(raw: str, form: i64, tmp: &mut String, out: &mut String) 
 // Are `o` and `c` a matchertext matcher pair?
 const fn mt_pair(o: u8, c: u8) bool {
     return o == b'(' && c == b')' || o == b'[' && c == b']' || o == b'{' && c == b'}';
+}
+
+/// Float literal text `txt` as a C literal: the exact spelling without `_` separators, the language
+/// width suffix mapped to C's. An unsuffixed literal typed f32 (`single`) gets C's `f`, so the C
+/// compiler rounds it once from the text, as compile-time evaluation does.
+pub fn push_c_float_lit(txt: str, single: bool, dst: &mut String) {
+    let n = txt.len();
+    let mut t = txt;
+    let mut sfx = "";
+    if n > 3 && txt.slice(n - 3, n) == "f32" {
+        t = txt.slice(0, n - 3);
+        sfx = "f";
+    } else if n > 3 && txt.slice(n - 3, n) == "f64" {
+        t = txt.slice(0, n - 3);
+    } else if single {
+        sfx = pick(float_marked(txt), "f", ".0f");
+    }
+    for i in 0..t.len() {
+        if t[i] != b'_' {
+            dst.push_byte(t[i]);
+        }
+    }
+    dst.push_str(sfx);
 }
 
 pub fn push_c_number(txt: str, dst: &mut String) {

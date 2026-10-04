@@ -101,7 +101,7 @@ fn broad() {
     h::expect_c("struct initializer", BROAD, "(Point){ .x = 1");
     h::expect_c("if statement", BROAD, "if (");
     h::expect_c("loops emit a structured while", BROAD, "while (1)");
-    h::expect_c("new", BROAD, "malloc(sizeof(int32_t))");
+    h::expect_c("new", BROAD, "__sc_new(sizeof(int32_t))");
 }
 
 @test
@@ -137,6 +137,32 @@ fn switch_ranges() {
 fn pointer_arith() {
     h::expect_c("pointer offset", "fn f(p: *i32) i32 { return unsafe *(p + 1); }\n", "+ 1LL)");
     h::expect_c("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n", "(a - b)");
+}
+
+// An ordered raw-pointer comparison compares addresses as integers (C defines `<` only within one
+// object); equality stays a pointer comparison.
+@test
+fn pointer_compare() {
+    h::expect_c("ordered", "fn f(p: *const i32, q: *mut i32) bool { return p < q; }\n", "((uintptr_t)p < (uintptr_t)q)");
+    h::expect_c(
+        "negated in an assert",
+        "fn f(p: *const i32, q: *const i32) { assert(p <= q, \"o\"); }\n",
+        "if ((uintptr_t)p > (uintptr_t)q)",
+    );
+    h::expect_c("equality", "fn f(p: *const i32, q: *const i32) bool { return p == q; }\n", "(p == q)");
+    h::expect_c_absent("integer order", "fn f(a: usize, b: usize) bool { return a < b; }\n", "uintptr_t");
+}
+
+// A bare `*T` is `*const T`: a shared borrow converts to it, it spells `const T *` in C, and it never
+// converts to `*mut T`.
+@test
+fn bare_pointer_is_const() {
+    h::expect_c("bare pointer spelling", "fn f(p: *i32) i32 { return unsafe *p; }\n", "const int32_t *p");
+    h::expect_err_msg(
+        "bare pointer to *mut",
+        "fn m(p: *mut i32) {}\nfn f(p: *i32) { m(p); }\n",
+        "expected '*mut i32', found '*const i32'",
+    );
 }
 
 @test
@@ -345,6 +371,21 @@ fn errors() {
         "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { let mut i: i32 = 0; do { i = i + 1; } while i < 3; return i; }\nfn main() i32 { unsafe exit(m() - 3); }\n",
         0,
     );
+}
+
+// `@c.align(expr)` emits the same C as the integer literal it evaluates to: the whole emitted tree
+// of the two programs is byte-identical.
+@test
+fn align_constant_expression_matches_literal() {
+    let lit = h::compile_c(
+        "const N: u32 = 32;\n@c.align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
+    );
+    let ex = h::compile_c(
+        "const N: u32 = 32;\n@c.align(N * 2)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
+    );
+    assert(lit.ok() && ex.ok(), "both forms compile");
+    assert(lit.code_has("__attribute__((aligned(64)))"), "the literal form aligns");
+    assert(str::from_cstr(lit.code) == str::from_cstr(ex.code), "the expression form emits the same C");
 }
 
 @test

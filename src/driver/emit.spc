@@ -5094,7 +5094,15 @@ fn render_const_elem(p: &loader::Package, mg: &mut mbe::Mangler, a: &Ast, src: s
             cbe::push_c_str_data(bytes.as_str(), out);
             return true;
         }
-        if txt.len() != 0 && txt.byte_at(0) >= 48 && txt.byte_at(0) <= 57 {
+        if tk == TokenType::FloatLiteral {
+            let ty = a.type_of(eid);
+            let y = *a.type_at(ty);
+            cbe::push_c_float_lit(
+                txt,
+                ty != TYPE_NONE && y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_F32,
+                out,
+            );
+        } else if txt.len() != 0 && txt.byte_at(0) >= 48 && txt.byte_at(0) <= 57 {
             cbe::push_c_number(txt, out);
         } else if n.as_data.literal.token_type == TokenType::Null {
             out.push_str("0");

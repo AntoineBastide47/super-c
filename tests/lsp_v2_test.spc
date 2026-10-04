@@ -286,6 +286,57 @@ fn lsp_completion_derive_visibility() {
     assert(o.contains("{\"label\":\"Clone\""));
 }
 
+// Names inside a constant-expression attribute argument: completion, hover, go-to-definition and
+// rename reach them like any expression's.
+const ALIGN_SRC: str = "const WIDTH: u32 = 64;\n\n@c.align(WIDTH)\nstruct S {\n    pub x: i32,\n}\n\nfn main() i32 {\n    return sizeof(S) as i32 - 64;\n}\n";
+
+@test
+fn lsp_attribute_expression_names() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", ALIGN_SRC);
+    let root = str::from_cstr(p.rootp());
+
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", ALIGN_SRC);
+    // After "WI" inside @c.align(...).
+    push_completion(&mut ses, root, "src/main.spc", 2, 2, 11);
+    push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/hover", 2, 11);
+    push_req_at(&mut ses, root, "src/main.spc", 4, "textDocument/definition", 2, 11);
+    let mut b = String::new();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/src/main.spc\"},\"position\":{\"line\":2,\"character\":11},\"newName\":\"BREADTH\"}}");
+    frame(&mut ses, &b);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert(o.contains("{\"label\":\"WIDTH\""), "completion offers the constant");
+    assert(!o.contains("{\"label\":\"macos\""), "no platform names inside '@c.align'");
+    let hv = o.find("\"id\":3,");
+    assert(hv >= 0 && o.slice(hv as usize, o.len()).starts_with("\"id\":3,\"result\":{\"contents\""), "hover answers");
+    assert(o.contains("const WIDTH: u32 = 64;"), "hover shows the constant's declaration");
+    let df = o.find("\"id\":4,");
+    assert(df >= 0, "definition answers");
+    let dfo = o.slice(df as usize, o.len());
+    let at = dfo.find("\"range\":{\"start\":{\"line\":0,\"character\":6}");
+    assert(at >= 0 && at < dfo.find("Content-Length"), "definition at the constant");
+    // The declaration and the use inside the attribute.
+    assert_eq(count(o, "\"newText\":\"BREADTH\""), 2);
+    assert(
+        o.contains(
+            "{\"start\":{\"line\":2,\"character\":9},\"end\":{\"line\":2,\"character\":14}},\"newText\":\"BREADTH\"",
+        ),
+        "rename edits the attribute argument",
+    );
+}
+
 // Completion: lexical scope, member privacy, labels, imports.
 
 const SCOPE_SRC: str = "fn first() i32 {\n    let alpha = 1;\n    return alpha;\n}\n\nfn second() i32 {\n    let beta = 2;\n    return beta;\n}\n\nfn third(o: Option<i32>) i32 {\n    switch o {\n        Some(inner) => {\n            return inner;\n        },\n        None => {},\n    };\n    return 0;\n}\n";
@@ -1143,6 +1194,28 @@ fn lsp_edit_burst_folds_and_tags_versions() {
     assert(r5.contains("-32800"));
     let r6 = response_of(o, "\"id\":6");
     assert(r6.contains("main"));
+}
+
+const CR_DOC: str = "// Doubles\r// its input.\r@c.noinline\rfn twice(x: i32) i32 {\r    return x * 2;\r}\r\rfn main() i32 {\r    return twice(0);\r}\r";
+
+// A file with lone `\r` line ends: hover finds the comment block above the item, attribute
+// line skipped, one documentation line per comment line.
+@test
+fn lsp_hover_doc_with_cr_line_ends() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", CR_DOC);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", CR_DOC);
+    push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 8, 12);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let r = response_of(out.as_str(), "\"id\":2");
+    assert(r.contains("Doubles\\nits input."), "the doc block, one line per comment line");
 }
 
 const REF_UTIL: str = "pub struct Point {\n    pub x: i32,\n}\n\nextend Point {\n    pub fn norm(self: &Point) i32 {\n        return self.x;\n    }\n}\n";

@@ -46,6 +46,10 @@ fn p_place(out: &mut String, b: &ir::CoreBody, pl: ir::PlaceId) {
 }
 
 fn p_operand(out: &mut String, b: &ir::CoreBody, op: ir::OperandId) {
+    if op == ir::IR_NONE {
+        out.push_str("_"); // an aggregate member a designated literal leaves zero
+        return;
+    }
     let o = b.operands.at(op as usize);
     if o.kind == ir::OP_COPY {
         out.push_str("copy ");
@@ -236,7 +240,12 @@ pub fn print_body(b: &ir::CoreBody) String {
                 }
                 p_operand(&mut out, b, b.oper_pool[(t.args_start + k) as usize]);
             }
-            out.push_str(") -> bb");
+            out.push_str(")");
+            if t.intr != ir::CI_NONE {
+                out.push_str(" intrinsic ");
+                out.push_str(ir::ci_name(t.intr));
+            }
+            out.push_str(" -> bb");
             out.push_u64(t.t0);
         } else if t.kind == ir::TM_RETURN {
             out.push_str("return");

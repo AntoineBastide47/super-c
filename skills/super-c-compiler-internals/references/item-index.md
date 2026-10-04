@@ -117,12 +117,14 @@ resolved reference to its owner item by id range: a
 parse-time item's nodes are contiguous in each arena and end at the item's node (post-order),
 an extend's header (generics, target, interface) precedes its first member, and a function's
 body is the run ending at its block node. A node past every range (a desugar appended later)
-falls back to the declaration spans (`Spans`, built once per module). A reference to a
+falls back to the declaration spans (`Spans`, built once per module). An item's
+constant-expression attribute arguments parse before it, inside its range. A reference to a
 declaration inside the owner's own ranges (a local, a parameter, a generic) is no edge and
 needs no lookup. The target is the item of the referenced declaration (`item_of`), or for a
 nested declaration (a field, a variant) the item whose span holds it; a memo over (module,
 node) serves the repeats. Ownership edges run from every member to its extend. Import paths
-(before the first item) and synthesized nodes without a span produce no edge.
+(the nodes of the imports before the first item, by id) and synthesized nodes without a span
+produce no edge.
 
 `build` adds two kinds the resolver cannot see: an edge from every extend to each of its
 members (the members are checked with their extend, so its job is theirs and its component
@@ -152,7 +154,8 @@ target) pair, at most one dynamic record per pair.
 
 ## Signature hash
 
-`sig_hash` covers the item key, kind, visibility and attributes, then by kind: a function's
+`sig_hash` covers the item key, kind, visibility and attributes (a constant-expression argument
+as its value), then by kind: a function's
 `extern`/variadic/`const`/`unsafe` flags, generic parameters and bounds, where clauses, the
 parameter and return types from the signature metadata (`ensure_sigs`), and its owner's key; an
 aggregate's member types; an extend's target and interface; a constant's, alias's or

@@ -92,7 +92,8 @@ lowers privately. What a check may read as checked follows the static visibility
 job checks its non-item nodes (`static_assert`), closes the module (`close_instances`
 records concrete generic instantiations into the per-module `Ast.instances` pool, the
 whole-module lints) and records its post-typecheck item edges. Format-string,
-compound-assign and string-switch lowering happen here. Deferred `static_assert`s and
+compound-assign and string-switch lowering happen here. Each item's constant-expression
+attribute arguments are checked and folded with the item (`tc_attr_exprs`). Deferred `static_assert`s and
 constants a check could not fold are queued on the interpreter. Diagnostics and method
 marks come out per item and publish in declaration order after the stage.
 

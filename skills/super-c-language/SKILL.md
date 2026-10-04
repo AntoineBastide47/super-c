@@ -25,6 +25,10 @@ width 120, 4-space indent). Treat its output as authoritative.
 See [types.md](references/types.md) for the full type system reference (scalars, structs,
 enums, generics, closures, trait objects, slices, arrays, tuples, pointers, references).
 
+See [operations.md](references/operations.md) for the normative result of every scalar,
+conversion, float, pointer, atomic and control operation (wraps, traps, defined value, or
+undefined), identical at compile time and at run time.
+
 See [style.md](references/style.md) for naming conventions, file organization, comment
 rules, and the formatting contract.
 
@@ -539,7 +543,7 @@ source text, values, and file:line on failure.
 | `@c.always_inline` | Force inlining |
 | `@c.noinline` | Prevent inlining |
 | `@c.noreturn` | Mark non-returning |
-| `@c.align(N)` | Set alignment |
+| `@c.align(N)` | Set alignment: a power of two from 1 to 2^28 (268435456); `N` is an integer literal or a constant expression of type `u32` |
 | `@c.packed` | Pack struct |
 | `@c.export("sym")` | Pin exact C symbol |
 | `@c.import("sym")` | Import exact C symbol |
@@ -553,6 +557,13 @@ source text, values, and file:line on failure.
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
+
+A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names
+resolve at module scope (in the `extend` scope for a member), the argument checks against the type
+the attribute declares and folds at compile time like a `const` initializer. A misspelled name, a
+type mismatch or an argument that does not fold is an error at the argument. The formatter prints
+the argument as an expression, and the language server completes, hovers, renames and finds names
+inside it. A lone integer literal keeps the literal form and emits the same C.
 
 `@no_const` does not pass through fields: the type author tags each type. std tags its OS and
 runtime handles (`Atomic`, `Arc`, locks, channels, threads, sockets, the scheduler); value

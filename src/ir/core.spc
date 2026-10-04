@@ -408,7 +408,101 @@ pub const TM_DROP: u8 = 4; // place; t0 = successor
 pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;
 
-// Field order leaves no interior padding: 68 bytes, the two byte flags next to the tail padding.
+/// Verified intrinsic calls (Terminator.intr): a TM_CALL of the extern C memory or atomic routine the
+/// kind names, with the routine's arity and a pointer first argument (CI_FENCE takes none). Analyses
+/// read the exact effect from the kind; the call itself stays an ordinary call. Append-only.
+pub const CI_NONE: u8 = 0;
+pub const CI_MEMCPY: u8 = 1;
+pub const CI_MEMMOVE: u8 = 2;
+pub const CI_MEMSET: u8 = 3;
+pub const CI_ATOMIC_LOAD: u8 = 4; // `__sc_atomic_load_<T>(p, order)`
+pub const CI_ATOMIC_STORE: u8 = 5; // `__sc_atomic_store_<T>(p, v, order)`
+pub const CI_ATOMIC_RMW: u8 = 6; // `__sc_atomic_{swap,add,sub,and,or,xor}_<T>(p, v, order)`
+pub const CI_ATOMIC_CAS: u8 = 7; // `__sc_atomic_cas_<T>(p, expected, desired, weak, success, failure)`
+pub const CI_FENCE: u8 = 8; // `__sc_atomic_fence(order)`
+
+/// The intrinsic kind an extern function named `name` is, or CI_NONE.
+pub const fn ci_of_name(name: str) u8 {
+    if name == "memcpy" {
+        return CI_MEMCPY;
+    }
+    if name == "memmove" {
+        return CI_MEMMOVE;
+    }
+    if name == "memset" {
+        return CI_MEMSET;
+    }
+    if !name.starts_with("__sc_atomic_") {
+        return CI_NONE;
+    }
+    let op = name.slice(12, name.len());
+    if op == "fence" {
+        return CI_FENCE;
+    }
+    if op.starts_with("load_") {
+        return CI_ATOMIC_LOAD;
+    }
+    if op.starts_with("store_") {
+        return CI_ATOMIC_STORE;
+    }
+    if op.starts_with("cas_") {
+        return CI_ATOMIC_CAS;
+    }
+    if op.starts_with("swap_") || op.starts_with("add_") || op.starts_with("sub_") || op.starts_with("and_") || op.starts_with(
+        "or_",
+    ) || op.starts_with("xor_") {
+        return CI_ATOMIC_RMW;
+    }
+    return CI_NONE;
+}
+
+/// The argument count of intrinsic kind `k` (0 for CI_NONE).
+pub const fn ci_arity(k: u8) u32 {
+    if k == CI_MEMCPY || k == CI_MEMMOVE || k == CI_MEMSET || k == CI_ATOMIC_STORE || k == CI_ATOMIC_RMW {
+        return 3;
+    }
+    if k == CI_ATOMIC_LOAD {
+        return 2;
+    }
+    if k == CI_ATOMIC_CAS {
+        return 6;
+    }
+    if k == CI_FENCE {
+        return 1;
+    }
+    return 0;
+}
+
+/// The printed name of intrinsic kind `k`.
+pub const fn ci_name(k: u8) str<'static> {
+    if k == CI_MEMCPY {
+        return "memcpy";
+    }
+    if k == CI_MEMMOVE {
+        return "memmove";
+    }
+    if k == CI_MEMSET {
+        return "memset";
+    }
+    if k == CI_ATOMIC_LOAD {
+        return "atomic_load";
+    }
+    if k == CI_ATOMIC_STORE {
+        return "atomic_store";
+    }
+    if k == CI_ATOMIC_RMW {
+        return "atomic_rmw";
+    }
+    if k == CI_ATOMIC_CAS {
+        return "atomic_cas";
+    }
+    if k == CI_FENCE {
+        return "fence";
+    }
+    return "none";
+}
+
+// Field order leaves no interior padding: 68 bytes, the three byte fields in the tail.
 pub struct Terminator {
     pub a: u32, // per kind (see above)
     pub args_start: u32, // TM_CALL: argument operand range
@@ -430,7 +524,9 @@ pub struct Terminator {
     pub span: tok::Span,
     pub kind: u8,
     pub is_variadic: bool,
+    pub intr: u8, // TM_CALL: a CI_* verified intrinsic kind, CI_NONE otherwise
 }
+static_assert(sizeof(Terminator) == 68, "Terminator stays 68 bytes: intr sits in the tail padding");
 
 /// A terminator of `kind` with no operands and no successor.
 pub const fn term0(kind: u8, sp: tok::Span) Terminator {
@@ -450,6 +546,7 @@ pub const fn term0(kind: u8, sp: tok::Span) Terminator {
         targs_start: 0,
         targs_len: 0,
         is_variadic: false,
+        intr: CI_NONE,
         span: sp,
     };
 }
@@ -468,6 +565,7 @@ pub struct BasicBlock {
     pub term: Terminator,
     pub sealed: bool, // terminator present (the verifier rejects unsealed blocks)
 }
+static_assert(sizeof(BasicBlock) == 80, "BasicBlock stays 80 bytes");
 
 /// One lowered body. All ranges index the body-local pools below; nothing points at another body.
 pub struct CoreBody {

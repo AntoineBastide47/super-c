@@ -182,6 +182,31 @@ pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
     return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
 }
 
+/// Spawn `args` without a shell; `log` (may be null) captures the child's stdout+stderr. The child's pid,
+/// or -1 on spawn failure.
+pub fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
+}
+
+/// A copy of argv `src`.
+pub fn clone_args(src: &Vector<String>) Vector<String> {
+    let mut out = Vector::<String>::with_capacity(src.len());
+    for i in 0..src.len() {
+        out.push(src.at(i).clone());
+    }
+    return out;
+}
+
+/// Append `s` to argv `out` as one argument.
+pub fn push_arg(out: &mut Vector<String>, s: str) {
+    out.push(String::from_str(s));
+}
+
 /// False when the file cannot be opened, or a short write or failed close left it incomplete.
 pub fn write_file(path: str, body: str) bool {
     let f = stdio::fopen(path, "wb");

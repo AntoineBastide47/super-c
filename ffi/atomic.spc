@@ -1,9 +1,11 @@
 // Atomics backed by the compiler runtime's `__sc_atomic_*` builtins (lowered to `__atomic_*`). Each op
 // takes a memory-order code (see `std/parallel/atomics.spc`'s `MemoryOrder`: Relaxed=0, Acquire=1,
-// Release=2, AcqRel=3, SeqCst=4); an order illegal for an op clamps to SeqCst in the runtime wrapper. The
-// runtime provides i8/i16/i32/i64/isize/u8/u16/u32/u64/usize plus bool. Pointers can be exchanged or
-// compared by casting through usize. `cas` takes a `weak` flag (weak may fail spuriously but is cheaper on
-// LL/SC targets) plus separate success/failure orders. Every operation that takes a pointer is an
+// Release=2, AcqRel=3, SeqCst=4). An order the op cannot take panics with "invalid memory order": a load
+// and a `cas` failure take 0, 1 or 4; a store takes 0, 2 or 4; read-modify-write, a `cas` success and
+// `fence` take all five. The runtime provides i8/i16/i32/i64/isize/u8/u16/u32/u64/usize plus bool.
+// Pointers can be exchanged or compared by casting through usize. `cas` takes a `weak` flag (weak may
+// fail spuriously but is cheaper on LL/SC targets) plus separate success/failure orders; a failure order
+// stronger than the success order strengthens the success order. Every operation that takes a pointer is an
 // `unsafe fn`: the caller guarantees `p` is valid and naturally aligned. The typed `Atomic<T>` in
 // std/parallel/atomics.spc is the safe interface.
 

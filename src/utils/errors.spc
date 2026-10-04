@@ -383,6 +383,13 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     return lo - 1;
 }
 
+/// The 1-based line of byte `off` of `source`, with the line ends of `line_starts_of`.
+@c.cold
+pub fn line_of(source: str, off: u32) u32 {
+    let ls = line_starts_of(source);
+    return line_index(&ls, off) as u32 + 1;
+}
+
 // The `--> file:line:col` location, the offending source line (windowed to 120 cols), and the
 // caret run under the span: the block every rendered diagnostic shares.
 @c.cold

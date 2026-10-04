@@ -851,8 +851,10 @@ fn builtin_bit_counts_at_run_time() {
 }
 
 // The built-in integers' wrapping, overflowing, checked and saturating methods at the edges of each width
-// (Rust's semantics). Each `fam_*` returns a bit per failed check; the static_asserts run it at compile time
-// on the type's MAX and 2, and the test runs the same code in the emitted C with inputs from a Vector.
+// (Rust's semantics): MIN, MAX, -1, 0 and 1, a zero divisor, MIN / -1 and MIN * -1, and shift counts at the
+// width - 1, the width and the width + 1. Each `fam_*` returns a bit per failed check; the static_asserts run
+// it at compile time on the type's MAX and 2, and the test runs the same code in the emitted C with inputs
+// from a Vector.
 const fn fam_i8(a: i8, b: i8) u32 {
     let z = b - b;
     let one = b / b;
@@ -927,6 +929,17 @@ const fn fam_i8(a: i8, b: i8) u32 {
     }
     if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
         bad = bad | 1u32 << 21;
+    }
+    if !(one.wrapping_shl(8) == one && one.wrapping_shl(8 - 1) == m && m.wrapping_shr(8) == m && m.wrapping_shr(8 - 1) == -one && a.wrapping_shr(
+        8 - 1,
+    ) == z) {
+        bad = bad | 1u32 << 22;
+    }
+    let (r23, o23) = m.overflowing_mul(-one);
+    if !(m.checked_mul(-one).is_none() && m.wrapping_mul(-one) == m && r23 == m && o23 && m.checked_mul(z).unwrap() == z && m.checked_div(
+        one,
+    ).unwrap() == m && z.checked_div(-one).unwrap() == z && m.checked_rem(one).unwrap() == z && a.checked_sub(z).unwrap() == a) {
+        bad = bad | 1u32 << 23;
     }
     return bad;
 }
@@ -1005,6 +1018,17 @@ const fn fam_i16(a: i16, b: i16) u32 {
     if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
         bad = bad | 1u32 << 21;
     }
+    if !(one.wrapping_shl(16) == one && one.wrapping_shl(16 - 1) == m && m.wrapping_shr(16) == m && m.wrapping_shr(
+        16 - 1,
+    ) == -one && a.wrapping_shr(16 - 1) == z) {
+        bad = bad | 1u32 << 22;
+    }
+    let (r23, o23) = m.overflowing_mul(-one);
+    if !(m.checked_mul(-one).is_none() && m.wrapping_mul(-one) == m && r23 == m && o23 && m.checked_mul(z).unwrap() == z && m.checked_div(
+        one,
+    ).unwrap() == m && z.checked_div(-one).unwrap() == z && m.checked_rem(one).unwrap() == z && a.checked_sub(z).unwrap() == a) {
+        bad = bad | 1u32 << 23;
+    }
     return bad;
 }
 const fn fam_i32(a: i32, b: i32) u32 {
@@ -1081,6 +1105,17 @@ const fn fam_i32(a: i32, b: i32) u32 {
     }
     if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
         bad = bad | 1u32 << 21;
+    }
+    if !(one.wrapping_shl(32) == one && one.wrapping_shl(32 - 1) == m && m.wrapping_shr(32) == m && m.wrapping_shr(
+        32 - 1,
+    ) == -one && a.wrapping_shr(32 - 1) == z) {
+        bad = bad | 1u32 << 22;
+    }
+    let (r23, o23) = m.overflowing_mul(-one);
+    if !(m.checked_mul(-one).is_none() && m.wrapping_mul(-one) == m && r23 == m && o23 && m.checked_mul(z).unwrap() == z && m.checked_div(
+        one,
+    ).unwrap() == m && z.checked_div(-one).unwrap() == z && m.checked_rem(one).unwrap() == z && a.checked_sub(z).unwrap() == a) {
+        bad = bad | 1u32 << 23;
     }
     return bad;
 }
@@ -1159,6 +1194,17 @@ const fn fam_i64(a: i64, b: i64) u32 {
     if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
         bad = bad | 1u32 << 21;
     }
+    if !(one.wrapping_shl(64) == one && one.wrapping_shl(64 - 1) == m && m.wrapping_shr(64) == m && m.wrapping_shr(
+        64 - 1,
+    ) == -one && a.wrapping_shr(64 - 1) == z) {
+        bad = bad | 1u32 << 22;
+    }
+    let (r23, o23) = m.overflowing_mul(-one);
+    if !(m.checked_mul(-one).is_none() && m.wrapping_mul(-one) == m && r23 == m && o23 && m.checked_mul(z).unwrap() == z && m.checked_div(
+        one,
+    ).unwrap() == m && z.checked_div(-one).unwrap() == z && m.checked_rem(one).unwrap() == z && a.checked_sub(z).unwrap() == a) {
+        bad = bad | 1u32 << 23;
+    }
     return bad;
 }
 const fn fam_isize(a: isize, b: isize) u32 {
@@ -1236,6 +1282,17 @@ const fn fam_isize(a: isize, b: isize) u32 {
     if !(a.saturating_mul(b) == a && a.saturating_mul(-b) == m && m.saturating_mul(-one) == a && b.saturating_mul(-b) == -b * b) {
         bad = bad | 1u32 << 21;
     }
+    if !(one.wrapping_shl(sizeof(isize) as u32 * 8) == one && one.wrapping_shl(sizeof(isize) as u32 * 8 - 1) == m && m.wrapping_shr(
+        sizeof(isize) as u32 * 8,
+    ) == m && m.wrapping_shr(sizeof(isize) as u32 * 8 - 1) == -one && a.wrapping_shr(sizeof(isize) as u32 * 8 - 1) == z) {
+        bad = bad | 1u32 << 22;
+    }
+    let (r23, o23) = m.overflowing_mul(-one);
+    if !(m.checked_mul(-one).is_none() && m.wrapping_mul(-one) == m && r23 == m && o23 && m.checked_mul(z).unwrap() == z && m.checked_div(
+        one,
+    ).unwrap() == m && z.checked_div(-one).unwrap() == z && m.checked_rem(one).unwrap() == z && a.checked_sub(z).unwrap() == a) {
+        bad = bad | 1u32 << 23;
+    }
     return bad;
 }
 const fn fam_u8(a: u8, b: u8) u32 {
@@ -1311,6 +1368,16 @@ const fn fam_u8(a: u8, b: u8) u32 {
     }
     if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
         bad = bad | 1u32 << 21;
+    }
+    if !(one.wrapping_shl(8) == one && one.wrapping_shl(8 - 1) == a / b + one && a.wrapping_shr(8) == a && a.wrapping_shr(
+        8 - 1,
+    ) == one) {
+        bad = bad | 1u32 << 22;
+    }
+    if !(z.checked_mul(a).unwrap() == z && a.checked_div(one).unwrap() == a && a.checked_rem(one).unwrap() == z && z.checked_add(
+        a,
+    ).unwrap() == a && a.saturating_sub(a) == z && z.wrapping_sub(a) == one) {
+        bad = bad | 1u32 << 23;
     }
     return bad;
 }
@@ -1388,6 +1455,16 @@ const fn fam_u16(a: u16, b: u16) u32 {
     if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
         bad = bad | 1u32 << 21;
     }
+    if !(one.wrapping_shl(16) == one && one.wrapping_shl(16 - 1) == a / b + one && a.wrapping_shr(16) == a && a.wrapping_shr(
+        16 - 1,
+    ) == one) {
+        bad = bad | 1u32 << 22;
+    }
+    if !(z.checked_mul(a).unwrap() == z && a.checked_div(one).unwrap() == a && a.checked_rem(one).unwrap() == z && z.checked_add(
+        a,
+    ).unwrap() == a && a.saturating_sub(a) == z && z.wrapping_sub(a) == one) {
+        bad = bad | 1u32 << 23;
+    }
     return bad;
 }
 const fn fam_u32(a: u32, b: u32) u32 {
@@ -1463,6 +1540,16 @@ const fn fam_u32(a: u32, b: u32) u32 {
     }
     if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
         bad = bad | 1u32 << 21;
+    }
+    if !(one.wrapping_shl(32) == one && one.wrapping_shl(32 - 1) == a / b + one && a.wrapping_shr(32) == a && a.wrapping_shr(
+        32 - 1,
+    ) == one) {
+        bad = bad | 1u32 << 22;
+    }
+    if !(z.checked_mul(a).unwrap() == z && a.checked_div(one).unwrap() == a && a.checked_rem(one).unwrap() == z && z.checked_add(
+        a,
+    ).unwrap() == a && a.saturating_sub(a) == z && z.wrapping_sub(a) == one) {
+        bad = bad | 1u32 << 23;
     }
     return bad;
 }
@@ -1540,6 +1627,16 @@ const fn fam_u64(a: u64, b: u64) u32 {
     if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
         bad = bad | 1u32 << 21;
     }
+    if !(one.wrapping_shl(64) == one && one.wrapping_shl(64 - 1) == a / b + one && a.wrapping_shr(64) == a && a.wrapping_shr(
+        64 - 1,
+    ) == one) {
+        bad = bad | 1u32 << 22;
+    }
+    if !(z.checked_mul(a).unwrap() == z && a.checked_div(one).unwrap() == a && a.checked_rem(one).unwrap() == z && z.checked_add(
+        a,
+    ).unwrap() == a && a.saturating_sub(a) == z && z.wrapping_sub(a) == one) {
+        bad = bad | 1u32 << 23;
+    }
     return bad;
 }
 const fn fam_usize(a: usize, b: usize) u32 {
@@ -1615,6 +1712,16 @@ const fn fam_usize(a: usize, b: usize) u32 {
     }
     if !(a.saturating_mul(b) == a && b.saturating_mul(b) == b * b) {
         bad = bad | 1u32 << 21;
+    }
+    if !(one.wrapping_shl(sizeof(usize) as u32 * 8) == one && one.wrapping_shl(sizeof(usize) as u32 * 8 - 1) == a / b + one && a.wrapping_shr(
+        sizeof(usize) as u32 * 8,
+    ) == a && a.wrapping_shr(sizeof(usize) as u32 * 8 - 1) == one) {
+        bad = bad | 1u32 << 22;
+    }
+    if !(z.checked_mul(a).unwrap() == z && a.checked_div(one).unwrap() == a && a.checked_rem(one).unwrap() == z && z.checked_add(
+        a,
+    ).unwrap() == a && a.saturating_sub(a) == z && z.wrapping_sub(a) == one) {
+        bad = bad | 1u32 << 23;
     }
     return bad;
 }

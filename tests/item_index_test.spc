@@ -143,6 +143,23 @@ const C1: str = M"(pub fn cee() i32 {
 }
 )";
 
+// The first item after the imports names a constant in its attribute argument: those nodes
+// precede the item's own, after the import paths.
+const A3: str = M"(import b;
+import c;
+
+@c.align(b::W)
+pub struct First {
+    pub x: i32,
+}
+
+fn main() i32 {
+    return sizeof(First) as i32 + c::cee() - 18;
+}
+)";
+const B3: str = M"(pub const W: u32 = 16;
+)";
+
 struct Ws {
     pub proj: cli::Proj,
     pub root: String,
@@ -336,6 +353,16 @@ fn main() i32 {
     return (f() + k()) as i32 + b::bee() + c::cee();
 }
 )";
+
+@test
+fn index_edges_reach_attribute_arguments() {
+    let ws = ws_new(A3, B3, C1);
+    let p = indexed(&ws, A3, B3, C1, true);
+    let first = item_named(&p, mod_of(&p, "/a.spc"), "First");
+    let w = item_named(&p, mod_of(&p, "/b.spc"), "W");
+    assert(first != loader::ITEM_NONE && w != loader::ITEM_NONE, "items indexed");
+    assert(pre(&p, first, w), "an attribute argument of the first item is an edge of that item");
+}
 
 @test
 fn index_edges_reach_builtin_extends() {

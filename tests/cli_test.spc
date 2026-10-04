@@ -8,6 +8,7 @@ import stdio;
 import module::loader as loader;
 import build_system::build as bsys;
 import build_system::objcache as ocache;
+import build_system::probe as probe;
 import driver_shim as shim;
 
 struct Cmd {
@@ -337,17 +338,19 @@ fn octal_and_binary_literals_emit_c11() {
 }
 
 // A constant shift count or divisor is read by its value, whatever its spelling: a hex count past the
-// width reaches the checked helper (C leaves `x >> 64` undefined) and traps, and a hex divisor stays
-// a C operator.
+// width is an error at the operation, a run-time count past it reaches the checked helper (C leaves
+// `x >> 64` undefined) and traps, and a hex divisor stays a C operator.
 @test
 fn hex_shift_counts_reach_the_checked_helper() {
     let p = cli::proj_new();
+    p.mkfile("hex.spc", "fn f(x: u64) u64 {\n    return x >> 0x40;\n}\nfn main() i32 {\n    return f(1) as i32;\n}\n");
+    p.expect_fail("hex.spc", "error: this operation is undefined behavior when executed: shift out of range\n--> ");
     p.mkfile(
         "main.spc",
-        "static mut K: u64 = 200;\nfn f(x: u64) u64 {\n    return x / 0x10 + (x >> 0x40);\n}\nfn main() i32 {\n    print(\"{}\\n\", f(unsafe K));\n    return 0;\n}\n",
+        "static mut K: u64 = 200;\nfn f(x: u64, n: u64) u64 {\n    return x / 0x10 + (x >> n);\n}\nfn main() i32 {\n    print(\"{}\\n\", f(unsafe K, unsafe K - 0x88));\n    return 0;\n}\n",
     );
     assert(p.compile("main.spc").ok());
-    assert(p.gen_has("main.c", "__sc_shr_u64(x, 0x40ULL)") && p.gen_has("main.c", "(x / 0x10ULL)"));
+    assert(p.gen_has("main.c", "__sc_shr_u64(x, n)") && p.gen_has("main.c", "(x / 0x10ULL)"));
     assert(p.cc_build("-pedantic-errors ").ok());
     let r = p.run_bin_env("");
     assert(r.exit != 0 && r.out_shows("attempt to shift right with overflow"));
@@ -2311,7 +2314,7 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
         // super_rt.c comes too: the header's panic path references the runtime's thread-local task id, and
         // a C consumer of an emitted module links that TU exactly as a Super-C one does. (clang drops the
         // unused reference at -O0 and gcc keeps it, so leaving it out only ever worked by luck.)
-        "%s -std=c11 -Wall -Wextra -Werror -funsigned-char -I\"%s/build/dev/raw\" \"%s/cuser.c\" \"%s/build/dev/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        "%s -std=c11 -Wall -Wextra -Werror -funsigned-char -ffp-contract=off -I\"%s/build/dev/raw\" \"%s/cuser.c\" \"%s/build/dev/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
         cli::cc_name(),
         p.rootp(),
         p.rootp(),
@@ -9188,9 +9191,9 @@ fn build_symbol_segment_includes_no_type() {
 }
 
 // The profile's `lto` mode reaches both the compile and the link lines and their fingerprints. A
-// ThinLTO request is settled by the toolchain probe once per profile directory (`.lto`: key, linker,
-// verdict) and reused without a process; the linker cache lives under the cache root when the
-// linker accepts one. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
+// ThinLTO request is settled by the toolchain probe once per profile directory (the `thin-lto` line of
+// `.probes`: verdict, linker) and reused without a process; the linker cache lives under the cache root
+// when the linker accepts one. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
 @test
 fn build_lto_modes() {
     let p = cli::proj_new();
@@ -9205,15 +9208,15 @@ fn build_lto_modes() {
     env.push_str("/cache");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "thin build");
     let mut recp = String::new();
-    recp.format_into("{}/build/rel/.lto", root);
+    recp.format_into("{}/build/rel/.probes", root);
     let rec = loader::read_file(recp.as_str());
     assert(!rec.is_none(), "the probe record exists beside the profile's trees");
     let rb = rec.unwrap();
     let rs = rb.as_str();
-    assert(rs.starts_with("sc-lto 1\t"), "the record opens with its schema");
-    let verdict = lto_line(rs, 2);
-    let thin = verdict.starts_with("thin\t");
-    assert(thin || verdict.starts_with("auto\t"), "the verdict is thin or auto with a reason");
+    assert(rs.starts_with("sc-probes 1\t"), "the record opens with its schema");
+    let verdict = probe_result(rs, "thin-lto");
+    let thin = verdict.starts_with("thin ");
+    assert(thin || verdict.starts_with("auto: "), "the verdict is thin or auto with a reason");
     // The record is named after the linked path, extension included (`app.exe` on Windows).
     let mut cmdp = String::new();
     cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
@@ -9228,7 +9231,11 @@ fn build_lto_modes() {
     ocmd.format_into("{}/build/rel/obj/main.cmd", root);
     let o1 = loader::read_file(ocmd.as_str()).unwrap();
     assert(o1.as_str().find(want) >= 0, "the object fingerprint carries the settled mode");
-    if verdict.starts_with("thin\t") && verdict != "thin\t0" {
+    let mut used = String::from_str("| probes thin-lto=");
+    used.push_str(verdict);
+    assert(o1.as_str().find(used.as_str()) >= 0, "the object fingerprint carries the probe result it used");
+    assert(l1.as_str().find(used.as_str()) >= 0, "the link fingerprint carries the probe result it used");
+    if thin && verdict != "thin 0" {
         let mut cdir = String::new();
         cdir.format_into("{}/cache/lto/", root);
         let at = l1.as_str().find(cdir.as_str());
@@ -9252,6 +9259,25 @@ fn build_lto_modes() {
     assert(l2.as_str().find("-flto") < 0, "no LTO flag under SC_LTO=none");
     let bad = cli::superc_env_in(root, "SC_LTO", "fat", "build --profile=rel");
     assert(!bad.ok() && bad.out_has("SC_LTO must be none, full, auto or thin"), "an unknown SC_LTO value is an error");
+}
+
+// The result field of probe `id`'s line in probe record `s`; empty when the record has none.
+fn probe_result<'a>(s: str<'a>, id: str) str<'a> {
+    for i in 0..s.len() {
+        let line = lto_line(s, i);
+        if line.len() == 0 && i != 0 {
+            break;
+        }
+        if line.len() > id.len() && line.starts_with(id) && line[id.len()] == b'\t' {
+            let rest = line.slice(id.len() + 1, line.len());
+            let mut e: usize = 0;
+            while e < rest.len() && rest[e] != b'\t' {
+                e += 1;
+            }
+            return rest.slice(0, e);
+        }
+    }
+    return s.slice(0, 0);
 }
 
 fn lto_line(s: str, idx: usize) str {
@@ -9299,9 +9325,12 @@ fn build_lto_probe_fallback() {
         "the record names the fallback and its reason",
     );
     let mut recp = String::new();
-    recp.format_into("{}/build/rel/.lto", root);
+    recp.format_into("{}/build/rel/.probes", root);
     let rec = loader::read_file(recp.as_str()).unwrap();
-    assert(lto_line(rec.as_str(), 2) == "auto\tthe compiler rejects -flto=thin", "the probe record stores the reason");
+    assert(
+        probe_result(rec.as_str(), "thin-lto") == "auto: the compiler rejects -flto=thin",
+        "the probe record stores the reason",
+    );
     let mut cmdp = String::new();
     cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
     let l = loader::read_file(cmdp.as_str()).unwrap();
@@ -9309,6 +9338,102 @@ fn build_lto_probe_fallback() {
     let mut probe = String::new();
     probe.format_into("{}/build/rel/.ltoprobe", root);
     assert(p13_mtime(probe.as_str()) == 0, "the probe's temporary directory is removed");
+}
+
+// `build --print-probes` prints the compiler, the target and one `<id> <result>` row per probe, in table
+// order, each result one its kind allows ("not applicable" for a probe the target does not take). The
+// results are stable: a fresh record gives the same table. A second run, and a build after it, take every
+// result from the record without probing: the record keeps its mtime.
+@test
+fn build_print_probes() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let r1 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
+    assert(r1.ok(), "print the probe table");
+    let o1 = String::from_cstr(r1.out);
+    let s = o1.as_str();
+    assert(lto_line(s, 0).starts_with("compiler: "), "the table names the compiler first");
+    let tl = lto_line(s, 1);
+    assert(tl.starts_with("target: "), "then the target");
+    let x86 = tl.ends_with(" x86_64");
+    let a64 = tl.ends_with(" aarch64");
+    let t = probe::table();
+    for i in 0..t.len() {
+        let row = lto_line(s, i + 2);
+        assert(row.starts_with(t[i].id) && row.len() > 24 && row[23] == b' ', "one row per probe, in table order");
+        let res = row.slice(24, row.len());
+        assert(probe_result_fits(t[i].kind, t[i].forms, res), "the result is one its kind allows");
+        // Facts every supported C compiler shares on its own host.
+        let id = t[i].id;
+        if id == "add-overflow" || id == "thread-local" || id == "fp-contract-off" {
+            assert(res == "accepted", "every supported C compiler accepts it");
+        } else if id == "cas16" {
+            assert(res != "rejected" && res != "unknown", "a 16-byte compare-exchange compiles to a known form");
+        } else if id == "target-attr-x86_64" || id == "cpuid-count" {
+            assert(x86 == (res != probe::NOT_APPLICABLE), "an x86-64 probe applies on x86-64 alone");
+        } else if id == "target-attr-aarch64" {
+            assert(a64 == (res != probe::NOT_APPLICABLE), "an AArch64 probe applies on AArch64 alone");
+        } else if id.starts_with("wasm-") {
+            assert(res == probe::NOT_APPLICABLE, "a native host is not wasm32");
+        }
+    }
+    assert(lto_line(s, t.len() + 2).len() == 0, "nothing follows the table");
+    let mut recp = String::new();
+    recp.format_into("{}/build/dev/.probes", root);
+    let mut rp = recp.clone();
+    assert(unsafe shim::sc_unlink(rp.cstr()) == 0, "the run wrote the record");
+    let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
+    assert(r2.ok() && str::from_cstr(r2.out) == s, "a fresh record gives the same table");
+    let m1 = p13_mtime(recp.as_str());
+    p13_tick();
+    let r3 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
+    assert(r3.ok() && str::from_cstr(r3.out) == s, "the record gives the same table");
+    assert(p13_mtime(recp.as_str()) == m1, "a second run probes nothing");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "build after the table");
+    assert(p13_mtime(recp.as_str()) == m1, "a build probes nothing either");
+    let bad = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes src/main.spc");
+    assert(!bad.ok(), "the table belongs to a manifest profile, not a script");
+}
+
+// Result `res` is one that a probe of `kind` with spellings `forms` can give.
+fn probe_result_fits(kind: str, forms: str, res: str) bool {
+    if res == probe::NOT_APPLICABLE || res == "rejected" && kind != "lto" {
+        return true;
+    }
+    if kind == "accept" {
+        return res == "accepted";
+    }
+    if kind == "form" {
+        let mut a: usize = 0;
+        for i in 0..forms.len() + 1 {
+            if i == forms.len() || forms[i] == b'|' {
+                if forms.slice(a, i) == res {
+                    return true;
+                }
+                a = i + 1;
+            }
+        }
+        return false;
+    }
+    if kind == "cas16" {
+        return res == "inline" || res == "outline call" || res == "library call" || res == "unknown";
+    }
+    return kind == "lto" && (res.starts_with("thin ") || res.starts_with("auto: "));
+}
+
+// The 16-byte compare-exchange probe reads the assembly each toolchain writes: an instruction inline,
+// libgcc's outline atomics, or a libatomic call.
+@test
+fn probe_cas16_kind() {
+    assert(probe::cas16_kind("_f:\n\tlock\t\tcmpxchg16b\t(%rdi)\n") == "inline", "clang x86-64");
+    assert(probe::cas16_kind("f:\n\tlock cmpxchg16b\t(%rdi)\n") == "inline", "gcc x86-64 with -mcx16");
+    assert(probe::cas16_kind("_f:\n\tcaspal\tx4, x5, x6, x7, [x0]\n") == "inline", "AArch64 LSE");
+    assert(probe::cas16_kind("f:\n.L2:\n\tldaxp\tx4, x5, [x0]\n\tstlxp\tw6, x2, x3, [x0]\n") == "inline", "LL/SC");
+    assert(probe::cas16_kind("f:\n\tbl\t__aarch64_cas16_acq_rel\n") == "outline call", "gcc AArch64");
+    assert(probe::cas16_kind("f:\n\tcall\t__atomic_compare_exchange_16@PLT\n") == "library call", "gcc x86-64");
+    assert(probe::cas16_kind("f:\n\tret\n") == "unknown", "no compare-exchange at all");
 }
 
 // The emission statistics report the per-instance re-lowering census (a zero-size template lowered
@@ -10082,7 +10207,7 @@ fn runtime_arithmetic_follows_the_profile() {
     p.mkfile("uadd.spc", "const C: u8 = 255 + 1;\nfn main() i32 {\n    return C as i32;\n}\n");
     p.expect_fail("uadd.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
     p.mkfile("usub.spc", "fn main() i32 {\n    let x: u32 = 0 - 231;\n    return x as i32;\n}\n");
-    p.expect_fail("usub.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.expect_fail("usub.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     p.mkfile(
         "umul.spc",
         "const fn twice(x: u64) u64 {\n    return x * 2;\n}\nconst C: u64 = twice(u64::MAX);\nfn main() i32 {\n    return C as i32;\n}\n",
@@ -10092,7 +10217,7 @@ fn runtime_arithmetic_follows_the_profile() {
         "umax.spc",
         "fn main() i32 {\n    let x: u32 = u32::MAX + 1;\n    let z: usize = 0;\n    return (x + (z - 1) as u32) as i32;\n}\n",
     );
-    p.expect_fail("umax.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.expect_fail("umax.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     if cli::on_wasm() {
         return;
     }
@@ -10184,6 +10309,25 @@ fn runtime_arithmetic_follows_the_profile() {
             assert(r.out_shows(want.as_str()));
         }
     }
+}
+
+// The C compiler never fuses a float multiply and subtract, also under `release`: a fused `a * a - c` keeps
+// the 2^-60 that the rounded product drops. The operands come from argv, so the C compiler cannot fold them.
+@test
+fn release_float_has_no_contraction() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn main(argv: Vector<str>) i32 {\n    let one = argv.len() as f64;\n    let a = 1.0 + one / 1073741824.0;\n    let c = 1.0 + one / 536870912.0;\n    if a * a - c == 0.0 {\n        return 0;\n    }\n    return 1;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
+    assert(p.run_raw(args.as_str()).ok());
+    assert_eq(p.run_bin(), 0);
 }
 
 // std's library integers follow the profile as the built-in ones do: `Int<N>` and `UInt<N>` overflow in
@@ -10438,9 +10582,9 @@ fn literal_arithmetic_is_computed_in_its_type() {
     }
     // A declared or suffixed type that overflows is an error, at run time and at compile time.
     p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
-    p.expect_fail("decl.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.expect_fail("decl.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     p.mkfile("sfx.spc", "fn main() i32 {\n    let i = 2000000000i32 * 2;\n    return i;\n}\n");
-    p.expect_fail("sfx.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.expect_fail("sfx.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     p.mkfile("const.spc", "const C: i32 = i32::MAX + 1;\n\nfn main() i32 {\n    return C;\n}\n");
     p.expect_fail("const.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
     // A literal past 64 bits that no wide expectation takes is the checker's error, also in a constant
@@ -10504,7 +10648,7 @@ fn main() i32 {
     assert(p.run_raw(wargs.as_str()).ok());
     // A declared type rejects the widened value.
     p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
-    p.expect_fail("decl.spc", "error: this statement is undefined behavior when executed: arithmetic overflow");
+    p.expect_fail("decl.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     if cli::on_wasm() {
         return;
     }

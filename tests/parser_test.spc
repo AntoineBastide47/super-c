@@ -693,6 +693,88 @@ fn attributes() {
     }
 }
 
+// `@c.align` takes a constant expression besides an integer literal: the record keeps the
+// expression's module-arena node and the text between the parentheses; a lone integer literal keeps
+// the literal form and adds no node. The record stays 20 bytes.
+@test
+fn attribute_constant_expression() {
+    let src = "const N: u32 = 8;\n@c.align(N * 2)\nstruct A { x: u8 }\n@c.align(16)\nstruct B { x: u8 }\n";
+    let c = h::parse_ast(src);
+    assert(c.errors == 0, "constant-expression attribute parses");
+    assert_eq(c.ast.attrs.len(), 2);
+    assert(c.ast.attrs[0].expr, "an expression argument is the expression form");
+    let e = c.ast.attrs[0].arg;
+    assert(!Ast::in_body(e), "the argument is module syntax");
+    assert(c.ast.at_const(e).kind == NodeKind::NODE_BINARY, "the argument is the expression node");
+    let sp = c.ast.attrs[0].str_span;
+    assert(src.slice(sp.start as usize, sp.end as usize) == "N * 2", "the record spans the argument text");
+    assert(!c.ast.attrs[1].expr, "a lone integer literal keeps the literal form");
+    assert_eq(c.ast.attrs[1].arg, 16);
+    assert_eq(sizeof(Attr), 20);
+    assert(h::parse_has_error("@c.align(8 9)\nstruct A { x: u8 }\n"), "a token after the argument rejected");
+    let lit = h::parse_ast("@c.align(8 + 8)\nstruct A { x: u8 }\n@c.align(8 as u32)\nstruct B { x: u8 }\n");
+    assert(lit.errors == 0, "a literal-headed expression parses");
+    assert(lit.ast.at_const(lit.ast.attrs[0].arg).kind == NodeKind::NODE_BINARY, "literal head, binary tail");
+    assert(lit.ast.at_const(lit.ast.attrs[1].arg).kind == NodeKind::NODE_CAST, "literal head, cast tail");
+}
+
+// A constant-expression argument resolves, checks against the attribute's type and folds like a
+// constant initializer; each failure is an error at the argument. Its value is validated like the
+// literal form: a power of two from 1 to 2^28.
+@test
+fn attribute_constant_expression_errors() {
+    h::expect_err_msg(
+        "misspelled name",
+        "const WIDTH: u32 = 8;\n@c.align(WIDHT)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "cannot find value 'WIDHT'",
+    );
+    h::expect_err_msg(
+        "non-constant argument",
+        "static mut G: u32 = 8;\n@c.align(unsafe G)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "attribute argument cannot be evaluated at compile time",
+    );
+    h::expect_err_msg(
+        "trapping argument",
+        "const Z: u32 = 0;\n@c.align(8 / Z)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "attribute argument cannot be evaluated at compile time: division by zero",
+    );
+    h::expect_err_msg(
+        "argument of its own declaration's layout",
+        "@c.align(sizeof(S) as u32)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "attribute argument cannot be evaluated at compile time",
+    );
+    h::expect_err_msg(
+        "wrong-typed argument",
+        "const W: usize = 8;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "mismatched types: expected 'u32', found 'usize'",
+    );
+    h::expect_err_msg(
+        "evaluated alignment not a power of two",
+        "const W: u32 = 24;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@c.align' needs a power of two from 1 to 268435456, found 24",
+    );
+    h::expect_err_msg(
+        "literal alignment not a power of two",
+        "@c.align(3)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@c.align' needs a power of two from 1 to 268435456, found 3",
+    );
+    h::expect_err_msg(
+        "zero alignment",
+        "@c.align(0)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@c.align' needs a power of two from 1 to 268435456, found 0",
+    );
+    h::expect_err_msg(
+        "alignment past the limit",
+        "@c.align(536870912)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@c.align' needs a power of two from 1 to 268435456, found 536870912",
+    );
+    // The layout reads the value: a declaration checked earlier folds `sizeof` of the aligned one.
+    h::expect_ok(
+        "layout through the evaluated value",
+        "struct T { pub a: [u8; sizeof(S)] }\n@c.align(Q)\nstruct S { pub x: i32 }\nconst Q: u32 = 16;\nstatic_assert(sizeof(T) == 16);\nstatic_assert(alignof(S) == 16);\nfn main() i32 { return 0; }\n",
+    );
+}
+
 // An attribute appears at most once on one declaration, whatever its arguments: two `@c.align` gave
 // the layout service and the C emitter different answers. Several values go in one occurrence.
 @test
@@ -837,11 +919,11 @@ fn bug_regressions() {
     // attribute after the reserve hint is kept.
     {
         let c = h::parse_ast(
-            "@c.align(010)\nstruct A { x: u8 }\n@c.align(0o10)\nstruct B { x: u8 }\n@c.align(0b1_0000)\nstruct D { x: u8 }\n",
+            "@c.align(016)\nstruct A { x: u8 }\n@c.align(0o10)\nstruct B { x: u8 }\n@c.align(0b1_0000)\nstruct D { x: u8 }\n",
         );
         assert(c.errors == 0, "attribute integers parse");
         assert_eq(c.ast.attrs.len(), 3);
-        assert_eq(c.ast.attrs[0].arg, 10);
+        assert_eq(c.ast.attrs[0].arg, 16);
         assert_eq(c.ast.attrs[1].arg, 8);
         assert_eq(c.ast.attrs[2].arg, 16);
         assert(h::parse_has_error("@c.align(0x1_0000_0000)\nstruct A { x: u8 }\n"), "u32 overflow rejected");
@@ -1089,7 +1171,7 @@ fn diagnostics_by_message() {
     );
     h::expect_err_msg(
         "integer attribute argument",
-        "@c.align(x)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@c.align()\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "expected an integer argument",
     );
     h::expect_err_msg("missing expression", "fn main() i32 { let x = ; return 0; }\n", "expected expression");
