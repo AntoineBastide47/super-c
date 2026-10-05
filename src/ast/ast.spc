@@ -879,6 +879,11 @@ pub enum TypeKind {
     /// resolves it to the conformance's `type Output = ..` once `Self` is known (`Package::assoc_of`).
     /// Never concrete.
     TYPE_ASSOC,
+    /// `Simd<T, N>`, the prelude vector (`std/simd.spc`): `as_data.arr` holds the lane type and the
+    /// lane count's type (a `usize` TYPE_CONST once known), qualifier ARR_SYM (`Ty::arr_like`).
+    TYPE_SIMD,
+    /// `Mask<N>`, the prelude lane mask: as TYPE_SIMD with lane type `bool`.
+    TYPE_MASK,
 }
 
 /// A const-generic expression in canonical form: `k + sum(c_i * P_i)`. Linear is exactly the closed set
@@ -1099,6 +1104,53 @@ pub const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
         BT_ISIZE | BT_USIZE => pick(ptr32, 32u32, 64u32),
         _ => 0,
     };
+}
+
+/// The width in bits of SIMD lane type `bt` (`i8` to `u64` without `isize`/`usize`, `f32`, `f64`);
+/// 0 for any other type.
+pub const fn bt_lane_bits(bt: BuiltinType) u32 {
+    return switch bt {
+        BT_ISIZE | BT_USIZE => 0,
+        BT_F32 => 32,
+        BT_F64 => 64,
+        _ => bt_int_width(bt, false),
+    };
+}
+
+/// The error for vector type `Simd<T, n>` whose lane type is builtin `bt` (BT_COUNT: not a builtin)
+/// spelled `tname`, or for `Mask<n>` (`mask`), with a suggestion after a line break; empty when the
+/// type is valid: a lane type of `bt_lane_bits`, a power-of-two count from 2 to 64, 512 bits at most.
+pub fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String {
+    let lb = pick(bt == BuiltinType::BT_COUNT, 0u32, bt_lane_bits(bt));
+    let pow2 = n >= 2 && n <= 64 && (n & n - 1) == 0;
+    if pow2 && (mask || lb != 0 && n * lb as u64 <= 512) {
+        return String::new();
+    }
+    if !mask && lb == 0 {
+        let help = switch bt {
+            BT_USIZE => "; use `u32` or `u64`",
+            BT_ISIZE => "; use `i32` or `i64`",
+            BT_CHAR => "; use `u8`",
+            BT_BOOL => "; use `Mask<N>`",
+            _ => "",
+        };
+        return format("`{}` cannot be a SIMD lane type{}", tname, help);
+    }
+    let ty = if mask {
+        format("Mask<{}>", n);
+    } else {
+        format("Simd<{}, {}>", tname, n);
+    };
+    if !pow2 {
+        return format("`{}` needs a power-of-two lane count (2, 4, 8, 16, 32, or 64)", ty.as_str());
+    }
+    return format(
+        "`{}` is {} bits wide; the limit is 512 bits\nuse `Simd<{}, {}>`",
+        ty.as_str(),
+        n * lb as u64,
+        tname,
+        512 / lb,
+    );
 }
 
 /// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
@@ -1425,10 +1477,10 @@ pub fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
 /// binds its generic parameters positionally: its target type `pat` (read through `a`) is not an
 /// instance, or the arguments it constrains are its parameters, bare and in order.
 pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) bool {
-    if pat == TYPE_NONE || a.type_at(pat).kind != TypeKind::TYPE_INSTANCE {
+    let mut it = TyInstance {};
+    if pat == TYPE_NONE || !a.targs_of(pat, &mut it) {
         return true;
     }
-    let it = *a.instance(a.type_at(pat).as_data.inst);
     let gens = ea.at_const(ext).as_data.extend_def.generics;
     if ext_arity(ea, ext, it.n) != gens.len {
         return false;
@@ -1772,9 +1824,20 @@ extend Ty {
         return cval_exact(self.as_data.value, self.cbt());
     }
 
-    /// A TYPE_ARRAY whose length is symbolic (`[T; N]` inside the generic that declares `N`).
+    /// A TYPE_ARRAY whose length is symbolic (`[T; N]` inside the generic that declares `N`), or a
+    /// TYPE_SIMD or TYPE_MASK, whose length is always a type.
     pub const fn arr_sym(self: &Self) bool {
-        return self.kind == TypeKind::TYPE_ARRAY && self.qualifier == ARR_SYM;
+        return self.qualifier == ARR_SYM && self.arr_like();
+    }
+
+    /// A TYPE_ARRAY, TYPE_SIMD or TYPE_MASK: an element and a length in `as_data.arr`.
+    pub const fn arr_like(self: &Self) bool {
+        return self.kind == TypeKind::TYPE_ARRAY || self.is_vec();
+    }
+
+    /// A TYPE_SIMD or TYPE_MASK.
+    pub const fn is_vec(self: &Self) bool {
+        return self.kind == TypeKind::TYPE_SIMD || self.kind == TypeKind::TYPE_MASK;
     }
 
     /// A function-pointer type: a signature record, no declaration.
@@ -1831,8 +1894,12 @@ extend Ty as Eq {
     }
 }
 
-/// The array record `[elem; lt]`, where `ly` is the length type `lt`.
-pub const fn array_ty(elem: TypeId, lt: TypeId, ly: &Ty) Ty {
+/// The record of kind `k` (an `arr_like` kind) over `elem` and length type `lt` (`ly`): an array with
+/// a constant length in the u32 range holds the count, every other length stays a type.
+pub const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) Ty {
+    if k != TypeKind::TYPE_ARRAY {
+        return Ty { kind: k, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
+    }
     if ly.kind == TypeKind::TYPE_CONST && ly.as_data.value >= 0 && ly.as_data.value <= 0xFFFFFFFFi64 {
         return Ty {
             kind: TypeKind::TYPE_ARRAY,
@@ -2326,6 +2393,10 @@ pub struct TypePool {
     /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
     pub clins: Vector<ConstLin>,
     pub open: bool,
+    /// The prelude `Simd` and `Mask` declarations (`std/simd.spc`): an instance of either interns as
+    /// its TYPE_SIMD or TYPE_MASK (`vec_of`). Zero before the prelude loads.
+    pub simd: DefId,
+    pub mask: DefId,
 }
 
 extend TypePool {
@@ -2399,6 +2470,21 @@ extend TypePool {
         }
     }
 
+    /// The TYPE_SIMD or TYPE_MASK record an instance of `(module, decl)` over `args` stands for, or a
+    /// TYPE_ERROR record when the declaration is neither prelude anchor.
+    pub const fn vec_of(self: &Self, module: ModuleId, decl: NodeId, args: *const TypeId) Ty {
+        if decl == NODE_NONE {
+            return Ty { kind: TypeKind::TYPE_ERROR };
+        }
+        if decl == self.simd.node && module == self.simd.module {
+            return array_ty(TypeKind::TYPE_SIMD, unsafe args[0], unsafe args[1], self.at(0));
+        }
+        if decl == self.mask.node && module == self.mask.module {
+            return array_ty(TypeKind::TYPE_MASK, Ast::builtin(BuiltinType::BT_BOOL), unsafe args[0], self.at(0));
+        }
+        return Ty { kind: TypeKind::TYPE_ERROR };
+    }
+
     /// The id of canonical `nt` (`concrete` set), or -1. Read-only: safe on a frozen table.
     pub const fn find_ty(self: &Self, nt: &Ty) i64 {
         return ix_find(&self.tix, &self.tys, nt);
@@ -2465,6 +2551,9 @@ extend TypePool {
             TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.at(ty.as_data.elem as usize).concrete,
             TYPE_ARRAY => !ty.arr_sym() && self.at(ty.as_data.arr.elem as usize).concrete,
+            TYPE_SIMD | TYPE_MASK => self.at(ty.as_data.arr.elem as usize).concrete && self.at(
+                ty.as_data.arr.len as usize,
+            ).concrete,
             TYPE_INSTANCE | TYPE_FUNCTION | TYPE_DYN => {
                 let r = ty.rec();
                 let mut ok = true;
@@ -2498,6 +2587,10 @@ extend TypePool {
         let mut it = TyInstance { module: module, decl: decl, n: m };
         for j in 0..m {
             unsafe it.args[j] = unsafe args[j];
+        }
+        let v = self.vec_of(module, decl, args);
+        if v.kind != TypeKind::TYPE_ERROR {
+            return self.intern_g(v);
         }
         let idx = self.insert_inst(&it);
         return self.intern_g(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
@@ -2579,9 +2672,9 @@ extend TypePool {
     }
 
     /// `Ast::intern_array` for this table.
-    pub fn intern_array_g(self: &mut Self, elem: TypeId, lt: TypeId) TypeId {
+    pub fn intern_array_g(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
         let ly = *self.at(lt as usize);
-        return self.intern_g(array_ty(elem, lt, &ly));
+        return self.intern_g(array_ty(k, elem, lt, &ly));
     }
 
     /// `Ast::const_value` for this table.
@@ -3056,7 +3149,7 @@ extend Ast {
         };
         if t.kind == TypeKind::TYPE_CONST {
             c.as_data.value = t.as_data.value;
-        } else if t.kind == TypeKind::TYPE_ARRAY {
+        } else if t.arr_like() {
             c.as_data.arr = t.as_data.arr;
         } else if t.kind == TypeKind::TYPE_FIELD_PROJECTION {
             c.as_data.proj = t.as_data.proj; // both words are significant: owner AND binder
@@ -3192,7 +3285,7 @@ extend Ast {
     fn intern_type_i(self: &mut Self, t: Ty) TypeId {
         // A type built over a rejected one is rejected: TYPE_ERROR absorbs its parents.
         let k = t.kind;
-        if (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE) && t.as_data.elem == TYPE_ERROR || k == TypeKind::TYPE_ARRAY && (t.as_data.arr.elem == TYPE_ERROR || t.arr_sym() && t.as_data.arr.len == TYPE_ERROR) {
+        if (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE) && t.as_data.elem == TYPE_ERROR || t.arr_like() && (t.as_data.arr.elem == TYPE_ERROR || t.arr_sym() && t.as_data.arr.len == TYPE_ERROR) {
             return TYPE_ERROR;
         }
         let mut nt = Ast::ty_canon(&t);
@@ -3283,6 +3376,12 @@ extend Ast {
         }
         if rec_has_error(&it) {
             return TYPE_ERROR;
+        }
+        if self.gt != null {
+            let v = unsafe (*self.gt).vec_of(module, decl, args);
+            if v.kind != TypeKind::TYPE_ERROR {
+                return self.intern_type(v);
+            }
         }
         if unsafe TS_ON {
             ts_add(TS_INST, 1);
@@ -3666,9 +3765,38 @@ extend Ast {
 
     /// `[elem; lt]` for length type `lt` of this pool: a TYPE_CONST in the u32 range is a count,
     /// any other length stays symbolic.
-    pub fn intern_array(self: &mut Self, elem: TypeId, lt: TypeId) TypeId {
+    pub fn intern_array(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
         let ly = *self.type_at(lt);
-        return self.intern_type(array_ty(elem, lt, &ly));
+        return self.intern_type(array_ty(k, elem, lt, &ly));
+    }
+
+    /// Instance `t` as its record, or vector `t` (arguments `[T, N]`) or mask `t` (`[N]`) as the record
+    /// of the prelude instance it stands for; false for any other type.
+    pub const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
+        let y = self.type_at(t);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            *out = *self.instance(y.as_data.inst);
+            return true;
+        }
+        if !y.is_vec() {
+            return false;
+        }
+        let simd = y.kind == TypeKind::TYPE_SIMD;
+        let d = if self.gt == null {
+            DefId {};
+        } else {
+            pick(simd, unsafe (*self.gt).simd, unsafe (*self.gt).mask);
+        };
+        *out = TyInstance { module: d.module, decl: d.node, n: pick(simd, 2, 1) as u8 };
+        out.args[0] = pick(simd, y.as_data.arr.elem, y.as_data.arr.len);
+        out.args[1] = pick(simd, y.as_data.arr.len, TYPE_NONE);
+        return true;
+    }
+
+    /// The lane count of a TYPE_SIMD or TYPE_MASK `y` of this pool; 0 while it is symbolic.
+    pub const fn lanes(self: &Self, y: &Ty) u64 {
+        let ly = self.type_at(y.as_data.arr.len);
+        return pick(ly.kind == TypeKind::TYPE_CONST, ly.as_data.value as u64, 0);
     }
 
     /// Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
@@ -3763,6 +3891,7 @@ extend Ast {
             TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.type_concrete(ty.as_data.elem),
             TYPE_ARRAY => !ty.arr_sym() && self.type_concrete(ty.as_data.arr.elem),
+            TYPE_SIMD | TYPE_MASK => self.type_concrete(ty.as_data.arr.elem) && self.type_concrete(ty.as_data.arr.len),
             TYPE_INSTANCE | TYPE_FUNCTION | TYPE_DYN => {
                 let r = ty.rec();
                 if r != NO_REC {
@@ -3796,7 +3925,7 @@ extend Ast {
         }
         let ty = *src.type_at(t);
         let r = switch ty.kind {
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
                 let mut nt = ty;
                 nt.as_data.elem = self.reintern(src, ty.as_data.elem);
                 if ty.arr_sym() {

@@ -197,6 +197,18 @@ extend Errors {
         self.emit(sp.start, sp.end - sp.start, msg);
     }
 
+    /// `emit_span` of the first line of `msg`; the text after its line feed, if any, is a note.
+    @c.cold
+    pub fn emit_span_note(self: &mut Self, sp: tok::Span, msg: String) {
+        let cut = msg.as_str().find_byte(b'\n');
+        if cut < 0 {
+            self.emit_span(sp, msg);
+            return;
+        }
+        self.emit_span(sp, String::from_str(msg.as_str().slice(0, cut as usize)));
+        self.note(String::from_str(msg.as_str().slice(cut as usize + 1, msg.len())));
+    }
+
     /// Record a diagnostic produced OUT of source order: a region/lifetime error the solver
     /// only discovers after the whole function body has been walked. `from` is the index the enclosing
     /// function's diagnostics start at; the record is inserted at the first position in [from, len)

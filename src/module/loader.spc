@@ -682,7 +682,7 @@ fn agg_op_name(a: &Ast, n: &Node) str<'static> {
         t = y.as_data.elem;
     }
     let k = a.type_at(t).kind;
-    if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM && k != TypeKind::TYPE_GENERIC {
+    if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM && k != TypeKind::TYPE_GENERIC && k != TypeKind::TYPE_MASK {
         return "";
     }
     let op = n.as_data.binary.op;
@@ -1467,7 +1467,7 @@ fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
     let mut d: u32 = 0;
     if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         d = pub_child_depth(depth, y.as_data.elem);
-    } else if k == TypeKind::TYPE_ARRAY {
+    } else if y.arr_like() {
         d = pub_child_depth(depth, y.as_data.arr.elem);
         if y.arr_sym() {
             d = d.max(pub_child_depth(depth, y.as_data.arr.len));
@@ -1501,7 +1501,7 @@ fn pub_children(batch: &TypePool, b: usize, out: &mut Vector<u32>) {
     let k = y.kind;
     if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         pub_push_child(y.as_data.elem, out);
-    } else if k == TypeKind::TYPE_ARRAY {
+    } else if y.arr_like() {
         pub_push_child(y.as_data.arr.elem, out);
         if y.arr_sym() {
             pub_push_child(y.as_data.arr.len, out);
@@ -1539,7 +1539,7 @@ fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>,
     let k = y.kind;
     if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         y.as_data.elem = pub_fin(fin, y.as_data.elem);
-    } else if k == TypeKind::TYPE_ARRAY {
+    } else if y.arr_like() {
         y.as_data.arr.elem = pub_fin(fin, y.as_data.arr.elem);
         if y.arr_sym() {
             y.as_data.arr.len = pub_fin(fin, y.as_data.arr.len);
@@ -1567,7 +1567,7 @@ fn pub_key(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &m
     let kd = y.kind;
     if kd == TypeKind::TYPE_POINTER || kd == TypeKind::TYPE_REFERENCE || kd == TypeKind::TYPE_SLICE {
         k.w[1] = y.as_data.elem;
-    } else if kd == TypeKind::TYPE_ARRAY {
+    } else if y.arr_like() {
         k.w[1] = y.as_data.arr.elem;
         k.w[2] = y.as_data.arr.len;
     } else if kd == TypeKind::TYPE_FIELD_PROJECTION {
@@ -2009,8 +2009,29 @@ extend Package {
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
                 self.modules[i].ast.gt = gp;
+                if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "simd.spc" {
+                    self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd");
+                    self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask");
+                }
             }
         }
+    }
+
+    // The top-level struct `name` of module `m`, or node NODE_NONE.
+    fn top_struct(self: &Self, m: ModuleId, name: str) DefId {
+        let a = &self.modules[m as usize].ast;
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let id = unsafe a.list(items)[i as usize];
+            let n = a.at_const(id);
+            if n.kind == NodeKind::NODE_STRUCT {
+                let sp = a.at_const(n.as_data.aggregate.name).as_data.name.text;
+                if self.modules[m as usize].source.as_str().slice(sp.start as usize, sp.end as usize) == name {
+                    return DefId { module: m, node: id };
+                }
+            }
+        }
+        return DefId { module: m, node: NODE_NONE };
     }
 
     /// The final id of `t` as module `m` knew it before the last publication (final ids pass through).
@@ -2128,7 +2149,7 @@ extend Package {
                         let k = y.kind;
                         if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
                             y.as_data.elem = pub_child(&map, y.as_data.elem, i);
-                        } else if k == TypeKind::TYPE_ARRAY {
+                        } else if y.arr_like() {
                             y.as_data.arr.elem = pub_child(&map, y.as_data.arr.elem, i);
                             if y.arr_sym() {
                                 y.as_data.arr.len = pub_child(&map, y.as_data.arr.len, i);
@@ -2319,7 +2340,7 @@ extend Package {
             let k = y.kind;
             if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
                 out.push_u64(y.as_data.elem);
-            } else if k == TypeKind::TYPE_ARRAY {
+            } else if y.arr_like() {
                 out.push_u64(y.as_data.arr.elem);
                 out.push_byte(b' ');
                 out.push_u64(y.as_data.arr.len);
@@ -4173,9 +4194,7 @@ extend Package {
         let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             it.decl = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            it = *unsafe (*da).instance(y.as_data.inst);
-        } else if y.kind == TypeKind::TYPE_BUILTIN {
+        } else if unsafe (*da).targs_of(ai.args[0], &mut it) {} else if y.kind == TypeKind::TYPE_BUILTIN {
             it.module = self.core_module;
             it.decl = self.builtin_decl(y.as_data.builtin);
         }
@@ -4278,7 +4297,8 @@ extend Package {
             }
             return true;
         }
-        let pi = *unsafe (*ea).instance(unsafe (*ea).type_at(pat).as_data.inst);
+        let mut pi = TyInstance {};
+        let _ = unsafe (*ea).targs_of(pat, &mut pi);
         let np = ext_arity(unsafe &*ea, ext, pi.n);
         if np > it.n {
             return false;
@@ -4376,7 +4396,7 @@ extend Package {
             *out = unsafe (*da).const_value(cval_bits(v), dl.to);
             return true;
         }
-        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.arr_like() {
             let mut e = TYPE_NONE;
             if !self.ground_local(pm, y.as_data.elem, dm, lp, la, ln, &mut e, depth + 1) {
                 return false;
@@ -4386,7 +4406,7 @@ extend Package {
                 if !self.ground_local(pm, y.as_data.arr.len, dm, lp, la, ln, &mut lt, depth + 1) {
                     return false;
                 }
-                *out = unsafe (*da).intern_array(e, lt);
+                *out = unsafe (*da).intern_array(y.kind, e, lt);
                 return true;
             }
             let mut nt = y;

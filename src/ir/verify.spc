@@ -155,6 +155,9 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             if r.a as usize >= b.operands.len() {
                 return "rvalue-operand-out-of-range";
             }
+            if r.kind == ir::RV_CAST && r.b > ir::CAST_MASK_BITS {
+                return "cast-kind";
+            }
         } else if r.kind == ir::RV_BINARY || r.kind == ir::RV_REPEAT {
             if r.a as usize >= b.operands.len() || r.b as usize >= b.operands.len() {
                 return "rvalue-operand-out-of-range";
@@ -336,7 +339,8 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             let mut cur = b.locals.at(p.base as usize).ty;
             for j in 0..p.proj_len {
                 let pj = *b.projections.at((p.proj_start + j) as usize);
-                if pj.kind == ir::PJ_INDEX_OP && is_checked_view(da, &sv, cur) && op_mark(b, &marks, pj.data) != 1 {
+                let lanes = cur != TYPE_NONE && da.type_at(peel_refs(da, cur)).kind == TypeKind::TYPE_SIMD;
+                if pj.kind == ir::PJ_INDEX_OP && (lanes || is_checked_view(da, &sv, cur)) && op_mark(b, &marks, pj.data) != 1 {
                     fail = "index-not-checked";
                 }
                 cur = pj.ty;
@@ -344,6 +348,21 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
         }
         for i in 0..b.rvalues.len() {
             let r = b.rvalues.at(i);
+            if r.kind == ir::RV_CAST && (r.b == ir::CAST_SIMD_ARRAY || r.b == ir::CAST_MASK_BITS) {
+                // A vector and its array, a mask and `u64`: either way round.
+                let s0 = *da.type_at(b.operands.at(r.a as usize).ty);
+                let t0 = *da.type_at(r.target);
+                let v = pick(s0.is_vec(), s0, t0);
+                let o = pick(s0.is_vec(), t0, s0);
+                let ok = if r.b == ir::CAST_SIMD_ARRAY {
+                    v.kind == TypeKind::TYPE_SIMD && o.kind == TypeKind::TYPE_ARRAY && o.as_data.arr.elem == v.as_data.arr.elem;
+                } else {
+                    v.kind == TypeKind::TYPE_MASK && o.kind == TypeKind::TYPE_BUILTIN && o.as_data.builtin == BuiltinType::BT_U64;
+                };
+                if !ok {
+                    fail = "cast-types";
+                }
+            }
             if r.kind != ir::RV_SLICE {
                 continue;
             }

@@ -107,7 +107,15 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
         p_operand(out, b, r.b);
         out.push_str(")");
     } else if r.kind == ir::RV_CAST {
-        out.push_str("cast ");
+        out.push_str(
+            if r.b == ir::CAST_SIMD_ARRAY {
+                "cast.simd ";
+            } else if r.b == ir::CAST_MASK_BITS {
+                "cast.mask ";
+            } else {
+                "cast ";
+            },
+        );
         p_operand(out, b, r.a);
     } else if r.kind == ir::RV_AGGREGATE {
         out.push_str("agg");

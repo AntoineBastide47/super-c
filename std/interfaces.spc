@@ -33,6 +33,10 @@ pub interface Sync {}
 /// only where the structural rule already holds.
 pub interface Copy {}
 
+/// A SIMD lane type (`Simd<T, N>`): `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32` or
+/// `f64`. Only `std` implements it.
+pub interface SimdElement: Copy {}
+
 /// Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
 /// sub/mul/div/rem. A type need not name these interfaces: a bare method of the right name is enough;
 /// but conforming documents the intent and is what a generic bound can require.

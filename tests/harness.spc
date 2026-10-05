@@ -728,10 +728,13 @@ pub fn const_trap_class(msg: str) str<'static> {
     if msg.contains("shift out of range") {
         return "shift out of range";
     }
+    if msg.contains("index out of bounds") {
+        return "index out of bounds";
+    }
     return "";
 }
 
-/// The trap class of a run-time trap message (`rt_c.spc` arithmetic helpers), in the words a constant
+/// The trap class of a run-time trap message (`rt_c.spc` arithmetic and index helpers), in the words a constant
 /// reports for the same trap; empty for any other trap.
 pub fn runtime_trap_class(trap: str) str<'static> {
     if trap.contains("attempt to shift") {
@@ -742,6 +745,9 @@ pub fn runtime_trap_class(trap: str) str<'static> {
     }
     if trap.contains("with overflow") {
         return "arithmetic overflow";
+    }
+    if trap.contains("index out of bounds") {
+        return "index out of bounds";
     }
     return "";
 }

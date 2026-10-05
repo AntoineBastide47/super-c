@@ -1594,7 +1594,7 @@ extend Lowerer {
                 return t;
             }
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-            return sa.intern_array(e, lt);
+            return sa.intern_array(y.kind, e, lt);
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
             let e = self.proj_ty_map(y.as_data.elem, pm, params, args, n);
@@ -3346,7 +3346,7 @@ extend Lowerer {
             // normalized element check against the cached loop length; BCE proves it from the
             // loop guard (index < length) and marks it PROVEN
             let lop_e = self.copy_op(lpl);
-            let ck_e = self.bounds_check_len(iop2, lop_e, sp);
+            let ck_e = self.bounds_check_len(iop2, lop_e, NODE_NONE, sp);
             iop_e = self.copy_op(ck_e);
         }
         let epl = self.place_project(ipl, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop_e, sub: 0, ty: elem_ty });
@@ -3469,6 +3469,9 @@ extend Lowerer {
                 if vk != 0 {
                     let _ = self.own_temp(op, id);
                     op = self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, op, vk, 0, vt), sp));
+                } else if vt != TYPE_NONE && self.f.ty(vt).kind == TypeKind::TYPE_SIMD {
+                    // An array literal the checker typed as a vector: its array, then the lanes.
+                    op = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, op, ir::CAST_SIMD_ARRAY, 0, vt), sp));
                 }
             }
         }
@@ -3627,7 +3630,8 @@ extend Lowerer {
                     }
                 }
             }
-            let pl = self.rv_temp(ir::rv(ir::RV_CAST, op, ir::CAST_NUMERIC, 0, cty), sp);
+            let ck = self.cast_kind(self.body.operands.at(op as usize).ty, cty);
+            let pl = self.rv_temp(ir::rv(ir::RV_CAST, op, ck, 0, cty), sp);
             if er9 {
                 self.tp(ir::TP_CAST_ERASE, 0, d.expression);
             }
@@ -4576,8 +4580,8 @@ extend Lowerer {
                         is_ty9 = ok9 == NodeKind::NODE_STRUCT || ok9 == NodeKind::NODE_ENUM || ok9 == NodeKind::NODE_TYPE_ALIAS;
                     }
                     let oty9 = self.nty(ob9);
-                    if is_ty9 && oty9 != TYPE_NONE && self.f.ty(oty9).kind == TypeKind::TYPE_INSTANCE {
-                        let it9 = *self.f.instance(self.f.ty(oty9).as_data.inst);
+                    let mut it9 = TyInstance {};
+                    if is_ty9 && oty9 != TYPE_NONE && self.f.targs_of(oty9, &mut it9) {
                         for k9 in 0..it9.n {
                             self.body.targ_pool.push(unsafe it9.args[k9 as usize]);
                         }
@@ -4600,7 +4604,7 @@ extend Lowerer {
             let in9 = self.f.node(d.callee).as_data.specialization.expression;
             if self.f.node(in9).kind == NodeKind::NODE_MEMBER && self.f.node(in9).as_data.member.path {
                 let q9 = self.nty(self.f.node(in9).as_data.member.object);
-                if q9 != TYPE_NONE && self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE {
+                if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
                     impl9 = q9;
                 }
             }
@@ -5287,6 +5291,11 @@ extend Lowerer {
             if ty == TYPE_NONE || self.f.ty(ty).kind == TypeKind::TYPE_ARRAY {
                 return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, ty), sp));
             }
+            if self.f.ty(ty).kind == TypeKind::TYPE_SIMD {
+                // A repeat typed as a vector fills its array; `apply_adjust` converts it.
+                let aty = self.vec_array_ty(ty);
+                return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, aty), sp));
+            }
             // A repeat coerced to a slice: fill an array temp of the checked count; `apply_adjust`
             // views it.
             let mut n: i64 = -1;
@@ -5358,9 +5367,12 @@ extend Lowerer {
                 }
             }
         }
-        // A literal coerced to a slice builds its array; `apply_adjust` views it.
+        // A literal coerced to a slice builds its array; `apply_adjust` views it. One typed as a
+        // vector builds its array too, which `apply_adjust` converts.
         let mut aty = ty;
-        if self.slice_view(ty) {
+        if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_SIMD {
+            aty = self.vec_array_ty(ty);
+        } else if self.slice_view(ty) {
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
             aty = sa.intern_type(
@@ -6027,11 +6039,10 @@ extend Lowerer {
             rv = self.f.ty(rv).as_data.elem;
             g += 1;
         }
-        let y = *self.f.ty(rv);
-        if y.kind != TypeKind::TYPE_INSTANCE {
+        let mut it = TyInstance {};
+        if !self.f.targs_of(rv, &mut it) {
             return rr;
         }
-        let it = *self.f.instance(y.as_data.inst);
         let items = fa.at_const(fa.root).as_data.program.items;
         for i in 0..items.len {
             let nid = unsafe fa.list(items)[i as usize];
@@ -6060,7 +6071,8 @@ extend Lowerer {
             }
             // The extend's own arguments, each solved from the target argument that names it.
             let mut ea = [TYPE_NONE; 8];
-            let pi = *fa.instance(fa.type_at(pat).as_data.inst);
+            let mut pi = TyInstance {};
+            let _ = fa.targs_of(pat, &mut pi);
             let np = ext_arity(fa, nid, pi.n);
             let mut j: u32 = 0;
             while j < np && j < it.n as u32 {
@@ -6246,6 +6258,9 @@ extend Lowerer {
             return false;
         }
         let y = *self.f.ty(ty);
+        if y.kind == TypeKind::TYPE_SIMD {
+            return true;
+        }
         if y.kind == TypeKind::TYPE_STRUCT {
             let v = self.view_decls();
             return vd_is(v.v_str, y.as_data.decl, y.module);
@@ -6331,16 +6346,38 @@ extend Lowerer {
         return pl;
     }
 
+    /// The cast kind of `src as dst`: a vector and its array, a mask and its bits, else numeric.
+    fn cast_kind(self: &Self, src: TypeId, dst: TypeId) u8 {
+        let sk = pick(src == TYPE_NONE, TypeKind::TYPE_ERROR, self.f.ty(src).kind);
+        let dk = pick(dst == TYPE_NONE, TypeKind::TYPE_ERROR, self.f.ty(dst).kind);
+        if sk == TypeKind::TYPE_SIMD || dk == TypeKind::TYPE_SIMD {
+            return ir::CAST_SIMD_ARRAY;
+        }
+        if sk == TypeKind::TYPE_MASK || dk == TypeKind::TYPE_MASK {
+            return ir::CAST_MASK_BITS;
+        }
+        return ir::CAST_NUMERIC;
+    }
+
+    /// `[T; N]` for vector type `Simd<T, N>` `t`, in this pool.
+    fn vec_array_ty(self: &mut Self, t: TypeId) TypeId {
+        let y = *self.f.ty(t);
+        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        return sa.intern_array(TypeKind::TYPE_ARRAY, y.as_data.arr.elem, y.as_data.arr.len);
+    }
+
     /// `t = IN_BOUNDS(index, len)` against an already-materialized length operand. Returns the
     /// temp place holding the checked index; the caller addresses through it (dynamic index) or
-    /// discards it (constant index, which keeps PJ_INDEX_CONST for place disjointness).
-    fn bounds_check_len(self: &mut Self, iop: ir::OperandId, lop: ir::OperandId, sp: tok::Span) ir::PlaceId {
+    /// discards it (constant index, which keeps PJ_INDEX_CONST for place disjointness). `item` is the
+    /// check's `item.node`: `ir::CHECK_LANES` for a lane check.
+    fn bounds_check_len(self: &mut Self, iop: ir::OperandId, lop: ir::OperandId, item: NodeId, sp: tok::Span) ir::PlaceId {
         let ut = Ast::builtin(BuiltinType::BT_USIZE);
         let start = self.body.oper_pool.len() as u32;
         self.body.oper_pool.push(iop);
         self.body.oper_pool.push(lop);
-        let cpl = self.rv_temp(ir::rv(ir::RV_INTRINSIC, start, 2, ir::IN_BOUNDS, ut), sp);
-        return cpl;
+        let mut rv = ir::rv(ir::RV_INTRINSIC, start, 2, ir::IN_BOUNDS, ut);
+        rv.item.node = item;
+        return self.rv_temp(rv, sp);
     }
 
     /// Materialize `RV_LEN(view)` into a temp and return its place.
@@ -6349,11 +6386,21 @@ extend Lowerer {
         return self.rv_temp(ir::rv(ir::RV_LEN, view, 0, 0, ut), sp);
     }
 
-    /// `t = IN_BOUNDS(index, RV_LEN(view))`: the explicit element check.
+    /// `t = IN_BOUNDS(index, RV_LEN(view))`: the explicit element check. A vector's is a lane check
+    /// (`ir::CHECK_LANES`) against its lane count, a constant once known, as a loop bound is.
     fn bounds_check(self: &mut Self, view: ir::PlaceId, iop: ir::OperandId, sp: tok::Span) ir::PlaceId {
-        let lpl = self.len_temp(view, sp);
-        let lop = self.copy_op(lpl);
-        return self.bounds_check_len(iop, lop, sp);
+        let t = self.peeled_view_ty(view);
+        let vec = t != TYPE_NONE && self.f.ty(t).kind == TypeKind::TYPE_SIMD;
+        let mut n: u64 = 0;
+        if vec {
+            n = self.f.lanes(self.f.ty(t));
+        }
+        let lop = if n != 0 {
+            self.kop(ir::CK_INT, Ast::builtin(BuiltinType::BT_USIZE), n as i64, sp);
+        } else {
+            self.copy_op(self.len_temp(view, sp));
+        };
+        return self.bounds_check_len(iop, lop, pick(vec, ir::CHECK_LANES, NODE_NONE), sp);
     }
 
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {
@@ -6442,7 +6489,7 @@ extend Lowerer {
                     excl = self.copy_op(lpl);
                 } else if rd.inclusive {
                     let lop0 = self.copy_op(lpl);
-                    let ck = self.bounds_check_len(eop, lop0, sp);
+                    let ck = self.bounds_check_len(eop, lop0, NODE_NONE, sp);
                     let one = self.kop(ir::CK_INT, ut, 1, sp);
                     let ckop = self.copy_op(ck);
                     let etpl = self.rv_temp(ir::rv(ir::RV_BINARY, ckop, one, tt::TokenType::Plus as u8, ut), sp);
@@ -6504,7 +6551,9 @@ extend Lowerer {
                         }
                     }
                     if dec && cn.val >= 0 {
-                        if self.checked_view(self.peeled_view_ty(base)) {
+                        // The checker bounds a vector's constant lane (per instance when generic).
+                        let vt = self.peeled_view_ty(base);
+                        if self.checked_view(vt) && self.f.ty(vt).kind != TypeKind::TYPE_SIMD {
                             let _ = self.bounds_check(base, iop, sp);
                         }
                         return self.place_project(

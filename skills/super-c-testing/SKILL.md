@@ -383,7 +383,8 @@ compiler under wasmtime; the C compile and the program stay native.
   message of the same class (`const_trap_class`, `runtime_trap_class`: "arithmetic overflow" for
   `attempt to add/subtract/multiply/negate/divide with overflow` and the remainder form, "division
   by zero" for `attempt to divide by zero` and `... a divisor of zero`, "shift out of range" for
-  `attempt to shift left/right with overflow`). Floats compare by bits, any NaN as `nan`. It runs
+  `attempt to shift left/right with overflow`, "index out of bounds" for any message holding
+  it). Floats compare by bits, any NaN as `nan`. It runs
   under `dev` (overflow checks on); `decls` must not trap. `parity_program` prints the program.
 - `asm_check(src, opts, function, contains, absent)` builds, reads
   `build/<profile>/compile_commands.json`, finds the unit that defines `function`, reruns its

@@ -1440,14 +1440,17 @@ fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) 
     let y = *a.type_at(t);
     let mut dm = y.module;
     let mut dn = NODE_NONE;
+    let mut it = TyInstance {};
     if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
         dn = y.as_data.decl;
-    } else if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = *a.instance(y.as_data.inst);
+    } else if a.targs_of(t, &mut it) {
         dm = it.module;
         dn = it.decl;
     } else if y.kind == TypeKind::TYPE_BUILTIN {
         out.push_str(bt_name(y.as_data.builtin));
+        return;
+    } else if y.kind == TypeKind::TYPE_CONST {
+        out.format_into("{}", y.cval());
         return;
     }
     if dn == NODE_NONE {
@@ -1464,7 +1467,7 @@ fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) 
 }
 
 // Per-instantiation static_asserts inside a demanded generic body: evaluate each under the
-// demand's substitution; false fails the build, naming the first type argument.
+// demand's substitution; false fails the build, naming every binding.
 fn cemit_inst_asserts(
     p: &mut loader::Package,
     d_def: DefId,
@@ -1542,9 +1545,33 @@ fn cemit_inst_asserts(
         let mut errs = diag::Errors::new();
         errs.emit_span(n.span, format("static assertion failed: {}", msg));
         if np > 0 {
-            let mut tn = String::new();
-            cemit_ty_disp(p, ams[0], ats[0], &mut tn);
-            errs.note(format("in the instantiation where the first type parameter is '{}'", tn.as_str()));
+            // Every binding by name: `T = f32, N = 4`, so a failed bound names its values.
+            // A method also binds its type's parameters under the extend's names: each name prints once.
+            let mut tn = String::from_str("in the instantiation where ");
+            let pa = unsafe &*p.module_ast_const(pmod);
+            let psrc = p.modules[pmod as usize].source.as_str();
+            let mut names = Array::<u64, 8> {};
+            let mut nn: usize = 0;
+            for k in 0..np {
+                let gs = pa.at_const(pa.at_const(prm[k as usize]).as_data.generic_param.name).as_data.name.text;
+                let gn = psrc.slice(gs.start as usize, gs.end as usize);
+                let mut seen = false;
+                for j in 0..nn {
+                    seen = seen || names[j] == gn.hash();
+                }
+                if seen {
+                    continue;
+                }
+                names[nn] = gn.hash();
+                nn += 1;
+                if nn != 1 {
+                    tn.push_str(", ");
+                }
+                tn.push_str(gn);
+                tn.push_str(" = ");
+                cemit_ty_disp(p, ams[k as usize], ats[k as usize], &mut tn);
+            }
+            errs.note(tn);
         }
         errs.finalize(src, p.modules[d_def.module as usize].file.as_str());
         errs.log();
@@ -4507,10 +4534,13 @@ pub fn cemit_package(
                         continue;
                     }
                 }
-                if vn0.kind == NodeKind::NODE_ARRAY_LITERAL {
+                // A repeat `[v; N]` holds the value and the count, not the elements: the static graph spells it.
+                if vn0.kind == NodeKind::NODE_ARRAY_LITERAL && !vn0.as_data.array_literal.repeat {
                     let mut line2 = String::new();
                     let mut is_slice2 = false;
                     let mut ety2 = TYPE_NONE;
+                    // A vector's lanes are the array inside its struct.
+                    let vec2 = unsafe (*p.module_ast_const(em2)).type_at(cty).kind == TypeKind::TYPE_SIMD;
                     {
                         let ea2 = unsafe &*p.module_ast_const(em2);
                         let ty2 = *ea2.type_at(cty);
@@ -4549,7 +4579,7 @@ pub fn cemit_package(
                     } else {
                         ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
                         if ok2 {
-                            line2.push_str(" = { ");
+                            line2.push_str(mbe::if_s(vec2, " = { { ", " = { "));
                         }
                     }
                     if ok2 && vn0.as_data.array_literal.elements.len != 0 {
@@ -4565,7 +4595,7 @@ pub fn cemit_package(
                                 break;
                             }
                         }
-                        line2.push_str(" };\n");
+                        line2.push_str(mbe::if_s(vec2, " } };\n", " };\n"));
                         if is_slice2 {
                             let mut view2 = String::new();
                             if cem.mg.ctype(em2, cty, csym.as_str(), &mut view2) {
@@ -5104,6 +5134,11 @@ fn render_const_elem(p: &loader::Package, mg: &mut mbe::Mangler, a: &Ast, src: s
             );
         } else if txt.len() != 0 && txt.byte_at(0) >= 48 && txt.byte_at(0) <= 57 {
             cbe::push_c_number(txt, out);
+            // An unsigned constant past `INT64_MAX` is no implicitly unsigned C literal.
+            let y = *a.type_at(a.type_of(eid));
+            if y.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(y.as_data.builtin) {
+                out.push_str("ULL");
+            }
         } else if n.as_data.literal.token_type == TokenType::Null {
             out.push_str("0");
         } else {
@@ -5172,6 +5207,9 @@ fn st_group_types(em: &mut tbe::TuEmit, cev: &iri::Interp, root: u32) {
 fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u32, decl: str, out: &mut String) bool {
     let g = cev.static_at(gi);
     let shape = unsafe (*g).shape;
+    if unsafe (*g).vt != TYPE_NONE {
+        return mg.ctype(unsafe (*g).vm, unsafe (*g).vt, decl, out);
+    }
     if shape == iri::SS_HEAP || shape == iri::SS_ARRAY {
         let mut n2 = unsafe (*g).n;
         if n2 == 0 {
@@ -5314,7 +5352,7 @@ fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
     let pshape = unsafe (*pg).shape;
     let pslot = unsafe (*g).pslot;
     if pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP {
-        out.push_str("[");
+        out.push_str(mbe::if_s(unsafe (*pg).vt != TYPE_NONE, ".l[", "["));
         out.push_u64(pslot);
         out.push_str("]");
     } else if pshape == iri::SS_STRUCT {
@@ -5360,13 +5398,14 @@ fn st_rel(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: st
     }
     let tshape = unsafe (*cev.static_at(r.target)).shape;
     if tshape == iri::SS_ARRAY || tshape == iri::SS_HEAP {
-        if r.toff == 0 {
+        let vec = unsafe (*cev.static_at(r.target)).vt != TYPE_NONE;
+        if r.toff == 0 && !vec {
             out.push_str("(void *)");
             st_path(p, &mut cem.mg, cev, name, r.target, out);
         } else {
             out.push_str("(void *)&");
             st_path(p, &mut cem.mg, cev, name, r.target, out);
-            out.push_str("[");
+            out.push_str(mbe::if_s(vec, ".l[", "["));
             out.push_u64(r.toff);
             out.push_str("]");
         }
@@ -5503,7 +5542,9 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         }
         let ek = unsafe (&*p.module_ast_const(unsafe (*g).etm)).type_at(unsafe (*g).ety).kind;
         let escalar = ek == TypeKind::TYPE_BUILTIN || ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_FUNCTION;
-        out.push_str("{ ");
+        // A vector's lanes are the array inside its struct.
+        let vec = unsafe (*g).vt != TYPE_NONE;
+        out.push_str(mbe::if_s(vec, "{ { ", "{ "));
         for k in 0..nslots {
             if k != 0 {
                 out.push_str(", ");
@@ -5514,7 +5555,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
                 return false;
             }
         }
-        out.push_str(" }");
+        out.push_str(mbe::if_s(vec, " } }", " }"));
         return true;
     }
     if shape == iri::SS_ENUM {
@@ -8266,13 +8307,24 @@ fn report_fold_errs(p: &mut loader::Package) {
     }
 }
 
-// One located error per array length an instance folded out of range, noting the instantiation and
-// the site that demanded it.
+// One located error per array length an instance folded out of range, or per invalid vector type,
+// noting the instantiation and the site that demanded it.
 fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
+    // A faulty type the user wrote passes into the std instances it reaches: a fault inside std
+    // whose text a fault in user code reports is that fault again.
+    let mut user = Set::<u64>::new();
+    for i in 0..fs.len() {
+        if !p.modules[fs.at(i).module as usize].prelude {
+            user.insert(fs.at(i).msg.as_str().hash());
+        }
+    }
     for i in 0..fs.len() {
         let f = fs.at(i);
+        if p.modules[f.module as usize].prelude && user.contains(&f.msg.as_str().hash()) {
+            continue;
+        }
         let mut errs = diag::Errors::new();
-        errs.emit_span(f.span, format("{}", f.msg.as_str()));
+        errs.emit_span_note(f.span, format("{}", f.msg.as_str()));
         if f.inst.node != NODE_NONE {
             let da = unsafe &*p.module_ast_const(f.inst.module);
             let dn = da.at_const(f.inst.node);

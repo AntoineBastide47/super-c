@@ -725,9 +725,7 @@ extend CEmit {
         let mut rit = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             rit.decl = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            rit = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
-        } else if y.kind == TypeKind::TYPE_BUILTIN {
+        } else if unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut rit) {} else if y.kind == TypeKind::TYPE_BUILTIN {
             rit.module = self.p().core_module;
             rit.decl = self.p().builtin_decl(y.as_data.builtin);
         }
@@ -817,7 +815,8 @@ extend CEmit {
                 gi += 1;
             }
         } else {
-            let pi = *unsafe (*ea).instance(unsafe (*ea).type_at(pat).as_data.inst);
+            let mut pi = TyInstance {};
+            let _ = unsafe (*ea).targs_of(pat, &mut pi);
             let np = ext_arity(unsafe &*ea, ext, pi.n);
             let mut j: u32 = 0;
             while j < np && j < it.n {
@@ -2578,7 +2577,9 @@ extend CEmit {
                             b,
                             &rv,
                         );
-                        if CEmit::inlinable_def_kind(rv.kind) || agg_ok || CEmit::is_likely(&rv) {
+                        // A vector-array cast is a `memcpy` statement (`emit_vec_cast_store`), no expression.
+                        let vcast = rv.kind == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY;
+                        if CEmit::inlinable_def_kind(rv.kind) && !vcast || agg_ok || CEmit::is_likely(&rv) {
                             ndef.set(pl.base as usize, *ndef.at(pl.base as usize) + 1);
                             def_rv.set(pl.base as usize, s.rvalue);
                             def_blk.set(pl.base as usize, bi as u32);
@@ -2987,6 +2988,9 @@ extend CEmit {
     // dynamic-env construction, and other multi-statement stores.
     fn fusable_init_rvalue(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
         let k = rv.kind;
+        if k == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY {
+            return false;
+        }
         if k == ir::RV_USE || k == ir::RV_BINARY || k == ir::RV_UNARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT || k == ir::RV_SLICE {
             return true;
         }
@@ -5620,6 +5624,9 @@ extend CEmit {
             if rv0.kind == ir::RV_CLOSURE && self.closure_has_array_cap(b, &rv0) {
                 return self.emit_closure_store_arrays(o, b, s, &rv0);
             }
+            if rv0.kind == ir::RV_CAST && rv0.b == ir::CAST_SIMD_ARRAY {
+                return self.emit_vec_cast_store(o, b, s, &rv0);
+            }
         }
         // `new T { .. }`: allocate, then store the initializer through the fresh pointer.
         {
@@ -6041,6 +6048,25 @@ extend CEmit {
         return ok;
     }
 
+    // `[T; N]` to `Simd<T, N>` or back (`CAST_SIMD_ARRAY`): `memcpy` of the value's bytes, as C
+    // neither assigns an array nor reads one through a vector of stricter alignment.
+    fn emit_vec_cast_store(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let to_vec = self.rty_y(b, rv.target).kind == TypeKind::TYPE_SIMD;
+        o.push_str(mbe::if_s(to_vec, "  memcpy(&", "  memcpy("));
+        let mut ok = self.emit_place(b, s.place, o);
+        o.push_str(mbe::if_s(to_vec, ", ", ", &"));
+        let op = *b.operands.at(rv.a as usize);
+        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+            ok = ok && self.emit_place(b, op.data, o);
+        } else {
+            ok = ok && self.emit_operand(b, rv.a, o);
+        }
+        o.push_str(", sizeof(");
+        ok = ok && self.ty_c(b.module, rv.target, "", o);
+        o.push_str("));\n");
+        return ok;
+    }
+
     // `memcpy(&dst, src, sizeof(T[n]));` for fixed-array place `src`. The source is spelled without
     // `&` and sized by its type, not by `sizeof(src)`: an array parameter is a pointer in C. The
     // type is the source's: a designated literal's temp holds only the spelled elements, and the
@@ -6402,7 +6428,7 @@ extend CEmit {
                         break;
                     }
                     let ek2 = unsafe (*self.p().module_ast_const(nm2)).type_at(nt2).kind;
-                    let mut hop = ek2 == TypeKind::TYPE_ARRAY;
+                    let mut hop = ek2 == TypeKind::TYPE_ARRAY || ek2 == TypeKind::TYPE_SIMD;
                     if ek2 == TypeKind::TYPE_INSTANCE {
                         let a3 = self.p().module_ast_const(nm2);
                         let it3 = *unsafe (*a3).instance(unsafe (*a3).type_at(nt2).as_data.inst);
@@ -6450,6 +6476,8 @@ extend CEmit {
                     wrapped = !arr_st;
                 } else if self.is_str_ty(rm2, rt2) {
                     dst.push_str(".ptr");
+                } else if unsafe (*a2).type_at(rt2).kind == TypeKind::TYPE_SIMD {
+                    dst.push_str(".l");
                 }
                 dst.push_str("[");
                 if pj.kind == ir::PJ_INDEX_CONST {
@@ -7157,12 +7185,10 @@ extend CEmit {
                 guard += 1;
                 continue;
             }
-            if y.kind == TypeKind::TYPE_INSTANCE {
-                let it = *unsafe (*a).instance(y.as_data.inst);
-                if it.module == tgt.module && it.decl == tgt.node {
-                    *rpm = cm;
-                    return it;
-                }
+            let mut it = TyInstance {};
+            if unsafe (*a).targs_of(cur, &mut it) && it.module == tgt.module && it.decl == tgt.node {
+                *rpm = cm;
+                return it;
             }
             break;
         }
@@ -9746,7 +9772,7 @@ extend CEmit {
             if impl_ty != TYPE_NONE {
                 self.rty(b, impl_ty, &mut rm6, &mut rt6);
                 let k6 = unsafe (*self.p().module_ast_const(rm6)).type_at(rt6).kind;
-                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN;
+                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN || k6 == TypeKind::TYPE_SIMD || k6 == TypeKind::TYPE_MASK;
             }
             // The first argument names the implementor only when its parameter is `Self` (behind
             // references or pointers): an associated function's other first argument
@@ -9755,12 +9781,12 @@ extend CEmit {
                 self.rty(b, recv_ty, &mut rm6, &mut rt6);
                 self.peel_refs(&mut rm6, &mut rt6);
                 let k6 = unsafe (*self.p().module_ast_const(rm6)).type_at(rt6).kind;
-                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN;
+                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN || k6 == TypeKind::TYPE_SIMD || k6 == TypeKind::TYPE_MASK;
             }
             if !got && dest_ty != TYPE_NONE {
                 self.rty(b, dest_ty, &mut rm6, &mut rt6);
                 let k6 = unsafe (*self.p().module_ast_const(rm6)).type_at(rt6).kind;
-                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN;
+                got = k6 == TypeKind::TYPE_STRUCT || k6 == TypeKind::TYPE_ENUM || k6 == TypeKind::TYPE_INSTANCE || k6 == TypeKind::TYPE_BUILTIN || k6 == TypeKind::TYPE_SIMD || k6 == TypeKind::TYPE_MASK;
             }
             if !got {
                 return self.fail("iface-default-recv");
@@ -10166,7 +10192,8 @@ extend CEmit {
                 }
                 return ok;
             }
-            if rv.b != ir::CAST_NUMERIC {
+            if rv.b != ir::CAST_NUMERIC && rv.b != ir::CAST_MASK_BITS {
+                // A vector and its array convert by `memcpy` at their store (`emit_vec_cast_store`).
                 return self.fail("cast");
             }
             // A float converts to an integer saturating (`__sc_f2i_*`); C leaves an out-of-range value
@@ -10399,7 +10426,7 @@ extend CEmit {
             let mut rt = pl.ty;
             self.rty(b, pl.ty, &mut rm, &mut rt);
             let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-            if y.kind == TypeKind::TYPE_ARRAY && self.mg.arr_len(rm, &y) >= 0 {
+            if (y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SIMD) && self.mg.arr_len(rm, &y) >= 0 {
                 dst.push_u64(self.mg.arr_len(rm, &y) as u64);
                 return true;
             }
@@ -10636,7 +10663,14 @@ extend CEmit {
                 return true;
             }
             if k == ir::IN_BOUNDS as u32 {
-                return self.emit_intrinsic_call(b, "__sc_bounds(", rv.a, 2, dst);
+                // A lane check's helper comes with the vector's definition (`Mangler::vec_pack`).
+                return self.emit_intrinsic_call(
+                    b,
+                    mbe::if_s(rv.item.node == ir::CHECK_LANES, "__sc_lane(", "__sc_bounds("),
+                    rv.a,
+                    2,
+                    dst,
+                );
             }
             if k == ir::IN_BOUNDS_PROVEN as u32 {
                 // The proof made the panic edge unreachable: only the index value remains.

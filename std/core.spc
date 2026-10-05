@@ -2997,7 +2997,9 @@ pub const fn dangling<T>() *mut T {
 }
 
 /// What sort of type `type_info::<T>()` described. `Slice` covers `[]T`/`[]mut T`, `Str` is `str`;
-/// every other named struct instance (`Vector<T>`, `Box<T>`, user structs) reports `Struct`.
+/// every other named struct instance (`Vector<T>`, `Box<T>`, user structs) reports `Struct`. `Simd`
+/// and `Mask` describe `Simd<T, N>` and `Mask<N>`: `elem` is the lane type's tag (`Bool` for a
+/// mask) and `len` the lane count.
 pub enum TypeTag {
     Void,
     Bool,
@@ -3017,6 +3019,8 @@ pub enum TypeTag {
     Enum,
     Dyn,
     Opaque,
+    Simd,
+    Mask,
 }
 
 /// The value form of one `@reflect(key = value)` entry. A bare key (`@reflect(hidden)`) is `Bool`
@@ -3302,3 +3306,14 @@ extend char as Format {
         return format("{}", *self);
     }
 }
+
+extend i8 as SimdElement {}
+extend i16 as SimdElement {}
+extend i32 as SimdElement {}
+extend i64 as SimdElement {}
+extend u8 as SimdElement {}
+extend u16 as SimdElement {}
+extend u32 as SimdElement {}
+extend u64 as SimdElement {}
+extend f32 as SimdElement {}
+extend f64 as SimdElement {}

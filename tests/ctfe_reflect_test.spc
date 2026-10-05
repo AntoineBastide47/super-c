@@ -134,3 +134,39 @@ fn main() i32 {
         0,
     );
 }
+
+// A constant calls a static method of a generic type whose result is not `Self`: the parameters bind
+// from the path, not from the result.
+@test
+fn a_constant_binds_a_static_method_from_its_path() {
+    h::expect_exit(
+        "a static method returning Option<W<K>>",
+        M"(struct W<const K: usize> {
+    pub x: u64,
+}
+extend<const K: usize> W<K> {
+    pub fn fb(b: u64) Option<W<K>> {
+        if b > K as u64 {
+            return Option::<W<K>>::None;
+        }
+        return Option::<W<K>>::Some(W::<K> { x: b });
+    }
+}
+static_assert(W::<4>::fb(5).is_none() && W::<4>::fb(3).is_some(), "K binds to 4");
+fn main() i32 {
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// A repeat literal constant fills every element (`[v; N]` holds the value and the count).
+@test
+fn a_repeat_constant_fills_every_element() {
+    h::expect_exit(
+        "repeat constants",
+        "const Y: [f32; 4] = [2.0; 4];\nconst Z: [u64; 3] = [18446744073709551615; 3];\nfn main() i32 {\n    if Y[3] != 2.0 || Y[1] != 2.0 || Z[2] != 18446744073709551615 {\n        return 1;\n    }\n    return 0;\n}\n",
+        0,
+    );
+}

@@ -94,6 +94,15 @@ folds to a `TYPE_CONST` becomes a count again. Readers of a length that may be s
 it where the substitution lives: `Mangler::arr_len` (emission), `lay::Svc::len_of` (layout
 env), `Interp::arr_count` (evaluation frame).
 
+A vector `Simd<T, N>` is a `TYPE_SIMD` and a mask `Mask<N>` a `TYPE_MASK` record: the array
+payload (`TyArr`) with qualifier `ARR_SYM` always, `elem` the lane type (`bool` for a mask) and
+`len` the lane count's type (`TYPE_CONST` once known). `TypePool.simd` and `TypePool.mask` are
+the two prelude declarations (`Package::bind_types`); an instance of either canonicalizes to its
+record at every intern (`TypePool::vec_of`), so `f32x4`, `Simd<f32, 4>` and a substituted
+`Simd<T, N>` are one id. `Ty::arr_like` covers arrays and both kinds; `Ast::targs_of` gives a
+vector or mask the instance record it stands for (`[T, N]`, `[N]`), which every stage that
+binds an extend, resolves a method or spells the type reads.
+
 Every walker that maps child types maps an array's element and symbolic length, and the
 record of every type `Ty::rec` names (an instance's arguments, a dyn's, a signature's results
 and parameters) through `rec()`, rebuilding a signature with `intern_sig_rec` /

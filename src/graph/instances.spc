@@ -433,7 +433,7 @@ extend InstGraph {
         let mut d: u32 = 0;
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
             d = self.nest_depth(a, y.as_data.elem);
-        } else if y.kind == TypeKind::TYPE_ARRAY {
+        } else if y.arr_like() {
             d = self.nest_depth(a, y.as_data.arr.elem);
         } else if y.kind == TypeKind::TYPE_INSTANCE || y.fn_sig() {
             let it = *a.instance(y.rec());
@@ -483,10 +483,10 @@ extend InstGraph {
                 }
                 g.intern_g(nt);
             },
-            TYPE_ARRAY => {
+            TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
                 let e = self.subst_intern(a, y.as_data.arr.elem, frame, depth + 1);
                 let r9 = if y.arr_sym() {
-                    g.intern_array_g(e, self.subst_intern(a, y.as_data.arr.len, frame, depth + 1));
+                    g.intern_array_g(y.kind, e, self.subst_intern(a, y.as_data.arr.len, frame, depth + 1));
                 } else {
                     let mut nt = y;
                     nt.as_data.arr.elem = e;
@@ -559,10 +559,10 @@ extend InstGraph {
         let y = *ia.type_at(ai.args[0]);
         let mut d = DefId { module: y.module, node: NODE_NONE };
         let mut keys = Vector::<ArgKey>::new();
+        let mut it = TyInstance {};
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             d.node = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *ia.instance(y.as_data.inst);
+        } else if ia.targs_of(ai.args[0], &mut it) {
             d = DefId { module: it.module, node: it.decl };
             for i in 0..it.n {
                 let at = unsafe it.args[i as usize];
@@ -693,6 +693,19 @@ extend InstGraph {
         return true;
     }
 
+    // The error for vector or mask type `y` (of `a`) under `frame` (`vec_err`): empty when it is valid
+    // or still symbolic there.
+    fn vec_fault(self: &Self, a: &Ast, y: &Ty, frame: &Vector<Subst>) String {
+        let mut v = i128::zero();
+        if !self.concrete_subst(a, y.as_data.arr.elem, frame, 0) || !self.len_value(a, y.as_data.arr.len, frame, &mut v) {
+            return String::new();
+        }
+        let e = *self.g().at(self.subst_intern(a, y.as_data.arr.elem, frame, 0) as usize);
+        let bt = pick(e.kind == TypeKind::TYPE_BUILTIN, e.as_data.builtin, BuiltinType::BT_COUNT);
+        let tn = pick(bt == BuiltinType::BT_COUNT, "this type", bt_name(bt));
+        return vec_err(y.kind == TypeKind::TYPE_MASK, bt, tn, cval_bits(v) as u64);
+    }
+
     // Does `t` hold an array whose length folds outside 0..=4294967295 under `frame`, or a const
     // expression (a length or an argument) whose value leaves its types there?
     fn ty_bad(self: &Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) bool {
@@ -711,6 +724,7 @@ extend InstGraph {
                 ));
                 bad || self.ty_bad(a, y.as_data.arr.elem, frame, depth + 1);
             },
+            TYPE_SIMD | TYPE_MASK => self.cexpr_ovf(a, y.as_data.arr.len, frame) || self.vec_fault(a, &y, frame).len() != 0,
             TYPE_INSTANCE | TYPE_DYN | TYPE_FUNCTION => {
                 let mut bad = false;
                 let r = y.rec();
@@ -1020,6 +1034,15 @@ extend InstGraph {
             }
             return self.check_ty(a, y.as_data.arr.elem, frame, depth + 1);
         }
+        if y.is_vec() {
+            // A lane count whose expression overflows is that fault; any other invalid one is the vector's.
+            self.chk_decl = DefId { module: 0, node: NODE_NONE };
+            if self.cexpr_overflows(a, y.as_data.arr.len, frame) {
+                return true;
+            }
+            self.fault_msg = self.vec_fault(a, &y, frame);
+            return self.fault_msg.len() != 0;
+        }
         if y.kind != TypeKind::TYPE_INSTANCE {
             return false;
         }
@@ -1150,13 +1173,28 @@ extend InstGraph {
     fn demand_site(self: &Self, b: &ir::CoreBody, r: &InstRec) tok::Span {
         let a = unsafe &*(&*self.pkg).module_ast_const(b.module);
         if r.kind != IG_AGG {
+            // The call with the record's arguments, else the first call of its declaration.
+            let mut first = tok::Span { start: 0, end: 0 };
             for i in 0..b.blocks.len() {
                 let t = b.blocks.at(i).term;
-                if t.kind == ir::TM_CALL && t.callee.module == r.def.module && t.callee.node == r.def.node {
+                if t.kind != ir::TM_CALL || t.callee.module != r.def.module || t.callee.node != r.def.node {
+                    continue;
+                }
+                let mut same = t.targs_len == r.args_len;
+                for k in 0..pick(same, r.args_len, 0) {
+                    let key = self.keys[(r.args_start + k) as usize];
+                    let at = b.targ_pool[(t.targs_start + k) as usize];
+                    let y = a.type_at(at);
+                    same = same && (key.has_val && y.kind == TypeKind::TYPE_CONST && y.as_data.value == key.val || !key.has_val && at == key.ty);
+                }
+                if same {
                     return t.span;
                 }
+                if first.end == 0 {
+                    first = t.span;
+                }
             }
-            return tok::Span { start: 0, end: 0 };
+            return first;
         }
         for i in 0..b.locals.len() {
             let l = b.locals.at(i);
@@ -1294,7 +1332,7 @@ extend InstGraph {
         }
         return switch y.kind {
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.concrete_subst(a, y.as_data.elem, frame, depth + 1),
-            TYPE_ARRAY => self.concrete_subst(a, y.as_data.arr.elem, frame, depth + 1) && (!y.arr_sym() || self.concrete_subst(
+            TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => self.concrete_subst(a, y.as_data.arr.elem, frame, depth + 1) && (!y.arr_sym() || self.concrete_subst(
                 a,
                 y.as_data.arr.len,
                 frame,
@@ -1379,6 +1417,15 @@ extend InstGraph {
                 }
             }
             self.note_type(a, y.as_data.arr.elem, frame, depth + 1);
+            return;
+        }
+        if y.is_vec() {
+            if !self.fault_hit && self.cexpr_overflows(a, y.as_data.arr.len, frame) {
+                self.fault_hit = true;
+            } else if !self.fault_hit {
+                self.fault_msg = self.vec_fault(a, &y, frame);
+                self.fault_hit = self.fault_msg.len() != 0;
+            }
             return;
         }
         if y.fn_sig() {
@@ -1490,10 +1537,10 @@ extend InstGraph {
             }
             guard += 1;
         }
-        if a.type_at(rt).kind != TypeKind::TYPE_INSTANCE {
+        let mut it = TyInstance {};
+        if !a.targs_of(rt, &mut it) {
             return;
         }
-        let it = *a.instance(a.type_at(rt).as_data.inst);
         // Method key: receiver-instance args, then the method's own bound args (bail on symbolic).
         self.argbuf.truncate(0);
         for i in 0..it.n {
@@ -1564,10 +1611,10 @@ extend InstGraph {
         let ry = *a.type_at(rk.ty);
         let mut d = DefId { module: ry.module, node: NODE_NONE };
         let mut keys = Vector::<ArgKey>::new();
+        let mut it = TyInstance {};
         if ry.kind == TypeKind::TYPE_STRUCT || ry.kind == TypeKind::TYPE_ENUM {
             d.node = ry.as_data.decl;
-        } else if ry.kind == TypeKind::TYPE_INSTANCE {
-            let it = *a.instance(ry.as_data.inst);
+        } else if a.targs_of(rk.ty, &mut it) {
             d = DefId { module: it.module, node: it.decl };
             for i in 0..it.n {
                 keys.push(self.argkey_subst(a, unsafe it.args[i as usize], frame));
@@ -2210,9 +2257,10 @@ extend InstGraph {
     fn push_shape(self: &mut Self, a: &Ast, ext: NodeId) {
         let pat = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
         let gens = a.at_const(ext).as_data.extend_def.generics;
+        let mut pi = TyInstance {};
         let mut sh = ExtShape {
             ident: ext_is_identity(a, pat, a, a.module, ext),
-            inst: pat != TYPE_NONE && a.type_at(pat).kind == TypeKind::TYPE_INSTANCE,
+            inst: pat != TYPE_NONE && a.targs_of(pat, &mut pi),
             wide: gens.len > 8,
             np: 0,
             pn: 0,
@@ -2234,7 +2282,6 @@ extend InstGraph {
             }
         }
         if sh.inst {
-            let pi = *a.instance(a.type_at(pat).as_data.inst);
             sh.pn = pi.n;
             sh.np = ext_arity(a, ext, pi.n);
             for j in 0..sh.np {

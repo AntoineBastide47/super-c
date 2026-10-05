@@ -61,6 +61,15 @@ extend TypedFacts {
         return self.a().instance(i);
     }
 
+    /// `Ast::targs_of`: instance `t`, or a vector or mask as the instance it stands for.
+    pub const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
+        return self.a().targs_of(t, out);
+    }
+
+    pub const fn lanes(self: &Self, y: &Ty) u64 {
+        return self.a().lanes(y);
+    }
+
     /// The resolved declaration a reference names (module-qualified).
     pub const fn res(self: &Self, n: NodeId) DefId {
         return self.a().resolution_def(n); // resolution is resolve-final: live in every view

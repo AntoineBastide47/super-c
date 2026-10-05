@@ -2690,14 +2690,13 @@ extend Facts {
         for ci in 0..self.gcand.len() {
             let rv = *b.rvalues.at(b.statements.at(self.gcand[ci] as usize).rvalue as usize);
             if rv.kind == ir::RV_INTRINSIC {
-                if self.fixed_len(
-                    b,
-                    b.oper_pool[(rv.a + if rv.c == ir::IN_BOUNDS_GROUP {
-                        1;
-                    } else {
-                        rv.b - 1;
-                    }) as usize],
-                ) {
+                // A fixed array's length, or a constant one (a vector's lane count).
+                let lop = b.oper_pool[(rv.a + if rv.c == ir::IN_BOUNDS_GROUP {
+                    1;
+                } else {
+                    rv.b - 1;
+                }) as usize];
+                if self.fixed_len(b, lop) || self.const_ge2(b, lop) {
                     return true;
                 }
             } else if self.len_read(b, rv.a) && self.const_ge2(b, rv.b) || self.len_read(b, rv.b) && self.const_ge2(

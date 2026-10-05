@@ -8954,7 +8954,7 @@ fn main() i32 {
     let e = p.compile("main.spc");
     assert(e.exit != 0, "a violated per-instantiation guard rejects the build");
     assert(e.out_has("static assertion failed: only_structs takes a struct"), "with the guard's message");
-    assert(e.out_has("in the instantiation where the first type parameter is 'E'"), "naming the type argument");
+    assert(e.out_has("in the instantiation where T = E"), "naming the type argument");
 }
 
 // Payload-less enums project through `variants` in CTFE (tags are the declared constants),

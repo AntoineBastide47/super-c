@@ -952,7 +952,7 @@ extend Mangler {
             }
             return self.ground_l(rm, rt, dm, env, out, depth + 1);
         }
-        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.arr_like() {
             let mut e = TYPE_NONE;
             if !self.ground_l(pm, y.as_data.elem, dm, lim, &mut e, depth + 1) {
                 return false;
@@ -962,7 +962,7 @@ extend Mangler {
                 if !self.ground_l(pm, y.as_data.arr.len, dm, lim, &mut lt, depth + 1) {
                     return false;
                 }
-                *out = unsafe (*da).intern_array(e, lt);
+                *out = unsafe (*da).intern_array(y.kind, e, lt);
                 return true;
             }
             let mut nt = y;
@@ -1449,6 +1449,14 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.def_key(rm, y.as_data.arr.elem);
         }
+        if y.kind == TypeKind::TYPE_SIMD {
+            // A vector's definition is its pack (`vec_pack`), named as its symbol segment.
+            let mut nm = String::new();
+            let ne = replace(&mut self.no_edges, true);
+            let ok = self.type_m(rm, rt, &mut nm);
+            self.no_edges = ne;
+            return pick(ok, nm.as_str().hash(), 0u64);
+        }
         let mut key: u64 = 0;
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             return self.decl_key(y.module, y.as_data.decl);
@@ -1749,6 +1757,21 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*a).instance(y.as_data.inst);
             return self.inst_name(pm, &it, out);
+        }
+        if y.is_vec() {
+            // `__sc_v<N>_<lane>` and `__sc_mask<N>`: the runtime's reserved prefix, which no user type
+            // spells.
+            let n = self.arr_len(pm, &y);
+            if n < 0 {
+                return false;
+            }
+            out.push_str(if_s(y.kind == TypeKind::TYPE_SIMD, "__sc_v", "__sc_mask"));
+            out.push_u64(n as u64);
+            if y.kind == TypeKind::TYPE_MASK {
+                return true;
+            }
+            out.push_str("_");
+            return self.type_m(pm, y.as_data.arr.elem, out);
         }
         if y.fn_sig() {
             // `fn[m]<params>[r[<results>]]`, then each result and parameter: a signature's
@@ -2328,9 +2351,8 @@ extend Mangler {
         if md.node == NODE_NONE {
             return false;
         }
-        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+        let mut it = TyInstance {};
+        if unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             if !self.inst_name(rm, &it, out) {
                 return false;
             }
@@ -2374,10 +2396,12 @@ extend Mangler {
             return false;
         }
         self.last_method_def = md;
-        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        let mut it = TyInstance {};
         // A generic extend's method emits per receiver instance; a concrete extend's has its own symbol.
-        if y.kind == TypeKind::TYPE_INSTANCE && unsafe (*ea).at_const(ext).as_data.extend_def.generics.len != 0 {
-            let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+        if unsafe (*ea).at_const(ext).as_data.extend_def.generics.len != 0 && unsafe (*self.p().module_ast_const(rm)).targs_of(
+            rt,
+            &mut it,
+        ) {
             if !self.inst_name(rm, &it, out) {
                 return false;
             }
@@ -2402,8 +2426,7 @@ extend Mangler {
         let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             dd = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            it = *unsafe (*a).instance(y.as_data.inst);
+        } else if unsafe (*a).targs_of(rt, &mut it) {
             dm = it.module;
             dd = it.decl;
         }
@@ -2526,9 +2549,7 @@ extend Mangler {
         let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             it.decl = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
-        } else {
+        } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             return NODE_NONE;
         }
         let key = skey_mix(
@@ -2580,7 +2601,8 @@ extend Mangler {
         if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
             return true;
         }
-        let pi = *unsafe (*ea).instance(unsafe (*ea).type_at(pat).as_data.inst);
+        let mut pi = TyInstance {};
+        let _ = unsafe (*ea).targs_of(pat, &mut pi);
         let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
         let np = ext_arity(unsafe &*ea, ext, pi.n);
         if np > it.n {
@@ -2831,6 +2853,36 @@ extend Mangler {
             let ok = self.ctype(pm, y.as_data.elem, inner.as_str(), out);
             self.ptr_depth -= 1;
             return ok;
+        }
+        if y.kind == TypeKind::TYPE_MASK {
+            // Lane `i` is bit `i` of the smallest unsigned integer that holds the lanes.
+            let n = self.arr_len(pm, &y);
+            if n < 0 {
+                return false;
+            }
+            self.join_decl(
+                if n <= 8 {
+                    "uint8_t";
+                } else if n <= 16 {
+                    "uint16_t";
+                } else if n <= 32 {
+                    "uint32_t";
+                } else {
+                    "uint64_t";
+                },
+                decl,
+                out,
+            );
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_SIMD {
+            let st = out.len();
+            if !self.vec_pack(pm, t, &y, out) {
+                out.truncate(st);
+                return false;
+            }
+            self.join_decl("", decl, out);
+            return true;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*a).instance(y.as_data.inst);
@@ -3153,6 +3205,60 @@ extend Mangler {
             out.truncate(st);
             return false;
         }
+        self.pack_use(h);
+        return true;
+    }
+
+    /// The C struct of vector `t` (`y`, pool `pm`): `__sc_v<N>_<lane>`, defined once per mangler as a
+    /// pack (`pack_reqs`) holding `_Alignas(A) <lane> l[N]`, `A` the layout's alignment.
+    fn vec_pack(self: &mut Self, pm: ModuleId, t: TypeId, y: &Ty, out: &mut String) bool {
+        let n = self.arr_len(pm, y);
+        let st = out.len();
+        let ne = replace(&mut self.no_edges, true);
+        let ok = n > 0 && self.type_m(pm, t, out);
+        self.no_edges = ne;
+        if !ok {
+            return false;
+        }
+        let h = out.as_str().slice(st, out.len()).hash();
+        if !self.pack_seen.contains(&h) {
+            let nm = String::from_str(out.as_str().slice(st, out.len()));
+            let mut el = String::new();
+            let mut lane = String::from_str("l[");
+            lane.push_u64(n as u64);
+            lane.push_str("]");
+            if !self.ctype(pm, y.as_data.arr.elem, lane.as_str(), &mut el) {
+                return false;
+            }
+            let lo = self.layout_sub(pm, t);
+            if !lo.ok {
+                return false;
+            }
+            // The lane check (`ir::CHECK_LANES`) names its index and lane count; every TU that
+            // indexes a vector needs the vector complete, so its definition carries the helper.
+            let body = format(
+                "typedef struct {} {};\nstruct {} {{\n  _Alignas({}) {};\n}};\n_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n{}",
+                nm.as_str(),
+                nm.as_str(),
+                nm.as_str(),
+                lo.align,
+                el.as_str(),
+                nm.as_str(),
+                lo.size,
+                nm.as_str(),
+                lo.align,
+                nm.as_str(),
+                LANE_CHECK_C,
+            );
+            self.pack_seen.insert(h);
+            self.pack_reqs.push(WrapReq { h: h, elem: nm, body: body });
+        }
+        self.pack_use(h);
+        return true;
+    }
+
+    // Journal pack `h` (`pack_reqs`) and record the current context's need of its definition.
+    fn pack_use(self: &mut Self, h: u64) {
         // Journaled once per module, gate hit or not: the first claimant may vanish.
         if self.rec_on && self.rec_dup_once(h ^ 22) {
             for k in 0..self.pack_reqs.len() {
@@ -3169,7 +3275,6 @@ extend Mangler {
         if self.tn_on && !self.no_edges {
             self.need_name(h, self.ptr_depth == 0);
         }
-        return true;
     }
 
     /// Whether result `(pm, t)` is a fixed array of positive length: C returns it in its carrier
@@ -3363,7 +3468,8 @@ extend Mangler {
         if !self.args_m(pm, it, ne, out) {
             return false;
         }
-        if self.agg_on {
+        // A vector's or mask's anchor names its methods only: its storage is not the struct.
+        if self.agg_on && self.p().tt.deref().vec_of(it.module, it.decl, &it.args[0]).kind == TypeKind::TYPE_ERROR {
             let h9 = out.as_str().slice(base9, out.len()).hash();
             let new9 = switch self.agg_seen.get(&h9) {
                 Some(_v) => false,
@@ -3494,3 +3600,19 @@ fn push_cval(out: &mut String, v: i64, bt: BuiltinType) {
         out.push_u64(v as u64);
     }
 }
+
+// The vector lane check (`ir::CHECK_LANES`): the index and the lane count in the trap.
+const LANE_CHECK_C: str<'static> = M"(#ifndef SC_LANE_CHECK
+#define SC_LANE_CHECK
+static _Noreturn __attribute__((unused, cold, noinline)) void __sc_lane_oob(size_t __i, size_t __n) {
+  char __m[96];
+  snprintf(__m, sizeof __m, "index out of bounds: the index is %llu but the length is %llu", (unsigned long long)__i,
+           (unsigned long long)__n);
+  __sc_panic(__m);
+}
+static __attribute__((unused)) inline size_t __sc_lane(size_t __i, size_t __n) {
+  if (__i >= __n) __sc_lane_oob(__i, __n);
+  return __i;
+}
+#endif
+)";

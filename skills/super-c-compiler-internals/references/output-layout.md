@@ -121,6 +121,12 @@ the header of the type it collides with.
   declares its destination with it (`untyped_ret_struct`: the declaring interface's result list
   under its arguments in the dyn type's hierarchy, `dyn_iface_inst`), since no `<name>_ret` alias
   exists for an erased callee.
+- A vector is the struct `__sc_v<N>_<lane>` (`{ _Alignas(A) T l[N]; }`, `A` the layout
+  alignment), defined once per mangler as a pack (`Mangler::vec_pack`, `pack_reqs`) in its own
+  definition header, which also carries the lane-check helper `__sc_lane` under an include
+  guard, and asserts the layout model; a mask is its storage integer (`uint8_t` to `uint64_t`).
+  In mangled names a vector is `__sc_v<N>_<lane>` and a mask `__sc_mask<N>`: the runtime's
+  reserved prefix, which no user type spells.
 - A dyn vtable (`<stem>__vt`) holds `__free`, `tid`, the interface's methods, then each
   superinterface's methods (breadth first, `dyn_supers`: the checker records each interface
   bound's `dyn I<args>` on the bound node, grounded here under the dyn type's arguments), then one

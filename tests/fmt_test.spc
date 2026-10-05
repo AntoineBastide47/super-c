@@ -413,3 +413,12 @@ fn golden_if_let_while_let() {
         "fn f(o: Option<i32>) {\n    'a: while let Some(x) = g() {\n        // n\n        h(x);\n    }\n    while let Some(y) = g() {\n        h(y);\n    }\n    if let Some(y) = o {\n        h(y);\n    } else if let None = o {\n        h(0);\n    } else {\n        h(1);\n    }\n    let w = if let Some(q) = o {\n        q;\n    } else {\n        0;\n    };\n    if c() {\n        h(2);\n    } else if let Some(z) = o {\n        h(z);\n    }\n}\n",
     );
 }
+
+// Vector and mask types are generic type paths: the canonical form changes nothing.
+@test
+fn golden_vectors() {
+    expect_fmt(
+        "fn f(v: Simd<f32, 4>, m: Mask<4>) f32x4 {\n    let w: f32x4 = [v[0], v[1], 2.0, 3.0];\n    let n = !m & Mask::<4>::splat(true);\n    return w;\n}\n",
+        "fn f(v: Simd<f32, 4>, m: Mask<4>) f32x4 {\n    let w: f32x4 = [v[0], v[1], 2.0, 3.0];\n    let n = !m & Mask::<4>::splat(true);\n    return w;\n}\n",
+    );
+}

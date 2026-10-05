@@ -186,7 +186,7 @@ fn unify(
         }
         return;
     }
-    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.arr_like() {
         unify(pkg, km, y.as_data.elem, cm, z.as_data.elem, binds, depth + 1);
         if y.arr_sym() {
             let ca = unsafe &mut *(p.module_ast_const(cm) as *mut Ast);
@@ -279,13 +279,13 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
             }
             r;
         },
-        TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
+        TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
             let e = xty(pkg, km, y.as_data.elem, cm, binds, depth + 1);
             let mut r = TYPE_NONE;
             if y.arr_sym() {
                 let lt = xty(pkg, km, y.as_data.arr.len, cm, binds, depth + 1);
                 if e != TYPE_NONE && lt != TYPE_NONE {
-                    r = ca.intern_array(e, lt);
+                    r = ca.intern_array(y.kind, e, lt);
                 }
             } else if e != TYPE_NONE || y.as_data.elem == TYPE_NONE {
                 let mut nt = y;

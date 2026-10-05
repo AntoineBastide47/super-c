@@ -355,6 +355,29 @@ extend Svc {
             }
             return Layout { ok: true, size: el.size * n as u64, align: el.align };
         }
+        if y.is_vec() {
+            // A mask is the smallest unsigned integer holding its lane bits; a vector its lanes,
+            // aligned to `max(alignof(T), min(size, 16))` on every target and feature set.
+            let n = self.len_of(m, y.as_data.arr.len, env, depth + 1);
+            let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
+            if n < 0 || !el.ok {
+                return Layout { ok: false, unbound: n < 0 || el.unbound };
+            }
+            if y.kind == TypeKind::TYPE_MASK {
+                let w: u64 = if n <= 8 {
+                    1;
+                } else if n <= 16 {
+                    2;
+                } else if n <= 32 {
+                    4;
+                } else {
+                    8;
+                };
+                return Layout { ok: true, size: w, align: w };
+            }
+            let size = el.size * n as u64;
+            return Layout { ok: true, size: size, align: el.align.max(size.min(16)) };
+        }
         if y.kind == TypeKind::TYPE_GENERIC {
             let mut e = env;
             while e != null {

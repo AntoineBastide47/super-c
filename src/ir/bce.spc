@@ -845,6 +845,9 @@ extend Bce {
             let mut bind_len = false;
             let mut bind_pl: u32 = 0;
             if k2 == ir::RV_INTRINSIC && rv2.c == ir::IN_BOUNDS {
+                if rv2.item.node == ir::CHECK_LANES {
+                    break; // a lane check keeps its own trap text
+                }
                 let iop2 = b.oper_pool[rv2.a as usize];
                 let lop2 = b.oper_pool[(rv2.a + 1) as usize];
                 let mut off2: i64 = 0;
@@ -1197,7 +1200,8 @@ extend Bce {
     }
 
     /// Solve the integer facts now when a check with length operand `lop` could use them: its
-    /// length is a fixed array's, or a length compared with a constant, or an alignment is bound.
+    /// length is a fixed array's or a constant, or a length compared with a constant, or an alignment
+    /// is bound.
     /// The scratch then holds the facts at the current statement.
     fn ints_for(self: &mut Self, b: &ir::CoreBody, lop: u32) bool {
         if self.fx.ion {
@@ -1206,7 +1210,7 @@ extend Bce {
         if !self.iwant || self.itried {
             return false;
         }
-        let mut go = self.ialign || self.fx.fixed_len(b, lop);
+        let mut go = self.ialign || self.fx.fixed_len(b, lop) || self.fx.const_ge2(b, lop);
         if !go {
             let lk = self.vkey(b, lop);
             if lk.is_local && lk.off == 0 {
@@ -1320,7 +1324,8 @@ extend Bce {
                     b.rvalues[rid].c = ir::IN_BOUNDS_PROVEN;
                 } else {
                     let mut grouped: u32 = 0;
-                    if rv.c == ir::IN_BOUNDS {
+                    // A lane check keeps its own trap text: it never joins a group.
+                    if rv.c == ir::IN_BOUNDS && rv.item.node != ir::CHECK_LANES {
                         grouped = self.try_coalesce(b, bb, si, rid, iop, lop, stm.span);
                     }
                     if grouped != 0 {

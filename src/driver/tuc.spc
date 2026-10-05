@@ -405,8 +405,12 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         w32(&mut r.tab, ty.module);
         w32(&mut r.tab, er);
         w32(&mut r.tab, lr);
-    } else if ty.rec() != NO_REC {
-        let it = *a.instance(ty.rec());
+    } else if ty.rec() != NO_REC || ty.is_vec() {
+        // A vector or mask replays as the instance it stands for, which interns back to it.
+        let mut it = TyInstance {};
+        if !a.targs_of(at, &mut it) {
+            it = *a.instance(ty.rec());
+        }
         let mut ar = Array::<u32, 8> {};
         for i in 0..it.n {
             ar[i as usize] = tt_ref(p, r, am, unsafe it.args[i as usize]);

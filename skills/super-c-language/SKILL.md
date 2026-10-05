@@ -392,7 +392,8 @@ only the same length, never a count, and an instance folds it at every nesting l
 (`G<3>.g` is `[[i32; 3]; 2]` for `g: [[i32; N]; 2]`). `[T; 0]` is a real length, and a zero-length
 array is zero-sized like any ZST: it has no storage in C, keeps its element's alignment in an
 enclosing struct, and a pointer to one moves by 0 bytes. A zero-length array of an owning element
-moves like its element and frees nothing.
+moves like its element and frees nothing. An array has no `==` or ordering ("does not implement
+`Eq`; compare elements"): C would compare addresses.
 
 ## Compile-Time Evaluation
 

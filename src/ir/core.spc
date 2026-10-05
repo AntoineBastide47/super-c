@@ -296,6 +296,8 @@ pub const RV_SLICE: u8 = 13;
 /// Cast kinds (RV_CAST.b).
 pub const CAST_NUMERIC: u8 = 0;
 pub const CAST_COERCE_FROM: u8 = 1; // library `from` conversion; item = selected method
+pub const CAST_SIMD_ARRAY: u8 = 2; // `[T; N]` to `Simd<T, N>` or back: the same lanes (std only)
+pub const CAST_MASK_BITS: u8 = 3; // `Mask<N>` to `u64` or back: lane `i` is bit `i` (std only)
 
 /// Aggregate kinds (RV_AGGREGATE.c).
 pub const AGG_STRUCT: u8 = 0;
@@ -326,6 +328,8 @@ pub const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, ta
 /// PROVEN twin has identical language semantics but a BCE proof that the panic edge is
 /// unreachable: the C emitter prints only the index; the interpreter still checks.
 pub const IN_BOUNDS: u8 = 15;
+/// The `item.node` of an IN_BOUNDS on a vector lane index: its trap names the index and the lane count.
+pub const CHECK_LANES: NodeId = 1;
 pub const IN_BOUNDS_PROVEN: u8 = 16;
 /// IN_RANGE_BOUNDS(start, end, len): panics unless start <= end <= len, else returns the
 /// validated exclusive end. Inclusive ranges are decomposed at lowering (IN_BOUNDS(end, len)

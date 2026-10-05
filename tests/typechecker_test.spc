@@ -6402,3 +6402,66 @@ fn const_argument_from_disjoint_extends() {
         "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:33\n  |\n5 | fn main() i32 { let c: u64 = W::K; return 0; }\n  |                                 ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
     );
 }
+
+// A run-time value as a const generic argument is an error, not a crash.
+@test
+fn a_runtime_value_is_no_const_argument() {
+    h::expect_err_msg(
+        "a parameter as a const argument",
+        "struct W<const K: usize> { pub x: u8 }\nfn g(n: usize) u8 { let w = W::<n> { x: 1 }; return w.x; }\nfn main() i32 { return 0; }\n",
+        "const generic argument must be a constant integer",
+    );
+    h::expect_err_msg(
+        "a loop variable",
+        "struct W<const K: usize> { pub x: u8 }\nfn g() u8 { for i in 0..4usize { let w = W::<i> { x: 1 }; } return 0; }\nfn main() i32 { return 0; }\n",
+        "const generic argument must be a constant integer",
+    );
+    h::expect_err_msg(
+        "a function",
+        "struct W<const K: usize> { pub x: u8 }\nfn h() {}\nfn g() u8 { let w = W::<h> { x: 1 }; return w.x; }\nfn main() i32 { return 0; }\n",
+        "const generic argument must be a constant integer",
+    );
+    h::expect_err_msg(
+        "a local in a type",
+        "struct W<const K: usize> { pub x: u8 }\nfn g() u8 { let k: usize = 2; let w: W<k> = W::<2> { x: 1 }; return w.x; }\nfn main() i32 { return 0; }\n",
+        "const generic argument must be a constant integer",
+    );
+}
+
+// An array literal argument takes its element type from the turbofish's arguments.
+@test
+fn a_turbofish_types_an_array_literal_argument() {
+    h::expect_ok(
+        "explicit arguments",
+        "fn id<T: Copy, const N: usize>(a: [T; N]) [T; N] { return a; }\nfn main() i32 { let x: [i8; 4] = id::<i8, 4>([1, 2, 3, 4]); return x[0] as i32; }\n",
+    );
+}
+
+// C compares arrays by address: `==` on arrays is an error, not a pointer comparison.
+@test
+fn arrays_have_no_equality() {
+    h::expect_err_msg(
+        "array equality",
+        "fn main() i32 { let c: [i32; 2] = [1, 2]; let d = [1, 2]; if c == d { return 1; } return 0; }\n",
+        "`[i32; 2]` does not implement `Eq`; compare elements",
+    );
+    h::expect_err_msg(
+        "a float index literal",
+        "fn f(s: []i32) i32 { return s[1.5]; }\nfn main() i32 { return 0; }\n",
+        "index must be an integer",
+    );
+}
+
+// A static method's extend parameters take the expected result before an unpinned literal's default.
+@test
+fn an_associated_call_infers_from_the_expected_result() {
+    h::expect_ok(
+        "W::mk(7) as W<u8>",
+        "struct W<T> { pub x: T }\nextend<T: Copy> W<T> {\n    pub fn mk(v: T) Self { return W::<T> { x: v }; }\n}\nfn main() i32 { let w: W<u8> = W::mk(7); let z = W::mk(7); return (w.x as i32) + z.x; }\n",
+    );
+    // A qualifier's arguments type an array literal argument.
+    h::expect_ok(
+        "W::<i8>::of([1, 2])",
+        "struct W<T> { pub x: [T; 2] }\nextend<T: Copy> W<T> {\n    pub fn of(v: [T; 2]) Self { return W::<T> { x: v }; }\n}\nfn main() i32 { let w = W::<i8>::of([1, -2]); let v: [i8; 2] = w.x; return v[0] as i32; }\n",
+    );
+}
