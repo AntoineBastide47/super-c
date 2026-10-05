@@ -36,6 +36,9 @@ See [inference.md](references/inference.md) for the local type-inference rules: 
 defaults, safe-conversion ranks, branch joins, generic-argument evidence, const generic
 solving, closures, and overload ambiguity.
 
+See [simd.md](references/simd.md) for the vector and mask types `Simd<T, N>` and `Mask<N>`:
+their rules, layout, lane access, mask operations and diagnostics.
+
 ## Bindings and Mutability
 
 Mutability is a property of the **binding**, not the type.

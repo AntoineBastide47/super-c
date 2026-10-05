@@ -564,10 +564,12 @@ fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
         let fd = unsafe evs.e[3 * i];
         let ready = unsafe evs.e[3 * i + 1];
         let dropped = unsafe evs.e[3 * i + 2];
-        if fd < 0 || fd as usize >= unsafe (*r).nrec {
+        if fd < 0 {
             continue;
         }
-        let rec = unsafe ((*r).recs + fd as usize);
+        // The worker registers before it publishes its arm, so a descriptor's first event can come before
+        // the arm grew the table to it: the record is made here, or the event and its stale mark are lost.
+        let rec = rec_for(r, fd);
         // Counted BEFORE the reactor next decides to sleep, and stamped on the record: a worker whose
         // registration predates this event learns from the count that its one-shot may be gone (see
         // `commit_arm`), and `do_arm` learns it from the stamp.

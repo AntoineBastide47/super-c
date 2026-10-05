@@ -132,7 +132,7 @@ runs:
         path: |
           ~/wasi-sdk
           ~/.wasmtime
-        key: wasi-toolchain-sdk25-v1
+        key: wasi-toolchain-sdk25-wasmtime49.0.2-v1
 
     - name: Set up wasi-sdk + wasmtime
       if: inputs.target == 'wasm'
@@ -145,8 +145,14 @@ runs:
           mkdir -p "$HOME/wasi-sdk"
           tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
         fi
+        # A pinned release tarball: the install script resolves "latest" through the GitHub API and
+        # installs nothing when that lookup fails.
         if [ ! -x "$HOME/.wasmtime/bin/wasmtime" ]; then
-          curl -sSf https://wasmtime.dev/install.sh | bash
+          curl -sSfL -o /tmp/wasmtime.tar.xz \
+            https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.2/wasmtime-v49.0.2-x86_64-linux.tar.xz
+          mkdir -p "$HOME/.wasmtime/bin"
+          tar -xJf /tmp/wasmtime.tar.xz -C "$HOME/.wasmtime/bin" --strip-components=1 wasmtime-v49.0.2-x86_64-linux/wasmtime
         fi
+        "$HOME/.wasmtime/bin/wasmtime" --version
         echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
         echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> "$GITHUB_ENV"
