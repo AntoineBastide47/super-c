@@ -236,11 +236,10 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 `freopen` resets to full buffering and `_IOLBF` acts as `_IOFBF`, so a capture child sets
 `_IONBF` on both streams. Diagnose a Windows-only failure on the real `windows-latest`
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
-In both workflows, Linux, Windows and wasm build their compiler once (`compile`,
-`windows-compile`, `wasm-compile`: an artifact) and run the two test shards in parallel on it;
-in the release workflow the Linux correctness gate runs beside the shards and the release
-binary is built after all of them pass, while macOS keeps one job with the same steps in
-sequence. The toolchain and bootstrap steps live in `.github/actions/`. An
+In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
+`wasm-compile`: an artifact) and runs the two test shards in parallel on it; in the release
+workflow (macOS, Linux and Windows in one matrix) the macOS and Linux correctness gates run beside
+the shards and the release binary is built after all of them pass. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
 
@@ -250,7 +249,9 @@ Each child's stdout and stderr go to a capture file owned by the runner. A passi
 test's output is discarded. After the run, a `failures:` section replays each failed
 test's output under a `---- name ----` header, followed by how the process ended
 (the signal or exit code, or "did not panic as expected"), then lists the failed names
-again. `--quiet` drops the per-test `ok` and `skipped` lines; the header, the `FAILED`
+again. A test that aborts (a failed `assert`, a panic, a trap) also reports `last errno: N (message)`
+when the aborting thread's `errno` is not zero, on every OS: the runner resets `errno` when the test
+starts, so the code is one the test's own calls set, though maybe before the failing line. `--quiet` drops the per-test `ok` and `skipped` lines; the header, the `FAILED`
 lines, the failure section, and the tally stay. `--test-no-fork` captures nothing, so
 use it to see a passing test's output.
 

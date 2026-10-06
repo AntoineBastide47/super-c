@@ -788,3 +788,20 @@ fn build_constant_conditions_lint_quietly() {
         assert(!r.out_has("warning"));
     }
 }
+
+// Lint loads the prelude before the files: an explicit import of a prelude file reaches the prelude
+// module, as in a build, so its types are the prelude's, not a second copy's.
+@test
+fn lint_explicit_prelude_import_is_the_prelude_module() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::vector;\n\nfn main() i32 {\n    let v = vector::Vector::<i32>::new();\n    let w: Vector<i32> = v;\n    return w.len() as i32;\n}\n",
+    );
+    let mut args = String::from_str("lint \"");
+    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(!r.out_has("mismatched types"));
+    assert_eq(r.exit, 0);
+}

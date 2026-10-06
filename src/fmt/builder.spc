@@ -1916,7 +1916,7 @@ extend Builder {
                         self.b_bounds(w.bounds);
                     }
                 }
-                if f.body != NODE_NONE {
+                if f.body != NODE_NONE && !f.is_intrinsic() {
                     self.st.push(self.p.txt(" "));
                     self.st.push(self.b_block(f.body));
                 } else {

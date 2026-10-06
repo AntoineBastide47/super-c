@@ -381,7 +381,9 @@ the lifetime (`Slice<'a, T>` / `SliceMut<'a, T>`), which binds right after `[]` 
 `mut`, as after `&`. The compiler's own sources (`src/`, `std/`, `ffi/`) spell the named form
 `Slice<'a, T>` until a release parses the sugar. Arrays coerce to slices; the view borrows the
 array like `&a` (`&mut a` for `[]mut`) and never moves it: the array must outlive the view and
-cannot be written, moved or viewed mutably while the view is live. A literal coerced to a slice
+cannot be written, moved or viewed mutably while the view is live. A `[]mut T` coerces to `[]T` (a
+generic `[]T` parameter infers `T` from it); the `[]T` borrows the `[]mut T` shared, and a `[]mut T`
+passed to a call is a mutable use of it, as a `&mut` argument is. A literal coerced to a slice
 (`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
 its block, so its view cannot leave the block or be returned.
 `[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
@@ -565,6 +567,7 @@ source text, values, and file:line on failure.
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time |
+| `@intrinsic("simd.<name>")` | `std` only: a function without a body whose call is the operation the name gives (references/simd.md) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 
 A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names

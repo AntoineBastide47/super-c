@@ -3317,3 +3317,39 @@ extend u32 as SimdElement {}
 extend u64 as SimdElement {}
 extend f32 as SimdElement {}
 extend f64 as SimdElement {}
+extend i8 as SimdInt {
+    type Unsigned = u8;
+}
+extend i16 as SimdInt {
+    type Unsigned = u16;
+}
+extend i32 as SimdInt {
+    type Unsigned = u32;
+}
+extend i64 as SimdInt {
+    type Unsigned = u64;
+}
+extend u8 as SimdInt {
+    type Unsigned = u8;
+}
+extend u16 as SimdInt {
+    type Unsigned = u16;
+}
+extend u32 as SimdInt {
+    type Unsigned = u32;
+}
+extend u64 as SimdInt {
+    type Unsigned = u64;
+}
+extend i8 as SimdSigned {}
+extend i16 as SimdSigned {}
+extend i32 as SimdSigned {}
+extend i64 as SimdSigned {}
+extend f32 as SimdSigned {}
+extend f64 as SimdSigned {}
+extend f32 as SimdFloat {
+    type Bits = u32;
+}
+extend f64 as SimdFloat {
+    type Bits = u64;
+}

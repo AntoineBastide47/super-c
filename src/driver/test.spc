@@ -543,6 +543,17 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 const fn test_runner_includes() *const char {
     return M"(void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
+#include <errno.h>
+#include <signal.h>
+/* A failing test aborts: its report adds the thread's last error code, which a failed open, spawn or
+   write the test made often explains (errno is reset when the test starts; a code may still predate
+   the failure). Then the default action runs: POSIX re-raises SIGABRT, Windows exits with code 3. */
+static void sc_runner_abort(int sig) {
+  const int e = errno;
+  if (e != 0) fprintf(stderr, "  last errno: %d (%s)\n", e, strerror(e));
+  fflush(stderr);
+  signal(sig, SIG_DFL);
+}
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
@@ -1000,6 +1011,7 @@ static int sc_runner_ncpu(void) {
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */
+  signal(SIGABRT, sc_runner_abort);
   int jobs = 0, no_fork = 0, quiet = 0, shard = 1, shards = 1, timeout = 0;
   const char *filter = NULL, *weights = NULL, *record = NULL;
   for (int i = 1; i < argc; i++) {
@@ -1045,6 +1057,7 @@ int main(int argc, char **argv) {
       }
       char **env = sc_env_snapshot();
       char *cwd = sc_getcwd_alloc();
+      errno = 0;
       SC_TESTS[i].fn(genv);
       sc_env_restore(env);
       if (sc_chdir_back(cwd) != 0) { perror("chdir"); return 101; }
@@ -1092,6 +1105,7 @@ int main(int argc, char **argv) {
           sc_setenv("SC_TEST_DIAG", cpath);
           __sc_diag_install();
           sc_lk_fork_child_reset();
+          errno = 0;
           SC_TESTS[sel[next]].fn(genv);
           fflush(NULL);
           sc_lk_report_now();
@@ -1242,6 +1256,7 @@ static int sc_runner_ncpu(void) {
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOFBF, BUFSIZ); /* keep each child's flushed diagnostic in one append */
+  signal(SIGABRT, sc_runner_abort);
   const char *filter = NULL, *capture = NULL, *weights = NULL, *record = NULL;
   int run_one = -1, no_fork = 0, quiet = 0, jobs = 0, shard = 1, shards = 1, timeout = 0;
   for (int i = 1; i < argc; i++) {
@@ -1278,6 +1293,7 @@ int main(int argc, char **argv) {
       setvbuf(stderr, NULL, _IONBF, 0);
     }
     void *genv = sc_genv_init();
+    errno = 0;
     SC_TESTS[run_one].fn(genv);
     if (genv) sc_genv_free(genv);
     return 0;
@@ -1307,6 +1323,7 @@ int main(int argc, char **argv) {
       }
       char **env = sc_env_snapshot();
       char *cwd = sc_getcwd_alloc();
+      errno = 0;
       SC_TESTS[i].fn(genv);
       sc_env_restore(env);
       if (sc_chdir_back(cwd) != 0) { perror("chdir"); return 101; }

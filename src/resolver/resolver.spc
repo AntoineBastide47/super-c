@@ -1502,6 +1502,10 @@ extend Resolver {
                     let v = self.sym_lookup(iname, Namespace::NS_VALUE);
                     if v.decl != NODE_NONE {
                         self.resolve_ref_hit(sp.expression, v.decl, v.idx, Namespace::NS_VALUE);
+                    } else if self.name_resolves(iname, Namespace::NS_VALUE) && !span_is(self.source, iname, "dangling") {
+                        // A prelude or glob-imported generic function: `iota::<i32, 4>()`. `dangling`
+                        // stays unresolved: the compiler intrinsic its std declaration documents.
+                        self.resolve_ref(sp.expression, sp.expression, Namespace::NS_VALUE, "value");
                     } else {
                         self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type");
                     }
@@ -1884,7 +1888,7 @@ extend Resolver {
         self.errors.fix(sp.start, sp.start, 1);
     }
     // A decl is used when a node's resolution points at it. Only lets and parameters of
-    // functions with bodies are checked; `self` and `_`-prefixed names opt out.
+    // functions with written bodies are checked; `self` and `_`-prefixed names opt out.
     fn lint_unused(self: &mut Self) {
         let n = self.ast.nnodes();
         let mut used = Vector::<bool>::new();
@@ -1950,7 +1954,7 @@ extend Resolver {
                 if seen[k9 - 1] && !used[k9 - 1] && nd.as_data.let_stmt.name != NODE_NONE {
                     self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
                 }
-            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE || nd.kind == NodeKind::NODE_CLOSURE {
+            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE && !nd.as_data.function.is_intrinsic() || nd.kind == NodeKind::NODE_CLOSURE {
                 let params = if nd.kind == NodeKind::NODE_CLOSURE {
                     nd.as_data.closure.params;
                 } else {

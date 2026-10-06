@@ -53,96 +53,18 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Releasing $sha ($(git log -1 --format=%s "$sha"))"
 
-  # The pipeline of Linux, Windows and wasm: one job builds the compiler, the two test shards and (on
-  # Linux) the correctness gate run in parallel on that binary, and the release binary is built only
-  # after all of them pass:
+  # The pipeline of macOS, Linux, Windows and wasm: one job builds the compiler, the two test shards and
+  # (on macOS and Linux) the correctness gate run in parallel on that binary, and the release binary is
+  # built only after all of them pass:
   #
-  #   compile --+--> test 1/2 -----------+
-  #             +--> test 2/2 -----------+--> package --> release
-  #             +--> gate (Linux only) --+
+  #   compile --+--> test 1/2 ------------------+
+  #             +--> test 2/2 ------------------+--> package --> release
+  #             +--> gate (macOS and Linux) ----+
   #
   # Jobs share no files: `compile` uploads the compiler it built, and every later job downloads it (an
-  # artifact keeps no file modes, hence the chmod). macOS keeps one job with the same steps in sequence.
+  # artifact keeps no file modes, hence the chmod).
 
-  # --- macOS: build, suite, gate, release binary, package in one job ---------------------------------
-  macos:
-    needs: resolve
-    if: github.actor == github.repository_owner
-    name: macos (build, tests, gate, release binary)
-    runs-on: macos-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: macos
-          cache: ccache-macos-1
-          sha: ${{ needs.resolve.outputs.sha }}
-
-      - name: Clean release outputs
-        run: rm -rf build src/build ci/build super-c super-c-boot* smoke*
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: macos
-
-      # Every step goes through the build engine (parallel compile + ccache). `build` and `release` INSTALL
-      # their result as `super-c`, over the binary running the build: each profile links its own copy
-      # under <out-dir>/<profile>/ and the install renames a fresh file onto the name. `test` does not
-      # install: it runs the profile's copy where it lies, so a run of the suite never leaves a dev binary
-      # where the release artifact was.
-      - name: Build the compiler
-        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
-
-      # The full suite with the binary this commit just produced, so a failure is a failure of this code,
-      # not of the bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or
-      # double-frees.
-      - name: Run the test suite
-        run: SC_LEAK_CHECK=fatal ./super-c test --quiet
-
-      # ci/gate.sh without its check.sh step, which the steps above replace: the two-generation fixpoint,
-      # the worker-count identity under each task-delay seed, the strict C warnings, and every built-in
-      # profile but dev.
-      - name: Run the correctness gate
-        run: sh ci/gate.sh --no-check
-
-      - name: Build the release binary
-        run: |
-          set -eu
-          SC_LEAK_CHECK=fatal ./super-c release
-          test -x ./super-c
-          file ./super-c
-
-      # The concurrency runtime end to end, built and run by the release binary, so the artifact that
-      # ships is the one that was exercised.
-      - name: Run the concurrency smoke test
-        run: |
-          set -eu
-          ./super-c build ci/parallel_smoke.spc -o smoke
-          SC_LEAK_CHECK=fatal ./smoke
-
-      - name: Package
-        run: |
-          set -eu
-          name="super-c-macos-$(uname -m)"
-          mkdir -p "dist/${name}"
-          cp super-c "dist/${name}/super-c"
-          cp -R std ffi "dist/${name}/"
-          tar -C dist -czf "${name}.tar.gz" "${name}"
-          echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: asset-macos
-          path: ${{ env.ASSET }}
-          if-no-files-found: error
-
-  # --- Linux and Windows ------------------------------------------------------------------------------
+  # --- macOS, Linux and Windows -----------------------------------------------------------------------
   compile:
     needs: resolve
     if: github.actor == github.repository_owner
@@ -151,6 +73,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: macos-latest
+            target: macos
           - os: ubuntu-latest
             target: linux
           - os: windows-latest
@@ -205,6 +129,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: macos-latest
+            target: macos
+            test_shard: "1/2"
+            cache_shard: 1
+          - os: macos-latest
+            target: macos
+            test_shard: "2/2"
+            cache_shard: 2
           - os: ubuntu-latest
             target: linux
             test_shard: "1/2"
@@ -256,8 +188,19 @@ jobs:
   gate:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
-    name: gate (linux)
-    runs-on: ubuntu-latest
+    name: gate (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -265,13 +208,13 @@ jobs:
 
       - uses: ./.github/actions/toolchain
         with:
-          target: linux
-          cache: ccache-linux-gate
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-gate
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v4
         with:
-          name: compiler-linux
+          name: compiler-${{ matrix.target }}
 
       # ci/gate.sh without its check.sh step, which `compile` and `test` replace: the two-generation
       # fixpoint, the worker-count identity under each task-delay seed, the strict C warnings, and every
@@ -290,6 +233,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: macos-latest
+            target: macos
           - os: ubuntu-latest
             target: linux
           - os: windows-latest
@@ -490,7 +435,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [resolve, macos, package, wasm-package]
+    needs: [resolve, package, wasm-package]
     if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     steps:

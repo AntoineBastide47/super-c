@@ -96,6 +96,12 @@ extern "C" {
     /// Integral part, toward zero.
     @unsafe(safe)
     pub fn trunc(x: f64) f64;
+    /// Nearest integral value in the current rounding mode (to nearest, ties to even, unless changed).
+    @unsafe(safe)
+    pub fn nearbyint(x: f64) f64;
+    /// `x * 2^e`, exact unless it overflows or underflows.
+    @unsafe(safe)
+    pub fn ldexp(x: f64, e: i32) f64;
     /// Absolute value.
     @unsafe(safe)
     pub fn fabs(x: f64) f64;

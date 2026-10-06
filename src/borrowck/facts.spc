@@ -203,6 +203,7 @@ const COPY_CLOSURE_MAX: usize = 16;
 /// (references, and aggregates/closures embedding them). Raw pointers never count for either.
 pub struct Owner {
     pub pkg: *const loader::Package,
+    pub slice_mut: DefId, // the prelude's `[]mut T` struct: a value of it passes write access
     free_ext: Map<u64, u64>, // (tmod << 32 | tdecl) -> extend (emod << 32 | enode) + 1; absent = none
     ext_built: bool,
     // Owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
@@ -609,6 +610,18 @@ extend Gen {
             prev = pj.ty;
         }
         return false;
+    }
+
+    // Is the place's value a `[]mut T` view: an argument of it hands the callee its elements to write,
+    // as a `&mut` does?
+    const fn mut_view_place(self: &Self, pid: ir::PlaceId) bool {
+        let ty = self.place_of(pid).ty;
+        let a = self.owner().ast_of(self.body().module);
+        if ty == TYPE_NONE || a.type_at(ty).kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = a.instance(a.type_at(ty).as_data.inst);
+        return it.decl == self.owner().slice_mut.node && it.module == self.owner().slice_mut.module;
     }
 
     // Is the place's value a `&mut` reference (the only reference whose pointee a reborrow can
@@ -1978,10 +1991,10 @@ extend Gen {
                         self.copy_out = false;
                         // A `&mut` passed to a `&mut` parameter (every parameter of a fn value
                         // taking one is) reborrows its pointee: the call claims `*r` exactly like an
-                        // autoref claims its place.
-                        if (kinds[i as usize] == 2 || t.callee.node == NODE_NONE) && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && self.mut_ref_place(
+                        // autoref claims its place. A `[]mut T` view argument claims it alike.
+                        if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && ((kinds[i as usize] == 2 || t.callee.node == NODE_NONE) && self.mut_ref_place(
                             op.data,
-                        ) {
+                        ) || self.mut_view_place(op.data)) {
                             self.access(op.data, BF_NONE, ACC_WRITE, entry, t.span);
                         }
                         // ref -> pointer at an argument erases the borrow: the reference leaves the
@@ -2538,7 +2551,9 @@ extend Gen {
             self.calling = false;
         } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
             // No operands: `b` is the measured/described type.
-        } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
+        } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC || rv.kind == ir::RV_SIMD {
+            // A vector operation reads its operands; a store writes through its `[]mut T` slice, as
+            // a call taking the view does (a raw pointer carries no loan).
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];
                 if opid == ir::IR_NONE {
@@ -2546,6 +2561,12 @@ extend Gen {
                     continue;
                 }
                 self.op_read(opid, entry, s.span);
+                let op = *self.body().operands.at(opid as usize);
+                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_STORE && i == 0 && op.kind != ir::OP_CONST && self.mut_view_place(
+                    op.data,
+                ) {
+                    self.access(op.data, BF_NONE, ACC_WRITE, entry, s.span);
+                }
                 if rv.kind == ir::RV_AGGREGATE {
                     let op = *self.body().operands.at(opid as usize);
                     if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
@@ -2745,8 +2766,10 @@ pub fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
 extend Owner {
     /// An ownership oracle over `pkg` (which must outlive it) with empty memo tables.
     pub fn new(pkg: *const loader::Package) Owner {
+        let sm = unsafe (&*pkg).prelude_lookup("SliceMut", true);
         return Owner {
             pkg: pkg,
+            slice_mut: DefId { module: sm.mid, node: sm.node },
             free_ext: Map::<u64, u64>::new(),
             ext_built: false,
             owns_arr: Vector::<Vector<u64>>::new(),

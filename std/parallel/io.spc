@@ -171,7 +171,7 @@ struct Batch {
     pub n: i32,
 }
 
-static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 stopping
+static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 stopping / 4 stopping with no reactor
 
 static mut G_REACTOR: *mut Reactor = null;
 
@@ -922,7 +922,7 @@ pub fn ensure_reactor() *mut Reactor {
             if st == 2 {
                 return G_REACTOR;
             }
-            if st == 3 {
+            if st == 3 || st == 4 {
                 return null;
             }
             if st == 0 && unsafe atomic::cas_i32(sp, 0, 1, false, 4, 0) {
@@ -1206,10 +1206,10 @@ pub fn write(fd: i32, buf: []u8) isize {
     return at as isize;
 }
 
-/// Stop the reactor and release its poller. Idempotent; a no-op if it never started. Call it once, from
-/// the main thread. Every wait still pending is settled as not ready (its task resumes and finds its
-/// operation failed), every wait started meanwhile reports not ready at once, and the thread is joined
-/// only when no wait references the reactor. A later wait starts a fresh reactor.
+/// Stop the reactor and release its poller. Idempotent. Call it once, from the main thread. Every wait
+/// still pending is settled as not ready (its task resumes and finds its operation failed), every wait
+/// started meanwhile reports not ready at once, and the thread is joined only when no wait references the
+/// reactor. A later wait starts a fresh reactor.
 pub fn shutdown() {
     let sp = (&mut unsafe G_STATE) as *mut i32;
     loop {
@@ -1217,7 +1217,18 @@ pub fn shutdown() {
         if st == 2 && unsafe atomic::cas_i32(sp, 2, 3, false, 4, 0) {
             break;
         }
-        if st != 1 && st != 2 {
+        if st == 0 && unsafe atomic::cas_i32(sp, 0, 4, false, 4, 0) {
+            // No reactor, but a wait may have recorded itself and not yet admitted itself (see `admit`):
+            // it would start a reactor after this shutdown and wait on it. State 4 turns it away as not
+            // ready. With no reactor every I/O wait record is in that window, so the records clear at once;
+            // the order is the stopping reactor's (the state store, then the record scan, both SeqCst).
+            while runtime::tasks_waiting(runtime::WK_IO) != 0 {
+                sc_runtime::sc_rt_thread_yield();
+            }
+            unsafe atomic::store_i32(sp, 0, 4);
+            return;
+        }
+        if st != 0 && st != 1 && st != 2 {
             return;
         }
         sc_runtime::sc_rt_thread_yield();

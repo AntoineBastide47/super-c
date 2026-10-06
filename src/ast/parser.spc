@@ -78,6 +78,8 @@ pub struct Parser<'a> {
     // Associated type bindings (`Output = T`) read by `parse_type_args` and not yet taken by the type
     // path they belong to (`take_bindings`).
     pub bind_buf: Vector<NodeId>,
+    // The attributes just parsed hold `@intrinsic`: the next function takes no body.
+    pub intrinsic_next: bool,
 }
 
 extend Parser {
@@ -980,7 +982,18 @@ extend Parser {
         let mut body = NODE_NONE;
         let outer_sink = self.ast.sink_body;
         self.ast.sink_body = !(pinned || self.pin_scope || generics.len != 0);
-        if self.check(TokenType::LeftBrace) {
+        let intrinsic = replace(&mut self.intrinsic_next, false) && require_body;
+        if intrinsic {
+            // No written body: an empty block the lowering fills with the operation, so a bound call
+            // or a function value has a body to call.
+            let bstart = self.raw_peek().start();
+            self.expect(TokenType::Semicolon, "';' (an '@intrinsic' function has no body)");
+            body = self.fin(
+                NodeKind::NODE_BLOCK,
+                bstart,
+                NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
+            );
+        } else if self.check(TokenType::LeftBrace) {
             body = self.parse_block();
         } else if require_body {
             self.error_here("expected function body");
@@ -1008,11 +1021,7 @@ extend Parser {
                     returns: returns,
                     where_clause: where_clause,
                     body: body,
-                    flags: if is_variadic {
-                        FN_VARIADIC;
-                    } else {
-                        0;
-                    },
+                    flags: pick(is_variadic, FN_VARIADIC, 0) | pick(intrinsic, FN_INTRINSIC, 0),
                 },
             },
         );
@@ -4010,6 +4019,17 @@ extend Parser {
             }
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "intrinsic") {
+            // `@intrinsic("name")`: the operation the compiler substitutes for a call (std only).
+            *out = Attr { kind: AttrKind::ATTR_INTRINSIC as u8, str_span: Span::empty() };
+            if argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::StringLiteral {
+                let arg = self.attr_arg(&syntax, 0);
+                out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
+            } else {
+                self.errors.emit_span(ns.span(), format("attribute '@intrinsic' takes one string argument"));
+            }
+            return true;
+        }
         if syntax.parts == 1 && ns.kind() == TokenType::Unsafe {
             // `@unsafe(safe, const)`: claims about an extern function that the compiler cannot
             // verify, so they are spelled as unsafe. Any order; each claim once.
@@ -4353,6 +4373,7 @@ extend Parser {
         if self.pending_metas.len() > 0 {
             self.flush_metas_to(NODE_NONE);
         }
+        self.intrinsic_next = false;
         let mut attrs = Vector::<Attr>::new();
         if !self.check(TokenType::At) {
             return attrs;
@@ -4406,6 +4427,7 @@ extend Parser {
                 unknown.push(name);
             }
             if keep {
+                self.intrinsic_next = self.intrinsic_next || attr.kind == AttrKind::ATTR_INTRINSIC as u8;
                 attrs.push(attr);
             }
         }
@@ -4432,6 +4454,15 @@ extend Parser {
                     );
                     continue;
                 }
+            }
+            if attr.kind == AttrKind::ATTR_INTRINSIC as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION || !self.ast.at_const(
+                owner,
+            ).as_data.function.is_intrinsic()) {
+                self.errors.emit_span(
+                    self.node_span(owner),
+                    format("'@intrinsic' may only be applied to a function outside an extern block or interface"),
+                );
+                continue;
             }
             attr.owner = owner;
             self.ast.add_attr(attr);
@@ -4614,7 +4645,7 @@ extend Parser {
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list.
 pub fn known_attributes(out: &mut Vector<String>) {
-    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const)";
+    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const) intrinsic";
     let mut it = names.split(" ");
     loop {
         let w = it.next();

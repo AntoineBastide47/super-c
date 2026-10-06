@@ -27,7 +27,7 @@ import module::loader as loader;
 
 pub const EF_NONE: u8 = 0; // reads at most
 pub const EF_WRITE: u8 = 1; // writes place `a` (a whole local, an interior, or through a deref)
-pub const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic)
+pub const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic, a vector store)
 pub const EF_SYNC: u8 = 3; // writes nothing, but an ordered atomic makes other threads' writes visible
 pub const EF_CALL: u8 = 4; // an unknown call: the heap, statics, escaped storage and the `roots`
 pub const EF_DROP: u8 = 5; // drops place `a`: its ownership tree, or what a call reaches
@@ -63,12 +63,19 @@ fn push_root(e: &mut Effect, l: u32) {
     e.n += 1;
 }
 
-/// The effect of statement `s`.
+/// The effect of statement `s`. A vector store (`SIMD_STORE`, `SIMD_STORE_RAW`) writes its lanes
+/// through operand 0, a slice or a pointer; a vector load only reads through it.
 pub fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
     if s.kind != ir::ST_ASSIGN {
         return effect(EF_NONE, ir::IR_NONE);
     }
     let rv = b.rvalues.at(s.rvalue as usize);
+    if rv.kind == ir::RV_SIMD {
+        assert(rv.c as usize < ir::SIMD_CODES, "an RV_SIMD code without a table row");
+        if ir::simd_op(rv.c).effect == ir::SM_WRITE {
+            return effect(EF_PTR, b.oper_pool[rv.a as usize]);
+        }
+    }
     if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM {
         let mut e = effect(EF_ASM, s.place);
         let nout = b.asms.at(rv.item.node as usize).nout;
@@ -595,10 +602,15 @@ pub struct Facts {
     pub pgen: Vector<u32>,
     pub pkills: Vector<PKill>,
     pub copyof: Vector<CopyBind>,
+    // a prelude view built by a struct literal: its `len` field holds `src`; a `len` read of such a
+    // view: its value is `src` (`view_len`)
+    pub lenval: Vector<CopyBind>,
+    pub views: bool, // some view of this body was built by a struct literal: `view_len` can answer
     pub affof: Vector<AffBind>,
     pub refof: Vector<RefBind>,
     // the written locals in walk order (a log), and each block's log length when the walk left it
     pub wlog: Vector<u32>,
+    pub wold: Vector<u32>, // per `wlog` entry: the local's version before the write
     pub clk_end: Vector<u32>,
     pub bst: Vector<u32>, // dedupe stamps of one bump batch
     pub bstamp: u32,
@@ -697,9 +709,12 @@ extend Facts {
             pgen: Vector::<u32>::new(),
             pkills: Vector::<PKill>::new(),
             copyof: Vector::<CopyBind>::new(),
+            lenval: Vector::<CopyBind>::new(),
+            views: false,
             affof: Vector::<AffBind>::new(),
             refof: Vector::<RefBind>::new(),
             wlog: Vector::<u32>::new(),
+            wold: Vector::<u32>::new(),
             clk_end: Vector::<u32>::new(),
             bst: Vector::<u32>::new(),
             bstamp: 0,
@@ -794,6 +809,7 @@ extend Facts {
             self.lver.clear();
             self.basegen.clear();
             self.copyof.clear();
+            self.lenval.clear();
             self.affof.clear();
             self.refof.clear();
             self.vclock = 0;
@@ -805,6 +821,7 @@ extend Facts {
         }
         while self.copyof.len() < nl {
             self.copyof.push(CopyBind { src: 0, src_v: 0, my_v: 0, ok: false });
+            self.lenval.push(CopyBind { src: 0, src_v: 0, my_v: 0, ok: false });
             self.affof.push(AffBind { src: 0, src_v: 0, c: 0, my_v: 0, ok: false });
             self.refof.push(RefBind { pl: 0, my_v: 0, ok: false });
         }
@@ -814,6 +831,8 @@ extend Facts {
         self.bufgen = 0;
         self.pkills.clear();
         self.wlog.clear();
+        self.wold.clear();
+        self.views = false;
         if self.clk_end.len() < nb {
             self.clk_end.resize_default(nb);
         }
@@ -1099,7 +1118,7 @@ extend Facts {
                 } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
                     self.esc_op(b, rv.a);
                     self.esc_op(b, rv.b);
-                } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE || rv.kind == ir::RV_INTRINSIC && rv.c != ir::IN_SIZEOF && rv.c != ir::IN_ALIGNOF && rv.c != ir::IN_TYPE_INFO && rv.c != ir::IN_DANGLING {
+                } else if ir::has_op_range(&rv) {
                     for i in 0..rv.b {
                         self.esc_op(b, b.oper_pool[(rv.a + i) as usize]);
                     }
@@ -1387,6 +1406,7 @@ extend Facts {
 
     /// A new version of local `l` (a write, or a value no earlier binding describes).
     pub fn bump_local(self: &mut Self, l: u32) {
+        self.wold.push(self.lver[l as usize]);
         self.vclock += 1;
         self.lver.set(l as usize, self.vclock);
         self.wlog.push(l);
@@ -1672,7 +1692,8 @@ extend Facts {
 
     /// Enter block `blk` in the walk: bump every local written since its immediate dominator was
     /// left (another path's writes reach the walk's tables first), and at a loop header every
-    /// local, base and the heap the loop can write.
+    /// local, base and the heap the loop can write. A block with one predecessor restores those
+    /// locals' versions instead: every write since its predecessor was left is another path's.
     pub fn enter_block(self: &mut Self, b: &ir::CoreBody, blk: u32) {
         if self.rpo.len() != 0 && blk != self.rpo[0] {
             let d = self.idom[blk as usize];
@@ -1681,6 +1702,14 @@ extend Facts {
             } else {
                 self.clk_end[d as usize];
             };
+            if d != ir::IR_NONE && self.npred[blk as usize] == 1 {
+                let mut k = self.wlog.len();
+                while k > from as usize {
+                    k -= 1;
+                    self.lver.set(self.wlog[k] as usize, self.wold[k]);
+                }
+                return;
+            }
             self.bstamp += 1;
             for k in from as usize..self.wlog.len() {
                 let l = self.wlog[k];
@@ -1842,6 +1871,9 @@ extend Facts {
                 for k in 0..e.n {
                     self.lop(1, unsafe e.roots[k as usize], 0);
                 }
+                self.lwrite(b, s.place);
+            } else if e.kind == EF_PTR {
+                self.lfl |= 1;
                 self.lwrite(b, s.place);
             } else if e.kind == EF_WRITE {
                 self.lwrite(b, s.place);
@@ -2462,8 +2494,8 @@ extend Facts {
         }
         let rv = *b.rvalues.at(s.rvalue as usize);
         let dest = self.whole_local(b, s.place);
-        if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM {
-            let e = stmt_effect(b, s);
+        let e = stmt_effect(b, s);
+        if e.kind == EF_ASM || e.kind == EF_PTR {
             self.heap();
             self.kill_roots(&e);
             self.write_place(b, s.place);
@@ -2517,6 +2549,30 @@ extend Facts {
                 self.refof.set(dest as usize, RefBind { pl: rv.a, my_v: self.ver(dest), ok: true });
                 return;
             }
+            if rv.kind == ir::RV_AGGREGATE && rv.c == ir::AGG_STRUCT {
+                let k = self.view_len_key(b, &rv);
+                self.write_place(b, s.place);
+                if k.is_local && k.off == 0 {
+                    self.lenval.set(dest as usize, CopyBind { src: k.l, src_v: k.v, my_v: self.ver(dest), ok: true });
+                    self.views = true;
+                }
+                return;
+            }
+            if rv.kind == ir::RV_LEN {
+                let mut x = self.whole_local(b, rv.a);
+                self.write_place(b, s.place);
+                if x != ir::IR_NONE {
+                    x = self.copy_root(x);
+                    let lb = *self.lenval.at(x as usize);
+                    if lb.ok && lb.my_v == self.ver(x) && self.ver(lb.src) == lb.src_v {
+                        self.lenval.set(
+                            dest as usize,
+                            CopyBind { src: lb.src, src_v: lb.src_v, my_v: self.ver(dest), ok: true },
+                        );
+                    }
+                }
+                return;
+            }
         }
         self.write_place(b, s.place);
         if dest != ir::IR_NONE && self.addr_cast(b, &rv) {
@@ -2524,6 +2580,37 @@ extend Facts {
             let src = self.whole_local(b, b.operands.at(rv.a as usize).data);
             self.copyof.set(dest as usize, CopyBind { src: src, src_v: self.ver(src), my_v: self.ver(dest), ok: true });
         }
+    }
+
+    /// The value a length operand reads when it is the `len` of a view built by a struct literal,
+    /// else none.
+    pub fn view_len(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
+        let k = self.vkey(b, opid);
+        if !k.is_local || k.off != 0 {
+            return vkey_none();
+        }
+        let lb = *self.lenval.at(k.l as usize);
+        if !lb.ok || lb.my_v != self.ver(k.l) || self.ver(lb.src) != lb.src_v {
+            return vkey_none();
+        }
+        return VKey { is_const: false, c: 0, is_local: true, l: lb.src, v: lb.src_v, off: 0 };
+    }
+
+    // The value key of the `len` operand of a struct literal of a prelude view, else none.
+    fn view_len_key(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) VKey {
+        let pk = unsafe &*self.pkg;
+        if rv.item.node == NODE_NONE || !pk.modules.at(rv.item.module as usize).prelude {
+            return vkey_none();
+        }
+        let da = unsafe &*pk.module_ast_const(rv.item.module);
+        let members = da.at_const(rv.item.node).as_data.aggregate.members;
+        for j in 0..members.len {
+            let opid = b.oper_pool[(rv.a + j) as usize];
+            if opid != ir::IR_NONE && self.is_prelude_field(b, rv.target, unsafe da.list(members)[j as usize], "len") {
+                return self.vkey(b, opid);
+            }
+        }
+        return vkey_none();
     }
 
     // A numeric cast of a whole-local reference or pointer to a reference or pointer type.
@@ -2691,7 +2778,7 @@ extend Facts {
             let rv = *b.rvalues.at(b.statements.at(self.gcand[ci] as usize).rvalue as usize);
             if rv.kind == ir::RV_INTRINSIC {
                 // A fixed array's length, or a constant one (a vector's lane count).
-                let lop = b.oper_pool[(rv.a + if rv.c == ir::IN_BOUNDS_GROUP {
+                let lop = b.oper_pool[(rv.a + if rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN {
                     1;
                 } else {
                     rv.b - 1;
@@ -2740,8 +2827,8 @@ extend Facts {
             return;
         }
         let rv = *b.rvalues.at(s.rvalue as usize);
-        if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM {
-            let e = stmt_effect(b, s);
+        let e = stmt_effect(b, s);
+        if e.kind == EF_ASM || e.kind == EF_PTR {
             self.itop_exposed();
             self.ikill_roots(&e);
             return;
@@ -3090,7 +3177,7 @@ extend Facts {
             }
             return ibinary(norm_op(rv.c), &a, &c, aw, w, sg);
         }
-        if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN || rv.c == ir::IN_BOUNDS_GROUP) {
+        if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN || rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN) {
             // the checked index: below the length (minus the group's width) once the check passed
             let iop = b.oper_pool[rv.a as usize];
             let mut f = self.ival(b, iop, &mut aw, &mut asg);
@@ -3102,7 +3189,7 @@ extend Facts {
             }
             let mut cap = fhi(&lf);
             let mut ok = true;
-            if rv.c == ir::IN_BOUNDS_GROUP {
+            if rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN {
                 let mut gw: u32 = 0;
                 let mut gsg = false;
                 let gf = self.ival(b, b.oper_pool[(rv.a + 2) as usize], &mut gw, &mut gsg);

@@ -30,6 +30,15 @@ pub const IV_PTR: u8 = 7; // abstract pointer: object id << 32 | slot offset in 
 pub const IV_FN: u8 = 8; // function value: module << 32 | fn node in `i`
 // The instance arguments an object keeps: every argument of a generic aggregate (`TyInstance.args`).
 const OBJ_ARGS: usize = 8;
+// The operator of each vector comparison code, from `ir::SIMD_CMP_EQ` on.
+const CMP_TOKS: [TokenType; 6] = [
+    TokenType::EqualEqual,
+    TokenType::BangEqual,
+    TokenType::LessThan,
+    TokenType::LessThanEqual,
+    TokenType::GreaterThan,
+    TokenType::GreaterThanEqual,
+];
 
 // Trap kinds (identical taxonomy and messages to the established evaluator).
 pub const IT_TRAP_NONE: u8 = 0;
@@ -4505,6 +4514,9 @@ extend Interp {
             if self.failed {
                 return none();
             }
+            if l.kind == IV_OBJ && rv.c != TokenType::EqualEqual as u8 && rv.c != TokenType::BangEqual as u8 {
+                return self.vec_rvalue(b, &rv, l, r, none());
+            }
             return self.binary(l, r, rv.c, b.module, rv.target);
         }
         if rv.kind == ir::RV_UNARY {
@@ -4512,12 +4524,28 @@ extend Interp {
             if self.failed {
                 return none();
             }
+            if v.kind == IV_OBJ && (rv.b == TokenType::Minus as u32 || rv.b == TokenType::Tilde as u32) {
+                return self.vec_rvalue(b, &rv, v, none(), none());
+            }
             return self.unary(v, rv.b as u8, b.module, rv.target);
+        }
+        if rv.kind == ir::RV_SIMD {
+            let mut x: [IVal; 3] = [none(); 3];
+            for k in 0..rv.b {
+                unsafe x[k as usize] = self.operand(b, env, b.oper_pool[(rv.a + k) as usize]);
+            }
+            if self.failed {
+                return none();
+            }
+            return self.vec_rvalue(b, &rv, x[0], x[1], x[2]);
         }
         if rv.kind == ir::RV_CAST {
             let v = self.operand(b, env, rv.a);
             if self.failed {
                 return none();
+            }
+            if v.kind == IV_OBJ && rv.b == ir::CAST_NUMERIC {
+                return self.vec_rvalue(b, &rv, v, none(), none());
             }
             if rv.b == ir::CAST_SIMD_ARRAY {
                 // A vector is its array of lanes: a copy of the object, retyped.
@@ -4790,7 +4818,7 @@ extend Interp {
                 }
                 return iv_int(b.module, rv.target, iv.i);
             }
-            if rv.c == ir::IN_BOUNDS_GROUP {
+            if rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN {
                 let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
                 let lv = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
                 let wv = self.operand(b, env, b.oper_pool[(rv.a + 2) as usize]);
@@ -4798,6 +4826,18 @@ extend Interp {
                     return self.bail();
                 }
                 if iv.i as u64 > lv.i as u64 || wv.i as u64 > lv.i as u64 - iv.i as u64 {
+                    if rv.item.node == ir::CHECK_VEC {
+                        self.it_trap_text(
+                            IT_TRAP_UB_OOB,
+                            format(
+                                "index out of bounds: {} lanes from {} but the length is {}",
+                                wv.i as u64,
+                                iv.i as u64,
+                                lv.i as u64,
+                            ),
+                        );
+                        return none();
+                    }
                     self.it_trap(IT_TRAP_UB_OOB, "index out of bounds");
                     return none();
                 }
@@ -5190,6 +5230,626 @@ extend Interp {
         let v = self.eval(m, vv);
         *out = v.i;
         return v.kind == IV_INT;
+    }
+
+    // ---- vector lanes (the scalar rules per lane) ---------------------------------------------------
+
+    // Vector or mask type `(m, t)` resolved: its lane count, and for a vector its lane type `(em, et)`
+    // and lane builtin. False for any other type.
+    fn vshape(
+        self: &Self,
+        m: ModuleId,
+        t: TypeId,
+        n: &mut u64,
+        em: &mut ModuleId,
+        et: &mut TypeId,
+        bt: &mut BuiltinType,
+    ) bool {
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        if t == TYPE_NONE || !self.rty(m, t, &mut rm, &mut rt) {
+            return false;
+        }
+        let y = *(unsafe &*self.p().module_ast_const(rm)).type_at(rt);
+        if !y.is_vec() {
+            return false;
+        }
+        *n = self.arr_count(rm, &y, 0, NODE_NONE, 0, null, null) as u64;
+        if y.kind == TypeKind::TYPE_SIMD && !(self.rty(rm, y.as_data.arr.elem, em, et) && self.bt_of(*em, *et, bt)) {
+            return false;
+        }
+        return *n != 0;
+    }
+
+    // The type of operand `k` of vector rvalue `rv` in body `b`.
+    const fn vop_ty(b: &ir::CoreBody, rv: &ir::Rvalue, k: u32) TypeId {
+        let op = if rv.kind == ir::RV_SIMD {
+            b.oper_pool[(rv.a + k) as usize];
+        } else {
+            pick(k == 0, rv.a, rv.b);
+        };
+        return b.operands.at(op as usize).ty;
+    }
+
+    // Lane `i` of vector value `v`, typed `(em, et)`; none when `v` holds no such lane.
+    fn vlane(self: &Self, v: IVal, i: u64, em: ModuleId, et: TypeId) IVal {
+        let o = self.obj_ptr(v.i as u32);
+        if v.kind != IV_OBJ || o == null || i >= (unsafe (*o).slots.len()) as u64 {
+            return none();
+        }
+        let mut x = unsafe (*o).slots[i as usize];
+        x.tm = em;
+        x.ty = et;
+        return x;
+    }
+
+    // Trap at lane `i` of a vector operation: `lane <i>: <msg>` (`ir::lane_trap_msg`), the text of the
+    // emitted C.
+    fn lane_trap(self: &mut Self, kind: u8, i: u64, msg: str) IVal {
+        self.it_trap_text(kind, format("lane {}: {}", i, msg));
+        return none();
+    }
+
+    // The exact range check of an integer lane `v` of `vb` against integer type `rb`, as a value
+    // cast between them keeps it: false when `rb` cannot hold the value.
+    const fn lane_fits(self: &Self, v: i64, vb: BuiltinType, rb: BuiltinType) bool {
+        let pw = self.pw();
+        let u64r = bt_unsigned(rb) && bt_bits(rb, pw) == 64;
+        if bt_unsigned(vb) && v < 0 {
+            return u64r; // a u64 lane past i64::MAX
+        }
+        return pick(u64r, v >= 0 || bt_unsigned(vb), fits(rb, v, pw));
+    }
+
+    // Integer lane operator `op` (RV_BINARY token, or RV_UNARY `-`/`~` with `unary`) on lanes `a`, `c` of
+    // `bt` at lane `i`: the scalar rule (operations.md), trapping as the emitted C does.
+    fn lane_int(self: &mut Self, unary: bool, op: u8, a: i64, c: i64, bt: BuiltinType, i: u64) i64 {
+        let pw = self.pw();
+        let w = bt_bits(bt, pw) as i64;
+        let sg = bt_signed(bt);
+        let t = op as TokenType;
+        let rk = pick(unary, ir::RV_UNARY, ir::RV_BINARY);
+        if unary {
+            if t == TokenType::Tilde {
+                return wrap_to(bt, ~a, pw);
+            }
+            if sg && a == wrap_to(bt, (1u64 << (w - 1) as u64) as i64, pw) {
+                let _ = self.lane_trap(IT_TRAP_UB_OVERFLOW, i, ir::lane_trap_msg(rk, op, false));
+            }
+            return wrap_to(bt, a.wrapping_neg(), pw);
+        }
+        if t == TokenType::Plus || t == TokenType::Minus || t == TokenType::Star {
+            let mut o = false;
+            let mut v: i64 = 0;
+            if sg {
+                let r = if t == TokenType::Plus {
+                    add_ovf(a, c);
+                } else if t == TokenType::Minus {
+                    sub_ovf(a, c);
+                } else {
+                    mul_ovf(a, c);
+                };
+                o = r.ovf;
+                v = r.v;
+            } else {
+                v = Interp::lane_uop(t, a, c, &mut o);
+            }
+            if o || !fits(bt, v, pw) {
+                let _ = self.lane_trap(IT_TRAP_UB_OVERFLOW, i, ir::lane_trap_msg(rk, op, false));
+            }
+            return wrap_to(bt, v, pw);
+        }
+        if t == TokenType::Slash || t == TokenType::Percent {
+            if c == 0 {
+                let _ = self.lane_trap(IT_TRAP_UB_DIV_ZERO, i, ir::lane_trap_msg(rk, op, false));
+                return 0;
+            }
+            if sg && c == -1 && a == wrap_to(bt, (1u64 << (w - 1) as u64) as i64, pw) {
+                let _ = self.lane_trap(IT_TRAP_UB_OVERFLOW, i, ir::lane_trap_msg(rk, op, true));
+                return 0;
+            }
+            if sg {
+                return wrap_to(bt, pick(t == TokenType::Slash, a / c, a % c), pw);
+            }
+            return wrap_to(bt, pick(t == TokenType::Slash, a as u64 / c as u64, a as u64 % c as u64) as i64, pw);
+        }
+        if t == TokenType::LeftShift || t == TokenType::RightShift {
+            if sg && c < 0 || c as u64 >= w as u64 {
+                let _ = self.lane_trap(IT_TRAP_UB_SHIFT, i, ir::lane_trap_msg(rk, op, false));
+                return 0;
+            }
+            if t == TokenType::LeftShift {
+                return wrap_to(bt, (a as u64 << c as u64) as i64, pw);
+            }
+            return pick(sg, a >> c, (a as u64 >> c as u64) as i64);
+        }
+        return wrap_to(
+            bt,
+            if t == TokenType::Ampersand {
+                a & c;
+            } else if t == TokenType::Pipe {
+                a | c;
+            } else {
+                a ^ c;
+            },
+            pw,
+        );
+    }
+
+    // Unsigned `a op c` (`+ - *`) on 64 bits, wrapped; `o` set when it wrapped.
+    const fn lane_uop(op: TokenType, a: i64, c: i64, o: &mut bool) i64 {
+        let ua = a as u64;
+        let uc = c as u64;
+        if op == TokenType::Plus {
+            let (r, f) = ua.overflowing_add(uc);
+            *o = f;
+            return r as i64;
+        }
+        if op == TokenType::Minus {
+            let (r, f) = ua.overflowing_sub(uc);
+            *o = f;
+            return r as i64;
+        }
+        let (r, f) = ua.overflowing_mul(uc);
+        *o = f;
+        return r as i64;
+    }
+
+    // `x` rounded to lanes of `bt` (an f32 lane rounds once from the exact f64 result).
+    const fn fround(x: f64, bt: BuiltinType) f64 {
+        return pick(bt == BuiltinType::BT_F32, x as f32, x);
+    }
+
+    // Whether float `x` has its sign bit set.
+    const fn fsign(x: f64) bool {
+        return f64_bits(x) >> 63 != 0;
+    }
+
+    // IEEE 754-2019 minimumNumber (`min`, else maximumNumber) of float lanes `a`, `c`, or with `nan`,
+    // minimum (maximum): the C sequence `emit_vec_lanes` spells.
+    const fn fminmax(a: f64, c: f64, min: bool, nan: bool) bool {
+        if a != a || c != c {
+            return a != a == nan;
+        }
+        if a != c {
+            return a < c == min;
+        }
+        return Interp::fsign(a) == min;
+    }
+
+    // The bits of lane `x` of `bt` (an integer's two's complement, a float's encoding), zero-extended.
+    // An f32 NaN lane made from bits keeps them in `i` (`bits_lane`): its f64 value cannot hold a
+    // signaling NaN.
+    const fn lane_bits(x: IVal, bt: BuiltinType, pw: i32) u64 {
+        if bt == BuiltinType::BT_F32 {
+            if x.f != x.f && x.i >> 32 == 1 {
+                return x.i as u64 & 0xFFFFFFFF;
+            }
+            return f32_bits(x.f as f32);
+        }
+        if bt == BuiltinType::BT_F64 {
+            return f64_bits(x.f);
+        }
+        let w = bt_bits(bt, pw);
+        if w == 64 {
+            return x.i as u64;
+        }
+        return x.i as u64 & (1u64 << w as u64) - 1;
+    }
+
+    // The lane of `bt` with bits `u`, typed `(m, t)`.
+    const fn bits_lane(u: u64, bt: BuiltinType, m: ModuleId, t: TypeId, pw: i32) IVal {
+        if bt == BuiltinType::BT_F32 {
+            let mut v = iv_float(m, t, f32_from_bits(u as u32));
+            if v.f != v.f {
+                v.i = 1i64 << 32 | (u & 0xFFFFFFFF) as i64;
+            }
+            return v;
+        }
+        if bt == BuiltinType::BT_F64 {
+            return iv_float(m, t, f64_from_bits(u));
+        }
+        return iv_int(m, t, wrap_to(bt, u as i64, pw));
+    }
+
+    // Float lane `a` of `bt` with its sign bit cleared (`op` 0, `abs`), flipped (1, `-`) or taken from
+    // lane `s` (2, `copysign`), on the encoding: a NaN keeps its payload.
+    const fn fsign_lane(op: u8, a: IVal, s: IVal, bt: BuiltinType, m: ModuleId, t: TypeId, pw: i32) IVal {
+        let sb = pick(bt == BuiltinType::BT_F32, 1u64 << 31, 1u64 << 63);
+        let x = Interp::lane_bits(a, bt, pw);
+        let r = if op == 0 {
+            x & ~sb;
+        } else if op == 1 {
+            x ^ sb;
+        } else {
+            x & ~sb | Interp::lane_bits(s, bt, pw) & sb;
+        };
+        return Interp::bits_lane(r, bt, m, t, pw);
+    }
+
+    // Whether casting lane `a` of `bt` to the lane `d` of `rb` changed its value, or `a` is a NaN
+    // (SIMD_CAST_CHANGED; the predicate `vec_changed_tpl` spells in C).
+    fn lane_changed(self: &Self, a: IVal, bt: BuiltinType, d: IVal, rb: BuiltinType) bool {
+        let ff = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        let tf = rb == BuiltinType::BT_F32 || rb == BuiltinType::BT_F64;
+        if ff && tf {
+            return a.f != a.f || d.f != a.f;
+        }
+        // The exact float range of the integer side: [lo, hi).
+        let ib = pick(ff, rb, bt);
+        let iw = bt_bits(ib, self.pw()) - pick(bt_signed(ib), 1i32, 0i32);
+        let hi = math::ldexp(1.0, iw);
+        let lo = pick(bt_signed(ib), 0.0 - hi, 0.0);
+        if ff {
+            return !(a.f >= lo && a.f < hi && math::trunc(a.f) == a.f);
+        }
+        if tf {
+            return !(d.f >= lo && d.f < hi && pick(bt_unsigned(bt), (d.f as u64) as i64, d.f as i64) == a.i);
+        }
+        return !self.lane_fits(a.i, bt, rb);
+    }
+
+    // A vector rvalue over evaluated operands `x0`..`x2`: RV_SIMD, or a lane-wise RV_BINARY, RV_UNARY or
+    // RV_CAST. A vector is its lanes object, a mask its lane bits. The first failing lane traps.
+    fn vec_rvalue(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, x0: IVal, x1: IVal, x2: IVal) IVal {
+        let pw = self.pw();
+        let c = pick(rv.kind == ir::RV_SIMD, rv.c, 255u8);
+        let tm = b.module;
+        let tt = self.vty(b, rv.target);
+        // The result's shape, and operand 0's (a vector, or the result's for `iota`).
+        let mut rn: u64 = 0;
+        let mut rem: ModuleId = 0;
+        let mut ret = TYPE_NONE;
+        let mut rbt = BuiltinType::BT_VOID;
+        let rvec = self.vshape(tm, rv.target, &mut rn, &mut rem, &mut ret, &mut rbt);
+        let mut n: u64 = 0;
+        let mut em: ModuleId = 0;
+        let mut et = TYPE_NONE;
+        let mut bt = BuiltinType::BT_VOID;
+        // The vector operand: the stored one, the choice's first, else operand 0. Shapes come from the
+        // body's operand types, which resolve under the active frames.
+        let vk = pick(c == ir::SIMD_CHOOSE || c == ir::SIMD_STORE_RAW, 1u32, pick(c == ir::SIMD_STORE, 2u32, 0u32));
+        let v0 = pick(vk == 1, x1, pick(vk == 2, x2, x0));
+        let ok0 = c == ir::SIMD_IOTA || c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW || self.vshape(
+            tm,
+            Interp::vop_ty(b, rv, vk),
+            &mut n,
+            &mut em,
+            &mut et,
+            &mut bt,
+        );
+        if c == ir::SIMD_IOTA || c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
+            n = rn;
+            em = rem;
+            et = ret;
+            bt = rbt;
+        }
+        if !ok0 || !rvec && c != ir::SIMD_STORE && c != ir::SIMD_STORE_RAW {
+            return self.bail();
+        }
+        if c == ir::SIMD_LOAD || c == ir::SIMD_STORE || c == ir::SIMD_LOAD_RAW || c == ir::SIMD_STORE_RAW {
+            // The elements through the slice's pointer from the checked start, or through the pointer.
+            let mut p = x0;
+            let mut at: i64 = 0;
+            if c == ir::SIMD_LOAD || c == ir::SIMD_STORE {
+                let so = self.obj_ptr(x0.i as u32);
+                if x0.kind != IV_OBJ || so == null || x1.kind != IV_INT {
+                    return self.bail();
+                }
+                let dv = self.decl_view(unsafe (*so).dm, unsafe (*so).dn);
+                if dv.fp < 0 {
+                    return self.bail();
+                }
+                p = unsafe (*self.obj_ptr(x0.i as u32)).slots[dv.fp as usize];
+                at = x1.i;
+            }
+            let mut id: u32 = 0;
+            if c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
+                id = self.obj_new(n);
+                if id == 0 {
+                    return none();
+                }
+            }
+            for i in 0..n {
+                let mut obj: u32 = 0;
+                let mut slot: u32 = 0;
+                let mut cur = none();
+                if !self.ptr_elem(b, p, at + i as i64, et, &mut obj, &mut slot, &mut cur) {
+                    return none();
+                }
+                if id == 0 {
+                    unsafe (*self.obj_ptr(obj)).slots.set(slot as usize, self.vlane(v0, i, em, et));
+                } else {
+                    let mut l = cur;
+                    l.tm = em;
+                    l.ty = et;
+                    unsafe (*self.obj_ptr(id)).slots.set(i as usize, l);
+                }
+            }
+            if id == 0 {
+                return iv_int(tm, tt, 0);
+            }
+            self.vec_tag(id, tm, rv.target);
+            return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+        }
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        let mask = c != 255u8 && (ir::simd_op(c).rule == ir::SR_MASK || ir::simd_op(c).rule == ir::SR_CHANGED);
+        let mut bits: u64 = 0;
+        let mut id: u32 = 0;
+        if !mask {
+            id = self.obj_new(rn);
+            if id == 0 {
+                return none();
+            }
+        }
+        if c == ir::SIMD_BITCAST {
+            // The bytes in little-endian order (every target is little-endian), regrouped.
+            let w = pick(bt == BuiltinType::BT_F32, 32u64, bt_bits(bt, pw) as u64);
+            let rw = pick(rbt == BuiltinType::BT_F32, 32u64, bt_bits(rbt, pw) as u64);
+            if n * w != rn * rw {
+                return self.bail(); // sizes differ: `bitcast`'s static_assert reports it
+            }
+            let mut acc: u64 = 0;
+            let mut have: u64 = 0;
+            let mut j: u64 = 0;
+            for i in 0..n {
+                let lb = Interp::lane_bits(self.vlane(x0, i, em, et), bt, pw);
+                for k in 0..w / 8 {
+                    acc = acc | (lb >> k * 8 & 0xFF) << have;
+                    have += 8;
+                    if have == rw {
+                        unsafe (*self.obj_ptr(id)).slots.set(j as usize, Interp::bits_lane(acc, rbt, rem, ret, pw));
+                        j += 1;
+                        acc = 0;
+                        have = 0;
+                    }
+                }
+            }
+            self.vec_tag(id, tm, rv.target);
+            return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+        }
+        // The cast result's lane shape for the changed-lane mask.
+        let mut on: u64 = 0;
+        let mut om: ModuleId = 0;
+        let mut ot = TYPE_NONE;
+        let mut obt = BuiltinType::BT_VOID;
+        if c == ir::SIMD_CAST_CHANGED && !self.vshape(tm, Interp::vop_ty(b, rv, 1), &mut on, &mut om, &mut ot, &mut obt) {
+            return self.bail();
+        }
+        for i in 0..rn {
+            // Lane `i` of operand 0 and of operand 1 (a scalar shift count is the same in every lane).
+            let second = c == ir::SIMD_CONCAT && i >= n;
+            let li = if c == ir::SIMD_HIGH_HALF {
+                i + rn;
+            } else if second {
+                i - n;
+            } else {
+                i;
+            };
+            let a = self.vlane(pick(second, x1, v0), li, em, et);
+            let cv = pick(x1.kind == IV_OBJ, self.vlane(x1, i, em, et), x1);
+            let mut r = a;
+            if c == 255u8 && rv.kind == ir::RV_CAST {
+                r = self.cast(a, rem, ret);
+            } else if c == 255u8 && fl {
+                r = if rv.kind == ir::RV_UNARY {
+                    Interp::fsign_lane(1, a, a, bt, rem, ret, pw);
+                } else {
+                    self.float_op(a.f, cv.f, rv.c, bt, rem, ret);
+                };
+            } else if c == 255u8 {
+                r = iv_int(
+                    rem,
+                    ret,
+                    self.lane_int(
+                        rv.kind == ir::RV_UNARY,
+                        pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c),
+                        a.i,
+                        cv.i,
+                        bt,
+                        i,
+                    ),
+                );
+            } else if c == ir::SIMD_IOTA {
+                r = pick(fl, iv_float(rem, ret, i as f64), iv_int(rem, ret, i as i64));
+            } else if c >= ir::SIMD_CMP_EQ && c <= ir::SIMD_CMP_GE {
+                r = self.binary(a, cv, (unsafe CMP_TOKS[(c - ir::SIMD_CMP_EQ) as usize]) as u8, tm, TYPE_NONE);
+            } else if c == ir::SIMD_CHOOSE {
+                r = pick((x0.i as u64 >> i & 1) != 0, a, self.vlane(x2, i, em, et));
+            } else if c == ir::SIMD_LOW_HALF || c == ir::SIMD_HIGH_HALF || c == ir::SIMD_CONCAT {
+                // `a` is the lane already.
+            } else if c == ir::SIMD_CAST_CHANGED {
+                r = iv_bool(tm, TYPE_NONE, self.lane_changed(a, bt, self.vlane(x1, i, om, ot), obt));
+            } else if fl && c >= ir::SIMD_MIN && c <= ir::SIMD_MAX || fl && (c == ir::SIMD_MINIMUM || c == ir::SIMD_MAXIMUM) {
+                // The chosen operand itself, its NaN bits included, as the C picks it.
+                r = pick(
+                    Interp::fminmax(a.f, cv.f, c == ir::SIMD_MIN || c == ir::SIMD_MINIMUM, c >= ir::SIMD_MINIMUM),
+                    a,
+                    cv,
+                );
+            } else if fl && (c == ir::SIMD_ABS || c == ir::SIMD_COPYSIGN) {
+                r = Interp::fsign_lane(pick(c == ir::SIMD_ABS, 0u8, 2u8), a, cv, bt, rem, ret, pw);
+            } else if fl {
+                let mut bit = none();
+                let fv = self.lane_float(c, a.f, cv.f, self.vlane(x2, i, em, et).f, bt, &mut bit);
+                r = pick(mask, bit, iv_float(rem, ret, Interp::fround(fv, bt)));
+            } else {
+                r = self.lane_simd_int(c, a.i, cv.i, bt, rbt, i, rem, ret);
+            }
+            if self.failed {
+                return none();
+            }
+            if mask {
+                bits = bits | pick(r.i != 0, 1u64, 0u64) << i;
+            } else {
+                r.tm = rem;
+                r.ty = ret;
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, r);
+            }
+        }
+        if mask {
+            return iv_int(tm, tt, bits as i64);
+        }
+        self.vec_tag(id, tm, rv.target);
+        return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+    }
+
+    // RV_SIMD code `c` on float lanes `a`, `c2`, `c3` of `bt`: the value, or for a mask code the lane
+    // bit in `bit.i`.
+    fn lane_float(self: &Self, c: u8, a: f64, c2: f64, c3: f64, bt: BuiltinType, bit: &mut IVal) f64 {
+        let f32l = bt == BuiltinType::BT_F32;
+        let mut minn: f64 = 2.2250738585072014e-308;
+        let mut maxf: f64 = F64_MAX;
+        if f32l {
+            minn = 1.1754943508222875e-38;
+            maxf = 3.4028234663852886e38;
+        }
+        let ab = math::fabs(a);
+        let set = switch c {
+            ir::SIMD_IS_NAN => a != a,
+            ir::SIMD_IS_INF => ab > maxf,
+            ir::SIMD_IS_FINITE => ab <= maxf,
+            ir::SIMD_IS_NORMAL => ab >= minn && ab <= maxf,
+            ir::SIMD_IS_SUBNORMAL => ab != 0.0 && ab < minn,
+            ir::SIMD_IS_SIGN_NEG => Interp::fsign(a),
+            _ => false,
+        };
+        bit.i = pick(set, 1i64, 0i64);
+        if c == ir::SIMD_FMA && f32l {
+            // `fmaf`: the product of two f32 lanes is exact in f64, the sum's error exact (two-sum),
+            // and the sum rounded to odd keeps the one f32 rounding.
+            let p = a * c2;
+            let s = p + c3;
+            let bb = s - p;
+            let e = p - (s - bb) + (c3 - bb);
+            let sb = f64_bits(s);
+            if e != 0.0 && it_isfinite(s) && (sb & 1) == 0 {
+                return f64_from_bits(pick(e > 0.0 == s > 0.0, sb + 1, sb - 1));
+            }
+            return s;
+        }
+        return switch c {
+            ir::SIMD_SQRT => math::sqrt(a),
+            ir::SIMD_CEIL => math::ceil(a),
+            ir::SIMD_FLOOR => math::floor(a),
+            ir::SIMD_TRUNC => math::trunc(a),
+            ir::SIMD_ROUND_EVEN => math::nearbyint(a),
+            ir::SIMD_FMA => math::fma(a, c2, c3),
+            _ => 0.0,
+        };
+    }
+
+    // RV_SIMD code `c` on integer lanes `a`, `c2` of `bt` at lane `i` (result lanes `rb`, typed
+    // `(m, t)`): a lane, or a mask code's bit in `i`. The predicates of `vec_simd_tpl`.
+    fn lane_simd_int(
+        self: &mut Self,
+        c: u8,
+        a: i64,
+        c2: i64,
+        bt: BuiltinType,
+        rb: BuiltinType,
+        i: u64,
+        m: ModuleId,
+        t: TypeId,
+    ) IVal {
+        let pw = self.pw();
+        let w = bt_bits(bt, pw) as u64;
+        let sg = bt_signed(bt);
+        let min = pick(sg, wrap_to(bt, (1u64 << w - 1) as i64, pw), 0i64);
+        let max = pick(sg, wrap_to(bt, ((1u64 << w - 1) - 1) as i64, pw), wrap_to(bt, -1, pw));
+        let u = Interp::lane_bits(iv_int(m, t, a), bt, pw);
+        let k = c2 as u64 & w - 1;
+        let lt = pick(sg, a < c2, a as u64 < c2 as u64);
+        if c >= ir::SIMD_WRAP_ADD && c <= ir::SIMD_WRAP_MUL || c >= ir::SIMD_OVF_ADD && c <= ir::SIMD_SAT_SUB {
+            let op = if c == ir::SIMD_WRAP_ADD || c == ir::SIMD_OVF_ADD || c == ir::SIMD_SAT_ADD {
+                TokenType::Plus;
+            } else if c == ir::SIMD_WRAP_SUB || c == ir::SIMD_OVF_SUB || c == ir::SIMD_SAT_SUB {
+                TokenType::Minus;
+            } else {
+                TokenType::Star;
+            };
+            let mut o = false;
+            let mut v: i64 = 0;
+            if sg {
+                let r = if op == TokenType::Plus {
+                    add_ovf(a, c2);
+                } else if op == TokenType::Minus {
+                    sub_ovf(a, c2);
+                } else {
+                    mul_ovf(a, c2);
+                };
+                o = r.ovf || !fits(bt, r.v, pw);
+                v = r.v;
+            } else {
+                v = Interp::lane_uop(op, a, c2, &mut o);
+                o = o || !fits(bt, v, pw);
+            }
+            if c >= ir::SIMD_OVF_ADD && c <= ir::SIMD_OVF_MUL {
+                return iv_bool(m, TYPE_NONE, o);
+            }
+            if c == ir::SIMD_SAT_ADD && o {
+                return iv_int(m, t, pick(sg && c2 < 0, min, max));
+            }
+            if c == ir::SIMD_SAT_SUB && o {
+                return iv_int(m, t, pick(sg && c2 < 0, max, min));
+            }
+            return iv_int(m, t, wrap_to(bt, v, pw));
+        }
+        let v = switch c {
+            ir::SIMD_WRAP_NEG => wrap_to(bt, a.wrapping_neg(), pw),
+            ir::SIMD_WRAP_SHL => wrap_to(bt, (a as u64 << k) as i64, pw),
+            ir::SIMD_WRAP_SHR => pick(sg, a >> k as i64, (u >> k) as i64),
+            ir::SIMD_MIN => pick(lt, a, c2),
+            ir::SIMD_MAX => pick(lt, c2, a),
+            ir::SIMD_WRAP_ABS => pick(a < 0, wrap_to(bt, a.wrapping_neg(), pw), a),
+            ir::SIMD_ABS_DIFF => wrap_to(
+                rb,
+                pick(
+                    pick(sg, a > c2, a as u64 > c2 as u64),
+                    (a as u64).wrapping_sub(c2 as u64),
+                    (c2 as u64).wrapping_sub(a as u64),
+                ) as i64,
+                pw,
+            ),
+            ir::SIMD_CLZ => (u.leading_zeros() as u64 - (64 - w)) as i64,
+            ir::SIMD_CTZ => pick(u == 0, w, u.trailing_zeros() as u64) as i64,
+            ir::SIMD_POPCNT => u.count_ones() as i64,
+            ir::SIMD_ROTL => wrap_to(bt, (u << k | u >> (w - k & w - 1)) as i64, pw),
+            ir::SIMD_ROTR => wrap_to(bt, (u >> k | u << (w - k & w - 1)) as i64, pw),
+            ir::SIMD_NARROW_SAT => pick(a < 0 && sg && !bt_signed(rb), 0i64, a),
+            _ => a,
+        };
+        if c == ir::SIMD_ABS && sg {
+            if a == min {
+                return self.lane_trap(IT_TRAP_UB_OVERFLOW, i, ir::lane_trap_msg(ir::RV_SIMD, c, false));
+            }
+            return iv_int(m, t, pick(a < 0, a.wrapping_neg(), a));
+        }
+        if c == ir::SIMD_BITREV || c == ir::SIMD_BSWAP {
+            // Bit `j` (byte `j`) moves to `w - 1 - j`.
+            let step = pick(c == ir::SIMD_BSWAP, 8u64, 1u64);
+            let mut r: u64 = 0;
+            let mut j: u64 = 0;
+            while j < w {
+                r = r | (u >> j & (1u64 << step) - 1) << w - step - j;
+                j += step;
+            }
+            return iv_int(m, t, wrap_to(bt, r as i64, pw));
+        }
+        if c == ir::SIMD_NARROW_CHECKED {
+            if !self.lane_fits(a, bt, rb) {
+                return self.lane_trap(IT_TRAP_UB_OVERFLOW, i, ir::lane_trap_msg(ir::RV_SIMD, c, false));
+            }
+            return iv_int(m, t, wrap_to(rb, a, pw));
+        }
+        if c == ir::SIMD_NARROW_SAT {
+            let rw = bt_bits(rb, pw) as u64;
+            let rmax = pick(bt_signed(rb), (1u64 << rw - 1) - 1, (1u64 << rw) - 1) as i64;
+            let rmin = pick(bt_signed(rb), 0 - (1u64 << rw - 1) as i64, 0i64);
+            let big = pick(sg, v > rmax, v as u64 > rmax as u64);
+            return iv_int(m, t, pick(big, rmax, pick(sg && v < rmin, rmin, v)));
+        }
+        return iv_int(m, t, v);
     }
 
     // ---- arithmetic (pinned semantics) ------------------------------------------------------------
@@ -5730,7 +6390,7 @@ extend Interp {
                 return iv_int(m, target, wrap_to(tb, (t as u64) as i64, self.pw()));
             }
             if t >= half {
-                return iv_int(m, target, wrap_to(tb, (1u64 << (bits - 1) as u64) as i64 - 1, self.pw()));
+                return iv_int(m, target, wrap_to(tb, ((1u64 << (bits - 1) as u64) - 1) as i64, self.pw()));
             }
             if t <= 0.0 - half {
                 return iv_int(m, target, wrap_to(tb, (1u64 << (bits - 1) as u64).wrapping_neg() as i64, self.pw()));

@@ -325,9 +325,26 @@ fn multi_return() {
     h::expect_c("multi-return field", MR, "int32_t _0;");
     h::expect_c("multi-return compound literal", MR, "(dm_ret){");
 
-    let DESTR: str = "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
+    let DESTR: str = "@c.noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
     h::expect_c("destructure reads _0", DESTR, "._0;");
     h::expect_c("destructure reads _1", DESTR, "._1;");
+    // An inlined multi-return call's members are its return slots: no result struct is read.
+    let INL: str = "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
+    h::expect_c_absent("an inlined destructure reads no member", INL, "._1;");
+}
+
+// A callee generic over a const parameter inlines with the parameter's value, and its
+// per-instantiation static_assert still runs.
+@test
+fn const_generic_callee_inlines() {
+    let FILL: str = "fn fill<const N: usize>(v: i32) [i32; N] {\n    static_assert(N > 1, \"two lanes\");\n    return [v; N];\n}\n";
+    let mut ok = String::from_str(FILL);
+    ok.push_str("fn f() i32 {\n    let a = fill::<4>(2);\n    return a[3];\n}\n");
+    h::expect_c_absent("the call is inlined", ok.as_str(), "fill__4(2");
+    let mut bad = String::from_str(FILL);
+    bad.push_str("fn main() i32 {\n    let a = fill::<1>(2);\n    return a[0];\n}\n");
+    let r = h::diff_build(bad.as_str(), []);
+    assert(!r.built && r.diag.as_str().contains("two lanes"), "the static_assert of the inlined instance runs");
 }
 
 @test

@@ -461,7 +461,11 @@ instances share it as they share the lowering. The inliner's callees come from t
 package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
 at the start of `cemit_package` (the size gate reads `CoreBody.inline_size_ok`, recorded
 before the rewrite), and the accepted ones are copied compact; no task lowers a callee
-from syntax. The record of the migration, the analysis boundary and the validation
+from syntax. A callee generic over a const parameter splices with each read of the parameter
+(and each `{N / 2}` form in its types) replaced by the bound value; a generic callee with a
+per-instantiation `static_assert` splices too, and the caller's `CoreBody.demands` keeps the
+call, whose symbol the emitter still demands so the assert runs. A multi-return call's member
+reads of its result temp (and of the temps copied from it) become reads of the return slots. The record of the migration, the analysis boundary and the validation
 checks is [ownership-analysis.md](references/ownership-analysis.md).
 
 ## CTFE (Compile-Time Function Evaluation)

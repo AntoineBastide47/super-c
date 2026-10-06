@@ -32,6 +32,7 @@ pub struct CoreBody {
     pub switch_pool: Vector<u64>,      // TM_SWITCH pairs: value<<32 | target
     pub targ_pool: Vector<TypeId>,     // generic-argument ranges
     pub user_moves: Vector<u64>,       // bit per operand: OP_MOVE is a USER consumption
+    pub demands: Vector<Terminator>,   // inlined calls whose instance the emitter still demands
     pub entry: BlockId,
 }
 ```
@@ -107,16 +108,44 @@ Each `Projection` carries the type **after** it applies.
 | `RV_USE` | `a` = OperandId; `b` = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array |
 | `RV_REF` | `&place`; `b` = 1 when mutable |
 | `RV_ADDR` | Raw address of place; `b` = 1 when `*mut` |
-| `RV_UNARY` / `RV_BINARY` | Operand(s) + token op |
+| `RV_UNARY` / `RV_BINARY` | Operand(s) + token op; over vector types the operator applies its scalar rule to each lane (a `<<`/`>>` count may be a scalar of the lane type) |
 | `RV_CAST` | `b` = CastKind: `CAST_NUMERIC` (every `as` cast and every coercion with no library method: numeric, pointer, reference), `CAST_COERCE_FROM` (library `from`; `item` = selected method), `CAST_SIMD_ARRAY` (`[T; N]` to `Simd<T, N>` or back, the same lanes: an array literal with an expected vector type, and `std`'s casts; the emitter spells a `memcpy` statement, never an expression) or `CAST_MASK_BITS` (`Mask<N>` to `u64` or back, an integer conversion that truncates to the lane bits) |
 | `RV_AGGREGATE` | Operand range; `c` = `AGG_STRUCT`/`AGG_TUPLE`/`AGG_ARRAY`/`AGG_VARIANT` |
 | `RV_REPEAT` | `[elem; count]`: `a` = element OperandId, `b` = count OperandId |
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
-| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_BOUNDS` (an element check; on a vector lane index `item.node` is `CHECK_LANES` and the length operand is the lane count, a constant when known: the trap names the index and the count, through `__sc_lane`, which the vector's definition header carries, and BCE never groups it), `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc through `__sc_new`, which panics "out of memory" on a null result; a zero-sized `T` allocates 1 byte and stores nothing), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
+| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_BOUNDS_GROUP` / `IN_BOUNDS_GROUP_PROVEN` (index, length, width: BCE coalescing's check of a run of element accesses, and a vector load's or store's, see `RV_SIMD`), `IN_BOUNDS` (an element check; on a vector lane index `item.node` is `CHECK_LANES` and the length operand is the lane count, a constant when known: the trap names the index and the count, through `__sc_lane`, which the vector's definition header carries, and BCE never groups it), `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc through `__sc_new`, which panics "out of memory" on a null result; a zero-sized `T` allocates 1 byte and stores nothing), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
 | `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
+| `RV_SIMD` | A named vector operation: `a`, `b` = operand range in `oper_pool`, `c` = the `SIMD_*` code, `target` = result type; `item` unused |
 
+`RV_SIMD` codes are indexes of `SIMD_OPS` (`core.spc`, append-only), one row per code: the
+intrinsic name (`@intrinsic("simd.<name>")`), the operand count, the type rule (`SR_*`: the vector
+operands and result alike, a mask result, `choose`, other lanes, a bitcast, halves, `concat`,
+`iota`, a load, a store), the lane class (`SE_*`), the memory effect through operand 0 (`SM_NONE`,
+`SM_READ`, `SM_WRITE`). One code covers every lane kind, as `RV_BINARY` does:
+`SIMD_MIN`/`SIMD_MAX` are IEEE minimumNumber/maximumNumber on float lanes, `SIMD_ABS` clears a
+float lane's sign bit. Lane-wise `as` (`cast`, `widen`, `narrow_wrapping`) is `RV_CAST`
+`CAST_NUMERIC` over vectors; `checked_*` and `cast_checked` are std compositions of the wrapping
+operation (or the cast) and `SIMD_OVF_*` (or `SIMD_CAST_CHANGED`, whose operands are the source and
+the cast result). `SIMD_LOAD`/`SIMD_STORE` take the slice, then a start that is the result of an
+`IN_BOUNDS_GROUP(start, len, N)` with `item.node` = `CHECK_VEC` (the verifier requires that kind;
+`N` is the lane count, the const-generic parameter in a generic body): the second producer of group
+checks, whose trap names the lanes, the start and the length (`__sc_bounds_vec`) and which BCE
+proves like an element check of the last lane (`IN_BOUNDS_GROUP_PROVEN`) when `N` is a constant. A
+proven or kept check records the fact of its last lane (of each lane up to 8), and a slice built by
+a struct literal (`Slice { ptr, len: n }`) matches the facts of `n` (`ir::facts::Facts::view_len`). `SIMD_LOAD_RAW`/`SIMD_STORE_RAW` take a raw pointer; the aligned std
+forms are the unaligned ones after a `static_assert`, so no record carries an alignment. The
+effect query (`ir::facts::stmt_effect`) gives a store `EF_PTR` through operand 0; a load writes
+only its result. The interpreter runs the lane loop over the scalar rules; the emitter writes a
+lane loop with a constant trip count, or `memcpy`/`memmove` for the byte-moving codes. A trapping
+operation writes a scratch result and ORs each lane's failure predicate into a flag (a form C
+compilers vectorize, so no `__builtin_*_overflow` below 64-bit products); only a set flag runs a
+second loop that collects the failure bit per lane and traps once at the lowest (`__sc_panic_lane`,
+`lane <i>: <message>`, `ir::lane_trap_msg`), from the unchanged operands. The vector type's
+definition header carries the lane runtime, so a program without vectors emits none of it. A call of an `@intrinsic`
+function lowers to its operation (`Lowerer::lower_intrinsic`); its declaration's empty body lowers
+to the same operation over the arguments, for a bound call or a function value.
 ## Statements
 
 `Statement { kind, place, rvalue, a, span }`:

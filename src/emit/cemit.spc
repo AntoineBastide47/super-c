@@ -2358,7 +2358,7 @@ extend CEmit {
         if CEmit::is_likely(&rv) {
             return self.op_is_bare_local(b, b.oper_pool[rv.a as usize], l);
         }
-        if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE {
+        if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE || rv.kind == ir::RV_SIMD {
             // B is a genuine operand count here (RV_INTRINSIC overloads b as a TypeId, so it is
             // excluded; a temp used only inside an intrinsic stays declared, which is safe).
             for i in 0..rv.b {
@@ -2510,8 +2510,8 @@ extend CEmit {
         if s.kind != ir::ST_ASSIGN {
             return false;
         }
-        if b.rvalues.at(s.rvalue as usize).kind == ir::RV_INTRINSIC {
-            // Asm/new/safepoint carry an effect.
+        if b.rvalues.at(s.rvalue as usize).kind == ir::RV_INTRINSIC || b.rvalues.at(s.rvalue as usize).kind == ir::RV_SIMD {
+            // Asm/new/safepoint and a vector store carry an effect, a vector load reads memory.
             return false;
         }
         let pl = *b.places.at(s.place as usize);
@@ -2579,7 +2579,9 @@ extend CEmit {
                         );
                         // A vector-array cast is a `memcpy` statement (`emit_vec_cast_store`), no expression.
                         let vcast = rv.kind == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY;
-                        if CEmit::inlinable_def_kind(rv.kind) && !vcast || agg_ok || CEmit::is_likely(&rv) {
+                        if CEmit::inlinable_def_kind(rv.kind) && !vcast && !self.vec_rv(b, &rv) || agg_ok || CEmit::is_likely(
+                            &rv,
+                        ) {
                             ndef.set(pl.base as usize, *ndef.at(pl.base as usize) + 1);
                             def_rv.set(pl.base as usize, s.rvalue);
                             def_blk.set(pl.base as usize, bi as u32);
@@ -2988,7 +2990,7 @@ extend CEmit {
     // dynamic-env construction, and other multi-statement stores.
     fn fusable_init_rvalue(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
         let k = rv.kind;
-        if k == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY {
+        if k == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY || self.vec_rv(b, rv) {
             return false;
         }
         if k == ir::RV_USE || k == ir::RV_BINARY || k == ir::RV_UNARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT || k == ir::RV_SLICE {
@@ -3191,6 +3193,9 @@ extend CEmit {
         }
         if self.is_dead_store(b, s) || self.is_coalesced_store(b, s) || self.is_inlined_store(b, s) {
             return false;
+        }
+        if s.kind == ir::ST_ASSIGN && b.rvalues.at(s.rvalue as usize).kind == ir::RV_SIMD {
+            return true;
         }
         if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.erased(
             b,
@@ -3413,6 +3418,14 @@ extend CEmit {
         self.compute_fusion(b, cf);
         self.compute_call_fwd(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
+        // The instances of inlined calls whose per-instantiation static_asserts still run: their
+        // symbols demand them, as the calls did.
+        for i in 0..b.demands.len() {
+            let mut s9 = self.sget();
+            let t9 = *b.demands.at(i);
+            let _ = self.term_callee_sym(b, &t9, true, &mut s9);
+            self.sput(s9);
+        }
         self.pr.stop(prb::P_DECL, dm);
         // Preemption tick, function-local so the C compiler can keep it in a register: the TLS
         // countdown cost a load+store on every loop back-edge. A loop reaching 2048 back-edges
@@ -5487,6 +5500,9 @@ extend CEmit {
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_ASM as u32 {
                 return self.emit_asm_stmt(o, b, &rv0);
             }
+            if self.vec_rv(b, &rv0) {
+                return self.emit_vec_store(o, b, s, &rv0);
+            }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.ticks_on(b) {
                     o.push_str("  if (__builtin_expect(--__sc_spc == 0, 0)) __sc_spc = __sc_preempt_check();\n");
@@ -6046,6 +6062,295 @@ extend CEmit {
         let ok = self.emit_operand(b, opid, o);
         o.push_str(";\n");
         return ok;
+    }
+
+    // A vector or mask type resolved: its lane count and, for a vector, its lane builtin. False for any
+    // other type.
+    fn vec_ty(self: &Self, b: &ir::CoreBody, t: TypeId, n: &mut i64, bt: &mut BuiltinType) bool {
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if !y.is_vec() {
+            return false;
+        }
+        *n = self.mg.arr_len(rm, &y);
+        if y.kind == TypeKind::TYPE_SIMD {
+            let mut em = rm;
+            let mut et = y.as_data.arr.elem;
+            let _ = self.mg.resolve(rm, y.as_data.arr.elem, &mut em, &mut et);
+            *bt = unsafe (*self.p().module_ast_const(em)).type_at(et).as_data.builtin;
+        }
+        return *n > 0;
+    }
+
+    // An rvalue the emitter writes as vector statements (`emit_vec_store`): an RV_SIMD, or an
+    // operator or numeric cast over vector types.
+    fn vec_rv(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        let k = rv.kind;
+        let unary = k == ir::RV_UNARY && (rv.b == tt::TokenType::Minus as u32 || rv.b == tt::TokenType::Tilde as u32);
+        return k == ir::RV_SIMD || (k == ir::RV_BINARY || unary || k == ir::RV_CAST && rv.b == ir::CAST_NUMERIC) && rv.target != TYPE_NONE && self.rty_y(
+            b,
+            rv.target,
+        ).kind == TypeKind::TYPE_SIMD;
+    }
+
+    // Vector rvalue `rv` stored to `s.place`: a lane loop over the storage arrays with a constant trip
+    // count, or `memcpy` for the operations that move bytes. A trapping lane operation collects a
+    // failure bit per lane and traps once, at the lowest failing lane (`__sc_panic_lane`); a mask
+    // result collects its lane bits.
+    fn emit_vec_store(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let mut ops: [u32; 3] = [ir::IR_NONE; 3];
+        let mut nops: u32 = 1;
+        ops[0] = rv.a;
+        if rv.kind == ir::RV_SIMD {
+            nops = rv.b;
+            for i in 0..nops {
+                unsafe ops[i as usize] = b.oper_pool[(rv.a + i) as usize];
+            }
+        } else if rv.kind == ir::RV_BINARY {
+            nops = 2;
+            ops[1] = rv.b;
+        }
+        let c = pick(rv.kind == ir::RV_SIMD, rv.c, 255u8);
+        let mut d = self.sget();
+        let store = c == ir::SIMD_STORE || c == ir::SIMD_STORE_RAW;
+        let mut ok = store || self.emit_place(b, s.place, &mut d);
+        let mut sp: [String; 3] = [String::new(), String::new(), String::new()];
+        let mut lanes: [bool; 3] = [false; 3];
+        let mut n: i64 = 0;
+        let mut rn: i64 = 0;
+        let mut bt = BuiltinType::BT_VOID;
+        let mut rbt = BuiltinType::BT_VOID;
+        let mut obt = BuiltinType::BT_VOID;
+        for i in 0..nops {
+            let opid = unsafe ops[i as usize];
+            let mut on: i64 = 0;
+            let ot = b.operands.at(opid as usize).ty;
+            unsafe lanes[i as usize] = self.vec_ty(b, ot, &mut on, &mut obt) && self.rty_y(b, ot).kind == TypeKind::TYPE_SIMD;
+            if unsafe lanes[i as usize] && (n == 0 || c == ir::SIMD_CHOOSE) {
+                n = on;
+                bt = obt;
+            }
+            ok = ok && self.emit_operand(b, opid, unsafe &mut sp[i as usize]);
+        }
+        // The result's lanes: of the cast result for the changed-lane mask.
+        let rt = if c == ir::SIMD_CAST_CHANGED {
+            b.operands.at(ops[1] as usize).ty;
+        } else {
+            rv.target;
+        };
+        let _ = self.vec_ty(b, rt, &mut rn, &mut rbt);
+        if c == ir::SIMD_IOTA {
+            n = rn;
+            bt = rbt;
+        }
+        if !ok {
+            self.sput(d);
+            return false;
+        }
+        // The operations that move bytes.
+        if c == ir::SIMD_BITCAST || c == ir::SIMD_LOW_HALF || c == ir::SIMD_HIGH_HALF || c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
+            // A raw pointer may address the destination, and a bitcast may read it: `memmove`.
+            o.push_str(mbe::if_s(c == ir::SIMD_BITCAST || c == ir::SIMD_LOAD_RAW, "  memmove(&", "  memcpy(&"));
+            o.push_string(&d);
+            o.push_str(", ");
+            if c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
+                o.push_string(&sp[0]);
+                if c == ir::SIMD_LOAD {
+                    o.push_str(".ptr + ");
+                    o.push_string(&sp[1]);
+                }
+            } else {
+                o.push_str("&");
+                o.push_string(&sp[0]);
+                if c == ir::SIMD_HIGH_HALF {
+                    o.format_into(".l[{}]", rn);
+                }
+            }
+            o.push_str(", sizeof(");
+            o.push_string(&d);
+            o.push_str("));\n");
+        } else if store {
+            let v = pick(c == ir::SIMD_STORE, 2usize, 1usize);
+            o.push_str(mbe::if_s(c == ir::SIMD_STORE, "  memcpy(", "  memmove("));
+            o.push_string(&sp[0]);
+            if c == ir::SIMD_STORE {
+                o.push_str(".ptr + ");
+                o.push_string(&sp[1]);
+            }
+            o.format_into(", &{}, sizeof({}));\n", unsafe sp[v].as_str(), unsafe sp[v].as_str());
+        } else if c == ir::SIMD_CONCAT {
+            o.format_into("  memcpy(&{}.l[0], &{}, sizeof({}));\n", d.as_str(), sp[0].as_str(), sp[0].as_str());
+            o.format_into("  memcpy(&{}.l[{}], &{}, sizeof({}));\n", d.as_str(), n, sp[1].as_str(), sp[1].as_str());
+        } else {
+            ok = self.emit_vec_lanes(o, b, rv, c, &d, &sp, &lanes, n, bt, rbt);
+        }
+        self.sput(d);
+        return ok;
+    }
+
+    // The lane loop of `emit_vec_store`: operand spellings `sp` (`lanes`: a vector, read per lane),
+    // `n` lanes of builtin `bt` (operand 0's, or the result's for `iota`), result lanes `rbt`, result
+    // type `rt`. A trapping operation writes a scratch result and ORs each lane's failure into a flag,
+    // a form the C compiler vectorizes; only when a flag is set does a second loop collect the failing
+    // lanes' bits, from the unchanged operands, for `__sc_panic_lane`.
+    fn emit_vec_lanes(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        rv: &ir::Rvalue,
+        c: u8,
+        d: &String,
+        sp: &[String; 3],
+        lanes: &[bool; 3],
+        n: i64,
+        bt: BuiltinType,
+        rbt: BuiltinType,
+    ) bool {
+        assert(n > 0);
+        let t = if rv.kind == ir::RV_SIMD {
+            mbe::if_s(c == ir::SIMD_CAST_CHANGED, vec_changed_tpl(bt, rbt), vec_simd_tpl(c, bt, rbt));
+        } else if rv.kind == ir::RV_CAST {
+            vec_cast_tpl(bt, rbt);
+        } else {
+            vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt);
+        };
+        if t.len() == 0 {
+            return self.fail("vector operation");
+        }
+        // The trap: up to two failure kinds (`/` and `%`: a zero divisor, then MIN / -1).
+        let tok = pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c);
+        let traps = t.contains("__sc_f0");
+        let two = t.contains("__sc_f1");
+        let mask = c != 255u8 && (ir::simd_op(c).rule == ir::SR_MASK || ir::simd_op(c).rule == ir::SR_CHANGED);
+        o.push_str("  {\n");
+        if mask {
+            o.push_str("  uint64_t __sc_m = 0;\n");
+        }
+        if !traps {
+            self.vec_loop(o, t, d.as_str(), sp, lanes, n, bt, rbt, c, mask);
+            if mask {
+                o.format_into("  {} = __sc_m;\n", d.as_str());
+            }
+            o.push_str("  }\n");
+            return true;
+        }
+        o.push_str("  ");
+        let ok = self.ty_c(b.module, rv.target, "", o);
+        o.push_str(
+            mbe::if_s(two, " __sc_r;\n  uint32_t __sc_f0 = 0, __sc_f1 = 0;\n", " __sc_r;\n  uint32_t __sc_f0 = 0;\n"),
+        );
+        let fast = String::from_str(t).replace("|= (uint64_t)", "|= ").replace(" << __sc_i", "");
+        self.vec_loop(o, fast.as_str(), "__sc_r", sp, lanes, n, bt, rbt, c, mask);
+        // `+ - *`, negation and `abs` trap where the build checks overflow (`__sc_lane_ovf`).
+        let simd = rv.kind == ir::RV_SIMD;
+        let ovf = simd && c == ir::SIMD_ABS || !simd && (tok == tt::TokenType::Plus as u8 || tok == tt::TokenType::Minus as u8 || tok == tt::TokenType::Star as u8);
+        o.push_str(
+            mbe::if_s(
+                ovf,
+                "  if (__sc_lane_ovf(__sc_f0)) {\n",
+                mbe::if_s(two, "  if (__sc_f0 | __sc_f1) {\n", "  if (__sc_f0) {\n"),
+            ),
+        );
+        o.push_str("  uint64_t __sc_g0 = 0, __sc_g1 = 0;\n");
+        let cold = String::from_str(t).replace("__sc_f", "__sc_g");
+        self.vec_loop(o, cold.as_str(), "__sc_r", sp, lanes, n, bt, rbt, c, mask);
+        o.format_into(
+            "  __sc_panic_lane(__sc_g0, __sc_g1, \"{}\", ",
+            ir::lane_trap_msg(rv.kind, pick(simd, c, tok), false),
+        );
+        if two {
+            o.format_into("\"{}\");\n  }}\n", ir::lane_trap_msg(rv.kind, pick(simd, c, tok), true));
+        } else {
+            o.push_str("0);\n  }\n");
+        }
+        o.format_into("  {} = __sc_r;\n  }}\n", d.as_str());
+        return ok;
+    }
+
+    // One lane loop of `emit_vec_lanes` over template `t`, its result lanes in `d`.
+    fn vec_loop(
+        self: &Self,
+        o: &mut String,
+        t: str,
+        d: str,
+        sp: &[String; 3],
+        lanes: &[bool; 3],
+        n: i64,
+        bt: BuiltinType,
+        rbt: BuiltinType,
+        c: u8,
+        mask: bool,
+    ) {
+        o.format_into("  for (uint32_t __sc_i = 0; __sc_i < {}; __sc_i++) {{ ", n);
+        // Each vector operand's lane in a local: one read, and no self-comparison when two operands
+        // are one variable.
+        for j in 0..3usize {
+            if unsafe lanes[j] {
+                let ty = lane_c(pick(j == 1 && c == ir::SIMD_CAST_CHANGED, rbt, bt));
+                o.format_into("{} __sc_{} = {}.l[__sc_i]; ", ty, unsafe ["a", "b", "c"][j], unsafe sp[j].as_str());
+            }
+        }
+        let w = self.int_bits(bt);
+        // The integer side of a conversion between a float and an integer: its exact float range.
+        let ib = pick(bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64, rbt, bt);
+        let iw = self.int_bits(ib) - pick(int_signed(ib), 1i64, 0i64);
+        let mut i: usize = 0;
+        while i < t.len() {
+            let ch = t.byte_at(i);
+            i += 1;
+            if ch != b'$' {
+                o.push_byte(ch);
+                continue;
+            }
+            let k = t.byte_at(i);
+            i += 1;
+            if k >= b'a' && k <= b'c' {
+                let j = (k - b'a') as usize;
+                if unsafe lanes[j] {
+                    o.push_str("__sc_");
+                    o.push_byte(k);
+                } else {
+                    o.push_string(unsafe &sp[j]);
+                }
+            } else if k == b'd' {
+                o.push_str(d);
+                o.push_str(mbe::if_s(mask, "", ".l[__sc_i]"));
+            } else if k == b'T' || k == b'R' {
+                o.push_str(lane_c(pick(k == b'T', bt, rbt)));
+            } else if k == b'U' || k == b'P' {
+                o.push_str(
+                    if w == 8 && k == b'U' {
+                        "uint8_t";
+                    } else if w == 16 && k == b'U' {
+                        "uint16_t";
+                    } else if w <= 32 {
+                        "uint32_t";
+                    } else {
+                        "uint64_t";
+                    },
+                );
+            } else if k == b'W' {
+                o.push_u64(w as u64);
+            } else if k == b'X' || k == b'Y' {
+                o.push_str(lane_limit(bt, k == b'Y'));
+            } else if k == b'x' || k == b'y' {
+                o.push_str(lane_limit(rbt, k == b'y'));
+            } else if k == b'L' {
+                o.push_str(mbe::if_s(int_signed(ib), "-0x1p", "0"));
+                if int_signed(ib) {
+                    o.push_u64(iw as u64);
+                }
+            } else if k == b'H' {
+                o.format_into("0x1p{}", iw);
+            } else if k == b'N' {
+                o.push_str(bt_name(rbt));
+            } else if k == b'F' {
+                o.push_str(mbe::if_s(bt == BuiltinType::BT_F32, "f", ""));
+            }
+        }
+        o.push_str(" }\n");
     }
 
     // `[T; N]` to `Simd<T, N>` or back (`CAST_SIMD_ARRAY`): `memcpy` of the value's bytes, as C
@@ -7483,8 +7788,9 @@ extend CEmit {
         if !self.collect_demand || idef.node == NODE_NONE || !self.mg.in_generic_extend(idef.module, idef.node) {
             return;
         }
-        let y8 = *unsafe (*self.p().module_ast_const(rm6)).type_at(rt6);
-        if y8.kind != TypeKind::TYPE_INSTANCE {
+        // A vector or mask receiver is the prelude instance it stands for.
+        let mut rit = TyInstance {};
+        if !unsafe (*self.p().module_ast_const(rm6)).targs_of(rt6, &mut rit) {
             return;
         }
         let ia = self.p().module_ast_const(idef.module);
@@ -7492,7 +7798,6 @@ extend CEmit {
         if ifd.kind != NodeKind::NODE_FUNCTION || ifd.as_data.function.is_extern() || ifd.as_data.function.body == NODE_NONE {
             return;
         }
-        let rit = *unsafe (*self.p().module_ast_const(rm6)).instance(y8.as_data.inst);
         if !self.mg.rec_on {
             // An identical (impl, receiver instance, env) demand builds the same record: the drain
             // would drop it on the symbol, so it never queues (journal mode records every attempt).
@@ -7538,10 +7843,12 @@ extend CEmit {
             self.demand_seen.insert(k0);
         }
         let mut snap = mbe::subs_copy(&self.mg.subs);
-        let y8 = *unsafe (*self.p().module_ast_const(rm6)).type_at(rt6);
         let mut sfx = String::new();
-        if y8.kind == TypeKind::TYPE_INSTANCE && self.mg.in_generic_extend(idef.module, idef.node) {
-            let rit = *unsafe (*self.p().module_ast_const(rm6)).instance(y8.as_data.inst);
+        let mut rit = TyInstance {};
+        if unsafe (*self.p().module_ast_const(rm6)).targs_of(rt6, &mut rit) && self.mg.in_generic_extend(
+            idef.module,
+            idef.node,
+        ) {
             let ext = self.mg.extend_of(idef.module, idef.node);
             self.bind_recv(&mut snap, idef.module, ext, rm6, &rit);
             if !self.mg.args_m(rm6, &rit, rit.n, &mut sfx) {
@@ -10125,6 +10432,16 @@ extend CEmit {
             if rv.target != TYPE_NONE && self.arr_slice_wrap(b, rv.a, rv.target, dst) {
                 return true;
             }
+            if rv.b == 1 && self.rty_y(b, b.operands.at(rv.a as usize).ty).kind == TypeKind::TYPE_INSTANCE {
+                // `[]mut T` as `[]T`: the same pointer and length in the shared view's struct.
+                let mut sv = self.sget();
+                let mut ok = self.emit_operand(b, rv.a, &mut sv);
+                dst.push_str("(");
+                ok = ok && self.ty_c(b.module, rv.target, "", dst);
+                dst.format_into("){{ .ptr = ({}).ptr, .len = ({}).len }}", sv.as_str(), sv.as_str());
+                self.sput(sv);
+                return ok;
+            }
             return self.emit_operand(b, rv.a, dst);
         }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
@@ -10163,7 +10480,15 @@ extend CEmit {
             if cancels {
                 return self.emit_place_lim(b, rv.a, rpl.proj_len - 1, dst);
             }
-            dst.push_str(mbe::if_s(wrap, "__sc_wrap(&", "&"));
+            // An array parameter is a pointer in C: its value is the array's address.
+            let arr_arg = rpl.proj_len == 0 && b.locals.at(rpl.base as usize).storage == ir::LS_ARG && self.rty_y(
+                b,
+                rpl.ty,
+            ).kind == TypeKind::TYPE_ARRAY;
+            dst.push_str(mbe::if_s(wrap, "__sc_wrap(", ""));
+            if !arr_arg {
+                dst.push_str("&");
+            }
             let okw = self.emit_place(b, rv.a, dst);
             if wrap {
                 dst.push_str(")");
@@ -10677,7 +11002,17 @@ extend CEmit {
                 return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
             }
             if k == ir::IN_BOUNDS_GROUP as u32 {
-                return self.emit_intrinsic_call(b, "__sc_bounds_group(", rv.a, 3, dst);
+                // A vector access's check names its start, lanes and length (`Mangler::vec_pack`).
+                return self.emit_intrinsic_call(
+                    b,
+                    mbe::if_s(rv.item.node == ir::CHECK_VEC, "__sc_bounds_vec(", "__sc_bounds_group("),
+                    rv.a,
+                    3,
+                    dst,
+                );
+            }
+            if k == ir::IN_BOUNDS_GROUP_PROVEN as u32 {
+                return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
             }
             if k == ir::IN_RANGE_BOUNDS as u32 {
                 return self.emit_intrinsic_call(b, "__sc_range(", rv.a, 3, dst);
@@ -12726,6 +13061,241 @@ fn float_marked(t: str) bool {
 // The FNV-1a step over definition `d`: the seed of a demand fingerprint.
 const fn def_fp(d: DefId) u64 {
     return (0xcbf29ce484222325u64 ^ (d.module as u64 << 32 | d.node as u64)).wrapping_mul(1099511628211u64);
+}
+
+// The C type of a lane builtin.
+const fn lane_c(bt: BuiltinType) str<'static> {
+    return switch bt {
+        BT_I8 => "int8_t",
+        BT_I16 => "int16_t",
+        BT_I32 => "int32_t",
+        BT_I64 => "int64_t",
+        BT_U8 => "uint8_t",
+        BT_U16 => "uint16_t",
+        BT_U32 => "uint32_t",
+        BT_U64 => "uint64_t",
+        BT_F32 => "float",
+        _ => "double",
+    };
+}
+
+// The `<stdint.h>` limit of an integer lane builtin: its maximum (`max`) or minimum.
+const fn lane_limit(bt: BuiltinType, max: bool) str<'static> {
+    return switch bt {
+        BT_I8 => mbe::if_s(max, "INT8_MAX", "INT8_MIN"),
+        BT_I16 => mbe::if_s(max, "INT16_MAX", "INT16_MIN"),
+        BT_I32 => mbe::if_s(max, "INT32_MAX", "INT32_MIN"),
+        BT_I64 => mbe::if_s(max, "INT64_MAX", "INT64_MIN"),
+        BT_U8 => mbe::if_s(max, "UINT8_MAX", "0"),
+        BT_U16 => mbe::if_s(max, "UINT16_MAX", "0"),
+        BT_U32 => mbe::if_s(max, "UINT32_MAX", "0"),
+        _ => mbe::if_s(max, "UINT64_MAX", "0"),
+    };
+}
+
+// The C statement of lane `__sc_i` of a vector operator (`unary`: RV_UNARY) on lanes of `bt`, with
+// the placeholders of `emit_vec_lanes`; "" when the operator has none. A trap sets bit `__sc_i` of
+// `__sc_f0`, or of `__sc_f1` for the second failure kind of `/` and `%`, by a predicate on the lane
+// values (no `__builtin_*_overflow` below 64-bit products: the C compiler vectorizes the predicates).
+const fn vec_op_tpl(unary: bool, op: u8, bt: BuiltinType) str<'static> {
+    let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+    let sg = int_signed(bt);
+    let t = op as tt::TokenType;
+    if unary {
+        if t == tt::TokenType::Minus {
+            return mbe::if_s(fl, "$d = -$a;", "$d = ($T)(0u - ($P)$a); __sc_f0 |= (uint64_t)($a == $X) << __sc_i;");
+        }
+        return mbe::if_s(fl || t != tt::TokenType::Tilde, "", "$d = ($T)~($P)$a;");
+    }
+    if fl {
+        return switch t {
+            Plus => "$d = $a + $b;",
+            Minus => "$d = $a - $b;",
+            Star => "$d = $a * $b;",
+            Slash => "$d = $a / $b;",
+            _ => "",
+        };
+    }
+    let wide = bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_U64;
+    return switch t {
+        Plus => mbe::if_s(
+            sg,
+            "$T __sc_s = ($T)(($P)$a + ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ __sc_s) & ($b ^ __sc_s)) < 0) << __sc_i;",
+            "$T __sc_s = ($T)($a + $b); $d = __sc_s; __sc_f0 |= (uint64_t)(__sc_s < $a) << __sc_i;",
+        ),
+        Minus => mbe::if_s(
+            sg,
+            "$T __sc_s = ($T)(($P)$a - ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ $b) & ($a ^ __sc_s)) < 0) << __sc_i;",
+            "$d = ($T)($a - $b); __sc_f0 |= (uint64_t)($a < $b) << __sc_i;",
+        ),
+        Star => if wide {
+            "__sc_f0 |= (uint64_t)__builtin_mul_overflow($a, $b, &$d) << __sc_i;";
+        } else if sg {
+            "int64_t __sc_s = (int64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s < $X || __sc_s > $Y) << __sc_i;";
+        } else {
+            "uint64_t __sc_s = (uint64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s > $Y) << __sc_i;";
+        },
+        Slash => mbe::if_s(
+            sg,
+            "__sc_f0 |= (uint64_t)($b == 0) << __sc_i; __sc_f1 |= (uint64_t)($b == -1 && $a == $X) << __sc_i; $d = $b == 0 || ($b == -1 && $a == $X) ? 0 : $a / $b;",
+            "__sc_f0 |= (uint64_t)($b == 0) << __sc_i; $d = $b == 0 ? 0 : $a / $b;",
+        ),
+        Percent => mbe::if_s(
+            sg,
+            "__sc_f0 |= (uint64_t)($b == 0) << __sc_i; __sc_f1 |= (uint64_t)($b == -1 && $a == $X) << __sc_i; $d = $b == 0 || $b == -1 ? 0 : $a % $b;",
+            "__sc_f0 |= (uint64_t)($b == 0) << __sc_i; $d = $b == 0 ? 0 : $a % $b;",
+        ),
+        Ampersand => "$d = $a & $b;",
+        Pipe => "$d = $a | $b;",
+        Caret => "$d = $a ^ $b;",
+        LeftShift => mbe::if_s(
+            sg,
+            "__sc_f0 |= (uint64_t)($b < 0 || $b >= $W) << __sc_i; $d = ($T)(($P)$a << ($b & ($W - 1)));",
+            "__sc_f0 |= (uint64_t)($b >= $W) << __sc_i; $d = ($T)(($P)$a << ($b & ($W - 1)));",
+        ),
+        RightShift => mbe::if_s(
+            sg,
+            "__sc_f0 |= (uint64_t)($b < 0 || $b >= $W) << __sc_i; $d = ($T)($a >> ($b & ($W - 1)));",
+            "__sc_f0 |= (uint64_t)($b >= $W) << __sc_i; $d = ($T)($a >> ($b & ($W - 1)));",
+        ),
+        _ => "",
+    };
+}
+
+// The C statement of lane `__sc_i` of a lane-wise `as` from lanes of `bt` to lanes of `rbt`
+// (operations.md: a float to an integer saturates through `__sc_f2i_*`).
+const fn vec_cast_tpl(bt: BuiltinType, rbt: BuiltinType) str<'static> {
+    let ff = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+    let tf = rbt == BuiltinType::BT_F32 || rbt == BuiltinType::BT_F64;
+    return mbe::if_s(ff && !tf, "$d = __sc_f2i_$N($a);", "$d = ($R)$a;");
+}
+
+// The mask bit of lane `__sc_i` of SIMD_CAST_CHANGED: `$a` the source lane of `bt`, `$b` its cast to
+// `rbt`; set when the value changed or the source is a NaN.
+const fn vec_changed_tpl(bt: BuiltinType, rbt: BuiltinType) str<'static> {
+    let ff = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+    let tf = rbt == BuiltinType::BT_F32 || rbt == BuiltinType::BT_F64;
+    if ff && tf {
+        return "__sc_m |= (uint64_t)!($a == $a && ($T)$b == $a) << __sc_i;";
+    }
+    if ff {
+        return "__sc_m |= (uint64_t)!($a >= $L && $a < $H && trunc$F($a) == $a) << __sc_i;";
+    }
+    if tf {
+        return "__sc_m |= (uint64_t)!($b >= $L && $b < $H && ($T)$b == $a) << __sc_i;";
+    }
+    if int_signed(bt) && !int_signed(rbt) {
+        return "__sc_m |= (uint64_t)(($T)$b != $a || $a < 0) << __sc_i;";
+    }
+    if !int_signed(bt) && int_signed(rbt) {
+        return "__sc_m |= (uint64_t)(($T)$b != $a || $b < 0) << __sc_i;";
+    }
+    return "__sc_m |= (uint64_t)(($T)$b != $a) << __sc_i;";
+}
+
+// The C statement of lane `__sc_i` of RV_SIMD code `c` over lanes of `bt` with result lanes `rbt`
+// (the placeholders of `emit_vec_lanes`); "" for a code without a lane loop.
+const fn vec_simd_tpl(c: u8, bt: BuiltinType, rbt: BuiltinType) str<'static> {
+    let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+    let sg = int_signed(bt);
+    if c >= ir::SIMD_CMP_EQ && c <= ir::SIMD_CMP_GE {
+        let cmp: []str = [
+            "__sc_m |= (uint64_t)($a == $b) << __sc_i;",
+            "__sc_m |= (uint64_t)($a != $b) << __sc_i;",
+            "__sc_m |= (uint64_t)($a < $b) << __sc_i;",
+            "__sc_m |= (uint64_t)($a <= $b) << __sc_i;",
+            "__sc_m |= (uint64_t)($a > $b) << __sc_i;",
+            "__sc_m |= (uint64_t)($a >= $b) << __sc_i;",
+        ];
+        return cmp[(c - ir::SIMD_CMP_EQ) as usize];
+    }
+    if c == ir::SIMD_NARROW_CHECKED {
+        if sg && !int_signed(rbt) {
+            return "$d = ($R)$a; __sc_f0 |= (uint64_t)(($T)$d != $a || $a < 0) << __sc_i;";
+        }
+        if !sg && int_signed(rbt) {
+            return "$d = ($R)$a; __sc_f0 |= (uint64_t)(($T)$d != $a || $d < 0) << __sc_i;";
+        }
+        return "$d = ($R)$a; __sc_f0 |= (uint64_t)(($T)$d != $a) << __sc_i;";
+    }
+    if c == ir::SIMD_NARROW_SAT {
+        if !sg {
+            return "$d = $a > $y ? $y : ($R)$a;";
+        }
+        return mbe::if_s(
+            int_signed(rbt),
+            "$d = $a < $x ? $x : $a > $y ? $y : ($R)$a;",
+            "$d = $a < 0 ? 0 : $a > $y ? $y : ($R)$a;",
+        );
+    }
+    if c == ir::SIMD_BSWAP {
+        return switch bt {
+            BT_I8 | BT_U8 => "$d = $a;",
+            BT_I16 | BT_U16 => "$d = ($T)__builtin_bswap16(($U)$a);",
+            BT_I32 | BT_U32 => "$d = ($T)__builtin_bswap32(($U)$a);",
+            _ => "$d = ($T)__builtin_bswap64(($U)$a);",
+        };
+    }
+    if fl {
+        return switch c {
+            ir::SIMD_MIN => "$d = $a != $a ? $b : $b != $b ? $a : $a < $b ? $a : $b < $a ? $b : signbit($a) ? $a : $b;",
+            ir::SIMD_MAX => "$d = $a != $a ? $b : $b != $b ? $a : $a > $b ? $a : $b > $a ? $b : signbit($a) ? $b : $a;",
+            ir::SIMD_MINIMUM => "$d = $a != $a ? $a : $b != $b ? $b : $a < $b ? $a : $b < $a ? $b : signbit($a) ? $a : $b;",
+            ir::SIMD_MAXIMUM => "$d = $a != $a ? $a : $b != $b ? $b : $a > $b ? $a : $b > $a ? $b : signbit($a) ? $b : $a;",
+            ir::SIMD_ABS => "$d = fabs$F($a);",
+            ir::SIMD_COPYSIGN => "$d = copysign$F($a, $b);",
+            ir::SIMD_SQRT => "$d = sqrt$F($a);",
+            ir::SIMD_CEIL => "$d = ceil$F($a);",
+            ir::SIMD_FLOOR => "$d = floor$F($a);",
+            ir::SIMD_TRUNC => "$d = trunc$F($a);",
+            ir::SIMD_ROUND_EVEN => "$d = nearbyint$F($a);",
+            ir::SIMD_FMA => "$d = fma$F($a, $b, $c);",
+            ir::SIMD_IS_NAN => "__sc_m |= (uint64_t)($a != $a) << __sc_i;",
+            ir::SIMD_IS_INF => "__sc_m |= (uint64_t)(isinf($a) != 0) << __sc_i;",
+            ir::SIMD_IS_FINITE => "__sc_m |= (uint64_t)(isfinite($a) != 0) << __sc_i;",
+            ir::SIMD_IS_NORMAL => "__sc_m |= (uint64_t)(isnormal($a) != 0) << __sc_i;",
+            ir::SIMD_IS_SUBNORMAL => "__sc_m |= (uint64_t)(fpclassify($a) == FP_SUBNORMAL) << __sc_i;",
+            ir::SIMD_IS_SIGN_NEG => "__sc_m |= (uint64_t)(signbit($a) != 0) << __sc_i;",
+            ir::SIMD_IOTA => "$d = ($T)__sc_i;",
+            ir::SIMD_CHOOSE => "$d = (($a >> __sc_i) & 1) ? $b : $c;",
+            _ => "",
+        };
+    }
+    return switch c {
+        ir::SIMD_IOTA => "$d = ($T)__sc_i;",
+        ir::SIMD_CHOOSE => "$d = (($a >> __sc_i) & 1) ? $b : $c;",
+        ir::SIMD_WRAP_ADD => "(void)__builtin_add_overflow($a, $b, &$d);",
+        ir::SIMD_WRAP_SUB => "(void)__builtin_sub_overflow($a, $b, &$d);",
+        ir::SIMD_WRAP_MUL => "(void)__builtin_mul_overflow($a, $b, &$d);",
+        ir::SIMD_WRAP_NEG => "$d = ($T)(0u - ($P)$a);",
+        ir::SIMD_WRAP_SHL => "$d = ($T)(($P)$a << ($b & ($W - 1)));",
+        ir::SIMD_WRAP_SHR => "$d = ($T)($a >> ($b & ($W - 1)));",
+        ir::SIMD_OVF_ADD => "{ $T __sc_r; __sc_m |= (uint64_t)__builtin_add_overflow($a, $b, &__sc_r) << __sc_i; }",
+        ir::SIMD_OVF_SUB => "{ $T __sc_r; __sc_m |= (uint64_t)__builtin_sub_overflow($a, $b, &__sc_r) << __sc_i; }",
+        ir::SIMD_OVF_MUL => "{ $T __sc_r; __sc_m |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_r) << __sc_i; }",
+        ir::SIMD_SAT_ADD => mbe::if_s(
+            sg,
+            "$T __sc_s = ($T)(($P)$a + ($P)$b); $d = (($a ^ __sc_s) & ($b ^ __sc_s)) < 0 ? ($b < 0 ? $X : $Y) : __sc_s;",
+            "$T __sc_s = ($T)($a + $b); $d = __sc_s < $a ? $Y : __sc_s;",
+        ),
+        ir::SIMD_SAT_SUB => mbe::if_s(
+            sg,
+            "$T __sc_s = ($T)(($P)$a - ($P)$b); $d = (($a ^ $b) & ($a ^ __sc_s)) < 0 ? ($b < 0 ? $Y : $X) : __sc_s;",
+            "$d = $a < $b ? 0 : ($T)($a - $b);",
+        ),
+        ir::SIMD_MIN => "$d = $a < $b ? $a : $b;",
+        ir::SIMD_MAX => "$d = $a > $b ? $a : $b;",
+        ir::SIMD_ABS => "__sc_f0 |= (uint64_t)($a == $X) << __sc_i; $d = $a < 0 ? ($T)(0u - ($P)$a) : $a;",
+        ir::SIMD_WRAP_ABS => "$d = $a < 0 ? ($T)(0u - ($P)$a) : $a;",
+        ir::SIMD_ABS_DIFF => "$d = $a > $b ? ($R)(($P)$a - ($P)$b) : ($R)(($P)$b - ($P)$a);",
+        ir::SIMD_CLZ => "$d = ($T)(sc_clz64((uint64_t)($U)$a) - (64 - $W));",
+        ir::SIMD_CTZ => "$d = ($T)($a == 0 ? $Wu : sc_ctz64((uint64_t)($U)$a));",
+        ir::SIMD_POPCNT => "$d = ($T)sc_popcount64((uint64_t)($U)$a);",
+        ir::SIMD_ROTL => "{ $P __sc_x = ($U)$a; unsigned __sc_n = (unsigned)$b & ($W - 1); $d = ($T)($U)((__sc_x << __sc_n) | (__sc_x >> (($W - __sc_n) & ($W - 1)))); }",
+        ir::SIMD_ROTR => "{ $P __sc_x = ($U)$a; unsigned __sc_n = (unsigned)$b & ($W - 1); $d = ($T)($U)((__sc_x >> __sc_n) | (__sc_x << (($W - __sc_n) & ($W - 1)))); }",
+        ir::SIMD_BITREV => "$d = ($T)(sc_bitrev64((uint64_t)($U)$a) >> (64 - $W));",
+        _ => "",
+    };
 }
 
 const fn int_signed(bt: BuiltinType) bool {

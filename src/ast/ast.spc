@@ -84,6 +84,7 @@ pub enum AttrKind {
     ATTR_BENCH,
     ATTR_NO_CONST,
     ATTR_UNSAFE, // `@unsafe(safe, const)`: unverified claims about an extern function, in `arg`
+    ATTR_INTRINSIC, // `@intrinsic("name")` (std only): a bodiless function the compiler implements
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
@@ -404,6 +405,7 @@ pub const FN_EXTERN: u8 = 2;
 pub const FN_VARIADIC: u8 = 4;
 pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
 pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
+pub const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
 
 extend FunctionData {
     pub const fn is_public(self: &Self) bool {
@@ -424,6 +426,10 @@ extend FunctionData {
 
     pub const fn is_unsafe(self: &Self) bool {
         return (self.flags & FN_UNSAFE) != 0;
+    }
+
+    pub const fn is_intrinsic(self: &Self) bool {
+        return (self.flags & FN_INTRINSIC) != 0;
     }
 
     /// Set or clear the FN_* bit `bit`.

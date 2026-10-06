@@ -8,8 +8,10 @@
 // collection-length fact additionally by (place structure, heap generation, base generation). Facts
 // flow along edges into blocks with one forward predecessor, loop headers included (the header's
 // entry bumps everything the loop can write), which is enough for the canonical indexed loop: the
-// header's `index < length` branch fact reaches the loop body. The solved integer facts (intervals,
-// strides) are the second proof source.
+// header's `index < length` branch fact reaches the loop body; an integer comparison's false edge
+// gives the negated fact (`!(a < b)` is `b <= a`: an early-return guard), and a proof chains
+// through up to two `x <= y` facts. The solved integer facts (intervals, strides) are the second
+// proof source.
 import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
@@ -507,6 +509,13 @@ extend Bce {
         if lk.is_local && f.ln_ok && f.ln_l == lk.l && f.ln_v == lk.v && f.ln_off == lk.off {
             return true;
         }
+        // a view built by a struct literal: its length is the value its `len` holds
+        if self.fx.views && f.ln_ok && f.ln_off == 0 {
+            let vk = self.fx.view_len(b, lop);
+            if vk.is_local && f.ln_l == vk.l && f.ln_v == vk.v {
+                return true;
+            }
+        }
         if lk.is_local && lk.off == 0 && f.lp_ok {
             let lp = self.len_place_of(lk.l);
             let flp = fact_lp(f);
@@ -515,6 +524,36 @@ extend Bce {
             }
         }
         return false;
+    }
+
+    /// Does a chain of at most `hops + 1` facts `x <= y` (each over a whole value) lead from value
+    /// `(l, v)` to the length operand `lop`? A guard (`if s.len() < n { return; }`) bounds a loop's
+    /// limit this way.
+    fn le_len(self: &mut Self, b: &ir::CoreBody, l: u32, v: u32, lop: u32, hops: u32) bool {
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.iconst || f.il != l || f.iv != v || f.ioff != 0 {
+                continue;
+            }
+            if self.len_matches(b, &f, lop) || hops != 0 && f.ln_ok && f.ln_off == 0 && self.le_len(
+                b,
+                f.ln_l,
+                f.ln_v,
+                lop,
+                hops - 1,
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Is local `l` of an integer type? A float comparison's false edge gives no fact: a NaN makes
+    /// both `a < b` and `b <= a` false.
+    const fn int_local(self: &Self, b: &ir::CoreBody, l: u32) bool {
+        let t = b.locals.at(l as usize).ty;
+        let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
+        return t != TYPE_NONE && y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
     }
 
     /// Prove `index < length` for one IN_BOUNDS site. Returns true when removable; fills the
@@ -538,7 +577,13 @@ extend Bce {
             if f.kind != 0 {
                 continue;
             }
-            if self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
+            if self.idx_matches(&f, &ik, true) && (self.len_matches(b, &f, lop) || f.ln_ok && f.ln_off == 0 && self.le_len(
+                b,
+                f.ln_l,
+                f.ln_v,
+                lop,
+                1,
+            )) {
                 return true;
             }
         }
@@ -570,6 +615,45 @@ extend Bce {
         if self.int_widened(b, iop) {
             *reason = BR_WIDENED;
         }
+        return false;
+    }
+
+    /// Prove `start <= len && w <= len - start` for the group check of a vector access: its last lane
+    /// `start + w - 1` is below the length, by the facts, the aligned strides or the intervals.
+    fn prove_group(self: &mut Self, b: &ir::CoreBody, iop: u32, lop: u32, w: i64, reason: &mut u8) bool {
+        let mut ik = self.vkey(b, iop);
+        let lk = self.vkey(b, lop);
+        if ik.is_const && lk.is_const {
+            return ik.c >= 0 && lk.c >= 0 && ik.c <= lk.c && w <= lk.c - ik.c;
+        }
+        if !ik.is_local {
+            return false;
+        }
+        ik.off += w - 1;
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.kind == 0 && self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
+                return true;
+            }
+        }
+        if self.prove_aligned(b, &ik, lop) {
+            return true;
+        }
+        if self.ints_for(b, lop) {
+            let mut xw: u32 = 0;
+            let mut xs = false;
+            let mut yw: u32 = 0;
+            let mut ys = false;
+            let x = self.fx.ival(b, iop, &mut xw, &mut xs);
+            let y = self.fx.ival(b, lop, &mut yw, &mut ys);
+            if xw != 0 && yw != 0 && !xs && !ys && !x.hn && !y.ln && y.lo >= w as u64 && x.hi <= y.lo - w as u64 {
+                return true;
+            }
+            if self.prove_aligned(b, &ik, lop) {
+                return true;
+            }
+        }
+        *reason = pick(self.limited || self.fx.ilimited, BR_RESOURCE_LIMIT, BR_JOIN_LOST_FACT);
         return false;
     }
 
@@ -727,7 +811,13 @@ extend Bce {
                 if f2.iconst || f2.il != f1.ln_l || f2.iv != f1.ln_v || f2.ioff != 0 || need_strict && f2.kind != 0 {
                     continue;
                 }
-                if self.len_matches(b, &f2, lop) {
+                if self.len_matches(b, &f2, lop) || f2.ln_ok && f2.ln_off == 0 && self.le_len(
+                    b,
+                    f2.ln_l,
+                    f2.ln_v,
+                    lop,
+                    1,
+                ) {
                     return true;
                 }
             }
@@ -1005,22 +1095,22 @@ extend Bce {
     /// DropCtx emits.
     // Push the true-edge fact of comparison `cb` with its right side read as `rk` (length place
     // `lp`), within the edge's fact budget (the edge's facts start at `st0`).
-    fn edge_fact(self: &mut Self, cb: &CmpBind, rk: fx::VKey, lp: LenBind, st0: usize) {
+    fn edge_fact(self: &mut Self, le: bool, ik: fx::VKey, rk: fx::VKey, lp: LenBind, st0: usize) {
         if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
             return;
         }
         self.in_facts.push(
             Fact {
-                kind: if cb.le {
+                kind: if le {
                     1;
                 } else {
                     0;
                 },
-                iconst: cb.a.is_const,
-                ic: cb.a.c,
-                il: cb.a.l,
-                iv: cb.a.v,
-                ioff: cb.a.off,
+                iconst: ik.is_const,
+                ic: ik.c,
+                il: ik.l,
+                iv: ik.v,
+                ioff: ik.off,
                 ln_ok: true,
                 ln_l: rk.l,
                 ln_v: rk.v,
@@ -1293,15 +1383,47 @@ extend Bce {
         let rid = stm.rvalue as usize;
         let rv = *b.rvalues.at(rid);
         let dest = self.fx.whole_local(b, stm.place);
-        if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_BOUNDS_GROUP {
+        if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN) {
             let iop = b.oper_pool[rv.a as usize];
             let lop = b.oper_pool[(rv.a + 1) as usize];
             let wo = *b.operands.at(b.oper_pool[(rv.a + 2) as usize] as usize);
             let ik = self.vkey(b, iop);
+            if rv.item.node == ir::CHECK_VEC {
+                // A vector access's own check, provable like an element check of its last lane.
+                let mut reason: u8 = BR_UNKNOWN_INDEX;
+                let mut proven = false;
+                if wo.kind == ir::OP_CONST {
+                    let wc = *b.constants.at(wo.data as usize);
+                    proven = wc.kind == ir::CK_INT && wc.val > 0 && self.prove_group(b, iop, lop, wc.val, &mut reason);
+                }
+                if check_only {
+                    if rv.c == ir::IN_BOUNDS_GROUP_PROVEN && !proven {
+                        *err = "bce: unprovable IN_BOUNDS_GROUP_PROVEN";
+                    }
+                } else {
+                    st.total += 1;
+                    if proven {
+                        st.removed += 1;
+                        b.rvalues[rid].c = ir::IN_BOUNDS_GROUP_PROVEN;
+                    } else {
+                        unsafe {
+                            st.reasons[reason as usize] = st.reasons[reason as usize] + 1;
+                        }
+                    }
+                }
+            }
             if ik.is_local && wo.kind == ir::OP_CONST {
                 let wc = *b.constants.at(wo.data as usize);
-                if wc.kind == ir::CK_INT && wc.val > 0 && wc.val <= 8 {
-                    for k in 0..wc.val {
+                // Each element's fact when the group is small; a wider vector access records its last
+                // lane only, which proves the same access again.
+                let mut k0 = wc.val;
+                if wc.val <= 8 {
+                    k0 = 0;
+                } else if rv.item.node == ir::CHECK_VEC {
+                    k0 = wc.val - 1;
+                }
+                if wc.kind == ir::CK_INT && wc.val > 0 {
+                    for k in k0..wc.val {
                         let mut ikk = ik;
                         ikk.off = ik.off + k;
                         self.fact_from_check(b, 0, ikk, lop);
@@ -1675,12 +1797,26 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             }
         }
         if succ0 != ir::IR_NONE && z.flows(blk as u32, succ0) {
-            z.in_start.set(succ0 as usize, z.in_facts.len() as u32);
+            let st0 = z.in_facts.len();
             for i in 0..z.facts.len() {
                 let f0 = *z.facts.at(i);
                 z.in_facts.push(f0);
             }
-            z.in_len.set(succ0 as usize, z.facts.len() as u32);
+            // a branch condition on its false edge: `!(a < b)` is `b <= a`, `!(a <= b)` is `b < a`
+            if succ_true != ir::IR_NONE {
+                let ck = z.vkey(b, t.a);
+                if ck.is_local {
+                    let cb = *z.cmpof.at(ck.l as usize);
+                    if cb.ok && cb.my_v == ck.v && (cb.b.is_const || cb.b.is_local) && cb.a.is_local && z.int_local(
+                        b,
+                        cb.a.l,
+                    ) {
+                        z.edge_fact(!cb.le, cb.b, cb.a, cb.a_lp, st0);
+                    }
+                }
+            }
+            z.in_start.set(succ0 as usize, st0 as u32);
+            z.in_len.set(succ0 as usize, (z.in_facts.len() - st0) as u32);
             z.in_set.set(succ0 as usize, true);
         }
         if succ_true != ir::IR_NONE && z.flows(blk as u32, succ_true) {
@@ -1696,13 +1832,13 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                 let cb = *z.cmpof.at(ck.l as usize);
                 if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
                     let lp = cb.b_lp; // captured at the comparison, so never stale here
-                    z.edge_fact(&cb, cb.b, lp, st0);
+                    z.edge_fact(cb.le, cb.a, cb.b, lp, st0);
                     if cb.b.off == 0 {
                         // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
                         for ci in 0..z.chunks.len() {
                             let ch = z.chunks[ci];
                             if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
-                                z.edge_fact(&cb, ch.e, ch.e_lp, st0);
+                                z.edge_fact(cb.le, cb.a, ch.e, ch.e_lp, st0);
                             }
                         }
                     }
@@ -1728,7 +1864,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             let tr = z.fx.copy_root(tl);
             let cb = *z.cmpof.at(tr as usize);
             if cb.ok && cb.my_v == z.fx.ver(tr) && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
-                z.edge_fact(&cb, cb.b, cb.b_lp, st0);
+                z.edge_fact(cb.le, cb.a, cb.b, cb.b_lp, st0);
             }
             z.in_start.set(tj as usize, st0 as u32);
             z.in_len.set(tj as usize, (z.in_facts.len() - st0) as u32);

@@ -10,6 +10,13 @@
 static inline uint32_t sc_ctz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_ctzll(sc_x) : 64u; }
 static inline uint32_t sc_clz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_clzll(sc_x) : 64u; }
 static inline uint32_t sc_popcount64(uint64_t sc_x) { return (uint32_t)__builtin_popcountll(sc_x); }
+/* The 64 bits of `sc_x` in reverse order (vector `reverse_bits`): swap halves, then bytes, then bits. */
+static inline uint64_t sc_bitrev64(uint64_t sc_x) {
+  sc_x = __builtin_bswap64(sc_x);
+  sc_x = (sc_x & 0x0F0F0F0F0F0F0F0FULL) << 4 | (sc_x >> 4 & 0x0F0F0F0F0F0F0F0FULL);
+  sc_x = (sc_x & 0x3333333333333333ULL) << 2 | (sc_x >> 2 & 0x3333333333333333ULL);
+  return (sc_x & 0x5555555555555555ULL) << 1 | (sc_x >> 1 & 0x5555555555555555ULL);
+}
 /* Wrapping arithmetic for the built-in integer methods in core.spc (`wrapping_*`, `overflowing_*`,
    `checked_*`, `saturating_*`): C's unsigned operators, modulo 2^64 in every profile; a narrower method
    truncates the result. A shift count is below 64. `sc_mulo_*` tell whether the full product overflows 64

@@ -626,7 +626,7 @@ pub fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
         let k = body.rvalues.at(r).kind;
         if k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_SLICE || k == ir::RV_DYN || k == ir::RV_CLOSURE {
             ft = ft | FT_BORROW_OP;
-        } else if k > ir::RV_SLICE {
+        } else if k > ir::RV_SIMD {
             ft = ft | FT_UNKNOWN;
         }
     }

@@ -27,6 +27,7 @@
 import ast::ast as *;
 import lexer::token as tok;
 import module::loader as loader;
+import ir::layout as lay;
 import ir::core as ir;
 import ir::lower as irl;
 import stdlib;
@@ -87,6 +88,7 @@ struct CalleeInfo {
     pub body: ir::CoreBody,
     pub gp: Vector<NodeId>,
     pub fg: u32, // trailing entries of `gp` that are the function's own parameters
+    pub demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
 }
 
 /// One generic-parameter binding: `(pm, pnode)` resolves to the caller's type `at`.
@@ -255,7 +257,33 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
             }
             r;
         },
-        TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ERROR => TYPE_NONE,
+        TYPE_CONST_EXPR => {
+            // A form over const-generic parameters (`{N / 2}`): its value under the bindings.
+            let l = *ka.const_lin_at(y.as_data.inst);
+            let mut v = l.k;
+            let mut ok = true;
+            for i in 0..l.n {
+                let pd = unsafe l.p[i as usize];
+                let mut x = TYPE_NONE;
+                for j in 0..binds.len() {
+                    if binds.at(j).pm == pd.module && binds.at(j).pnode == pd.node {
+                        x = binds.at(j).at;
+                    }
+                }
+                ok = ok && x != TYPE_NONE && ca.type_at(x).kind == TypeKind::TYPE_CONST && lin_acc(
+                    &mut v,
+                    unsafe l.c[i as usize],
+                    cval_exact(ca.type_at(x).as_data.value, ca.type_at(x).cbt()),
+                );
+            }
+            let mut out = i128::zero();
+            let mut r = TYPE_NONE;
+            if ok && l.finish(v, lay::target_for(p.arch).ptr == 4, &mut out) {
+                r = ca.const_value(cval_bits(out), l.to);
+            }
+            r;
+        },
+        TYPE_FIELD_PROJECTION | TYPE_ERROR => TYPE_NONE,
         TYPE_FUNCTION => {
             // A function-pointer type substitutes its signature; a function or closure item is
             // nominal (module, declaration): the package id itself, sound only without a
@@ -428,9 +456,105 @@ extend InlineCtx {
     }
 }
 
+// Is `d` a generic parameter (an item local of a const-generic parameter names it)?
+fn is_param(p: &loader::Package, d: DefId) bool {
+    return d.node != NODE_NONE && (unsafe &*p.module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
+}
+
+// Is operand `o` of `b` a constant, or a read of a const-generic parameter (a constant once spliced)?
+fn const_or_param(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+    let op = *b.operands.at(o as usize);
+    if op.kind == ir::OP_CONST {
+        return true;
+    }
+    let pl = *b.places.at(op.data as usize);
+    return pl.proj_len == 0 && b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF && is_param(
+        p,
+        b.locals.at(pl.base as usize).item,
+    );
+}
+
+// The value of const-generic parameter `d` under `binds` (caller types of module `cm`), or false.
+fn param_value(p: &loader::Package, d: DefId, cm: ModuleId, binds: &Vector<GBind>, v: &mut i64) bool {
+    for i in 0..binds.len() {
+        let g = binds.at(i);
+        if g.pm == d.module && g.pnode == d.node {
+            let y = *(unsafe &*p.module_ast_const(cm)).type_at(g.at);
+            *v = y.as_data.value;
+            return y.kind == TypeKind::TYPE_CONST;
+        }
+    }
+    return false;
+}
+
+// A multi-return call's one destination is a temp the caller copies whole into other temps and
+// reads only as members `0..nret` (`_t._0`). `alias` receives the temp and its copies; true when
+// every other read of them is a member read, which the splice redirects to the return slots.
+fn multi_alias(b: &ir::CoreBody, dpl: u32, nret: u32, alias: &mut Vector<u32>) bool {
+    alias.truncate(0);
+    alias.push(b.places.at(dpl as usize).base);
+    let mut grew = true;
+    let mut rounds = 0;
+    while grew && rounds < 4 {
+        grew = false;
+        rounds += 1;
+        for i in 0..b.statements.len() {
+            let x = alias_copy(b, i, alias);
+            if x != ir::IR_NONE && !alias.contains(&x) {
+                alias.push(x);
+                grew = true;
+            }
+        }
+    }
+    // the operands the alias copies read
+    let mut cops = Vector::<u32>::new();
+    for k in 0..b.statements.len() {
+        if alias_copy(b, k, alias) != ir::IR_NONE {
+            cops.push(b.rvalues.at(b.statements.at(k).rvalue as usize).a);
+        }
+    }
+    for i in 0..b.operands.len() {
+        let o = *b.operands.at(i);
+        if o.kind == ir::OP_CONST || !alias.contains(&b.places.at(o.data as usize).base) {
+            continue;
+        }
+        let p = *b.places.at(o.data as usize);
+        if p.proj_len == 0 {
+            // only an alias copy reads the whole temp
+            if !cops.contains(&(i as u32)) {
+                return false;
+            }
+        } else if b.projections.at(p.proj_start as usize).kind != ir::PJ_FIELD || b.projections.at(
+            p.proj_start as usize,
+        ).data >= nret {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The local statement `i` of `b` copies a whole `alias` local into (`x = copy _t`), else IR_NONE.
+fn alias_copy(b: &ir::CoreBody, i: usize, alias: &Vector<u32>) u32 {
+    let st = *b.statements.at(i);
+    if st.kind != ir::ST_ASSIGN || b.places.at(st.place as usize).proj_len != 0 {
+        return ir::IR_NONE;
+    }
+    let rv = *b.rvalues.at(st.rvalue as usize);
+    if rv.kind != ir::RV_USE {
+        return ir::IR_NONE;
+    }
+    let o = *b.operands.at(rv.a as usize);
+    if o.kind == ir::OP_CONST || b.places.at(o.data as usize).proj_len != 0 || !alias.contains(
+        &b.places.at(o.data as usize).base,
+    ) {
+        return ir::IR_NONE;
+    }
+    return b.places.at(st.place as usize).base;
+}
+
 // The declaration-level checks: 0 = a candidate worth keeping, else the rejection. A candidate's
 // enclosing extend block (or NODE_NONE) is written to `ext`.
-fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &mut NodeId) u64 {
+fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &mut NodeId, demand: &mut bool) u64 {
     let p = unsafe &*pkg;
     if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return REJ_BASE | IJ_NOT_FN as u64;
@@ -456,15 +580,14 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &
     }
     *ext = extend_of(a, d.node);
     // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
-    // only when a call site DEMANDS the instance, and inlining the call erases the demand.
-    // Such callees must stay calls. `asserts` holds the module's static_assert spans.
+    // only when a call site DEMANDS the instance, so a splice of it records the call in the
+    // caller's `demands` (`demand`). `asserts` holds the module's static_assert spans.
+    *demand = false;
     if f.generics.len != 0 || *ext != NODE_NONE && a.at_const(*ext).as_data.extend_def.generics.len != 0 {
         let bsp = a.at_const(f.body).span;
         for k in 0..asserts.len() {
             let sp = asserts[k];
-            if (sp >> 32) as u32 >= bsp.start && (sp & 0xFFFFFFFFu64) as u32 <= bsp.end {
-                return REJ_BASE | IJ_SHAPE as u64;
-            }
+            *demand = *demand || (sp >> 32) as u32 >= bsp.start && (sp & 0xFFFFFFFFu64) as u32 <= bsp.end;
         }
     }
     return 0;
@@ -532,9 +655,10 @@ extend InlineStore {
                     has_asserts.set(dm, 1);
                 }
                 let mut ext = NODE_NONE;
-                r = vet_decl(pkg, d, asserts.at(dm), &mut ext);
+                let mut demand = false;
+                r = vet_decl(pkg, d, asserts.at(dm), &mut ext, &mut demand);
                 if r == 0 {
-                    r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len());
+                    r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len(), demand);
                 }
             }
             self.keep_ix.insert(key, r);
@@ -550,6 +674,7 @@ extend InlineStore {
         ext: NodeId,
         body: &ir::CoreBody,
         nclosures: usize,
+        demand: bool,
     ) u64 {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
@@ -581,7 +706,8 @@ extend InlineStore {
             }
         }
         for i in 0..body.locals.len() {
-            if body.locals.at(i).storage == ir::LS_STATIC_REF {
+            // A const-generic parameter's value becomes a constant at the splice.
+            if body.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(p, body.locals.at(i).item) {
                 return shape; // item symbol/linkage is the owner TU's business
             }
         }
@@ -594,7 +720,7 @@ extend InlineStore {
             if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT) {
                 bad = true;
             }
-            if rv.kind == ir::RV_REPEAT && body.is_generic {
+            if rv.kind == ir::RV_REPEAT && body.is_generic && !const_or_param(p, body, rv.b) {
                 bad = true; // a symbolic repeat count must re-lower per instance
             }
             if bad {
@@ -623,7 +749,7 @@ extend InlineStore {
             gp.push(unsafe a.list(fgl)[i as usize]);
         }
         let slot = self.kept.len() as u64;
-        self.kept.push(CalleeInfo { body: kb, gp: gp, fg: fgl.len });
+        self.kept.push(CalleeInfo { body: kb, gp: gp, fg: fgl.len, demand: demand });
         return slot;
     }
 }
@@ -682,6 +808,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let mut wire = replace(&mut cx.sc_wire, Vector::<u8>::new());
     let mut probe = replace(&mut cx.sc_probe, Vector::<TypeId>::new());
     let mut shape = replace(&mut cx.sc_shape, Vector::<u64>::new());
+    let mut alias = Vector::<u32>::new();
     let mut bi: usize = 0;
     while bi < lw.body.blocks.len() {
         let t = lw.body.blocks.at(bi).term;
@@ -731,7 +858,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             let dpl = lw.body.dest_pool[t.dests_start as usize];
             void_dest = eff_pty(&lw.body, dpl) == Ast::builtin(BuiltinType::BT_VOID);
         }
-        if k.args != t.args_len || k.returns != t.dests_len && !void_dest {
+        let multi = k.returns > 1 && t.dests_len == 1;
+        if k.args != t.args_len || k.returns != t.dests_len && !void_dest && !multi {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
             continue;
         }
@@ -749,8 +877,10 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             unify(pkg, km, k.locals.at((k.returns + j) as usize).ty, cm, cty, &mut binds, 0);
         }
         for r in 0..k.returns {
-            let dpl = lw.body.dest_pool[(t.dests_start + r) as usize];
-            unify(pkg, km, k.locals.at(r as usize).ty, cm, lw.body.places.at(dpl as usize).ty, &mut binds, 0);
+            if !multi {
+                let dpl = lw.body.dest_pool[(t.dests_start + r) as usize];
+                unify(pkg, km, k.locals.at(r as usize).ty, cm, lw.body.places.at(dpl as usize).ty, &mut binds, 0);
+            }
         }
         if t.targs_len as usize == ki.gp.len() && ki.gp.len() != 0 {
             for i in 0..ki.gp.len() {
@@ -880,10 +1010,11 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             let ca = unsafe &*(&*pkg).module_ast_const(cm);
             let mut mode: u8 = 255;
             if pt != TYPE_NONE && sty != TYPE_NONE {
-                // &mut T into a &T parameter: the same C pointer value, no adjustment needed
+                // &mut T into a &T parameter, *mut T into *const T: the same C pointer value, no
+                // adjustment needed
                 let py0 = *ca.type_at(pt);
                 let sy0 = *ca.type_at(sty);
-                if py0.kind == TypeKind::TYPE_REFERENCE && sy0.kind == TypeKind::TYPE_REFERENCE && py0.as_data.elem == sy0.as_data.elem {
+                if py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) && py0.as_data.elem == sy0.as_data.elem {
                     mode = 0;
                 }
             }
@@ -907,11 +1038,24 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         if wok {
             for r in 0..k.returns {
-                let dpl = lw.body.dest_pool[(t.dests_start + r) as usize];
-                if mty(tyr, k.locals.at(r as usize).ty) != eff_pty(&lw.body, dpl) {
+                if !multi && mty(tyr, k.locals.at(r as usize).ty) != eff_pty(
+                    &lw.body,
+                    lw.body.dest_pool[(t.dests_start + r) as usize],
+                ) {
                     wok = false;
                     break;
                 }
+            }
+            if multi {
+                wok = multi_alias(&lw.body, lw.body.dest_pool[t.dests_start as usize], k.returns, &mut alias);
+            }
+        }
+        // Every const-generic parameter the body reads has a constant binding.
+        for i in 0..k.locals.len() {
+            let mut v: i64 = 0;
+            let it = k.locals.at(i).item;
+            if wok && k.locals.at(i).storage == ir::LS_STATIC_REF && !param_value(unsafe &*pkg, it, cm, &binds, &mut v) {
+                wok = false;
             }
         }
         if !wok {
@@ -919,7 +1063,10 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             continue;
         }
         // ---- splice (infallible from here) -----------------------------------------------------
-        splice(lw, ki, &t, bi - 1, tyr, &wire, &mut blk_origin, &mut origins);
+        if !multi {
+            alias.truncate(0);
+        }
+        splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins);
         added += k.statements.len() + k.args as usize + k.returns as usize;
         st.inlined += 1;
     }
@@ -962,6 +1109,8 @@ fn splice(
     t: &ir::Terminator,
     call_blk: usize,
     tymap: &Map<u64, u64>,
+    binds: &Vector<GBind>,
+    alias: &Vector<u32>,
     wire: &Vector<u8>,
     blk_origin: &mut Vector<u32>,
     origins: &mut Vector<Origin>,
@@ -999,8 +1148,10 @@ fn splice(
         // Declared callee locals (args and user bindings) become LS_INL: still declared for every
         // consumer that asks (`decl` must clear: it names a node in the CALLEE module's Ast).
         // Return slots become plain temps: the join moves them out.
-        if d.storage == ir::LS_RET {
+        if d.storage == ir::LS_RET || d.storage == ir::LS_STATIC_REF {
+            // a const-generic parameter's reads became its constant: the local stays unused
             d.storage = ir::LS_TEMP;
+            d.item = DefId { module: 0, node: NODE_NONE };
         } else if d.storage == ir::LS_ARG || d.decl != NODE_NONE {
             d.storage = ir::LS_INL;
         }
@@ -1041,12 +1192,32 @@ fn splice(
     }
     for i in 0..k.operands.len() {
         let mut o = *k.operands.at(i);
-        if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+        o.ty = mty(tymap, o.ty);
+        let mut v: i64 = 0;
+        if (o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE) && k.places.at(o.data as usize).proj_len == 0 && param_value(
+            unsafe &*pkg9,
+            k.locals.at(k.places.at(o.data as usize).base as usize).item,
+            b.module,
+            binds,
+            &mut v,
+        ) {
+            // A const-generic parameter read: its bound value.
+            b.constants.push(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: o.ty,
+                    val: v,
+                    raw: tok::Span::empty(),
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+            );
+            o.kind = ir::OP_CONST;
+            o.data = b.constants.len() as u32 - 1;
+        } else if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
             o.data += p0;
         } else {
             o.data += c0;
         }
-        o.ty = mty(tymap, o.ty);
         b.operands.push(o);
     }
     for i in 0..k.rvalues.len() {
@@ -1073,7 +1244,7 @@ fn splice(
             if rv.item.node != ir::IR_NONE {
                 rv.item.node += o0;
             }
-        } else if rv.kind == ir::RV_AGGREGATE {
+        } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_SIMD {
             rv.a += op0;
         } else if rv.kind == ir::RV_INTRINSIC {
             if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING {
@@ -1208,10 +1379,38 @@ fn splice(
         );
         blk_origin.push(orec);
     }
-    // join: move each return slot into the call's destination, then continue at the call's target
+    // join: move each return slot into the call's destination, then continue at the call's target.
+    // A multi-return call's member reads of its one destination read the return slots instead.
     {
         let js = b.statements.len() as u32;
-        for r in 0..k.returns {
+        let multi = alias.len() != 0;
+        if multi {
+            for i in 0..p0 as usize {
+                let p = *b.places.at(i);
+                if p.proj_len != 0 && alias.contains(&p.base) {
+                    let pl = b.places.index_mut(i);
+                    pl.base = l0 + b.projections.at(p.proj_start as usize).data;
+                    pl.proj_start += 1;
+                    pl.proj_len -= 1;
+                }
+            }
+            // the copies of the temp become storage markers of their destination, and their
+            // operands read return slot 0 (the operand pool is scanned whole): nothing reads the temps
+            let slot0 = b.places.len() as u32;
+            b.places.push(ir::Place { base: l0, proj_start: 0, proj_len: 0, ty: b.locals.at(l0 as usize).ty });
+            for i in 0..s0 as usize {
+                let x = alias_copy(b, i, alias);
+                if x != ir::IR_NONE {
+                    let oi = b.rvalues.at(b.statements.at(i).rvalue as usize).a as usize;
+                    b.operands.index_mut(oi).data = slot0;
+                    b.operands.index_mut(oi).ty = b.locals.at(l0 as usize).ty;
+                    let st = b.statements.index_mut(i);
+                    st.kind = ir::ST_STORAGE_LIVE;
+                    st.a = x;
+                }
+            }
+        }
+        for r in 0..pick(multi, 0u32, k.returns) {
             let rl = l0 + r;
             b.places.push(ir::Place { base: rl, proj_start: 0, proj_len: 0, ty: b.locals.at(rl as usize).ty });
             b.operands.push(
@@ -1220,8 +1419,16 @@ fn splice(
             let dpl = b.dest_pool[(t.dests_start + r) as usize];
             b.push_assign(dpl, ir::rv(ir::RV_USE, b.operands.len() as u32 - 1, 0, 0, b.places.at(dpl as usize).ty), sp);
         }
+        if ki.demand {
+            b.demands.push(*t);
+        }
         b.blocks.push(
-            ir::BasicBlock { stmt_start: js, stmt_len: k.returns, term: ir::goto_term(t.t0, sp), sealed: true },
+            ir::BasicBlock {
+                stmt_start: js,
+                stmt_len: b.statements.len() as u32 - js,
+                term: ir::goto_term(t.t0, sp),
+                sealed: true,
+            },
         );
         blk_origin.push(orec);
     }

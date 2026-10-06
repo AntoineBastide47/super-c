@@ -14,6 +14,7 @@ import graph::items as gitems;
 import module::loader as loader;
 import pattern::pattern as pat;
 import ir::interp as iri;
+import ir::core as ir;
 import ir::layout as lay;
 import typechecker::infer as inf;
 import utils::errors as diag;
@@ -3381,16 +3382,23 @@ extend<'a> TypeChecker<'a> {
         for i in 0..g {
             gp[i as usize] = DefId { module: d.module, node: unsafe (*fa).list(f.generics)[i as usize] };
         }
+        self.check_generic_bounds(node, d.module, d.node, f.generics, &gp[0], ga, g, &gp[0], ga, 0);
+        return self.tc_sig_subst(d, &gp[0], ga, g);
+    }
+
+    // The function-pointer type of function `d`'s signature with parameters `gp[0..g]` bound to
+    // `ga[0..g]`.
+    fn tc_sig_subst(self: &mut Self, d: DefId, gp: *const DefId, ga: *const TypeId, g: i32) TypeId {
+        let f = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function;
         let mut slots = Vector::<TypeId>::with_capacity((f.returns.len + f.params.len) as usize);
         for i in 0..f.returns.len {
             let ri = unsafe (*self.mod_ast(d.module)).list(f.returns)[i as usize];
-            slots.push(self.subst_type(self.node_type_in(d.module, ri), &gp[0], ga, g));
+            slots.push(self.subst_type(self.node_type_in(d.module, ri), gp, ga, g));
         }
         for i in 0..f.params.len {
             let pid = unsafe (*self.mod_ast(d.module)).list(f.params)[i as usize];
-            slots.push(self.subst_type(self.decl_type_in(d.module, pid), &gp[0], ga, g));
+            slots.push(self.subst_type(self.decl_type_in(d.module, pid), gp, ga, g));
         }
-        self.check_generic_bounds(node, d.module, d.node, f.generics, &gp[0], ga, g, &gp[0], ga, 0);
         return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), f.returns.len, f.params.len, false);
     }
 
@@ -4896,7 +4904,9 @@ extend<'a> TypeChecker<'a> {
         } else if p.kind == TypeKind::TYPE_INSTANCE && aT.kind == TypeKind::TYPE_INSTANCE {
             let pi = *unsafe (*self.cur_ast()).instance(p.as_data.inst);
             let ai = *unsafe (*self.cur_ast()).instance(aT.as_data.inst);
-            if pi.decl == ai.decl && pi.module == ai.module && pi.n == ai.n {
+            // An argument `[]mut T` binds a `[]T` parameter's element (it coerces).
+            let view = top && self.slice_kind(param_ty, null) == 1 && self.slice_kind(arg_ty, null) == 2;
+            if (pi.decl == ai.decl && pi.module == ai.module || view) && pi.n == ai.n {
                 for i in 0..pi.n {
                     self.tc_infer_ev(unsafe pi.args[i as usize], unsafe ai.args[i as usize], false);
                 }
@@ -6631,6 +6641,41 @@ extend<'a> TypeChecker<'a> {
     // exposes a vector's or a mask's storage, or implement `SimdElement`.
     const fn tc_in_std(self: &Self) bool {
         return unsafe (*self.package).modules[self.cur_module() as usize].prelude;
+    }
+
+    // An `@intrinsic` function `id`: only a `std` module declares one, and its name is one the lowering
+    // knows (`ir::simd_intrinsic`).
+    fn tc_check_intrinsic(self: &mut Self, id: NodeId) {
+        // No body names the result types: type them for the body the lowering builds.
+        let rets = unsafe (*self.cur_ast()).at_const(id).as_data.function.returns;
+        for i in 0..rets.len {
+            let _ = self.resolve_type(
+                unsafe (*self.cur_ast()).slot_type_node(unsafe (*self.cur_ast()).list(rets)[i as usize]),
+            );
+        }
+        let at = self.tc_attr(self.cur_module(), id, AttrKind::ATTR_INTRINSIC);
+        let pk = unsafe &*self.package;
+        let m = &pk.modules[self.cur_module() as usize];
+        let sp = unsafe (*at).str_span;
+        let std = m.prelude || m.path.as_str().starts_with("std::") && pk.std_root.len() != 0 && m.file.as_str().starts_with(
+            pk.std_root.as_str(),
+        );
+        if !std {
+            self.errors.emit_span(sp, format("'@intrinsic' is reserved for the standard library"));
+        }
+        if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 {
+            self.errors.emit_span(sp, format("unknown intrinsic '{}'", diag::span_str(self.source, sp.start, sp.end)));
+        }
+    }
+
+    // Whether the lanes of vector type `vt` implement the prelude interface `name` (`SimdSigned`).
+    fn tc_lanes_are(self: &mut Self, vt: TypeId, name: str) bool {
+        let h = unsafe (*self.package).prelude_lookup(name, true);
+        return h.node != NODE_NONE && self.type_satisfies(
+            self.type_at(vt).as_data.arr.elem,
+            DefId { module: h.mid, node: h.node },
+            0,
+        );
     }
 
     // `expr as T` (node `id`) from `src` to `dst`, one of them a vector or mask: `[T; N]` and
@@ -10060,8 +10105,10 @@ extend<'a> TypeChecker<'a> {
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             tmod = y.module;
             tdecl = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let inst = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+        } else if y.kind == TypeKind::TYPE_INSTANCE || y.is_vec() {
+            // A vector or mask conforms as the prelude instance it stands for.
+            let mut inst = TyInstance {};
+            let _ = unsafe (*self.cur_ast()).targs_of(st, &mut inst);
             tmod = inst.module;
             tdecl = inst.decl;
             while in2 < inst.n as i32 && in2 < 8 {
@@ -12546,6 +12593,17 @@ extend<'a> TypeChecker<'a> {
             }
             return fits;
         }
+        {
+            // `[]mut T` is a `[]T` of the same elements: a shared view, which borrows the view.
+            let mut ae: TypeId = TYPE_NONE;
+            let mut ee: TypeId = TYPE_NONE;
+            if self.slice_kind(actual, &mut ae) == 2 && self.slice_kind(expected, &mut ee) == 1 && ae == ee {
+                if !probe {
+                    unsafe (*self.cur_ast()).set_coerce(node, expected, DefId { module: 0, node: NODE_NONE });
+                }
+                return true;
+            }
+        }
         if ac.kind == TypeKind::TYPE_ARRAY {
             let mut selem: TypeId = TYPE_NONE;
             let sk = self.slice_kind(expected, &mut selem);
@@ -14492,11 +14550,19 @@ extend<'a> TypeChecker<'a> {
             unsafe (*self.cur_ast()).set_type(itn, dt);
         }
         self.check_copy_conformance(id, iface, suba[0]);
-        if !self.tc_in_std() && self.iface_named(iface, "SimdElement") && unsafe (*self.package).modules[iface.module as usize].prelude {
+        let lanes = self.iface_named(iface, "SimdElement") || self.iface_named(iface, "SimdInt") || self.iface_named(
+            iface,
+            "SimdSigned",
+        ) || self.iface_named(iface, "SimdFloat");
+        if !self.tc_in_std() && lanes && unsafe (*self.package).modules[iface.module as usize].prelude {
             let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
+            let isp = unsafe (*self.cur_ast()).at_const(itype).span;
             self.errors.emit_span(
-                unsafe (*self.cur_ast()).at_const(itype).span,
-                format("only the SIMD lane types in `std` implement `SimdElement`"),
+                isp,
+                format(
+                    "only the SIMD lane types in `std` implement `{}`",
+                    diag::span_str(self.source, isp.start, isp.end),
+                ),
             );
         }
         // A type states one conformance per (interface, arguments) pair: `Conv<i32>` and
@@ -14820,6 +14886,20 @@ extend TypeChecker {
         }
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Minus {
+            if !untyped(opnd) && self.type_at(opnd).kind == TypeKind::TYPE_SIMD {
+                // Lane by lane, as on a scalar of the lane type.
+                if !self.tc_lanes_are(opnd, "SimdSigned") {
+                    let ty = self.type_buf(opnd);
+                    self.errors.emit_span(
+                        sp,
+                        format(
+                            "cannot apply unary operator '-' to type '{}' (its lanes have no sign)",
+                            str::from_cstr(&ty[0]),
+                        ),
+                    );
+                }
+                return opnd;
+            }
             if !untyped(opnd) && !self.is_numeric(opnd) {
                 self.errors.emit_span(sp, format("unary '-' requires a numeric operand"));
                 return TYPE_ERROR;
@@ -15003,6 +15083,9 @@ extend TypeChecker {
                 w = "integer".ptr() as *const char;
             }
             self.errors.emit_span(sp, format("operator requires {} operands", str::from_cstr(w)));
+            if self.type_at(self.strip(r)).kind == TypeKind::TYPE_SIMD {
+                self.errors.note(format("a scalar does not convert to a vector: use `Simd::splat`"));
+            }
             return TYPE_NONE;
         }
         if l == r {
@@ -15113,8 +15196,13 @@ extend TypeChecker {
             // already typed here, so it picks between them.
             if md.node != NODE_NONE {
                 let mut rt = Tys8 {};
-                let rl = Lits8 {};
+                let mut rl = Lits8 {};
                 rt[0] = unsafe (*self.cur_ast()).type_of(right);
+                if lt.is_vec() && self.tc_lit_kind(right) != 0 {
+                    // A literal shift count is any lane's: its class picks `Shl<T>` over `Shl<Self>`.
+                    rt[0] = TYPE_NONE;
+                    rl[0] = self.tc_peek_lit_class(right);
+                }
                 let mut tie = false;
                 md = self.tc_pick_by_args(om, od, tok::Span::empty(), m, ls, md, &rt[0], &rl[0], 1, true, &mut tie);
                 unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
@@ -15145,6 +15233,14 @@ extend TypeChecker {
                 let p1 = self.tc_method_param(ls, md, 1);
                 if !self.operand_fits_param(p1, right) {
                     self.err_mismatch(right, p1);
+                    let rt = unsafe (*self.cur_ast()).type_of(right);
+                    if lt.kind == TypeKind::TYPE_SIMD && rt != TYPE_NONE && self.type_at(rt).kind != TypeKind::TYPE_SIMD {
+                        if m == "shl" || m == "shr" {
+                            self.errors.note(format("a shift count is the vector type or its lane type"));
+                        } else {
+                            self.errors.note(format("a scalar does not convert to a vector: use `Simd::splat`"));
+                        }
+                    }
                 }
                 let ret = self.tc_method_ret(ls, md);
                 if ret != TYPE_NONE {
@@ -15306,6 +15402,11 @@ extend TypeChecker {
         *out = os;
         if self.aggregate_decl(os, &mut om, &mut od) {
             let md = self.find_method_cstr(om, od, "bit_not");
+            if md.node != NODE_NONE && !self.method_extend_bounds_hold(os, md) {
+                self.err_method_extend_bounds(sp, os, md);
+                *out = TYPE_NONE;
+                return true;
+            }
             if md.node != NODE_NONE {
                 unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
             }
@@ -19949,6 +20050,33 @@ extend TypeChecker {
             ) == TYPE_NONE {
                 unsafe (*self.cur_ast()).set_type(obj, precv);
             }
+            // A generic extend's method as a value (`W::<i32>::get`): the qualifying instance binds the
+            // extend's parameters, and the path records the target's arguments (as a call's receiver
+            // would name them).
+            let mext = self.enclosing(method.module, method.node, NodeKind::NODE_EXTEND);
+            let mf = unsafe (*self.mod_ast(method.module)).at_const(method.node).as_data.function;
+            let mut tm: ModuleId = 0;
+            let mut td = NODE_NONE;
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
+            let mut gn: i32 = 0;
+            if !self.tc_is_callee(id) && mext != NODE_NONE && mf.generics.len == 0 && unsafe (*self.mod_ast(
+                method.module,
+            )).at_const(mext).as_data.extend_def.generics.len != 0 && inst_ty != TYPE_NONE && self.aggregate_of(
+                inst_ty,
+                &mut tm,
+                &mut td,
+                &mut gp,
+                &mut ga,
+                &mut gn,
+            ) {
+                let mut ps = Defs8 {};
+                let mut ts = Tys8 {};
+                let mut k: i32 = 0;
+                self.frame_ext(method.module, mext, &ga[0], gn, &mut ps[0], &mut ts[0], &mut k);
+                unsafe (*self.cur_ast()).set_type_args(id, &ga[0], gn as u8);
+                return self.tc_sig_subst(method, &ps[0], &ts[0], k);
+            }
             return self.decl_type_in(method.module, method.node);
         }
         let mut amb = false;
@@ -20528,6 +20656,16 @@ extend TypeChecker {
                     ),
                 );
                 self.errors.note(format("bind the result in the bound: 'Output = {}'", str::from_cstr(&tb[0])));
+            }
+            return l;
+        }
+        if m.len() != 0 && ls != TYPE_NONE && self.type_at(ls).is_vec() {
+            // A vector `v op= r` picks its operator as `v op r` does: a shift count may be a lane.
+            self.check_expr(bd.right);
+            let mut out = TYPE_NONE;
+            let _ = self.check_arith_overload(id, l, &mut out);
+            if !self.is_assignable(bd.left) {
+                self.errors.emit_span(unsafe (*a).at_const(bd.left).span, format("cannot assign to this expression"));
             }
             return l;
         }
@@ -23716,6 +23854,9 @@ extend TypeChecker {
                     self.decl_type(unsafe (*a).list(params)[i as usize]);
                 }
                 let fnd = unsafe (*self.cur_ast()).at_const(id).as_data.function;
+                if fnd.is_intrinsic() {
+                    self.tc_check_intrinsic(id);
+                }
                 // `@blocking` is implemented by packing the call's arguments into a frame the pool thread
                 // runs from, and a variadic call has no fixed shape to pack, so say so here rather than
                 // let codegen quietly emit an ordinary (worker-blocking) call.
@@ -23832,7 +23973,7 @@ extend TypeChecker {
                 self.icx.current_fn = id;
                 self.err_wm = self.errors.errors.len();
                 self.loop_depth = 0;
-                if fnd.body != NODE_NONE {
+                if fnd.body != NODE_NONE && !fnd.is_intrinsic() {
                     // An `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
                     // no per-statement markers; the safety obligation sits at the call sites.
                     if fnd.is_unsafe() {

@@ -13,6 +13,9 @@ const fn check_name(c: u8) str<'static> {
     if c == ir::IN_BOUNDS_GROUP {
         return "bounds.group";
     }
+    if c == ir::IN_BOUNDS_GROUP_PROVEN {
+        return "bounds.group.proven";
+    }
     if c == ir::IN_RANGE_BOUNDS {
         return "range_bounds";
     }
@@ -117,9 +120,14 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
             },
         );
         p_operand(out, b, r.a);
-    } else if r.kind == ir::RV_AGGREGATE {
-        out.push_str("agg");
-        out.push_u64(r.c);
+    } else if r.kind == ir::RV_AGGREGATE || r.kind == ir::RV_SIMD {
+        if r.kind == ir::RV_SIMD {
+            out.push_str("simd.");
+            out.push_str(ir::simd_op(r.c).name);
+        } else {
+            out.push_str("agg");
+            out.push_u64(r.c);
+        }
         out.push_str("[");
         for i in 0..r.b {
             if i != 0 {

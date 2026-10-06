@@ -3601,7 +3601,9 @@ fn push_cval(out: &mut String, v: i64, bt: BuiltinType) {
     }
 }
 
-// The vector lane check (`ir::CHECK_LANES`): the index and the lane count in the trap.
+// The vector lane check (`ir::CHECK_LANES`): the index and the lane count in the trap; the range check
+// of a vector load or store (`ir::CHECK_VEC`): the lane count, the start and the length; and a lane
+// operation's trap. Every vector type's definition carries it, so a program without vectors has none.
 const LANE_CHECK_C: str<'static> = M"(#ifndef SC_LANE_CHECK
 #define SC_LANE_CHECK
 static _Noreturn __attribute__((unused, cold, noinline)) void __sc_lane_oob(size_t __i, size_t __n) {
@@ -3614,5 +3616,29 @@ static __attribute__((unused)) inline size_t __sc_lane(size_t __i, size_t __n) {
   if (__i >= __n) __sc_lane_oob(__i, __n);
   return __i;
 }
+static _Noreturn __attribute__((unused, cold, noinline)) void __sc_vec_oob(size_t __i, size_t __n, size_t __w) {
+  char __m[128];
+  snprintf(__m, sizeof __m, "index out of bounds: %llu lanes from %llu but the length is %llu", (unsigned long long)__w,
+           (unsigned long long)__i, (unsigned long long)__n);
+  __sc_panic(__m);
+}
+static __attribute__((unused)) inline size_t __sc_bounds_vec(size_t __i, size_t __n, size_t __w) {
+  if (__i > __n || __w > __n - __i) __sc_vec_oob(__i, __n, __w);
+  return __i;
+}
+/* A vector operation's lane trap: bit `i` of `__f0` (failure `__m0`) or of `__f1` (failure `__m1`) is
+   set when lane `i` fails; the lowest failing lane names itself. `__sc_lane_ovf` keeps an overflow
+   failure only in a build that checks overflow (the scalar `+ - *` rule). */
+static _Noreturn __attribute__((unused, cold, noinline)) void __sc_panic_lane(uint64_t __f0, uint64_t __f1, const char *__m0, const char *__m1) {
+  unsigned __l = (unsigned)__builtin_ctzll(__f0 | __f1);
+  char __m[128];
+  snprintf(__m, sizeof __m, "lane %u: %s", __l, (__f0 >> __l & 1) ? __m0 : __m1);
+  __sc_panic(__m);
+}
+#ifdef SC_ARITH_WRAP
+#define __sc_lane_ovf(f) ((void)(f), 0)
+#else
+#define __sc_lane_ovf(f) (f)
+#endif
 #endif
 )";

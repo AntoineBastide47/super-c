@@ -37,6 +37,21 @@ pub interface Copy {}
 /// `f64`. Only `std` implements it.
 pub interface SimdElement: Copy {}
 
+/// An integer lane type: `i8` to `i64` and `u8` to `u64`. Only `std` implements it.
+pub interface SimdInt: SimdElement {
+    /// The unsigned lane type of the same width.
+    type Unsigned;
+}
+
+/// A lane type with a sign: `i8` to `i64`, `f32` and `f64`. Only `std` implements it.
+pub interface SimdSigned: SimdElement {}
+
+/// A float lane type: `f32` or `f64`. Only `std` implements it.
+pub interface SimdFloat: SimdSigned {
+    /// The unsigned integer lane type of the same width: the type of the bits.
+    type Bits;
+}
+
 /// Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
 /// sub/mul/div/rem. A type need not name these interfaces: a bare method of the right name is enough;
 /// but conforming documents the intent and is what a generic bound can require.

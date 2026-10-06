@@ -5,6 +5,7 @@
 // optional origin NodeId kept for diagnostic compatibility.
 import ast::ast as *;
 import lexer::token as tok;
+import lexer::token_type as tt;
 
 pub type BlockId = u32;
 pub type LocalId = u32;
@@ -292,6 +293,256 @@ pub const RV_INTRINSIC: u8 = 12; // a = operand range start, b = len (IN_SIZEOF/
 /// from 0), item.node = end OperandId (IR_NONE = to the container's length), c bit0 = inclusive.
 /// Kept structural so end-openness survives (a materialized Range value cannot express it).
 pub const RV_SLICE: u8 = 13;
+/// A named vector operation: a = operand range start, b = len, c = SIMD_* code, target = result
+/// type. Lane-wise operators and casts stay RV_BINARY, RV_UNARY and RV_CAST over vector types.
+pub const RV_SIMD: u8 = 14;
+
+/// True for the rvalue kinds whose operands are the range `a`, `b` long, in `oper_pool`.
+pub const fn has_op_range(rv: &Rvalue) bool {
+    return rv.kind == RV_AGGREGATE || rv.kind == RV_CLOSURE || rv.kind == RV_SIMD || rv.kind == RV_INTRINSIC && rv.c != IN_SIZEOF && rv.c != IN_ALIGNOF && rv.c != IN_TYPE_INFO && rv.c != IN_DANGLING;
+}
+
+/// RV_SIMD operation codes (`Rvalue.c`), indexes of SIMD_OPS. Append-only. One code per lane rule:
+/// the element kind selects the scalar rule, as for RV_BINARY (`MIN` is IEEE minimumNumber on float
+/// lanes, `ABS` clears the sign bit of a float lane).
+pub const SIMD_IOTA: u8 = 0;
+pub const SIMD_CMP_EQ: u8 = 1;
+pub const SIMD_CMP_NE: u8 = 2;
+pub const SIMD_CMP_LT: u8 = 3;
+pub const SIMD_CMP_LE: u8 = 4;
+pub const SIMD_CMP_GT: u8 = 5;
+pub const SIMD_CMP_GE: u8 = 6;
+pub const SIMD_CHOOSE: u8 = 7;
+pub const SIMD_WRAP_ADD: u8 = 8;
+pub const SIMD_WRAP_SUB: u8 = 9;
+pub const SIMD_WRAP_MUL: u8 = 10;
+pub const SIMD_WRAP_NEG: u8 = 11;
+pub const SIMD_WRAP_SHL: u8 = 12;
+pub const SIMD_WRAP_SHR: u8 = 13;
+pub const SIMD_OVF_ADD: u8 = 14;
+pub const SIMD_OVF_SUB: u8 = 15;
+pub const SIMD_OVF_MUL: u8 = 16;
+pub const SIMD_SAT_ADD: u8 = 17;
+pub const SIMD_SAT_SUB: u8 = 18;
+pub const SIMD_MIN: u8 = 19;
+pub const SIMD_MAX: u8 = 20;
+pub const SIMD_ABS: u8 = 21;
+pub const SIMD_WRAP_ABS: u8 = 22;
+pub const SIMD_ABS_DIFF: u8 = 23;
+pub const SIMD_CLZ: u8 = 24;
+pub const SIMD_CTZ: u8 = 25;
+pub const SIMD_POPCNT: u8 = 26;
+pub const SIMD_ROTL: u8 = 27;
+pub const SIMD_ROTR: u8 = 28;
+pub const SIMD_BITREV: u8 = 29;
+pub const SIMD_BSWAP: u8 = 30;
+pub const SIMD_COPYSIGN: u8 = 31;
+pub const SIMD_MINIMUM: u8 = 32;
+pub const SIMD_MAXIMUM: u8 = 33;
+pub const SIMD_SQRT: u8 = 34;
+pub const SIMD_CEIL: u8 = 35;
+pub const SIMD_FLOOR: u8 = 36;
+pub const SIMD_TRUNC: u8 = 37;
+pub const SIMD_ROUND_EVEN: u8 = 38;
+pub const SIMD_FMA: u8 = 39;
+pub const SIMD_IS_NAN: u8 = 40;
+pub const SIMD_IS_INF: u8 = 41;
+pub const SIMD_IS_FINITE: u8 = 42;
+pub const SIMD_IS_NORMAL: u8 = 43;
+pub const SIMD_IS_SUBNORMAL: u8 = 44;
+pub const SIMD_IS_SIGN_NEG: u8 = 45;
+pub const SIMD_CAST_CHANGED: u8 = 46; // (source, cast result): the lanes whose value changed or were NaN
+pub const SIMD_NARROW_CHECKED: u8 = 47;
+pub const SIMD_NARROW_SAT: u8 = 48;
+pub const SIMD_BITCAST: u8 = 49;
+pub const SIMD_LOW_HALF: u8 = 50;
+pub const SIMD_HIGH_HALF: u8 = 51;
+pub const SIMD_CONCAT: u8 = 52;
+pub const SIMD_LOAD: u8 = 53; // (slice, checked start): reads N elements
+pub const SIMD_STORE: u8 = 54; // (slice, checked start, vector): writes N elements
+pub const SIMD_LOAD_RAW: u8 = 55; // (pointer): reads sizeof(T) * N bytes
+pub const SIMD_STORE_RAW: u8 = 56; // (pointer, vector): writes sizeof(T) * N bytes
+
+/// SimdOp.rule: how the operands and the result relate (V is operand 0's vector type, N its lanes).
+pub const SR_VEC: u8 = 0; // every operand and the result are V
+pub const SR_MASK: u8 = 1; // every operand is V; the result is Mask<N>
+pub const SR_CHOOSE: u8 = 2; // (Mask<N>, V, V) -> V; V is operand 1's type
+pub const SR_LANES: u8 = 3; // (V) or (V, V) -> a vector of N other lanes
+pub const SR_CHANGED: u8 = 4; // (V, W), W of N lanes -> Mask<N>
+pub const SR_BITCAST: u8 = 5; // V -> a vector of the same size
+pub const SR_HALF: u8 = 6; // V -> N / 2 lanes of V's element
+pub const SR_CONCAT: u8 = 7; // (V, V) -> 2 * N lanes of V's element
+pub const SR_ANY: u8 = 8; // no operand; the result is any vector
+pub const SR_LOAD: u8 = 9; // a slice or pointer of T [, usize start] -> Simd<T, N>
+pub const SR_STORE: u8 = 10; // a slice or pointer of T [, usize start], Simd<T, N> -> unit
+
+/// SimdOp.elem: the lane types the operation accepts (operand 0's lanes, or the result's for SR_ANY).
+pub const SE_ANY: u8 = 0;
+pub const SE_INT: u8 = 1;
+pub const SE_FLOAT: u8 = 2;
+pub const SE_SIGNED: u8 = 3; // a signed integer or a float
+pub const SE_SINT: u8 = 4; // a signed integer
+
+/// SimdOp.effect: the memory the operation touches through operand 0.
+pub const SM_NONE: u8 = 0;
+pub const SM_READ: u8 = 1;
+pub const SM_WRITE: u8 = 2;
+
+/// One RV_SIMD operation: its intrinsic name (`@intrinsic("simd.<name>")`), operand count, type
+/// rule, lane types, and memory effect through operand 0.
+pub struct SimdOp {
+    pub name: str<'static>,
+    pub arity: u8,
+    pub rule: u8,
+    pub elem: u8,
+    pub effect: u8,
+}
+
+const fn sop(name: str<'static>, arity: u8, rule: u8, elem: u8) SimdOp {
+    return SimdOp { name: name, arity: arity, rule: rule, elem: elem, effect: SM_NONE };
+}
+
+/// The number of RV_SIMD codes.
+pub const SIMD_CODES: usize = 57;
+
+pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
+    sop("iota", 0, SR_ANY, SE_ANY),
+    sop("eq", 2, SR_MASK, SE_ANY),
+    sop("ne", 2, SR_MASK, SE_ANY),
+    sop("lt", 2, SR_MASK, SE_ANY),
+    sop("le", 2, SR_MASK, SE_ANY),
+    sop("gt", 2, SR_MASK, SE_ANY),
+    sop("ge", 2, SR_MASK, SE_ANY),
+    sop("choose", 3, SR_CHOOSE, SE_ANY),
+    sop("wrapping_add", 2, SR_VEC, SE_INT),
+    sop("wrapping_sub", 2, SR_VEC, SE_INT),
+    sop("wrapping_mul", 2, SR_VEC, SE_INT),
+    sop("wrapping_neg", 1, SR_VEC, SE_INT),
+    sop("wrapping_shl", 2, SR_VEC, SE_INT),
+    sop("wrapping_shr", 2, SR_VEC, SE_INT),
+    sop("overflow_add", 2, SR_MASK, SE_INT),
+    sop("overflow_sub", 2, SR_MASK, SE_INT),
+    sop("overflow_mul", 2, SR_MASK, SE_INT),
+    sop("saturating_add", 2, SR_VEC, SE_INT),
+    sop("saturating_sub", 2, SR_VEC, SE_INT),
+    sop("min", 2, SR_VEC, SE_ANY),
+    sop("max", 2, SR_VEC, SE_ANY),
+    sop("abs", 1, SR_VEC, SE_SIGNED),
+    sop("wrapping_abs", 1, SR_VEC, SE_SINT),
+    sop("abs_diff", 2, SR_LANES, SE_INT),
+    sop("leading_zeros", 1, SR_VEC, SE_INT),
+    sop("trailing_zeros", 1, SR_VEC, SE_INT),
+    sop("count_ones", 1, SR_VEC, SE_INT),
+    sop("rotate_left", 2, SR_VEC, SE_INT),
+    sop("rotate_right", 2, SR_VEC, SE_INT),
+    sop("reverse_bits", 1, SR_VEC, SE_INT),
+    sop("swap_bytes", 1, SR_VEC, SE_INT),
+    sop("copysign", 2, SR_VEC, SE_FLOAT),
+    sop("minimum", 2, SR_VEC, SE_FLOAT),
+    sop("maximum", 2, SR_VEC, SE_FLOAT),
+    sop("sqrt", 1, SR_VEC, SE_FLOAT),
+    sop("ceil", 1, SR_VEC, SE_FLOAT),
+    sop("floor", 1, SR_VEC, SE_FLOAT),
+    sop("trunc", 1, SR_VEC, SE_FLOAT),
+    sop("round_even", 1, SR_VEC, SE_FLOAT),
+    sop("fma", 3, SR_VEC, SE_FLOAT),
+    sop("is_nan", 1, SR_MASK, SE_FLOAT),
+    sop("is_infinite", 1, SR_MASK, SE_FLOAT),
+    sop("is_finite", 1, SR_MASK, SE_FLOAT),
+    sop("is_normal", 1, SR_MASK, SE_FLOAT),
+    sop("is_subnormal", 1, SR_MASK, SE_FLOAT),
+    sop("is_sign_negative", 1, SR_MASK, SE_FLOAT),
+    sop("cast_changed", 2, SR_CHANGED, SE_ANY),
+    sop("narrow", 1, SR_LANES, SE_INT),
+    sop("narrow_saturating", 1, SR_LANES, SE_INT),
+    sop("bitcast", 1, SR_BITCAST, SE_ANY),
+    sop("low_half", 1, SR_HALF, SE_ANY),
+    sop("high_half", 1, SR_HALF, SE_ANY),
+    sop("concat", 2, SR_CONCAT, SE_ANY),
+    SimdOp { name: "load", arity: 2, rule: SR_LOAD, elem: SE_ANY, effect: SM_READ },
+    SimdOp { name: "store", arity: 3, rule: SR_STORE, elem: SE_ANY, effect: SM_WRITE },
+    SimdOp { name: "load_raw", arity: 1, rule: SR_LOAD, elem: SE_ANY, effect: SM_READ },
+    SimdOp { name: "store_raw", arity: 2, rule: SR_STORE, elem: SE_ANY, effect: SM_WRITE },
+];
+
+/// The SIMD_OPS row of code `c`.
+pub const fn simd_op(c: u8) SimdOp {
+    let t: []SimdOp = SIMD_OPS;
+    return t[c as usize];
+}
+
+/// What `@intrinsic("simd.<name>")` lowers to (`simd_intrinsic`).
+pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
+pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
+pub const SI_CAST: u32 = 3; // RV_CAST CAST_NUMERIC
+pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
+
+/// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
+pub fn simd_intrinsic(name: str) u32 {
+    if !name.starts_with("simd.") {
+        return 0;
+    }
+    let n = name.slice(5, name.len());
+    let ops: []str = ["add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "shr"];
+    let toks: []tt::TokenType = [
+        tt::TokenType::Plus,
+        tt::TokenType::Minus,
+        tt::TokenType::Star,
+        tt::TokenType::Slash,
+        tt::TokenType::Percent,
+        tt::TokenType::Ampersand,
+        tt::TokenType::Pipe,
+        tt::TokenType::Caret,
+        tt::TokenType::LeftShift,
+        tt::TokenType::RightShift,
+    ];
+    for i in 0..ops.len() {
+        if n == ops[i] {
+            return SI_BINARY << 8 | toks[i] as u32;
+        }
+    }
+    if n == "neg" || n == "not" {
+        return SI_UNARY << 8 | pick(n == "neg", tt::TokenType::Minus, tt::TokenType::Tilde) as u32;
+    }
+    if n == "cast" {
+        return SI_CAST << 8;
+    }
+    let t: []SimdOp = SIMD_OPS;
+    for c in 0..t.len() {
+        if n == t[c].name {
+            return SI_SIMD << 8 | c as u32;
+        }
+    }
+    return 0;
+}
+
+/// The run-time and compile-time trap message of a failing lane of rvalue kind `rk`: RV_BINARY with
+/// operator token `op`, RV_UNARY (`-`), or RV_SIMD with code `op`; `second` for the second failure
+/// kind of `/` and `%` (MIN / -1 after a zero divisor). The trap reads `lane <i>: <message>`.
+pub const fn lane_trap_msg(rk: u8, op: u8, second: bool) str<'static> {
+    if rk != RV_BINARY {
+        return pick(
+            rk == RV_SIMD && op == SIMD_NARROW_CHECKED,
+            "attempt to narrow a lane that does not fit",
+            "attempt to negate with overflow",
+        );
+    }
+    let t = op as tt::TokenType;
+    return switch t {
+        Plus => "attempt to add with overflow",
+        Minus => "attempt to subtract with overflow",
+        Star => "attempt to multiply with overflow",
+        Slash => pick(second, "attempt to divide with overflow", "attempt to divide by zero"),
+        Percent => pick(
+            second,
+            "attempt to calculate the remainder with overflow",
+            "attempt to calculate the remainder with a divisor of zero",
+        ),
+        LeftShift => "attempt to shift left with overflow",
+        RightShift => "attempt to shift right with overflow",
+        _ => "attempt to negate with overflow",
+    };
+}
 
 /// Cast kinds (RV_CAST.b).
 pub const CAST_NUMERIC: u8 = 0;
@@ -337,10 +588,14 @@ pub const IN_BOUNDS_PROVEN: u8 = 16;
 pub const IN_RANGE_BOUNDS: u8 = 17;
 pub const IN_RANGE_BOUNDS_PROVEN: u8 = 18;
 /// IN_BOUNDS_GROUP(index, len, width): panics unless index <= len && width <= len - index (the
-/// overflow-safe spelling of `index + width <= len`), else returns the unchanged index. Produced
-/// only by BCE range-check coalescing: one group check at the FIRST access site covers the
-/// accesses index .. index + width - 1, whose own element checks become IN_BOUNDS_PROVEN.
+/// overflow-safe spelling of `index + width <= len`), else returns the unchanged index. Two
+/// producers: BCE range-check coalescing (one group check at the FIRST access site covers the
+/// accesses index .. index + width - 1, whose own element checks become IN_BOUNDS_PROVEN), and
+/// the lowering of a vector load or store (SIMD_LOAD, SIMD_STORE), whose check is `CHECK_VEC`.
 pub const IN_BOUNDS_GROUP: u8 = 19;
+/// The `item.node` of the IN_BOUNDS_GROUP before a vector load or store: its trap names the start,
+/// the lane count and the length.
+pub const CHECK_VEC: NodeId = 2;
 /// Combined preemption + cancellation safepoint (i32 result): the emitted hot path is the same
 /// tick decrement as IN_SAFEPOINT; the cold half additionally asks the runtime's cancel hook
 /// whether an unmasked request is pending, ACCEPTS it, and reports 1 -- the following switch then
@@ -355,10 +610,13 @@ pub const IN_CHUNK: u8 = 21;
 /// IN_LIKELY(cond): returns the bool `cond` unchanged; the C emitter tells the C compiler that it
 /// is usually true (the success test of `?`, whose failure path returns early).
 pub const IN_LIKELY: u8 = 22;
+/// IN_BOUNDS_GROUP with a BCE proof that the panic edge is unreachable (a vector access's group
+/// check in a strided loop): the C emitter prints only the index; the interpreter still checks.
+pub const IN_BOUNDS_GROUP_PROVEN: u8 = 23;
 
-/// True for the five safe-access check intrinsics.
+/// True for the six safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {
-    return c == IN_BOUNDS || c == IN_BOUNDS_PROVEN || c == IN_BOUNDS_GROUP || c == IN_RANGE_BOUNDS || c == IN_RANGE_BOUNDS_PROVEN;
+    return c == IN_BOUNDS || c == IN_BOUNDS_PROVEN || c == IN_BOUNDS_GROUP || c == IN_BOUNDS_GROUP_PROVEN || c == IN_RANGE_BOUNDS || c == IN_RANGE_BOUNDS_PROVEN;
 }
 
 /// Operand count of a check intrinsic: element checks take (index, len); range and group checks
@@ -620,6 +878,9 @@ pub struct CoreBody {
     pub user_moves: Vector<u64>,
     pub asms: Vector<AsmRec>,
     pub asm_spans: Vector<tok::Span>,
+    /// The calls the inliner replaced whose callee instance holds a per-instantiation
+    /// `static_assert`: the emitter still demands each instance, so the assert still runs.
+    pub demands: Vector<Terminator>,
     pub entry: BlockId,
 }
 
@@ -643,6 +904,7 @@ extend Operand as Copy {}
 extend Rvalue as Copy {}
 extend Constant as Copy {}
 extend AsmRec as Copy {}
+extend Terminator as Copy {}
 
 extend CoreBody {
     /// True when a projection of place `pl` is a deref: the place reaches through a reference.
@@ -688,6 +950,11 @@ extend CoreBody {
             t.iface = pub_map1(map, t.iface);
             t.recv = pub_map1(map, t.recv);
         }
+        for i in 0..self.demands.len() {
+            let t = self.demands.index_mut(i);
+            t.iface = pub_map1(map, t.iface);
+            t.recv = pub_map1(map, t.recv);
+        }
         for i in 0..self.rvalues.len() {
             let rv = self.rvalues.index_mut(i);
             rv.target = pub_map1(map, rv.target);
@@ -727,6 +994,7 @@ extend CoreBody {
             user_moves: Vector::<u64>::new(),
             asms: Vector::<AsmRec>::new(),
             asm_spans: Vector::<tok::Span>::new(),
+            demands: Vector::<Terminator>::new(),
             entry: 0,
         };
     }
@@ -762,6 +1030,7 @@ extend CoreBody {
         self.user_moves.truncate(0);
         self.asms.truncate(0);
         self.asm_spans.truncate(0);
+        self.demands.truncate(0);
         self.entry = 0;
     }
 
@@ -774,6 +1043,7 @@ extend CoreBody {
         n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity()) * 4;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
+        n += self.demands.capacity() * sizeof(Terminator);
         return n as u64;
     }
 
@@ -807,6 +1077,7 @@ extend CoreBody {
         out.targ_pool = exact(&src.targ_pool);
         out.asms = exact(&src.asms);
         out.asm_spans = exact(&src.asm_spans);
+        out.demands = exact(&src.demands);
         return out;
     }
 

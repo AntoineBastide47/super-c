@@ -3,6 +3,7 @@
 // symbolic or error type is always permitted in a generic body.
 import ast::ast as *;
 import ir::core as ir;
+import lexer::token_type as tt;
 import module::loader as loader;
 
 // The six prelude length-carrying views whose safe access must address through an explicit
@@ -108,6 +109,138 @@ const fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
     return marks[p.base as usize];
 }
 
+// The width in bits of a vector type's lanes, 0 when symbolic.
+fn lane_bits(da: &Ast, y: &Ty) u64 {
+    let e = *da.type_at(y.as_data.arr.elem);
+    return pick(e.kind == TypeKind::TYPE_BUILTIN, bt_lane_bits(e.as_data.builtin), 0u32);
+}
+
+// The lane class of a vector type's lanes: 1 signed integer, 2 unsigned integer, 3 float, 0 symbolic.
+fn lane_class(da: &Ast, y: &Ty) u8 {
+    let e = *da.type_at(y.as_data.arr.elem);
+    if e.kind != TypeKind::TYPE_BUILTIN {
+        return 0;
+    }
+    let bt = e.as_data.builtin;
+    if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
+        return 3;
+    }
+    return pick(
+        bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_U64,
+        2u8,
+        1u8,
+    );
+}
+
+// The operand and result types of vector rvalue `r` (RV_SIMD by its code's row, and RV_BINARY,
+// RV_UNARY and a numeric RV_CAST over vectors by the scalar operator rules per lane): the violated
+// rule, or "". A symbolic lane type passes the lane-class rules (a generic body).
+fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
+    let res = *da.type_at(r.target);
+    if r.kind == ir::RV_BINARY || r.kind == ir::RV_UNARY || r.kind == ir::RV_CAST && r.b == ir::CAST_NUMERIC {
+        let a = *da.type_at(b.operands.at(r.a as usize).ty);
+        if a.kind != TypeKind::TYPE_SIMD && res.kind != TypeKind::TYPE_SIMD {
+            return "";
+        }
+        if a.kind != TypeKind::TYPE_SIMD || res.kind != TypeKind::TYPE_SIMD || a.as_data.arr.len != res.as_data.arr.len {
+            return "vector-operand-types";
+        }
+        if r.kind == ir::RV_CAST {
+            return "";
+        }
+        let k = lane_class(da, &a);
+        let t = pick(r.kind == ir::RV_UNARY, r.b as u8, r.c) as tt::TokenType;
+        let shift = t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift;
+        let int_only = shift || t == tt::TokenType::Percent || t == tt::TokenType::Ampersand || t == tt::TokenType::Pipe || t == tt::TokenType::Caret || t == tt::TokenType::Tilde;
+        let rhs = if r.kind == ir::RV_BINARY {
+            b.operands.at(r.b as usize).ty;
+        } else {
+            r.target;
+        };
+        if r.target != b.operands.at(r.a as usize).ty || rhs != r.target && !(shift && rhs == a.as_data.arr.elem) {
+            return "vector-operand-types";
+        }
+        if k != 0 && (int_only && k == 3 || r.kind == ir::RV_UNARY && t == tt::TokenType::Minus && k == 2) {
+            return "vector-lane-class";
+        }
+        return "";
+    }
+    if r.kind != ir::RV_SIMD {
+        return "";
+    }
+    let op = ir::simd_op(r.c);
+    let mut tys: [TypeId; 3] = [TYPE_NONE; 3];
+    for k in 0..r.b {
+        unsafe tys[k as usize] = b.operands.at(b.oper_pool[(r.a + k) as usize] as usize).ty;
+    }
+    // The vector operand: the stored one, the choice's first, else operand 0 (the result for `iota`
+    // and the loads).
+    let vt = if op.rule == ir::SR_ANY || op.rule == ir::SR_LOAD {
+        r.target;
+    } else if op.rule == ir::SR_STORE {
+        unsafe tys[(op.arity - 1) as usize];
+    } else {
+        unsafe tys[pick(op.rule == ir::SR_CHOOSE, 1usize, 0usize)];
+    };
+    let v = *da.type_at(vt);
+    if v.kind != TypeKind::TYPE_SIMD {
+        return "simd-vector-operand";
+    }
+    let k = lane_class(da, &v);
+    let el = op.elem;
+    if k != 0 && (el == ir::SE_INT && k == 3 || el == ir::SE_FLOAT && k != 3 || el == ir::SE_SIGNED && k == 2 || el == ir::SE_SINT && k != 1) {
+        return "simd-lane-class";
+    }
+    let same = r.b < 2 || tys[1] == vt || op.rule == ir::SR_CHOOSE || op.rule == ir::SR_CHANGED || op.rule == ir::SR_LOAD || op.rule == ir::SR_STORE;
+    let mask = res.kind == TypeKind::TYPE_MASK && res.as_data.arr.len == v.as_data.arr.len;
+    let lanes = res.kind == TypeKind::TYPE_SIMD && res.as_data.arr.len == v.as_data.arr.len;
+    // Lane counts and widths, 0 when symbolic (a generic body): a size rule holds unless both are known.
+    let rv = res.kind == TypeKind::TYPE_SIMD;
+    let vn = da.lanes(&v);
+    let rn = pick(rv, da.lanes(&res), 0u64);
+    let vb = lane_bits(da, &v);
+    let rb = pick(rv, lane_bits(da, &res), 0u64);
+    let open = vn * vb == 0 || rn * rb == 0;
+    let ok = switch op.rule {
+        ir::SR_VEC => same && r.target == vt && (r.b < 3 || tys[2] == vt),
+        ir::SR_MASK => same && mask,
+        ir::SR_CHOOSE => r.target == vt && tys[2] == vt && da.type_at(tys[0]).kind == TypeKind::TYPE_MASK && da.type_at(
+            tys[0],
+        ).as_data.arr.len == v.as_data.arr.len,
+        ir::SR_LANES => same && lanes && (r.c != ir::SIMD_ABS_DIFF || rb == vb && lane_class(da, &res) == 2 || open) && (r.c != ir::SIMD_NARROW_CHECKED && r.c != ir::SIMD_NARROW_SAT || rb < vb && lane_class(
+            da,
+            &res,
+        ) != 3 || open),
+        ir::SR_CHANGED => mask && da.type_at(tys[1]).kind == TypeKind::TYPE_SIMD && da.type_at(tys[1]).as_data.arr.len == v.as_data.arr.len,
+        ir::SR_HALF | ir::SR_CONCAT | ir::SR_BITCAST => same && res.kind == TypeKind::TYPE_SIMD && (op.rule == ir::SR_BITCAST || res.as_data.arr.elem == v.as_data.arr.elem) && (open || pick(
+            op.rule == ir::SR_BITCAST,
+            rn * rb == vn * vb,
+            pick(op.rule == ir::SR_HALF, rn * 2 == vn, rn == vn * 2),
+        )),
+        ir::SR_LOAD | ir::SR_STORE => {
+            // Operand 0 is a slice (`load`, `store`, then a `usize` start) or a pointer (the raw forms)
+            // of the lanes.
+            let p = *da.type_at(tys[0]);
+            let raw = r.c == ir::SIMD_LOAD_RAW || r.c == ir::SIMD_STORE_RAW;
+            let mut pe = TYPE_NONE;
+            if raw && p.kind == TypeKind::TYPE_POINTER {
+                pe = p.as_data.elem;
+            } else if !raw && p.kind == TypeKind::TYPE_INSTANCE && tys[1] == Ast::builtin(BuiltinType::BT_USIZE) {
+                let mut it = TyInstance {};
+                if da.targs_of(tys[0], &mut it) && it.n != 0 {
+                    pe = it.args[0];
+                }
+            }
+            pe == v.as_data.arr.elem && (op.rule == ir::SR_LOAD || res.kind == TypeKind::TYPE_BUILTIN);
+        },
+        _ => true,
+    };
+    if !ok {
+        return "simd-operand-types";
+    }
+    return "";
+}
+
 /// First violated rule as a static string, or "" when the body verifies.
 pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) str<'static> {
     if b.blocks.len() == 0 {
@@ -194,10 +327,21 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             if r.item.node != ir::IR_NONE && r.item.node as usize >= b.operands.len() {
                 return "slice-end-out-of-range";
             }
+        } else if r.kind == ir::RV_SIMD {
+            if r.c as usize >= ir::SIMD_CODES || r.b != ir::simd_op(r.c).arity as u32 {
+                return "simd-code-or-arity";
+            }
+            for k in 0..r.b {
+                if (r.a + k) as usize >= b.oper_pool.len() || b.oper_pool[(r.a + k) as usize] as usize >= b.operands.len() {
+                    return "rvalue-range-out-of-range";
+                }
+            }
         } else if r.kind == ir::RV_AGGREGATE || r.kind == ir::RV_CLOSURE || r.kind == ir::RV_INTRINSIC {
             if r.b != 0 && (r.a + r.b) as usize > b.oper_pool.len() {
                 return "rvalue-range-out-of-range";
             }
+        } else if r.kind > ir::RV_SIMD {
+            return "rvalue-kind";
         }
         if r.target as usize >= type_bound {
             return "rvalue-type-out-of-range";
@@ -289,7 +433,8 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
     }
     // Def-chain rules: a safe indexed projection addresses through an element-check
     // result, and a safe RV_SLICE takes its exclusive end from a range-check result. Marks: 0 =
-    // untouched, 1 = element-check temp, 2 = range-check temp, 3 = anything else (poisoned).
+    // untouched, 1 = element-check temp, 2 = range-check temp, 3 = anything else (poisoned), 4 = a vector
+    // access's group-check temp.
     if pkg != null {
         let pk = unsafe &*pkg;
         let da = unsafe &*pk.module_ast_const(b.module);
@@ -312,7 +457,9 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
                 }
                 let r = *b.rvalues.at(s.rvalue as usize);
                 let mut m: u8 = 3;
-                if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS || r.c == ir::IN_BOUNDS_PROVEN || r.c == ir::IN_BOUNDS_GROUP) {
+                if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS_GROUP || r.c == ir::IN_BOUNDS_GROUP_PROVEN) && r.item.node == ir::CHECK_VEC {
+                    m = 4;
+                } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS || r.c == ir::IN_BOUNDS_PROVEN || r.c == ir::IN_BOUNDS_GROUP || r.c == ir::IN_BOUNDS_GROUP_PROVEN) {
                     m = 1;
                 } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_RANGE_BOUNDS || r.c == ir::IN_RANGE_BOUNDS_PROVEN) {
                     m = 2;
@@ -362,6 +509,17 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
                 if !ok {
                     fail = "cast-types";
                 }
+            }
+            let vt = vec_types(da, b, r);
+            if vt.len() != 0 {
+                fail = vt;
+            }
+            if r.kind == ir::RV_SIMD && (r.c == ir::SIMD_LOAD || r.c == ir::SIMD_STORE) && op_mark(
+                b,
+                &marks,
+                b.oper_pool[(r.a + 1) as usize],
+            ) != 4 {
+                fail = "vector-access-not-checked";
             }
             if r.kind != ir::RV_SLICE {
                 continue;

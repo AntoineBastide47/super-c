@@ -894,7 +894,26 @@ extend Lowerer {
             self.scope_locals.push(rets.len + i);
         }
         self.scope_enter();
-        self.lower_stmt(fd.body);
+        if fd.is_intrinsic() {
+            // The operation itself over the arguments: the body a function value or a bound call runs.
+            let mut ops = self.avget();
+            for i in 0..params.len {
+                ops.push(self.copy_op(self.place_of_local(rets.len + i)));
+            }
+            let rt = if rets.len == 1 {
+                self.body.locals.at(0).ty;
+            } else {
+                Ast::builtin(BuiltinType::BT_VOID);
+            };
+            let r = self.lower_intrinsic(DefId { module: self.module, node: fnode }, &mut ops, rt, sp);
+            self.avput(ops);
+            if r != ir::IR_NONE && rets.len == 1 {
+                let pl = self.place_of_local(0);
+                self.assign(pl, self.rv_use(r, rt), sp);
+            }
+        } else {
+            self.lower_stmt(fd.body);
+        }
         self.scope_exit();
         self.emit_deads_down_to(0);
         // Fall-off return (void functions; a returning tail already sealed the block).
@@ -3475,6 +3494,13 @@ extend Lowerer {
                 }
             }
         }
+        if co != null && self.view_kind(unsafe (*co).target) == 1 && self.view_kind(
+            self.body.operands.at(op as usize).ty,
+        ) == 2 {
+            // `[]mut T` as `[]T`: the shared view borrows the view, as an array's view borrows it.
+            op = self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, op, 1, 0, unsafe (*co).target), sp));
+            co = null;
+        }
         if co != null && self.f.wide_lit(id) != null {
             // a wide literal already CARRIES the target-width limbs: the widening `from` shim
             // would truncate through its scalar parameter, so the constant retypes instead
@@ -4145,6 +4171,23 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         let mut argv = self.avget();
         argv.push(lop);
+        if self.is_intrinsic_fn(DefId { module: m, node: decl }) {
+            // A vector operator: the operation over the values (`lower_intrinsic`), no call.
+            let rop = if rhs != NODE_NONE {
+                self.lower_expr(rhs);
+            } else {
+                lop;
+            };
+            if rop == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            if rhs != NODE_NONE {
+                argv.push(rop);
+            }
+            let r = self.lower_intrinsic(DefId { module: m, node: decl }, &mut argv, ty, sp);
+            self.avput(argv);
+            return r;
+        }
         if rhs != NODE_NONE {
             let mut rop = self.lower_expr(rhs);
             if rop == ir::IR_NONE {
@@ -4590,6 +4633,12 @@ extend Lowerer {
                 }
             }
         }
+        if target.node != NODE_NONE && self.is_intrinsic_fn(target) {
+            self.body.targ_pool.truncate(ts as usize);
+            let r = self.lower_intrinsic(target, &mut argv, ty, sp);
+            self.avput(argv);
+            return r;
+        }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
@@ -4962,6 +5011,111 @@ extend Lowerer {
 
     fn intrinsic_value(self: &mut Self, ik: u8, bv: TypeId, ty: TypeId, sp: tok::Span) ir::OperandId {
         return self.copy_op(self.rv_temp(ir::rv(ir::RV_INTRINSIC, self.body.oper_pool.len() as u32, bv, ik, ty), sp));
+    }
+
+    // Whether `f` is an `@intrinsic` function: a call lowers to the operation it names.
+    const fn is_intrinsic_fn(self: &Self, f: DefId) bool {
+        let n = unsafe (&*(&*self.pkg).module_ast_const(f.module)).at_const(f.node);
+        return n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_intrinsic();
+    }
+
+    // The place operand `op` reads, or a temp holding it.
+    fn op_place(self: &mut Self, op: ir::OperandId, sp: tok::Span) ir::PlaceId {
+        let o = *self.body.operands.at(op as usize);
+        if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+            return o.data;
+        }
+        return self.spill(op, sp);
+    }
+
+    // The lane count of vector type `vt` as a `usize` operand: a constant once known, the const-generic
+    // parameter, else `sizeof(vt) / sizeof(lane)` (a vector holds its lanes without padding).
+    fn lanes_op(self: &mut Self, vt: TypeId, sp: tok::Span) ir::OperandId {
+        let ut = Ast::builtin(BuiltinType::BT_USIZE);
+        let n = self.f.lanes(self.f.ty(vt));
+        if n != 0 {
+            return self.kop(ir::CK_INT, ut, n as i64, sp);
+        }
+        // The const-generic parameter itself, which every instance binds (a constant for the evaluator).
+        let ly = *self.f.ty(self.f.ty(vt).as_data.arr.len);
+        if ly.kind == TypeKind::TYPE_GENERIC {
+            return self.copy_op(
+                self.place_of_local(self.item_local(DefId { module: ly.module, node: ly.as_data.decl }, ut, sp)),
+            );
+        }
+        let a = self.intrinsic_value(ir::IN_SIZEOF, vt, ut, sp);
+        let b = self.intrinsic_value(ir::IN_SIZEOF, self.f.ty(vt).as_data.arr.elem, ut, sp);
+        return self.copy_op(self.rv_temp(ir::rv(ir::RV_BINARY, a, b, tt::TokenType::Slash as u8, ut), sp));
+    }
+
+    // A call of `@intrinsic` function `f` over the operands `ops`, of type `ty`: the operation its name
+    // gives (`ir::simd_intrinsic`). A reference operand (an operator method's `&Self`) is read through.
+    // A vector load or store checks its lanes against the slice first: `IN_BOUNDS_GROUP(start, len, N)`.
+    fn lower_intrinsic(self: &mut Self, f: DefId, ops: &mut Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let fa = unsafe &*(&*self.pkg).module_ast_const(f.module);
+        let at = fa.attr_of(f.node, AttrKind::ATTR_INTRINSIC);
+        let src = unsafe (&*self.pkg).modules.at(f.module as usize).source.as_str();
+        let k = if at == null {
+            0u32;
+        } else {
+            ir::simd_intrinsic(src.slice((unsafe (*at).str_span.start) as usize, (unsafe (*at).str_span.end) as usize));
+        };
+        if k == 0 {
+            self.fail_at("intrinsic", NODE_NONE);
+            return ir::IR_NONE;
+        }
+        for i in 0..ops.len() {
+            let ot = self.body.operands.at(ops[i] as usize).ty;
+            if self.f.ty(ot).kind == TypeKind::TYPE_REFERENCE {
+                let pl = self.op_place(ops[i], sp);
+                let d = self.place_project(
+                    pl,
+                    ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: self.f.ty(ot).as_data.elem },
+                );
+                ops.set(i, self.copy_op(d));
+            }
+        }
+        let c = k as u8;
+        let kind = k >> 8;
+        if kind == ir::SI_BINARY || kind == ir::SI_UNARY || kind == ir::SI_CAST {
+            let rv = if kind == ir::SI_BINARY {
+                ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty);
+            } else {
+                ir::rv(
+                    pick(kind == ir::SI_UNARY, ir::RV_UNARY, ir::RV_CAST),
+                    ops[0],
+                    pick(kind == ir::SI_UNARY, c, ir::CAST_NUMERIC),
+                    0,
+                    ty,
+                );
+            };
+            return self.copy_op(self.rv_temp(rv, sp));
+        }
+        if c == ir::SIMD_LOAD || c == ir::SIMD_STORE {
+            let s = self.op_place(ops[0], sp);
+            let lop = self.copy_op(self.len_temp(s, sp));
+            let vt = if c == ir::SIMD_LOAD {
+                ty;
+            } else {
+                self.body.operands.at(ops[2] as usize).ty;
+            };
+            let wop = self.lanes_op(vt, sp);
+            let start = self.body.oper_pool.len() as u32;
+            self.body.oper_pool.push(ops[1]);
+            self.body.oper_pool.push(lop);
+            self.body.oper_pool.push(wop);
+            let mut g = ir::rv(ir::RV_INTRINSIC, start, 3, ir::IN_BOUNDS_GROUP, Ast::builtin(BuiltinType::BT_USIZE));
+            g.item.node = ir::CHECK_VEC;
+            ops.set(0, self.copy_op(s));
+            ops.set(1, self.copy_op(self.rv_temp(g, sp)));
+        }
+        return self.simd_op(c, ops, ty, sp);
+    }
+
+    // `RV_SIMD` code `c` over `ops`, of type `ty`, in a fresh temp.
+    fn simd_op(self: &mut Self, c: u8, ops: &Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let start = self.pool_ops(ops);
+        return self.copy_op(self.rv_temp(ir::rv(ir::RV_SIMD, start, ops.len() as u32, c, ty), sp));
     }
 
     // An unresolved callee spelling a compiler intrinsic name (behind an optional specialization).

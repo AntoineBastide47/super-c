@@ -124,6 +124,11 @@ pub struct Package {
     /// chain). `add_module` is the one place modules join the package, and paths never change.
     pub mod_index: Map<u64, u32>,
     pub mod_chain: Vector<u32>,
+    /// `std::` paths that name a prelude file loaded before them under its `__std::` path (the batch
+    /// `lint` and the LSP load the prelude first), and that module: `find` falls back to them, so an
+    /// explicit import gets the prelude module, as `load_prelude` gives a file imported first.
+    pub alias_path: Vector<String>,
+    pub alias_id: Vector<u32>,
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
     pub arch: i32,
@@ -3722,6 +3727,31 @@ extend Package {
             }
             m = self.mod_chain[m as usize];
         }
+        for i in 0..self.alias_path.len() {
+            if self.alias_path[i].as_str() == path {
+                return self.alias_id[i] as i32;
+            }
+        }
+        return -1;
+    }
+
+    // `find`, or the prelude module of `file` when a `std::` path names it: recorded as an alias.
+    fn find_file(self: &mut Self, path: str, file: str) i32 {
+        let ex = self.find(path);
+        if ex >= 0 || !path.starts_with("std::") {
+            return ex;
+        }
+        let mut f = String::from_str(file);
+        for i in 0..self.modules.len() {
+            if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == basename_of(file) && unsafe shim::sc_same_file(
+                f.cstr(),
+                self.modules[i].file.cstr(),
+            ) == 1 {
+                self.alias_path.push(String::from_str(path));
+                self.alias_id.push(i as u32);
+                return i as i32;
+            }
+        }
         return -1;
     }
 
@@ -3906,7 +3936,7 @@ extend Package {
     // A unit that failed to read or parse falls back to the serial loader at replay, so its
     // diagnostics print with the serial wording, position and order.
     fn load_module_par(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
-        let existing = self.find(mod_path);
+        let existing = self.find_file(mod_path, file_path);
         if existing >= 0 {
             return existing;
         }
@@ -3946,7 +3976,7 @@ extend Package {
                 self.collect_imports(unsafe &*ap, sp2, &mut dc, target, &mut all_paths, &mut all_files);
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
-                    if self.find(cp) >= 0 {
+                    if self.find_file(cp, all_files[c].as_str()) >= 0 {
                         continue;
                     }
                     let seen = punit_find(&units, &heads, cp) < units.len();
@@ -3985,7 +4015,7 @@ extend Package {
             stack.set(top, stack[top] + 1);
             let cp = units.at(ui).child_paths.at(c).as_str();
             // A visited unit gave its path away, so a loaded import is found here, not among the units.
-            if self.find(cp) >= 0 {
+            if self.find_file(cp, units.at(ui).child_files.at(c).as_str()) >= 0 {
                 continue;
             }
             // The wave loop gave every recorded import its own unit.
@@ -4011,7 +4041,7 @@ extend Package {
         expand: &mut bool,
     ) i32 {
         *expand = false;
-        let ex = self.find(units.at(ui).path.as_str());
+        let ex = self.find_file(units.at(ui).path.as_str(), units.at(ui).file.as_str());
         if ex >= 0 {
             return ex;
         }
@@ -4038,7 +4068,7 @@ extend Package {
     // parsed whole before any resolution, so mutual imports need no special handling. The stack is
     // explicit, bounded by the module count, so a long import chain cannot exhaust the call stack.
     fn load_module_serial(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
-        let existing = self.find(mod_path);
+        let existing = self.find_file(mod_path, file_path);
         if existing >= 0 {
             return existing;
         }
@@ -4058,7 +4088,7 @@ extend Package {
             stack.index_mut(top).next = k + 1;
             let cp = replace(stack.index_mut(top).paths.index_mut(k), String::new());
             let cf = replace(stack.index_mut(top).files.index_mut(k), String::new());
-            if self.find(cp.as_str()) >= 0 {
+            if self.find_file(cp.as_str(), cf.as_str()) >= 0 {
                 continue;
             }
             if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {

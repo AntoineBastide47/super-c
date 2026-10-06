@@ -641,5 +641,6 @@ fn index_states_after_analysis() {
     let main = item_named(&p, am, "main");
     assert(p.item_state(am as ModuleId, p.idx.items.at(main as usize).node) == loader::IS_CHECKED, "the node query");
     assert(p.item_state(am as ModuleId, 1) == loader::IS_PARSED, "a node that is no item");
-    assert(p.sched.retained() < 65536, "a small workspace holds a small index");
+    // The prelude's items (std/simd.spc's lane operations among them) are most of it.
+    assert(p.sched.retained() < 131072, "a small workspace holds a small index");
 }
