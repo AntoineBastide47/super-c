@@ -3795,3 +3795,25 @@ fn a_foreign_generic_self_result_is_the_instance() {
     assert(p.cc_build("").ok(), "builds");
     assert(p.run_bin() == 0, "the instance's value");
 }
+
+// A reference to an array parameter is the array's address: the C parameter is a pointer, so `&a`
+// would be the pointer's address.
+@test
+fn a_reference_to_an_array_parameter_reads_it() {
+    h::expect_exit(
+        "array parameter reference",
+        "fn first(a: [i32; 4]) i32 {\n    let r = &a;\n    return r[0] + r[3];\n}\nfn main() i32 {\n    return first([7, 0, 0, 2]) - 9;\n}\n",
+        0,
+    );
+}
+
+// A generic extend's method as a value (`W::<i64>::get`, `Simd::<f32, 4>::sqrt`): the qualifier's
+// instance binds the extend, so the value is that instance's function.
+@test
+fn a_generic_method_value_is_its_instance() {
+    h::expect_exit(
+        "generic method values",
+        "struct W<T> {\n    pub v: T,\n}\n\nextend<T: Copy> W<T> {\n    pub fn make(v: T) Self {\n        return W::<T> { v: v };\n    }\n\n    pub fn get(self: &Self) T {\n        return self.v;\n    }\n\n    pub fn pair(self: Self, o: Self) (T, T) {\n        return self.v, o.v;\n    }\n}\n\nfn main() i32 {\n    let mk = W::<i64>::make;\n    let g = W::<i64>::get;\n    let sq = Simd::<f32, 4>::sqrt;\n    let ad = Simd::<i8, 4>::abs_diff;\n    let w = mk(5);\n    let (x, y) = w.pair(mk(2));\n    let r = sq(Simd::<f32, 4>::splat(16.0));\n    let d = ad(Simd::<i8, 4>::splat(-100), Simd::<i8, 4>::splat(100));\n    return (g(&w) + x + y) as i32 + r[0] as i32 + d[0] as i32 - 216;\n}\n",
+        0,
+    );
+}

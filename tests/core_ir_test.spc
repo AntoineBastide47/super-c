@@ -14,6 +14,7 @@ import ir::interp as iri;
 import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
+import ir::facts as fx;
 import lexer::token as tok;
 import tests::harness as h;
 
@@ -580,4 +581,116 @@ fn memory_intrinsics_evaluate_at_compile_time() {
         "import string;\nconst fn moved(right: bool) u32 {\n    let mut a: [u8; 6] = [1, 2, 3, 4, 5, 6];\n    let p = &mut a as *mut [u8; 6] as *mut u8;\n    if right {\n        unsafe string::memmove(unsafe (p + 1), p, 4);\n    } else {\n        unsafe string::memmove(p, unsafe (p + 1), 4);\n    }\n    let mut r: u32 = 0;\n    for x in a {\n        r = r * 10 + x as u32;\n    }\n    return r;\n}\nconst fn filled() u32 {\n    let mut a = Vector::<u8>::new();\n    let mut b = Vector::<u8>::new();\n    for i in 1..5 {\n        a.push(i as u8);\n        b.push(0);\n    }\n    let q = b.as_ptr() as *mut u8;\n    unsafe string::memset(q, 7, 2);\n    unsafe string::memcpy(unsafe (q + 2), a.as_ptr(), 2);\n    let mut r: u32 = 0;\n    for x in b.iter() {\n        r = r * 10 + *x as u32;\n    }\n    return r;\n}\nconst R: u32 = moved(true);\nconst L: u32 = moved(false);\nconst F: u32 = filled();\nstatic_assert(R == 112346, \"memmove to a higher address\");\nstatic_assert(L == 234556, \"memmove to a lower address\");\nstatic_assert(F == 7712, \"memset then memcpy\");\nfn main(argv: Vector<str>) i32 {\n    let right = argv.len() == 1;\n    if moved(right) != R || moved(!right) != L || filled() != F {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
+}
+
+const SIMD_SRC: str = "fn f(s: []i32, d: []mut i32, p: *mut i32) Simd<i32, 4> {\n    let v = load::<i32, 4>(s, 0);\n    store(d, 0, v);\n    let w = unsafe load_unaligned::<i32, 4>(p);\n    unsafe store_unaligned(p, w);\n    let m = v.less_than(w);\n    return m.choose(v.min(w), w) + v;\n}\n";
+
+// The statements of `b` whose rvalue is an RV_SIMD, in order.
+fn simd_stmts(b: &ir::CoreBody) Vector<usize> {
+    let mut v = Vector::<usize>::new();
+    for i in 0..b.statements.len() {
+        let st = b.statements.at(i);
+        if st.kind == ir::ST_ASSIGN && b.rvalues.at(st.rvalue as usize).kind == ir::RV_SIMD {
+            v.push(i);
+        }
+    }
+    return v;
+}
+
+@test
+fn vector_memory_codes_have_their_effects() {
+    let p = typed_package(SIMD_SRC);
+    let out = lowered(&p, "f");
+    assert(has(&out, "simd.load["), "the slice load prints");
+    assert(has(&out, "bounds.group("), "a group check comes first");
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let b = &lw.body;
+    let mut seen: u32 = 0;
+    let ss = simd_stmts(b);
+    for k in 0..ss.len() {
+        let st = *b.statements.at(ss[k]);
+        let rv = *b.rvalues.at(st.rvalue as usize);
+        let e = fx::stmt_effect(b, &st);
+        if rv.c == ir::SIMD_STORE || rv.c == ir::SIMD_STORE_RAW {
+            // A store writes through its slice or pointer, operand 0.
+            assert(e.kind == fx::EF_PTR && e.a == b.oper_pool[rv.a as usize], "a store writes through operand 0");
+            seen += 1;
+        } else {
+            // A load, like every other code, only writes its result.
+            assert(e.kind == fx::EF_WRITE && e.a == st.place, "a load or a lane operation writes its result");
+            seen += pick(rv.c == ir::SIMD_LOAD || rv.c == ir::SIMD_LOAD_RAW, 1u32, 0u32);
+        }
+    }
+    assert_eq(seen, 4);
+}
+
+@test
+fn verifier_rejects_malformed_vector_records() {
+    let p = typed_package(SIMD_SRC);
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
+    assert_eq(irv::verify(&lw.body, tp, &p), "");
+    let ss = simd_stmts(&lw.body);
+    let mut cmp: usize = 0;
+    let mut load: usize = 0;
+    let mut min: usize = 0;
+    let mut rawl: usize = 0;
+    for k in 0..ss.len() {
+        let r = lw.body.statements.at(ss[k]).rvalue as usize;
+        let c = lw.body.rvalues.at(r).c;
+        if c == ir::SIMD_CMP_LT {
+            cmp = r;
+        } else if c == ir::SIMD_LOAD {
+            load = r;
+        } else if c == ir::SIMD_MIN {
+            min = r;
+        } else if c == ir::SIMD_LOAD_RAW {
+            rawl = r;
+        }
+    }
+    let good = *lw.body.rvalues.at(cmp);
+    // An unknown code, and another operand count.
+    lw.body.rvalues[cmp].c = ir::SIMD_CODES as u8;
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-code-or-arity");
+    lw.body.rvalues[cmp].c = ir::SIMD_IS_NAN;
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-code-or-arity");
+    // A float-only code on integer lanes.
+    lw.body.rvalues[cmp].c = ir::SIMD_COPYSIGN;
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-lane-class");
+    // A comparison whose result is not the mask of its lanes.
+    lw.body.rvalues[cmp] = good;
+    lw.body.rvalues[cmp].target = lw.body.operands.at(lw.body.oper_pool[good.a as usize] as usize).ty;
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
+    lw.body.rvalues[cmp] = good;
+    // A slice load whose start skipped its group check.
+    let lv = *lw.body.rvalues.at(load);
+    let start = lw.body.oper_pool[(lv.a + 1) as usize];
+    let raw = lw.body.oper_pool[lv.a as usize];
+    lw.body.oper_pool[(lv.a + 1) as usize] = raw;
+    assert(irv::verify(&lw.body, tp, &p) != "", "an unchecked load start is rejected");
+    lw.body.oper_pool[(lv.a + 1) as usize] = start;
+    assert_eq(irv::verify(&lw.body, tp, &p), "");
+    // A start checked by a plain element check, not the access's group check.
+    for i in 0..lw.body.rvalues.len() {
+        let r = *lw.body.rvalues.at(i);
+        if r.kind == ir::RV_INTRINSIC && r.c == ir::IN_BOUNDS_GROUP && r.item.node == ir::CHECK_VEC {
+            lw.body.rvalues[i].item.node = 0;
+            assert_eq(irv::verify(&lw.body, tp, &p), "vector-access-not-checked");
+            lw.body.rvalues[i].item.node = ir::CHECK_VEC;
+        }
+    }
+    // A slice load of a raw pointer.
+    lw.body.oper_pool[lv.a as usize] = lw.body.oper_pool[lw.body.rvalues.at(rawl).a as usize];
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
+    lw.body.oper_pool[lv.a as usize] = raw;
+    // A low half with as many lanes as its operand.
+    lw.body.rvalues[min].c = ir::SIMD_LOW_HALF;
+    lw.body.rvalues[min].b = 1;
+    assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
 }

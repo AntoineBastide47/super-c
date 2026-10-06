@@ -17,6 +17,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
 import std::parallel::time as time;
 import tests::parallel_harness as ph;
+import sc_io;
 
 // A connected pair: `a` is the client end, `b` the accepted end.
 struct Pair {
@@ -120,14 +121,31 @@ fn read_and_write_waits_on_one_socket_are_independent() {
     };
     // The write wait is satisfied at once (the socket is writable) and never pending, so its completion
     // is what orders it: only once it has finished is the byte written, and the still-armed reader must
-    // wake on it. (Writing while the write wait is still arming is a different case: under epoll the two
-    // directions share one registration, and that interleaving left the write wait unserved once in
-    // eight runs on a loaded Linux box, which is a reactor question, not this test's.)
+    // wake on it. The reader may still be registering when the writer does: under epoll the two
+    // directions share one registration, which neither may drop.
     assert(writer.wait_timeout(time::Duration::from_secs(10)), "the write wait finishes at once");
     write_one(&p.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the read wait finishes");
     assert_eq(count(&hits), 2);
     finish();
+}
+
+// Registrations add up on every backend: a read registration that lands after a write one, before the
+// poller is read, keeps the write interest and its queued event (an epoll registration replaces the
+// descriptor's mask, so each carries the bits registered before it).
+@test
+fn a_registration_keeps_the_other_directions_event() {
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let p = pair(&l);
+    let q = unsafe sc_io::sc_io_new();
+    assert(q != null, "a poller");
+    assert_eq(unsafe sc_io::sc_io_set(q, p.b.fd, sc_io::WR, 0), 0);
+    assert_eq(unsafe sc_io::sc_io_set(q, p.b.fd, sc_io::RD, 1), 0);
+    let mut out: [i32; 192] = [0; 192];
+    assert_eq(unsafe sc_io::sc_io_wait(q, &mut out[0], sc_io::EV_MAX, 10000), 1);
+    assert_eq(out[0], p.b.fd);
+    assert_eq(out[1], sc_io::WR);
+    unsafe sc_io::sc_io_free(q);
 }
 
 // The same two waits, but the byte arrives WHILE the write wait is arming: the read event may be delivered

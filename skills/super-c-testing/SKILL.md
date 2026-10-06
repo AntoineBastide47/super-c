@@ -366,7 +366,10 @@ through the compiler under test (below).
 `tests/harness.spc` builds each program as `main.spc` of a scratch manifest project
 (`diff_build`, `diff_run`). An option is a build flag (`--profile=release`, `--target=wasm`,
 `--cc=cc -target x86_64-apple-macos11`, one argument even with spaces) or, as `NAME=VALUE`, an
-environment variable of the build (`SC_BCE=0` keeps every bounds check). On the wasm lane each build
+environment variable of the build (`SC_BCE=0` keeps every bounds check). The project defines
+`--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program run many
+times: it compiles in about half the dev profile's time, and ASan's start-up makes each run several
+times slower. On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
 compiler under wasmtime; the C compile and the program stay native.
 
@@ -385,7 +388,8 @@ compiler under wasmtime; the C compile and the program stay native.
   `attempt to add/subtract/multiply/negate/divide with overflow` and the remainder form, "division
   by zero" for `attempt to divide by zero` and `... a divisor of zero`, "shift out of range" for
   `attempt to shift left/right with overflow`, "index out of bounds" for any message holding
-  it). Floats compare by bits, any NaN as `nan`. It runs
+  it; a vector lane trap keeps its text from `lane <digit>`, so the lane must match too). Floats
+  compare by bits, any NaN as `nan`. It runs
   under `dev` (overflow checks on); `decls` must not trap. `parity_program` prints the program.
 - `asm_check(src, opts, function, contains, absent)` builds, reads
   `build/<profile>/compile_commands.json`, finds the unit that defines `function`, reruns its
@@ -414,14 +418,25 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   fold to a constant"). isize/usize literals stay in the 32-bit range.
 - `loops.spc`: loops with affine and strided indexes, guards and sub-slices over a Vector and a
   slice of it; one oracle, `same_output` with BCE on against `SC_BCE=0`.
+- `vector.spc`: one lane operation of `std/simd.spc` per case (`VOPS` and the rearrangements) over
+  every lane type and 2, 4 or the most lanes, boundary-biased inputs (a float lane as its bits, so
+  signaling NaNs reach every side), and half the cases with small values so arithmetic seldom
+  traps. One oracle in one program (`check_cases`): each case as a constant against its run time
+  (the value, or the constant's error detail equal to the run-time trap, lane included), and the run
+  time against a scalar lane loop (`rk<k>`; a trap must have the same text without its lane). A run
+  executes every case from a start and prints to stderr, so a trap costs one more run from the next
+  case, not a process per case; the program is built with `--profile=ubsan`, and a trap exits with
+  status 134 through a SIGABRT handler, as a crash report or core dump costs more than the run.
+  `tests/simd_ops_test.spc` sweeps every operation, lane type, lane count and conversion target
+  through the same functions, in programs of at most 256 cases.
 
 `tests/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
 (`-DSC_ARITH_WRAP` through `--cstd` under `dev`: the runtime wraps, the constant traps), which the
 scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
-`SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops] ./super-c test --quiet
+`SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops|vector] ./super-c test --quiet
 --filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four
-programs (scalar) or two (loops).
+programs (scalar), two (loops) or one or two (vector: a rebuild without the trapping constants).
 
 ## Test Design Rules
 

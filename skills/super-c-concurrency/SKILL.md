@@ -438,8 +438,10 @@ the reactor echo programs hung on CI. Interests are never removed one by one. A 
 any other reason (deadline, cancel, shutdown) parks once more until the reactor
 acknowledges the node's removal, so no reference to a frame outlives it and the
 operating system never holds a pointer. Read and write waits on one descriptor are two
-lists; where a backend keeps one registration per descriptor (epoll) the reactor
-registers both directions again when the second one gains a waiter. Several waiters in
+lists. A registration adds its direction on every backend: epoll keeps one mask per
+descriptor and a modification replaces it, so the poller registers the union of the bits
+registered since the descriptor's last event, and a registration never drops the other
+direction or its queued event. Several waiters in
 one direction are all woken by its event and each retries. Every `net` handle closes through
 `io::close`, which first excludes the close from every registration in flight (on macOS
 a `close` overlapping a `kevent` registration of the same socket wedges both threads in

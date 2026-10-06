@@ -1,9 +1,12 @@
-// SIMD baselines: each kernel as a plain scalar loop, the reference that defines its result, and as
-// hand-written C intrinsics, one C file per instruction set. Every implementation of a kernel gives the
-// scalar loop's bits, any NaN counting as one value: `first_mismatch` checks that on every tail length,
-// and the benchmark and tests/simd_baseline_test.spc run it. record.sh turns a run into the rows of
-// baseline.tsv and probes.tsv.
+// SIMD baselines: each kernel as a plain scalar loop, the reference that defines its result, as
+// hand-written C intrinsics, one C file per instruction set, and over std/simd.spc's portable vectors
+// (the kernels lane operations express; the others run their scalar loops). Every implementation of a
+// kernel gives the scalar loop's bits, any NaN counting as one value: `first_mismatch` checks that on
+// every tail length, and the benchmark and tests/simd_baseline_test.spc run it. The benchmark fails when
+// a portable kernel runs more than 15% slower than its scalar loop. record.sh turns a run into the rows
+// of baseline.tsv and probes.tsv.
 import std::float as fl;
+import std::simd;
 import std::testing::bench as bench;
 
 const KERNELS: usize = 11;
@@ -78,6 +81,25 @@ const SCALAR: Kernels = Kernels {
     abs_diff_u8: abs_diff_u8,
 };
 
+// The kernels over portable vectors, and the scalar loops of the others.
+const PORTABLE: Kernels = Kernels {
+    name: "portable".ptr() as *const char,
+    saxpy_f32: saxpy_f32_v,
+    dot_f32_ordered: dot_f32_ordered,
+    dot_f32_tree: dot_f32_tree_v,
+    count_eq_u8: count_eq_u8_v,
+    sum_i32: sum_i32_v,
+    min_max_f32: min_max_f32_v,
+    filter_gt_f32: filter_gt_f32,
+    gather_sum_f32: gather_sum_f32,
+    tail_load_f32: tail_load_f32,
+    mix_width: mix_width_v,
+    abs_diff_u8: abs_diff_u8_v,
+};
+
+// The kernels PORTABLE runs over vectors, by index.
+const PORTED: [usize; 7] = [0, 2, 3, 4, 5, 9, 10];
+
 @arch(x86_64)
 extern "C" "sse2.h" {
     fn sb_sse2() *const void;
@@ -124,6 +146,7 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
         let reps = SIZES[2] / bytes; // every round processes 4 MiB
         for k in 0..KERNELS {
             let elements = reps * input.elements(k);
+            let mut scalar_ns: f64 = 0.0;
             for t in 0..tables.len() {
                 let table = tables[t];
                 let mut b = bench::Bencher::new(names()[k]);
@@ -136,6 +159,20 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
                 let mut s = b.samples().clone();
                 let ns = bench::summarize(&mut s).median * 1e9 / elements as f64;
                 println("simd\t{}\t{}\t{}\t{}", names()[k], str::from_cstr(table.name), bytes, ns);
+                if t == 0 {
+                    scalar_ns = ns;
+                } else if t == 1 && ported(k) && ns > scalar_ns * 1.15 {
+                    bench::fail(
+                        format(
+                            "portable {} at {} bytes: {} ns per element, the scalar loop {}",
+                            names()[k],
+                            bytes,
+                            ns,
+                            scalar_ns,
+                        ).as_str(),
+                    );
+                    return;
+                }
             }
         }
     }
@@ -161,15 +198,27 @@ pub fn first_mismatch() String {
     return String::new();
 }
 
-/// The instruction sets this CPU runs besides the scalar loops.
+/// The instruction sets this CPU runs besides the scalar loops and the portable vectors.
 pub fn isa_count() usize {
-    return implementations().len() - 1;
+    return implementations().len() - 2;
 }
 
-// The implementations this CPU runs: the scalar loops, then each table a C file reports as supported.
+// Whether PORTABLE runs kernel `k` over vectors.
+fn ported(k: usize) bool {
+    for p in PORTED {
+        if p == k {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The implementations this CPU runs: the scalar loops, the portable vectors, then each table a C file
+// reports as supported.
 fn implementations() Vector<&'static Kernels> {
     let mut v = Vector::<&'static Kernels>::new();
     v.push(&SCALAR);
+    v.push(&PORTABLE);
     if ARCH == Arch::X86_64 {
         push_table(&mut v, unsafe sb_sse2());
         push_table(&mut v, unsafe sb_avx2());
@@ -363,6 +412,175 @@ fn abs_diff_u8(ap: *const u8, bp: *const u8, outp: *mut u8, n: usize) {
         } else {
             b[i] - a[i];
         };
+    }
+}
+
+// The portable kernels: full 64-byte vectors over `len - len % N` elements, then the scalar loop's body
+// on the tail. The widest vector gives independent lane chains, as the scalar loop's vectorized form
+// keeps several accumulators.
+
+fn saxpy_f32_v(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
+    let x = view(xp, n);
+    let y = view_mut(yp, n);
+    let av = Simd::<f32, 16>::splat(a);
+    let m = n - n % 16;
+    let mut i: usize = 0;
+    while i < m {
+        simd::store(y, i, av * simd::load::<f32, 16>(x, i) + simd::load::<f32, 16>(y, i));
+        i += 16;
+    }
+    while i < n {
+        y[i] = a * x[i] + y[i];
+        i += 1;
+    }
+}
+
+// The 32 tree lanes as two vectors of 16: lane k sums the products i with i % 32 == k, in order.
+fn dot_f32_tree_v(xp: *const f32, yp: *const f32, n: usize) f32 {
+    let x = view(xp, n);
+    let y = view(yp, n);
+    let m = n - n % TREE;
+    let mut lo = Simd::<f32, 16>::splat(-0.0);
+    let mut hi = lo;
+    let mut i: usize = 0;
+    while i < m {
+        lo = lo + simd::load::<f32, 16>(x, i) * simd::load::<f32, 16>(y, i);
+        hi = hi + simd::load::<f32, 16>(x, i + 16) * simd::load::<f32, 16>(y, i + 16);
+        i += TREE;
+    }
+    let mut acc: [f32; TREE] = [-0.0; TREE];
+    let l: []mut f32 = acc;
+    simd::store(l, 0, lo);
+    simd::store(l, 16, hi);
+    while i < n {
+        l[i % TREE] += x[i] * y[i];
+        i += 1;
+    }
+    return tree(l);
+}
+
+fn count_eq_u8_v(xp: *const u8, n: usize, v: u8) usize {
+    let x = view(xp, n);
+    let vv = Simd::<u8, 64>::splat(v);
+    let m = n - n % 64;
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i < m {
+        c += simd::load::<u8, 64>(x, i).equal(vv).count();
+        i += 64;
+    }
+    while i < n {
+        c += (x[i] == v) as usize;
+        i += 1;
+    }
+    return c;
+}
+
+fn sum_i32_v(xp: *const i32, n: usize) i32 {
+    let x = view(xp, n);
+    let m = n - n % 16;
+    let mut acc = Simd::<i32, 16>::splat(0);
+    let mut i: usize = 0;
+    while i < m {
+        acc = acc.wrapping_add(simd::load::<i32, 16>(x, i));
+        i += 16;
+    }
+    let mut s: i32 = 0;
+    for l in acc.to_array() {
+        s = s.wrapping_add(l);
+    }
+    while i < n {
+        s = s.wrapping_add(x[i]);
+        i += 1;
+    }
+    return s;
+}
+
+fn min_max_f32_v(xp: *const f32, n: usize, outp: *mut f32) {
+    let x = view(xp, n);
+    let m = n - n % 16;
+    let mut lov = Simd::<f32, 16>::splat(1.0 / 0.0);
+    let mut hiv = Simd::<f32, 16>::splat(-1.0 / 0.0);
+    let mut i: usize = 0;
+    while i < m {
+        let v = simd::load::<f32, 16>(x, i);
+        lov = lov.min_num(v);
+        hiv = hiv.max_num(v);
+        i += 16;
+    }
+    let mut lo: f32 = 1.0 / 0.0;
+    let mut hi: f32 = -1.0 / 0.0;
+    let lows = lov.to_array();
+    let highs = hiv.to_array();
+    for k in 0..16usize {
+        let a = unsafe lows[k];
+        let b = unsafe highs[k];
+        if a < lo || a == lo && a.is_sign_negative() {
+            lo = a;
+        }
+        if b > hi || b == hi && !b.is_sign_negative() {
+            hi = b;
+        }
+    }
+    while i < n {
+        let v = x[i];
+        if v < lo || v == lo && v.is_sign_negative() {
+            lo = v;
+        }
+        if v > hi || v == hi && !v.is_sign_negative() {
+            hi = v;
+        }
+        i += 1;
+    }
+    if lo > hi {
+        lo = 0.0 / 0.0;
+        hi = lo;
+    }
+    let out = view_mut(outp, 2);
+    out[0] = lo;
+    out[1] = hi;
+}
+
+fn mix_width_v(xp: *const f32, t: f32, pp: *const u8, qp: *const u8, outp: *mut u8, n: usize) {
+    let x = view(xp, n);
+    let p = view(pp, n);
+    let q = view(qp, n);
+    let out = view_mut(outp, n);
+    let tv = Simd::<f32, 16>::splat(t);
+    let m = n - n % 16;
+    let mut i: usize = 0;
+    while i < m {
+        let gt = simd::load::<f32, 16>(x, i).greater_than(tv);
+        simd::store(out, i, gt.choose(simd::load::<u8, 16>(p, i), simd::load::<u8, 16>(q, i)));
+        i += 16;
+    }
+    while i < n {
+        out[i] = if x[i] > t {
+            p[i];
+        } else {
+            q[i];
+        };
+        i += 1;
+    }
+}
+
+fn abs_diff_u8_v(ap: *const u8, bp: *const u8, outp: *mut u8, n: usize) {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let out = view_mut(outp, n);
+    let m = n - n % 64;
+    let mut i: usize = 0;
+    while i < m {
+        simd::store(out, i, simd::load::<u8, 64>(a, i).abs_diff(simd::load::<u8, 64>(b, i)));
+        i += 64;
+    }
+    while i < n {
+        out[i] = if a[i] > b[i] {
+            a[i] - b[i];
+        } else {
+            b[i] - a[i];
+        };
+        i += 1;
     }
 }
 

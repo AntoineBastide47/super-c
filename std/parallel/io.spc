@@ -272,9 +272,6 @@ fn batch_flush(r: *mut Reactor, b: &mut Batch) {
 fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
     let i = fd as usize;
     if i >= unsafe (*r).nrec {
-        if i >= REC_MAX {
-            panic("reactor: descriptor number beyond the record table");
-        }
         let mut cap = unsafe (*r).nrec;
         while cap <= i {
             cap = cap * 2;
@@ -398,8 +395,7 @@ fn ack(n: *mut IoWait, b: &mut Batch) {
 // its syscall at once); a real failure (a closed descriptor, the platform's registration limit) reports
 // the wait as not ready. Otherwise the waiter is linked, and the reactor registers again only where it
 // must: when the direction's last event found no waiter (the worker's one-shot may have been consumed
-// before this node was seen), or when the other direction has waiters too, so that a backend with one
-// registration per descriptor (epoll) carries both whichever registration landed last.
+// before this node was seen).
 fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
     if unsafe (*n).dir == CLOSE {
         do_close(r, n);
@@ -449,9 +445,6 @@ fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
         // An event on this descriptor was delivered after the worker registered: the one-shot it consumed
         // may have been this node's, whichever waiters that event woke, so the interest is set again.
         again = again | dir;
-    }
-    if unsafe (*rec).rd != null && unsafe (*rec).wr != null {
-        again = RD | WR;
     }
     if again != 0 && set_interest(r, fd, rec, again) != 0 {
         // The descriptor cannot be watched any more (closed under its waiters, most often): every wait on
@@ -1034,6 +1027,9 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     if fd < 0 {
         // Never a descriptor: ready, so the caller's syscall reports the real error.
         return true;
+    }
+    if fd as usize >= REC_MAX {
+        panic("reactor: descriptor number beyond the record table");
     }
     // The wait record comes BEFORE admission: see `admit`.
     runtime::wait_note(runtime::WK_IO, fd as usize);

@@ -3,6 +3,7 @@
 // explicit check calls, and the verifier rejects malformed check operations. Dynamic values are
 // derived from argv so compile-time evaluation cannot fold the failing access away.
 import tests::harness as h;
+import tests::cli_harness as cli;
 import ast::ast as *;
 import ir::core as ir;
 import ir::verify as irv;
@@ -612,4 +613,46 @@ fn interval_widening_terminates_on_nested_loops() {
     let SRC: str = "fn nested(s: []i32) i32 {\n    if s.len() < 64 {\n        return 0;\n    }\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < 64 {\n        let mut j: usize = 0;\n        while j < i {\n            t += s[j];\n            j += 1;\n        }\n        i += 1;\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for _k in 0..64 {\n        v.push(1);\n    }\n    return nested(v[0..64]) - 2016 + argv.len() as i32 - 1;\n}\n";
     expect_c_user_absent("the inner access is proven", SRC, "__sc_bounds(");
     h::expect_exit("nested behavior", SRC, 0);
+}
+
+// The exit code of project program `src` (it imports std::simd), whose C calls the vector range check
+// when `present`.
+fn vec_check(label: str, src: str, present: bool) i32 {
+    let b = h::diff_build(src, []);
+    assert(b.built, label);
+    let mut path = String::from_str(str::from_cstr(b.proj.rootp()));
+    path.push_str("/build/dev/gen/main.c");
+    let c = cli::read_text(path.as_str());
+    assert(c.contains("__sc_bounds_vec(") == present, label);
+    // a proven vector access leaves no element check either
+    assert(present || !c.contains("__sc_bounds("), label);
+    return h::diff_run(&b, "").exit;
+}
+
+// A vector load or store checks `start <= len && N <= len - start` once (IN_BOUNDS_GROUP): in a loop
+// over `len - len % N` stepping by N the interval and stride facts prove it; against the bare length,
+// or after the slice's owner shrinks, the check stays.
+@test
+fn vector_access_group_checks() {
+    let STRIDED: str = "import std::simd;\nfn sum(s: []i32, d: []mut i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < n {\n        let v = simd::load::<i32, 4>(s, i);\n        acc = acc.wrapping_add(v);\n        i += 4;\n    }\n    return acc[0] + acc[3] + d.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let mut d = [0; 4];\n    return sum(v[0..v.len()], d) - 18;\n}\n";
+    assert_eq(vec_check("the strided load is proven", STRIDED, false), 0);
+    let BARE: str = "import std::simd;\nfn sum(s: []i32) i32 {\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < s.len() {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    return sum(v[0..v.len()]);\n}\n";
+    assert(vec_check("the bare length keeps the check", BARE, true) != 0, "the last partial load traps");
+    let SHRINK: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let n = v.len() - v.len() % 4;\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < n {\n        t += simd::load::<i32, 4>(v[0..v.len()], i)[0];\n        let _ = v.pop();\n        let _ = v.pop();\n        let _ = v.pop();\n        i += 4;\n    }\n    return t;\n}\n";
+    assert(vec_check("a pop in the loop keeps the check", SHRINK, true) != 0, "the load past the shrunk length traps");
+    let BETWEEN: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let i = argv.len() + 3; // == 4\n    if i + 4 > v.len() {\n        return 9;\n    }\n    let a = simd::load::<i32, 4>(v[0..v.len()], i);\n    let _ = v.pop();\n    let b = simd::load::<i32, 4>(v[0..v.len()], i);\n    return a[0] + b[0];\n}\n";
+    assert(
+        vec_check("a store to the length's base keeps the second check", BETWEEN, true) != 0,
+        "the second load traps",
+    );
+    // A slice built by a struct literal: its length is the value of its `len` operand, so the loop
+    // over that value's aligned part is proven; a later write to the field keeps the check.
+    let VIEW: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let s = Slice::<i32> { ptr: p, len: n };\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    assert_eq(vec_check("a view literal's length is its len operand", VIEW, false), 0);
+    let VIEW_SET: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let mut s = Slice::<i32> { ptr: p, len: n };\n    s.len = n - 3;\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    assert(vec_check("a write to the view's len keeps the check", VIEW_SET, true) != 0, "the second load traps");
+    // An early-return guard bounds the loop's limit by the other slice's length: both accesses are
+    // proven (`i < m <= n <= y.len()`).
+    let GUARD: str = "import std::simd;\nfn sum(x: []f32, y: []f32) f32 {\n    let n = x.len();\n    if y.len() < n {\n        return 0.0;\n    }\n    let m = n - n % 4;\n    let mut acc = Simd::<f32, 4>::splat(0.0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc + simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);\n        i += 4;\n    }\n    let mut s = acc[0] + acc[1] + acc[2] + acc[3];\n    for k in m..n {\n        s = s + x[k] * y[k];\n    }\n    return s;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<f32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as f32);\n    }\n    return sum(v[0..v.len()], v[0..v.len()]) as i32 - 204;\n}\n";
+    assert_eq(vec_check("a guard proves the other slice and the scalar tail", GUARD, false), 0);
 }

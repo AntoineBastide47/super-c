@@ -59,8 +59,131 @@ Simd::<T, N>::LANES                   // N
 A literal's length must equal `N` ("array literal has 3 elements but the vector has 4 lanes").
 A constant index past the lanes is a compile error ("index 4 is out of bounds for a vector of 4
 lanes"); any other index is checked at run time and traps with "index out of bounds: the index is
-I but the length is N", in a constant and at run time alike. A vector has no fields, no `==` or
-ordering ("does not implement `Eq`; compare lanes") and no arithmetic.
+I but the length is N", in a constant and at run time alike. A vector has no fields and no `==` or
+ordering ("does not implement `Eq`; compare lanes"): `equal` and the other comparisons give a mask.
+
+## Lane operations
+
+Every lane operation applies the scalar rule of its lane type (operations.md) to each lane, as a
+constant and at run time alike. The emitted C is a lane loop with a constant trip count over the
+storage arrays, or `memcpy` for the operations that move bytes; it uses no target intrinsic and no
+C vector extension, and its result never depends on the C compiler vectorizing it.
+
+The lane interfaces bound the operations: `SimdInt` (`i8` to `u64`), `SimdSigned` (`i8` to `i64`,
+`f32`, `f64`) and `SimdFloat` (`f32`, `f64`). Only `std` implements them; a call on other lanes is
+"cannot call ..: unsatisfied interface bounds".
+
+| Operators | Lanes | Rule |
+|-----------|-------|------|
+| `+ - *` | all | integers: checked trap (overflow traps where the build checks overflow, else wraps); floats: IEEE |
+| `/` | all | integers: traps on a zero divisor and on signed `MIN / -1` |
+| `%` | integers | traps as `/` |
+| unary `-` | `SimdSigned` | integers: checked trap at `MIN` |
+| `& \| ^ ~` | integers | bitwise |
+| `<< >>` | integers | the count is the same vector type, or a scalar of the lane type for every lane; traps when a count is below 0 or at least the width; `>>` is arithmetic on signed lanes |
+
+The operands of a binary operator have one vector type, and the compound forms (`+=`, `<<= 2`)
+follow the same rules. A scalar does not convert: `v + 1.0` is "mismatched types" and `1.0 + v`
+"operator requires numeric operands", both with the note "a scalar does not convert to a vector:
+use `Simd::splat`"; a shift count of another type notes "a shift count is the vector type or its
+lane type". The operators are the conformances `Add`, `Sub`,
+`Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl` and `Shr`, so a generic bound
+reaches them.
+
+```text
+// SimdInt lanes
+v.wrapping_add(w) v.wrapping_sub(w) v.wrapping_mul(w) v.wrapping_neg()
+v.wrapping_shl(n) v.wrapping_shr(n)     // n: Self, the count modulo the width
+v.checked_add(w) (Simd<T, N>, Mask<N>)  // the wrapped value, the lanes that overflowed (sub, mul too)
+v.saturating_add(w) v.saturating_sub(w) // clamped to [MIN, MAX]
+v.min(w) v.max(w)
+v.leading_zeros() v.trailing_zeros() v.count_ones()   // per lane, as T; a zero lane gives the width
+v.rotate_left(n) v.rotate_right(n)      // n: Self, modulo the width
+v.reverse_bits() v.swap_bytes()
+v.abs_diff(w) Simd<T::Unsigned, N>      // |v - w| exact, in the unsigned lane type of the width
+// SimdSigned lanes
+v.abs()                                 // an integer MIN lane traps (as -MIN); a float lane drops its sign bit
+// signed integer lanes
+v.wrapping_abs()                        // MIN stays MIN
+// SimdFloat lanes
+v.copysign(sign) v.sqrt() v.ceil() v.floor() v.trunc() v.round_even()
+v.fma(b, c)                             // v * b + c, one rounding
+v.min_num(w) v.max_num(w) v.minimum(w) v.maximum(w)
+v.is_nan() v.is_infinite() v.is_finite() v.is_normal() v.is_subnormal() v.is_sign_negative()  // Mask<N>
+v.to_bits() Simd<T::Bits, N>            Simd::<T, N>::from_bits(b)   // T::Bits: u32 for f32, u64 for f64
+// every lane type
+v.equal(w) v.not_equal(w) v.less_than(w) v.less_equal(w) v.greater_than(w) v.greater_equal(w)  // Mask<N>
+v.clamp(lo, hi)                         // max(lo, min(v, hi)), min_num/max_num on floats
+m.choose(when_true, when_false)         simd::choose(m, when_true, when_false)
+simd::iota::<T, N>()                    // lanes 0, 1, .., N - 1
+```
+
+| Operation | A NaN operand | Zeros of both signs |
+|-----------|---------------|---------------------|
+| `min_num(a, b)` | the other operand; NaN only when both are | `-0.0` |
+| `max_num(a, b)` | the other operand; NaN only when both are | `+0.0` |
+| `minimum(a, b)` | NaN | `-0.0` |
+| `maximum(a, b)` | NaN | `+0.0` |
+
+The four are IEEE 754-2019 minimumNumber, maximumNumber, minimum and maximum; the C spells them as
+compare sequences, never `fmin`/`fmax`, whose zero rule C leaves open. A comparison with a NaN lane
+is false, except `not_equal`. A signaling NaN is treated as quiet. The NaN payload of an arithmetic
+result is not specified; `-`, `abs`, `copysign`, `to_bits`, `from_bits`, `bitcast`, `choose`, the
+halves, `concat`, and the loads and stores keep every bit, at compile time too. `round_even` rounds
+to nearest, ties to even (`nearbyint`: no program changes the rounding mode). `clamp` panics with
+"Simd::clamp: a lane has lo > hi or a NaN bound" when `lo <= hi` is false in a lane.
+
+```text
+v.cast::<U>()               // each lane by `as` (operations.md)
+v.cast_checked::<U>()       // (Simd<U, N>, Mask<N>): the lanes whose value changed or held a NaN
+v.widen::<U>()              // U wider, the same kind (signed, unsigned or float): exact
+v.narrow::<U>()             // U a narrower integer: a lane U cannot hold traps
+v.narrow_saturating::<U>()  // clamped to U's range
+v.narrow_wrapping::<U>()    // the low bits
+v.bitcast::<U, M>()         // sizeof(T) * N == sizeof(U) * M: the only conversion that reinterprets bits
+v.low_half() v.high_half()  // Simd<T, N / 2>, N >= 4
+simd::concat(a, b)          // Simd<T, 2 * N>, which must be a valid vector
+```
+
+`widen`, `narrow*`, `bitcast` and the halves check their types per instance with a `static_assert`
+that names the operation ("widen: U must be a wider lane type of the same kind as T"). `iota`
+needs no check: every lane count fits every lane type.
+
+```text
+simd::load::<T, N>(s: []T, start: usize) Simd<T, N>
+simd::store(s: []mut T, start: usize, v: Simd<T, N>)
+unsafe simd::load_unaligned::<T, N>(p: *const T)       unsafe simd::store_unaligned(p: *mut T, v)
+unsafe simd::load_aligned::<T, N, A>(p: *const T)      unsafe simd::store_aligned::<T, N, A>(p: *mut T, v)
+```
+
+A slice access checks its lanes once, overflow-free: it traps unless `start <= len` and
+`N <= len - start`, with "index out of bounds: N lanes from START but the length is LEN". In a loop
+over `len - len % N` that steps by `N`, bounds-check elimination proves the check and removes it
+when `N` is a constant (not in a body generic over `N`); `len` may be the slice's length or the
+value a `Slice { ptr, len }` literal stored.
+The raw forms need `unsafe`; the caller guarantees `N` valid elements and, for the aligned forms, an
+`A`-byte alignment (`A` a power of two of at least `alignof(T)`). A load borrows its slice shared and
+a store mutably, as a call taking the view does: a store while a reference into the slice or its
+array is live is a borrow error. A `[]mut T` is a `[]T` for a load (`simd::load(y, i)` then
+`simd::store(y, i, ..)` updates in place).
+
+A trapping lane operation traps once, at its lowest failing lane, with `lane <i>: <the scalar
+message>` ("lane 2: attempt to add with overflow", "lane 0: attempt to narrow a lane that does not
+fit"), as a constant and at run time.
+
+The named operations are signatures with `@intrinsic("simd.<name>")` and no body, in `std` only
+(else "'@intrinsic' is reserved for the standard library"; an unknown name is "unknown intrinsic").
+A call lowers to the operation itself; a bound call or a function value runs a body the compiler
+builds from the same operation.
+
+Every named operation above has a free form: `simd::f(a, ..)` is `a.f(..)` (`simd::min(a, b)`,
+`simd::checked_add(a, b)`, `simd::to_bits(v)`, `simd::from_bits::<f32, 4>(b)`). The conversions are
+methods only; `choose`, `iota`, `concat` and the loads and stores are free functions. A free form
+is visible unqualified too (std's `simd` is a prelude module); a module's own function of the same
+name hides it. `SimdInt::Unsigned` and `SimdFloat::Bits` are the lane interfaces' associated types.
+
+The std compositions (`widen`, `narrow*`, `bitcast`, the halves, `clamp`, `checked_*`,
+`cast_checked`, `splat`) inline at their calls: no call remains in a loop, in every profile.
 
 ## Mask operations
 
@@ -94,6 +217,10 @@ place ("use `get` or `set`"), and a mask is no condition ("use `.any()` or `.all
   `bool`.
 - No C ABI: native vector calling conventions differ by platform, compiler, feature set and
   width.
+- One lane rule per operation, chosen by the lane type, like the scalar operators: `abs` and
+  `min`/`max` have one Core IR code each, so a generic body lowers once for every lane type.
+- Lane interfaces instead of per-instance checks for the lane kind: a misuse is a type error at the
+  call, in generic code too.
 
 ## Casts and evaluation
 

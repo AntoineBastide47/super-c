@@ -3,6 +3,7 @@
 import tests::gen::driver as gen;
 import tests::gen::scalar as scalar;
 import tests::gen::loops as loops;
+import tests::gen::vector as vector;
 import tests::cli_harness as cli;
 import driver_shim as shim;
 import stdlib;
@@ -26,6 +27,12 @@ fn gen_scalar_seeds() {
 @test
 fn gen_loop_seeds() {
     let mut m = loops::loop_model(6);
+    expect_seeds(&mut m, [1, 2, 3]);
+}
+
+@test
+fn gen_vector_seeds() {
+    let mut m = vector::vector_model(8);
     expect_seeds(&mut m, [1, 2, 3]);
 }
 
@@ -96,6 +103,7 @@ fn gen_random_run() {
     let mut failures: u64 = 0;
     let mut sm = scalar::scalar_model(6, 3);
     let mut lm = loops::loop_model(6);
+    let mut vm = vector::vector_model(8);
     for i in 0..runs {
         let seed = base + i;
         if model.len() == 0 || model == "scalar" {
@@ -107,6 +115,13 @@ fn gen_random_run() {
         }
         if model.len() == 0 || model == "loops" {
             let r = gen::run_seed(&mut lm, seed);
+            if r.len() != 0 {
+                eprintln("{}", r.as_str());
+                failures += 1;
+            }
+        }
+        if model.len() == 0 || model == "vector" {
+            let r = gen::run_seed(&mut vm, seed);
             if r.len() != 0 {
                 eprintln("{}", r.as_str());
                 failures += 1;

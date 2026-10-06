@@ -19,6 +19,9 @@ extern "C" {
     /// Terminate abnormally without running atexit handlers.
     @unsafe(safe)
     pub fn abort() void;
+    /// End the process with `code` at once: no atexit handlers, no stream flush. Safe in a signal handler.
+    @c.import("_Exit")
+    pub fn exit_now(code: i32) void;
     /// Register a handler to run at normal exit; 0 on success.
     pub fn atexit(handler: fn() void) i32;
     @c.import("getenv")

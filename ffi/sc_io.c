@@ -502,18 +502,30 @@ int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
 
 #else /* ---- POSIX: kqueue / epoll ------------------------------------------------------------------- */
 
+/* Descriptor numbers the epoll interest table covers: the reactor's record bound (`REC_MAX` in
+   std/parallel/io.spc). */
+#define SC_IO_FD_CAP 4194304
+
 typedef struct {
   int q;       /* kqueue / epoll descriptor */
   int wake[2]; /* self-pipe: read end stays registered, a write makes sc_io_wait return */
+#if defined(__linux__)
+  /* Per descriptor, the bits registered since its last delivered event: epoll keeps one mask per
+     descriptor and a modification replaces it, so each registration carries the union. Zero pages until
+     touched. */
+  unsigned char *want;
+#endif
 } sc_io_poller;
 
 void *sc_io_new(void) {
   sc_io_poller *p = (sc_io_poller *)calloc(1, sizeof *p);
   if (!p) return 0;
 #if defined(__linux__)
+  p->want = (unsigned char *)calloc(SC_IO_FD_CAP, 1);
+  if (!p->want) { free(p); return 0; }
   p->q = epoll_create1(EPOLL_CLOEXEC);
-  if (p->q < 0) { free(p); return 0; }
-  if (pipe2(p->wake, O_CLOEXEC | O_NONBLOCK) != 0) { close(p->q); free(p); return 0; }
+  if (p->q < 0) { free(p->want); free(p); return 0; }
+  if (pipe2(p->wake, O_CLOEXEC | O_NONBLOCK) != 0) { close(p->q); free(p->want); free(p); return 0; }
 #else
   p->q = kqueue();
   if (p->q < 0) { free(p); return 0; }
@@ -545,6 +557,9 @@ void sc_io_free(void *ptr) {
   close(p->wake[0]);
   close(p->wake[1]);
   close(p->q);
+#if defined(__linux__)
+  free(p->want);
+#endif
   free(p);
 }
 
@@ -555,21 +570,34 @@ int sc_io_set(void *ptr, int fd, int want, int known) {
      lost: refused, so the wait settles as not ready, the answer a closed descriptor gets. */
   if (fd == p->q || fd == p->wake[0] || fd == p->wake[1]) return -1;
 #if defined(__linux__)
-  /* One registration per descriptor carries both directions. A one-shot registration that fired is
+  /* One registration per descriptor carries both directions, and a modification replaces its mask: a
+     registration that left out the other direction would drop that direction's interest, and its event
+     if still queued, with nothing to tell the reactor. So each call registers the union of the bits
+     registered since the descriptor's last event (`want`, cleared when sc_io_wait reports it), and
+     registers again while another thread added bits after it read the union: the last registration then
+     holds every bit, and the loop ends within one pass per bit. A one-shot registration that fired is
      disabled, not gone, so it is modified rather than added; a descriptor closed and reused under the
      reactor has no registration any more (ENOENT), and the fresh add takes over. EPERM is a descriptor
      epoll cannot watch (a regular file): it is always ready, which is what 1 tells the reactor. */
-  struct epoll_event ev;
-  memset(&ev, 0, sizeof ev);
-  ev.events = ((want & SC_IO_RD) ? EPOLLIN : 0) | ((want & SC_IO_WR) ? EPOLLOUT : 0) | EPOLLONESHOT;
-  ev.data.fd = fd;
-  if (known) {
-    if (epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
-    if (errno != ENOENT) return errno == EPERM ? 1 : -1;
+  if ((unsigned)fd >= SC_IO_FD_CAP) { errno = EMFILE; return -1; }
+  unsigned char *u = &p->want[fd];
+  int m = __atomic_or_fetch(u, (unsigned char)want, __ATOMIC_SEQ_CST);
+  for (;;) {
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = ((m & SC_IO_RD) ? EPOLLIN : 0) | ((m & SC_IO_WR) ? EPOLLOUT : 0) | EPOLLONESHOT;
+    ev.data.fd = fd;
+    int rc;
+    if (known && epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0) rc = 0;
+    else if (known && errno != ENOENT) rc = errno == EPERM ? 1 : -1;
+    else if (epoll_ctl(p->q, EPOLL_CTL_ADD, fd, &ev) == 0) rc = 0;
+    else if (errno == EEXIST) rc = epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0 ? 0 : -1;
+    else rc = errno == EPERM ? 1 : -1;
+    const int now = __atomic_load_n(u, __ATOMIC_SEQ_CST);
+    if (rc != 0 || (now & ~m) == 0) return rc;
+    m |= now;
+    known = 1;
   }
-  if (epoll_ctl(p->q, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-  if (errno == EEXIST) return epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0 ? 0 : -1;
-  return errno == EPERM ? 1 : -1;
 #else
   /* Read and write are separate knotes: add what is wanted (EV_ADD on an existing knote refreshes it, so a
      descriptor reused under the reactor is registered afresh). With no event list, a change that fails
@@ -615,6 +643,8 @@ int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
   for (int i = 0; i < n; i++) {
 #if defined(__linux__)
     const int fd = evs[i].data.fd;
+    /* The one-shot fired and holds nothing now: the next registration starts a new union. */
+    if (fd != p->wake[0]) __atomic_store_n(&p->want[fd], 0, __ATOMIC_SEQ_CST);
     int ready = 0;
     if (evs[i].events & (EPOLLIN | EPOLLRDHUP)) ready |= SC_IO_RD;
     if (evs[i].events & EPOLLOUT) ready |= SC_IO_WR;

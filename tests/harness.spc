@@ -597,11 +597,17 @@ pub struct DiffRun {
 }
 
 /// Build `src` as main.spc of a scratch project. An option of the form NAME=VALUE sets that
-/// environment variable for the build (`SC_BCE=0`); any other option is one build flag.
+/// environment variable for the build (`SC_BCE=0`); any other option is one build flag. The project
+/// defines `--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program
+/// run many times: it compiles in about half the dev profile's time, and ASan's start-up makes each
+/// run several times slower.
 pub fn diff_build(src: str, opts: []str) DiffBuild {
     let exe = cli::superc_path(); // resolved before the chdir below
     let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"prog\"\nroot = \"main.spc\"\n");
+    p.mkfile(
+        "build.toml",
+        "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n",
+    );
     p.mkfile("main.spc", src);
     let mut root = String::from_str(str::from_cstr(p.rootp()));
     let mut cmd = String::new();
@@ -717,8 +723,20 @@ pub fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
 }
 
 /// The trap class a compile-time error names for a trap ("arithmetic overflow", "division by zero",
-/// "shift out of range"); empty for any other error.
-pub fn const_trap_class(msg: str) str<'static> {
+/// "shift out of range"), or the text from `lane <i>: ` of a vector operation's trap, the same at run
+/// time; empty for any other error.
+pub fn const_trap_class<'a>(msg: str<'a>) str<'a> {
+    let lane = msg.find("lane ");
+    if lane >= 0 && lane as usize + 5 < msg.len() && msg.byte_at(lane as usize + 5) >= b'0' && msg.byte_at(
+        lane as usize + 5,
+    ) <= b'9' {
+        let t = msg.slice(lane as usize, msg.len());
+        let stack = t.find(" (call stack");
+        if stack >= 0 {
+            return t.slice(0, stack as usize);
+        }
+        return t.trim();
+    }
     if msg.contains("arithmetic overflow") {
         return "arithmetic overflow";
     }
@@ -735,8 +753,15 @@ pub fn const_trap_class(msg: str) str<'static> {
 }
 
 /// The trap class of a run-time trap message (`rt_c.spc` arithmetic and index helpers), in the words a constant
-/// reports for the same trap; empty for any other trap.
-pub fn runtime_trap_class(trap: str) str<'static> {
+/// reports for the same trap, or the text from `lane <i>: ` of a vector operation's trap; empty for any
+/// other trap.
+pub fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {
+    let lane = trap.find("lane ");
+    if lane >= 0 && lane as usize + 5 < trap.len() && trap.byte_at(lane as usize + 5) >= b'0' && trap.byte_at(
+        lane as usize + 5,
+    ) <= b'9' {
+        return trap.slice(lane as usize, trap.len()).trim();
+    }
     if trap.contains("attempt to shift") {
         return "shift out of range";
     }
