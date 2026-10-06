@@ -635,6 +635,36 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()) };
 }
 
+/// Assert that the build of `src` fails with a diagnostic containing `needle`, before its C compile.
+pub fn expect_build_err(label: str, src: str, needle: str) {
+    let b = diff_build(src, []);
+    let ok = !b.built && b.diag.contains(needle) && !b.diag.contains("C compile failed") && !b.diag.contains("internal");
+    if !ok {
+        eprintln("{}: {}", label, b.diag.as_str());
+    }
+    assert(ok, label);
+}
+
+/// Assert that `src` builds and its run with argument `arg` traps with `msg` on stderr, or exits 0
+/// when `msg` is empty; a sanitizer report fails it either way.
+pub fn expect_run(label: str, src: str, arg: str, msg: str) {
+    let b = diff_build(src, []);
+    if !b.built {
+        eprintln("{}: {}", label, b.diag.as_str());
+    }
+    assert(b.built, label);
+    let r = diff_run(&b, arg);
+    let ok = !r.err.contains("runtime error:") && !r.err.contains("Sanitizer") && if msg.len() == 0 {
+        r.exit == 0;
+    } else {
+        r.exit != 0 && r.err.contains(msg);
+    };
+    if !ok {
+        eprintln("{}: exit {}: {}{}", label, r.exit, r.out.as_str(), r.err.as_str());
+    }
+    assert(ok, label);
+}
+
 /// Run the program `b` built with `args` (a command-line fragment) and capture its output.
 pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
     let root = str::from_cstr(b.proj.rootp());

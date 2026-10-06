@@ -243,12 +243,17 @@ fn emit_stamp_keys_on_the_compiler_content() {
     assert_eq(same.exit, 3);
     assert(!same.out_has("phase load"), "the same compiler skips the transpile");
     // Another compiler at the same path and mtime: appended bytes change the content, not the behavior.
-    let f = stdio::fopen(exe.as_str(), "ab");
-    assert(f != null, "the copy opens for append");
+    // The new file is written beside the copy and renamed over it: Linux refuses to open a file for
+    // writing while it counts a process as executing it (ETXTBSY).
+    let next = format("{}.next", exe.as_str());
+    let mut cp = format("cp {} {}", exe.as_str(), next.as_str());
+    assert_eq(cli::run_quiet(cp.cstr()), 0);
+    let f = stdio::fopen(next.as_str(), "ab");
+    assert(f != null, "the new copy opens for append");
     let _ = unsafe stdio::fwrite("x".ptr(), 1, 1, f);
     unsafe stdio::fclose(f);
-    let mut touch = format("touch -r {}/tc/ref {}", root, exe.as_str());
-    assert_eq(cli::run_quiet(touch.cstr()), 0);
+    let mut mv = format("mv {} {} && touch -r {}/tc/ref {}", next.as_str(), exe.as_str(), root, exe.as_str());
+    assert_eq(cli::run_quiet(mv.cstr()), 0);
     let other = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(other.exit, 3);
     assert(other.out_has("phase load"), "a different compiler transpiles again");

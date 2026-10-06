@@ -749,6 +749,312 @@ pub unsafe fn store_aligned<T: SimdElement, const N: usize, const A: usize>(p: *
     store_unaligned::<T, N>(p, v);
 }
 
+// Rearrangement (the language skill's references/simd.md). An index list is a `[usize; M]` constant
+// expression; `M` is the result's lane count, and `Simd<T, M>` must be a valid vector.
+
+/// Lane `i` is `v[idx[i]]`; every index is below `N`.
+@intrinsic("simd.swizzle")
+pub fn swizzle<T: SimdElement, const N: usize, const M: usize>(v: Simd<T, N>, idx: [usize; M]) Simd<T, M>;
+
+/// Lane `i` is `a[idx[i]]` for an index below `N`, else `b[idx[i] - N]`; every index is below `2 * N`.
+@intrinsic("simd.shuffle")
+pub fn shuffle<T: SimdElement, const N: usize, const M: usize>(a: Simd<T, N>, b: Simd<T, N>, idx: [usize; M]) Simd<T, M>;
+
+/// Lane `i` is `v[idx[i]]` for an index below `N`, else 0; `U` is an unsigned integer type.
+pub fn swizzle_or_zero<T: SimdElement, U: SimdInt, const N: usize, const M: usize>(v: Simd<T, N>, idx: Simd<U, M>) Simd<
+    T,
+    M
+> {
+    static_assert(type_info::<U>().kind == type_info::<u8>().kind, "swizzle_or_zero: the indexes must be unsigned");
+    return swizzle_zero(v, idx);
+}
+
+/// `swizzle_or_zero(v, idx)` and the mask of the lanes whose index is `N` or more.
+pub fn swizzle_checked<T: SimdElement, U: SimdInt, const N: usize, const M: usize>(v: Simd<T, N>, idx: Simd<U, M>) (
+    Simd<T, M>,
+    Mask<M>
+) {
+    static_assert(type_info::<U>().kind == type_info::<u8>().kind, "swizzle_checked: the indexes must be unsigned");
+    return swizzle_zero(v, idx), swizzle_oob(v, idx);
+}
+
+@intrinsic("simd.swizzle_or_zero")
+fn swizzle_zero<T: SimdElement, U: SimdInt, const N: usize, const M: usize>(v: Simd<T, N>, idx: Simd<U, M>) Simd<T, M>;
+
+@intrinsic("simd.swizzle_oob")
+fn swizzle_oob<T: SimdElement, U: SimdInt, const N: usize, const M: usize>(v: Simd<T, N>, idx: Simd<U, M>) Mask<M>;
+
+/// Lane `i` is `v[N - 1 - i]`.
+pub fn reverse<T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+    return swizzle(v, lane_list::<N>(N - 1, 0, 1, 0));
+}
+
+/// Lane `i` is `v[(i + K) % N]`.
+pub fn rotate_lanes_left<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+    return swizzle(v, lane_list::<N>(K % N, 1, 0, 1));
+}
+
+/// Lane `i` is `v[(i + N - K % N) % N]`.
+pub fn rotate_lanes_right<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+    return swizzle(v, lane_list::<N>(N - K % N, 1, 0, 1));
+}
+
+/// Lane `i` is `a[i / 2]` for an even `i`, else `b[i / 2]`.
+pub fn interleave_low<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+    return shuffle(a, b, lane_list::<N>(0, 2, 0, 0));
+}
+
+/// Lane `i` is `a[N / 2 + i / 2]` for an even `i`, else `b[N / 2 + i / 2]`.
+pub fn interleave_high<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+    return shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0));
+}
+
+/// The even lanes of `a`, then those of `b`: lane `i` is `a[2 * i]` below `N / 2`, else `b[2 * i - N]`.
+pub fn deinterleave_even<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+    return shuffle(a, b, lane_list::<N>(0, 3, 0, 0));
+}
+
+/// The odd lanes of `a`, then those of `b`: lane `i` is `a[2 * i + 1]` below `N / 2`, else
+/// `b[2 * i + 1 - N]`.
+pub fn deinterleave_odd<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+    return shuffle(a, b, lane_list::<N>(1, 3, 0, 0));
+}
+
+/// `(interleave_low(a, b), interleave_high(a, b))`.
+pub fn zip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+    return shuffle(a, b, lane_list::<N>(0, 2, 0, 0)), shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0));
+}
+
+/// `(deinterleave_even(a, b), deinterleave_odd(a, b))`.
+pub fn unzip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+    return shuffle(a, b, lane_list::<N>(0, 3, 0, 0)), shuffle(a, b, lane_list::<N>(1, 3, 0, 0));
+}
+
+// The index list of `N` lanes from `base`: kind 0 counts down by `down` per lane (`reverse`), 1 counts
+// up modulo `N` (the rotations), 2 interleaves (lane `i` from `base + i / 2` of `a`, or of `b` for an
+// odd `i`), 3 deinterleaves (`base + 2 * i` of `a ++ b`).
+const fn lane_list<const N: usize>(base: usize, kind: u8, down: usize, up: usize) [usize; N] {
+    let mut a = [0usize; N];
+    for i in 0..N {
+        unsafe a[i] = if kind == 0 {
+            base - i * down;
+        } else if kind == 1 {
+            (base + i * up) % N;
+        } else if kind == 2 {
+            base + i / 2 + i % 2 * N;
+        } else {
+            base + 2 * i;
+        };
+    }
+    return a;
+}
+
+/// The active lanes of `v` in lane order at positions `0` to `count - 1`, and `fill[i]` at the
+/// positions from `count`.
+@intrinsic("simd.compress")
+pub fn compress<T: SimdElement, const N: usize>(m: Mask<N>, v: Simd<T, N>, fill: Simd<T, N>) Simd<T, N>;
+
+/// Active lane `i` is `packed[k]`, `k` the number of active lanes below `i`; inactive lane `i` is
+/// `fill[i]`.
+@intrinsic("simd.expand")
+pub fn expand<T: SimdElement, const N: usize>(m: Mask<N>, packed: Simd<T, N>, fill: Simd<T, N>) Simd<T, N>;
+
+// Reductions. An integer reduction wraps, so its result is independent of order; a float reduction
+// names its order (`ordered` left to right, `tree` by halves), which fixes the result.
+
+/// The lanes' sum modulo 2^W.
+@intrinsic("simd.reduce_add")
+pub fn reduce_add<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes' product modulo 2^W.
+@intrinsic("simd.reduce_mul")
+pub fn reduce_mul<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes' sum, or None when the exact sum does not fit `T`.
+pub fn reduce_add_checked<T: SimdInt, const N: usize>(v: Simd<T, N>) Option<T> {
+    if reduce_add_overflows(v) {
+        return Option::<T>::None;
+    }
+    return Option::<T>::Some(reduce_add(v));
+}
+
+/// The lanes' product, or None when the exact product does not fit `T`.
+pub fn reduce_mul_checked<T: SimdInt, const N: usize>(v: Simd<T, N>) Option<T> {
+    if reduce_mul_overflows(v) {
+        return Option::<T>::None;
+    }
+    return Option::<T>::Some(reduce_mul(v));
+}
+
+@intrinsic("simd.reduce_add_overflows")
+fn reduce_add_overflows<T: SimdInt, const N: usize>(v: Simd<T, N>) bool;
+
+@intrinsic("simd.reduce_mul_overflows")
+fn reduce_mul_overflows<T: SimdInt, const N: usize>(v: Simd<T, N>) bool;
+
+/// `((-0.0 + v[0]) + v[1]) + ... + v[N - 1]`, each sum rounded.
+@intrinsic("simd.reduce_add_ordered")
+pub fn reduce_add_ordered<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// `((1.0 * v[0]) * v[1]) * ... * v[N - 1]`, each product rounded.
+@intrinsic("simd.reduce_mul_ordered")
+pub fn reduce_mul_ordered<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The sum by halves: `r[i] = v[i] + v[i + N / 2]` for the lower half, repeated until one lane.
+@intrinsic("simd.reduce_add_tree")
+pub fn reduce_add_tree<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The product by halves, as `reduce_add_tree`.
+@intrinsic("simd.reduce_mul_tree")
+pub fn reduce_mul_tree<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The smallest lane.
+@intrinsic("simd.reduce_min")
+pub fn reduce_min<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The largest lane.
+@intrinsic("simd.reduce_max")
+pub fn reduce_max<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes reduced by `min_num`: NaN only when every lane is NaN.
+@intrinsic("simd.reduce_min_num")
+pub fn reduce_min_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes reduced by `max_num`: NaN only when every lane is NaN.
+@intrinsic("simd.reduce_max_num")
+pub fn reduce_max_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes reduced by `minimum`: NaN when a lane is NaN.
+@intrinsic("simd.reduce_minimum")
+pub fn reduce_minimum<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes reduced by `maximum`: NaN when a lane is NaN.
+@intrinsic("simd.reduce_maximum")
+pub fn reduce_maximum<T: SimdFloat, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes' bitwise and.
+@intrinsic("simd.reduce_and")
+pub fn reduce_and<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes' bitwise or.
+@intrinsic("simd.reduce_or")
+pub fn reduce_or<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lanes' bitwise exclusive or.
+@intrinsic("simd.reduce_xor")
+pub fn reduce_xor<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
+
+/// The lowest lane holding the smallest value.
+@intrinsic("simd.arg_min")
+pub fn arg_min<T: SimdInt, const N: usize>(v: Simd<T, N>) usize;
+
+/// The lowest lane holding the largest value.
+@intrinsic("simd.arg_max")
+pub fn arg_max<T: SimdInt, const N: usize>(v: Simd<T, N>) usize;
+
+/// The lowest lane holding the smallest non-NaN value (`-0.0` below `+0.0`), or None when every lane
+/// is NaN.
+pub fn arg_min_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) Option<usize> {
+    let i = arg_min_lane(v);
+    if i == N {
+        return Option::<usize>::None;
+    }
+    return Option::<usize>::Some(i);
+}
+
+/// The lowest lane holding the largest non-NaN value (`+0.0` above `-0.0`), or None when every lane
+/// is NaN.
+pub fn arg_max_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) Option<usize> {
+    let i = arg_max_lane(v);
+    if i == N {
+        return Option::<usize>::None;
+    }
+    return Option::<usize>::Some(i);
+}
+
+@intrinsic("simd.arg_min_num")
+fn arg_min_lane<T: SimdFloat, const N: usize>(v: Simd<T, N>) usize;
+
+@intrinsic("simd.arg_max_num")
+fn arg_max_lane<T: SimdFloat, const N: usize>(v: Simd<T, N>) usize;
+
+/// The sum of `(a[i] as A) * (b[i] as A)`: modulo 2^W for an integer `A` at least as wide as `T`, and
+/// as `reduce_add_ordered` of the products, each rounded to `A`, for a float `A` at least as wide.
+pub fn dot<A: SimdElement, T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) A {
+    static_assert(sizeof(A) >= sizeof(T) && type_info::<A>().kind == type_info::<f64>().kind == (type_info::<T>().kind == type_info::<
+        f64
+    >().kind), "dot: A must be a type of the same kind as T, at least as wide");
+    return dot_lanes::<A>(a, b);
+}
+
+@intrinsic("simd.dot")
+fn dot_lanes<A: SimdElement, T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) A;
+
+// Masked and partial memory. An inactive lane never touches its element; every active lane is checked
+// before the first access, and a failing one traps at the lowest. `I` is `u32` or `u64`.
+
+/// Lane `i` is `s[start + i]` where that element exists, else `fallback[i]`. Never panics.
+@intrinsic("simd.load_or")
+pub fn load_or<T: SimdElement, const N: usize>(s: []T, start: usize, fallback: Simd<T, N>) Simd<T, N>;
+
+/// Active lane `i` is `s[start + i]`; an inactive one is `fallback[i]`. Panics: an active lane past
+/// `s`.
+@intrinsic("simd.load_masked")
+pub fn load_masked<T: SimdElement, const N: usize>(s: []T, start: usize, m: Mask<N>, fallback: Simd<T, N>) Simd<T, N>;
+
+/// Store active lane `i` of `v` to `s[start + i]`. Panics before any write: an active lane past `s`.
+@intrinsic("simd.store_masked")
+pub fn store_masked<T: SimdElement, const N: usize>(s: []mut T, start: usize, m: Mask<N>, v: Simd<T, N>);
+
+/// Active lane `i` is `s[idx[i]]`; an inactive one is `fallback[i]`. Panics: an active index past `s`.
+pub fn gather<T: SimdElement, I: SimdInt, const N: usize>(s: []T, idx: Simd<I, N>, m: Mask<N>, fallback: Simd<T, N>) Simd<
+    T,
+    N
+> {
+    static_assert(sizeof(I) >= 4 && type_info::<I>().kind == type_info::<u8>().kind, "gather: the indexes must be u32 or u64");
+    return gather_lanes(s, idx, m, fallback);
+}
+
+/// Store active lane `i` of `v` to `s[idx[i]]`, in lane order: of active lanes with one index, the
+/// highest is written last. Panics before any write: an active index past `s`.
+pub fn scatter<T: SimdElement, I: SimdInt, const N: usize>(s: []mut T, idx: Simd<I, N>, m: Mask<N>, v: Simd<T, N>) {
+    static_assert(sizeof(I) >= 4 && type_info::<I>().kind == type_info::<u8>().kind, "scatter: the indexes must be u32 or u64");
+    scatter_lanes(s, idx, m, v);
+}
+
+@intrinsic("simd.gather")
+fn gather_lanes<T: SimdElement, I: SimdInt, const N: usize>(s: []T, idx: Simd<I, N>, m: Mask<N>, fallback: Simd<T, N>) Simd<
+    T,
+    N
+>;
+
+@intrinsic("simd.scatter")
+fn scatter_lanes<T: SimdElement, I: SimdInt, const N: usize>(s: []mut T, idx: Simd<I, N>, m: Mask<N>, v: Simd<T, N>);
+
+/// Store the active lanes of `v` in lane order to `s[start..start + count]` and return `count`, the
+/// active lane count; nothing past them is written. Panics before any write: `start + count` past `s`.
+@intrinsic("simd.compress_store")
+pub fn compress_store<T: SimdElement, const N: usize>(s: []mut T, start: usize, m: Mask<N>, v: Simd<T, N>) usize;
+
+/// Active lane `i` is `*p[i]`; an inactive one is `fallback[i]`. The caller guarantees every active
+/// lane's pointer valid.
+@intrinsic("simd.gather_ptr")
+pub unsafe fn gather_ptr<T: SimdElement, const N: usize>(p: [*const T; N], m: Mask<N>, fallback: Simd<T, N>) Simd<T, N>;
+
+/// Store active lane `i` of `v` to `*p[i]`, in lane order. The caller guarantees every active lane's
+/// pointer valid.
+@intrinsic("simd.scatter_ptr")
+pub unsafe fn scatter_ptr<T: SimdElement, const N: usize>(p: [*mut T; N], m: Mask<N>, v: Simd<T, N>);
+
+/// Active lane `i` is `p[i]`; an inactive one is `fallback[i]`. The caller guarantees every active
+/// lane's element valid.
+@intrinsic("simd.load_masked_ptr")
+pub unsafe fn load_masked_ptr<T: SimdElement, const N: usize>(p: *const T, m: Mask<N>, fallback: Simd<T, N>) Simd<T, N>;
+
+/// Store active lane `i` of `v` to `p[i]`. The caller guarantees every active lane's element valid.
+@intrinsic("simd.store_masked_ptr")
+pub unsafe fn store_masked_ptr<T: SimdElement, const N: usize>(p: *mut T, m: Mask<N>, v: Simd<T, N>);
+
 extend<const N: usize> Mask<N> {
     /// `b` in every lane.
     pub fn splat(b: bool) Self {

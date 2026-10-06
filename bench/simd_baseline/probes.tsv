@@ -47,22 +47,6 @@ clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582
 clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	at-hwcap2	not applicable
 clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	at-hwcap3	not applicable
 clang version 19.1.5-wasi-sdk (https://github.com/llvm/llvm-project ab4b5a2db582958af1ee308a790cfdb42bd24720)	wasm32-wasip1	clang	thin-lto	thin 2
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	add-overflow	accepted
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	fp-contract-off	accepted
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-x86_64	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-aarch64	+i8mm
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v2	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v3	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v4	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-simd128	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-relaxed-simd	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cas16	inline
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thread-local	accepted
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cpuid-count	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	getauxval	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap2	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap3	not applicable
-Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thin-lto	thin 1
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	add-overflow	accepted
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	fp-contract-off	accepted
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	target-attr-x86_64	not applicable
@@ -79,3 +63,19 @@ Homebrew clang version 22.1.8	wasm32-wasip1	clang	getauxval	not applicable
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	at-hwcap2	not applicable
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	at-hwcap3	not applicable
 Homebrew clang version 22.1.8	wasm32-wasip1	clang	thin-lto	thin 2
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	add-overflow	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	fp-contract-off	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-x86_64	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	target-attr-aarch64	+i8mm
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	march-x86-64-v4	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-simd128	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	wasm-relaxed-simd	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cas16	inline
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thread-local	accepted
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	cpuid-count	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	getauxval	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap2	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	at-hwcap3	not applicable
+Apple clang version 21.0.0 (clang-2100.1.1.101)	arm64-apple-darwin27.0.0	cc	thin-lto	thin 1

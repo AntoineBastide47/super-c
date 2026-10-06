@@ -694,3 +694,109 @@ fn verifier_rejects_malformed_vector_records() {
     lw.body.rvalues[min].b = 1;
     assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
 }
+
+const MASKED_SRC: str = "fn f(s: []i32, d: []mut i32, p: *mut i32, v: Simd<i32, 4>, m: Mask<4>) Simd<i32, 4> {\n    let a = load_or(s, 1, v);\n    let b = load_masked(s, 2, m, a);\n    store_masked(d, 0, m, b);\n    let n = compress_store(d, 1, m, b);\n    let q: [*mut i32; 4] = [p; 4];\n    let r: [*const i32; 4] = [p; 4];\n    let c = unsafe gather_ptr(r, m, b);\n    unsafe scatter_ptr(q, m, c);\n    let e = unsafe load_masked_ptr(p, m, c);\n    unsafe store_masked_ptr(p, m, e);\n    let w = swizzle(e, [3, 1]);\n    return shuffle(w, w, [3, 0, 2, 1]) + Simd::<i32, 4>::splat(n as i32);\n}\n";
+
+// Function `name` of the module whose path ends with `path`, or NODE_NONE.
+fn find_in(p: &loader::Package, path: str, name: str) DefId {
+    for u in 0..p.modules.len() {
+        if !p.modules.at(u).path.as_str().ends_with(path) {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(u as ModuleId);
+        let src = p.modules.at(u).source.as_str();
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            if a.at_const(nid).kind == NodeKind::NODE_FUNCTION {
+                let sp = a.at_const(a.at_const(nid).as_data.function.name).as_data.name.text;
+                if src.slice(sp.start as usize, sp.end as usize) == name {
+                    return DefId { module: u as ModuleId, node: nid };
+                }
+            }
+        }
+    }
+    return DefId { module: 0, node: NODE_NONE };
+}
+
+// The masked, gather and compressing forms write through operand 0 (an element per active lane at a
+// lane-dependent address: `SM_WRITE_LANES`), their loads only write their results (`SM_READ_LANES`),
+// and the rearranging codes have no memory effect; the index lists print.
+@test
+fn masked_memory_codes_have_their_effects() {
+    let mut p = typed_package(MASKED_SRC);
+    // The lowering evaluates the index lists.
+    let mut cirv = iri::interp_new(&mut p);
+    p.cir = &mut cirv;
+    let out = lowered(&p, "f");
+    assert(has(&out, "simd.swizzle[") && has(&out, "][3, 1]") && has(&out, "][3, 0, 2, 1]"), "the index lists print");
+    let mut seen: u32 = 0;
+    let fs: [DefId; 3] = [
+        find_in(&p, p.modules.at(p.modules.len() - 1).path.as_str(), "f"),
+        find_in(&p, "simd", "gather"),
+        find_in(&p, "simd", "scatter"),
+    ];
+    for d in fs {
+        assert(d.node != NODE_NONE, "the function is found");
+        let mut lw = irl::Lowerer::new(&p, d.module, d.node);
+        assert(lw.lower_fn(d.node), "body lowers");
+        let b = &lw.body;
+        let ss = simd_stmts(b);
+        for k in 0..ss.len() {
+            let st = *b.statements.at(ss[k]);
+            let rv = *b.rvalues.at(st.rvalue as usize);
+            let e = fx::stmt_effect(b, &st);
+            let fx9 = ir::simd_op(rv.c).effect;
+            if ir::simd_writes(rv.c) {
+                assert(e.kind == fx::EF_PTR && e.a == b.oper_pool[rv.a as usize], "a store writes through operand 0");
+                assert(fx9 == ir::SM_WRITE_LANES, "a masked store writes per lane");
+                seen += 1;
+            } else {
+                assert(e.kind == fx::EF_WRITE && e.a == st.place, "a load or a lane operation writes its result");
+                assert(fx9 == pick(rv.c >= ir::SIMD_LOAD_OR, ir::SM_READ_LANES, ir::SM_NONE), "the effect column");
+                seen += pick(rv.c >= ir::SIMD_LOAD_OR, 1u32, 0u32);
+            }
+        }
+    }
+    // f: load_or, load_masked, gather_ptr, load_masked_ptr; store_masked, compress_store, scatter_ptr,
+    // store_masked_ptr; and the std wrappers' gather and scatter.
+    assert_eq(seen, 10);
+}
+
+// An index list must name a lane of its operands, have the result's length, and be present outside a
+// generic lowering that re-lowers per instance.
+@test
+fn verifier_rejects_malformed_index_lists() {
+    let mut p = typed_package(MASKED_SRC);
+    let mut cirv = iri::interp_new(&mut p);
+    p.cir = &mut cirv;
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
+    assert_eq(irv::verify(&lw.body, tp, &p), "");
+    let ss = simd_stmts(&lw.body);
+    for k in 0..ss.len() {
+        let r = lw.body.statements.at(ss[k]).rvalue as usize;
+        let rv = *lw.body.rvalues.at(r);
+        if rv.c != ir::SIMD_SWIZZLE && rv.c != ir::SIMD_SHUFFLE {
+            continue;
+        }
+        let at = rv.item.node as usize;
+        let w = lw.body.simd_aux[at + 1];
+        // A lane past the operands: 4 for one vector of 4 lanes, 8 for two.
+        lw.body.simd_aux[at + 1] = w & 0xFFFFFF00 | 4 * rv.b;
+        assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
+        lw.body.simd_aux[at + 1] = w;
+        // A list of another length than the result's lanes.
+        lw.body.simd_aux[at] = lw.body.simd_aux[at] + 1;
+        assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
+        lw.body.simd_aux[at] = lw.body.simd_aux[at] - 1;
+        // No list in a body that does not re-lower per instance.
+        lw.body.rvalues[r].item.node = ir::IR_NONE;
+        assert_eq(irv::verify(&lw.body, tp, &p), "simd-operand-types");
+        lw.body.rvalues[r].item.node = at as u32;
+    }
+    assert_eq(irv::verify(&lw.body, tp, &p), "");
+}

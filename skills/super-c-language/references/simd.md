@@ -185,6 +185,87 @@ name hides it. `SimdInt::Unsigned` and `SimdFloat::Bits` are the lane interfaces
 The std compositions (`widen`, `narrow*`, `bitcast`, the halves, `clamp`, `checked_*`,
 `cast_checked`, `splat`) inline at their calls: no call remains in a loop, in every profile.
 
+## Rearrangement
+
+```text
+simd::swizzle(v, idx: [usize; M]) Simd<T, M>            // lane i: v[idx[i]]
+simd::shuffle(a, b, idx: [usize; M]) Simd<T, M>         // lane i: idx[i] < N ? a[idx[i]] : b[idx[i] - N]
+simd::swizzle_or_zero(v, idx: Simd<U, M>) Simd<T, M>    // U unsigned; lane i: idx[i] < N ? v[idx[i]] : 0
+simd::swizzle_checked(v, idx) (Simd<T, M>, Mask<M>)     // and the lanes whose index is N or more
+simd::reverse(v)                                        // lane i: v[N - 1 - i]
+simd::rotate_lanes_left::<K>(v)                         // lane i: v[(i + K) % N]
+simd::rotate_lanes_right::<K>(v)                        // lane i: v[(i + N - K % N) % N]
+simd::interleave_low(a, b)      simd::interleave_high(a, b)    // a[N/2*h + i/2] for an even i, else b[..]
+simd::deinterleave_even(a, b)   simd::deinterleave_odd(a, b)   // lane i: (a ++ b)[2i] or [2i + 1]
+simd::zip(a, b)    // (interleave_low, interleave_high)
+simd::unzip(a, b)  // (deinterleave_even, deinterleave_odd)
+simd::compress(m, v, fill)    // active lanes of v at 0..count-1 in lane order, fill[i] from count
+simd::expand(m, packed, fill) // active lane i: packed[k], k the active lanes below i; inactive: fill[i]
+```
+
+An index list is a constant `[usize; M]` expression; `M` is the result's lane count, and
+`Simd<T, M>` must be a valid vector. The checker evaluates it at the call: "the index list of
+`swizzle` must be a compile-time constant", and an index past the operands' lanes names its value
+and position ("names lane 4 at position 1, past the 4 lanes of its operands"). A list or lane count
+over the enclosing generic's parameters is checked per instance, where the error names the
+bindings as a failed per-instance `static_assert` does. `swizzle` and `shuffle` have no function
+value. The other rearrangements are std functions over `swizzle` and `shuffle` with lists from a
+`const fn`: their body re-lowers per instance, and the inliner re-lowers it under each call's
+bindings, so they inline at their calls like the other compositions.
+
+## Reductions
+
+| Operation | Lanes | Rule |
+|-----------|-------|------|
+| `reduce_add`, `reduce_mul` | integer | modulo 2^W: the result does not depend on the order |
+| `reduce_add_checked`, `reduce_mul_checked` | integer | `Option<T>`: None when the exact sum or product does not fit `T` |
+| `reduce_add_ordered` | float | `((-0.0 + v[0]) + v[1]) + ... + v[N - 1]` |
+| `reduce_mul_ordered` | float | `((1.0 * v[0]) * v[1]) * ... * v[N - 1]` |
+| `reduce_add_tree`, `reduce_mul_tree` | float | `r[i] = v[i] op v[i + N/2]` over the lower half, repeated until one lane |
+| `reduce_min`, `reduce_max` | integer | the extreme lane |
+| `reduce_min_num`, `reduce_max_num`, `reduce_minimum`, `reduce_maximum` | float | the lane operation of the name: `_num` ignores NaN lanes, `minimum`/`maximum` return NaN for one |
+| `reduce_and`, `reduce_or`, `reduce_xor` | integer | bitwise |
+| `arg_min`, `arg_max` | integer | `usize`: the lowest lane of the extreme value |
+| `arg_min_num`, `arg_max_num` | float | `Option<usize>`: the lowest lane of the extreme non-NaN value (`-0.0` below `+0.0`); None when every lane is NaN |
+| `simd::dot::<A>(a, b)` | any | integer `A`: the sum of `(a[i] as A) * (b[i] as A)` modulo 2^W; float `A`: `reduce_add_ordered` of the products, each rounded to `A` |
+
+The float sum starts at `-0.0`, so lanes of `-0.0` sum to `-0.0`. A float reduction names its order
+and no lowering reorders it; none is named `sum`. `A` has the kind of `T` (integer or float) and at
+least its width ("dot: A must be a type of the same kind as T, at least as wide").
+
+## Masked and partial memory
+
+```text
+simd::load_or(s: []T, start, fallback) Simd<T, N>
+simd::load_masked(s: []T, start, m: Mask<N>, fallback) Simd<T, N>
+simd::store_masked(s: []mut T, start, m, v)
+simd::gather(s: []T, idx: Simd<I, N>, m, fallback) Simd<T, N>     // I is u32 or u64
+simd::scatter(s: []mut T, idx: Simd<I, N>, m, v)
+simd::compress_store(s: []mut T, start, m, v) usize
+unsafe simd::gather_ptr(p: [*const T; N], m, fallback)    unsafe simd::scatter_ptr(p: [*mut T; N], m, v)
+unsafe simd::load_masked_ptr(p: *const T, m, fallback)    unsafe simd::store_masked_ptr(p: *mut T, m, v)
+```
+
+| Operation | Active lane `i` | Inactive lane `i` | Trap |
+|-----------|-----------------|-------------------|------|
+| `load_or` | `s[start + i]` where it exists | `fallback[i]` | never |
+| `load_masked` | `s[start + i]` | `fallback[i]`, no access | an active lane past `s` |
+| `store_masked` | writes `s[start + i]` | no access | an active lane past `s`, before any write |
+| `gather` | `s[idx[i]]` | `fallback[i]`, no access | an active index past `s` |
+| `scatter` | writes `s[idx[i]]` in lane order | no access | an active index past `s`, before any write |
+| `compress_store` | writes the active lanes at `start..start + count`, returns `count` | no access | `start + count` past `s`, before any write |
+
+An inactive lane never reads, writes or checks its element; every active lane is checked before the
+first access, and the lowest failing one traps: "lane 3: index out of bounds: the index is 9 + 3
+but the length is 12" (from a start), "lane 1: index out of bounds: the index is 6 but the length
+is 6" (an index), and for `compress_store` the slice access text ("3 lanes from 10 but the length is
+12"). `start + i` never overflows: the check is `start <= len` and then `i < len - start`. Of
+active scatter lanes with one index, the highest writes last and wins (Rust's `scatter` and AVX-512
+order). `compress_store` writes exactly `count` elements, never past the active lanes. No masked
+store reads and writes back the whole vector: another thread may own an inactive element. A store
+borrows its slice mutably, a load shared; the raw forms are `unsafe`, and the caller guarantees each
+active lane's element.
+
 ## Mask operations
 
 ```text

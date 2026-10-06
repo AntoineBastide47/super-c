@@ -82,32 +82,34 @@ fn halves_concat_iota_and_bits_match() {
     sweep([72, 73, 74, 75, 76, 77]);
 }
 
-// The build of `src` fails with a diagnostic containing `needle`.
-fn expect_build_err(label: str, src: str, needle: str) {
-    let b = h::diff_build(src, []);
-    if b.built || !b.diag.contains(needle) {
-        eprintln("{}: {}", label, b.diag.as_str());
-    }
-    assert(!b.built && b.diag.contains(needle), label);
+@test
+fn rearrangements_match() {
+    sweep([78, 79, 80, 81, 82, 83, 84]);
 }
 
-// The run of `src` with argument `arg` traps with `msg` (on stderr), or exits 0 when `msg` is empty.
-fn expect_run(label: str, src: str, arg: str, msg: str) {
-    let b = h::diff_build(src, []);
-    if !b.built {
-        eprintln("{}: {}", label, b.diag.as_str());
-    }
-    assert(b.built, label);
-    let r = h::diff_run(&b, arg);
-    let ok = if msg.len() == 0 {
-        r.exit == 0;
-    } else {
-        r.exit != 0 && r.err.contains(msg);
-    };
-    if !ok {
-        eprintln("{}: exit {}: {}{}", label, r.exit, r.out.as_str(), r.err.as_str());
-    }
-    assert(ok, label);
+@test
+fn interleaves_compress_and_expand_match() {
+    sweep([85, 86, 87, 88, 89, 90, 91, 92]);
+}
+
+@test
+fn integer_reductions_match() {
+    sweep([93, 94, 95, 96, 97, 98, 103, 104, 109, 110, 111, 112, 113]);
+}
+
+@test
+fn float_reductions_and_dot_match() {
+    sweep([99, 100, 101, 102, 105, 106, 107, 108, 114, 115, 116, 117]);
+}
+
+@test
+fn masked_loads_and_stores_match() {
+    sweep([118, 119, 120, 123]);
+}
+
+@test
+fn gathers_and_scatters_match() {
+    sweep([121, 122]);
 }
 
 @test
@@ -135,24 +137,24 @@ fn operator_misuse_is_diagnosed() {
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str(main);
-        expect_build_err(c[1], src.as_str(), c[1]);
+        h::expect_build_err(c[1], src.as_str(), c[1]);
     }
-    expect_build_err(
+    h::expect_build_err(
         "widen to a narrower type",
         "fn main() i32 {\n    let v = Simd::<i32, 4>::splat(1).widen::<i16>();\n    return v[0] as i32 - 1;\n}\n",
         "widen: U must be a wider lane type of the same kind as T",
     );
-    expect_build_err(
+    h::expect_build_err(
         "bitcast to another size",
         "fn main() i32 {\n    let v = Simd::<i32, 4>::splat(1).bitcast::<u8, 8>();\n    return v[0] as i32;\n}\n",
         "bitcast: the two vectors must have the same size",
     );
-    expect_build_err(
+    h::expect_build_err(
         "narrow to a wider type",
         "fn main() i32 {\n    let v = Simd::<i16, 4>::splat(1).narrow::<i32>();\n    return v[0];\n}\n",
         "narrow: U must be a narrower integer type than T",
     );
-    expect_build_err(
+    h::expect_build_err(
         "low half of two lanes",
         "fn main() i32 {\n    let v = Simd::<i32, 2>::splat(1).low_half();\n    return v[0];\n}\n",
         "low_half: the vector needs at least 4 lanes",
@@ -189,7 +191,7 @@ fn main() i32 {
     return 0;
 }
 )";
-    expect_run("bound dispatch, a function value, an unqualified turbofish and choose", src, "", "");
+    h::expect_run("bound dispatch, a function value, an unqualified turbofish and choose", src, "", "");
 }
 
 // The free forms are the methods: `simd::f(a, ..)` is `a.f(..)`, generic code over the lanes' unsigned
@@ -222,7 +224,7 @@ fn main() i32 {
     return 0;
 }
 )";
-    expect_run("the free forms", src, "", "");
+    h::expect_run("the free forms", src, "", "");
 }
 
 // A slice access checks its lanes once: `start <= len && N <= len - start`, overflow-free, and the trap
@@ -241,10 +243,10 @@ fn main(args: Vector<str>) i32 {
     return unsafe b[start + 3] - 2 * unsafe a[start + 3];
 }
 )";
-    expect_run("start = len - N", src, "6", "");
-    expect_run("start = len - N + 1", src, "7", "index out of bounds: 4 lanes from 7 but the length is 10");
-    expect_run("start > len", src, "11", "index out of bounds: 4 lanes from 11 but the length is 10");
-    expect_run(
+    h::expect_run("start = len - N", src, "6", "");
+    h::expect_run("start = len - N + 1", src, "7", "index out of bounds: 4 lanes from 7 but the length is 10");
+    h::expect_run("start > len", src, "11", "index out of bounds: 4 lanes from 11 but the length is 10");
+    h::expect_run(
         "start = usize::MAX",
         src,
         "18446744073709551615",
@@ -338,7 +340,7 @@ fn main() i32 {
     return 0;
 }
 )";
-    expect_run("the min/max table and fma", src, "", "");
+    h::expect_run("the min/max table and fma", src, "", "");
 }
 
 // A store needs its slice mutably borrowed, a load shared: a live borrow of the other kind conflicts.
@@ -346,33 +348,33 @@ fn main() i32 {
 // `[]T` it is borrowed shared.
 @test
 fn vector_access_borrows_its_slice() {
-    expect_build_err(
+    h::expect_build_err(
         "a store under a shared borrow",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let r = &a[0];\n    simd::store(a, 0, Simd::<i32, 4>::splat(0));\n    return *r;\n}\n",
         "borrow",
     );
-    expect_build_err(
+    h::expect_build_err(
         "a load under a mutable borrow",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let m = &mut a[0];\n    let v = simd::load::<i32, 4>(a, 0);\n    *m = v[1];\n    return a[0];\n}\n",
         "borrow",
     );
-    expect_build_err(
+    h::expect_build_err(
         "a store through a `[]mut` view under a shared borrow of it",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let s: []mut i32 = a;\n    let r = &s[0];\n    simd::store(s, 0, Simd::<i32, 4>::splat(7));\n    return *r;\n}\n",
         "borrow",
     );
-    expect_build_err(
+    h::expect_build_err(
         "a `[]mut` view passed to a call under a shared borrow of it",
         "fn g(s: []mut i32) {\n    s[0] = 7;\n}\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let s: []mut i32 = a;\n    let r = &s[0];\n    g(s);\n    return *r;\n}\n",
         "borrow",
     );
-    expect_build_err(
+    h::expect_build_err(
         "a write through a `[]mut` view while its `[]T` view is live",
         "fn main() i32 {\n    let mut a = [3, 4];\n    let y: []mut i32 = a;\n    let r: []i32 = y;\n    y[0] = 5;\n    return r[0];\n}\n",
         "borrow",
     );
     // A `[]mut` view is a `[]T` for a load: an update in place needs no second view.
-    expect_run(
+    h::expect_run(
         "an update in place through one view",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4, 5, 6, 7, 8];\n    let y: []mut i32 = a;\n    let v = simd::load::<i32, 4>(y, 0);\n    simd::store(y, 4, v + simd::load::<i32, 4>(y, 4));\n    return a[7] - 12;\n}\n",
         "",

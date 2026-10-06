@@ -81,24 +81,24 @@ const SCALAR: Kernels = Kernels {
     abs_diff_u8: abs_diff_u8,
 };
 
-// The kernels over portable vectors, and the scalar loops of the others.
+// Every kernel over portable vectors.
 const PORTABLE: Kernels = Kernels {
     name: "portable".ptr() as *const char,
     saxpy_f32: saxpy_f32_v,
-    dot_f32_ordered: dot_f32_ordered,
+    dot_f32_ordered: dot_f32_ordered_v,
     dot_f32_tree: dot_f32_tree_v,
     count_eq_u8: count_eq_u8_v,
     sum_i32: sum_i32_v,
     min_max_f32: min_max_f32_v,
-    filter_gt_f32: filter_gt_f32,
-    gather_sum_f32: gather_sum_f32,
-    tail_load_f32: tail_load_f32,
+    filter_gt_f32: filter_gt_f32_v,
+    gather_sum_f32: gather_sum_f32_v,
+    tail_load_f32: tail_load_f32_v,
     mix_width: mix_width_v,
     abs_diff_u8: abs_diff_u8_v,
 };
 
 // The kernels PORTABLE runs over vectors, by index.
-const PORTED: [usize; 7] = [0, 2, 3, 4, 5, 9, 10];
+const PORTED: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 @arch(x86_64)
 extern "C" "sse2.h" {
@@ -435,28 +435,49 @@ fn saxpy_f32_v(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
     }
 }
 
-// The 32 tree lanes as two vectors of 16: lane k sums the products i with i % 32 == k, in order.
+// The products summed left to right: per 16 elements, the running sum folded into the first product,
+// then one ordered reduction. -0.0 + x is x, so the order and every rounding are the scalar loop's.
+fn dot_f32_ordered_v(xp: *const f32, yp: *const f32, n: usize) f32 {
+    let x = view(xp, n);
+    let y = view(yp, n);
+    let m = n - n % 16;
+    let mut s: f32 = -0.0;
+    let mut i: usize = 0;
+    while i < m {
+        let mut q = simd::load::<f32, 16>(x, i) * simd::load::<f32, 16>(y, i);
+        q[0] = s + q[0];
+        s = simd::reduce_add_ordered(q);
+        i += 16;
+    }
+    while i < n {
+        s += x[i] * y[i];
+        i += 1;
+    }
+    return s;
+}
+
+// The 32 tree lanes as two vectors of 16: lane k sums the products i with i % 32 == k, in order. The tail
+// adds -0.0 to the lanes past n, which keeps them; the tree's first level adds the two vectors, and
+// `reduce_add_tree` halves the rest.
 fn dot_f32_tree_v(xp: *const f32, yp: *const f32, n: usize) f32 {
     let x = view(xp, n);
     let y = view(yp, n);
     let m = n - n % TREE;
-    let mut lo = Simd::<f32, 16>::splat(-0.0);
-    let mut hi = lo;
+    let nz = Simd::<f32, 16>::splat(-0.0);
+    let pz = Simd::<f32, 16>::splat(0.0);
+    let mut lo = nz;
+    let mut hi = nz;
     let mut i: usize = 0;
     while i < m {
         lo = lo + simd::load::<f32, 16>(x, i) * simd::load::<f32, 16>(y, i);
         hi = hi + simd::load::<f32, 16>(x, i + 16) * simd::load::<f32, 16>(y, i + 16);
         i += TREE;
     }
-    let mut acc: [f32; TREE] = [-0.0; TREE];
-    let l: []mut f32 = acc;
-    simd::store(l, 0, lo);
-    simd::store(l, 16, hi);
-    while i < n {
-        l[i % TREE] += x[i] * y[i];
-        i += 1;
+    if i < n {
+        lo = lo + simd::load_or(x, i, nz) * simd::load_or(y, i, pz);
+        hi = hi + simd::load_or(x, i + 16, nz) * simd::load_or(y, i + 16, pz);
     }
-    return tree(l);
+    return simd::reduce_add_tree(lo + hi);
 }
 
 fn count_eq_u8_v(xp: *const u8, n: usize, v: u8) usize {
@@ -539,6 +560,75 @@ fn min_max_f32_v(xp: *const f32, n: usize, outp: *mut f32) {
     let out = view_mut(outp, 2);
     out[0] = lo;
     out[1] = hi;
+}
+
+// The elements above `t` of each 16, stored in order after those already kept.
+fn filter_gt_f32_v(xp: *const f32, n: usize, t: f32, outp: *mut f32) usize {
+    let x = view(xp, n);
+    let out = view_mut(outp, n);
+    let tv = Simd::<f32, 16>::splat(t);
+    let m = n - n % 16;
+    let mut k: usize = 0;
+    let mut i: usize = 0;
+    while i < m {
+        let v = simd::load::<f32, 16>(x, i);
+        k += simd::compress_store(out, k, v.greater_than(tv), v);
+        i += 16;
+    }
+    while i < n {
+        if x[i] > t {
+            out[k] = x[i];
+            k += 1;
+        }
+        i += 1;
+    }
+    return k;
+}
+
+// `dot_f32_tree_v`'s lanes over gathered elements: the tail gathers only its active lanes and adds -0.0
+// to the others.
+fn gather_sum_f32_v(xp: *const f32, ip: *const u32, n: usize) f32 {
+    let x = view(xp, n);
+    let idx = view(ip, n);
+    let m = n - n % TREE;
+    let nz = Simd::<f32, 16>::splat(-0.0);
+    let all = Mask::<16>::splat(true);
+    let mut lo = nz;
+    let mut hi = nz;
+    let mut i: usize = 0;
+    while i < m {
+        lo = lo + simd::gather(x, simd::load::<u32, 16>(idx, i), all, nz);
+        hi = hi + simd::gather(x, simd::load::<u32, 16>(idx, i + 16), all, nz);
+        i += TREE;
+    }
+    if i < n {
+        let lanes = simd::iota::<u32, 16>();
+        let zi = Simd::<u32, 16>::splat(0);
+        let left = (n - i) as u32;
+        lo = lo + simd::gather(x, simd::load_or(idx, i, zi), lanes.less_than(Simd::<u32, 16>::splat(left)), nz);
+        if left > 16 {
+            hi = hi + simd::gather(
+                x,
+                simd::load_or(idx, i + 16, zi),
+                lanes.less_than(Simd::<u32, 16>::splat(left - 16)),
+                nz,
+            );
+        }
+    }
+    return simd::reduce_add_tree(lo + hi);
+}
+
+// Each row's ROW elements in the first lanes of one vector (`load_or`: the last row's lanes past x are
+// the fallback), scaled and stored to the row's first ROW elements; the other lanes stay unwritten.
+fn tail_load_f32_v(a: f32, xp: *const f32, yp: *mut f32, rows: usize) {
+    let x = view(xp, rows * ROW);
+    let y = view_mut(yp, rows * STRIDE);
+    let av = Simd::<f32, 16>::splat(a);
+    let fb = Simd::<f32, 16>::splat(0.0);
+    let row = Mask::<16>::from_bits_truncate((1u64 << ROW as u64) - 1);
+    for r in 0..rows {
+        simd::store_masked(y, r * STRIDE, row, av * simd::load_or(x, r * ROW, fb));
+    }
 }
 
 fn mix_width_v(xp: *const f32, t: f32, pp: *const u8, qp: *const u8, outp: *mut u8, n: usize) {
