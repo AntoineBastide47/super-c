@@ -1466,6 +1466,73 @@ fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) 
     out.push_str(p.modules[dm as usize].source.as_str().slice(ns.start as usize, ns.end as usize));
 }
 
+// The note naming an instance's bindings, `in the instantiation where T = f32, N = 4`: the `np`
+// parameters `prm` of module `pmod` bound to `(ams, ats)`. A method also binds its type's parameters
+// under the extend's names: each name prints once.
+fn inst_where(
+    p: &loader::Package,
+    pmod: ModuleId,
+    prm: &Array<NodeId, 8>,
+    ams: &Array<ModuleId, 8>,
+    ats: &Array<TypeId, 8>,
+    np: u8,
+) String {
+    let mut tn = String::from_str("in the instantiation where ");
+    let pa = unsafe &*p.module_ast_const(pmod);
+    let psrc = p.modules[pmod as usize].source.as_str();
+    let mut names = Array::<u64, 8> {};
+    let mut nn: usize = 0;
+    for k in 0..np {
+        let gs = pa.at_const(pa.at_const(prm[k as usize]).as_data.generic_param.name).as_data.name.text;
+        let gn = psrc.slice(gs.start as usize, gs.end as usize);
+        let mut seen = false;
+        for j in 0..nn {
+            seen = seen || names[j] == gn.hash();
+        }
+        if seen {
+            continue;
+        }
+        names[nn] = gn.hash();
+        nn += 1;
+        if nn != 1 {
+            tn.push_str(", ");
+        }
+        tn.push_str(gn);
+        tn.push_str(" = ");
+        cemit_ty_disp(p, ams[k as usize], ats[k as usize], &mut tn);
+    }
+    return tn;
+}
+
+// The program error the per-instance re-lowering `lw` of `d` under `subs` found (`Lowerer::user_err`:
+// an index list that does not evaluate or names a lane past its operands for these arguments),
+// reported at its node with the instance's bindings.
+fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>, lw: &irl::Lowerer) {
+    if lw.user_err == NODE_NONE {
+        return;
+    }
+    let a = unsafe &*p.module_ast_const(d.module);
+    let mut prm = Array::<NodeId, 8> {};
+    let mut ams = Array::<ModuleId, 8> {};
+    let mut ats = Array::<TypeId, 8> {};
+    let mut np: u8 = 0;
+    for k in 0..subs.len() {
+        let sb = *subs.at(k);
+        if sb.pm == subs.at(0).pm && np < 8 {
+            prm[np as usize] = sb.pnode;
+            ams[np as usize] = sb.am;
+            ats[np as usize] = sb.at;
+            np += 1;
+        }
+    }
+    let mut errs = diag::Errors::new();
+    errs.emit_span(a.at_const(lw.user_err).span, format("{}", lw.user_msg));
+    errs.note(inst_where(p, subs.at(0).pm, &prm, &ams, &ats, np));
+    errs.finalize(p.modules[d.module as usize].source.as_str(), p.modules[d.module as usize].file.as_str());
+    errs.log();
+    p.ok = false;
+}
+
 // Per-instantiation static_asserts inside a demanded generic body: evaluate each under the
 // demand's substitution; false fails the build, naming every binding.
 fn cemit_inst_asserts(
@@ -1545,33 +1612,7 @@ fn cemit_inst_asserts(
         let mut errs = diag::Errors::new();
         errs.emit_span(n.span, format("static assertion failed: {}", msg));
         if np > 0 {
-            // Every binding by name: `T = f32, N = 4`, so a failed bound names its values.
-            // A method also binds its type's parameters under the extend's names: each name prints once.
-            let mut tn = String::from_str("in the instantiation where ");
-            let pa = unsafe &*p.module_ast_const(pmod);
-            let psrc = p.modules[pmod as usize].source.as_str();
-            let mut names = Array::<u64, 8> {};
-            let mut nn: usize = 0;
-            for k in 0..np {
-                let gs = pa.at_const(pa.at_const(prm[k as usize]).as_data.generic_param.name).as_data.name.text;
-                let gn = psrc.slice(gs.start as usize, gs.end as usize);
-                let mut seen = false;
-                for j in 0..nn {
-                    seen = seen || names[j] == gn.hash();
-                }
-                if seen {
-                    continue;
-                }
-                names[nn] = gn.hash();
-                nn += 1;
-                if nn != 1 {
-                    tn.push_str(", ");
-                }
-                tn.push_str(gn);
-                tn.push_str(" = ");
-                cemit_ty_disp(p, ams[k as usize], ats[k as usize], &mut tn);
-            }
-            errs.note(tn);
+            errs.note(inst_where(p, pmod, &prm, &ams, &ats, np));
         }
         errs.finalize(src, p.modules[d_def.module as usize].file.as_str());
         errs.log();
@@ -1760,9 +1801,9 @@ fn push_layout_assert(out: &mut String, nm: str, size: u64, align: u64) {
 }
 
 // Tally a template: a generic body whose shared lowering must re-lower per instance (an
-// unexpanded reflection binder) or per zero-size signature.
+// unexpanded reflection binder, or a vector index list over a parameter) or per zero-size signature.
 fn count_template(b: &irc::CoreBody, pr: &mut prb::Probe) {
-    if b.has_reflect {
+    if b.has_reflect || b.has_lists {
         pr.count(prb::C_TPL_REFLECT, 1);
     } else if b.has_zst_cond {
         pr.count(prb::C_TPL_ZST, 1);
@@ -1848,10 +1889,10 @@ fn cemit_relower_census(
             continue;
         }
         let body = &lws.at(b).body;
-        if !body.has_reflect && !body.has_zst_cond {
+        let reflect = body.has_reflect || body.has_lists;
+        if !reflect && !body.has_zst_cond {
             continue;
         }
-        let reflect = body.has_reflect;
         pr.count(
             if reflect {
                 prb::C_INST_REFLECT;
@@ -2288,7 +2329,7 @@ struct SeedShard {
     // Drain-slice state: one shard per SLICE of a wave in the parallel instance frontier;
     // per-demand capture marks let the merge replay each demand's claims at its exact queue slot.
     pub dmarks: Vector<CapMark>,
-    pub douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure
+    pub douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure, 3 = emitted with a program error the merge reports
     pub derrs: Vector<str<'static>>,
     pub dvix: Vector<u64>, // per demand: index into dvars (0xFF.. = none)
     pub dvkeys: Vector<u64>, // per dvars entry: the zst-signature cache key
@@ -2555,10 +2596,11 @@ fn cemit_drain_demand(
     let mut li2 = li;
     // The reflection re-lowering serves this demand only; its slot is dropped at the end.
     let mut own_slot = false;
-    if lws.at(li as usize).body.has_reflect {
+    if lws.at(li as usize).body.has_reflect || lws.at(li as usize).body.has_lists {
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
         let okr9 = relower(&mut lw2, d_def.node, &d_subs, dow, prb::P_RELOWER_REFLECT, prb::C_RELOWER_REFLECT);
         if okr9 {
+            cemit_inst_error(p, d_def, &d_subs, &lw2);
             lws.push(lw2);
             li2 = lws.len() as u64 - 1;
             own_slot = true;
@@ -2738,15 +2780,18 @@ fn cemit_drain_slice_one(
     let d_subs = &dem.at(di).subs;
     let d_sfx = dem.at(di).sfx.as_str();
     let mut var_on = false;
+    let mut user_err = false;
     let mut var_zkey: u64 = 0;
     let mut var_lw = irl::Lowerer::new(p, 0, NODE_NONE);
     let mut li2 = li;
     let mut cfp: *const cfl::CFlow = null;
     let mut cf_own = cfl::CFlow::new_empty();
-    if lws.at(li as usize).body.has_reflect {
+    if lws.at(li as usize).body.has_reflect || lws.at(li as usize).body.has_lists {
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
         let okr9 = relower(&mut lw2, d_def.node, d_subs, dow2, prb::P_RELOWER_REFLECT, prb::C_RELOWER_REFLECT);
         if okr9 {
+            // A program error is reported in demand order by the merge (`cemit_inst_error`).
+            user_err = lw2.user_err != NODE_NONE;
             var_on = true;
             var_lw = lw2;
         } else {
@@ -2867,7 +2912,7 @@ fn cemit_drain_slice_one(
         }
         return;
     }
-    o.douts.push(0);
+    o.douts.push(pick(user_err, 3u8, 0u8));
     o.derrs.push("");
     if li2 != 0xFFFFFFFFFFFFFFFFu64 || !var_on {
         o.dvix.push(vix);
@@ -4133,7 +4178,19 @@ pub fn cemit_package(
                 };
                 let mb = *o.dmarks.at(d_ord);
                 let out9 = o.douts[d_ord];
-                if out9 == 0 {
+                if out9 == 3 {
+                    // Emitted, with the program error its re-lowering found: reported here, in demand
+                    // order. A bare lowering finds the node again (no drops, no probe counts).
+                    let mut lw9 = irl::Lowerer::new(p, cem.demand.at(j).def.module, cem.demand.at(j).def.node);
+                    let js9 = mbe::subs_copy(&cem.demand.at(j).subs);
+                    for k9 in 0..js9.len() {
+                        let sb9 = *js9.at(k9);
+                        lw9.env.push(irl::LSub { pm: sb9.pm, pnode: sb9.pnode, am: sb9.am, at: sb9.at });
+                    }
+                    let _ = lw9.lower_fn(cem.demand.at(j).def.node);
+                    cemit_inst_error(p, cem.demand.at(j).def, &js9, &lw9);
+                }
+                if out9 == 0 || out9 == 3 {
                     done.insert(dkj, 1);
                     acc.inst_ok += 1;
                     let vix = o.dvix[d_ord];

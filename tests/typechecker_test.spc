@@ -3439,6 +3439,21 @@ fn dyn_conformance_needs_the_dyn_arguments() {
     );
 }
 
+// Several results are not a tuple: a member of the call is an error where it is written.
+@test
+fn several_results_have_no_members() {
+    h::expect_err_msg(
+        "a field of several results",
+        "fn two() (i32, i32) { return 1, 2; }\nfn main() i32 { let x = two().1; return x; }\n",
+        "a call with several results has no members: bind them with `let (a, b) = ..`",
+    );
+    h::expect_err_msg(
+        "a generic call's several results",
+        "fn dup<T: Copy>(a: T) (T, T) { return a, a; }\nfn main() i32 { return dup(3).0; }\n",
+        "a call with several results has no members",
+    );
+}
+
 // A `fn` value and a `dyn fn` compare every result: a function with several results never matches a
 // signature with other results or with none.
 @test

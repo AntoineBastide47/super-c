@@ -3,7 +3,8 @@
 A generic body lowers once and every instance renders that shared lowering under its
 substitution chain, except a body whose shape depends on the instance: an unexpanded
 reflection binder (`CoreBody.has_reflect`: `inline for` over `fields`/`variants`/
-`payloads` of a symbolic owner, or an `inline for` bound by a const parameter) re-lowers
+`payloads` of a symbolic owner, or an `inline for` bound by a const parameter) or a vector index
+list over a parameter (`has_lists`, counted with reflection in the census) re-lowers
 per instance, and an unfolded zero-size condition (`CoreBody.has_zst_cond`: a
 `sizeof(T) <op> <const>` branch with `T` unbound) re-lowers once per zero-size signature
 of the instance's arguments. The alternative is a symbolic generic IR: keep those

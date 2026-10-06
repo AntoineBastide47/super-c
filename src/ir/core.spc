@@ -294,7 +294,8 @@ pub const RV_INTRINSIC: u8 = 12; // a = operand range start, b = len (IN_SIZEOF/
 /// Kept structural so end-openness survives (a materialized Range value cannot express it).
 pub const RV_SLICE: u8 = 13;
 /// A named vector operation: a = operand range start, b = len, c = SIMD_* code, target = result
-/// type. Lane-wise operators and casts stay RV_BINARY, RV_UNARY and RV_CAST over vector types.
+/// type, item.node = the start of its index list in `simd_aux` (SIMD_SWIZZLE, SIMD_SHUFFLE) or IR_NONE.
+/// Lane-wise operators and casts stay RV_BINARY, RV_UNARY and RV_CAST over vector types.
 pub const RV_SIMD: u8 = 14;
 
 /// True for the rvalue kinds whose operands are the range `a`, `b` long, in `oper_pool`.
@@ -362,6 +363,44 @@ pub const SIMD_LOAD: u8 = 53; // (slice, checked start): reads N elements
 pub const SIMD_STORE: u8 = 54; // (slice, checked start, vector): writes N elements
 pub const SIMD_LOAD_RAW: u8 = 55; // (pointer): reads sizeof(T) * N bytes
 pub const SIMD_STORE_RAW: u8 = 56; // (pointer, vector): writes sizeof(T) * N bytes
+pub const SIMD_SWIZZLE: u8 = 57; // (v) and an index list: lane i is v[idx[i]]
+pub const SIMD_SHUFFLE: u8 = 58; // (a, b) and an index list: lane i is (a ++ b)[idx[i]]
+pub const SIMD_SWIZZLE_ZERO: u8 = 59; // (v, idx): lane i is v[idx[i]], or 0 past the lanes
+pub const SIMD_SWIZZLE_OOB: u8 = 60; // (v, idx): the lanes whose index is past the lanes
+pub const SIMD_COMPRESS: u8 = 61; // (m, v, fill)
+pub const SIMD_EXPAND: u8 = 62; // (m, packed, fill)
+pub const SIMD_REDUCE_ADD: u8 = 63;
+pub const SIMD_REDUCE_MUL: u8 = 64;
+pub const SIMD_REDUCE_ADD_ORD: u8 = 65;
+pub const SIMD_REDUCE_MUL_ORD: u8 = 66;
+pub const SIMD_REDUCE_ADD_TREE: u8 = 67;
+pub const SIMD_REDUCE_MUL_TREE: u8 = 68;
+pub const SIMD_REDUCE_ADD_OVF: u8 = 69; // whether the exact sum does not fit the lane type
+pub const SIMD_REDUCE_MUL_OVF: u8 = 70;
+pub const SIMD_REDUCE_MIN: u8 = 71;
+pub const SIMD_REDUCE_MAX: u8 = 72;
+pub const SIMD_REDUCE_MIN_NUM: u8 = 73;
+pub const SIMD_REDUCE_MAX_NUM: u8 = 74;
+pub const SIMD_REDUCE_MINIMUM: u8 = 75;
+pub const SIMD_REDUCE_MAXIMUM: u8 = 76;
+pub const SIMD_REDUCE_AND: u8 = 77;
+pub const SIMD_REDUCE_OR: u8 = 78;
+pub const SIMD_REDUCE_XOR: u8 = 79;
+pub const SIMD_ARG_MIN: u8 = 80; // the lowest lane holding the extreme value
+pub const SIMD_ARG_MAX: u8 = 81;
+pub const SIMD_ARG_MIN_NUM: u8 = 82; // the same over the non-NaN lanes; N when every lane is NaN
+pub const SIMD_ARG_MAX_NUM: u8 = 83;
+pub const SIMD_DOT: u8 = 84; // (a, b): the products in the result type, summed as REDUCE_ADD(_ORD)
+pub const SIMD_LOAD_OR: u8 = 85; // (slice, start, fallback)
+pub const SIMD_LOAD_MASKED: u8 = 86; // (slice, start, m, fallback)
+pub const SIMD_STORE_MASKED: u8 = 87; // (slice, start, m, v)
+pub const SIMD_GATHER: u8 = 88; // (slice, idx, m, fallback)
+pub const SIMD_SCATTER: u8 = 89; // (slice, idx, m, v)
+pub const SIMD_COMPRESS_STORE: u8 = 90; // (slice, start, m, v): the active lane count
+pub const SIMD_GATHER_PTR: u8 = 91; // ([*const T; N], m, fallback)
+pub const SIMD_SCATTER_PTR: u8 = 92; // ([*mut T; N], m, v)
+pub const SIMD_LOAD_MASKED_PTR: u8 = 93; // (pointer, m, fallback)
+pub const SIMD_STORE_MASKED_PTR: u8 = 94; // (pointer, m, v)
 
 /// SimdOp.rule: how the operands and the result relate (V is operand 0's vector type, N its lanes).
 pub const SR_VEC: u8 = 0; // every operand and the result are V
@@ -375,6 +414,13 @@ pub const SR_CONCAT: u8 = 7; // (V, V) -> 2 * N lanes of V's element
 pub const SR_ANY: u8 = 8; // no operand; the result is any vector
 pub const SR_LOAD: u8 = 9; // a slice or pointer of T [, usize start] -> Simd<T, N>
 pub const SR_STORE: u8 = 10; // a slice or pointer of T [, usize start], Simd<T, N> -> unit
+pub const SR_INDEX: u8 = 11; // (V) or (V, V) and an index list of M -> M lanes of V's element
+pub const SR_RT_INDEX: u8 = 12; // (V, M lanes of an unsigned integer) -> M lanes of V's element, or Mask<M>
+pub const SR_MASKED: u8 = 13; // (Mask<N>, V, V) -> V
+pub const SR_REDUCE: u8 = 14; // (V) -> the element (bool for an overflow test, usize for a lane index)
+pub const SR_DOT: u8 = 15; // (V, V) -> a scalar of the same kind, at least as wide as the element
+pub const SR_MLOAD: u8 = 16; // the elements' place, [start or index vector,] [Mask<N>,] V -> V
+pub const SR_MSTORE: u8 = 17; // the elements' place, start or index vector, Mask<N>, V -> unit (usize)
 
 /// SimdOp.elem: the lane types the operation accepts (operand 0's lanes, or the result's for SR_ANY).
 pub const SE_ANY: u8 = 0;
@@ -383,10 +429,13 @@ pub const SE_FLOAT: u8 = 2;
 pub const SE_SIGNED: u8 = 3; // a signed integer or a float
 pub const SE_SINT: u8 = 4; // a signed integer
 
-/// SimdOp.effect: the memory the operation touches through operand 0.
+/// SimdOp.effect: the memory the operation touches through operand 0: none, the lanes' elements, or
+/// (masked and gather forms) one element per active lane at a lane-dependent address.
 pub const SM_NONE: u8 = 0;
 pub const SM_READ: u8 = 1;
 pub const SM_WRITE: u8 = 2;
+pub const SM_READ_LANES: u8 = 3;
+pub const SM_WRITE_LANES: u8 = 4;
 
 /// One RV_SIMD operation: its intrinsic name (`@intrinsic("simd.<name>")`), operand count, type
 /// rule, lane types, and memory effect through operand 0.
@@ -402,8 +451,12 @@ const fn sop(name: str<'static>, arity: u8, rule: u8, elem: u8) SimdOp {
     return SimdOp { name: name, arity: arity, rule: rule, elem: elem, effect: SM_NONE };
 }
 
+const fn mop(name: str<'static>, arity: u8, rule: u8, effect: u8) SimdOp {
+    return SimdOp { name: name, arity: arity, rule: rule, elem: SE_ANY, effect: effect };
+}
+
 /// The number of RV_SIMD codes.
-pub const SIMD_CODES: usize = 57;
+pub const SIMD_CODES: usize = 95;
 
 pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
     sop("iota", 0, SR_ANY, SE_ANY),
@@ -463,12 +516,61 @@ pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
     SimdOp { name: "store", arity: 3, rule: SR_STORE, elem: SE_ANY, effect: SM_WRITE },
     SimdOp { name: "load_raw", arity: 1, rule: SR_LOAD, elem: SE_ANY, effect: SM_READ },
     SimdOp { name: "store_raw", arity: 2, rule: SR_STORE, elem: SE_ANY, effect: SM_WRITE },
+    sop("swizzle", 1, SR_INDEX, SE_ANY),
+    sop("shuffle", 2, SR_INDEX, SE_ANY),
+    sop("swizzle_or_zero", 2, SR_RT_INDEX, SE_ANY),
+    sop("swizzle_oob", 2, SR_RT_INDEX, SE_ANY),
+    sop("compress", 3, SR_MASKED, SE_ANY),
+    sop("expand", 3, SR_MASKED, SE_ANY),
+    sop("reduce_add", 1, SR_REDUCE, SE_INT),
+    sop("reduce_mul", 1, SR_REDUCE, SE_INT),
+    sop("reduce_add_ordered", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_mul_ordered", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_add_tree", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_mul_tree", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_add_overflows", 1, SR_REDUCE, SE_INT),
+    sop("reduce_mul_overflows", 1, SR_REDUCE, SE_INT),
+    sop("reduce_min", 1, SR_REDUCE, SE_INT),
+    sop("reduce_max", 1, SR_REDUCE, SE_INT),
+    sop("reduce_min_num", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_max_num", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_minimum", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_maximum", 1, SR_REDUCE, SE_FLOAT),
+    sop("reduce_and", 1, SR_REDUCE, SE_INT),
+    sop("reduce_or", 1, SR_REDUCE, SE_INT),
+    sop("reduce_xor", 1, SR_REDUCE, SE_INT),
+    sop("arg_min", 1, SR_REDUCE, SE_INT),
+    sop("arg_max", 1, SR_REDUCE, SE_INT),
+    sop("arg_min_num", 1, SR_REDUCE, SE_FLOAT),
+    sop("arg_max_num", 1, SR_REDUCE, SE_FLOAT),
+    sop("dot", 2, SR_DOT, SE_ANY),
+    mop("load_or", 3, SR_MLOAD, SM_READ_LANES),
+    mop("load_masked", 4, SR_MLOAD, SM_READ_LANES),
+    mop("store_masked", 4, SR_MSTORE, SM_WRITE_LANES),
+    mop("gather", 4, SR_MLOAD, SM_READ_LANES),
+    mop("scatter", 4, SR_MSTORE, SM_WRITE_LANES),
+    mop("compress_store", 4, SR_MSTORE, SM_WRITE_LANES),
+    mop("gather_ptr", 3, SR_MLOAD, SM_READ_LANES),
+    mop("scatter_ptr", 3, SR_MSTORE, SM_WRITE_LANES),
+    mop("load_masked_ptr", 3, SR_MLOAD, SM_READ_LANES),
+    mop("store_masked_ptr", 3, SR_MSTORE, SM_WRITE_LANES),
 ];
 
 /// The SIMD_OPS row of code `c`.
 pub const fn simd_op(c: u8) SimdOp {
     let t: []SimdOp = SIMD_OPS;
     return t[c as usize];
+}
+
+/// Lane `i` of the index list at `simd_aux[start..]`: its length, then its lanes four to a word.
+pub const fn aux_lane(b: &CoreBody, start: u32, i: u64) u32 {
+    return b.simd_aux[(start as u64 + 1 + i / 4) as usize] >> (i % 4 * 8) as u32 & 0xFF;
+}
+
+/// Whether code `c` writes through operand 0 (`SM_WRITE`, `SM_WRITE_LANES`).
+pub const fn simd_writes(c: u8) bool {
+    let e = simd_op(c).effect;
+    return e == SM_WRITE || e == SM_WRITE_LANES;
 }
 
 /// What `@intrinsic("simd.<name>")` lowers to (`simd_intrinsic`).
@@ -839,6 +941,10 @@ pub struct CoreBody {
     /// The body contains an UNEXPANDED reflection binder (`inline for .. in fields(..)` whose
     /// owner stayed symbolic): instances must RE-LOWER with the demand env, never share this body.
     pub has_reflect: bool,
+    /// A vector index list names a generic parameter (`SIMD_SWIZZLE`/`SIMD_SHUFFLE` with no
+    /// `simd_aux` record): instances re-lower with the demand env as for `has_reflect`, and the
+    /// inliner re-lowers the callee under each call's bindings.
+    pub has_lists: bool,
     /// The body contains an unfolded `sizeof(T) <op> <const>` branch: instances re-lower with the
     /// demand env so the untaken side (a ZST container path or its material twin) never emits.
     pub has_zst_cond: bool,
@@ -878,6 +984,9 @@ pub struct CoreBody {
     pub user_moves: Vector<u64>,
     pub asms: Vector<AsmRec>,
     pub asm_spans: Vector<tok::Span>,
+    /// RV_SIMD index lists (`item.node` is the start): the length, then the lane indexes four `u8` per
+    /// word, low byte first.
+    pub simd_aux: Vector<u32>,
     /// The calls the inliner replaced whose callee instance holds a per-instantiation
     /// `static_assert`: the emitter still demands each instance, so the assert still runs.
     pub demands: Vector<Terminator>,
@@ -972,6 +1081,7 @@ extend CoreBody {
             returns: 0,
             is_generic: false,
             has_reflect: false,
+            has_lists: false,
             has_zst_cond: false,
             inst_ticks: false,
             count_blocks: 0,
@@ -994,6 +1104,7 @@ extend CoreBody {
             user_moves: Vector::<u64>::new(),
             asms: Vector::<AsmRec>::new(),
             asm_spans: Vector::<tok::Span>::new(),
+            simd_aux: Vector::<u32>::new(),
             demands: Vector::<Terminator>::new(),
             entry: 0,
         };
@@ -1008,6 +1119,7 @@ extend CoreBody {
         self.returns = 0;
         self.is_generic = false;
         self.has_reflect = false;
+        self.has_lists = false;
         self.has_zst_cond = false;
         self.inst_ticks = false;
         self.count_blocks = 0;
@@ -1030,6 +1142,7 @@ extend CoreBody {
         self.user_moves.truncate(0);
         self.asms.truncate(0);
         self.asm_spans.truncate(0);
+        self.simd_aux.truncate(0);
         self.demands.truncate(0);
         self.entry = 0;
     }
@@ -1040,7 +1153,7 @@ extend CoreBody {
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
         n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
-        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity()) * 4;
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity()) * 4;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
         n += self.demands.capacity() * sizeof(Terminator);
@@ -1056,6 +1169,7 @@ extend CoreBody {
         out.returns = src.returns;
         out.is_generic = src.is_generic;
         out.has_reflect = src.has_reflect;
+        out.has_lists = src.has_lists;
         out.has_zst_cond = src.has_zst_cond;
         out.inst_ticks = src.inst_ticks;
         out.count_blocks = src.count_blocks;
@@ -1077,6 +1191,7 @@ extend CoreBody {
         out.targ_pool = exact(&src.targ_pool);
         out.asms = exact(&src.asms);
         out.asm_spans = exact(&src.asm_spans);
+        out.simd_aux = exact(&src.simd_aux);
         out.demands = exact(&src.demands);
         return out;
     }

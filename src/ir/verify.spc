@@ -169,15 +169,15 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
         return "";
     }
     let op = ir::simd_op(r.c);
-    let mut tys: [TypeId; 3] = [TYPE_NONE; 3];
+    let mut tys: [TypeId; 4] = [TYPE_NONE; 4];
     for k in 0..r.b {
         unsafe tys[k as usize] = b.operands.at(b.oper_pool[(r.a + k) as usize] as usize).ty;
     }
-    // The vector operand: the stored one, the choice's first, else operand 0 (the result for `iota`
-    // and the loads).
+    // The vector operand: the stored one, the last of the masked forms, the choice's first, else
+    // operand 0 (the result for `iota` and the loads).
     let vt = if op.rule == ir::SR_ANY || op.rule == ir::SR_LOAD {
         r.target;
-    } else if op.rule == ir::SR_STORE {
+    } else if op.rule == ir::SR_STORE || op.rule == ir::SR_MASKED || op.rule >= ir::SR_MLOAD {
         unsafe tys[(op.arity - 1) as usize];
     } else {
         unsafe tys[pick(op.rule == ir::SR_CHOOSE, 1usize, 0usize)];
@@ -190,6 +190,9 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
     let el = op.elem;
     if k != 0 && (el == ir::SE_INT && k == 3 || el == ir::SE_FLOAT && k != 3 || el == ir::SE_SIGNED && k == 2 || el == ir::SE_SINT && k != 1) {
         return "simd-lane-class";
+    }
+    if op.rule >= ir::SR_INDEX {
+        return pick(lane_rules(da, b, r, &tys, &v, &res), "", "simd-operand-types");
     }
     let same = r.b < 2 || tys[1] == vt || op.rule == ir::SR_CHOOSE || op.rule == ir::SR_CHANGED || op.rule == ir::SR_LOAD || op.rule == ir::SR_STORE;
     let mask = res.kind == TypeKind::TYPE_MASK && res.as_data.arr.len == v.as_data.arr.len;
@@ -218,12 +221,12 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
             pick(op.rule == ir::SR_HALF, rn * 2 == vn, rn == vn * 2),
         )),
         ir::SR_LOAD | ir::SR_STORE => {
-            // Operand 0 is a slice (`load`, `store`, then a `usize` start) or a pointer (the raw forms)
-            // of the lanes.
+            // Operand 0 is a slice (`load`, `store`, then a `usize` start) or a pointer (the raw forms,
+            // or a reference passed to their pointer parameter) of the lanes.
             let p = *da.type_at(tys[0]);
             let raw = r.c == ir::SIMD_LOAD_RAW || r.c == ir::SIMD_STORE_RAW;
             let mut pe = TYPE_NONE;
-            if raw && p.kind == TypeKind::TYPE_POINTER {
+            if raw && (p.kind == TypeKind::TYPE_POINTER || p.kind == TypeKind::TYPE_REFERENCE) {
                 pe = p.as_data.elem;
             } else if !raw && p.kind == TypeKind::TYPE_INSTANCE && tys[1] == Ast::builtin(BuiltinType::BT_USIZE) {
                 let mut it = TyInstance {};
@@ -239,6 +242,108 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
         return "simd-operand-types";
     }
     return "";
+}
+
+// Whether `t` is the mask of vector type `v`'s lanes.
+fn mask_of(da: &Ast, t: TypeId, v: &Ty) bool {
+    return da.type_at(t).kind == TypeKind::TYPE_MASK && da.type_at(t).as_data.arr.len == v.as_data.arr.len;
+}
+
+// The operand rules of the rearranging, reducing and masked memory codes (`SR_INDEX` and up): `v`
+// is the vector operand (`vec_types`), `res` the result. A symbolic lane count or width passes.
+fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: &Ty, res: &Ty) bool {
+    let op = ir::simd_op(r.c);
+    let vt = unsafe tys[(op.arity - 1) as usize];
+    let vn = da.lanes(v);
+    let t1 = *da.type_at(tys[1]);
+    let usz = Ast::builtin(BuiltinType::BT_USIZE);
+    let scalar = res.kind == TypeKind::TYPE_BUILTIN;
+    switch op.rule {
+        ir::SR_INDEX => {
+            // Lane i of the index list, below the operands' lanes; IR_NONE only in a shared generic
+            // lowering that re-lowers per instance.
+            let rn = pick(res.kind == TypeKind::TYPE_SIMD, da.lanes(res), 0u64);
+            if res.kind != TypeKind::TYPE_SIMD || res.as_data.arr.elem != v.as_data.arr.elem || r.b == 2 && tys[1] != tys[0] {
+                return false;
+            }
+            if r.item.node == ir::IR_NONE {
+                return b.has_lists;
+            }
+            if r.item.node as usize >= b.simd_aux.len() || b.simd_aux[r.item.node as usize] as u64 != rn && rn != 0 || r.item.node as u64 + 1 + (b.simd_aux[r.item.node as usize] as u64 + 3) / 4 > b.simd_aux.len() as u64 {
+                return false;
+            }
+            for i in 0..b.simd_aux[r.item.node as usize] as u64 {
+                if ir::aux_lane(b, r.item.node, i) as u64 >= vn * r.b as u64 && vn != 0 {
+                    return false;
+                }
+            }
+            return true;
+        },
+        ir::SR_RT_INDEX => {
+            let mask = r.c == ir::SIMD_SWIZZLE_OOB;
+            let kind_ok = pick(
+                mask,
+                res.kind == TypeKind::TYPE_MASK,
+                res.kind == TypeKind::TYPE_SIMD && res.as_data.arr.elem == v.as_data.arr.elem,
+            );
+            return kind_ok && t1.kind == TypeKind::TYPE_SIMD && lane_class(da, &t1) != 1 && lane_class(da, &t1) != 3 && res.as_data.arr.len == t1.as_data.arr.len;
+        },
+        ir::SR_MASKED => {
+            return mask_of(da, tys[0], v) && tys[1] == vt && r.target == vt;
+        },
+        ir::SR_REDUCE => {
+            let want = if r.c == ir::SIMD_REDUCE_ADD_OVF || r.c == ir::SIMD_REDUCE_MUL_OVF {
+                Ast::builtin(BuiltinType::BT_BOOL);
+            } else if r.c >= ir::SIMD_ARG_MIN && r.c <= ir::SIMD_ARG_MAX_NUM {
+                usz;
+            } else {
+                v.as_data.arr.elem;
+            };
+            return r.target == want;
+        },
+        ir::SR_DOT => {
+            // A scalar of the lanes' kind, at least as wide.
+            let k = lane_class(da, v);
+            let fl = scalar && (res.as_data.builtin == BuiltinType::BT_F32 || res.as_data.builtin == BuiltinType::BT_F64);
+            return tys[1] == vt && (!scalar && k == 0 || scalar && (k == 0 || k == 3 == fl && bt_lane_bits(
+                res.as_data.builtin,
+            ) as u64 >= lane_bits(da, v)));
+        },
+        _ => {
+            // The masked memory forms: the elements' place (a slice, a pointer or an array of pointers),
+            // a start or index vector, the mask, then the vector.
+            let p = *da.type_at(tys[0]);
+            let raw = r.c >= ir::SIMD_GATHER_PTR;
+            let gat = r.c == ir::SIMD_GATHER || r.c == ir::SIMD_SCATTER;
+            let mut pe = TYPE_NONE;
+            if r.c == ir::SIMD_GATHER_PTR || r.c == ir::SIMD_SCATTER_PTR {
+                if p.kind == TypeKind::TYPE_ARRAY && da.type_at(p.as_data.arr.elem).kind == TypeKind::TYPE_POINTER && (vn == 0 || p.as_data.arr.len as u64 == vn) {
+                    pe = da.type_at(p.as_data.arr.elem).as_data.elem;
+                }
+            } else if raw && (p.kind == TypeKind::TYPE_POINTER || p.kind == TypeKind::TYPE_REFERENCE) {
+                // A reference passed to the pointer parameter: the same address.
+                pe = p.as_data.elem;
+            } else if !raw && p.kind == TypeKind::TYPE_INSTANCE {
+                let mut it = TyInstance {};
+                if da.targs_of(tys[0], &mut it) && it.n != 0 {
+                    pe = it.args[0];
+                }
+            }
+            let ix = gat && t1.kind == TypeKind::TYPE_SIMD && t1.as_data.arr.len == v.as_data.arr.len && (lane_class(
+                da,
+                &t1,
+            ) == 0 || lane_bits(da, &t1) >= 32 && lane_class(da, &t1) == 2) || !gat && (raw || tys[1] == usz);
+            let m = r.c == ir::SIMD_LOAD_OR || mask_of(da, unsafe tys[(op.arity - 2) as usize], v);
+            let out = if op.rule == ir::SR_MLOAD {
+                r.target == vt;
+            } else if r.c == ir::SIMD_COMPRESS_STORE {
+                r.target == usz;
+            } else {
+                scalar;
+            };
+            return pe == v.as_data.arr.elem && ix && m && out;
+        },
+    };
 }
 
 /// First violated rule as a static string, or "" when the body verifies.

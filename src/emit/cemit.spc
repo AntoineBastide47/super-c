@@ -6100,6 +6100,9 @@ extend CEmit {
     // failure bit per lane and traps once, at the lowest failing lane (`__sc_panic_lane`); a mask
     // result collects its lane bits.
     fn emit_vec_store(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        if rv.kind == ir::RV_SIMD && rv.c >= ir::SIMD_SWIZZLE {
+            return self.emit_vec_ops(o, b, s, rv);
+        }
         let mut ops: [u32; 3] = [ir::IR_NONE; 3];
         let mut nops: u32 = 1;
         ops[0] = rv.a;
@@ -6188,6 +6191,478 @@ extend CEmit {
         }
         self.sput(d);
         return ok;
+    }
+
+    // RV_SIMD codes SIMD_SWIZZLE and up (`ir::SR_INDEX` and up), stored to `s.place`: a rearrangement
+    // into a scratch result (an operand may be the destination), a reduction as one loop in the order
+    // its definition fixes, and a masked or gather memory form as a loop that collects the failing
+    // active lanes, one trap at the lowest, then one element access per active lane in lane order.
+    fn emit_vec_ops(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let c = rv.c;
+        let op = ir::simd_op(c);
+        let mut sp: [String; 4] = [String::new(), String::new(), String::new(), String::new()];
+        let mut ok = true;
+        for i in 0..rv.b {
+            ok = ok && self.emit_operand(b, b.oper_pool[(rv.a + i) as usize], unsafe &mut sp[i as usize]);
+        }
+        let vk = pick(op.rule == ir::SR_MASKED || op.rule >= ir::SR_MLOAD, op.arity as u32 - 1, 0u32);
+        let mut n: i64 = 0;
+        let mut bt = BuiltinType::BT_VOID;
+        ok = ok && self.vec_ty(b, b.operands.at(b.oper_pool[(rv.a + vk) as usize] as usize).ty, &mut n, &mut bt);
+        let mut rn: i64 = 0;
+        let mut rbt = bt;
+        let mut rm = b.module;
+        let mut rt = rv.target;
+        self.rty(b, rv.target, &mut rm, &mut rt);
+        let ry = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if ry.kind == TypeKind::TYPE_BUILTIN {
+            rbt = ry.as_data.builtin;
+        } else {
+            let _ = self.vec_ty(b, rv.target, &mut rn, &mut rbt);
+        }
+        let unit = ry.kind == TypeKind::TYPE_BUILTIN && rbt == BuiltinType::BT_VOID;
+        let mut d = self.sget();
+        ok = ok && (unit || self.emit_place(b, s.place, &mut d));
+        if !ok {
+            self.sput(d);
+            return false;
+        }
+        o.push_str("  {\n");
+        // A start, a mask, a pointer or a slice reads once, before any lane: a forwarded operand
+        // expression (its own checks included) must run exactly once whatever the lanes do.
+        for i in 0..rv.b {
+            let ot = b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize).ty;
+            let k = self.rty_y(b, ot).kind;
+            if k != TypeKind::TYPE_SIMD && k != TypeKind::TYPE_ARRAY {
+                let mut nm = String::new();
+                nm.format_into("__sc_o{}", i);
+                o.push_str("  ");
+                ok = ok && self.ty_c(b.module, ot, nm.as_str(), o);
+                o.format_into(" = {};\n", unsafe sp[i as usize].as_str());
+                unsafe sp[i as usize] = nm;
+            }
+        }
+        let a = sp[0].as_str();
+        let x = sp[1].as_str();
+        let lp = "  for (uint32_t __sc_i = 0; __sc_i < ";
+        if op.rule == ir::SR_INDEX || op.rule == ir::SR_RT_INDEX || op.rule == ir::SR_MASKED || op.rule == ir::SR_MLOAD {
+            if c != ir::SIMD_SWIZZLE_OOB {
+                o.push_str("  ");
+                ok = self.ty_c(b.module, rv.target, " __sc_r;\n", o);
+            }
+        }
+        switch op.rule {
+            ir::SR_INDEX => {
+                if rv.item.node == ir::IR_NONE {
+                    self.sput(d);
+                    return self.fail("vector index list");
+                }
+                if rn <= 16 {
+                    // One assignment per lane, in index order.
+                    for i in 0..rn as u64 {
+                        let k = ir::aux_lane(b, rv.item.node, i) as i64;
+                        o.format_into("  __sc_r.l[{}] = {}.l[{}];\n", i, pick(k < n, a, x), pick(k < n, k, k - n));
+                    }
+                } else {
+                    o.format_into("  static const uint8_t __sc_x[{}] = {{", rn);
+                    for i in 0..rn as u64 {
+                        o.format_into("{}{}", mbe::if_s(i == 0, "", ", "), ir::aux_lane(b, rv.item.node, i));
+                    }
+                    o.format_into("}};\n{}{}; __sc_i++) __sc_r.l[__sc_i] = ", lp, rn);
+                    if rv.b == 1 {
+                        o.format_into("{}.l[__sc_x[__sc_i]];\n", a);
+                    } else {
+                        o.format_into(
+                            "__sc_x[__sc_i] < {} ? {}.l[__sc_x[__sc_i]] : {}.l[__sc_x[__sc_i] - {}];\n",
+                            n,
+                            a,
+                            x,
+                            n,
+                        );
+                    }
+                }
+            },
+            ir::SR_RT_INDEX => {
+                if c == ir::SIMD_SWIZZLE_OOB {
+                    o.format_into(
+                        "  uint64_t __sc_m = 0;\n{}{}; __sc_i++) __sc_m |= (uint64_t)({}.l[__sc_i] >= {}) << __sc_i;\n",
+                        lp,
+                        rn,
+                        x,
+                        n,
+                    );
+                    o.format_into("  {} = __sc_m;\n", d.as_str());
+                    o.push_str("  }\n");
+                    self.sput(d);
+                    return ok;
+                }
+                o.format_into(
+                    "{}{}; __sc_i++) __sc_r.l[__sc_i] = {}.l[__sc_i] < {} ? {}.l[{}.l[__sc_i]] : 0;\n",
+                    lp,
+                    rn,
+                    x,
+                    n,
+                    a,
+                    x,
+                );
+            },
+            ir::SR_MASKED => {
+                // compress: the active lanes from position 0 over `fill`; expand: each active lane takes
+                // the next packed lane.
+                let f = sp[2].as_str();
+                o.push_str("  uint32_t __sc_k = 0;\n");
+                if c == ir::SIMD_COMPRESS {
+                    o.format_into(
+                        "  __sc_r = {};\n{}{}; __sc_i++) if (({} >> __sc_i) & 1) __sc_r.l[__sc_k++] = {}.l[__sc_i];\n",
+                        f,
+                        lp,
+                        n,
+                        a,
+                        x,
+                    );
+                } else {
+                    o.format_into(
+                        "{}{}; __sc_i++) __sc_r.l[__sc_i] = (({} >> __sc_i) & 1) ? {}.l[__sc_k++] : {}.l[__sc_i];\n",
+                        lp,
+                        n,
+                        a,
+                        x,
+                        f,
+                    );
+                }
+            },
+            ir::SR_REDUCE | ir::SR_DOT => {
+                ok = ok && self.emit_vec_reduce(o, c, &sp, n, bt, rbt, d.as_str());
+                o.push_str("  }\n");
+                self.sput(d);
+                return ok;
+            },
+            _ => {
+                self.emit_vec_mem(o, c, &sp, n);
+            },
+        };
+        if op.rule != ir::SR_MSTORE || c == ir::SIMD_COMPRESS_STORE {
+            o.format_into("  {} = {};\n", d.as_str(), mbe::if_s(c == ir::SIMD_COMPRESS_STORE, "__sc_c", "__sc_r"));
+        }
+        o.push_str("  }\n");
+        self.sput(d);
+        return ok;
+    }
+
+    // The reductions and `dot` of `emit_vec_ops` over the `n` lanes of `bt` of `sp[0]` (and `sp[1]`),
+    // the result (of builtin `rbt`) stored to `d`: the left-to-right fold, the halving tree, the lowest
+    // extreme lane, or the exact-result test, each the interpreter's sequence (`Interp::vec_reduce`).
+    fn emit_vec_reduce(
+        self: &mut Self,
+        o: &mut String,
+        c: u8,
+        sp: &[String; 4],
+        n: i64,
+        bt: BuiltinType,
+        rbt: BuiltinType,
+        d: str,
+    ) bool {
+        let v = sp[0].as_str();
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        let sg = int_signed(bt);
+        let w = self.int_bits(bt);
+        let t = lane_c(bt);
+        let p = mbe::if_s(w <= 32, "uint32_t", "uint64_t");
+        let lp = "  for (uint32_t __sc_i = ";
+        if c == ir::SIMD_REDUCE_ADD_OVF {
+            // The exact sum in 128 bits, `__sc_hi`:`__sc_lo`, against the lane type's range.
+            o.format_into(
+                "  uint64_t __sc_lo = 0; int64_t __sc_hi = 0;\n{}0; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; uint64_t __sc_s = __sc_lo + (uint64_t)__sc_y; __sc_hi += ",
+                lp,
+                n,
+                t,
+                v,
+            );
+            o.push_str(mbe::if_s(sg, "(__sc_y < 0 ? -1 : 0) + ", ""));
+            o.push_str("(__sc_s < __sc_lo); __sc_lo = __sc_s; }\n");
+            if sg {
+                o.format_into(
+                    "  {} = !(__sc_hi == ((int64_t)__sc_lo >> 63) && (int64_t)__sc_lo >= {} && (int64_t)__sc_lo <= {});\n",
+                    d,
+                    lane_limit(bt, false),
+                    lane_limit(bt, true),
+                );
+            } else {
+                o.format_into("  {} = !(__sc_hi == 0 && __sc_lo <= {});\n", d, lane_limit(bt, true));
+            }
+            return true;
+        }
+        if c == ir::SIMD_REDUCE_MUL_OVF {
+            // A zero lane makes the product zero; otherwise its magnitude only grows, so one past 64
+            // bits never fits.
+            o.format_into(
+                "  uint64_t __sc_p = 1; int __sc_ng = 0, __sc_ov = 0, __sc_z = 0;\n{}0; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; ",
+                lp,
+                n,
+                t,
+                v,
+            );
+            if sg {
+                o.push_str(
+                    "uint64_t __sc_g = __sc_y < 0 ? 0 - (uint64_t)__sc_y : (uint64_t)__sc_y; __sc_ng ^= __sc_y < 0; ",
+                );
+            } else {
+                o.push_str("uint64_t __sc_g = __sc_y; ");
+            }
+            o.push_str("__sc_z |= __sc_g == 0; __sc_ov |= __builtin_mul_overflow(__sc_p, __sc_g, &__sc_p); }\n");
+            if sg {
+                o.format_into("  {} = !__sc_z && (__sc_ov || __sc_p > ((uint64_t)1 << {}) - !__sc_ng);\n", d, w - 1);
+            } else {
+                o.format_into("  {} = !__sc_z && (__sc_ov || __sc_p > {});\n", d, lane_limit(bt, true));
+            }
+            return true;
+        }
+        if c >= ir::SIMD_ARG_MIN && c <= ir::SIMD_ARG_MAX_NUM {
+            // The lowest lane that beats every lane before it; a NaN lane never does, -0.0 is below +0.0.
+            let min = c == ir::SIMD_ARG_MIN || c == ir::SIMD_ARG_MIN_NUM;
+            o.format_into(
+                "  size_t __sc_b = {};\n{}0; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; ",
+                n,
+                lp,
+                n,
+                t,
+                v,
+            );
+            o.push_str(mbe::if_s(fl, "if (__sc_y != __sc_y) continue; ", ""));
+            o.format_into("if (__sc_b == {} || __sc_y {} {}.l[__sc_b]", n, mbe::if_s(min, "<", ">"), v);
+            if fl {
+                o.format_into(
+                    " || (__sc_y == {}.l[__sc_b] && {}signbit(__sc_y) && {}signbit({}.l[__sc_b]))",
+                    v,
+                    mbe::if_s(min, "", "!"),
+                    mbe::if_s(min, "!", ""),
+                    v,
+                );
+            }
+            o.format_into(") __sc_b = __sc_i; }}\n  {} = __sc_b;\n", d);
+            return true;
+        }
+        if c == ir::SIMD_REDUCE_ADD_TREE || c == ir::SIMD_REDUCE_MUL_TREE {
+            // Halves: lane i of the lower half with lane i of the upper, until one lane.
+            let opc = mbe::if_s(c == ir::SIMD_REDUCE_ADD_TREE, "+", "*");
+            o.format_into(
+                "  {} __sc_t[{}];\n{}0; __sc_i < {}; __sc_i++) __sc_t[__sc_i] = {}.l[__sc_i];\n",
+                t,
+                n,
+                lp,
+                n,
+                v,
+            );
+            o.format_into(
+                "  for (uint32_t __sc_h = {}; __sc_h != 0; __sc_h /= 2) for (uint32_t __sc_i = 0; __sc_i < __sc_h; __sc_i++) __sc_t[__sc_i] = __sc_t[__sc_i] {} __sc_t[__sc_i + __sc_h];\n",
+                n / 2,
+                opc,
+            );
+            o.format_into("  {} = __sc_t[0];\n", d);
+            return true;
+        }
+        if c == ir::SIMD_DOT {
+            // Each product in the accumulator's type (wrapped, or rounded), then the sum in lane order.
+            let at = lane_c(rbt);
+            let u = v;
+            let y = sp[1].as_str();
+            if rbt == BuiltinType::BT_F32 || rbt == BuiltinType::BT_F64 {
+                o.format_into(
+                    "  {} __sc_x = -0.0;\n{}0; __sc_i < {}; __sc_i++) {{ {} __sc_p = ({}){}.l[__sc_i] * ({}){}.l[__sc_i]; __sc_x = __sc_x + __sc_p; }}\n",
+                    at,
+                    lp,
+                    n,
+                    at,
+                    at,
+                    u,
+                    at,
+                    y,
+                );
+            } else {
+                let ap = mbe::if_s(self.int_bits(rbt) <= 32, "uint32_t", "uint64_t");
+                o.format_into(
+                    "  {} __sc_x = 0;\n{}0; __sc_i < {}; __sc_i++) __sc_x = __sc_x + ({})({}){}.l[__sc_i] * ({})({}){}.l[__sc_i];\n",
+                    ap,
+                    lp,
+                    n,
+                    ap,
+                    at,
+                    u,
+                    ap,
+                    at,
+                    y,
+                );
+                o.format_into("  {} = ({})__sc_x;\n", d, at);
+                return true;
+            }
+            o.format_into("  {} = __sc_x;\n", d);
+            return true;
+        }
+        if fl && c <= ir::SIMD_REDUCE_MUL_ORD {
+            let add = c == ir::SIMD_REDUCE_ADD_ORD;
+            o.format_into(
+                "  {} __sc_x = {};\n{}0; __sc_i < {}; __sc_i++) __sc_x = __sc_x {} {}.l[__sc_i];\n",
+                t,
+                mbe::if_s(add, "-0.0", "1.0"),
+                lp,
+                n,
+                mbe::if_s(add, "+", "*"),
+                v,
+            );
+        } else if fl {
+            // The lane rule on (accumulator, lane): the kept operand itself.
+            let lc = if c == ir::SIMD_REDUCE_MIN_NUM {
+                ir::SIMD_MIN;
+            } else if c == ir::SIMD_REDUCE_MAX_NUM {
+                ir::SIMD_MAX;
+            } else if c == ir::SIMD_REDUCE_MINIMUM {
+                ir::SIMD_MINIMUM;
+            } else {
+                ir::SIMD_MAXIMUM;
+            };
+            let st = String::from_str(vec_simd_tpl(lc, bt, bt)).replace("$d", "__sc_x").replace("$a", "__sc_x").replace(
+                "$b",
+                "__sc_y",
+            );
+            o.format_into(
+                "  {} __sc_x = {}.l[0];\n{}1; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; {} }}\n",
+                t,
+                v,
+                lp,
+                n,
+                t,
+                v,
+                st.as_str(),
+            );
+        } else if c == ir::SIMD_REDUCE_ADD || c == ir::SIMD_REDUCE_MUL {
+            o.format_into(
+                "  {} __sc_x = ({}){}.l[0];\n{}1; __sc_i < {}; __sc_i++) __sc_x = __sc_x {} ({}){}.l[__sc_i];\n",
+                p,
+                p,
+                v,
+                lp,
+                n,
+                mbe::if_s(c == ir::SIMD_REDUCE_ADD, "+", "*"),
+                p,
+                v,
+            );
+            o.format_into("  {} = ({})__sc_x;\n", d, t);
+            return true;
+        } else {
+            let e = if c == ir::SIMD_REDUCE_MIN {
+                "__sc_y < __sc_x ? __sc_y : __sc_x";
+            } else if c == ir::SIMD_REDUCE_MAX {
+                "__sc_y > __sc_x ? __sc_y : __sc_x";
+            } else if c == ir::SIMD_REDUCE_AND {
+                "__sc_x & __sc_y";
+            } else if c == ir::SIMD_REDUCE_OR {
+                "__sc_x | __sc_y";
+            } else {
+                "__sc_x ^ __sc_y";
+            };
+            o.format_into(
+                "  {} __sc_x = {}.l[0];\n{}1; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; __sc_x = ({})({}); }}\n",
+                t,
+                v,
+                lp,
+                n,
+                t,
+                v,
+                t,
+                e,
+            );
+        }
+        o.format_into("  {} = __sc_x;\n", d);
+        return true;
+    }
+
+    // The masked and gather memory forms of `emit_vec_ops` (`ir::SR_MLOAD`, `ir::SR_MSTORE`) over `n`
+    // lanes: operand spellings `sp` (the slice, pointer or pointer array first), the result in
+    // `__sc_r` for a load.
+    fn emit_vec_mem(self: &mut Self, o: &mut String, c: u8, sp: &[String; 4], n: i64) {
+        let op = ir::simd_op(c);
+        let s = sp[0].as_str();
+        let st = sp[1].as_str();
+        let m = unsafe sp[(op.arity - 2) as usize].as_str();
+        let v = unsafe sp[(op.arity - 1) as usize].as_str();
+        let store = op.rule == ir::SR_MSTORE;
+        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER;
+        let lp = "  for (uint32_t __sc_i = 0; __sc_i < ";
+        if c == ir::SIMD_COMPRESS_STORE {
+            o.format_into(
+                "  uint64_t __sc_c = (uint64_t)__builtin_popcountll({}), __sc_k = 0;\n  (void)__sc_bounds_vec({}, {}.len, __sc_c);\n",
+                m,
+                st,
+                s,
+            );
+            o.format_into(
+                "{}{}; __sc_i++) if (({} >> __sc_i) & 1) {}.ptr[{} + __sc_k++] = {}.l[__sc_i];\n",
+                lp,
+                n,
+                m,
+                s,
+                st,
+                v,
+            );
+            return;
+        }
+        // The element of lane i.
+        let mut e = String::new();
+        if c == ir::SIMD_GATHER_PTR || c == ir::SIMD_SCATTER_PTR {
+            e.format_into("*{}[__sc_i]", s);
+        } else if c >= ir::SIMD_GATHER_PTR {
+            e.format_into("{}[__sc_i]", s);
+        } else if gat {
+            e.format_into("{}.ptr[{}.l[__sc_i]]", s, st);
+        } else {
+            e.format_into("{}.ptr[{} + __sc_i]", s, st);
+        }
+        if c == ir::SIMD_LOAD_OR {
+            o.format_into(
+                "{}{}; __sc_i++) __sc_r.l[__sc_i] = {} <= {}.len && __sc_i < {}.len - {} ? {} : {}.l[__sc_i];\n",
+                lp,
+                n,
+                st,
+                s,
+                s,
+                st,
+                e.as_str(),
+                v,
+            );
+            return;
+        }
+        if c < ir::SIMD_GATHER_PTR {
+            // Every active lane's check before any access; one trap, at the lowest failing lane.
+            o.format_into(
+                "  uint64_t __sc_f = 0;\n{}{}; __sc_i++) __sc_f |= (uint64_t)((({} >> __sc_i) & 1) && ",
+                lp,
+                n,
+                m,
+            );
+            if gat {
+                o.format_into("(uint64_t){}.l[__sc_i] >= {}.len) << __sc_i;\n", st, s);
+                o.format_into(
+                    "  if (__sc_f) __sc_mem_oob(__sc_f, (uint64_t){}.l[__builtin_ctzll(__sc_f)], {}.len, 0);\n",
+                    st,
+                    s,
+                );
+            } else {
+                o.format_into("({} > {}.len || __sc_i >= {}.len - {})) << __sc_i;\n", st, s, s, st);
+                o.format_into("  if (__sc_f) __sc_mem_oob(__sc_f, {}, {}.len, 1);\n", st, s);
+            }
+        }
+        if store {
+            o.format_into("{}{}; __sc_i++) if (({} >> __sc_i) & 1) {} = {}.l[__sc_i];\n", lp, n, m, e.as_str(), v);
+        } else {
+            o.format_into(
+                "{}{}; __sc_i++) __sc_r.l[__sc_i] = (({} >> __sc_i) & 1) ? {} : {}.l[__sc_i];\n",
+                lp,
+                n,
+                m,
+                e.as_str(),
+                v,
+            );
+        }
     }
 
     // The lane loop of `emit_vec_store`: operand spellings `sp` (`lanes`: a vector, read per lane),

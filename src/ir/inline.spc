@@ -137,6 +137,10 @@ pub struct InlineCtx {
     pub xm_ix: Map<u64, u64>, // shape hash -> xms index
     pub xm_key: Vector<Vector<u64>>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
     pub xms: Vector<Map<u64, u64>>,
+    /// Callees with vector index lists over their parameters (`CoreBody.has_lists`) re-lowered under
+    /// one call shape's bindings, where the lists resolve: shape hash -> `rl` index, or a rejection.
+    pub rl_ix: Map<u64, u64>,
+    pub rl: Vector<CalleeInfo>,
     // `run` scratch (capacity survives across bodies).
     pub sc_blk_origin: Vector<u32>,
     pub sc_origins: Vector<Origin>,
@@ -431,6 +435,8 @@ extend InlineCtx {
             xm_ix: Map::<u64, u64>::new(),
             xm_key: Vector::<Vector<u64>>::new(),
             xms: Vector::<Map<u64, u64>>::new(),
+            rl_ix: Map::<u64, u64>::new(),
+            rl: Vector::<CalleeInfo>::new(),
             sc_blk_origin: Vector::<u32>::new(),
             sc_origins: Vector::<Origin>::new(),
             sc_binds: Vector::<GBind>::new(),
@@ -439,6 +445,55 @@ extend InlineCtx {
             sc_probe: Vector::<TypeId>::new(),
             sc_shape: Vector::<u64>::new(),
         };
+    }
+
+    /// Callee `d` (kept as `ki`) re-lowered under the call's bindings `binds` (types of caller module
+    /// `cm`), its index lists resolved; null when they do not resolve, or when the kept body drops
+    /// something (a fresh lowering carries no elaborated drops).
+    fn relowered(
+        self: &mut Self,
+        pkg: *const loader::Package,
+        ki: *const CalleeInfo,
+        d: DefId,
+        cm: ModuleId,
+        binds: &Vector<GBind>,
+    ) *const CalleeInfo {
+        let mut key = callee_key(d) ^ (cm as u64).wrapping_mul(1099511628211u64);
+        for i in 0..binds.len() {
+            let g = binds.at(i);
+            key = (key ^ (g.pm as u64 << 32 | g.pnode as u64)).wrapping_mul(1099511628211u64);
+            key = (key ^ g.at as u64).wrapping_mul(1099511628211u64);
+        }
+        switch self.rl_ix.get(&key) {
+            Some(v) => {
+                if *v == REJ_BASE {
+                    return null;
+                }
+                return self.rl.at((*v) as usize);
+            },
+            None => {},
+        };
+        let k = unsafe &(*ki).body;
+        let mut drops = false;
+        for i in 0..k.blocks.len() {
+            drops = drops || k.blocks.at(i).term.kind == ir::TM_DROP;
+        }
+        let mut lw = irl::Lowerer::new(pkg, d.module, d.node);
+        for i in 0..binds.len() {
+            let g = binds.at(i);
+            lw.env.push(irl::LSub { pm: g.pm, pnode: g.pnode, am: cm, at: g.at });
+        }
+        if drops || !lw.lower_fn(d.node) || lw.body.has_lists || lw.body.has_reflect || lw.user_err != NODE_NONE {
+            self.rl_ix.insert(key, REJ_BASE);
+            return null;
+        }
+        let mut body = ir::CoreBody::compact_from(&lw.body);
+        body.elaborated = true; // nothing to elaborate: the kept body drops nothing
+        self.rl.push(
+            CalleeInfo { body: body, gp: unsafe (*ki).gp.clone(), fg: unsafe (*ki).fg, demand: unsafe (*ki).demand },
+        );
+        self.rl_ix.insert(key, self.rl.len() as u64 - 1);
+        return self.rl.at(self.rl.len() - 1);
     }
 
     /// The shared store's verdict for callee `d`: the kept slot, or REJ_BASE|reason (a body the
@@ -849,21 +904,21 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             }
             continue;
         }
-        let ki = unsafe (&*cx.store).kept.at(slot as usize);
-        let k = &ki.body;
+        let ki0 = unsafe (&*cx.store).kept.at(slot as usize);
+        let k0 = &ki0.body;
         // A void callee has no return slot, but its call keeps the one void destination the
         // lowering gives every call; the splice leaves that destination unwritten.
         let mut void_dest = false;
-        if k.returns == 0 && t.dests_len == 1 {
+        if k0.returns == 0 && t.dests_len == 1 {
             let dpl = lw.body.dest_pool[t.dests_start as usize];
             void_dest = eff_pty(&lw.body, dpl) == Ast::builtin(BuiltinType::BT_VOID);
         }
-        let multi = k.returns > 1 && t.dests_len == 1;
-        if k.args != t.args_len || k.returns != t.dests_len && !void_dest && !multi {
+        let multi = k0.returns > 1 && t.dests_len == 1;
+        if k0.args != t.args_len || k0.returns != t.dests_len && !void_dest && !multi {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
             continue;
         }
-        if added + k.statements.len() + k.args as usize + k.returns as usize > MAX_ADDED_STMTS {
+        if added + k0.statements.len() + k0.args as usize + k0.returns as usize > MAX_ADDED_STMTS {
             st.reasons[IJ_BUDGET as usize] = st.reasons[IJ_BUDGET as usize] + 1;
             continue;
         }
@@ -871,28 +926,39 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         binds.truncate(0);
         let cm = lw.body.module;
         let km = t.callee.module;
-        for j in 0..k.args {
+        for j in 0..k0.args {
             let opid = lw.body.oper_pool[(t.args_start + j) as usize];
             let cty = lw.body.operands.at(opid as usize).ty;
-            unify(pkg, km, k.locals.at((k.returns + j) as usize).ty, cm, cty, &mut binds, 0);
+            unify(pkg, km, k0.locals.at((k0.returns + j) as usize).ty, cm, cty, &mut binds, 0);
         }
-        for r in 0..k.returns {
+        for r in 0..k0.returns {
             if !multi {
                 let dpl = lw.body.dest_pool[(t.dests_start + r) as usize];
-                unify(pkg, km, k.locals.at(r as usize).ty, cm, lw.body.places.at(dpl as usize).ty, &mut binds, 0);
+                unify(pkg, km, k0.locals.at(r as usize).ty, cm, lw.body.places.at(dpl as usize).ty, &mut binds, 0);
             }
         }
-        if t.targs_len as usize == ki.gp.len() && ki.gp.len() != 0 {
-            for i in 0..ki.gp.len() {
-                bind_add(&mut binds, km, ki.gp[i], lw.body.targ_pool[t.targs_start as usize + i]);
+        if t.targs_len as usize == ki0.gp.len() && ki0.gp.len() != 0 {
+            for i in 0..ki0.gp.len() {
+                bind_add(&mut binds, km, ki0.gp[i], lw.body.targ_pool[t.targs_start as usize + i]);
             }
-        } else if ki.fg != 0 && t.targs_len >= ki.fg {
-            let skip = (t.targs_len - ki.fg) as usize;
-            let base0 = ki.gp.len() - ki.fg as usize;
-            for i in 0..ki.fg as usize {
-                bind_add(&mut binds, km, ki.gp[base0 + i], lw.body.targ_pool[t.targs_start as usize + skip + i]);
+        } else if ki0.fg != 0 && t.targs_len >= ki0.fg {
+            let skip = (t.targs_len - ki0.fg) as usize;
+            let base0 = ki0.gp.len() - ki0.fg as usize;
+            for i in 0..ki0.fg as usize {
+                bind_add(&mut binds, km, ki0.gp[base0 + i], lw.body.targ_pool[t.targs_start as usize + skip + i]);
             }
         }
+        // A callee whose index lists name its parameters runs as re-lowered under these bindings.
+        let mut kp = ki0 as *const CalleeInfo;
+        if k0.has_lists {
+            kp = cx.relowered(pkg, kp, t.callee, cm, &binds);
+            if kp == null {
+                st.reasons[IJ_GENERIC as usize] = st.reasons[IJ_GENERIC as usize] + 1;
+                continue;
+            }
+        }
+        let ki = unsafe &*kp;
+        let k = &ki.body;
         // ---- translate every callee type up front; any failure rejects the site ----------------
         // The translation depends only on (callee slot, caller module, binds): repeated call
         // shapes reuse the finished map instead of re-walking the callee type table.
@@ -1137,6 +1203,7 @@ fn splice(
     let d0 = b.dest_pool.len() as u32;
     let sw0 = b.switch_pool.len() as u32;
     let tg0 = b.targ_pool.len() as u32;
+    let ax0 = b.simd_aux.len() as u32;
     let nkb = k.blocks.len() as u32;
     let prelude = b0 + nkb;
     let join = prelude + 1;
@@ -1246,6 +1313,9 @@ fn splice(
             }
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_SIMD {
             rv.a += op0;
+            if rv.kind == ir::RV_SIMD && rv.item.node != ir::IR_NONE {
+                rv.item.node += ax0;
+            }
         } else if rv.kind == ir::RV_INTRINSIC {
             if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING {
                 rv.b = mty(tymap, rv.b);
@@ -1281,6 +1351,9 @@ fn splice(
     }
     for i in 0..k.targ_pool.len() {
         b.targ_pool.push(mty(tymap, k.targ_pool[i]));
+    }
+    for i in 0..k.simd_aux.len() {
+        b.simd_aux.push(k.simd_aux[i]);
     }
     for i in 0..k.statements.len() {
         let mut s = *k.statements.at(i);

@@ -3626,6 +3626,19 @@ static __attribute__((unused)) inline size_t __sc_bounds_vec(size_t __i, size_t 
   if (__i > __n || __w > __n - __i) __sc_vec_oob(__i, __n, __w);
   return __i;
 }
+/* A masked or gather access's trap: bit `i` of `__f` is set when active lane `i` is out of bounds; the
+   lowest names itself and its element, `__x + i` from start `__x` (`__start`), or index `__x`. */
+static _Noreturn __attribute__((unused, cold, noinline)) void __sc_mem_oob(uint64_t __f, uint64_t __x, size_t __n, int __start) {
+  unsigned __l = (unsigned)__builtin_ctzll(__f);
+  char __m[160];
+  if (__start)
+    snprintf(__m, sizeof __m, "lane %u: index out of bounds: the index is %llu + %u but the length is %llu", __l,
+             (unsigned long long)__x, __l, (unsigned long long)__n);
+  else
+    snprintf(__m, sizeof __m, "lane %u: index out of bounds: the index is %llu but the length is %llu", __l,
+             (unsigned long long)__x, (unsigned long long)__n);
+  __sc_panic(__m);
+}
 /* A vector operation's lane trap: bit `i` of `__f0` (failure `__m0`) or of `__f1` (failure `__m1`) is
    set when lane `i` fails; the lowest failing lane names itself. `__sc_lane_ovf` keeps an overflow
    failure only in a build that checks overflow (the scalar `+ - *` rule). */

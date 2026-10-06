@@ -2552,8 +2552,9 @@ extend Gen {
         } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
             // No operands: `b` is the measured/described type.
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC || rv.kind == ir::RV_SIMD {
-            // A vector operation reads its operands; a store writes through its `[]mut T` slice, as
-            // a call taking the view does (a raw pointer carries no loan).
+            // A vector operation reads its operands; a store (whole, masked, scatter or compressing)
+            // writes through its `[]mut T` slice, as a call taking the view does (a raw pointer
+            // carries no loan).
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];
                 if opid == ir::IR_NONE {
@@ -2562,7 +2563,7 @@ extend Gen {
                 }
                 self.op_read(opid, entry, s.span);
                 let op = *self.body().operands.at(opid as usize);
-                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_STORE && i == 0 && op.kind != ir::OP_CONST && self.mut_view_place(
+                if rv.kind == ir::RV_SIMD && i == 0 && ir::simd_writes(rv.c) && op.kind != ir::OP_CONST && self.mut_view_place(
                     op.data,
                 ) {
                     self.access(op.data, BF_NONE, ACC_WRITE, entry, s.span);

@@ -136,6 +136,17 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
             p_operand(out, b, b.oper_pool[(r.a + i) as usize]);
         }
         out.push_str("]");
+        if r.kind == ir::RV_SIMD && ir::simd_op(r.c).rule == ir::SR_INDEX && r.item.node != ir::IR_NONE {
+            // The index list.
+            out.push_str("[");
+            for i in 0..b.simd_aux[r.item.node as usize] {
+                if i != 0 {
+                    out.push_str(", ");
+                }
+                out.push_u64(ir::aux_lane(b, r.item.node, i));
+            }
+            out.push_str("]");
+        }
     } else if r.kind == ir::RV_REPEAT {
         out.push_str("repeat(");
         p_operand(out, b, r.a);

@@ -63,8 +63,10 @@ fn push_root(e: &mut Effect, l: u32) {
     e.n += 1;
 }
 
-/// The effect of statement `s`. A vector store (`SIMD_STORE`, `SIMD_STORE_RAW`) writes its lanes
-/// through operand 0, a slice or a pointer; a vector load only reads through it.
+/// The effect of statement `s`. A vector store (`SM_WRITE`: `SIMD_STORE`, `SIMD_STORE_RAW`; and
+/// `SM_WRITE_LANES`: the masked, scatter and compressing stores, one element per active lane at a
+/// lane-dependent address) writes through operand 0, a slice, a pointer or an array of pointers; a
+/// vector load only reads through it.
 pub fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
     if s.kind != ir::ST_ASSIGN {
         return effect(EF_NONE, ir::IR_NONE);
@@ -72,7 +74,7 @@ pub fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
     let rv = b.rvalues.at(s.rvalue as usize);
     if rv.kind == ir::RV_SIMD {
         assert(rv.c as usize < ir::SIMD_CODES, "an RV_SIMD code without a table row");
-        if ir::simd_op(rv.c).effect == ir::SM_WRITE {
+        if ir::simd_writes(rv.c) {
             return effect(EF_PTR, b.oper_pool[rv.a as usize]);
         }
     }

@@ -115,9 +115,17 @@ pub struct Lowerer {
     pub body: ir::CoreBody,
     pub err: str<'static>, // first unsupported-construct reason ("" = ok)
     pub err_node: NodeId, // the node that failed (diagnostic snippet in the SC_CORE_IR report)
+    /// A program error found while lowering an instance (NODE_NONE when none): a vector index list
+    /// that does not evaluate there, or names a lane past its operands (`user_msg`). The lowering goes
+    /// on, the list reading lane 0, as a failed per-instance static_assert does; the emitter reports
+    /// it, and the evaluator refuses the body with it.
+    pub user_err: NodeId,
+    pub user_msg: str<'static>,
     /// The instance env for substitution-aware lowering (reflection expansion needs the CONCRETE
     /// owner); empty for the shared generic pre-pass.
     pub env: Vector<LSub>,
+    // The index-list argument of the vector operation call being lowered (`index_op`).
+    list_node: NodeId,
     proj_frames: Vector<ProjFrame>,
     binds: Vector<Binding>,
     bind_ix: Map<NodeId, ir::LocalId>, // decl -> its latest local in `binds`
@@ -319,7 +327,10 @@ extend Lowerer {
             body: ir::CoreBody::new(DefId { module: module, node: owner }, module),
             err: "",
             err_node: NODE_NONE,
+            user_err: NODE_NONE,
+            user_msg: "",
             env: Vector::<LSub>::new(),
+            list_node: NODE_NONE,
             proj_frames: Vector::<ProjFrame>::new(),
             binds: Vector::<Binding>::new(),
             bind_ix: Map::<NodeId, ir::LocalId>::new(),
@@ -414,6 +425,8 @@ extend Lowerer {
         self.body.clear(DefId { module: self.module, node: owner }, self.module);
         self.err = "";
         self.err_node = NODE_NONE;
+        self.user_err = NODE_NONE;
+        self.list_node = NODE_NONE;
         self.proj_frames.truncate(0);
         // Remove only this body's keys: clearing the whole table would cost its capacity per body.
         for i in 0..self.binds.len() {
@@ -4587,8 +4600,18 @@ extend Lowerer {
             // direct call: nothing to evaluate for the callee
         }
         self.tp(ir::TP_CALL_MARK, 0, id);
+        // A vector operation's index list is a constant, read by `index_op`, never a run-time value.
+        let mut lst = false;
+        if target.node != NODE_NONE && self.is_intrinsic_fn(target) {
+            let ik = self.intrinsic_code(target);
+            lst = ik >> 8 == ir::SI_SIMD && ir::simd_op(ik as u8).rule == ir::SR_INDEX;
+        }
         for i in 0..d.args.len {
             let a = unsafe self.f.list(d.args)[i as usize];
+            if lst && i + 1 == d.args.len {
+                self.list_node = a;
+                continue;
+            }
             let op = self.lower_expr(a);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -5049,24 +5072,21 @@ extend Lowerer {
     }
 
     // A call of `@intrinsic` function `f` over the operands `ops`, of type `ty`: the operation its name
-    // gives (`ir::simd_intrinsic`). A reference operand (an operator method's `&Self`) is read through.
+    // gives (`ir::simd_intrinsic`). An operand of a reference parameter (an operator method's `&Self`)
+    // is read through; a reference passed to a pointer parameter stays the address.
     // A vector load or store checks its lanes against the slice first: `IN_BOUNDS_GROUP(start, len, N)`.
     fn lower_intrinsic(self: &mut Self, f: DefId, ops: &mut Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
-        let fa = unsafe &*(&*self.pkg).module_ast_const(f.module);
-        let at = fa.attr_of(f.node, AttrKind::ATTR_INTRINSIC);
-        let src = unsafe (&*self.pkg).modules.at(f.module as usize).source.as_str();
-        let k = if at == null {
-            0u32;
-        } else {
-            ir::simd_intrinsic(src.slice((unsafe (*at).str_span.start) as usize, (unsafe (*at).str_span.end) as usize));
-        };
+        let k = self.intrinsic_code(f);
         if k == 0 {
             self.fail_at("intrinsic", NODE_NONE);
             return ir::IR_NONE;
         }
+        let fa = unsafe &*(&*self.pkg).module_ast_const(f.module);
+        let ps = fa.at_const(f.node).as_data.function.params;
         for i in 0..ops.len() {
             let ot = self.body.operands.at(ops[i] as usize).ty;
-            if self.f.ty(ot).kind == TypeKind::TYPE_REFERENCE {
+            let pt = fa.at_const(unsafe fa.list(ps)[i]).as_data.parameter.ty;
+            if self.f.ty(ot).kind == TypeKind::TYPE_REFERENCE && pt != NODE_NONE && fa.at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE {
                 let pl = self.op_place(ops[i], sp);
                 let d = self.place_project(
                     pl,
@@ -5108,14 +5128,103 @@ extend Lowerer {
             g.item.node = ir::CHECK_VEC;
             ops.set(0, self.copy_op(s));
             ops.set(1, self.copy_op(self.rv_temp(g, sp)));
+        } else if ir::simd_op(c).rule >= ir::SR_MLOAD {
+            // The masked and gather forms check their active lanes themselves; the slice is a place.
+            ops.set(0, self.copy_op(self.op_place(ops[0], sp)));
         }
-        return self.simd_op(c, ops, ty, sp);
+        if ir::simd_op(c).rule == ir::SR_INDEX {
+            let node = self.list_node;
+            self.list_node = NODE_NONE;
+            return self.index_op(c, node, ops, ty, sp);
+        }
+        return self.simd_op(c, ops, ty, ir::IR_NONE, sp);
     }
 
-    // `RV_SIMD` code `c` over `ops`, of type `ty`, in a fresh temp.
-    fn simd_op(self: &mut Self, c: u8, ops: &Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
+    // The `ir::simd_intrinsic` lowering of `@intrinsic` function `f`, 0 for none.
+    fn intrinsic_code(self: &Self, f: DefId) u32 {
+        let at = unsafe (&*(&*self.pkg).module_ast_const(f.module)).attr_of(f.node, AttrKind::ATTR_INTRINSIC);
+        if at == null {
+            return 0;
+        }
+        let src = unsafe (&*self.pkg).modules.at(f.module as usize).source.as_str();
+        return ir::simd_intrinsic(
+            src.slice((unsafe (*at).str_span.start) as usize, (unsafe (*at).str_span.end) as usize),
+        );
+    }
+
+    // `RV_SIMD` code `c` over `ops`, of type `ty`, in a fresh temp; `aux` is its index list's start.
+    fn simd_op(self: &mut Self, c: u8, ops: &Vector<ir::OperandId>, ty: TypeId, aux: u32, sp: tok::Span) ir::OperandId {
         let start = self.pool_ops(ops);
-        return self.copy_op(self.rv_temp(ir::rv(ir::RV_SIMD, start, ops.len() as u32, c, ty), sp));
+        let mut r = ir::rv(ir::RV_SIMD, start, ops.len() as u32, c, ty);
+        r.item.node = aux;
+        return self.copy_op(self.rv_temp(r, sp));
+    }
+
+    // The lane count of vector type `vt`, through the instance env for a const-generic one; 0 when
+    // it is not known.
+    fn env_lanes(self: &Self, vt: TypeId) u64 {
+        let n = self.f.lanes(self.f.ty(vt));
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        if n != 0 || !self.env_resolve(self.f.ty(vt).as_data.arr.len, &mut rm, &mut rt) {
+            return n;
+        }
+        let y = *unsafe (&*(&*self.pkg).module_ast_const(rm)).type_at(rt);
+        return pick(y.kind == TypeKind::TYPE_CONST, y.as_data.value as u64, 0u64);
+    }
+
+    // SIMD_SWIZZLE or SIMD_SHUFFLE over `ops` with index list `node`, a constant expression: its lanes
+    // packed into `simd_aux`. A shared generic lowering whose list or lane count names a parameter
+    // keeps no record and re-lowers per instance (`has_lists`), where both are known; so does the
+    // operation's own body (NODE_NONE), which no call reaches: the checker refuses it as a value.
+    fn index_op(self: &mut Self, c: u8, node: NodeId, ops: &mut Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
+        if node == NODE_NONE {
+            // The operation's own body: its list is the last parameter.
+            ops.truncate(ops.len() - 1);
+        }
+        let n = self.env_lanes(self.body.operands.at(ops[0] as usize).ty);
+        let mut lst = Vector::<u64>::new();
+        let mut st: u8 = 2;
+        if node != NODE_NONE && unsafe (&*self.pkg).cir != null {
+            st = unsafe (*((&*self.pkg).cir as *mut iri::Interp)).eval_lanes(self.module, node, &self.env, &mut lst);
+        }
+        if node == NODE_NONE || self.env.len() == 0 && (st == 1 || st == 0 && n == 0) {
+            self.body.has_lists = true;
+            return self.simd_op(c, ops, ty, ir::IR_NONE, sp);
+        }
+        let m = self.env_lanes(ty);
+        if st != 0 || n == 0 || m == 0 {
+            if self.env.len() == 0 || n == 0 || m == 0 {
+                self.fail_at("a vector index list that is not a constant", node);
+                return ir::IR_NONE;
+            }
+            // An instance's list that does not evaluate (a run-time value beside a generic parameter,
+            // or a trap): the program's error, reported by the emitter; the lanes read lane 0.
+            self.user_err = node;
+            self.user_msg = pick(
+                st == 2,
+                "the index list cannot be evaluated: it traps",
+                "the index list must be a compile-time constant",
+            );
+            lst.truncate(0);
+            lst.resize_default(m as usize);
+        }
+        let aux = self.body.simd_aux.len() as u32;
+        self.body.simd_aux.push(lst.len() as u32);
+        for i in 0..lst.len() {
+            let mut k = lst[i];
+            if k >= n * ops.len() as u64 {
+                self.user_err = node;
+                self.user_msg = "the index list names a lane past the lanes of its operands";
+                k = 0;
+            }
+            if i % 4 == 0 {
+                self.body.simd_aux.push(0);
+            }
+            let w = self.body.simd_aux.len() - 1;
+            self.body.simd_aux.set(w, self.body.simd_aux[w] | k as u32 << (i % 4 * 8) as u32);
+        }
+        return self.simd_op(c, ops, ty, aux, sp);
     }
 
     // An unresolved callee spelling a compiler intrinsic name (behind an optional specialization).

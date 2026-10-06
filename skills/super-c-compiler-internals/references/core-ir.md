@@ -32,6 +32,7 @@ pub struct CoreBody {
     pub switch_pool: Vector<u64>,      // TM_SWITCH pairs: value<<32 | target
     pub targ_pool: Vector<TypeId>,     // generic-argument ranges
     pub user_moves: Vector<u64>,       // bit per operand: OP_MOVE is a USER consumption
+    pub simd_aux: Vector<u32>,         // RV_SIMD index lists: the length, then u8 lanes four to a word
     pub demands: Vector<Terminator>,   // inlined calls whose instance the emitter still demands
     pub entry: BlockId,
 }
@@ -117,7 +118,7 @@ Each `Projection` carries the type **after** it applies.
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
 | `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_BOUNDS_GROUP` / `IN_BOUNDS_GROUP_PROVEN` (index, length, width: BCE coalescing's check of a run of element accesses, and a vector load's or store's, see `RV_SIMD`), `IN_BOUNDS` (an element check; on a vector lane index `item.node` is `CHECK_LANES` and the length operand is the lane count, a constant when known: the trap names the index and the count, through `__sc_lane`, which the vector's definition header carries, and BCE never groups it), `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc through `__sc_new`, which panics "out of memory" on a null result; a zero-sized `T` allocates 1 byte and stores nothing), `IN_LIKELY` (the success test of `?`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` and folds it into its branch, because clang drops a hint read through a variable) |
 | `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
-| `RV_SIMD` | A named vector operation: `a`, `b` = operand range in `oper_pool`, `c` = the `SIMD_*` code, `target` = result type; `item` unused |
+| `RV_SIMD` | A named vector operation: `a`, `b` = operand range in `oper_pool`, `c` = the `SIMD_*` code, `target` = result type; `item.node` = the start of its index list in `simd_aux` (`SIMD_SWIZZLE`, `SIMD_SHUFFLE`), else `IR_NONE` |
 
 `RV_SIMD` codes are indexes of `SIMD_OPS` (`core.spc`, append-only), one row per code: the
 intrinsic name (`@intrinsic("simd.<name>")`), the operand count, the type rule (`SR_*`: the vector
@@ -145,7 +146,46 @@ second loop that collects the failure bit per lane and traps once at the lowest 
 `lane <i>: <message>`, `ir::lane_trap_msg`), from the unchanged operands. The vector type's
 definition header carries the lane runtime, so a program without vectors emits none of it. A call of an `@intrinsic`
 function lowers to its operation (`Lowerer::lower_intrinsic`); its declaration's empty body lowers
-to the same operation over the arguments, for a bound call or a function value.
+to the same operation over the arguments, for a bound call or a function value. An argument of a
+reference parameter (an operator's `&Self`) is read through; a reference passed to a pointer
+parameter stays the address.
+
+The rearranging, reducing and masked memory codes (rules `SR_INDEX` and up):
+
+| Codes | Operands | Result |
+|-------|----------|--------|
+| `SIMD_SWIZZLE`, `SIMD_SHUFFLE` | `(v)`, `(a, b)` and the index list | `M` lanes of the element |
+| `SIMD_SWIZZLE_ZERO`, `SIMD_SWIZZLE_OOB` | `(v, idx)`, `idx` `M` unsigned lanes | `M` lanes, or `Mask<M>` of the indexes past `N` |
+| `SIMD_COMPRESS`, `SIMD_EXPAND` | `(m, v, fill)` | the vector |
+| `SIMD_REDUCE_*`, `SIMD_ARG_*` | `(v)` | the element; `bool` for `SIMD_REDUCE_ADD_OVF`/`_MUL_OVF` (the exact result does not fit); `usize` for the `ARG` codes (`N` when every lane is NaN) |
+| `SIMD_DOT` | `(a, b)` | a scalar of the lanes' kind at least as wide |
+| `SIMD_LOAD_OR`, `SIMD_LOAD_MASKED`, `SIMD_GATHER` | `(slice, start or idx, [m,] fallback)` | the vector |
+| `SIMD_STORE_MASKED`, `SIMD_SCATTER`, `SIMD_COMPRESS_STORE` | `(slice, start or idx, m, v)` | unit; `usize` count for `COMPRESS_STORE` |
+| `SIMD_GATHER_PTR`, `SIMD_SCATTER_PTR` | `([*const T; N] or [*mut T; N], m, fallback or v)` | the vector, unit |
+| `SIMD_LOAD_MASKED_PTR`, `SIMD_STORE_MASKED_PTR` | `(pointer, m, fallback or v)` | the vector, unit |
+
+An index list is `simd_aux[start]` = its length `M`, then its lanes four `u8` to a word, low byte
+first (`ir::aux_lane`); the lowering evaluates the list (`Interp::eval_lanes`) under the instance
+env, holding the engine lock, and keeps each list per substitution. A shared generic lowering
+whose list or lane count names a parameter keeps no list (`item.node` = `IR_NONE`) and sets
+`CoreBody.has_lists`: every instance re-lowers where both are known, as for `has_reflect`, and the
+inliner re-lowers such a callee under each call shape's bindings (`InlineCtx::relowered`, when the
+kept body drops nothing). An instance's list that does not evaluate or names a lane past the
+operands is `Lowerer::user_err` with `user_msg`: the lowering goes on (the lanes read lane 0), the
+emitter reports it with the bindings (`cemit_inst_error`), and the evaluator traps with it. The inliner appends the callee's
+`simd_aux` and shifts `item.node`; the printer prints the list after the operands. The verifier
+checks the list against the result's lanes and the operands' lanes, the mask widths, unsigned
+index lanes (`u32`/`u64` for a gather or scatter), and the pointer array's length.
+
+The memory column: `SM_READ_LANES` (the masked loads and gathers) and `SM_WRITE_LANES` (the masked
+stores, scatters and `compress_store`) touch one element per active lane at a lane-dependent
+address; `ir::simd_writes` covers `SM_WRITE` and `SM_WRITE_LANES`, and the effect query gives every
+writing code `EF_PTR` through operand 0. Their range checks are part of the operation (they depend
+on the mask), not `IN_*` intrinsics: the interpreter and the emitter check every active lane first
+and trap once at the lowest (`__sc_mem_oob`, or `__sc_bounds_vec` for `compress_store`), then access
+each active lane's element alone, in lane order. Reductions fold in the order their definition
+fixes; `SIMD_REDUCE_*_OVF` tests the exact result (a 128-bit sum; a product with no zero lane only
+grows past 64 bits).
 ## Statements
 
 `Statement { kind, place, rvalue, a, span }`:

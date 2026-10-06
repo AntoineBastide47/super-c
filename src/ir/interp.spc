@@ -708,6 +708,8 @@ pub struct Interp {
     pub subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
     pub sub_base: usize,
     pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
+    pub lane_memo: Map<u64, u64>, // an evaluated index list (`eval_lanes`): its start << 32 | length in `lane_pool`
+    pub lane_pool: Vector<u64>,
     pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
     pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
@@ -813,6 +815,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         subst: Vector::<ISub>::new(),
         sub_base: 0,
         view_memo: Map::<u64, DeclView>::new(),
+        lane_memo: Map::<u64, u64>::new(),
+        lane_pool: Vector::<u64>::new(),
         statics: Vector::<StaticObj>::new(),
         all_typed: false,
         record_folds: false,
@@ -2169,6 +2173,11 @@ extend Interp {
         } else {
             lw.lower_fn(fnode);
         };
+        if lw.user_err != NODE_NONE {
+            // The instance's index list is the program's error: the evaluation traps with it.
+            self.it_trap(IT_TRAP_PANIC, lw.user_msg);
+            return -1;
+        }
         if !ok {
             self.err_refused = self.err_refused || lw.failed_on_error_type();
             return -1;
@@ -4530,12 +4539,15 @@ extend Interp {
             return self.unary(v, rv.b as u8, b.module, rv.target);
         }
         if rv.kind == ir::RV_SIMD {
-            let mut x: [IVal; 3] = [none(); 3];
+            let mut x: [IVal; 4] = [none(); 4];
             for k in 0..rv.b {
                 unsafe x[k as usize] = self.operand(b, env, b.oper_pool[(rv.a + k) as usize]);
             }
             if self.failed {
                 return none();
+            }
+            if rv.c >= ir::SIMD_SWIZZLE {
+                return self.vec_lanes(b, &rv, &x);
             }
             return self.vec_rvalue(b, &rv, x[0], x[1], x[2]);
         }
@@ -5692,6 +5704,403 @@ extend Interp {
         }
         self.vec_tag(id, tm, rv.target);
         return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+    }
+
+    // RV_SIMD codes SIMD_SWIZZLE and up over evaluated operands `x`: rearrangement, reductions, and
+    // the masked and gather memory forms (operand rules: `ir::SR_INDEX` and up). A memory form checks
+    // every active lane before its first access and traps at the lowest failing one; an inactive lane
+    // never touches its element.
+    fn vec_lanes(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, x: &[IVal; 4]) IVal {
+        let c = rv.c;
+        let tm = b.module;
+        let tt = self.vty(b, rv.target);
+        let op = ir::simd_op(c);
+        let vk = pick(op.rule == ir::SR_MASKED || op.rule >= ir::SR_MLOAD, op.arity as u32 - 1, 0u32);
+        let mut n: u64 = 0;
+        let mut em: ModuleId = 0;
+        let mut et = TYPE_NONE;
+        let mut bt = BuiltinType::BT_VOID;
+        if !self.vshape(tm, Interp::vop_ty(b, rv, vk), &mut n, &mut em, &mut et, &mut bt) {
+            return self.bail();
+        }
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        let mut rn: u64 = 0;
+        let mut rem: ModuleId = 0;
+        let mut ret = TYPE_NONE;
+        let mut rbt = BuiltinType::BT_VOID;
+        let rvec = self.vshape(tm, rv.target, &mut rn, &mut rem, &mut ret, &mut rbt);
+        if op.rule == ir::SR_REDUCE || op.rule == ir::SR_DOT {
+            return self.vec_reduce(b, rv, x, n, em, et, bt);
+        }
+        let mut bits: u64 = 0;
+        let mut id: u32 = 0;
+        if (op.rule == ir::SR_INDEX || op.rule == ir::SR_MASKED || c == ir::SIMD_SWIZZLE_ZERO || op.rule == ir::SR_MLOAD) && !rvec {
+            return self.bail(); // a vector result that is not a valid vector
+        }
+        if rvec && c != ir::SIMD_SWIZZLE_OOB {
+            id = self.obj_new(rn);
+            if id == 0 {
+                return none();
+            }
+        }
+        if op.rule == ir::SR_INDEX && rv.item.node == ir::IR_NONE {
+            return self.bail(); // a shared generic lowering's list, known per instance only
+        }
+        if op.rule == ir::SR_INDEX || op.rule == ir::SR_RT_INDEX {
+            // Lane i from the index list or the index vector; past the lanes, zero (or a mask bit).
+            let mut cnt = rn;
+            let mut im: ModuleId = 0;
+            let mut it = TYPE_NONE;
+            let mut ib = BuiltinType::BT_VOID;
+            if op.rule == ir::SR_RT_INDEX && !self.vshape(
+                tm,
+                Interp::vop_ty(b, rv, 1),
+                &mut cnt,
+                &mut im,
+                &mut it,
+                &mut ib,
+            ) {
+                return self.bail();
+            }
+            for i in 0..cnt {
+                let k = if op.rule == ir::SR_INDEX {
+                    ir::aux_lane(b, rv.item.node, i) as u64;
+                } else {
+                    self.vlane(x[1], i, tm, TYPE_NONE).i as u64;
+                };
+                if c == ir::SIMD_SWIZZLE_OOB {
+                    bits = bits | pick(k >= n, 1u64, 0u64) << i;
+                    continue;
+                }
+                let l = if k < n {
+                    self.vlane(x[0], k, em, et);
+                } else if c == ir::SIMD_SHUFFLE {
+                    self.vlane(x[1], k - n, em, et);
+                } else {
+                    pick(fl, iv_float(em, et, 0.0), iv_int(em, et, 0));
+                };
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, l);
+            }
+            if c == ir::SIMD_SWIZZLE_OOB {
+                return iv_int(tm, tt, bits as i64);
+            }
+        } else if op.rule == ir::SR_MASKED {
+            // compress: the active lanes of v from position 0; expand: active lane i takes the next
+            // packed lane. The rest come from `fill`.
+            let mut k: u64 = 0;
+            for i in 0..n {
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, self.vlane(x[2], i, em, et));
+            }
+            for i in 0..n {
+                if (x[0].i as u64 >> i & 1) != 0 {
+                    let (to, from) = pick(c == ir::SIMD_COMPRESS, (k, i), (i, k));
+                    unsafe (*self.obj_ptr(id)).slots.set(to as usize, self.vlane(x[1], from, em, et));
+                    k += 1;
+                }
+            }
+        } else {
+            return self.vec_mem(b, rv, x, n, em, et, (unsafe x[(op.arity - 2) as usize].i) as u64, id);
+        }
+        self.vec_tag(id, tm, rv.target);
+        return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+    }
+
+    // The masked and gather memory forms of `vec_lanes`: `m` the mask (every lane for `load_or`),
+    // `id` the result's lanes object for a load.
+    fn vec_mem(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        rv: &ir::Rvalue,
+        x: &[IVal; 4],
+        n: u64,
+        em: ModuleId,
+        et: TypeId,
+        m: u64,
+        id: u32,
+    ) IVal {
+        let c = rv.c;
+        let tm = b.module;
+        let tt = self.vty(b, rv.target);
+        let op = ir::simd_op(c);
+        let store = op.rule == ir::SR_MSTORE;
+        let v = unsafe x[(op.arity - 1) as usize];
+        let ptrs = c == ir::SIMD_GATHER_PTR || c == ir::SIMD_SCATTER_PTR;
+        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER;
+        // The base pointer and the length of a slice; a raw form has no length.
+        let mut p = x[0];
+        let mut len: u64 = 0;
+        if c < ir::SIMD_GATHER_PTR {
+            let so = self.obj_ptr(x[0].i as u32);
+            if x[0].kind != IV_OBJ || so == null {
+                return self.bail();
+            }
+            let dv = self.decl_view(unsafe (*so).dm, unsafe (*so).dn);
+            if dv.fp < 0 || dv.fl < 0 {
+                return self.bail();
+            }
+            p = unsafe (*so).slots[dv.fp as usize];
+            len = (unsafe (*so).slots[dv.fl as usize].i) as u64;
+        }
+        let start = x[1].i as u64;
+        let mut act = m;
+        if c == ir::SIMD_LOAD_OR {
+            // The lanes inside the slice are the active ones; none traps.
+            act = 0;
+            for i in 0..n {
+                if start <= len && i < len - start {
+                    act = act | 1u64 << i;
+                }
+            }
+        }
+        let count = act.count_ones() as u64;
+        if c == ir::SIMD_COMPRESS_STORE && (start > len || count > len - start) {
+            self.it_trap_text(
+                IT_TRAP_UB_OOB,
+                format("index out of bounds: {} lanes from {} but the length is {}", count, start, len),
+            );
+            return none();
+        }
+        if c < ir::SIMD_GATHER_PTR && c != ir::SIMD_COMPRESS_STORE {
+            for i in 0..n {
+                let ix = pick(gat, self.vlane(x[1], i, tm, TYPE_NONE).i as u64, start);
+                let bad = pick(gat, ix >= len, start > len || i >= len - start);
+                if (act >> i & 1) != 0 && bad {
+                    if gat {
+                        self.it_trap_text(
+                            IT_TRAP_UB_OOB,
+                            format("lane {}: index out of bounds: the index is {} but the length is {}", i, ix, len),
+                        );
+                    } else {
+                        self.it_trap_text(
+                            IT_TRAP_UB_OOB,
+                            format(
+                                "lane {}: index out of bounds: the index is {} + {} but the length is {}",
+                                i,
+                                start,
+                                i,
+                                len,
+                            ),
+                        );
+                    }
+                    return none();
+                }
+            }
+        }
+        let mut k: u64 = 0;
+        for i in 0..n {
+            if (act >> i & 1) == 0 {
+                if !store {
+                    unsafe (*self.obj_ptr(id)).slots.set(i as usize, self.vlane(v, i, em, et));
+                }
+                continue;
+            }
+            // The element: lane i of the pointer array, the index vector's lane, the next compressed
+            // position, or start + i.
+            let mut base = p;
+            let mut at: i64 = 0;
+            if ptrs {
+                base = self.vlane(x[0], i, tm, TYPE_NONE);
+                at = 0;
+            } else if gat {
+                at = self.vlane(x[1], i, tm, TYPE_NONE).i;
+            } else if c == ir::SIMD_COMPRESS_STORE {
+                at = (start + k) as i64;
+            } else if c >= ir::SIMD_GATHER_PTR {
+                at = i as i64;
+            } else {
+                at = (start + i) as i64;
+            }
+            k += 1;
+            let mut obj: u32 = 0;
+            let mut slot: u32 = 0;
+            let mut cur = none();
+            if !self.ptr_elem(b, base, at, et, &mut obj, &mut slot, &mut cur) {
+                return none();
+            }
+            if store {
+                unsafe (*self.obj_ptr(obj)).slots.set(slot as usize, self.vlane(v, i, em, et));
+            } else {
+                let mut l = cur;
+                l.tm = em;
+                l.ty = et;
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, l);
+            }
+        }
+        if c == ir::SIMD_COMPRESS_STORE {
+            return iv_int(tm, tt, count as i64);
+        }
+        if store {
+            return iv_int(tm, tt, 0);
+        }
+        self.vec_tag(id, tm, rv.target);
+        return IVal { kind: IV_OBJ, tm: tm, ty: tt, i: id, f: 0.0 };
+    }
+
+    // The reductions and `dot` of `vec_lanes` over the `n` lanes of `bt` of `x[0]` (and `x[1]`): a
+    // left-to-right fold, the halving tree, the lowest extreme lane, or the exact-result test.
+    fn vec_reduce(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        rv: &ir::Rvalue,
+        x: &[IVal; 4],
+        n: u64,
+        em: ModuleId,
+        et: TypeId,
+        bt: BuiltinType,
+    ) IVal {
+        let c = rv.c;
+        let tm = b.module;
+        let tt = self.vty(b, rv.target);
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        if c == ir::SIMD_REDUCE_ADD_OVF || c == ir::SIMD_REDUCE_MUL_OVF {
+            return iv_bool(tm, tt, !self.exact_fits(c == ir::SIMD_REDUCE_ADD_OVF, x[0], n, em, et, bt));
+        }
+        if c >= ir::SIMD_ARG_MIN && c <= ir::SIMD_ARG_MAX_NUM {
+            // The lowest lane whose value beats every lane before it; a NaN lane never does, and -0.0
+            // is below +0.0.
+            let min = c == ir::SIMD_ARG_MIN || c == ir::SIMD_ARG_MIN_NUM;
+            let mut best = n;
+            for i in 0..n {
+                let l = self.vlane(x[0], i, em, et);
+                if fl && l.f != l.f {
+                    continue;
+                }
+                if best == n {
+                    best = i;
+                    continue;
+                }
+                let o = self.vlane(x[0], best, em, et);
+                let beats = if fl {
+                    l.f != o.f && l.f < o.f == min || l.f == o.f && Interp::fsign(l.f) != Interp::fsign(o.f) && Interp::fsign(
+                        l.f,
+                    ) == min;
+                } else {
+                    l.i != o.i && pick(bt_unsigned(bt), l.i as u64 < o.i as u64, l.i < o.i) == min;
+                };
+                if beats {
+                    best = i;
+                }
+            }
+            return iv_int(tm, tt, best as i64);
+        }
+        let mut abt = bt;
+        if c == ir::SIMD_DOT && !self.bt_of(tm, tt, &mut abt) {
+            return self.bail();
+        }
+        // The lanes, as the accumulator's type for `dot` (each product rounded or wrapped there).
+        let mut l = Vector::<IVal>::new();
+        for i in 0..n {
+            let mut a = self.vlane(x[0], i, em, et);
+            if c == ir::SIMD_DOT {
+                let p = self.cast(a, tm, tt);
+                let q = self.cast(self.vlane(x[1], i, em, et), tm, tt);
+                a = if fl {
+                    self.float_op(p.f, q.f, TokenType::Star as u32, abt, tm, tt);
+                } else {
+                    self.lane_simd_int(ir::SIMD_WRAP_MUL, p.i, q.i, abt, abt, i, tm, tt);
+                };
+            }
+            l.push(a);
+        }
+        let add = c == ir::SIMD_REDUCE_ADD || c == ir::SIMD_REDUCE_ADD_ORD || c == ir::SIMD_REDUCE_ADD_TREE || c == ir::SIMD_DOT;
+        let mul = c == ir::SIMD_REDUCE_MUL || c == ir::SIMD_REDUCE_MUL_ORD || c == ir::SIMD_REDUCE_MUL_TREE;
+        if c == ir::SIMD_REDUCE_ADD_TREE || c == ir::SIMD_REDUCE_MUL_TREE {
+            // Halves: lane i of the lower half with lane i of the upper, until one lane.
+            let mut h = n / 2;
+            while h != 0 {
+                for i in 0..h {
+                    l.set(
+                        i as usize,
+                        self.float_op(
+                            l[i as usize].f,
+                            l[(i + h) as usize].f,
+                            pick(add, TokenType::Plus, TokenType::Star) as u32,
+                            abt,
+                            tm,
+                            tt,
+                        ),
+                    );
+                }
+                h = h / 2;
+            }
+            return l[0];
+        }
+        let mut acc = if fl && (add || mul) {
+            iv_float(tm, tt, pick(add, -0.0, 1.0));
+        } else if c == ir::SIMD_DOT {
+            iv_int(tm, tt, 0);
+        } else {
+            l[0];
+        };
+        let from = pick(fl && (add || mul) || c == ir::SIMD_DOT, 0u64, 1u64);
+        for i in from..n {
+            let a = l[i as usize];
+            if fl && (add || mul) {
+                acc = self.float_op(acc.f, a.f, pick(add, TokenType::Plus, TokenType::Star) as u32, abt, tm, tt);
+            } else if fl {
+                // min_num, max_num, minimum, maximum: the lane rule, the kept operand itself.
+                let lo = c == ir::SIMD_REDUCE_MIN_NUM || c == ir::SIMD_REDUCE_MINIMUM;
+                acc = pick(Interp::fminmax(acc.f, a.f, lo, c >= ir::SIMD_REDUCE_MINIMUM), acc, a);
+            } else if c == ir::SIMD_REDUCE_AND || c == ir::SIMD_REDUCE_OR || c == ir::SIMD_REDUCE_XOR {
+                acc.i = if c == ir::SIMD_REDUCE_AND {
+                    acc.i & a.i;
+                } else if c == ir::SIMD_REDUCE_OR {
+                    acc.i | a.i;
+                } else {
+                    acc.i ^ a.i;
+                };
+            } else {
+                let lc = if add {
+                    ir::SIMD_WRAP_ADD;
+                } else if mul {
+                    ir::SIMD_WRAP_MUL;
+                } else {
+                    pick(c == ir::SIMD_REDUCE_MIN, ir::SIMD_MIN, ir::SIMD_MAX);
+                };
+                acc = self.lane_simd_int(lc, acc.i, a.i, abt, abt, i, tm, tt);
+            }
+        }
+        acc.tm = tm;
+        acc.ty = tt;
+        return acc;
+    }
+
+    // Whether the exact sum (`add`) or product of the `n` integer lanes of `v` fits their type `bt`.
+    // The sum runs in 128 bits (`hi`:`lo`); a product with no zero lane only grows in magnitude, so
+    // one past 64 bits never fits.
+    fn exact_fits(self: &Self, add: bool, v: IVal, n: u64, em: ModuleId, et: TypeId, bt: BuiltinType) bool {
+        let pw = self.pw();
+        let w = bt_bits(bt, pw) as u64;
+        let sg = bt_signed(bt);
+        let mut lo: u64 = pick(add, 0u64, 1u64);
+        let mut hi: i64 = 0;
+        let mut neg = false;
+        let mut over = false;
+        for i in 0..n {
+            let a = self.vlane(v, i, em, et).i;
+            if add {
+                let s = lo.wrapping_add(a as u64);
+                hi = hi + pick(sg && a < 0, -1i64, 0i64) + pick(s < lo, 1i64, 0i64);
+                lo = s;
+                continue;
+            }
+            let mag = pick(sg && a < 0, (a as u64).wrapping_neg(), a as u64);
+            if mag == 0 {
+                return true;
+            }
+            neg = neg != (sg && a < 0);
+            over = over || lo > 0xFFFFFFFFFFFFFFFFu64 / mag;
+            lo = lo.wrapping_mul(mag);
+        }
+        if add {
+            // The exact value hi * 2^64 + lo, in the type's range.
+            return pick(sg, hi == lo as i64 >> 63 && fits(bt, lo as i64, pw), hi == 0 && (w == 64 || lo >> w == 0));
+        }
+        let mut lim = 1u64 << w - 1;
+        if !sg {
+            lim = lim - 1 + lim;
+        }
+        return !over && (!sg && lo <= lim || sg && (lo < lim || neg && lo == lim));
     }
 
     // RV_SIMD code `c` on float lanes `a`, `c2`, `c3` of `bt`: the value, or for a mask code the lane
@@ -8050,6 +8459,108 @@ extend Interp {
             return v;
         }
         return none();
+    }
+
+    /// The elements of `[usize; M]` constant expression `id` of module `m` under the lowering
+    /// substitution `env` (a vector operation's index list), appended to `out`: 0 done, 1 not
+    /// evaluable here (it names an unbound generic parameter or a run-time value), 2 a trap
+    /// (`trap_detail`). It nests inside a run, as a constant item's evaluation does, and holds the
+    /// engine lock: parallel lowerings share the evaluator. A list once evaluated under one
+    /// substitution is kept: every lowering pass of a body asks for it again.
+    pub fn eval_lanes(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>) u8 {
+        self.eng_enter();
+        let mut key = plain_key(m, id);
+        for i in 0..env.len() {
+            let e = env.at(i);
+            key = (key ^ (e.pm as u64 << 32 | e.pnode as u64)).wrapping_mul(1099511628211u64);
+            key = (key ^ (e.am as u64 << 32 | e.at as u64)).wrapping_mul(1099511628211u64);
+        }
+        switch self.lane_memo.get(&key) {
+            Some(v) => {
+                for k in 0..*v & 0xFFFFFFFF {
+                    out.push(self.lane_pool[((*v >> 32) + k) as usize]);
+                }
+                self.eng_leave();
+                return 0;
+            },
+            None => {},
+        };
+        let st = self.eval_lanes_run(m, id, env, out);
+        if st == 0 {
+            self.lane_memo.insert(key, self.lane_pool.len() as u64 << 32 | out.len() as u64);
+            for k in 0..out.len() {
+                self.lane_pool.push(out[k]);
+            }
+        }
+        self.eng_leave();
+        return st;
+    }
+
+    fn eval_lanes_run(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>) u8 {
+        let top = self.ev_depth == 0 && self.in_run == 0;
+        if top {
+            self.eval_reset();
+        }
+        let failed0 = self.failed;
+        let sb0 = self.subst.len();
+        let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        lw.f.unchecked_view = !self.visible_node(m, id);
+        for i in 0..env.len() {
+            // A binding to an outer instance's parameter resolves through the chain: the value read
+            // of a const parameter takes one hop.
+            let e = *env.at(i);
+            let mut am = e.am;
+            let mut at = e.at;
+            let mut hops = 0;
+            while hops < 16 && (unsafe &*self.p().module_ast_const(am)).type_at(at).kind == TypeKind::TYPE_GENERIC {
+                let y = *(unsafe &*self.p().module_ast_const(am)).type_at(at);
+                let mut j = env.len();
+                while j > 0 && !(env.at(j - 1).pm == y.module && env.at(j - 1).pnode == y.as_data.decl) {
+                    j -= 1;
+                }
+                if j == 0 {
+                    break;
+                }
+                am = env.at(j - 1).am;
+                at = env.at(j - 1).at;
+                hops += 1;
+            }
+            self.subst.push(ISub { pmod: e.pm, pnode: e.pnode, am: am, at: at });
+            lw.env.push(e);
+        }
+        let prev_base = self.sub_base;
+        self.sub_base = sb0;
+        self.ev_depth += 1;
+        let mut st: u8 = 1;
+        if lw.lower_expr_root(id) {
+            let args = Vector::<IVal>::new();
+            let v = self.run(&lw.body, &args);
+
+            let o = self.obj_ptr(v.i as u32);
+            if v.kind == IV_OBJ && o != null {
+                st = 0;
+                for k in 0..unsafe (*o).slots.len() {
+                    let x = unsafe (*o).slots[k];
+                    if x.kind != IV_INT {
+                        st = 1;
+                    }
+                    out.push(x.i as u64);
+                }
+            } else if self.trap.len() != 0 {
+                st = 2;
+            }
+        }
+        self.ev_depth -= 1;
+        self.sub_base = prev_base;
+        self.subst.truncate(sb0);
+        self.failed = !top && failed0;
+        return st;
+    }
+
+    /// `eval_lanes` with no substitution: the checker's view of an index list.
+    pub fn eval_list(self: &mut Self, m: ModuleId, id: NodeId, out: &mut Vector<u64>) u8 {
+        let env = Vector::<irl::LSub>::new();
+        return self.eval_lanes(m, id, &env, out);
     }
 
     /// Fold `id` under an explicit generic substitution (per-instantiation static_asserts);

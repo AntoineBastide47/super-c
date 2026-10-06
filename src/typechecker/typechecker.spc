@@ -3271,6 +3271,9 @@ extend<'a> TypeChecker<'a> {
         if d.node == NODE_NONE || self.type_at(expected).kind != TypeKind::TYPE_FUNCTION {
             return false;
         }
+        if self.tc_list_op_value(node, d) {
+            return true; // reported: no second error for the binding
+        }
         let fa = self.mod_ast(d.module);
         let gens = unsafe (*fa).at_const(d.node).as_data.function.generics;
         let g = gens.len as i32;
@@ -3375,6 +3378,9 @@ extend<'a> TypeChecker<'a> {
     fn tc_fn_value_sig(self: &mut Self, node: NodeId, d: DefId, ga: *const TypeId, g: i32) TypeId {
         let fa = self.mod_ast(d.module);
         let f = unsafe (*fa).at_const(d.node).as_data.function;
+        if self.tc_list_op_value(node, d) {
+            return TYPE_ERROR;
+        }
         if g > 8 {
             return TYPE_NONE;
         }
@@ -6666,6 +6672,128 @@ extend<'a> TypeChecker<'a> {
         if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 {
             self.errors.emit_span(sp, format("unknown intrinsic '{}'", diag::span_str(self.source, sp.start, sp.end)));
         }
+    }
+
+    // The index list of a call of vector operation `f` (`simd.swizzle`, `simd.shuffle`), its last
+    // argument `args`: a constant `[usize; M]` whose indexes are below the lanes of the vector
+    // operands. A list or lane count over the enclosing generic's parameters is checked per instance,
+    // where the lowering evaluates it.
+    fn tc_index_list(self: &mut Self, fm: ModuleId, f: NodeId, args: NodeList) {
+        let k = self.tc_list_op(fm, f);
+        let ceptr = self.cir();
+        if k == 0 || ceptr == null {
+            return;
+        }
+        let a = self.cur_ast();
+        let ln = unsafe (*a).list(args)[(args.len - 1) as usize];
+        let sp = unsafe (*a).at_const(ln).span;
+        let name = ir::simd_op(k as u8).name;
+        let mut lst = Vector::<u64>::new();
+        self.eng_hold(true);
+        let st = unsafe (*ceptr).eval_list(self.cur_module(), ln, &mut lst);
+        self.eng_hold(false);
+        if st == 2 {
+            self.errors.emit_span(
+                sp,
+                format("the index list of `{}` cannot be evaluated: {}", name, unsafe (*ceptr).trap_detail()),
+            );
+            return;
+        }
+        if st == 1 {
+            // Not evaluable here: a generic parameter's list waits for its instances, unless it
+            // reads a run-time value too.
+            let names = self.tc_list_names(ln);
+            if (names & 1) != 0 || (names & 2) == 0 {
+                self.errors.emit_span(sp, format("the index list of `{}` must be a compile-time constant", name));
+            }
+            return;
+        }
+        let vt = self.strip(unsafe (*a).type_of(unsafe (*a).list(args)[0]));
+        let vy = *self.type_at(vt);
+        let e = *self.type_at(vy.as_data.arr.elem);
+        if e.kind == TypeKind::TYPE_BUILTIN {
+            // The result's lane count is the list's length.
+            let tb = self.type_buf(vy.as_data.arr.elem);
+            let msg = vec_err(false, e.as_data.builtin, str::from_cstr(&tb[0]), lst.len() as u64);
+            if msg.len() != 0 {
+                self.errors.emit_span(sp, msg);
+                return;
+            }
+        }
+        let n = unsafe (*a).lanes(&vy) * (args.len - 1) as u64;
+        for i in 0..lst.len() {
+            if n != 0 && lst[i] >= n {
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "the index list of `{}` names lane {} at position {}, past the {} lanes of its operands",
+                        name,
+                        lst[i],
+                        i,
+                        n,
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
+    // What the names inside expression `id` of the current module resolve to: bit 0 a run-time value
+    // (a parameter or a local binding), bit 1 a generic parameter. Every node inside its span counts,
+    // a turbofish's arguments too.
+    fn tc_list_names(self: &Self, id: NodeId) u8 {
+        let a = self.cur_ast();
+        let sp = unsafe (*a).at_const(id).span;
+        let mut r: u8 = 0;
+        for k in 0..unsafe (*a).nnodes() {
+            let nid = unsafe (*a).nth_id(k);
+            let n = unsafe (*a).at_const(nid);
+            let named = n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_TYPE_PATH;
+            if !named || n.span.start < sp.start || n.span.end > sp.end {
+                continue;
+            }
+            let d = unsafe (*a).resolution_def(nid);
+            if d.node == NODE_NONE {
+                continue;
+            }
+            let dk = unsafe (*self.mod_ast(d.module)).at_const(d.node).kind;
+            if dk == NodeKind::NODE_GENERIC_PARAM {
+                r = r | 2;
+            } else if dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_FOR {
+                r = r | 1;
+            }
+        }
+        return r;
+    }
+
+    // The `ir::simd_intrinsic` lowering of function `f` when it is a vector operation with a constant
+    // index list (`ir::SR_INDEX`), else 0.
+    fn tc_list_op(self: &mut Self, fm: ModuleId, f: NodeId) u32 {
+        let n = unsafe (*self.mod_ast(fm)).at_const(f);
+        if n.kind != NodeKind::NODE_FUNCTION || !n.as_data.function.is_intrinsic() {
+            return 0;
+        }
+        let at = self.tc_attr(fm, f, AttrKind::ATTR_INTRINSIC);
+        if at == null {
+            return 0;
+        }
+        let k = ir::simd_intrinsic(
+            diag::span_str(self.mod_src(fm), unsafe (*at).str_span.start, unsafe (*at).str_span.end),
+        );
+        return pick(k >> 8 == ir::SI_SIMD && ir::simd_op(k as u8).rule == ir::SR_INDEX, k, 0u32);
+    }
+
+    // Generic function `d` named as a value at `node`: a vector operation with a constant index list
+    // has none (the list is part of the operation). True after reporting one.
+    fn tc_list_op_value(self: &mut Self, node: NodeId, d: DefId) bool {
+        let k = self.tc_list_op(d.module, d.node);
+        if k != 0 {
+            self.errors.emit_span(
+                unsafe (*self.cur_ast()).at_const(node).span,
+                format("`{}` takes a constant index list and cannot be named as a value", ir::simd_op(k as u8).name),
+            );
+        }
+        return k != 0;
     }
 
     // Whether the lanes of vector type `vt` implement the prelude interface `name` (`SimdSigned`).
@@ -17851,6 +17979,9 @@ extend TypeChecker {
             want,
             fmt_builtin,
         );
+        if fdecl != NODE_NONE && args.len != 0 {
+            self.tc_index_list(fmod, fdecl, args);
+        }
         // A method whose RESULT carries a borrow (`Option<&V>`, a view, ...) borrows its receiver
         // as much as one returning a bare `&T`. check_call_receiver can only inspect the
         // DECLARED return node, which is not enough: the borrow may sit inside a generic argument
@@ -19204,6 +19335,14 @@ extend TypeChecker {
         self.icx.proj_obj_ok = false;
         self.icx.call_args = ca;
         self.icx.call_targs = cta;
+        if obj == TYPE_NONE && self.icx.mret_call == obj_node {
+            // Several results are not a tuple (the language skill): nothing to take a member of.
+            self.errors.emit_span(
+                unsafe (*self.cur_ast()).at_const(id).span,
+                format("a call with several results has no members: bind them with `let (a, b) = ..`"),
+            );
+            return TYPE_ERROR;
+        }
         if obj == TYPE_NONE || obj == TYPE_ERROR {
             return obj;
         }
