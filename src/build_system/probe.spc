@@ -199,6 +199,16 @@ pub const fn table() Slice<'static, Probe> {
     return PROBES;
 }
 
+/// The index of the probe `id`, or -1 (an empty id names none).
+pub fn index_of(id: str) i32 {
+    for i in 0..table().len() {
+        if table()[i].id == id {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
 /// The ThinLTO probe's index.
 pub const LTO: usize = 15;
 

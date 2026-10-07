@@ -13,6 +13,8 @@ import ir::layout as lay;
 import ir::core as ir;
 import lexer::token_type as tt;
 import module::loader as loader;
+import emit::simd_plan as sp;
+import ir::cpu_features as cf;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -89,6 +91,25 @@ pub struct CEmit {
     /// `extern <decl>;` stubs for every static/const item bodies reference (fusion-TU gate).
     pub stat_decls: String,
     pub fn_attrs: String,
+    /// The backend table has an entry the build's features hold, and SC_SIMD_SCALAR is not 1:
+    /// vector statements go through the planner (`simd_plan`). `simd_trace` (SC_SIMD_TRACE=1) reports
+    /// each operation without a native entry.
+    pub simd_on: bool,
+    simd_trace: bool,
+    /// Per local of the body being emitted: the statement of the one `choose` that reads it, when it
+    /// is a comparison result nothing else reads (`lane_only`); IR_NONE otherwise. Empty until a
+    /// comparison asks. `ml_chunks`: per such local the comparison rendered as lane-mask temps, their
+    /// chunk count (0: bits in the local).
+    ml_ch: Vector<u32>,
+    ml_chunks: Vector<u32>,
+    /// Per local: the comparison result it copies when that copy is the one read of both (`let m =
+    /// a.lt(b); m.choose(..)`): the `choose` reads the comparison's temps. IR_NONE otherwise.
+    ml_alias: Vector<u32>,
+    /// Per local: its reads, its one definition (IR_NONE - 1 for several), the statement of its one
+    /// read (`mask_red`).
+    ml_cnt: Vector<u32>,
+    ml_def: Vector<u32>,
+    ml_use: Vector<u32>,
     pub blk_defs: String,
     pub blk_seen: Set<u64>,
     /// Block-wrapper prototypes, one per `sh_blk_k` row (ends in `sh_blk_e2`).
@@ -340,8 +361,12 @@ extend CEmit {
         let mut mg = mbe::Mangler::new(pkg);
         // The emitted text's type uses decide each unit's definition headers.
         mg.tn_on = true;
+        let pk = unsafe &*pkg;
+        let st = stdlib::getenv("SC_SIMD_TRACE");
         return CEmit {
             pkg: pkg,
+            simd_on: simd_enabled(pk),
+            simd_trace: st != null && str::from_cstr(st) == "1",
             out: String::new(),
             err: "",
             refused: Vector::<Refusal>::new(),
@@ -1834,6 +1859,12 @@ extend CEmit {
     // temporaries and return slots stay `_N`.
     fn setup_locals(self: &mut Self, b: &ir::CoreBody) {
         let n = b.locals.len();
+        self.ml_ch.clear();
+        self.ml_chunks.clear();
+        self.ml_alias.clear();
+        self.ml_cnt.clear();
+        self.ml_def.clear();
+        self.ml_use.clear();
         self.wx_on = false;
         self.sx_coal.clear();
         self.sx_nm_pool.clear();
@@ -3449,6 +3480,16 @@ extend CEmit {
             }
             if *self.sx_inline.at(l) != ir::IR_NONE {
                 // Single-use pure temp: inlined at its read, no declaration.
+                continue;
+            }
+            let ml = if self.simd_on && b.locals.at(l).ty != TYPE_NONE && self.rty_y(b, b.locals.at(l).ty).kind == TypeKind::TYPE_MASK {
+                self.lane_only(b, l as u32);
+                pick(self.ml_alias[l] != ir::IR_NONE, self.ml_alias[l], l as u32);
+            } else {
+                ir::IR_NONE;
+            };
+            if ml != ir::IR_NONE && self.ml_lanes(b, ml) {
+                // A comparison in lane-mask temporaries, or the copy its `choose` reads: no value.
                 continue;
             }
             if *self.sx_fuse.at(l) {
@@ -5503,6 +5544,12 @@ extend CEmit {
             if self.vec_rv(b, &rv0) {
                 return self.emit_vec_store(o, b, s, &rv0);
             }
+            if rv0.kind == ir::RV_USE && self.ml_chunks.len() != 0 && b.places.at(s.place as usize).proj_len == 0 && self.ml_alias[b.places.at(
+                s.place as usize,
+            ).base as usize] != ir::IR_NONE && self.ml_src(b.places.at(s.place as usize).base) != ir::IR_NONE {
+                // The copy of a comparison's result its `choose` reads as the comparison's lane temps.
+                return true;
+            }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.ticks_on(b) {
                     o.push_str("  if (__builtin_expect(--__sc_spc == 0, 0)) __sc_spc = __sc_preempt_check();\n");
@@ -6152,6 +6199,41 @@ extend CEmit {
             self.sput(d);
             return false;
         }
+        // A contiguous load or store through its entry, at the checked start.
+        if self.simd_on && (c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW || store) {
+            let mut vp = vplan_none();
+            let ld = !store;
+            let vi = pick(c == ir::SIMD_STORE, 2usize, 1usize);
+            let mut pn: i64 = 0;
+            let mut pbt = BuiltinType::BT_VOID;
+            if ld {
+                pn = rn;
+                pbt = rbt;
+            } else {
+                let _ = self.vec_ty(b, b.operands.at((unsafe ops[vi]) as usize).ty, &mut pn, &mut pbt);
+            }
+            vp.pl = self.vplan(
+                ir::OP_SIMD + pick(ld, ir::SIMD_LOAD, ir::SIMD_STORE) as u32,
+                pbt,
+                pick(ld, pbt, BuiltinType::BT_VOID),
+                pn,
+            );
+            if vp.pl.form != sp::PF_SCALAR {
+                let mut psp: [String; 3] = [String::new(), String::new(), String::new()];
+                psp[0].push_string(&sp[0]);
+                if c == ir::SIMD_LOAD || c == ir::SIMD_STORE {
+                    psp[0].format_into(".ptr + {}", sp[1].as_str());
+                }
+                vp.kinds[0] = VK_PTR;
+                vp.res = pick(ld, VR_VEC, VR_UNIT);
+                if !ld {
+                    psp[1].push_string(unsafe &sp[vi]);
+                }
+                let pok = self.emit_planned(o, &vp, &psp, pick(ld, 1u32, 2u32), d.as_str());
+                self.sput(d);
+                return pok;
+            }
+        }
         // The operations that move bytes.
         if c == ir::SIMD_BITCAST || c == ir::SIMD_LOW_HALF || c == ir::SIMD_HIGH_HALF || c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
             // A raw pointer may address the destination, and a bitcast may read it: `memmove`.
@@ -6187,7 +6269,7 @@ extend CEmit {
             o.format_into("  memcpy(&{}.l[0], &{}, sizeof({}));\n", d.as_str(), sp[0].as_str(), sp[0].as_str());
             o.format_into("  memcpy(&{}.l[{}], &{}, sizeof({}));\n", d.as_str(), n, sp[1].as_str(), sp[1].as_str());
         } else {
-            ok = self.emit_vec_lanes(o, b, rv, c, &d, &sp, &lanes, n, bt, rbt);
+            ok = self.emit_vec_lanes(o, b, s.place, rv, c, &ops, &d, &sp, &lanes, n, bt, rbt);
         }
         self.sput(d);
         return ok;
@@ -6227,6 +6309,10 @@ extend CEmit {
             self.sput(d);
             return false;
         }
+        if self.simd_on && self.emit_vec_ops_planned(o, b, rv, &sp, n, bt, rn, rbt, d.as_str()) {
+            self.sput(d);
+            return true;
+        }
         o.push_str("  {\n");
         // A start, a mask, a pointer or a slice reads once, before any lane: a forwarded operand
         // expression (its own checks included) must run exactly once whatever the lanes do.
@@ -6241,6 +6327,11 @@ extend CEmit {
                 o.format_into(" = {};\n", unsafe sp[i as usize].as_str());
                 unsafe sp[i as usize] = nm;
             }
+        }
+        if self.simd_on && self.emit_vec_mem_planned(o, c, &sp, n, bt, d.as_str()) {
+            o.push_str("  }\n");
+            self.sput(d);
+            return ok;
         }
         let a = sp[0].as_str();
         let x = sp[1].as_str();
@@ -6576,6 +6667,74 @@ extend CEmit {
         return true;
     }
 
+    // A contiguous masked load or store of `emit_vec_ops` (`load_or`, `load_masked`, `store_masked` and
+    // their pointer forms; operands `sp`, bound once) over `n` lanes of `bt` through the `LoadMasked` or
+    // `StoreMasked` entry: the range checks of the active lanes first, as the lane loop does them,
+    // then the entry with the elements' address, the active lanes and the fallback or the stored
+    // vector; the result in `d`. `load_or`'s active lanes are those inside the slice. False when the
+    // planner chose the loop (nothing written).
+    fn emit_vec_mem_planned(self: &mut Self, o: &mut String, c: u8, sp: &[String; 4], n: i64, bt: BuiltinType, d: str) bool {
+        let ptr = c == ir::SIMD_LOAD_MASKED_PTR || c == ir::SIMD_STORE_MASKED_PTR;
+        let store = c == ir::SIMD_STORE_MASKED || c == ir::SIMD_STORE_MASKED_PTR;
+        if !ptr && c != ir::SIMD_LOAD_OR && c != ir::SIMD_LOAD_MASKED && !store {
+            return false;
+        }
+        let mut vp = vplan_none();
+        vp.pl = self.vplan(
+            ir::OP_SIMD + pick(store, ir::SIMD_STORE_MASKED, ir::SIMD_LOAD_MASKED) as u32,
+            bt,
+            pick(store, BuiltinType::BT_VOID, bt),
+            n,
+        );
+        if vp.pl.form == sp::PF_SCALAR {
+            return false;
+        }
+        vp.kinds = [VK_PTR, VK_MASK, VK_VEC];
+        vp.res = pick(store, VR_UNIT, VR_VEC);
+        let all = ~0u64 >> (64 - n) as u64;
+        let mut psp: [String; 3] = [String::new(), String::new(), String::new()];
+        if ptr {
+            psp[0].push_string(&sp[0]);
+            psp[1].push_string(&sp[1]);
+            psp[2].push_string(&sp[2]);
+        } else {
+            let s = sp[0].as_str();
+            let st = sp[1].as_str();
+            // The start only where the slice holds it: no lane is active past the end.
+            psp[0].format_into("{}.ptr + ({} <= {}.len ? {} : 0)", s, st, s, st);
+            if c == ir::SIMD_LOAD_OR {
+                o.format_into(
+                    "  uint64_t __sc_mk = {} >= {}.len ? 0 : {}.len - {} >= {}u ? {}u : ~0ULL >> (64 - ({}.len - {}));\n",
+                    st,
+                    s,
+                    s,
+                    st,
+                    n,
+                    all,
+                    s,
+                    st,
+                );
+                psp[1].push_str("__sc_mk");
+                psp[2].push_string(&sp[2]);
+            } else {
+                let m = sp[2].as_str();
+                o.format_into(
+                    "  uint64_t __sc_f = 0;\n  for (uint32_t __sc_i = 0; __sc_i < {}; __sc_i++) __sc_f |= (uint64_t)((({} >> __sc_i) & 1) && ({} > {}.len || __sc_i >= {}.len - {})) << __sc_i;\n",
+                    n,
+                    m,
+                    st,
+                    s,
+                    s,
+                    st,
+                );
+                o.format_into("  if (__sc_f) __sc_mem_oob(__sc_f, {}, {}.len, 1);\n", st, s);
+                psp[1].push_str(m);
+                psp[2].push_string(&sp[3]);
+            }
+        }
+        return self.emit_planned(o, &vp, &psp, 3, d);
+    }
+
     // The masked and gather memory forms of `emit_vec_ops` (`ir::SR_MLOAD`, `ir::SR_MSTORE`) over `n`
     // lanes: operand spellings `sp` (the slice, pointer or pointer array first), the result in
     // `__sc_r` for a load.
@@ -6674,8 +6833,10 @@ extend CEmit {
         self: &mut Self,
         o: &mut String,
         b: &ir::CoreBody,
+        place: ir::PlaceId,
         rv: &ir::Rvalue,
         c: u8,
+        ops: &[u32; 3],
         d: &String,
         sp: &[String; 3],
         lanes: &[bool; 3],
@@ -6699,6 +6860,33 @@ extend CEmit {
         let traps = t.contains("__sc_f0");
         let two = t.contains("__sc_f1");
         let mask = c != 255u8 && (ir::simd_op(c).rule == ir::SR_MASK || ir::simd_op(c).rule == ir::SR_CHANGED);
+        // Through the planner: a lane-mask comparison writes temps named for its local, and a
+        // `choose` of such a local reads them.
+        let mut vp = vplan_none();
+        let planned = self.simd_on && self.vec_plan_of(b, place, rv, c, ops, lanes, n, bt, rbt, &mut vp);
+        let mut psp: [String; 3] = [sp[0].clone(), sp[1].clone(), sp[2].clone()];
+        let mut pd = d.clone();
+        let na: u32 = if rv.kind == ir::RV_SIMD {
+            ir::simd_op(c).arity;
+        } else if rv.kind == ir::RV_BINARY {
+            2;
+        } else {
+            1;
+        };
+        if planned && vp.res == VR_LANES {
+            pd.clear();
+            pd.format_into("__sc_ml{}", b.places.at(place as usize).base);
+        }
+        if planned && vp.kinds[0] == VK_LANES {
+            psp[0].clear();
+            psp[0].format_into("__sc_ml{}", self.ml_src(b.places.at(b.operands.at(ops[0] as usize).data as usize).base));
+        }
+        if planned && !traps {
+            return self.emit_planned(o, &vp, &psp, na, pd.as_str());
+        }
+        if planned && rv.kind == ir::RV_BINARY && self.vec_checks_planned(o, &vp, &psp, rv, n, bt, pd.as_str()) {
+            return true;
+        }
         o.push_str("  {\n");
         if mask {
             o.push_str("  uint64_t __sc_m = 0;\n");
@@ -6740,8 +6928,717 @@ extend CEmit {
         } else {
             o.push_str("0);\n  }\n");
         }
+        if planned {
+            // The checks passed: the entry of the wrapping twin computes the lanes.
+            let pok = self.emit_planned(o, &vp, &psp, na, pd.as_str());
+            o.push_str("  }\n");
+            return ok && pok;
+        }
         o.format_into("  {} = __sc_r;\n  }}\n", d.as_str());
         return ok;
+    }
+
+    // ---- the lowering planner (`simd_plan`) ---------------------------------------------------------
+
+    // How `op` over `n` lanes of `t`, with result lane or scalar type `r`, lowers under the build's
+    // features; SC_SIMD_TRACE reports it when no single entry covers the lanes.
+    fn vplan(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
+        let pk = self.p();
+        let pl = sp::plan(&pk.simd_table, pk.features, pk.mem_check, op, t, r, n as u64);
+        if self.simd_trace && pl.form != sp::PF_NATIVE {
+            let nm = ir::op_variant(op);
+            eprintln(
+                "simd: no native entry for {} on {}x{}: {}",
+                nm.as_str(),
+                bt_name(t),
+                n,
+                mbe::if_s(pl.form == sp::PF_SPLIT, "chunks", "the lane loop"),
+            );
+        }
+        return pl;
+    }
+
+    // The table index of the entry for `op` over `n` lanes of `t` with result `r`, or -1.
+    fn ventry(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
+        return sp::find(&self.p().simd_table, self.p().features, self.p().mem_check, op, t, r, n);
+    }
+
+    // The C name of table entry `e`, `__sc_si_<symbol>`, recorded as a need of the current context:
+    // the entry's definition header defines it (`static inline`, always inlined).
+    fn entry_name(self: &mut Self, e: u32, out: &mut String) {
+        let en = *self.p().simd_table.at(e as usize);
+        let st = out.len();
+        out.push_str("__sc_si_");
+        let tg = self.mg.method_target(en.module, en.node);
+        let _ = self.mg.fn_sym(en.module, en.node, tg, out);
+        self.mg.need_name(out.as_str().slice(st, out.len()).hash(), true);
+    }
+
+    // The C declaration of `name` at parameter `i` of table entry `e` (its result for VP_RET).
+    fn entry_ty(self: &mut Self, e: u32, i: u32, name: str, o: &mut String) bool {
+        let en = *self.p().simd_table.at(e as usize);
+        let a = unsafe &*self.p().module_ast_const(en.module);
+        let f = a.at_const(en.node).as_data.function;
+        let tn = if i == VP_RET {
+            a.slot_type_node(unsafe a.list(f.returns)[0]);
+        } else {
+            a.at_const(unsafe a.list(f.params)[i as usize]).as_data.parameter.ty;
+        };
+        return self.ty_c(en.module, a.type_of(tn), name, o);
+    }
+
+    // The checks of a trapping `+ - *` or shift by a scalar count `rv` over `n` lanes of `bt` without
+    // its lane loop, then its wrapping twin's plan `vp` (operand spellings `sp`) into `d`: `+ - *`
+    // through the `OverflowAdd`/`Sub`/`Mul` entry of the same chunks, whose bits name the failing lanes;
+    // a shift by testing its count once (every lane fails alike, lane 0 first). False when there is no
+    // such entry (nothing written).
+    fn vec_checks_planned(
+        self: &mut Self,
+        o: &mut String,
+        vp: &VPlan,
+        sp: &[String; 3],
+        rv: &ir::Rvalue,
+        n: i64,
+        bt: BuiltinType,
+        d: str,
+    ) bool {
+        let k = tok_op(rv.c as tt::TokenType);
+        let msg = ir::lane_trap_msg(rv.kind, rv.c, false);
+        if k == ir::OP_SHL || k == ir::OP_SHR {
+            o.format_into(
+                "  if ((uint64_t)({}) >= {}u) __sc_panic_lane(1, 0, \"{}\", 0);\n",
+                sp[1].as_str(),
+                lane_bytes(bt) * 8,
+                msg,
+            );
+            return self.emit_planned(o, vp, sp, 2, d);
+        }
+        if k > ir::OP_MUL {
+            return false;
+        }
+        let mut ov = *vp;
+        ov.pl = self.vplan(ir::OP_SIMD + ir::SIMD_OVF_ADD as u32 + k, bt, BuiltinType::BT_BOOL, n);
+        ov.res = VR_MASK;
+        if ov.pl.form != vp.pl.form || ov.pl.chunk_lanes != vp.pl.chunk_lanes {
+            return false;
+        }
+        o.push_str("  {\n  uint64_t __sc_f0;\n");
+        let ok = self.emit_planned(o, &ov, sp, 2, "__sc_f0");
+        o.format_into("  if (__sc_lane_ovf(__sc_f0)) __sc_panic_lane(__sc_f0, 0, \"{}\", 0);\n", msg);
+        let ok2 = self.emit_planned(o, vp, sp, 2, d);
+        o.push_str("  }\n");
+        return ok && ok2;
+    }
+
+    // `d = <entry>(args)` for plan `vp`: one call over all the lanes, or one per chunk in lane order,
+    // each vector argument's chunk copied out and a vector result's chunk copied back (the entry's own
+    // parameter and result types spell the chunks: no type is made). `sp` spells the arguments
+    // (`vp.kinds`); `vp.wres`, when set, applies to each call's result and `vp.warg` to argument 0.
+    fn emit_planned(self: &mut Self, o: &mut String, vp: &VPlan, sp: &[String; 3], na: u32, d: str) bool {
+        let pl = vp.pl;
+        let split = pl.form == sp::PF_SPLIT;
+        let re = if vp.wres >= 0 {
+            vp.wres as u32;
+        } else {
+            pl.entry;
+        };
+        let mut ok = true;
+        if vp.res == VR_LANES {
+            // The comparison's lane masks outlive this statement: its `choose` follows in the block.
+            for k in 0..pl.chunks {
+                o.push_str("  ");
+                ok = ok && self.entry_ty(re, VP_RET, format("{}_{}", d, k).as_str(), o);
+                o.push_str(";\n");
+            }
+        }
+        o.push_str("  {\n");
+        if split {
+            // Every operand is read, and spelled, once before any chunk is written: a pointer may
+            // alias a vector operand or the result.
+            for i in 0..na {
+                let kd = unsafe vp.kinds[i as usize];
+                let s = unsafe sp[i as usize].as_str();
+                if kd == VK_MASK {
+                    o.format_into("  uint64_t __sc_k{} = (uint64_t)({});\n", i, s);
+                } else if kd != VK_LANES {
+                    o.push_str("  ");
+                    let nm = if kd == VK_VEC {
+                        format("__sc_k{}[{}]", i, pl.chunks);
+                    } else {
+                        format("__sc_k{}", i);
+                    };
+                    ok = ok && self.entry_ty(pl.entry, i, nm.as_str(), o);
+                    if kd == VK_VEC {
+                        o.format_into(";\n  memcpy(__sc_k{}, &{}, sizeof(__sc_k{}));\n", i, s, i);
+                    } else {
+                        o.format_into(" = {};\n", s);
+                    }
+                }
+            }
+            if vp.res == VR_VEC {
+                o.push_str("  ");
+                ok = ok && self.entry_ty(re, VP_RET, format("__sc_kr[{}]", pl.chunks).as_str(), o);
+                o.push_str(";\n");
+            } else if vp.res == VR_MASK {
+                o.push_str("  uint64_t __sc_m = 0;\n");
+            } else if vp.res >= VR_ANY {
+                o.format_into("  bool __sc_m = {};\n", (vp.res == VR_ALL) as u32);
+            }
+        }
+        let mut call = String::new();
+        for k in 0..pl.chunks {
+            let lo = k * pl.chunk_lanes;
+            call.clear();
+            if vp.wres >= 0 {
+                self.entry_name(vp.wres as u32, &mut call);
+                call.push_byte(b'(');
+            }
+            self.entry_name(pl.entry, &mut call);
+            call.push_byte(b'(');
+            for i in 0..na {
+                let s = unsafe sp[i as usize].as_str();
+                if i != 0 {
+                    call.push_str(", ");
+                }
+                let w0 = i == 0 && vp.warg >= 0;
+                if w0 {
+                    self.entry_name(vp.warg as u32, &mut call);
+                    call.push_byte(b'(');
+                }
+                let kd = unsafe vp.kinds[i as usize];
+                if kd == VK_LANES {
+                    call.format_into("{}_{}", s, k);
+                } else if !split {
+                    call.push_str(s);
+                } else if kd == VK_VEC {
+                    call.format_into("__sc_k{}[{}]", i, k);
+                } else if kd == VK_MASK {
+                    // The chunk's lane bits, as its mask type.
+                    call.push_byte(b'(');
+                    ok = ok && self.entry_ty(pick(w0, vp.warg as u32, pl.entry), pick(w0, 0, i), "", &mut call);
+                    call.format_into(")(__sc_k{} >> {} & {}u)", i, lo, (1u64 << pl.chunk_lanes) - 1);
+                } else if kd == VK_PTR {
+                    call.format_into("__sc_k{} + {}", i, lo);
+                } else {
+                    call.format_into("__sc_k{}", i);
+                }
+                if w0 {
+                    call.push_byte(b')');
+                }
+            }
+            call.push_byte(b')');
+            if vp.wres >= 0 {
+                call.push_byte(b')');
+            }
+            if vp.res == VR_LANES {
+                o.format_into("  {}_{} = {};\n", d, k, call.as_str());
+            } else if vp.res == VR_UNIT {
+                o.format_into("  {};\n", call.as_str());
+            } else if vp.res == VR_ALL && !split {
+                o.format_into("  {} = {} ? {}u : 0;\n", d, call.as_str(), vp.ones);
+            } else if vp.res >= VR_ANY && split {
+                // The chunks' tests in lane order: the first that decides ends the chain.
+                o.format_into("  __sc_m = __sc_m {} {};\n", mbe::if_s(vp.res == VR_ALL, "&&", "||"), call.as_str());
+            } else if !split {
+                o.format_into("  {} = {};\n", d, call.as_str());
+            } else if vp.res == VR_MASK {
+                o.format_into("  __sc_m |= (uint64_t){} << {};\n", call.as_str(), lo);
+            } else {
+                o.format_into("  __sc_kr[{}] = {};\n", k, call.as_str());
+            }
+        }
+        if split && vp.res == VR_VEC {
+            o.format_into("  memcpy(&{}, __sc_kr, sizeof(__sc_kr));\n", d);
+        } else if split && (vp.res == VR_MASK || vp.res == VR_ANY) {
+            o.format_into("  {} = __sc_m;\n", d);
+        } else if split && vp.res == VR_ALL {
+            o.format_into("  {} = __sc_m ? {}u : 0;\n", d, vp.ones);
+        }
+        o.push_str("  }\n");
+        return ok;
+    }
+
+    // The plan of lane-wise vector statement `rv` (`emit_vec_lanes`) writing `place`, operands `ops`
+    // (`lanes`: a vector), `n` lanes of `bt` and result lanes `rbt`: the entry of the operation, or of
+    // its wrapping twin when the operation traps (the lane loop computes the failures first). A
+    // comparison is a lane-mask comparison, then its conversion to bits, or lane-mask temps when the one
+    // `choose` that reads it can take them (`lane_only`); `choose` reads such temps, else converts its
+    // mask to lanes. False for the lane loop.
+    fn vec_plan_of(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        place: ir::PlaceId,
+        rv: &ir::Rvalue,
+        c: u8,
+        ops: &[u32; 3],
+        lanes: &[bool; 3],
+        n: i64,
+        bt: BuiltinType,
+        rbt: BuiltinType,
+        vp: &mut VPlan,
+    ) bool {
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        for i in 0..3usize {
+            unsafe vp.kinds[i] = pick(unsafe lanes[i], VK_VEC, VK_SCALAR);
+        }
+        let mut op = ir::OP_COUNT;
+        let mut r = bt;
+        if rv.kind == ir::RV_BINARY {
+            let k = tok_op(rv.c as tt::TokenType);
+            if !lanes[1] {
+                op = if k == ir::OP_SHL {
+                    ir::OP_SHL_SCALAR;
+                } else if k == ir::OP_SHR {
+                    ir::OP_SHR_SCALAR;
+                } else {
+                    ir::OP_COUNT;
+                };
+            } else if fl {
+                op = pick(k <= ir::OP_DIV, k, ir::OP_COUNT);
+            } else if k <= ir::OP_MUL {
+                op = ir::OP_SIMD + ir::SIMD_WRAP_ADD as u32 + k;
+            } else if k == ir::OP_SHL || k == ir::OP_SHR {
+                op = ir::OP_SIMD + ir::SIMD_WRAP_SHL as u32 + k - ir::OP_SHL;
+            } else {
+                op = pick(k >= ir::OP_AND && k <= ir::OP_XOR, k, ir::OP_COUNT);
+            }
+        } else if rv.kind == ir::RV_UNARY {
+            op = if rv.b != tt::TokenType::Minus as u32 {
+                ir::OP_NOT;
+            } else if fl {
+                ir::OP_NEG;
+            } else {
+                ir::OP_SIMD + ir::SIMD_WRAP_NEG as u32;
+            };
+        } else if rv.kind == ir::RV_CAST {
+            op = ir::OP_CAST;
+            r = rbt;
+        } else if c >= ir::SIMD_CMP_EQ && c <= ir::SIMD_CMP_GE {
+            let u = lane_mask_bt(bt);
+            vp.pl = self.vplan(ir::OP_CMP_LANES + (c - ir::SIMD_CMP_EQ) as u32, bt, u, n);
+            if vp.pl.form == sp::PF_SCALAR {
+                return false;
+            }
+            let l = b.places.at(place as usize).base;
+            if b.places.at(place as usize).proj_len == 0 && self.ml_lanes(b, l) {
+                self.ml_chunks.set(l as usize, vp.pl.chunks as u32);
+                vp.res = VR_LANES;
+                return true;
+            }
+            // The one test of the result by `any`, `none`, `all` or `!all`: a lane-mask reduction.
+            let mut all = false;
+            if b.places.at(place as usize).proj_len == 0 && self.mask_red(b, l, n, &mut all) {
+                vp.wres = self.ventry(
+                    pick(all, ir::OP_ALL_LANES, ir::OP_ANY_LANES),
+                    u,
+                    BuiltinType::BT_BOOL,
+                    vp.pl.chunk_lanes,
+                );
+                vp.res = pick(all, VR_ALL, VR_ANY);
+                vp.ones = ~0u64 >> (64 - n) as u64;
+                if vp.wres >= 0 {
+                    return true;
+                }
+            }
+            vp.wres = self.ventry(ir::OP_LANES_TO_MASK, u, BuiltinType::BT_BOOL, vp.pl.chunk_lanes);
+            vp.res = VR_MASK;
+            return vp.wres >= 0;
+        } else if c == ir::SIMD_CHOOSE {
+            vp.pl = self.vplan(ir::OP_CHOOSE_LANES, bt, bt, n);
+            let m = *b.operands.at(ops[0] as usize);
+            if m.kind != ir::OP_CONST && b.places.at(m.data as usize).proj_len == 0 && self.ml_src(
+                b.places.at(m.data as usize).base,
+            ) != ir::IR_NONE {
+                vp.kinds[0] = VK_LANES;
+                return true;
+            }
+            vp.kinds[0] = VK_MASK;
+            if vp.pl.form != sp::PF_SCALAR {
+                let u = lane_mask_bt(bt);
+                vp.warg = self.ventry(ir::OP_MASK_TO_LANES, u, u, vp.pl.chunk_lanes);
+                if vp.warg >= 0 {
+                    return true;
+                }
+            }
+            vp.pl = self.vplan(ir::OP_SIMD + c as u32, bt, bt, n);
+            return vp.pl.form != sp::PF_SCALAR;
+        } else {
+            op = ir::OP_SIMD + pick(c == ir::SIMD_ABS && !fl, ir::SIMD_WRAP_ABS, c) as u32;
+            let rule = ir::simd_op(c).rule;
+            if rule == ir::SR_MASK || rule == ir::SR_CHANGED {
+                r = BuiltinType::BT_BOOL;
+                vp.res = VR_MASK;
+                if rule == ir::SR_CHANGED {
+                    // The key names the cast result's lanes (`tc_simd_shape`).
+                    let mut cn: i64 = 0;
+                    let _ = self.vec_ty(b, b.operands.at(ops[1] as usize).ty, &mut cn, &mut r);
+                }
+            } else if rule == ir::SR_LANES {
+                r = rbt;
+            } else if rule != ir::SR_VEC {
+                return false;
+            }
+        }
+        if op == ir::OP_COUNT {
+            if self.simd_trace {
+                // No entry form: integer `/` and `%`, a trapping shift by a vector count.
+                let k = if rv.kind == ir::RV_SIMD {
+                    ir::OP_SIMD + c as u32;
+                } else {
+                    tok_op(rv.c as tt::TokenType);
+                };
+                eprintln(
+                    "simd: no entry form for {} on {}x{}: the lane loop",
+                    ir::op_variant(k).as_str(),
+                    bt_name(bt),
+                    n,
+                );
+            }
+            return false;
+        }
+        vp.pl = self.vplan(op, bt, r, n);
+        return vp.pl.form != sp::PF_SCALAR;
+    }
+
+    // An index, run-time index or reduction operation of `emit_vec_ops` under the planner. A constant
+    // index list is the C compiler's shuffle of the lanes, which it lowers to the target's shuffle
+    // instructions (`i8x16.shuffle`): the indexes stay constants. A run-time index or a reduction
+    // calls its entry, a reduction split into chunks first combining them by halves in its
+    // definition's order. False when the planner chose the loop (nothing written).
+    fn emit_vec_ops_planned(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        rv: &ir::Rvalue,
+        sp: &[String; 4],
+        n: i64,
+        bt: BuiltinType,
+        rn: i64,
+        rbt: BuiltinType,
+        d: str,
+    ) bool {
+        let c = rv.c;
+        let rule = ir::simd_op(c).rule;
+        if rule == ir::SR_INDEX {
+            if rv.item.node == ir::IR_NONE {
+                return false;
+            }
+            o.format_into(
+                "  {{\n  typedef {} __sc_gv __attribute__((vector_size({})));\n",
+                mbe::bt_c_decl(bt),
+                n as u64 * lane_bytes(bt),
+            );
+            let w = ir::simd_op(c).arity as usize;
+            for i in 0..w {
+                o.format_into(
+                    "  __sc_gv __sc_g{};\n  memcpy(&__sc_g{}, &{}, sizeof(__sc_gv));\n",
+                    i,
+                    i,
+                    unsafe sp[i].as_str(),
+                );
+            }
+            o.format_into("  __auto_type __sc_gr = __builtin_shufflevector(__sc_g0, __sc_g{}", w - 1);
+            for i in 0..rn as u64 {
+                o.format_into(", {}", ir::aux_lane(b, rv.item.node, i));
+            }
+            o.format_into(");\n  memcpy(&{}, &__sc_gr, sizeof(__sc_gr));\n  }}\n", d);
+            return true;
+        }
+        if rule != ir::SR_RT_INDEX && rule != ir::SR_REDUCE || rule == ir::SR_RT_INDEX && rn != n {
+            return false;
+        }
+        // A run-time index's key names the index lanes' type.
+        let mut r = pick(rule == ir::SR_REDUCE, rbt, bt);
+        if rule == ir::SR_RT_INDEX {
+            let mut xn: i64 = 0;
+            let _ = self.vec_ty(b, b.operands.at(b.oper_pool[(rv.a + 1) as usize] as usize).ty, &mut xn, &mut r);
+        }
+        let pl = self.vplan(ir::OP_SIMD + c as u32, bt, r, n);
+        if pl.form == sp::PF_SCALAR || rule == ir::SR_RT_INDEX && pl.form != sp::PF_NATIVE {
+            return false;
+        }
+        let mut call = String::new();
+        self.entry_name(pl.entry, &mut call);
+        call.push_byte(b'(');
+        if rule == ir::SR_RT_INDEX {
+            call.format_into("{}, {})", sp[0].as_str(), sp[1].as_str());
+        } else if pl.form == sp::PF_NATIVE {
+            call.format_into("{})", sp[0].as_str());
+        } else {
+            // The chunks, then the upper half of them onto the lower half until one is left.
+            o.push_str("  {\n");
+            for k in 0..pl.chunks {
+                o.push_str("  ");
+                if !self.entry_ty(pl.entry, 0, format("__sc_q{}", k).as_str(), o) {
+                    return false;
+                }
+                o.format_into(
+                    ";\n  memcpy(&__sc_q{}, &{}.l[{}], sizeof(__sc_q{}));\n",
+                    k,
+                    sp[0].as_str(),
+                    k * pl.chunk_lanes,
+                    k,
+                );
+            }
+            let mut cn = String::new();
+            self.entry_name(pl.combine, &mut cn);
+            let mut h = pl.chunks / 2;
+            while h >= 1 {
+                for i in 0..h {
+                    o.format_into("  __sc_q{} = {}(__sc_q{}, __sc_q{});\n", i, cn.as_str(), i, i + h);
+                }
+                h /= 2;
+            }
+            o.format_into("  {} = {}__sc_q0);\n  }}\n", d, call.as_str());
+            return true;
+        }
+        o.format_into("  {} = {};\n", d, call.as_str());
+        return true;
+    }
+
+    // The local whose lane-mask temps local `l` reads (itself, or the comparison result it copies),
+    // or IR_NONE when it reads none.
+    fn ml_src(self: &Self, l: u32) u32 {
+        if self.ml_chunks.len() == 0 {
+            return ir::IR_NONE;
+        }
+        let a = self.ml_alias[l as usize];
+        let x = pick(a != ir::IR_NONE, a, l);
+        return pick(self.ml_chunks[x as usize] != 0, x, ir::IR_NONE);
+    }
+
+    // The statement of the one `choose` that reads mask local `l` as its mask, after the comparison
+    // that writes `l` in the same block, when nothing else names `l`; IR_NONE otherwise. The body's
+    // uses are counted on the first ask.
+    fn lane_only(self: &mut Self, b: &ir::CoreBody, l: u32) u32 {
+        if self.ml_ch.len() == 0 {
+            let nl = b.locals.len();
+            self.ml_cnt.resize_default(nl);
+            self.ml_def.resize_default(nl);
+            let mut cp = self.uget(); // per local: the statement that copies it whole
+            cp.resize_default(nl);
+            let mut sb = self.uget(); // per statement: its block
+            sb.resize_default(b.statements.len());
+            for i in 0..b.blocks.len() {
+                let bb = b.blocks.at(i);
+                for k in bb.stmt_start..bb.stmt_start + bb.stmt_len {
+                    sb.set(k as usize, i as u32);
+                }
+            }
+            self.ml_ch.resize_default(nl);
+            self.ml_chunks.resize_default(nl);
+            self.ml_alias.resize_default(nl);
+            self.ml_use.resize_default(nl);
+            for i in 0..nl {
+                self.ml_ch.set(i, ir::IR_NONE);
+                self.ml_alias.set(i, ir::IR_NONE);
+                self.ml_use.set(i, ir::IR_NONE);
+                self.ml_def.set(i, ir::IR_NONE);
+                cp.set(i, ir::IR_NONE);
+            }
+            // Every operand names one use; a reference, a second definition or a call result
+            // disqualifies the local.
+            for i in 0..b.operands.len() {
+                let x = *b.operands.at(i);
+                if x.kind != ir::OP_CONST {
+                    let k = b.places.at(x.data as usize).base as usize;
+                    self.ml_cnt.set(k, self.ml_cnt[k] + 1);
+                }
+            }
+            for i in 0..b.statements.len() {
+                let st = *b.statements.at(i);
+                if st.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let k = b.places.at(st.place as usize).base as usize;
+                self.ml_def.set(k, pick(self.ml_def[k] == ir::IR_NONE, i as u32, ir::IR_NONE - 1));
+                let rv = *b.rvalues.at(st.rvalue as usize);
+                if rv.kind == ir::RV_USE || rv.kind == ir::RV_CAST || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_BINARY {
+                    for x in [rv.a, pick(rv.kind == ir::RV_BINARY, rv.b, rv.a)] {
+                        let xo = *b.operands.at(x as usize);
+                        if xo.kind != ir::OP_CONST && b.places.at(xo.data as usize).proj_len == 0 {
+                            self.ml_use.set(b.places.at(xo.data as usize).base as usize, i as u32);
+                        }
+                    }
+                }
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
+                    let rk = b.places.at(rv.a as usize).base as usize;
+                    self.ml_cnt.set(rk, self.ml_cnt[rk] + 2);
+                }
+                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_CHOOSE {
+                    let m = *b.operands.at(b.oper_pool[rv.a as usize] as usize);
+                    if m.kind != ir::OP_CONST && b.places.at(m.data as usize).proj_len == 0 {
+                        self.ml_ch.set(b.places.at(m.data as usize).base as usize, i as u32);
+                    }
+                }
+                if rv.kind == ir::RV_USE && b.places.at(st.place as usize).proj_len == 0 {
+                    let x = *b.operands.at(rv.a as usize);
+                    if x.kind != ir::OP_CONST && b.places.at(x.data as usize).proj_len == 0 {
+                        cp.set(b.places.at(x.data as usize).base as usize, i as u32);
+                    }
+                }
+            }
+            for i in 0..b.blocks.len() {
+                let t = &b.blocks.at(i).term;
+                if t.kind == ir::TM_CALL {
+                    for j in 0..t.dests_len {
+                        let k = b.places.at(b.dest_pool[(t.dests_start + j) as usize] as usize).base as usize;
+                        self.ml_cnt.set(k, self.ml_cnt[k] + 2);
+                    }
+                }
+            }
+            for i in 0..nl {
+                let ci = self.ml_ch[i];
+                let di = self.ml_def[i];
+                if ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 || di > ci || sb[di as usize] != sb[ci as usize] {
+                    self.ml_ch.set(i, ir::IR_NONE);
+                }
+            }
+            // A local whose one read is a whole copy into such a local: the copy's `choose` reads it.
+            for i in 0..nl {
+                let ci = cp[i];
+                let di = self.ml_def[i];
+                if self.ml_ch[i] != ir::IR_NONE || ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 {
+                    continue;
+                }
+                let t = b.places.at(b.statements.at(ci as usize).place as usize).base as usize;
+                let ch = self.ml_ch[t];
+                if ch != ir::IR_NONE && self.ml_def[t] == ci && di < ci && sb[di as usize] == sb[ch as usize] {
+                    self.ml_ch.set(i, ch);
+                    self.ml_alias.set(t, i as u32);
+                }
+            }
+            self.uput(cp);
+            self.uput(sb);
+        }
+        return self.ml_ch[l as usize];
+    }
+
+    // Whether comparison result `l` lives in lane-mask temporaries (`__sc_ml<l>_<k>`): its one read
+    // is a `choose` (`lane_only`) whose plan takes them chunk for chunk. Its variable then holds
+    // nothing, so it is not declared, nor the copy the `choose` reads it through.
+    fn ml_lanes(self: &mut Self, b: &ir::CoreBody, l: u32) bool {
+        if !self.simd_on {
+            return false;
+        }
+        let ci = self.lane_only(b, l);
+        let d = pick(ci == ir::IR_NONE, ir::IR_NONE, self.ml_def[l as usize]);
+        if d >= ir::IR_NONE - 1 {
+            return false;
+        }
+        let rv = *b.rvalues.at(b.statements.at(d as usize).rvalue as usize);
+        if rv.kind != ir::RV_SIMD || rv.c < ir::SIMD_CMP_EQ || rv.c > ir::SIMD_CMP_GE {
+            return false;
+        }
+        let mut n: i64 = 0;
+        let mut bt = BuiltinType::BT_VOID;
+        let _ = self.vec_ty(b, b.operands.at(b.oper_pool[rv.a as usize] as usize).ty, &mut n, &mut bt);
+        let cr = *b.rvalues.at(b.statements.at(ci as usize).rvalue as usize);
+        let mut cn: i64 = 0;
+        let mut cbt = BuiltinType::BT_VOID;
+        let _ = self.vec_ty(b, b.operands.at(b.oper_pool[(cr.a + 1) as usize] as usize).ty, &mut cn, &mut cbt);
+        let u = lane_mask_bt(bt);
+        let pk = self.p();
+        let pl = sp::plan(
+            &pk.simd_table,
+            pk.features,
+            pk.mem_check,
+            ir::OP_CMP_LANES + (rv.c - ir::SIMD_CMP_EQ) as u32,
+            bt,
+            u,
+            n as u64,
+        );
+        let cp = sp::plan(&pk.simd_table, pk.features, pk.mem_check, ir::OP_CHOOSE_LANES, cbt, cbt, cn as u64);
+        return pl.form != sp::PF_SCALAR && cn == n && lane_mask_bt(cbt) == u && cp.form == pl.form && cp.chunk_lanes == pl.chunk_lanes;
+    }
+
+    // Whether comparison result `l` (`n` lanes) reaches only one test, `x != 0` or `x == 0` (`any`,
+    // `none`) or, with `all`, `x == ` or `x != ` the `n` low bits (`all`, `!all`), of its cast to u64,
+    // through whole copies: each local of the chain defined once and read once. The comparison may
+    // then write any value the test reads the same: 1 or 0 for `any`, the `n` bits or 0 for `all`.
+    fn mask_red(self: &mut Self, b: &ir::CoreBody, l: u32, n: i64, all: &mut bool) bool {
+        let _ = self.lane_only(b, l);
+        let mut x = l;
+        let mut cast = false;
+        // Eight copies at most, then the cast and the test.
+        for _ in 0..10 {
+            let u = self.ml_use[x as usize];
+            if self.ml_cnt[x as usize] != 1 || u == ir::IR_NONE || self.ml_def[x as usize] >= ir::IR_NONE - 1 {
+                return false;
+            }
+            let st = *b.statements.at(u as usize);
+            let rv = *b.rvalues.at(st.rvalue as usize);
+            if rv.kind == ir::RV_BINARY {
+                let t = rv.c as tt::TokenType;
+                let ka = *b.operands.at(rv.a as usize);
+                let k = pick(ka.kind != ir::OP_CONST && b.places.at(ka.data as usize).base == x, rv.b, rv.a);
+                let mut v: u64 = 0;
+                if !cast || t != tt::TokenType::EqualEqual && t != tt::TokenType::BangEqual || !self.const_u64(
+                    b,
+                    k,
+                    &mut v,
+                    0,
+                ) {
+                    return false;
+                }
+                *all = v != 0;
+                return v == 0 || v == ~0u64 >> (64 - n) as u64;
+            }
+            let y = b.places.at(st.place as usize).base;
+            let to_u64 = rv.kind == ir::RV_CAST && !cast && self.rty_y(b, rv.target).as_data.builtin == BuiltinType::BT_U64;
+            if b.places.at(st.place as usize).proj_len != 0 || self.ml_def[y as usize] != u || rv.kind != ir::RV_USE && !to_u64 {
+                return false;
+            }
+            cast = cast || to_u64;
+            x = y;
+        }
+        return false;
+    }
+
+    // The value of operand `opid`: an integer constant, or a single-use temporary (`sx_inline`) of
+    // an unsigned type computing one with `~`, `+`, `-`, `<<`, `>>` or a cast, in its type's width.
+    fn const_u64(self: &Self, b: &ir::CoreBody, opid: ir::OperandId, out: &mut u64, depth: u32) bool {
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            let c = *b.constants.at(op.data as usize);
+            *out = c.val as u64;
+            return c.kind == ir::CK_INT;
+        }
+        if depth > 8 || op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        let pl = *b.places.at(op.data as usize);
+        if pl.proj_len != 0 || *self.sx_inline.at(pl.base as usize) == ir::IR_NONE {
+            return false;
+        }
+        let y = self.rty_y(b, b.locals.at(pl.base as usize).ty);
+        let bt = y.as_data.builtin;
+        if y.kind != TypeKind::TYPE_BUILTIN || !bt_is_unsigned(bt) {
+            return false;
+        }
+        let w = bt_int_width(bt, lay::target_for(self.p().arch).ptr == 4) as u64;
+        let rv = *b.rvalues.at((*self.sx_inline.at(pl.base as usize)) as usize);
+        let mut a: u64 = 0;
+        let mut c: u64 = 0;
+        if !self.const_u64(b, rv.a, &mut a, depth + 1) {
+            return false;
+        }
+        let t = rv.c as tt::TokenType;
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_CAST {
+            *out = a;
+        } else if rv.kind == ir::RV_UNARY && rv.b == tt::TokenType::Tilde as u32 {
+            *out = ~a;
+        } else if rv.kind != ir::RV_BINARY || !self.const_u64(b, rv.b, &mut c, depth + 1) {
+            return false;
+        } else if t == tt::TokenType::Plus || t == tt::TokenType::Minus {
+            *out = pick(t == tt::TokenType::Plus, a.wrapping_add(c), a.wrapping_sub(c));
+        } else if (t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift) && c < w {
+            *out = pick(t == tt::TokenType::LeftShift, a.wrapping_shl(c as u32), (a & ~0u64 >> 64 - w) >> c);
+        } else {
+            return false;
+        }
+        *out = *out & ~0u64 >> 64 - w;
+        return true;
     }
 
     // One lane loop of `emit_vec_lanes` over template `t`, its result lanes in `d`.
@@ -13933,4 +14830,87 @@ extend CmpSide {
             64u32;
         };
     }
+}
+
+// A planned vector statement (`CEmit::emit_planned`): the plan, what each argument is (a vector, a
+// mask, a scalar, or lane-mask temps), what the result is, and the table indexes of the entries
+// applied to each call's result and to its argument 0 (-1: none).
+/// Whether the planner may call a backend entry: the table has one the build's features hold, and
+/// SC_SIMD_SCALAR (a test switch) is not 1.
+pub fn simd_enabled(pk: &loader::Package) bool {
+    let sw = stdlib::getenv("SC_SIMD_SCALAR");
+    if sw != null && str::from_cstr(sw) == "1" {
+        return false;
+    }
+    for i in 0..pk.simd_table.len() {
+        if cf::contains(pk.features, pk.simd_table.at(i).fs) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct VPlan {
+    pub pl: sp::Plan,
+    pub kinds: [u8; 3],
+    pub res: u8,
+    pub wres: i64,
+    pub warg: i64,
+    /// VR_ALL: the value of a true result, every lane's bit.
+    pub ones: u64,
+}
+
+const VK_VEC: u8 = 0;
+const VK_MASK: u8 = 1;
+const VK_SCALAR: u8 = 2;
+const VK_LANES: u8 = 3;
+const VK_PTR: u8 = 4; // the elements' address: chunk `k` starts at element `k * chunk_lanes`
+const VR_VEC: u8 = 0;
+const VR_MASK: u8 = 1;
+const VR_LANES: u8 = 2;
+const VR_UNIT: u8 = 3;
+const VR_ANY: u8 = 4; // a comparison tested once by `any`: 1 or 0 (`mask_red`)
+const VR_ALL: u8 = 5; // .. by `all`: `ones` or 0
+const VP_RET: u32 = 0xFFFFFFFF;
+
+// A fresh plan: the lane loop, nothing applied.
+const fn vplan_none() VPlan {
+    return VPlan { pl: sp::Plan { form: sp::PF_SCALAR }, res: VR_VEC, wres: -1, warg: -1 };
+}
+
+// The operation (`ir::OP_ADD` to `ir::OP_SHR`) of binary operator token `t`; OP_COUNT for another.
+const fn tok_op(t: tt::TokenType) u32 {
+    return switch t {
+        Plus => ir::OP_ADD,
+        Minus => ir::OP_SUB,
+        Star => ir::OP_MUL,
+        Slash => ir::OP_DIV,
+        Percent => ir::OP_REM,
+        Ampersand => ir::OP_AND,
+        Pipe => ir::OP_OR,
+        Caret => ir::OP_XOR,
+        LeftShift => ir::OP_SHL,
+        RightShift => ir::OP_SHR,
+        _ => ir::OP_COUNT,
+    };
+}
+
+// The lane type of a lane mask of lanes `bt`: the unsigned integer of its width.
+const fn lane_mask_bt(bt: BuiltinType) BuiltinType {
+    return switch bt {
+        BT_I8 | BT_U8 => BuiltinType::BT_U8,
+        BT_I16 | BT_U16 => BuiltinType::BT_U16,
+        BT_I32 | BT_U32 | BT_F32 => BuiltinType::BT_U32,
+        _ => BuiltinType::BT_U64,
+    };
+}
+
+// The bytes of lane type `bt`.
+const fn lane_bytes(bt: BuiltinType) u64 {
+    return switch bt {
+        BT_I8 | BT_U8 => 1,
+        BT_I16 | BT_U16 => 2,
+        BT_I32 | BT_U32 | BT_F32 => 4,
+        _ => 8,
+    };
 }

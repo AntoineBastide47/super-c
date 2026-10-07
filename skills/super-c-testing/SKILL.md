@@ -402,6 +402,35 @@ compiler under wasmtime; the C compile and the program stay native.
   `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
   which the wasm lane sets (`asm_wasm32` in `tests/differential_test.spc` returns early without it).
 
+### The vector conformance lane
+
+`SC_SIMD_LANE=wasm` (a wasi-sdk in `WASI_SDK_PATH`, wasmtime on the PATH; `h::simd_lane()`) makes
+every differential build of a test a wasm32 build with `--target-feature=+simd128`, run under
+`wasmtime run -W relaxed-simd-deterministic=y`; `expect_run` also builds without the feature and
+requires the same output. The lane's `ubsan` profile is `opt-level = 1` without sanitizers (wasm32
+has no UBSan runtime, and an unoptimized large function can pass the engine's limit of locals). A
+host instruction check returns early in the lane. The masked-memory tests run there too: the
+guard page is the end of linear memory (`sbrk`), the trap-before-write check reads the C order
+(WASI has no signal handler), and the disjoint stores run one half after the other (no
+threads). The release workflow's wasm job runs
+`SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_`,
+then the same with `--filter=gen_vector_seeds`.
+
+- `tests/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
+  entry of `std/simd/backend/wasm.spc`, through four vector model cases of each operation that
+  reaches it at its lane count and at the most lanes, and a choice or masked access over at most
+  four lanes under every mask, built planned and with `SC_SIMD_SCALAR=1`; each case's value or
+  trap must be equal, and the C of the first build must call every entry. Loads, stores and the `any`/`all`
+  forms go through one extra program. Without the lane the tests return at once.
+- `tests/simd_wasm_test.spc`: the C of a program without vectors is byte-identical with and without
+  the features; `expect_asm` checks that kernels use their SIMD128 instructions (`f32x4.add`,
+  `i8x16.eq`, `v128.bitselect`, `i8x16.bitmask`, `v128.any_true`, `v128.load32_lane`) with no
+  `call`, that a constant shuffle is `i8x16.shuffle` (no swizzle, no lane loads), that a
+comparison feeding `choose`, `any` or `all` uses no `bitmask`, and that a
+  checked `+` or shift keeps no lane loop (`--profile=test`; needs `WASI_SDK_PATH`); the
+  `std::simd::wasm` operations against a scalar model over NaNs, both zeros and out-of-range
+  lanes, and split loads and stores through overlapping pointers (in the lane).
+
 ### The program generator
 
 `tests/gen/` generates small seeded programs. `driver.spc` holds `Rng` (splitmix64), the `Model`

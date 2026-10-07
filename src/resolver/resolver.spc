@@ -1029,6 +1029,7 @@ extend Resolver {
             self.resolve_type(param.ty);
             i = i + 1;
         }
+        self.resolve_attr_exprs(id, true);
         i = 0;
         while i < fd.returns.len {
             let rid = self.child(fd.returns, i);
@@ -1108,7 +1109,7 @@ extend Resolver {
     fn resolve_associated_items(self: &mut Self, items: NodeList) {
         for i in 0..items.len {
             let iid = self.child(items, i);
-            self.resolve_attr_exprs(iid);
+            self.resolve_attr_exprs(iid, false);
             switch self.ast.at_const(iid).kind {
                 NODE_FUNCTION => {
                     self.resolve_function(iid);
@@ -1126,19 +1127,20 @@ extend Resolver {
         }
     }
 
-    // The constant-expression arguments of `owner`'s attributes, in the caller's scope.
-    fn resolve_attr_exprs(self: &mut Self, owner: NodeId) {
+    // The constant-expression arguments of `owner`'s attributes, in the caller's scope; with
+    // `params`, the ones resolved among a function's parameters (`attr_in_params`), in its scope.
+    fn resolve_attr_exprs(self: &mut Self, owner: NodeId, params: bool) {
         let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
         for i in 0..ks.len() {
             let at = self.ast.attr_expr_at(owner, i);
-            if at != null {
+            if at != null && attr_in_params(ks[i] as u8) == params {
                 self.resolve_expr(unsafe (*at).arg);
             }
         }
     }
 
     fn resolve_item(self: &mut Self, id: NodeId) {
-        self.resolve_attr_exprs(id);
+        self.resolve_attr_exprs(id, false);
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_FUNCTION => {

@@ -929,7 +929,14 @@ fn draw_start(rng: &mut Rng, n: u64) String {
     let picks: [u64; 6] = [0, 1, n / 2, n - 1, n, n + 1];
     let mut s = String::new();
     if rng.one_in(8) {
-        s.push_str("18446744073709551615");
+        // The target's largest: wasm32's in the vector conformance lane.
+        s.push_str(
+            if h::simd_lane() {
+                "4294967295";
+            } else {
+                "18446744073709551615";
+            },
+        );
     } else {
         s.push_u64(unsafe picks[rng.below(6) as usize]);
     }
@@ -1534,10 +1541,10 @@ fn trap_core(t: str, lane: bool) String {
     return String::from_str(s);
 }
 
-// Run every case of program `b` in `mode` (`v` or `r`): one process from the first case, and after a
-// trap one more from the next case. `out[k]` gets each tagged value (`C`, `V`, `S`: "<tag> <value>"), or
-// "trap: <message>" for the case that trapped; `bad` notes a sanitizer report.
-fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>, bad: &mut String) {
+/// Run every case of program `b` in `mode` (`v` or `r`): one process from the first case, and after a
+/// trap one more from the next case. `out[k]` gets each tagged value (`C`, `V`, `S`: "<tag> <value>"), or
+/// "trap: <message>" for the case that trapped; `bad` notes a sanitizer report.
+pub fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>, bad: &mut String) {
     let mut from: usize = 0;
     while from < n {
         let mut args = String::new();

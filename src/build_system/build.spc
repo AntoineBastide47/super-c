@@ -26,6 +26,7 @@ import build_system::manifest as mf;
 import build_system::objcache as *;
 import build_system::probe as pr;
 import ast::parser as par;
+import ir::cpu_features as cf;
 import lsp::json as json;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
@@ -1072,6 +1073,8 @@ struct CcStream {
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
     pub ccprobe_path: String, // <pdir>/.ccprobe, the ccache probe's discarded output
     pub probes: pr::Probes, // the toolchain probe record and the probes this build needs
+    pub feats: cf::CpuFeatureSet, // the build's CPU features: their flags' probes must accept them
+    pub feat_bad: bool, // a feature's flag was rejected: nothing compiles
     pub cc_args: Vector<String>, // resolved compiler argv ([ccache] + cc tokens); empty until ensure_cc
     pub prefix_args: Vector<String>, // cc_args + cc_tail tokens; empty until ensure_cc
     pub ccver: String,
@@ -1148,6 +1151,12 @@ extend CcStream {
         }
         self.probes.settle(&self.ccver);
         self.lto_resolve();
+        // Each enabled feature's flag passed its probe: a rejected one fails the build here, before any
+        // compile, and every result used joins the command fingerprint.
+        if !features_pass(&mut self.probes, self.feats, self.cc_raw.as_str()) {
+            self.ret = 1;
+            self.feat_bad = true;
+        }
         self.probes.save();
         let lf = mf::lto_flag(self.lto);
         if lf.len() != 0 {
@@ -1345,6 +1354,9 @@ extend CcStream {
     /// object joins the link list.
     pub fn plan_c(self: &mut Self, rel: str) {
         self.ensure_cc();
+        if self.feat_bad {
+            return;
+        }
         self.total_c = self.total_c + 1;
         let mut cpath = loader::join2(self.gen.as_str(), rel);
         let mut opath = loader::join2(self.obj.as_str(), rel.slice(0, rel.len() - 2));
@@ -1753,14 +1765,23 @@ fn stamp_push_dir(out: &mut String, dir: str) {
     stamp_line(out, "dir\t", (unsafe shim::sc_mtime(dp.cstr())) as u64, stamp_dir_hash(dir), 0, dir);
 }
 
-// The emission options record: target, arch, bootstrap tags, lint, the emitted C unit count, the
-// root directory and the emission-mode environment switches.
-fn stamp_opt_line(out: &mut String, target: i32, arch: i32, bootstrap: bool, lint: bool, ccount: u64, root_dir: str) {
+// The emission options record: target, arch, CPU features, bootstrap tags, lint, the emitted C unit
+// count, the root directory and the emission-mode environment switches.
+fn stamp_opt_line(
+    out: &mut String,
+    target: i32,
+    arch: i32,
+    feats: cf::CpuFeatureSet,
+    bootstrap: bool,
+    lint: bool,
+    ccount: u64,
+    root_dir: str,
+) {
     out.push_str("opt\t");
     out.push_u64(target as u64);
     out.push_str("\t");
     out.push_u64(arch as u64 & 0xFF);
-    out.push_str("\t");
+    out.format_into("\t{}.{}\t", feats.w[0], feats.w[1]);
     out.push_u64(bootstrap as u64);
     out.push_str("\t");
     out.push_u64(lint as u64);
@@ -1804,7 +1825,7 @@ fn stamp_write(
     }
     let mut out = String::from_str("sc-emit-stamp v3\n");
     stamp_exe_line(&mut out, cid);
-    stamp_opt_line(&mut out, target, arch, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
+    stamp_opt_line(&mut out, target, arch, p.features, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
         // flags shape the emitted tree.
@@ -1844,7 +1865,17 @@ fn stamp_write(
 
 // Is the recorded emission still exact for the current inputs? On mtime drift with matching
 // content the stamp is refreshed in place so the next check stays on the fast path.
-fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool, lint: bool, gen: str, cid: u64) bool {
+fn stamp_fresh(
+    path: str,
+    root_dir: str,
+    target: i32,
+    arch: i32,
+    feats: cf::CpuFeatureSet,
+    bootstrap: bool,
+    lint: bool,
+    gen: str,
+    cid: u64,
+) bool {
     if cid == 0 {
         return false;
     }
@@ -1893,9 +1924,9 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             rewritten.push_str("\n");
         } else if kind == "opt" {
             // Every field but the unit count must match this build's options.
-            ccount = stamp_u64(line, 5);
+            ccount = stamp_u64(line, 6);
             let mut want = String::new();
-            stamp_opt_line(&mut want, target, arch, bootstrap, lint, ccount, root_dir);
+            stamp_opt_line(&mut want, target, arch, feats, bootstrap, lint, ccount, root_dir);
             if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
@@ -1976,6 +2007,73 @@ pub struct BuildCtx<'a> {
     /// `--transpiler`: the command that runs the transpile step in place of this compiler's own frontend
     /// (`run_transpiler`); empty for the frontend.
     pub transpiler: str<'a>,
+    /// `--target-feature`: the comma list applied after the manifest's `target-features`.
+    pub target_features: str<'a>,
+}
+
+/// Check the `target-features` lists of `m` (the build's and every profile's: a feature of another
+/// instruction set applies to another build) and the command line's list `cli` (strict) against the
+/// instruction set `m.arch`; false after printing the first error.
+pub fn check_features(m: &mf::Manifest, cli: str) bool {
+    let mut s = cf::baseline(m.arch);
+    let mut err = String::new();
+    let mut ok = true;
+    for i in 0..m.target_features.len() {
+        ok = ok && cf::apply(m.target_features.at(i).as_str(), m.arch, false, &mut s, &mut err);
+    }
+    for k in 0..m.profiles.len() {
+        let tf = &m.profiles.at(k).target_features;
+        for i in 0..tf.len() {
+            ok = ok && cf::apply(tf.at(i).as_str(), m.arch, false, &mut s, &mut err);
+        }
+    }
+    ok = ok && cf::apply(cli, m.arch, true, &mut s, &mut err);
+    if !ok {
+        eprintln("error: {}", err.as_str());
+    }
+    return ok;
+}
+
+/// Whether C flags `fl` enable a memory checker: an address, memory or thread sanitizer.
+pub fn mem_checker(fl: str) bool {
+    let mut at = fl.find("-fsanitize=");
+    while at >= 0 {
+        let rest = fl.slice(at as usize + 11, fl.len());
+        let mut e: usize = 0;
+        while e < rest.len() && rest.byte_at(e) != b' ' {
+            e += 1;
+        }
+        let v = rest.slice(0, e);
+        if v.contains("address") || v.contains("memory") || v.contains("thread") {
+            return true;
+        }
+        let nx = rest.find("-fsanitize=");
+        at = if nx < 0 {
+            -1;
+        } else {
+            at + 11 + nx;
+        };
+    }
+    return false;
+}
+
+/// The CPU features of a build of `m` under profile `prof_name`: the instruction set's baseline, then
+/// the profile's `target-features` (else the build's), then the command line's list `cli`, closed
+/// under `implies`. The lists passed `check_features`.
+pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
+    let mut s = cf::baseline(m.arch);
+    let mut err = String::new();
+    let pi = m.profile_index(prof_name);
+    let tf = if pi >= 0 && m.profiles.at(pi as usize).has_features {
+        &m.profiles.at(pi as usize).target_features;
+    } else {
+        &m.target_features;
+    };
+    for i in 0..tf.len() {
+        let _ = cf::apply(tf.at(i).as_str(), m.arch, false, &mut s, &mut err);
+    }
+    let _ = cf::apply(cli, m.arch, true, &mut s, &mut err);
+    return cf::close(s);
 }
 
 // Transpile `root`'s closure into `srcgen` with this compiler's own frontend, streaming each finished
@@ -2001,6 +2099,21 @@ fn emit_closure(
     // set too), set before the load.
     let mut p = loader::package_new(root_dir, alt, cx.std_dir);
     p.arch = m.arch;
+    p.features = features_for(m, prof_name, cx.target_features);
+    let pi = m.profile_index(prof_name);
+    if pi >= 0 {
+        let mut fl = String::new();
+        push_all(&mut fl, &m.cflags);
+        push_profile_side(
+            &mut fl,
+            m.profiles.at(pi as usize),
+            &m.profiles.at(pi as usize).cflags,
+            false,
+            cx.target,
+            m.sdk,
+        );
+        p.mem_check = mem_checker(fl.as_str());
+    }
     p.test_build = topts != null && unsafe (*topts).enabled;
     p.profile = String::from_str(prof_name);
     p.profiles = profile_names(m);
@@ -2089,6 +2202,9 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     args.push(format("--profile={}", prof_name));
     args.push(format("--target={}", par::axis_names(false)[cx.target as usize]));
     args.push(format("--arch={}", par::axis_names(true)[m.arch as usize]));
+    if cx.target_features.len() != 0 {
+        args.push(format("--target-feature={}", cx.target_features));
+    }
     if cx.bootstrap_tags {
         push_arg(&mut args, "--bootstrap-tags");
     }
@@ -2198,6 +2314,7 @@ pub fn transpile_step(
         root_dir,
         cx.target,
         m.arch,
+        features_for(m, prof_name, cx.target_features),
         cx.bootstrap_tags,
         cx.lint,
         gen.as_str(),
@@ -2217,6 +2334,66 @@ pub fn transpile_step(
         emit_closure(m, prof_name, root, root_dir, alt, srcgen.as_str(), jobs, cx, topts, sink, stamp_new.as_str(), cid);
     };
     return Transpiled { rc: rc, skipped: false, cid: cid };
+}
+
+// The `need` bits of the probes of the features of `s`.
+// Whether every probe of a feature of `feats` accepted its flag (each result is marked used); prints
+// the rejection of each that did not, naming the C compiler `cc`.
+fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, cc: str) bool {
+    let mut ok = true;
+    for i in 0..cf::FEATURE_COUNT {
+        let k = pr::index_of(cf::row(i).probe);
+        if !cf::has(feats, i) || k < 0 {
+            continue;
+        }
+        probes.mark_used(k as usize);
+        if probes.res.at(k as usize).as_str() == "rejected" {
+            eprintln(
+                "build: the C compiler '{}' rejects '{}': target feature '{}' needs a compiler that supports it",
+                cc,
+                cf::row(i).c_flag,
+                cf::row(i).name,
+            );
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+/// `features_pass` for a build without a manifest: C compiler `cc` (words) with compile flags `flags`,
+/// the probe record in `pdir`.
+pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32, feats: cf::CpuFeatureSet) bool {
+    let need = feature_probes(feats);
+    if need == 0 {
+        return true;
+    }
+    let mut ccpath = String::new();
+    let ccmt = which_path(cc, &mut ccpath);
+    let key = format("{}\t{}\t{}\t{}\t{}\t{}\t", LTO_SCHEMA, ccpath.as_str(), ccmt, target, arch, flags);
+    let mut pargv = Vector::<String>::new();
+    split_args(&mut pargv, cc);
+    split_args(&mut pargv, flags);
+    mkdir_p(pdir);
+    let mut probes = pr::Probes::start(pdir, key.as_str(), pargv, "", target, arch, need);
+    let mut va = Vector::<String>::new();
+    split_args(&mut va, cc);
+    push_arg(&mut va, "--version");
+    let ver = cc_version_argv(&mut va, pdir);
+    probes.settle(&ver);
+    let ok = features_pass(&mut probes, feats, cc);
+    probes.save();
+    return ok;
+}
+
+fn feature_probes(s: cf::CpuFeatureSet) u64 {
+    let mut need: u64 = 0;
+    for i in 0..cf::FEATURE_COUNT {
+        let k = pr::index_of(cf::row(i).probe);
+        if cf::has(s, i) && k >= 0 {
+            need |= 1u64 << k as u64;
+        }
+    }
+    return need;
 }
 
 /// `transpile_step` for the manifest's primary root under `prof_name`: the tree `root_build` compiles,
@@ -2262,8 +2439,9 @@ fn cc_stream(
         // Shared-library objects need it; harmless for the exe targets.
         flags.push_str(" -fPIC");
     }
-    // The cross triple comes first; manifest flags can override.
-    push_sdk_flags(&mut flags, m.sdk, m.arch);
+    // The cross triple and the CPU features' flags come first; manifest flags can override.
+    let feats = features_for(m, prof.name, cx.target_features);
+    push_sdk_flags(&mut flags, m.sdk, m.arch, feats);
     push_all(&mut flags, &m.cflags);
     push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target, m.sdk);
     if prof.pgo_use {
@@ -2279,7 +2457,7 @@ fn cc_stream(
     tail.push_str(" -MMD -c");
     // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
     let mut ldbase = String::new();
-    push_sdk_flags(&mut ldbase, m.sdk, m.arch);
+    push_sdk_flags(&mut ldbase, m.sdk, m.arch, feats);
     push_sdk_libs(&mut ldbase, m.sdk);
     // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
     if prof.strip && (m.sdk == 2 || m.sdk == 3) {
@@ -2317,7 +2495,15 @@ fn cc_stream(
     let mut pargv = Vector::<String>::new();
     split_args(&mut pargv, cc_raw.as_str());
     split_args(&mut pargv, flags.as_str());
-    let probes = pr::Probes::start(pdir.as_str(), key.as_str(), pargv, ldbase.as_str(), cx.target, m.arch, need);
+    let probes = pr::Probes::start(
+        pdir.as_str(),
+        key.as_str(),
+        pargv,
+        ldbase.as_str(),
+        cx.target,
+        m.arch,
+        need | feature_probes(feats),
+    );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};
     let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
@@ -2333,6 +2519,8 @@ fn cc_stream(
         cc_raw: cc_raw,
         cc_tail: tail,
         ldbase: ldbase,
+        feats: feats,
+        feat_bad: false,
         target: cx.target,
         lto_req: lto_req,
         lto: lto_req,

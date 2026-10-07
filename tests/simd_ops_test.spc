@@ -246,11 +246,17 @@ fn main(args: Vector<str>) i32 {
     h::expect_run("start = len - N", src, "6", "");
     h::expect_run("start = len - N + 1", src, "7", "index out of bounds: 4 lanes from 7 but the length is 10");
     h::expect_run("start > len", src, "11", "index out of bounds: 4 lanes from 11 but the length is 10");
+    // The largest start of the target: wasm32 in the vector conformance lane.
+    let max = if h::simd_lane() {
+        "4294967295";
+    } else {
+        "18446744073709551615";
+    };
     h::expect_run(
         "start = usize::MAX",
         src,
-        "18446744073709551615",
-        "index out of bounds: 4 lanes from 18446744073709551615 but the length is 10",
+        max,
+        format("index out of bounds: 4 lanes from {} but the length is 10", max).as_str(),
     );
     let decls = M"(import std::simd;
 const fn ld(start: usize) i32 {
@@ -264,7 +270,7 @@ const fn ld(start: usize) i32 {
         "ld(opq::<usize>(6))",
         "ld(opq::<usize>(7))",
         "ld(opq::<usize>(11))",
-        "ld(opq::<usize>(18446744073709551615))",
+        "ld(opq::<usize>(usize::MAX))",
     ];
     let tys: [str; 4] = ["i32", "i32", "i32", "i32"];
     let d = h::const_runtime_parity(decls, exprs, tys, []);

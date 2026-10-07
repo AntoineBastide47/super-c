@@ -16,6 +16,7 @@ import typechecker::typechecker as tc;
 import utils::errors as diag;
 import driver::util as *;
 import build_system::objcache as ocache;
+import build_system::build as bsys;
 
 /// --test run options, forwarded to the generated runner.
 pub struct TestOpts {
@@ -1606,7 +1607,14 @@ pub fn test_build_and_run(
     let base = "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types";
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();
-    push_sdk_flags(&mut fl, sdk, p.arch);
+    push_sdk_flags(&mut fl, sdk, p.arch, p.features);
+    let mut pfl = String::from_str(base);
+    pfl.push_str(fl.as_str());
+    pfl.push_byte(b' ');
+    pfl.push_str(ccflags);
+    if !bsys::features_accepted(loader::dirname_of(root), ccs.as_str(), pfl.as_str(), target, p.arch, p.features) {
+        return 1;
+    }
     let mut args = Vector::<String>::new();
     split_args(&mut args, ccs.as_str());
     let croot = ocache::object_cache_dir();

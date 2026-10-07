@@ -16,6 +16,7 @@ import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
 import graph::items as gitems;
 import ir::layout as lay;
+import ir::cpu_features as cf;
 
 /// The C `SEEK_END` whence value used to size a file before reading it.
 pub const SEEK_END: i32 = 2;
@@ -32,6 +33,9 @@ pub struct Module {
     pub ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
     pub has_ast: bool,
     pub prelude: bool, // part of the auto-imported std prelude
+    /// The vector backend file (`std/simd/backend/<isa>.spc`): its entries render apart, so the
+    /// module emits no unit of its own.
+    pub backend: bool,
 }
 
 /// One shard-policy entry: module `module` (its `::` path) emits `tus` module TUs and `insts`
@@ -132,6 +136,15 @@ pub struct Package {
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
     pub arch: i32,
+    /// The resolved CPU features of the build (`--target-feature`, `target-features`): the baseline of
+    /// `arch` unless the driver sets them.
+    pub features: cf::CpuFeatureSet,
+    /// The backend table: every `@simd_impl` entry by key, then by feature count, the largest first
+    /// (built once every module is typed; `emit::simd_plan` reads it).
+    pub simd_table: Vector<cf::SimdEntry>,
+    /// The build runs under a memory checker (an address, memory or thread sanitizer in its C flags):
+    /// the planner keeps the checked lane loop of every masked or gather access.
+    pub mem_check: bool,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
     /// build (TEST), the profile name (PROFILE; empty is `dev`), and the profile names a PROFILE
     /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
@@ -1379,7 +1392,14 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 /// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
 /// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
 pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
+    return package_from_source_arch(src, std_dir, target, unsafe shim::sc_host_arch());
+}
+
+/// `package_from_source` for instruction set `arch` (loader arch codes) with its baseline features.
+pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) Package {
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
+    p.arch = arch;
+    p.features = cf::baseline(arch);
     p.load_prelude(std_dir, target);
     let mut source = String::from_str(src);
     let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
@@ -2015,21 +2035,25 @@ extend Package {
             if self.modules[i].has_ast {
                 self.modules[i].ast.gt = gp;
                 if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "simd.spc" {
-                    self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd");
-                    self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask");
+                    self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd", NodeKind::NODE_STRUCT);
+                    self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask", NodeKind::NODE_STRUCT);
+                    self.tt.deref_mut().simd_op = self.top_struct(i as ModuleId, "Op", NodeKind::NODE_ENUM);
+                }
+                if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "cpu.spc" {
+                    self.tt.deref_mut().cpu_feature = self.top_struct(i as ModuleId, "Feature", NodeKind::NODE_ENUM);
                 }
             }
         }
     }
 
-    // The top-level struct `name` of module `m`, or node NODE_NONE.
-    fn top_struct(self: &Self, m: ModuleId, name: str) DefId {
+    // The top-level struct or enum (`kind`) `name` of module `m`, or node NODE_NONE.
+    fn top_struct(self: &Self, m: ModuleId, name: str, kind: NodeKind) DefId {
         let a = &self.modules[m as usize].ast;
         let items = a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe a.list(items)[i as usize];
             let n = a.at_const(id);
-            if n.kind == NodeKind::NODE_STRUCT {
+            if n.kind == kind {
                 let sp = a.at_const(n.as_data.aggregate.name).as_data.name.text;
                 if self.modules[m as usize].source.as_str().slice(sp.start as usize, sp.end as usize) == name {
                     return DefId { module: m, node: id };
@@ -2389,6 +2413,7 @@ extend Package {
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
+            features: cf::baseline(unsafe shim::sc_host_arch()),
             build_module: -1,
             tt: Box::<TypePool>::new(TypePool {}),
             ok: true,
@@ -5342,6 +5367,24 @@ extend Package {
                 let id = self.load_module(modpath.as_str(), file.as_str(), self.bootstrap, target);
                 if id >= 0 {
                     self.modules[id as usize].prelude = true;
+                }
+            }
+        }
+        // The vector backend file of the instruction set, when std has one and the build has a
+        // feature: its `@simd_impl` entries are what the lowering planner calls.
+        let backends: [str<'static>; 3] = ["x86", "aarch64", "wasm"];
+        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) {
+            let bn = unsafe backends[self.arch as usize];
+            let mut bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
+            if unsafe shim::sc_mtime(bf.cstr()) != 0 {
+                let id = self.load_module(
+                    format("std::simd::backend::{}", bn).as_str(),
+                    bf.as_str(),
+                    self.bootstrap,
+                    target,
+                );
+                if id >= 0 {
+                    self.modules[id as usize].backend = true;
                 }
             }
         }

@@ -97,6 +97,16 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         }
     }
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
+    // The CPU features, a memory checker and the backend table decide the vector entries a body
+    // calls: every entry's key, features and name.
+    h = fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.mem_check as u64);
+    for i in 0..p.simd_table.len() {
+        let e = *p.simd_table.at(i);
+        let a = unsafe &*p.module_ast_const(e.module);
+        let nm = a.at_const(a.at_const(e.node).as_data.function.name).as_data.name.text;
+        h = fnv_mix(fnv_mix(fnv_mix(h, e.key), e.fs.w[0] ^ e.fs.w[1] << 1), e.lanes as u64);
+        h = fnv_cont(h, p.modules[e.module as usize].source.as_str().slice(nm.start as usize, nm.end as usize));
+    }
     h = fnv_mix(h, p.bootstrap as u64);
     h = fnv_mix(h, p.modules.len() as u64);
     // The ordered path list: prefixing (`user_mods > 1`), short-prefix collisions and ModuleId

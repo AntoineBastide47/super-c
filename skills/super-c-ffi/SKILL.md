@@ -134,6 +134,51 @@ declaring block must include the header that defines the name: an opaque type us
 without its header fails in the C compile. By-value handles (`clock_t`) also work when
 the C type is a scalar.
 
+### Register types: `@c.value(size, align)`
+
+```superc
+extern "C" "wasm_simd128.h" {
+    @c.value(16, 16)
+    pub type v128_t;             // a C vector register type, passed by value
+}
+```
+
+`@c.value` gives an opaque type of an `extern "C"` block a layout: `size` a nonzero multiple of
+`align`, both constant expressions of type `usize` ("'@c.value' needs a nonzero size that is a
+multiple of the alignment"; on any other declaration "'@c.value' may only be applied to an
+opaque type ('type T;') in an 'extern \"C\"' block"). The type is `Copy` and `sizeof`/`alignof`
+read the layout; a `_Static_assert` beside the block's header include checks it against C. It may be a local, a parameter or a result, never storage: a struct field, an
+array or slice element, a variant payload, a static or const, a pointer or reference target, a
+closure capture, or a generic argument, written or inferred, is "`v128_t` is a register type;
+store it through `Simd<T, N>`". It moves to and from a vector through memory
+(`wasm_v128_load`, `wasm_v128_store`), which the C compiler keeps in registers.
+
+## Memory Annotations
+
+```superc
+extern "C" "wasm_simd128.h" {
+    @c.reads(mem, 16)
+    fn wasm_v128_load(mem: *const void) v128_t;
+    @c.writes(mem, 16)
+    fn wasm_v128_store(mem: *mut void, a: v128_t);
+    @c.lane_access
+    fn wasm_v128_load32_lane(mem: *const void, vec: v128_t, lane: i32) v128_t;
+}
+```
+
+`@c.reads(p, bytes)` and `@c.writes(p, bytes)` state that the function reads or writes only
+`bytes` bytes through raw pointer parameter `p` (`*mut` for a write) and has no other memory
+effect; `bytes` is a `usize` constant or an expression over the function's other `usize`
+parameters (`n * 4`; no call, no cast). A function may state both: the write is its effect.
+`@c.lane_access` marks a function that touches memory lane by lane: a build under a memory
+checker (`-fsanitize=` with `address`, `memory` or `thread`) never plans a vector entry that
+calls one; it states no range, so it takes no `@c.reads` or `@c.writes`. The three
+apply to a function of an `extern "C"` block or an `@intrinsic` function only, and do not
+change the emitted C: the Core IR effect query (`ir::facts::call_access`) reads them, so a read
+writes nothing and a write writes only through `p`. Errors: "'q' is not a parameter of this
+function", "parameter 'n' of '@c.reads' must be a raw pointer", "parameter 'p' of '@c.writes'
+must be a '*mut' pointer".
+
 ## Variadics
 
 ### Calling variadic C functions
@@ -314,6 +359,9 @@ const A: i64 = unsafe llabs(-7);                      // evaluates the model
 | `@c.export("sym")` | function | Pin exact C symbol (external linkage) |
 | `@c.import("sym")` | extern fn | Import with exact C symbol |
 | `@unsafe(safe, const)` | extern fn | Claims, any order: `safe` = callable without `unsafe`, `const` = body is the compile-time model |
+| `@c.value(size, align)` | opaque extern type | A C register type of that layout (Register types above) |
+| `@c.reads(p, n)` / `@c.writes(p, n)` | extern fn | Reads or writes only `n` bytes through pointer parameter `p` (Memory Annotations above) |
+| `@c.lane_access` | extern fn | Lane-by-lane memory access: no vector entry that calls it under a memory checker |
 
 ## bindgen
 

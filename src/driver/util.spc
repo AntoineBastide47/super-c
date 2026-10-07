@@ -9,6 +9,7 @@ import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
 import driver::rt_c as rtc;
+import ir::cpu_features as cf;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
 pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
@@ -504,9 +505,15 @@ const fn ndk_host_tag() str<'static> {
 }
 
 /// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
-/// own defaults. Nothing here overrides the manifest: these come first, manifest flags after. Callers
-/// split the result on whitespace (`split_args`), so no quoting: a sysroot path must hold no space.
-pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
+/// own defaults, then the flags of the enabled CPU `features` in table order. Nothing here overrides
+/// the manifest: these come first, manifest flags after. Callers split the result on whitespace
+/// (`split_args`), so no quoting: a sysroot path must hold no space.
+pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32, features: cf::CpuFeatureSet) {
+    push_triple(cmd, sdk, arch);
+    cf::push_c_flags(features, cmd);
+}
+
+fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
     if sdk == 1 {
         // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
         // lack thread-local storage, which the runtime's preemption tick needs.

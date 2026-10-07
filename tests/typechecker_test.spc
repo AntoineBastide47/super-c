@@ -1318,6 +1318,29 @@ fn tuples() {
         "fn f() i32 { let (a, b) = 5; return a + b; }\n",
         "tuple binding requires",
     );
+    // An annotation types the bindings, the value widening to it.
+    h::expect_ok(
+        "annotated tuple binding",
+        "fn f(a: i16, b: i16) i32 { let (x, y): (i32, i32) = (a, b); let r: &i32 = &x; return *r * y; }\n",
+    );
+    h::expect_ok(
+        "an unsafe tuple adapts to the annotation",
+        "fn f(a: [i16; 2], i: usize) i32 { let (x, y): (i32, i32) = unsafe (a[i], a[i]); let r: &i32 = &x; return *r * y; }\n",
+    );
+    h::expect_err_msg(
+        "annotated tuple binding mismatch",
+        "fn f() i32 { let (x, y): (i32, bool) = (1, 2); return x; }\n",
+        "mismatched types: expected",
+    );
+    h::expect_err_msg(
+        "annotated multi-value binding",
+        "fn two() (i16, i16) { return 1, 2; }\nfn f() i32 { let (c, d): (i32, i16) = two(); return c; }\n",
+        "the annotation of a multi-value call's bindings must name its result types",
+    );
+    h::expect_ok(
+        "annotated multi-value binding with its types",
+        "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let (c, d): (i16, i16) = two(); return c + d; }\n",
+    );
 }
 
 @test

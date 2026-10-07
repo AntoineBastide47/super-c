@@ -7,8 +7,19 @@ import tests::harness as h;
 import tests::cli_harness as cli;
 
 // The page-mapping calls of the host, as a program prelude: `guarded(n)` gives `n` elements of `i32`
-// whose last ends at a page closed to every access.
+// whose last ends at a page closed to every access; on wasm32, at the end of linear memory, past
+// which an access traps.
 fn guard_prelude() str<'static> {
+    if h::simd_lane() {
+        return M"(extern "C" "unistd.h" {
+    fn sbrk(increment: isize) *mut void;
+}
+fn guarded(n: usize) SliceMut<'static, i32> {
+    let base = unsafe sbrk(65536) as *mut u8;
+    return SliceMut::<i32> { ptr: unsafe (base + 65536 - n * 4) as *mut i32, len: n };
+}
+)";
+    }
     if cli::on_windows() {
         return M"(extern "C" "windows.h" {
     fn VirtualAlloc(addr: *mut void, size: usize, kind: u32, prot: u32) *mut void;
@@ -47,8 +58,7 @@ fn guarded(n: usize) SliceMut<'static, i32> {
 }
 
 // Thirteen elements end at a page with no access: every form whose inactive lanes cover that page
-// runs without a fault, and the active lanes read and write their elements. No lane skips it: the
-// wasm lane builds the program natively (only its transpile step runs in the wasm compiler).
+// runs without a fault, and the active lanes read and write their elements.
 @test
 fn inactive_lanes_never_touch_a_guard_page() {
     let mut src = String::from_str("import std::simd;\n");
@@ -90,8 +100,9 @@ fn inactive_lanes_never_touch_a_guard_page() {
 }
 
 // A store whose active lanes include one out of bounds traps before any write: the SIGABRT handler
-// finds the slice unchanged. Repeated scatter indexes write in lane order, so the highest active lane
-// wins, and `compress_store` writes its count and nothing past it.
+// finds the slice unchanged (WASI has no signal handler: there the C shows the range check before
+// the store). Repeated scatter indexes write in lane order, so the highest active lane wins, and
+// `compress_store` writes its count and nothing past it.
 @test
 fn stores_check_every_lane_first_and_keep_lane_order() {
     let src = M"(import std::simd;
@@ -135,7 +146,18 @@ fn pick3(ok: bool) i32 {
 )";
     let b = h::diff_build(src, []);
     assert(b.built, b.diag.as_str());
-    for mode in ["0", "1", "2"] {
+    let lane = h::simd_lane();
+    if lane {
+        let mut mc = String::from_str(str::from_cstr(b.proj.rootp()));
+        mc.push_str("/build/dev/raw/main.c");
+        let c = cli::read_text(mc.as_str());
+        let chk = c.as_str().find("__sc_mem_oob(");
+        let st = c.as_str().find("store_masked_i32x4(");
+        assert(chk >= 0 && st > chk, "the range check comes before the masked store");
+    }
+    let modes: [str; 3] = ["0", "1", "2"];
+    for mi in pick_lane(lane)..3usize {
+        let mode = unsafe modes[mi];
         let r = h::diff_run(&b, mode);
         if r.exit != 0 {
             eprintln("mode {}: exit {}: {}", mode, r.exit, r.err.as_str());
@@ -191,8 +213,8 @@ const fn raw(m: u64) i32 {
         "ld(opq::<usize>(2), opq::<u64>(0xF))",
         "ld(opq::<usize>(3), opq::<u64>(0xF))",
         "ld(opq::<usize>(3), opq::<u64>(0x7))",
-        "ld(opq::<usize>(18446744073709551615), opq::<u64>(0x4))",
-        "ld(opq::<usize>(18446744073709551615), opq::<u64>(0))",
+        "ld(opq::<usize>(usize::MAX), opq::<u64>(0x4))",
+        "ld(opq::<usize>(usize::MAX), opq::<u64>(0))",
         "st(opq::<usize>(5), opq::<u64>(0x3))",
         "st(opq::<usize>(5), opq::<u64>(0x1))",
         "ga(opq::<u32>(4), opq::<u64>(0xF))",
@@ -247,10 +269,51 @@ fn masked_stores_borrow_their_slice() {
     }
 }
 
+// The first mode the run reaches: the lane runs mode 2 alone (modes 0 and 1 need a signal handler).
+fn pick_lane(lane: bool) usize {
+    if lane {
+        return 2;
+    }
+    return 0;
+}
+
 // Two threads store to the two halves of one slice through masked stores and scatters whose inactive
 // lanes cover the other half: no lane outside its mask is written, so the race profile reports nothing.
+// WASI has no threads: there one half runs first, and the other half must hold its zeros.
 @test
 fn disjoint_masked_stores_do_not_race() {
+    if h::simd_lane() {
+        h::expect_run(
+            "disjoint masked stores",
+            M"(import std::simd;
+static mut A: [i32; 8] = [0; 8];
+fn half(hi: bool) {
+    let s = SliceMut::<i32> { ptr: &mut unsafe A[0], len: 8 };
+    let m = Mask::<8>::from_bits_truncate(if hi {
+        0xF0u64;
+    } else {
+        0x0Fu64;
+    });
+    for r in 0..200 {
+        let v = Simd::<i32, 8>::splat(r);
+        simd::store_masked(s, 0, m, v);
+        simd::scatter(s, simd::iota::<u32, 8>(), m, v + v);
+    }
+}
+fn main() i32 {
+    half(true);
+    if unsafe A[0] != 0 || unsafe A[3] != 0 {
+        return 1;
+    }
+    half(false);
+    return unsafe A[0] + unsafe A[7] - 796;
+}
+)",
+            "",
+            "",
+        );
+        return;
+    }
     let src = M"(import std::simd;
 import std::parallel::thread as thread;
 static mut A: [i32; 8] = [0; 8];

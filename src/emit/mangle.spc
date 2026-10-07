@@ -10,7 +10,7 @@ import ir::interp as iri;
 
 // The C spelling of a builtin in declarations (usize is size_t, NOT uintptr_t; c32/c64 are the
 // _Complex pair). "void" doubles as the fallback.
-const fn bt_c_decl(b: BuiltinType) str<'static> {
+pub const fn bt_c_decl(b: BuiltinType) str<'static> {
     return switch b {
         BT_BOOL => "bool",
         BT_CHAR => "char",
@@ -1874,6 +1874,17 @@ extend Mangler {
                 return false;
             }
             push_cval(out, v, bt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // Each opaque type by its name: two register types (`@c.value`) differ in every symbol.
+            let da = self.p().module_ast_const(y.module);
+            out.push_str("o");
+            self.ident(
+                y.module,
+                unsafe (*da).at_const(unsafe (*da).at_const(y.as_data.decl).as_data.type_alias.name).as_data.name.text,
+                out,
+            );
             return true;
         }
         out.push_str("v");

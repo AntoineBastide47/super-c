@@ -69,9 +69,20 @@ const fn copy_msg(dst: *mut char, s: &String) {
     unsafe dst[k] = 0 as char;
 }
 
+/// `compile` of `src` as a module of the standard library (path `std::harness`, a file under the std
+/// root) for instruction set `arch` (loader arch codes, -1 for the host's): the std-only attributes
+/// apply, and the backend table's diagnostics (`build_simd_table`) count as the module's.
+pub fn compile_std(src: str, arch: i32, stop: i32) Compiled {
+    return compile_in(src, stop, true, arch);
+}
+
 // Run `src` through the pipeline up to `stop`, reporting the user module (index 0) diagnostics.
 /// Compile `src` in process through stage `stop` (STAGE_*), collecting diagnostics.
 pub fn compile(src: str, stop: i32) Compiled {
+    return compile_in(src, stop, false, -1);
+}
+
+fn compile_in(src: str, stop: i32, as_std: bool, arch: i32) Compiled {
     let mut r = Compiled {};
 
     // Parse stage: lex + parse standalone (no package needed to see syntax errors). The lexer pads its
@@ -103,13 +114,26 @@ pub fn compile(src: str, stop: i32) Compiled {
     }
 
     // Semantic stages need the prelude: load the snippet as module 0 alongside std, exactly like the CLI.
-    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
+    let mut p = loader::package_from_source_arch(
+        src,
+        "std",
+        unsafe shim::sc_host_platform(),
+        if arch >= 0 {
+            arch;
+        } else {
+            unsafe shim::sc_host_arch();
+        },
+    );
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
 
     let n = p.modules.len();
     let uidx = n - 1; // the user module is loaded last, after the prelude
+    if as_std {
+        p.modules[uidx].path = String::from_str("std::harness");
+        p.modules[uidx].file = loader::join2(p.std_root.as_str(), "std/harness.spc");
+    }
     // Resolve every module (prelude first, user last); snapshot the user module's diagnostics.
     for i in 0..n {
         h_resolve(&mut p, i, uidx, &mut r);
@@ -124,6 +148,13 @@ pub fn compile(src: str, stop: i32) Compiled {
     // pass over the fully typed package, exactly like the driver.
     for i in 0..n {
         h_typecheck(&mut p, i, uidx, &mut r);
+    }
+    if r.errors == 0 && as_std {
+        let te = demit::build_simd_table(&mut p, n);
+        if te.len() != 0 {
+            r.errors = 1;
+            copy_msg(&mut r.first[0], &te);
+        }
     }
     if r.errors == 0 {
         demit::publish_checkpoint(&mut p, null);
@@ -567,12 +598,18 @@ pub fn expect_resolve_ok(label: str, src: str) {
 /// Assert that typechecking `src` reports an error containing `needle`.
 pub fn expect_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_TYPECHECK);
+    if !c.msg_has(needle) {
+        eprintln("{}: the first error is: {}", label, str::from_cstr(&c.first[0]));
+    }
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
 }
 /// Assert that resolving `src` reports an error containing `needle`.
 pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_RESOLVE);
+    if !c.msg_has(needle) {
+        eprintln("{}: the first error is: {}", label, str::from_cstr(&c.first[0]));
+    }
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
 }
@@ -582,11 +619,28 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 // compiler under test. On the wasm lane the build runs its transpile step in the wasm compiler
 // (`--transpiler`), so the guest does the constant evaluation.
 
-/// The build of one differential program: its scratch project, whether it built, and the build output.
+/// The build of one differential program: its scratch project, whether it built, the build output,
+/// and whether it is a wasm32 module (run under wasmtime).
 pub struct DiffBuild {
     pub proj: cli::Proj,
     pub built: bool,
     pub diag: String,
+    pub wasm: bool,
+}
+
+// The vector conformance lane, `SC_SIMD_LANE=wasm` (a wasi-sdk in WASI_SDK_PATH, wasmtime on the
+// PATH): every differential program builds for wasm32 with `+simd128` and runs under wasmtime, and
+// `expect_run` also builds it without the feature and requires the same results. -1 until read; the
+// runner forks one process per test, so the cache is never shared.
+static mut SIMD_LANE: i32 = -1;
+
+/// Whether the vector conformance lane is on (`SC_SIMD_LANE=wasm`).
+pub fn simd_lane() bool {
+    if unsafe SIMD_LANE < 0 {
+        let e = stdlib::getenv("SC_SIMD_LANE");
+        unsafe SIMD_LANE = (e != null && str::from_cstr(e) == "wasm") as i32;
+    }
+    return unsafe SIMD_LANE == 1;
 }
 
 /// One run of a differential program: exit code, stdout and stderr.
@@ -604,16 +658,27 @@ pub struct DiffRun {
 pub fn diff_build(src: str, opts: []str) DiffBuild {
     let exe = cli::superc_path(); // resolved before the chdir below
     let p = cli::proj_new();
+    // wasm32 has no UndefinedBehaviorSanitizer runtime, and a large unoptimized function can pass
+    // the engines' limit of locals: the lane's `ubsan` profile optimizes lightly.
     p.mkfile(
         "build.toml",
-        "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n",
+        if simd_lane() {
+            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\n";
+        } else {
+            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
+        },
     );
     p.mkfile("main.spc", src);
     let mut root = String::from_str(str::from_cstr(p.rootp()));
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
     let mut env = cli::fixture_cache_env(root.as_str());
+    let mut wasm = simd_lane();
+    if wasm {
+        cmd.push_str(" --target=wasm --target-feature=+simd128");
+    }
     for o in opts {
+        wasm = wasm || o == "--target=wasm";
         if o.starts_with("-") {
             cmd.format_into(" \"{}\"", o);
         } else {
@@ -632,7 +697,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     if unsafe shim::sc_chdir(root.cstr()) == 0 {
         rc = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), null, env.cstr());
     }
-    return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()) };
+    return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()), wasm: wasm };
 }
 
 /// Assert that the build of `src` fails with a diagnostic containing `needle`, before its C compile.
@@ -648,6 +713,14 @@ pub fn expect_build_err(label: str, src: str, needle: str) {
 /// Assert that `src` builds and its run with argument `arg` traps with `msg` on stderr, or exits 0
 /// when `msg` is empty; a sanitizer report fails it either way.
 pub fn expect_run(label: str, src: str, arg: str, msg: str) {
+    if simd_lane() {
+        // The scalar lowering and the hardware entries give the same results.
+        let d = same_output(src, ["--target-feature=-simd128"], [], [arg]);
+        if d.len() != 0 {
+            eprintln("{}: scalar and +simd128: {}", label, d.as_str());
+        }
+        assert(d.len() == 0, label);
+    }
     let b = diff_build(src, []);
     if !b.built {
         eprintln("{}: {}", label, b.diag.as_str());
@@ -669,7 +742,12 @@ pub fn expect_run(label: str, src: str, arg: str, msg: str) {
 pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
     let root = str::from_cstr(b.proj.rootp());
     let mut cmd = String::new();
-    cmd.format_into("\"{}/prog{}\" {}", root, str::from_cstr(cli::binext()), args);
+    if b.wasm {
+        // Relaxed SIMD runs deterministically: a result never depends on the host.
+        cmd.format_into("wasmtime run -W relaxed-simd-deterministic=y --dir=\"{}\" \"{}/prog\" {}", root, root, args);
+    } else {
+        cmd.format_into("\"{}/prog{}\" {}", root, str::from_cstr(cli::binext()), args);
+    }
     let mut outp = String::new();
     outp.format_into("{}/.out", root);
     let mut errp = String::new();
@@ -1174,6 +1252,13 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
 
 /// Assert the instruction checks of `asm_check` on `function` of `src` built with `opts`.
 pub fn expect_asm(label: str, src: str, opts: []str, function: str, contains: []str, absent: []str) {
+    let mut wasm = false;
+    for o in opts {
+        wasm = wasm || o == "--target=wasm";
+    }
+    if simd_lane() && !wasm {
+        return; // the lane builds every program for wasm32: a host instruction check does not apply
+    }
     let d = asm_check(src, opts, function, contains, absent);
     if d.len() != 0 {
         eprintln("{}: {}", label, d.as_str());

@@ -10,7 +10,8 @@
 // known function bodies of at most MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks,
 // non-recursive through the active splice chain, without asm, closures, variadic intrinsics,
 // reflection, asserts, wide literals, static references, or `from` coercions, and without
-// attributes beyond the inline hints (@c.noinline and @c.noreturn therefore reject). Inner calls
+// attributes beyond the inline hints, the build gates and `@target_feature` (@c.noinline and
+// @c.noreturn therefore reject). Inner calls
 // must target CONCRETE public functions or header-declared extern functions, and fn-value
 // constants CONCRETE public functions -- anything else would need the
 // emitter's demand machinery (symbols, prototypes, per-instantiation static_asserts) from a
@@ -46,7 +47,7 @@ pub const IJ_COUNT: usize = 8;
 /// Emission-mode env switches: every setting that changes the C a body renders to. Build stamps
 /// and TU-cache keys read the list by index, so a new switch joins here once and every consumer
 /// follows; the order is part of the recorded keys.
-pub const EMIT_MODE_ENV_N: usize = 3;
+pub const EMIT_MODE_ENV_N: usize = 4;
 
 pub fn emit_mode_env(i: usize) str<'static> {
     if i == 0 {
@@ -55,8 +56,11 @@ pub fn emit_mode_env(i: usize) str<'static> {
     if i == 1 {
         return "SC_BCE";
     }
-    assert(i == 2);
-    return "SC_BCE_DISABLE";
+    if i == 2 {
+        return "SC_BCE_DISABLE";
+    }
+    assert(i == 3);
+    return "SC_SIMD_SCALAR";
 }
 
 const MAX_CALLEE_STMTS: usize = 40;
@@ -627,8 +631,9 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &
         if a.attrs.at(k).owner != d.node {
             continue;
         }
+        // The build filter and the feature checks have read the gates and features: no code of theirs.
         let kd = a.attrs.at(k).kind;
-        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8;
+        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8;
         if !benign {
             return REJ_BASE | IJ_NOT_FN as u64;
         }

@@ -618,6 +618,95 @@ pub fn simd_intrinsic(name: str) u32 {
     return 0;
 }
 
+/// The portable vector operations a `@simd_impl` entry implements, `std::simd::Op` in the same
+/// order (a variant's discriminant is its index): the operators of `simd_intrinsic` (`add` to `shr`,
+/// `neg`, `not`), the numeric cast, the RV_SIMD codes from OP_SIMD, then the forms only the
+/// lowering planner uses: the comparisons and `choose` over lane masks (a lane of all ones when
+/// true), the conversions between a lane mask and `Mask<N>`, the lane-mask `any` and `all`, and the
+/// shifts by one scalar count already checked to be below the lane width.
+pub const OP_ADD: u32 = 0;
+pub const OP_SUB: u32 = 1;
+pub const OP_MUL: u32 = 2;
+pub const OP_DIV: u32 = 3;
+pub const OP_REM: u32 = 4;
+pub const OP_AND: u32 = 5;
+pub const OP_OR: u32 = 6;
+pub const OP_XOR: u32 = 7;
+pub const OP_SHL: u32 = 8;
+pub const OP_SHR: u32 = 9;
+pub const OP_NEG: u32 = 10;
+pub const OP_NOT: u32 = 11;
+pub const OP_CAST: u32 = 12;
+pub const OP_SIMD: u32 = 13;
+pub const OP_CMP_LANES: u32 = OP_SIMD + SIMD_CODES as u32; // eq, ne, lt, le, gt, ge
+pub const OP_CHOOSE_LANES: u32 = OP_CMP_LANES + 6;
+pub const OP_LANES_TO_MASK: u32 = OP_CHOOSE_LANES + 1;
+pub const OP_MASK_TO_LANES: u32 = OP_CHOOSE_LANES + 2;
+pub const OP_ANY_LANES: u32 = OP_CHOOSE_LANES + 3;
+pub const OP_ALL_LANES: u32 = OP_CHOOSE_LANES + 4;
+pub const OP_SHL_SCALAR: u32 = OP_CHOOSE_LANES + 5;
+pub const OP_SHR_SCALAR: u32 = OP_CHOOSE_LANES + 6;
+pub const OP_COUNT: u32 = OP_CHOOSE_LANES + 7;
+
+const OP_NAMES: [str<'static>; 13] = [
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "rem",
+    "and",
+    "or",
+    "xor",
+    "shl",
+    "shr",
+    "neg",
+    "not",
+    "cast",
+];
+const OP_PLAN_NAMES: [str<'static>; 13] = [
+    "cmp_eq_lanes",
+    "cmp_ne_lanes",
+    "cmp_lt_lanes",
+    "cmp_le_lanes",
+    "cmp_gt_lanes",
+    "cmp_ge_lanes",
+    "choose_lanes",
+    "lanes_to_mask",
+    "mask_to_lanes",
+    "any_lanes",
+    "all_lanes",
+    "shl_scalar",
+    "shr_scalar",
+];
+
+/// The `std::simd::Op` variant of operation `op`: its name in CamelCase, a comparison prefixed `Cmp`.
+pub const fn op_variant(op: u32) String {
+    let mut out = String::new();
+    let ops: []str = OP_NAMES;
+    let pl: []str = OP_PLAN_NAMES;
+    let n = if op < OP_SIMD {
+        ops[op as usize];
+    } else if op < OP_CMP_LANES {
+        simd_op((op - OP_SIMD) as u8).name;
+    } else {
+        pl[(op - OP_CMP_LANES) as usize];
+    };
+    if op >= OP_SIMD + SIMD_CMP_EQ as u32 && op <= OP_SIMD + SIMD_CMP_GE as u32 {
+        out.push_str("Cmp");
+    }
+    let mut up = true;
+    for i in 0..n.len() {
+        let c = n.byte_at(i);
+        if c == b'_' {
+            up = true;
+        } else {
+            out.push_byte(pick(up && c >= b'a' && c <= b'z', c - 32, c));
+            up = false;
+        }
+    }
+    return out;
+}
+
 /// The run-time and compile-time trap message of a failing lane of rvalue kind `rk`: RV_BINARY with
 /// operator token `op`, RV_UNARY (`-`), or RV_SIMD with code `op`; `second` for the second failure
 /// kind of `/` and `%` (MIN / -1 after a zero divisor). The trap reads `lane <i>: <message>`.

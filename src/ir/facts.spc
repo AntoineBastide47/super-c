@@ -155,6 +155,14 @@ pub fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Termin
     if is_prelude_len_call(pkg, b, t) {
         return effect(EF_NONE, ir::IR_NONE);
     }
+    // A foreign function's memory annotation states all it touches.
+    let ma = call_access(pkg, b, t);
+    if ma.kind == MA_READ {
+        return effect(EF_NONE, ir::IR_NONE);
+    }
+    if ma.kind == MA_WRITE {
+        return effect(EF_PTR, ma.arg);
+    }
     let mut e = effect(EF_CALL, ir::IR_NONE);
     let da = unsafe &*(&*pkg).module_ast_const(b.module);
     for i in 0..t.args_len {
@@ -170,6 +178,61 @@ pub fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Termin
         }
     }
     return e;
+}
+
+/// The memory access a call states through its callee's annotation (`@c.reads`, `@c.writes`,
+/// `@c.lane_access` on a foreign function or an `@intrinsic` binding).
+pub const MA_NONE: u8 = 0; // no annotation
+pub const MA_READ: u8 = 1; // reads `bytes` bytes through argument `arg`, nothing else
+pub const MA_WRITE: u8 = 2; // writes `bytes` bytes through argument `arg`, and may read through it
+pub const MA_LANES: u8 = 3; // touches memory in active lanes at lane-dependent addresses: unknown
+
+/// One stated access (`call_access`): `arg` is the pointer argument's operand; the byte count is
+/// `bytes`, or with `bytes_node` set the annotation's expression over the callee's parameters, node
+/// `bytes_node` of module `module`, which every call evaluates with its arguments.
+pub struct MemAccess {
+    pub kind: u8,
+    pub arg: u32,
+    pub bytes: u64,
+    pub bytes_node: NodeId,
+    pub module: ModuleId,
+}
+
+/// The memory access call `t` states through its callee's annotation; MA_NONE without one.
+pub fn call_access(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) MemAccess {
+    let mut ma = MemAccess { kind: MA_NONE, arg: ir::IR_NONE, bytes: 0, bytes_node: NODE_NONE, module: t.callee.module };
+    if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || Ast::in_body(t.callee.node) {
+        return ma;
+    }
+    let a = unsafe &*(&*pkg).module_ast_const(t.callee.module);
+    if a.at_const(t.callee.node).kind != NodeKind::NODE_FUNCTION {
+        return ma;
+    }
+    if a.attr_of(t.callee.node, AttrKind::ATTR_C_LANE_ACCESS) != null {
+        ma.kind = MA_LANES;
+        return ma;
+    }
+    // A write states the call's effect where a function also reads.
+    let ks: [AttrKind; 2] = [AttrKind::ATTR_C_WRITES, AttrKind::ATTR_C_READS];
+    for k in ks {
+        let at = a.attr_of(t.callee.node, k);
+        if at == null {
+            continue;
+        }
+        let v = a.attr_value(t.callee.node, k);
+        if !v.ok || v.v >= t.args_len as u64 {
+            return ma;
+        }
+        ma.kind = pick(k == AttrKind::ATTR_C_READS, MA_READ, MA_WRITE);
+        ma.arg = b.oper_pool[(t.args_start + v.v as u32) as usize];
+        ma.bytes = v.w[0];
+        if v.w[1] != 0 {
+            let es = a.at_const(unsafe (*at).arg).as_data.array_literal.elements;
+            ma.bytes_node = unsafe a.list(es)[1];
+        }
+        return ma;
+    }
+    return ma;
 }
 
 // ---- version tracking --------------------------------------------------------------------------------

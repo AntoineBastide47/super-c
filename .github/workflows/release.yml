@@ -337,6 +337,14 @@ jobs:
       - name: Build the wasm compiler
         run: ./super-c build --target=wasm --profile=release -o super-c.wasm
 
+      # The vector conformance lane: every vector test program, and the vector generator model's fixed
+      # seeds, build for wasm32 with +simd128, run under wasmtime, and match the same program built
+      # without the feature or the scalar model.
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
       # The self-hosting fixpoint, on wasm: the build engine builds gen2 from the whole compiler with gen1
       # (the artifact) as its transpiler under wasmtime, then gen3 with gen2 as its transpiler, and
       # gen2's emission must be byte-identical to gen1's. WASI has no processes, so the native engine

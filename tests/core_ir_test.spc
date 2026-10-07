@@ -800,3 +800,50 @@ fn verifier_rejects_malformed_index_lists() {
     }
     assert_eq(irv::verify(&lw.body, tp, &p), "");
 }
+
+// A call of a foreign function with a memory annotation: the query returns the range through the
+// pointer argument (a constant count, or the annotation's expression over the parameters), and the
+// effect is a pure read, a write through that argument, or for a lane access an unknown call.
+@test
+fn memory_annotations_reach_the_effect_query() {
+    let p = typed_package(
+        "extern \"C\" {\n    @c.reads(src, 16)\n    fn rd(src: *const void) i32;\n    @c.writes(dst, n * 4)\n    fn wr(n: usize, dst: *mut void);\n    @c.lane_access\n    fn ln(p: *mut void);\n    fn plain(p: *mut void);\n    @c.reads(src, 8)\n    @c.writes(dst, 8)\n    fn cp(dst: *mut void, src: *const void);\n}\nfn f(a: *mut i32) i32 {\n    let x = unsafe rd(a as *const void);\n    unsafe wr(3, a as *mut void);\n    unsafe ln(a as *mut void);\n    unsafe plain(a as *mut void);\n    unsafe cp(a as *mut void, a as *const void);\n    return x;\n}\n",
+    );
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let b = &lw.body;
+    let mut kinds = Vector::<u8>::new();
+    for i in 0..b.blocks.len() {
+        let t = b.blocks.at(i).term;
+        if t.kind != ir::TM_CALL {
+            continue;
+        }
+        let ma = fx::call_access(&p, b, &t);
+        let e = fx::term_effect(&p, b, &t);
+        kinds.push(ma.kind);
+        if ma.kind == fx::MA_READ {
+            assert(
+                ma.arg == b.oper_pool[t.args_start as usize] && ma.bytes == 16 && ma.bytes_node == NODE_NONE,
+                "16 bytes from src",
+            );
+            assert(e.kind == fx::EF_NONE, "a read writes nothing");
+        } else if ma.kind == fx::MA_WRITE {
+            // `wr` writes n * 4 bytes through its second argument; `cp` reads and writes, and its
+            // write through the first states the effect.
+            let k: u32 = pick(kinds.len() == 2, 1u32, 0u32);
+            assert(
+                ma.arg == b.oper_pool[(t.args_start + k) as usize] && (k == 0 || ma.bytes_node != NODE_NONE),
+                "the written range",
+            );
+            assert(e.kind == fx::EF_PTR && e.a == ma.arg, "a write through dst");
+        } else {
+            assert(e.kind == fx::EF_CALL, "a lane access or no annotation: an unknown call");
+        }
+    }
+    assert(
+        kinds.len() == 5 && kinds[0] == fx::MA_READ && kinds[1] == fx::MA_WRITE && kinds[2] == fx::MA_LANES && kinds[3] == fx::MA_NONE && kinds[4] == fx::MA_WRITE,
+        "one call each, in order",
+    );
+}

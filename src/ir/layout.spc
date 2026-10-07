@@ -333,6 +333,19 @@ extend Svc {
             let w = self.tgt().ptr;
             return Layout { ok: true, size: w, align: w };
         }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // A register type states its layout (`@c.value(size, align)`); any other opaque type has
+            // none the compiler knows.
+            if !self.has_ast(y.module) || self.attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) == null {
+                return Layout { ok: false };
+            }
+            let av = self.a(y.module).attr_value(y.as_data.decl, AttrKind::ATTR_C_VALUE);
+            if !av.ok {
+                self.pending += 1;
+                return Layout { ok: false };
+            }
+            return Layout { ok: true, size: av.v, align: av.w[0] };
+        }
         if y.kind == TypeKind::TYPE_ARRAY {
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {

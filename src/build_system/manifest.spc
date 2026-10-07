@@ -24,6 +24,9 @@ pub struct Profile<'a> {
     pub pgo_use: bool,
     /// `overflow-checks`: 1 traps integer overflow, 0 wraps it (`-DSC_ARITH_WRAP`), -1 follows `opt`.
     pub overflow_checks: i32,
+    /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
+    pub target_features: Vector<String>,
+    pub has_features: bool,
 }
 
 /// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
@@ -157,6 +160,7 @@ pub struct Manifest<'a> {
     pub lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
     pub lib_shared: bool, // [lib] type contains "shared"
     pub shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
+    pub target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -181,6 +185,7 @@ extend Manifest as Free {
         self.lib_name.free();
         self.lib_root.free();
         self.shards.free();
+        self.target_features.free();
     }
 }
 
@@ -196,6 +201,8 @@ extend Profile {
             lto: LTO_FLAGS,
             pgo_use: false,
             overflow_checks: -1,
+            target_features: Vector::<String>::new(),
+            has_features: false,
         };
     }
 
@@ -399,6 +406,8 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 }
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);
+            } else if key == "target-features" {
+                take_arr(it, &mut errs, &mut m.target_features);
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown key '{}'", key));
             }
@@ -438,6 +447,9 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 }
             } else if key == "strip" {
                 set_bool(it, &mut errs, &mut p.strip);
+            } else if key == "target-features" {
+                take_arr(it, &mut errs, &mut p.target_features);
+                p.has_features = true;
             } else if key == "overflow-checks" {
                 let mut on = false;
                 set_bool(it, &mut errs, &mut on);
@@ -667,6 +679,7 @@ extend Manifest {
             lib_static: false,
             lib_shared: false,
             shards: Vector::<loader::ShardRule>::new(),
+            target_features: Vector::<String>::new(),
         };
     }
 

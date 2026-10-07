@@ -2525,6 +2525,18 @@ extend Interp {
                     if k != NodeKind::NODE_FUNCTION {
                         return self.fail();
                     }
+                    if da.at_const(fnode).as_data.function.needs_features() {
+                        // A function that needs CPU features computes with C intrinsics.
+                        let nm = da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
+                        self.it_trap_text(
+                            IT_TRAP_UNSUPPORTED,
+                            format(
+                                "`{}` has no compile-time value",
+                                self.src_of(fm).slice(nm.start as usize, nm.end as usize),
+                            ),
+                        );
+                        return false;
+                    }
                     // An `@unsafe(const)` extern function runs its body, the compile-time model.
                     is_extern = da.at_const(fnode).as_data.function.is_extern() && da.at_const(fnode).as_data.function.body == NODE_NONE;
                 }
@@ -6634,8 +6646,10 @@ extend Interp {
         if blk == null {
             return out;
         }
-        // A pointer to an array cast to a pointer to its element type addresses the first element:
-        // the array object, not the slot that holds it.
+        // A pointer to an array or a vector cast to a pointer to its element type addresses the
+        // first element: the array object, not the slot that holds it. Any other view of an
+        // aggregate (a byte pointer across nested arrays or a vector's lanes, a struct's first
+        // field) the slot model cannot follow: no compile-time value, never a provable fault.
         let mut sm: ModuleId = 0;
         let mut st = TYPE_NONE;
         if v.ty != TYPE_NONE && self.rty(v.tm, v.ty, &mut sm, &mut st) {
@@ -6649,7 +6663,8 @@ extend Interp {
                 &mut at,
             ) {
                 let ay = *(unsafe &*self.p().module_ast_const(am)).type_at(at);
-                if ay.kind == TypeKind::TYPE_ARRAY && self.teq(am, ay.as_data.arr.elem, em, et) {
+                let seq = ay.kind == TypeKind::TYPE_ARRAY || ay.kind == TypeKind::TYPE_SIMD;
+                if seq && self.teq(am, ay.as_data.arr.elem, em, et) {
                     let off = pv_off(v) as usize;
                     if off >= unsafe (*blk).slots.len() {
                         return self.bail();
@@ -6659,6 +6674,10 @@ extend Interp {
                         return self.bail();
                     }
                     return iv_ptr(m, target, av.i as u32, 0);
+                }
+                let agg = seq || ay.kind == TypeKind::TYPE_STRUCT || ay.kind == TypeKind::TYPE_INSTANCE;
+                if agg && !self.teq(am, at, em, et) {
+                    return self.bail();
                 }
             }
         }

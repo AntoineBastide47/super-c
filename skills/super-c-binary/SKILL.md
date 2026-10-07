@@ -82,8 +82,8 @@ transpile form, each argument one argv entry:
 
 ```sh
 CMD <root> --emit-sub=<sub> --manifest-dir=<abs project dir> --out-dir=<out-dir> --profile=<p> \
-    --target=<t> --arch=<a> [--bootstrap-tags] [--no-lint] [--const-eval-steps=N] \
-    [--const-eval-memory=N] [--emit-id=<id>]
+    --target=<t> --arch=<a> [--target-feature=<list>] [--bootstrap-tags] [--no-lint] \
+    [--const-eval-steps=N] [--const-eval-memory=N] [--emit-id=<id>]
 ```
 
 `super-c <root> --emit-sub=SUB ...` (`bsys::manifest_emit`) enters the project directory, reads its
@@ -208,8 +208,8 @@ false` is the run-once idiom and is left alone; a condition over a build constan
 `PLATFORM` or `PROFILE` is a deliberate switch and never reported), dead stores, discarded
 pure results, redundant casts, owning unions without `Free`. A module whose code the
 platform filter removed (a build-constant `if` or `switch`) skips the lints that count
-uses or reachability, as a module with `@platform` items skips the unused-import and
-unused-member lints.
+uses or reachability, as a module with `@platform` or `@arch` items skips the unused-import
+and unused-member lints.
 
 `print`, `println`, `eprint` and `eprintln` are prelude functions (`std/string.spc`) the
 compiler lowers itself, so an `import stdio;` used only for printing is unused. The
@@ -280,6 +280,7 @@ The manifest file configures any Super-C project, not just the compiler.
 ```toml
 bin = "super-c"              # output binary name
 root = "src/main.spc"        # entry point
+target-features = []         # CPU features (see CPU features below)
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static)
@@ -308,6 +309,7 @@ link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, aft
 strip = true
 lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
 overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
+target-features = ["+simd128"] # replaces the build-level list for this profile
 
 [profile.release]            # a section naming a built-in profile starts from its values and
 opt-level = 2                # overrides only the keys it sets (an array replaces the whole array)
@@ -494,8 +496,11 @@ once the version probe answers. A probe runs only when a build needs its result 
 record does not hold it: the needed probes start beside the compiler version probe,
 before the transpile, one child per spelling, all at once. A build that measured nothing
 leaves the record unchanged. The results a build used end every object and link
-fingerprint (` | probes <id>=<result>;`). Today a build uses the `thin-lto` verdict alone,
-under `lto = "thin"`; the emitted C uses no probe result, so the emit stamp holds none.
+fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
+"thin"`, and the probe of each CPU feature it enables that has one (`wasm-simd128`,
+`wasm-relaxed-simd`); a rejected feature probe fails the build before any compile ("build:
+the C compiler 'cc' rejects '-msimd128': target feature 'simd128' needs a compiler that
+supports it"). The emitted C uses no probe result, so the emit stamp holds none.
 
 ```sh
 super-c build --print-probes                    # the table for the dev profile and the host target
@@ -506,6 +511,41 @@ super-c build --print-probes --profile=release  # under the release flags
 `target: <platform> <arch>`, then one `<id> <result>` row per probe in table order, with the
 ids padded to 24 columns. It runs every applicable probe the record does not hold, the
 ThinLTO procedure included, adds the results to the record, and builds nothing.
+
+### CPU features
+
+A CPU feature lets the compiler select instructions of an instruction-set extension. It
+never changes a program's results: a vector operation gives the same lanes and the same
+traps with and without it. The table is `src/ir/cpu_features.spc` (`CPU_FEATURES`), mirrored
+by `std::cpu::Feature`:
+
+| Name | Instruction set | Implies | C flag | Probe | Default |
+|------|-----------------|---------|--------|-------|---------|
+| `simd128` | wasm32 | | `-msimd128` | `wasm-simd128` | off |
+| `relaxed-simd` | wasm32 | `simd128` | `-mrelaxed-simd` | `wasm-relaxed-simd` | off |
+| `sse2` | x86_64 | | | | always on |
+| `neon` | aarch64 | | | | always on |
+
+A build starts from its instruction set's baseline (the rows that are always on), applies
+the build.toml `target-features` list (a profile's list replaces the build-level one), then
+the `--target-feature=L` list (repeated flags join in order). Each list item is `+name` or
+`name` (enable) or `-name` (disable), applied in order; the implications close the set
+after the last item. An unknown name is an error before anything builds ("unknown target
+feature 'avx2' for wasm32; the wasm32 features are: simd128, relaxed-simd"), and so is a
+baseline feature disabled ("target feature 'sse2' is part of every x86_64 build"). A
+build.toml list may name features of several instruction sets: a build skips the others';
+on the command line another instruction set's feature is an error ("no target feature
+'neon' for wasm32; .."). The set adds each enabled feature's C flag to every compile, after
+its probe accepted it (a build without a manifest probes too), is part of every object
+fingerprint, of the emit stamp and of the per-unit cache key (a changed set emits and
+compiles every unit again), and selects the `@simd_impl` entries the vector planner may
+use; a build with no feature loads no backend file. A function with `@target_feature` is callable only from a build, or a function, that
+holds its features.
+
+```sh
+super-c build --target=wasm --target-feature=+simd128
+super-c build --target=wasm --target-feature=+relaxed-simd   # simd128 too
+```
 
 ### Common flags
 
@@ -522,6 +562,7 @@ ThinLTO procedure included, adds the results to the record, and builds nothing.
 | `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above) |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
+| `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
@@ -565,6 +606,8 @@ ThinLTO procedure included, adds the results to the record, and builds nothing.
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters (`BceStats`): checks and range checks seen and removed, coalesced, folded, signature crossings, and the kept checks per reason (six reason columns, `BR_WIDENED` the last) |
 | `SC_BCE` | `0` turns bounds-check elimination off: every check stays (the generator's BCE differential oracle) |
 | `SC_BCE_DISABLE` | A list of BCE rules to turn off, matched by substring: `fold` (folded panic guards), `sig` (signature facts), `int` (the interval facts of `ir/facts.spc`) |
+| `SC_SIMD_SCALAR` | `1`: the vector planner uses no `@simd_impl` entry; every vector operation keeps its lane loop (the entry differential oracle) |
+| `SC_SIMD_TRACE` | Print each vector operation for which `simd_plan` finds no single entry (`simd: no native entry for <Op> on <T>xN: chunks` or `the lane loop`) |
 | `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module-level schedule the type check ran before, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs). Keeps every body arena until emission planning (its final graph reads the bodies) |
 
 ### LSP

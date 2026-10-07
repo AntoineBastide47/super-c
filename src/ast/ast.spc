@@ -85,6 +85,12 @@ pub enum AttrKind {
     ATTR_NO_CONST,
     ATTR_UNSAFE, // `@unsafe(safe, const)`: unverified claims about an extern function, in `arg`
     ATTR_INTRINSIC, // `@intrinsic("name")` (std only): a bodiless function the compiler implements
+    ATTR_TARGET_FEATURE, // `@target_feature([cpu::Feature; K])`: callable only where the build has them
+    ATTR_SIMD_IMPL, // `@simd_impl(simd::Op, [cpu::Feature; K])` (std only): a hardware vector operation
+    ATTR_C_VALUE, // `@c.value(size, align)` on an extern opaque type: a register value of that layout
+    ATTR_C_READS, // `@c.reads(param, bytes)` on an extern function: it reads that range through `param`
+    ATTR_C_WRITES, // `@c.writes(param, bytes)`: it writes that range through `param`
+    ATTR_C_LANE_ACCESS, // `@c.lane_access`: it touches memory in active lanes at lane-dependent addresses
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
@@ -105,6 +111,14 @@ pub const WHERE_NONE: u8 = 0;
 pub const WHERE_OWN: u8 = 1;
 pub const WHERE_IN: u8 = 2;
 pub const WHERE_OUT: u8 = 3;
+
+/// A call (at `span`) of function `callee`, which needs CPU features, from function `caller` of the
+/// module (NODE_NONE outside a function).
+pub struct FeatureCall {
+    pub span: tok::Span,
+    pub callee: DefId,
+    pub caller: NodeId,
+}
 
 /// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `Ast::where_scope`
 /// matches it to a type parameter through the resolver's binding of its type.
@@ -197,9 +211,9 @@ pub struct BcCut {
     pub span: tok::Span,
 }
 
-/// `expr`: the argument is a constant expression (`attr_expr_type`): `arg` is its node in the
-/// module arena, `str_span` the source text between the parentheses, and its value is in
-/// `Ast.attr_vals`.
+/// `expr`: the arguments are constant expressions (`attr_expr_args`): `arg` is the node of the one
+/// argument, or of a NODE_TUPLE of several, in the module arena; `str_span` is the source text
+/// between the parentheses; the value is in `Ast.attr_vals`.
 pub struct Attr {
     pub owner: NodeId,
     pub kind: u8,
@@ -213,22 +227,61 @@ pub struct Attr {
 pub const TEST_SHOULD_PANIC: u32 = 1;
 pub const TEST_TIMEOUT_SHIFT: u32 = 1;
 
-/// The attribute kinds whose argument may be a constant expression, and the type each argument
-/// checks against.
-pub const ATTR_EXPR_KINDS: [AttrKind; 1] = [AttrKind::ATTR_ALIGN];
-const ATTR_EXPR_TYPES: [BuiltinType; 1] = [BuiltinType::BT_U32];
+/// The kinds of a constant-expression attribute argument (`attr_expr_args`): a `u32`, a `usize`, a
+/// `[cpu::Feature; K]` (any K), a `simd::Op`, a parameter of the function, or a byte count: a
+/// `usize` constant or an expression over `usize` parameters of the function.
+pub const AA_U32: u32 = 1;
+pub const AA_USIZE: u32 = 2;
+pub const AA_FEATURES: u32 = 3;
+pub const AA_OP: u32 = 4;
+pub const AA_PARAM: u32 = 5;
+pub const AA_BYTES: u32 = 6;
 
-/// The type a constant-expression argument of attribute `kind` checks against; BT_COUNT when the
-/// attribute takes none.
-pub const fn attr_expr_type(kind: u8) BuiltinType {
+/// The attribute kinds whose arguments are constant expressions, and the argument kinds of each, the
+/// first in the low four bits. The resolver resolves `@c.reads` and `@c.writes` among the function's
+/// parameters, the others in the declaration's scope.
+pub const ATTR_EXPR_KINDS: [AttrKind; 6] = [
+    AttrKind::ATTR_ALIGN,
+    AttrKind::ATTR_TARGET_FEATURE,
+    AttrKind::ATTR_SIMD_IMPL,
+    AttrKind::ATTR_C_VALUE,
+    AttrKind::ATTR_C_READS,
+    AttrKind::ATTR_C_WRITES,
+];
+const ATTR_EXPR_ARGS: [u32; 6] = [
+    AA_U32,
+    AA_FEATURES,
+    AA_OP | AA_FEATURES << 4,
+    AA_USIZE | AA_USIZE << 4,
+    AA_PARAM | AA_BYTES << 4,
+    AA_PARAM | AA_BYTES << 4,
+];
+
+/// The argument kinds of attribute `kind` (`AA_*`, four bits each, the first lowest); 0 when its
+/// arguments are not constant expressions.
+pub const fn attr_expr_args(kind: u8) u32 {
     let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
-    let ts: Slice<'static, BuiltinType> = ATTR_EXPR_TYPES;
+    let ts: Slice<'static, u32> = ATTR_EXPR_ARGS;
     for i in 0..ks.len() {
         if ks[i] as u8 == kind {
             return ts[i];
         }
     }
-    return BuiltinType::BT_COUNT;
+    return 0;
+}
+
+/// The number of arguments of argument kinds `args`.
+pub const fn attr_arity(args: u32) u32 {
+    let mut n: u32 = 0;
+    while args >> 4 * n != 0 {
+        n += 1;
+    }
+    return n;
+}
+
+/// Whether the resolver resolves attribute `kind`'s arguments among its function's parameters.
+pub const fn attr_in_params(kind: u8) bool {
+    return (attr_expr_args(kind) & 15) == AA_PARAM;
 }
 
 /// The largest `@c.align` value: GCC's limit for every target, and clang ignores a larger one.
@@ -245,11 +298,16 @@ pub fn c_align_error(v: u64) String {
 }
 
 /// The value of the constant-expression attribute `attrs[attr]`. The parser adds the record; the
-/// owner's type check evaluates the argument and sets `ok`.
+/// owner's type check evaluates the arguments and sets `ok`. `v` is the `@c.align` value, the
+/// `@simd_impl` operation (a `simd::Op` discriminant), the `@c.value` size, or the `@c.reads` and
+/// `@c.writes` parameter index; `w` the feature set of `@target_feature` and `@simd_impl` (bit `i`
+/// is `cpu::Feature` discriminant `i`), `w[0]` the `@c.value` alignment, and for `@c.reads` and
+/// `@c.writes` `w[0]` the byte count, or `w[1] = 1` when the count is an expression over parameters.
 pub struct AttrVal {
     pub attr: u32,
     pub ok: bool,
     pub v: u64,
+    pub w: [u64; 2],
 }
 
 /// One `@reflect(key = value)` entry, in its own side table: the key/value payload does not fit
@@ -406,6 +464,8 @@ pub const FN_VARIADIC: u8 = 4;
 pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
 pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
 pub const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
+pub const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
+pub const FN_LANE_ACCESS: u8 = 128; // `@c.lane_access`: memory in active lanes at lane-dependent addresses
 
 extend FunctionData {
     pub const fn is_public(self: &Self) bool {
@@ -414,6 +474,10 @@ extend FunctionData {
 
     pub const fn is_extern(self: &Self) bool {
         return (self.flags & FN_EXTERN) != 0;
+    }
+
+    pub const fn needs_features(self: &Self) bool {
+        return (self.flags & FN_FEATURES) != 0;
     }
 
     pub const fn is_variadic(self: &Self) bool {
@@ -2403,6 +2467,10 @@ pub struct TypePool {
     /// its TYPE_SIMD or TYPE_MASK (`vec_of`). Zero before the prelude loads.
     pub simd: DefId,
     pub mask: DefId,
+    /// The prelude `simd::Op` and `cpu::Feature` enums: the argument types of `@simd_impl` and
+    /// `@target_feature` (`ATTR_EXPR_KINDS`). Node NODE_NONE before the prelude loads.
+    pub simd_op: DefId,
+    pub cpu_feature: DefId,
 }
 
 extend TypePool {
@@ -2796,6 +2864,13 @@ pub struct Ast {
     pub lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
     pub member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
     pub where_bounds: Vector<WhereBound>,
+    /// The calls of a function that needs CPU features (`FN_FEATURES`), checked against the build's
+    /// features once every module is typed.
+    pub feature_calls: Vector<FeatureCall>,
+    /// The functions that call a `@c.lane_access` binding.
+    pub lane_callers: Vector<NodeId>,
+    /// The module declares a register type (`@c.value`).
+    pub has_c_value: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
     /// Per operator node: the method the type checker chose, as (module << 32 | node). Two conformances
@@ -2885,6 +2960,8 @@ extend Ast as Free {
         self.attr_vals.free();
         self.member_of.free();
         self.where_bounds.free();
+        self.feature_calls.free();
+        self.lane_callers.free();
         self.call_info.free();
         self.op_method.free();
         self.pat_vals.free();
@@ -3876,10 +3953,10 @@ extend Ast {
     }
 
     /// Record the evaluated value of `owner`'s constant-expression attribute `kind`.
-    pub fn set_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, ok: bool, v: u64) {
+    pub fn set_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, ok: bool, v: u64, w: [u64; 2]) {
         let i = *self.attr_ix.get(&(owner as u64 << 8 | kind as u64)).unwrap();
         let k = self.attr_val_ix(i);
-        self.attr_vals.set(k, AttrVal { attr: i, ok: ok, v: v });
+        self.attr_vals.set(k, AttrVal { attr: i, ok: ok, v: v, w: w });
     }
 
     pub fn add_meta(self: &mut Self, m: MetaAttr) {

@@ -37,7 +37,8 @@ defaults, safe-conversion ranks, branch joins, generic-argument evidence, const 
 solving, closures, and overload ambiguity.
 
 See [simd.md](references/simd.md) for the vector and mask types `Simd<T, N>` and `Mask<N>`:
-their rules, layout, lane access, mask operations and diagnostics.
+their rules, layout, lane access, mask operations and diagnostics, and for CPU features,
+`@target_feature`, the `@simd_impl` backend files and the wasm32 module `std::simd::wasm`.
 
 ## Bindings and Mutability
 
@@ -48,6 +49,11 @@ let x: i32 = 10;               // immutable binding, explicit type
 let mut sum = 0;                // mutable binding, inferred type
 let (div, mod) = divmod(p);     // destructuring
 ```
+
+An annotation on a destructuring binding types its names: `let (x, y): (i32, i32) = (a, b);`
+widens `i16` values as `let t: (i32, i32) = (a, b);` does. A multi-value call does not convert
+its results: its annotation must name their types ("the annotation of a multi-value call's
+bindings must name its result types").
 
 An immutable binding forbids reassignment, `&mut self` method calls, and `&mut` borrows.
 Split initialization is legal: `let x: T; x = v;` (assign-once enforced, binding stays
@@ -245,7 +251,8 @@ receiver a place: `(unsafe (*p)).m()` calls a `&mut self` method on the pointee,
 copy. Auto-deref through references, `Box` and `Deref` is unchanged.
 
 Prefix form (`unsafe expr`) or block form (`unsafe { .. }`); the prefix covers the whole
-postfix chain after it, so `unsafe (*p).a.b()` needs one `unsafe`. Use `.at()` for safe
+postfix chain after it, so `unsafe (*p).a.b()` needs one `unsafe`, and its operand takes the
+expected type of the whole (`let t: (i32, i32) = unsafe (a[i], a[j]);`). Use `.at()` for safe
 bounds-checked container access.
 
 ## Generics
@@ -564,6 +571,11 @@ source text, values, and file:line on failure.
 | `@emit_macro` | Export generic as reusable C macro |
 | `@fmt.skip` | Exempt from formatter |
 | `@platform(P)` | Platform gate |
+| `@arch(A)` | Instruction-set gate: `x86_64`, `aarch64`, `wasm32` (see Build Constants and Platform Gating) |
+| `@target_feature([cpu::Feature::X, ..])` | The function needs CPU features: callable only where the build or the caller holds them (references/simd.md) |
+| `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | `std` only: a backend entry of vector operation `X` (references/simd.md) |
+| `@c.value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |
+| `@c.reads(p, bytes)` / `@c.writes(p, bytes)` / `@c.lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time |
@@ -571,8 +583,10 @@ source text, values, and file:line on failure.
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 
 A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names
-resolve at module scope (in the `extend` scope for a member), the argument checks against the type
-the attribute declares and folds at compile time like a `const` initializer. A misspelled name, a
+resolve at module scope (in the `extend` scope for a member; `@c.reads`/`@c.writes` also see the
+function's parameters), the argument checks against the type the attribute declares and folds at
+compile time like a `const` initializer. An attribute with several arguments checks each against
+its own type and arity ("attribute '@c.reads' takes 2 arguments"). A misspelled name, a
 type mismatch or an argument that does not fold is an error at the argument. The formatter prints
 the argument as an expression, and the language server completes, hovers, renames and finds names
 inside it. A lone integer literal keeps the literal form and emits the same C.

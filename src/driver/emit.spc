@@ -30,10 +30,12 @@ import ir::bce as bce;
 import ir::inline as inl;
 import ir::interp as iri;
 import ir::layout as lay;
+import ir::cpu_features as cf;
 import emit::cemit as cbe;
 import emit::cflow as cfl;
 import emit::probe as prb;
 import emit::mangle as mbe;
+import emit::simd_plan as sp;
 import emit::tu as tbe;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
@@ -181,8 +183,18 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
     };
     let mut live = Vector::<bool>::new();
     live.resize_default(sz);
+    // The backend file emits no unit (`module_emits`): what it alone imports or names stays dead
+    // until live code names it. `by`: 1 imported by the backend file, 2 by another module.
+    let mut by = Vector::<u8>::new();
+    by.resize_default(sz);
+    for x in 0..n {
+        for e in p.idx.mod_imports[x]..p.idx.mod_imports[x + 1] {
+            let d = p.idx.imports[e as usize] as usize;
+            by[d] |= pick(p.modules[x].backend, 1u8, 2u8);
+        }
+    }
     for i in 0..n {
-        if !p.modules[i].prelude {
+        if !p.modules[i].prelude && !p.modules[i].backend && by[i] != 1 {
             live[i] = true;
         }
     }
@@ -236,6 +248,12 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
         }
     }
     return live;
+}
+
+// Whether module `m` emits a unit: it has an AST, is not an unreachable prelude module (`live`), and
+// is not the vector backend file, whose entries render apart (`cemit_simd_entries`).
+fn module_emits(p: &loader::Package, live: *const bool, m: usize) bool {
+    return p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !p.modules[m].backend;
 }
 
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
@@ -909,6 +927,172 @@ fn check_package_wide(p: &mut loader::Package, n: usize) {
         p.ok = dup_conformances_par(p, &dup_idx) && p.ok;
     }
     discharge_obligations(p, n, dup_par, &dup_idx);
+    check_feature_calls(p, n);
+    let _ = build_simd_table(p, n);
+}
+
+/// The backend table (`Package::simd_table`) from every checked `@simd_impl` entry, ordered by key
+/// and then by feature count, the largest first. Two entries with one key and the same feature count
+/// are an error naming both: either is the same entry twice, or the planner could not choose. Returns
+/// the first error as rendered (empty when none); every error is logged.
+pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
+    let mut first = String::new();
+    p.simd_table.clear();
+    for i in 0..n {
+        let a = &p.modules[i].ast;
+        for k in 0..a.attrs.len() {
+            let at = *a.attrs.at(k);
+            if at.kind != AttrKind::ATTR_SIMD_IMPL as u8 || !at.expr {
+                continue;
+            }
+            let v = a.attr_value_of(k as u32);
+            if v.ok {
+                let mut lanes = false;
+                for j in 0..a.lane_callers.len() {
+                    lanes = lanes || *a.lane_callers.at(j) == at.owner;
+                }
+                p.simd_table.push(
+                    cf::SimdEntry {
+                        key: v.v,
+                        fs: cf::CpuFeatureSet { w: v.w },
+                        module: i as u16,
+                        node: at.owner,
+                        lanes: lanes,
+                    },
+                );
+            }
+        }
+    }
+    p.simd_table.sort_by(sp::entry_cmp);
+    for k in 1..p.simd_table.len() {
+        let x = *p.simd_table.at(k - 1);
+        let y = *p.simd_table.at(k);
+        if x.key != y.key || cf::count(x.fs) != cf::count(y.fs) {
+            continue;
+        }
+        let ya = &p.modules[y.module as usize].ast;
+        let xa = &p.modules[x.module as usize].ast;
+        let xn = xa.at_const(xa.at_const(x.node).as_data.function.name).as_data.name.text;
+        let mut errs = diag::Errors::new();
+        errs.emit_span(
+            ya.at_const(y.node).span,
+            format(
+                "two '@simd_impl' entries for one operation, lane type, lane count and feature count: this one and '{}' ({})",
+                p.modules[x.module as usize].source.as_str().slice(xn.start as usize, xn.end as usize),
+                p.modules[x.module as usize].file.as_str(),
+            ),
+        );
+        errs.finalize(p.modules[y.module as usize].source.as_str(), p.modules[y.module as usize].file.as_str());
+        errs.log();
+        if first.len() == 0 {
+            first = errs.rendered_errors.at(0).clone();
+        }
+        p.ok = false;
+    }
+    return first;
+}
+
+// Each call of a function that needs CPU features (`@target_feature`, `@simd_impl`) is valid only
+// where the build has them, or inside a function that needs them itself (it is never called
+// otherwise); a function the program's environment calls (`main`, `@c.export`, `@test`, `@bench`)
+// needs them in the build. Read after every module is typed, when every callee's attribute holds its
+// value.
+fn check_feature_calls(p: &mut loader::Package, n: usize) {
+    for i in 0..n {
+        let a = &p.modules[i].ast;
+        let mut errs = diag::Errors::new();
+        for k in 0..a.attrs.len() {
+            let at = *a.attrs.at(k);
+            if at.kind != AttrKind::ATTR_TARGET_FEATURE as u8 {
+                continue;
+            }
+            let f = at.owner;
+            let need = fn_features(p, i as ModuleId, f);
+            let ks: [AttrKind; 5] = [
+                AttrKind::ATTR_EXPORT,
+                AttrKind::ATTR_TEST,
+                AttrKind::ATTR_TEST_INIT,
+                AttrKind::ATTR_TEST_FREE,
+                AttrKind::ATTR_BENCH,
+            ];
+            let nsp = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
+            let mut outer = i == 0 && p.modules[i].source.as_str().slice(nsp.start as usize, nsp.end as usize) == "main";
+            for kd in ks {
+                outer = outer || a.attr_of(f, kd) != null;
+            }
+            if outer && !cf::contains(p.features, need) {
+                feature_err(p, &mut errs, nsp, i as ModuleId, f, need, "; it is called from outside the program");
+            }
+        }
+        for k in 0..a.feature_calls.len() {
+            let fc = *a.feature_calls.at(k);
+            let need = fn_features(p, fc.callee.module, fc.callee.node);
+            if cf::contains(p.features, need) || fc.caller != NODE_NONE && cf::contains(
+                cf::close(fn_features(p, i as ModuleId, fc.caller)),
+                need,
+            ) {
+                continue;
+            }
+            feature_err(p, &mut errs, fc.span, fc.callee.module, fc.callee.node, need, "");
+        }
+        if errs.has_errors() {
+            errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+            errs.log();
+            p.ok = false;
+        }
+    }
+}
+
+// "`f` needs `+a,+b` (`--target-feature=+a,+b`)" at `sp`, then `why`: function `m`/`f` and the
+// features of `need` the build lacks.
+fn feature_err(
+    p: &loader::Package,
+    errs: &mut diag::Errors,
+    sp: tok::Span,
+    m: ModuleId,
+    f: NodeId,
+    need: cf::CpuFeatureSet,
+    why: str,
+) {
+    let mut miss = String::new();
+    for k in 0..cf::FEATURE_COUNT {
+        if cf::has(need, k) && !cf::has(p.features, k) {
+            miss.push_str(
+                if miss.len() == 0 {
+                    "+";
+                } else {
+                    ",+";
+                },
+            );
+            miss.push_str(cf::row(k).name);
+        }
+    }
+    let ca = &p.modules[m as usize].ast;
+    let nm = ca.at_const(ca.at_const(f).as_data.function.name).as_data.name.text;
+    errs.emit_span(
+        sp,
+        format(
+            "`{}` needs `{}` (`--target-feature={}`){}",
+            p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize),
+            miss.as_str(),
+            miss.as_str(),
+            why,
+        ),
+    );
+}
+
+pub fn fn_features(p: &loader::Package, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
+    let a = &p.modules[m as usize].ast;
+    let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
+    for k in ks {
+        if a.attr_of(f, k) != null {
+            let v = a.attr_value(f, k);
+            if v.ok {
+                return cf::CpuFeatureSet { w: v.w };
+            }
+        }
+    }
+    return cf::CpuFeatureSet { w: [0, 0] };
 }
 
 // Turn the evaluator lock and every module's interner lock on or off around a parallel stage.
@@ -2089,6 +2273,14 @@ fn cemit_seed_module(
         let nid = cands[i];
         let n = a.at_const(nid);
         if n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
+            continue;
+        }
+        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !cf::contains(
+            p.features,
+            fn_features(p, m as ModuleId, nid),
+        )) {
+            // No call can reach it in this build, and its body may name what the build lacks; an
+            // entry's definition is its definition header (`cemit_simd_entries`).
             continue;
         }
         if !testing && is_test_item(a, nid) {
@@ -3660,7 +3852,7 @@ pub fn cemit_package(
     em.mg.agg_on = true;
     let mut items = Vector::<tbe::AggItem>::new();
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
+        if !module_emits(p, live, m) {
             continue;
         }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
@@ -3707,7 +3899,8 @@ pub fn cemit_package(
     // Header-backed extern includes ship real prototypes: collect them (and the fns they declare,
     // so call sites never synthesize conflicting protos).
     let mut ext_incs = String::new();
-    cemit_extern_includes(p, &mut ext_incs, &mut cem.ext_backed);
+    let mut gated_incs = String::new();
+    cemit_extern_includes(p, &mut ext_incs, &mut gated_incs, &mut cem.ext_backed);
     // Every emitter shard starts from the same header-backed fn set.
     let mut ext_keys = Vector::<u64>::new();
     for k in cem.ext_backed.iter() {
@@ -3767,7 +3960,7 @@ pub fn cemit_package(
         let mut kl = psync::Semaphore::new(1);
         let mut shards = Vector::<SeedShard>::new();
         for m in 0..p.modules.len() {
-            let used = p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !(tuc.on && tuc.hit[m]);
+            let used = module_emits(p, live, m) && !(tuc.on && tuc.hit[m]);
             let mut sh = SeedShard::new(p, TuBufs::one(m), used, &em.env_defined, &ext_keys, m as i64);
             sh.cem.mg.share_short(&mut em.mg);
             sh.cem.mg.rec_on = used && tuc.on;
@@ -3819,7 +4012,7 @@ pub fn cemit_package(
             eprint("cemit-frontier seed: {} tasks\n", launched9);
         }
         for m in 0..p.modules.len() {
-            let eligible9 = p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]);
+            let eligible9 = module_emits(p, live, m);
             if !eligible9 {
                 if tuc.on {
                     tuc_pay.truncate(0);
@@ -3864,7 +4057,7 @@ pub fn cemit_package(
         set_stage_locks(p, false);
     } else {
         for m in 0..p.modules.len() {
-            if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
+            if !module_emits(p, live, m) {
                 // No seeds (missing AST / unreachable prelude): an empty section keeps the image indexed.
                 if tuc.on {
                     tuc_pay.truncate(0);
@@ -4297,6 +4490,10 @@ pub fn cemit_package(
         }
     }
     stage_ms(verbose, &mut tt0, "cemit-stage drain");
+    let mut si_names = Vector::<String>::new();
+    let mut si_defs = Vector::<String>::new();
+    let mut si_packs = Vector::<mbe::WrapReq>::new();
+    o.skips += cemit_simd_entries(p, &mut cem, &mut g, &mut dow, &ext_keys, &mut si_names, &mut si_defs, &mut si_packs);
     if verbose {
         if dwaves != 0 {
             eprint("cemit-frontier inst: {} waves, {} tasks, {} slices\n", dwaves, dtasks, dslices);
@@ -4915,6 +5112,10 @@ pub fn cemit_package(
         &mut em,
         &mut acc,
         &ext_incs,
+        &gated_incs,
+        &si_names,
+        &si_defs,
+        &mut si_packs,
         &macros_out,
         &cdefs,
         &sdefs,
@@ -5839,10 +6040,134 @@ fn macro_params(p: &loader::Package, mg: &mut mbe::Mangler, m: ModuleId, gens: N
     out.push_str("NAME) ");
 }
 
+// The definition of every `@simd_impl` entry the build's features hold, in table order: its body as
+// a `static inline` always-inlined C function named `__sc_si_<symbol>` (`CEmit::entry_name`),
+// rendered by a scratch emitter, so no spelling it does lands in a unit's records. The assembly gives
+// each its definition header, written only when a unit calls it.
+fn cemit_simd_entries(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    g: &mut ig::InstGraph,
+    dow: &mut DropCtx,
+    ext_keys: &Vector<u64>,
+    names: &mut Vector<String>,
+    defs: &mut Vector<String>,
+    packs: &mut Vector<mbe::WrapReq>,
+) u64 {
+    if !cem.simd_on {
+        return 0; // no unit calls an entry
+    }
+    let mut skips: u64 = 0;
+    let mut sc = cbe::CEmit::new(p);
+    // An entry's own vector operations keep their lane loops: no entry calls another.
+    sc.simd_on = false;
+    sc.mg.agg_on = true;
+    sc.mg.share_short(&mut cem.mg);
+    for k in 0..ext_keys.len() {
+        sc.ext_backed.insert(ext_keys[k]);
+    }
+    for e in 0..p.simd_table.len() {
+        let en = *p.simd_table.at(e);
+        if !cf::contains(p.features, en.fs) {
+            continue;
+        }
+        // A unit may call any usable entry: one that does not render is a build error.
+        let mut lw = irl::Lowerer::new(p, en.module, en.node);
+        let mut nm = String::from_str("__sc_si_");
+        let tg = sc.mg.method_target(en.module, en.node);
+        sc.out.clear();
+        sc.fn_attrs.clear();
+        sc.fn_attrs.push_str("static inline __attribute__((always_inline)) ");
+        let mut ok = cemit_take_body(g, p, en.module, en.node, false, &mut lw, &mut dow.pr) && sc.mg.fn_sym(
+            en.module,
+            en.node,
+            tg,
+            &mut nm,
+        );
+        if ok {
+            // The backend file emits no unit: its helpers (`reg`, `vec`) splice into the entry
+            // whatever the inlining switch says, and a call left would name no definition.
+            let off = dow.inl.off;
+            dow.inl.off = false;
+            dow.apply_drops(&mut lw);
+            dow.inl.off = off;
+            for k in 0..lw.body.blocks.len() {
+                let t = lw.body.blocks.at(k).term;
+                ok = ok && !(t.kind == irc::TM_CALL && t.callee.module == en.module);
+            }
+        }
+        let r0 = sc.refused.len();
+        if ok && sc.emit_fn(&lw.body, nm.as_str()) {
+            names.push(nm);
+            defs.push(sc.out.clone());
+            continue;
+        }
+        skips += 1;
+        if sc.refused.len() == r0 {
+            let fsp = p.modules[en.module as usize].ast.at_const(en.node).span;
+            sc.refused.push(
+                cbe::Refusal {
+                    m: en.module,
+                    start: fsp.start,
+                    end: fsp.end,
+                    why: "the vector entry does not lower, or calls a function of its file that does not inline",
+                },
+            );
+        }
+    }
+    for i in 0..sc.refused.len() {
+        cem.refused.push(sc.refused[i]);
+    }
+    // The vector structs the definitions spell: each written when a written entry needs it.
+    *packs = replace(&mut sc.mg.pack_reqs, Vector::<mbe::WrapReq>::new());
+    return skips;
+}
+
+// Whether every function of an extern block (`items` of module `m`) needs CPU features (`lacking`:
+// features the build lacks): its header is included where its functions are
+// (`cemit_extern_includes`), and with `lacking` it may not compile (`<wasm_simd128.h>` without
+// `-msimd128`) while no call can name its functions.
+fn extern_block_gated(p: &loader::Package, m: ModuleId, items: NodeList, lacking: bool) bool {
+    let a = &p.modules[m as usize].ast;
+    let mut fns = false;
+    for j in 0..items.len {
+        let f = unsafe a.list(items)[j as usize];
+        if a.at_const(f).kind == NodeKind::NODE_FUNCTION {
+            let fs = fn_features(p, m, f);
+            if cf::is_empty(fs) || lacking && cf::contains(p.features, fs) {
+                return false;
+            }
+            fns = true;
+        }
+    }
+    return fns;
+}
+
+// Whether a module other than the backend file imports module `m`.
+fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
+    let ix = &p.idx;
+    for x in 0..p.modules.len() {
+        let mut imp = false;
+        for e in ix.mod_imports[x]..ix.mod_imports[x + 1] {
+            imp = imp || ix.imports[e as usize] == m;
+        }
+        if !imp {
+            continue;
+        }
+        if !p.modules[x].backend {
+            return true;
+        }
+    }
+    return false;
+}
+
 // `extern "C" "<header>"` blocks across the package: emit each unique include (module-relative
 // realpath when it resolves, else the local/system spelling heuristic) and record every fn the
-// header prototypes (call-site protos would conflict with the real declarations).
-fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set<u64>) {
+// header prototypes (call-site protos would conflict with the real declarations). A block whose
+// functions all need CPU features joins `gated` instead (the entries' definition headers include
+// it), and `out` only when a module beyond the backend files imports it: a program that uses no
+// vector operation keeps its forward header.
+fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut String, backed: &mut Set<u64>) {
     let mut seen = Vector::<String>::new();
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
@@ -5857,7 +6182,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set
                 continue;
             }
             let eb = a.at_const(nid).as_data.extern_block;
-            if eb.header == NODE_NONE {
+            if eb.header == NODE_NONE || extern_block_gated(p, m as ModuleId, eb.items, true) {
                 continue;
             }
             for j in 0..eb.items.len {
@@ -5905,6 +6230,26 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set
                 line.push_str(htxt);
                 line.push_str(mbe::if_s(local, "\"\n", ">\n"));
             }
+            // Each register type's layout (`@c.value`) is the header's: the C compiler checks it.
+            for j in 0..eb.items.len {
+                let tid = unsafe a.list(eb.items)[j as usize];
+                if a.attr_of(tid, AttrKind::ATTR_C_VALUE) == null {
+                    continue;
+                }
+                let av = a.attr_value(tid, AttrKind::ATTR_C_VALUE);
+                if av.ok {
+                    let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
+                    let nm = src.slice(tn.start as usize, tn.end as usize);
+                    line.format_into(
+                        "_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"@c.value of {}\");\n",
+                        nm,
+                        av.v,
+                        nm,
+                        av.w[0],
+                        nm,
+                    );
+                }
+            }
             let mut dup = false;
             for k in 0..seen.len() {
                 if seen.at(k).as_str() == line.as_str() {
@@ -5912,7 +6257,13 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set
                     break;
                 }
             }
-            if dup {} else {
+            if dup {} else if extern_block_gated(p, m as ModuleId, eb.items, false) {
+                gated.push_string(&line);
+                if imported_beyond_backends(p, m as ModuleId) {
+                    out.push_string(&line);
+                }
+                seen.push(line);
+            } else {
                 out.push_string(&line);
                 seen.push(line);
             }
@@ -6165,6 +6516,10 @@ fn cemit_assemble(
     em: &mut tbe::TuEmit,
     acc: &mut SeedAcc,
     ext_incs: &String,
+    gated_incs: &String,
+    si_names: &Vector<String>,
+    si_defs: &Vector<String>,
+    si_packs: &mut Vector<mbe::WrapReq>,
     macros_out: &String,
     cdefs: &Segs,
     sdefs: &Segs,
@@ -6339,20 +6694,47 @@ fn cemit_assemble(
     }
     // Result packs (`Mangler::ret_pack`): each in its own definition header, by name; any other
     // file that spells one gets its typedef line.
+    let mut lp0 = 0xFFFFFFFFFFFFFFFFu64 as usize;
     {
         let mut pks = Vector::<mbe::WrapReq>::new();
         let mut seen = Set::<u64>::new();
         wrap_collect(&mut em.mg.pack_reqs, &mut seen, &mut pks);
         wrap_collect(&mut cem.mg.pack_reqs, &mut seen, &mut pks);
         pks.sort_by(wrap_req_cmp);
+        // The packs only the entries' definitions spell follow: written only when one is used.
+        let np = pks.len();
+        let mut spk = Vector::<mbe::WrapReq>::new();
+        wrap_collect(si_packs, &mut seen, &mut spk);
+        spk.sort_by(wrap_req_cmp);
+        for j in 0..spk.len() {
+            pks.push(replace(spk.index_mut(j), mbe::WrapReq { h: 0, elem: String::new(), body: String::new() }));
+        }
         for j in 0..pks.len() {
             let d = ds.add(pks[j].elem.as_str(), pks[j].body.as_str(), p.core_module);
+            if j == np {
+                lp0 = d as usize;
+            }
             let mut line = String::new();
             wrap_typedef(pks[j].elem.as_str(), &mut line);
             fd.add(pks[j].elem.as_str(), line.as_str(), d);
         }
     }
+    // The `@simd_impl` entries' definitions (`cemit_simd_entries`), each after the headers of the
+    // feature-gated extern blocks: a unit that calls one includes its header, and the header of an
+    // entry no unit calls is not written.
+    let si0 = ds.key.len();
+    for i in 0..si_names.len() {
+        let def = si_defs.at(i).as_str();
+        let mut body = gated_incs.clone();
+        body.push_str(def);
+        let d = ds.add(si_names.at(i).as_str(), body.as_str(), p.core_module);
+        let mut line = String::from_str(def.slice(0, def.find("{") as usize).trim_end());
+        line.push_str(";\n");
+        fd.add(si_names.at(i).as_str(), line.as_str(), d);
+    }
     let nd = ds.key.len();
+    let mut def_used = Vector::<u8>::new();
+    def_used.resize_default(nd);
     ds.stems();
     // Typedef homes: the definition header of the aggregate; a typedef nothing defines (a
     // zero-sized aggregate, a pointee no body needs) has no file and every header or unit that
@@ -6447,7 +6829,7 @@ fn cemit_assemble(
         if ext.len() != 0 {
             let mut t = String::from_str("#ifndef SC_CEMIT_EXT_H\n#define SC_CEMIT_EXT_H\n#include \"__sc_fwd.h\"\n");
             deps.clear();
-            fd.scan_def(ext.as_str(), NO_HOME, false, &mut incd, &mut deps);
+            fd.scan_def(ext.as_str(), NO_HOME, 0, &mut incd, &mut deps);
             ds.sort_by_stem(&mut deps);
             for k in 0..deps.len() {
                 def_inc(0, ds.stem[deps[k] as usize].as_str(), &mut t);
@@ -6508,7 +6890,7 @@ fn cemit_assemble(
         for k in 0..np.len() {
             incd.set(np[k] as usize, 1);
         }
-        fd.scan_def(ph[m].as_str(), NO_HOME, false, &mut incd, np);
+        fd.scan_def(ph[m].as_str(), NO_HOME, 0, &mut incd, np);
         ds.sort_by_stem(np);
         for k in 0..np.len() {
             def_inc(d, ds.stem[np[k] as usize].as_str(), &mut t);
@@ -6650,6 +7032,7 @@ fn cemit_assemble(
                     &mut pend,
                     &mut dv,
                     &mut prs,
+                    &mut def_used,
                 );
                 o.inst_incs.set(t, inc);
                 o.inst_heads.set(t, heads);
@@ -6704,6 +7087,7 @@ fn cemit_assemble(
                 &mut pend,
                 &mut dv,
                 &mut prs,
+                &mut def_used,
             );
             o.tu_incs.set(t, inc);
             o.tu_heads.set(t, heads);
@@ -6714,10 +7098,27 @@ fn cemit_assemble(
     // value (the by-value graph is acyclic, so no header needs its own include), its typedef
     // line, copies of the other declarations it spells, the body, its layout checks.
     let mut deps = Vector::<u32>::new();
+    // The used entries' vector structs: lazy packs a used entry spells by value.
+    for d in si0..nd {
+        if def_used[d] == 0 {
+            continue;
+        }
+        deps.clear();
+        fd.scan_def(ds.body.at(d), d as u32, 2, &mut incd, &mut deps);
+        for k in 0..deps.len() {
+            def_used.set(deps[k] as usize, 1);
+            incd.set(deps[k] as usize, 0);
+        }
+    }
     for d in 0..nd {
+        if (d >= si0 || d >= lp0) && def_used[d] == 0 {
+            o.defs_h.push(String::new());
+            o.defs_own.push(ds.body.own[d]);
+            continue;
+        }
         let body = ds.body.at(d);
         deps.clear();
-        fd.scan_def(body, d as u32, true, &mut incd, &mut deps);
+        fd.scan_def(body, d as u32, pick(d >= si0, 2u32, 1u32), &mut incd, &mut deps);
         ds.sort_by_stem(&mut deps);
         let mut t = String::new();
         t.reserve(body.len() + 64 * deps.len() + 128);
@@ -6896,10 +7297,11 @@ extend FwdDecls {
     /// Queue every declaration header text `text` (of definition header `own`) spells, and append
     /// to `deps` (once each, marked in `inc`) the definition headers of the types C needs complete
     /// there: the element type of every array declarator (`T x[2]`, `T (*p)[2]`, also in a
-    /// function-pointer parameter) and, with `by_val` (a definition body), a declared name outside
-    /// parentheses followed by a declarator name rather than `*` or `(`. `flush_unseen` then
-    /// writes the copies the file still needs.
-    fn scan_def(self: &mut Self, text: str, own: u32, by_val: bool, inc: &mut Vector<u8>, deps: &mut Vector<u32>) {
+    /// function-pointer parameter) and a declared name followed by a declarator name rather than
+    /// `*` or `(` within `by_val` levels of parentheses: none, 1 for a definition body (outside
+    /// parentheses), 2 for a function definition (its parameters too). `flush_unseen` then writes
+    /// the copies the file still needs.
+    fn scan_def(self: &mut Self, text: str, own: u32, by_val: u32, inc: &mut Vector<u8>, deps: &mut Vector<u32>) {
         self.serial += 1;
         self.hits.clear();
         let n = text.len();
@@ -6938,7 +7340,7 @@ extend FwdDecls {
                 while j < n && text.byte_at(j) == b' ' {
                     j += 1;
                 }
-                if by_val && depth == 0 && j < n && c_ident_byte(text.byte_at(j)) || arr_declarator(text, j) {
+                if depth < by_val && j < n && c_ident_byte(text.byte_at(j)) || arr_declarator(text, j) {
                     inc.set(home as usize, 1);
                     deps.push(home);
                 }
@@ -7195,6 +7597,7 @@ fn unit_incs(
     pend: &mut Vector<u32>,
     dv: &mut Vector<u32>,
     prs: &mut Vector<u32>,
+    used: &mut Vector<u8>,
 ) String {
     let n = p.modules.len();
     let mut inc = String::new();
@@ -7219,6 +7622,7 @@ fn unit_incs(
                 pend.push(dk);
             } else if incd[home as usize] == 0 {
                 incd.set(home as usize, 1);
+                used.set(home as usize, 1);
                 dv.push(home);
             }
         }
@@ -7311,7 +7715,7 @@ fn split_protos(
         }
         let line = text.slice(a, b + 1);
         deps.clear();
-        fd.scan_def(line, NO_HOME, false, incd, deps);
+        fd.scan_def(line, NO_HOME, 0, incd, deps);
         for k in 0..deps.len() {
             incd.set(deps[k] as usize, 0);
         }
@@ -8648,7 +9052,7 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
             iid,
             keep | attr_bit(AttrKind::ATTR_TEST) | attr_bit(AttrKind::ATTR_TEST_INIT) | attr_bit(
                 AttrKind::ATTR_TEST_FREE,
-            ) | attr_bit(AttrKind::ATTR_BENCH),
+            ) | attr_bit(AttrKind::ATTR_BENCH) | attr_bit(AttrKind::ATTR_SIMD_IMPL),
         );
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
@@ -9051,12 +9455,14 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // legal import cycles would otherwise self-justify). Modules whose closure carries link-time side
 // effects (@c.source/@c.link) or extends a foreign type (methods/conformances reachable without a
 // resolution edge) are exempt.
-// A module with @platform-gated items is exempt from cross-item unused lints (imports, members): the
-// dropped items' uses are invisible under the current target, so a per-target verdict would
-// contradict another target's. Code the early prune removed exempts only the names its text spells.
+// A module with @platform- or @arch-gated items is exempt from cross-item unused lints (imports,
+// members): the dropped items' uses are invisible under the current target, so a per-target verdict
+// would contradict another target's. Code the early prune removed exempts only the names its text
+// spells.
 fn module_platform_gated(a: *const Ast) bool {
     for i in 0..unsafe (*a).attrs.len() {
-        if unsafe (*a).attrs.at(i).kind == AttrKind::ATTR_PLATFORM as u8 {
+        let k = unsafe (*a).attrs.at(i).kind;
+        if k == AttrKind::ATTR_PLATFORM as u8 || k == AttrKind::ATTR_ARCH as u8 {
             return true;
         }
     }
@@ -10047,6 +10453,9 @@ pub fn run_package(
             keep.push(extp);
         }
         for d in 0..co.defs_h.len() {
+            if co.defs_h.at(d).len() == 0 {
+                continue; // an entry's definition no unit calls
+            }
             let mut hp = String::from_str(root);
             hp.push_str("/__sc_t/");
             hp.push_string(co.defs_stem.at(d));

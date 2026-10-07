@@ -22,6 +22,7 @@ import build_system::objcache as ocache;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
 import driver::taskctl as tctl;
+import ir::cpu_features as cf;
 
 fn run_file(
     path: str,
@@ -32,6 +33,7 @@ fn run_file(
     out_bin: str,
     target: i32,
     arch: i32,
+    features: cf::CpuFeatureSet,
     bootstrap_tags: bool,
     lint: bool,
     cflags: str,
@@ -46,6 +48,8 @@ fn run_file(
     // The build settings the prelude's build constants spell, set before the load.
     let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
     p.arch = arch;
+    p.features = features;
+    p.mem_check = bsys::mem_checker(cflags);
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
     let bi = bman::builtins_only();
@@ -675,6 +679,7 @@ struct CommonOpts {
     pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes (build across a new tag)
     pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     pub bad: bool, // malformed argument list: print usage and exit 1
+    pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
 }
 
 extend CommonOpts {
@@ -725,6 +730,11 @@ extend CommonOpts {
             } else {
                 self.bad = true;
             }
+        } else if arg.starts_with("--target-feature=") {
+            if self.target_features.len() != 0 {
+                self.target_features.push_byte(b',');
+            }
+            self.target_features.push_str(arg[17..]);
         } else if arg == "--bootstrap-tags" {
             self.bootstrap_tags = true;
         } else if arg == "--no-lint" {
@@ -1196,6 +1206,7 @@ OPTIONS:
     --cflag=F              bindgen: extra flag for the preprocessor invocation (repeatable)
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
+    --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
@@ -1354,6 +1365,11 @@ OPTIONS:
         }
         let mut man = mo.unwrap();
         man.arch = co.arch;
+        if !bsys::check_features(&man, co.target_features.as_str()) {
+            return 1;
+        }
+        // The engine's toolchain: the profile flags, and so the memory checker, match its own.
+        man.sdk = target_sdk(co.target);
         if bo.out_dir.len() != 0 {
             man.out_dir = String::from_str(bo.out_dir);
         }
@@ -1374,6 +1390,7 @@ OPTIONS:
             bootstrap_tags: co.bootstrap_tags,
             lint: co.lint,
             transpiler: "",
+            target_features: co.target_features.as_str(),
         };
         return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
     }
@@ -1401,6 +1418,9 @@ OPTIONS:
             let mut man = mo.unwrap();
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
+            if !bsys::check_features(&man, co.target_features.as_str()) {
+                return 1;
+            }
             // --target=ios|android|wasm picks the cross toolchain.
             man.sdk = target_sdk(co.target);
             let cx = bsys::BuildCtx {
@@ -1421,6 +1441,7 @@ OPTIONS:
                 bootstrap_tags: co.bootstrap_tags,
                 lint: co.lint,
                 transpiler: transpiler,
+                target_features: co.target_features.as_str(),
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);
@@ -1462,6 +1483,13 @@ OPTIONS:
     }
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
+    // A script build has no manifest: the baseline of the instruction set and the command line's list.
+    let mut feats = cf::baseline(co.arch);
+    let mut ferr = String::new();
+    if !cf::apply(co.target_features.as_str(), co.arch, true, &mut feats, &mut ferr) {
+        eprintln("error: {}", ferr.as_str());
+        return 1;
+    }
     let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false);
     let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true);
     let rc = run_file(
@@ -1473,6 +1501,7 @@ OPTIONS:
         out_bin,
         co.target,
         co.arch,
+        cf::close(feats),
         co.bootstrap_tags,
         co.lint,
         pflags.as_str(),

@@ -5,7 +5,7 @@
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=22
+CONTRACT_VERSION=23
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -126,12 +126,16 @@ tests/raii_gen_test.spc
 tests/resolver_test.spc
 tests/simd_baseline_test.spc
 tests/simd_ctfe_test.spc
+tests/simd_entry_test.spc
 tests/simd_masked_test.spc
 tests/simd_ops_test.spc
+tests/simd_plan_test.spc
 tests/simd_rearrange_test.spc
 tests/simd_reduce_test.spc
 tests/simd_types_test.spc
+tests/simd_wasm_test.spc
 tests/queue_test.spc
+tests/target_feature_test.spc
 tests/thread_test.spc
 tests/timer_test.spc
 tests/token_test.spc

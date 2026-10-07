@@ -114,6 +114,7 @@ width, and a signed value counts its two's complement pattern.
 | exposure and round trips | `p as usize` exposes the object; `n as *T` is valid for access only inside an exposed live object; a round trip in one data flow keeps the object ([Rust `with_exposed_provenance`](https://doc.rust-lang.org/std/ptr/fn.with_exposed_provenance.html)) |
 | zero-sized types | `p + n` is `p`; a zero-byte access touches nothing |
 | dereference | the pointer is non-null, aligned, and addresses `sizeof(T)` bytes of one live object with the access permission; otherwise undefined |
+| a view of another type | a pointer cast from an aggregate to another element type (bytes across a nested array or a vector's lanes) is valid inside the object; the compile-time evaluator follows only a cast to the element type of an array or vector, and has no value for any other view, so it never reports one as a fault |
 
 ## Atomics
 

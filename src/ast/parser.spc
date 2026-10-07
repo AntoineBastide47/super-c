@@ -12,6 +12,7 @@ import lexer::token as *;
 import lexer::token_type as *;
 import ast::ast as *;
 import utils::errors as diag;
+import ir::cpu_features as cf;
 
 pub const PARSE_MAX_DEPTH: u32 = 256;
 
@@ -37,7 +38,7 @@ struct AttrSyntax {
     pub has_args: bool,
     pub arg_start: usize,
     pub arg_end: usize,
-    pub expr: NodeId, // a constant-expression argument (`attr_expr_type`), NODE_NONE otherwise
+    pub expr: NodeId, // the constant-expression arguments (`attr_expr_args`), NODE_NONE otherwise
 }
 
 // The lexer only ever emits single '>' tokens (so nested generics can close); the parser glues
@@ -80,6 +81,8 @@ pub struct Parser<'a> {
     pub bind_buf: Vector<NodeId>,
     // The attributes just parsed hold `@intrinsic`: the next function takes no body.
     pub intrinsic_next: bool,
+    // Parsing the items of an `extern` block.
+    pub in_extern: bool,
 }
 
 extend Parser {
@@ -1547,6 +1550,7 @@ extend Parser {
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
+        self.in_extern = true;
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
@@ -1666,6 +1670,7 @@ extend Parser {
                 self.advance();
             }
         }
+        self.in_extern = false;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         return self.fin(
@@ -3636,7 +3641,7 @@ extend Parser {
         let t: []str = C_ATTR_NAMES;
         for i in 0..t.len() {
             if self.text_is(name, t[i]) {
-                *wants_str = i > C_ATTR_ALIGN;
+                *wants_str = i > C_ATTR_ALIGN && i < C_ATTR_STR_END;
                 *wants_int = i == C_ATTR_ALIGN;
                 return (unsafe C_ATTR_KINDS[i]) as i32;
             }
@@ -3667,12 +3672,20 @@ extend Parser {
         let has_args = self.match(TokenType::LeftParen);
         let arg_start = self.current;
         let mut expr = NODE_NONE;
-        if has_args && parts == 2 && self.text_is(namespace, "c") && !self.check(TokenType::RightParen) {
+        if has_args && !self.check(TokenType::RightParen) {
             let mut ws = false;
             let mut wi = false;
-            let k = self.attr_kind_of(name, &mut ws, &mut wi);
-            if k >= 0 && attr_expr_type(k as u8) != BuiltinType::BT_COUNT {
-                expr = self.parse_attr_expr();
+            let k = if parts == 2 && self.text_is(namespace, "c") {
+                self.attr_kind_of(name, &mut ws, &mut wi);
+            } else if parts == 1 && self.text_is(namespace, "target_feature") {
+                AttrKind::ATTR_TARGET_FEATURE as i32;
+            } else if parts == 1 && self.text_is(namespace, "simd_impl") {
+                AttrKind::ATTR_SIMD_IMPL as i32;
+            } else {
+                -1;
+            };
+            if k >= 0 && attr_expr_args(k as u8) != 0 {
+                expr = self.parse_attr_expr(k == AttrKind::ATTR_ALIGN as i32);
             }
         }
         if has_args {
@@ -3704,14 +3717,37 @@ extend Parser {
         };
     }
 
-    // The argument of an attribute that takes a constant expression: NODE_NONE for a lone integer
-    // literal (the literal form, read from its token), else the expression, parsed into the module
-    // arena (it is checked with its owner). Stops before the closing ')'.
-    fn parse_attr_expr(self: &mut Self) NodeId {
+    // The arguments of an attribute that takes constant expressions, parsed into the module arena
+    // (they are checked with their owner): one expression, or a NODE_TUPLE of several spanning the
+    // text between the parentheses; for `@c.align` (`lit`) NODE_NONE for a lone integer literal (the
+    // literal form, read from its token). Stops before the closing ')'.
+    fn parse_attr_expr(self: &mut Self, lit: bool) NodeId {
         let outer_sink = self.ast.sink_body;
         self.ast.sink_body = false;
         let mut expr = NODE_NONE;
-        if self.check(TokenType::IntegerLiteral) {
+        if !lit {
+            // Several arguments: a tuple whose span starts at the attribute's `(`, unlike a
+            // parenthesized tuple argument (`expr_args`). A trailing comma adds none.
+            let start = self.tokens[self.current - 1].start();
+            expr = self.parse_expression();
+            if self.check(TokenType::Comma) {
+                let mark = self.ast.mark();
+                self.ast.push(expr);
+                let mut n: u32 = 1;
+                while self.match(TokenType::Comma) && !self.check(TokenType::RightParen) && !self.at_end() {
+                    self.ast.push(self.parse_expression());
+                    n += 1;
+                }
+                let elems = self.ast.commit(mark);
+                if n > 1 {
+                    expr = self.mk(
+                        NodeKind::NODE_TUPLE,
+                        Span::new(start, self.previous_end()),
+                        NodeAs { array_literal: ArrayLiteralData { elements: elems } },
+                    );
+                }
+            }
+        } else if self.check(TokenType::IntegerLiteral) {
             let lit = self.advance();
             if !self.check(TokenType::RightParen) {
                 let head = self.mk(
@@ -4263,6 +4299,11 @@ extend Parser {
             );
             return false;
         }
+        if syntax.parts == 1 && (self.text_is(ns, "target_feature") || self.text_is(ns, "simd_impl")) {
+            let k = pick(self.text_is(ns, "simd_impl"), AttrKind::ATTR_SIMD_IMPL, AttrKind::ATTR_TARGET_FEATURE);
+            *out = Attr { kind: k as u8, str_span: Span::empty() };
+            return self.expr_args(&syntax, out);
+        }
         if !self.text_is(ns, "c") {
             if !self.bootstrap_tags {
                 self.errors.emit_span(
@@ -4309,6 +4350,9 @@ extend Parser {
             return false;
         }
         *out = Attr { kind: kind as u8, str_span: Span::empty() };
+        if kind != AttrKind::ATTR_ALIGN as i32 && attr_expr_args(kind as u8) != 0 {
+            return self.expr_args(&syntax, out);
+        }
         if syntax.expr != NODE_NONE {
             out.expr = true;
             out.arg = syntax.expr;
@@ -4363,6 +4407,40 @@ extend Parser {
                 ),
             );
         }
+        return true;
+    }
+
+    // The constant-expression arguments of attribute `out` (`attr_expr_args`): their count must match.
+    // The text between the parentheses is `str_span`: the formatter replaces it whole.
+    fn expr_args(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) bool {
+        let want = attr_arity(attr_expr_args(out.kind));
+        let e = syntax.expr;
+        let n: u32 = if e == NODE_NONE {
+            0;
+        } else if self.ast.at_const(e).kind == NodeKind::NODE_TUPLE && self.ast.at_const(e).span.start == self.tokens[syntax.arg_start - 1].start() {
+            self.ast.at_const(e).as_data.array_literal.elements.len;
+        } else {
+            1;
+        };
+        if n != want {
+            self.errors.emit_span(
+                syntax.namespace.span(),
+                format(
+                    "attribute '@{}' takes {} {}",
+                    diag::span_str(self.source, syntax.namespace.start(), syntax.name.end()),
+                    want,
+                    if want == 1 {
+                        "argument";
+                    } else {
+                        "arguments";
+                    },
+                ),
+            );
+            return false;
+        }
+        out.expr = true;
+        out.arg = e;
+        out.str_span = Span::new(self.tokens[syntax.arg_start - 1].end(), self.tokens[syntax.arg_end].start());
         return true;
     }
 
@@ -4455,6 +4533,44 @@ extend Parser {
                     continue;
                 }
             }
+            let fnk = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
+            let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
+                pick(fnk, "", "may only be applied to a function");
+            } else if attr.kind == AttrKind::ATTR_C_VALUE as u8 {
+                self.ast.has_c_value = true;
+                pick(
+                    self.in_extern && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_TYPE_ALIAS && self.ast.at_const(
+                        owner,
+                    ).as_data.type_alias.ty == NODE_NONE,
+                    "",
+                    "may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
+                );
+            } else if attr.kind == AttrKind::ATTR_C_READS as u8 || attr.kind == AttrKind::ATTR_C_WRITES as u8 || attr.kind == AttrKind::ATTR_C_LANE_ACCESS as u8 {
+                pick(
+                    fnk && (self.ast.at_const(owner).as_data.function.is_extern() || self.ast.at_const(owner).as_data.function.is_intrinsic()),
+                    "",
+                    "may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function",
+                );
+            } else {
+                "";
+            };
+            if place.len() != 0 {
+                let sp = if owner != NODE_NONE {
+                    self.node_span(owner);
+                } else {
+                    self.raw_peek().span();
+                };
+                let mut c = String::new();
+                known_attr_name(attr.kind, &mut c);
+                self.errors.emit_span(sp, format("'@{}' {}", c.as_str(), place));
+                continue;
+            }
+            if fnk && (attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8) {
+                self.ast.at(owner).as_data.function.set(FN_FEATURES, true);
+            }
+            if fnk && attr.kind == AttrKind::ATTR_C_LANE_ACCESS as u8 {
+                self.ast.at(owner).as_data.function.set(FN_LANE_ACCESS, true);
+            }
             if attr.kind == AttrKind::ATTR_INTRINSIC as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION || !self.ast.at_const(
                 owner,
             ).as_data.function.is_intrinsic()) {
@@ -4467,7 +4583,74 @@ extend Parser {
             attr.owner = owner;
             self.ast.add_attr(attr);
         }
+        if owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION {
+            self.check_feature_gate(owner, ~0u32);
+        } else if owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_EXTEND {
+            let g = self.ast.attr_of(owner, AttrKind::ATTR_ARCH);
+            let its = self.ast.at_const(owner).as_data.extend_def.items;
+            for i in 0..pick(g != null, its.len, 0) {
+                let f = unsafe self.ast.list(its)[i as usize];
+                if self.ast.at_const(f).kind == NodeKind::NODE_FUNCTION {
+                    self.check_feature_gate(f, unsafe (*g).arg);
+                }
+            }
+        }
         self.flush_metas_to(owner);
+    }
+
+    // The features a function's `@target_feature` or `@simd_impl` list names as `cpu::Feature`
+    // variants, against its `@arch` gate and its extend's (`ext`, all ones for none): checked at
+    // the parse, so a gated item the build removes reports as one it keeps does. A function without
+    // a gate, or a list that is not variant paths, the type checker checks.
+    fn check_feature_gate(self: &mut Self, f: NodeId, ext: u32) {
+        let g = self.ast.attr_of(f, AttrKind::ATTR_ARCH);
+        if g == null && ext == ~0u32 {
+            return;
+        }
+        let mut mask = ext;
+        if g != null {
+            mask &= unsafe (*g).arg;
+        }
+        let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
+        for k in ks {
+            let at = self.ast.attr_of(f, k);
+            if at == null || unsafe (*at).arg == NODE_NONE {
+                continue;
+            }
+            let mut list = unsafe (*at).arg;
+            if k == AttrKind::ATTR_SIMD_IMPL {
+                let es = self.ast.at_const(list).as_data.array_literal.elements;
+                list = if self.ast.at_const(list).kind == NodeKind::NODE_TUPLE && es.len == 2 {
+                    unsafe self.ast.list(es)[1];
+                } else {
+                    NODE_NONE;
+                };
+            }
+            if list == NODE_NONE || self.ast.at_const(list).kind != NodeKind::NODE_ARRAY_LITERAL {
+                continue;
+            }
+            let es = self.ast.at_const(list).as_data.array_literal.elements;
+            for i in 0..es.len {
+                let e = *self.ast.at_const(unsafe self.ast.list(es)[i as usize]);
+                if e.kind != NodeKind::NODE_MEMBER || !e.as_data.member.path {
+                    continue;
+                }
+                let nsp = self.ast.at_const(e.as_data.member.member).span;
+                let r = cf::find_variant(diag::span_str(self.source, nsp.start, nsp.end));
+                if r >= 0 && (mask >> cf::row(r as usize).arch as u32 & 1) == 0 {
+                    let an = axis_names(true)[cf::row(r as usize).arch as usize];
+                    self.errors.emit_span(
+                        e.span,
+                        format(
+                            "feature '{}' belongs to {}: the function needs '@arch({})'",
+                            cf::row(r as usize).name,
+                            an,
+                            an,
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     // Attach pending `@reflect` entries to their declaration -- or reject the position.
@@ -4645,7 +4828,7 @@ extend Parser {
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list.
 pub fn known_attributes(out: &mut Vector<String>) {
-    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const) intrinsic";
+    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const) intrinsic target_feature simd_impl";
     let mut it = names.split(" ");
     loop {
         let w = it.next();
@@ -4662,9 +4845,29 @@ pub fn known_attributes(out: &mut Vector<String>) {
     }
 }
 
+// The spelling of attribute `kind` after '@', for the expression-argument and placement kinds.
+fn known_attr_name(kind: u8, out: &mut String) {
+    if kind == AttrKind::ATTR_TARGET_FEATURE as u8 {
+        out.push_str("target_feature");
+        return;
+    }
+    if kind == AttrKind::ATTR_SIMD_IMPL as u8 {
+        out.push_str("simd_impl");
+        return;
+    }
+    let t: []str = C_ATTR_NAMES;
+    for i in 0..t.len() {
+        if (unsafe C_ATTR_KINDS[i]) as u8 == kind {
+            out.push_str("c.");
+            out.push_str(t[i]);
+        }
+    }
+}
+
 // The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
-// `align` takes an integer or a constant expression (`attr_expr_type`), the rest take a string.
-const C_ATTR_NAMES: [str<'static>; 14] = [
+// `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,
+// `reads` and `writes` take constant expressions (`attr_expr_args`), and `lane_access` none.
+const C_ATTR_NAMES: [str<'static>; 18] = [
     "inline",
     "always_inline",
     "noinline",
@@ -4679,15 +4882,20 @@ const C_ATTR_NAMES: [str<'static>; 14] = [
     "section",
     "source",
     "link",
+    "value",
+    "reads",
+    "writes",
+    "lane_access",
 ];
 const C_ATTR_ALIGN: usize = 8;
+const C_ATTR_STR_END: usize = 14;
 
 // Duplicate-check kinds beyond AttrKind (every kind stays below 64, the width of the seen mask):
 // `@derive` and `@reflect` keep no Attr record, and an unrecognized attribute has no kind.
 const ATTR_SEEN_DERIVE: u8 = 62;
 const ATTR_SEEN_REFLECT: u8 = 63;
 const ATTR_SEEN_NONE: u8 = 255;
-const C_ATTR_KINDS: [AttrKind; 14] = [
+const C_ATTR_KINDS: [AttrKind; 18] = [
     AttrKind::ATTR_INLINE,
     AttrKind::ATTR_ALWAYS_INLINE,
     AttrKind::ATTR_NOINLINE,
@@ -4702,6 +4910,10 @@ const C_ATTR_KINDS: [AttrKind; 14] = [
     AttrKind::ATTR_SECTION,
     AttrKind::ATTR_C_SOURCE,
     AttrKind::ATTR_C_LINK,
+    AttrKind::ATTR_C_VALUE,
+    AttrKind::ATTR_C_READS,
+    AttrKind::ATTR_C_WRITES,
+    AttrKind::ATTR_C_LANE_ACCESS,
 ];
 
 /// The identifiers accepted inside `@platform(...)` (negatable with '!'). The index of a name is

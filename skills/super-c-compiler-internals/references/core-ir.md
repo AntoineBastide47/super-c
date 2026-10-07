@@ -138,8 +138,9 @@ proven or kept check records the fact of its last lane (of each lane up to 8), a
 a struct literal (`Slice { ptr, len: n }`) matches the facts of `n` (`ir::facts::Facts::view_len`). `SIMD_LOAD_RAW`/`SIMD_STORE_RAW` take a raw pointer; the aligned std
 forms are the unaligned ones after a `static_assert`, so no record carries an alignment. The
 effect query (`ir::facts::stmt_effect`) gives a store `EF_PTR` through operand 0; a load writes
-only its result. The interpreter runs the lane loop over the scalar rules; the emitter writes a
-lane loop with a constant trip count, or `memcpy`/`memmove` for the byte-moving codes. A trapping
+only its result. The interpreter runs the lane loop over the scalar rules; the emitter calls the
+backend entries `simd_plan` selects ([simd-backends.md](simd-backends.md)), else writes a lane
+loop with a constant trip count, or `memcpy`/`memmove` for the byte-moving codes. A trapping
 operation writes a scratch result and ORs each lane's failure predicate into a flag (a form C
 compilers vectorize, so no `__builtin_*_overflow` below 64-bit products); only a set flag runs a
 second loop that collects the failure bit per lane and traps once at the lowest (`__sc_panic_lane`,

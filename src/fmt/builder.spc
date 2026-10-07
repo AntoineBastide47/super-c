@@ -262,7 +262,18 @@ extend Builder {
                 continue;
             }
             self.st.push(self.p.span(cur, at.str_span.start));
-            self.st.push(self.b_expr(at.arg));
+            if attr_arity(attr_expr_args(at.kind)) > 1 {
+                // Several arguments: the parser's tuple of them, printed without its parentheses.
+                let es = unsafe (*self.ast).at_const(at.arg).as_data.array_literal.elements;
+                for i in 0..es.len {
+                    if i != 0 {
+                        self.st.push(self.p.txt(", "));
+                    }
+                    self.st.push(self.b_expr(unsafe (*self.ast).list(es)[i as usize]));
+                }
+            } else {
+                self.st.push(self.b_expr(at.arg));
+            }
             cur = at.str_span.end;
         }
         self.st.push(self.p.span(cur, sg.end));

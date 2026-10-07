@@ -18,6 +18,8 @@ import ir::core as ir;
 import ir::layout as lay;
 import typechecker::infer as inf;
 import utils::errors as diag;
+import ir::cpu_features as cf;
+import ast::parser as par;
 
 /// Alias-chain hops before a cycle is reported.
 pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
@@ -379,6 +381,9 @@ pub struct TypeChecker<'a> {
     /// state, closures, returns, and unsafe state live here, isolated from the module-wide caches.
     pub icx: inf::InferenceContext,
     pub package: *mut loader::Package,
+    /// Some module of the package declares a register type (`@c.value`): the inferred types that
+    /// would store one are checked (`tc_no_held_reg`).
+    pub has_reg: bool,
     pub alias_depth: u32,
     // The local constant initializer being checked (start << 32 | end, 0 = none): a variable bound
     // outside it has no compile-time value.
@@ -1064,6 +1069,9 @@ extend<'a> TypeChecker<'a> {
             ph_int: ph_lookup(package, "Int"),
         };
         t.icx.sv.ast = ast;
+        for i in 0..unsafe (&*package).modules.len() {
+            t.has_reg = t.has_reg || unsafe (&*package).modules[i].ast.has_c_value;
+        }
         if unsafe (&*ast).last_use.len() != 0 {
             t.last_use_view = unsafe (&*ast).last_use.as_ptr();
             t.last_use_vn = unsafe (&*ast).last_use.len();
@@ -6646,7 +6654,11 @@ extend<'a> TypeChecker<'a> {
     // Whether the module under check belongs to `std`, the only code that may write a cast that
     // exposes a vector's or a mask's storage, or implement `SimdElement`.
     const fn tc_in_std(self: &Self) bool {
-        return unsafe (*self.package).modules[self.cur_module() as usize].prelude;
+        let pk = unsafe &*self.package;
+        let m = &pk.modules[self.cur_module() as usize];
+        return m.prelude || m.path.as_str().starts_with("std::") && pk.std_root.len() != 0 && m.file.as_str().starts_with(
+            pk.std_root.as_str(),
+        );
     }
 
     // An `@intrinsic` function `id`: only a `std` module declares one, and its name is one the lowering
@@ -6660,13 +6672,8 @@ extend<'a> TypeChecker<'a> {
             );
         }
         let at = self.tc_attr(self.cur_module(), id, AttrKind::ATTR_INTRINSIC);
-        let pk = unsafe &*self.package;
-        let m = &pk.modules[self.cur_module() as usize];
         let sp = unsafe (*at).str_span;
-        let std = m.prelude || m.path.as_str().starts_with("std::") && pk.std_root.len() != 0 && m.file.as_str().starts_with(
-            pk.std_root.as_str(),
-        );
-        if !std {
+        if !self.tc_in_std() {
             self.errors.emit_span(sp, format("'@intrinsic' is reserved for the standard library"));
         }
         if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 {
@@ -7125,6 +7132,9 @@ extend<'a> TypeChecker<'a> {
                 d.module,
                 gid,
             );
+            if m == self.cur_module() {
+                self.tc_no_reg(aid, unsafe ta[tn as usize]);
+            }
             tn = tn + 1;
         }
         self.apply_default_args(d.module, d.node, ta, &mut tn);
@@ -7413,7 +7423,9 @@ extend<'a> TypeChecker<'a> {
             },
             NODE_SLICE_TYPE => {
                 let it = unsafe (*a).at_const(id).as_data.indirect_type;
-                result = self.prelude_slice_type(self.resolve_type(it.ty), it.qualifier == TypeQualifier::TYPE_QUAL_MUT);
+                let et = self.resolve_type(it.ty);
+                self.tc_no_reg(it.ty, et);
+                result = self.prelude_slice_type(et, it.qualifier == TypeQualifier::TYPE_QUAL_MUT);
             },
             NODE_TUPLE_TYPE => {
                 let elems = unsafe (*a).at_const(id).as_data.array_literal.elements;
@@ -7424,6 +7436,7 @@ extend<'a> TypeChecker<'a> {
                     let mut targs = Tys8 {};
                     for i in 0..elems.len {
                         targs[i as usize] = self.resolve_type(unsafe (*a).list(elems)[i as usize]);
+                        self.tc_no_reg(unsafe (*a).list(elems)[i as usize], targs[i as usize]);
                     }
                     result = self.prelude_tuple_type(&targs[0], elems.len);
                 }
@@ -7436,8 +7449,10 @@ extend<'a> TypeChecker<'a> {
                     k = TypeKind::TYPE_POINTER;
                     q = ptr_qual(q);
                 }
+                let et = self.resolve_type(it.ty);
+                self.tc_no_reg(it.ty, et);
                 result = unsafe (*self.cur_ast()).intern_type(
-                    Ty { kind: k, qualifier: q as u8, as_data: TyAs { elem: self.resolve_type(it.ty) } },
+                    Ty { kind: k, qualifier: q as u8, as_data: TyAs { elem: et } },
                 );
             },
             NODE_ARRAY_TYPE => {
@@ -7447,10 +7462,12 @@ extend<'a> TypeChecker<'a> {
                 self.ct_ctx = "array length cannot be evaluated";
                 self.check_expr(at.length);
                 self.ct_ctx = cx0;
+                let et = self.resolve_type(at.element);
+                self.tc_no_reg(at.element, et);
                 result = if self.ct_n != ct0 {
                     TYPE_ERROR;
                 } else {
-                    self.tc_array_type(self.cur_module(), at.length, self.resolve_type(at.element));
+                    self.tc_array_type(self.cur_module(), at.length, et);
                 };
             },
             NODE_FUNCTION_TYPE => {
@@ -11075,6 +11092,9 @@ extend<'a> TypeChecker<'a> {
         if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_NEVER || y.is_vec() {
             return true;
         }
+        if k == TypeKind::TYPE_OPAQUE && self.tc_reg_type(ty) {
+            return true;
+        }
         if k == TypeKind::TYPE_REFERENCE {
             return y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
         }
@@ -13111,7 +13131,8 @@ extend<'a> TypeChecker<'a> {
     }
     // A call of an `unsafe fn`, or of an extern "C" function without `@unsafe(safe)`, needs `unsafe`, and a
     // `fn` pointer type cannot carry that: naming one as a value outside a call needs `unsafe` too, or a call
-    // through the pointer would skip it.
+    // through the pointer would skip it. For the same reason a function that needs CPU features needs them
+    // where it is named as a value.
     fn tc_fn_value_use(self: &mut Self, id: NodeId, d: DefId) {
         if d.node == NODE_NONE || self.tc_is_callee(id) {
             return;
@@ -13119,6 +13140,13 @@ extend<'a> TypeChecker<'a> {
         let f = unsafe (*self.mod_ast(d.module)).at_const(d.node);
         if f.kind != NodeKind::NODE_FUNCTION {
             return;
+        }
+        if f.as_data.function.needs_features() {
+            // A pointer to it calls it: the same rule as a call (`check_feature_calls`).
+            let sp = unsafe (*self.cur_ast()).at_const(id).span;
+            unsafe (*self.cur_ast()).feature_calls.push(
+                FeatureCall { span: sp, callee: d, caller: self.icx.current_fn },
+            );
         }
         let ext = f.as_data.function.is_extern() && !self.tc_unsafe_claim(d.module, d.node, UNSAFE_SAFE);
         if (ext || f.as_data.function.is_unsafe()) && self.tc_needs_unsafe() {
@@ -14974,8 +15002,9 @@ extend TypeChecker {
             self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
             self.icx.unsafe_used = 0;
         }
-        // `&e` / `&mut e` expecting a reference or pointer: `e` expects the pointee.
-        let mut owant = TYPE_NONE;
+        // `&e` / `&mut e` expecting a reference or pointer: `e` expects the pointee; `unsafe e`
+        // expects what the whole does.
+        let mut owant = pick(op == TokenType::Unsafe, expected, TYPE_NONE);
         if op == TokenType::Ampersand && expected != TYPE_NONE && (self.type_at(expected).kind == TypeKind::TYPE_REFERENCE || self.type_at(
             expected,
         ).kind == TypeKind::TYPE_POINTER) {
@@ -17982,6 +18011,20 @@ extend TypeChecker {
         if fdecl != NODE_NONE && args.len != 0 {
             self.tc_index_list(fmod, fdecl, args);
         }
+        if named && (unsafe (*fa).at_const(fdecl).as_data.function.flags & FN_LANE_ACCESS) != 0 && self.icx.current_fn != NODE_NONE {
+            // An entry that calls it is never planned under a memory checker (`build_simd_table`).
+            unsafe (*self.cur_ast()).lane_callers.push(self.icx.current_fn);
+        }
+        // A call through a local function value: its value use is the call (`tc_fn_value_use`).
+        let via_value = unsafe (*a).at_const(callee_id).kind == NodeKind::NODE_IDENTIFIER && unsafe (*a).resolution_def(
+            callee_id,
+        ).node != fdecl;
+        if named && !via_value && unsafe (*fa).at_const(fdecl).as_data.function.needs_features() {
+            let sp = unsafe (*a).at_const(id).span;
+            unsafe (*self.cur_ast()).feature_calls.push(
+                FeatureCall { span: sp, callee: DefId { module: fmod, node: fdecl }, caller: self.icx.current_fn },
+            );
+        }
         // A method whose RESULT carries a borrow (`Option<&V>`, a view, ...) borrows its receiver
         // as much as one returning a bare `&T`. check_call_receiver can only inspect the
         // DECLARED return node, which is not enough: the borrow may sit inside a generic argument
@@ -18951,6 +18994,10 @@ extend TypeChecker {
         let fa = self.mod_ast(fmod);
         let sp = unsafe (*a).at_const(id).span;
         for i in 0..gn {
+            if self.has_reg {
+                let g = unsafe gargs[i as usize];
+                self.tc_no_reg(id, pick(self.tc_reg_type(g), g, self.tc_held_reg(g, 0)));
+            }
             let gid = unsafe (*fa).list(gens)[i as usize];
             let pb = unsafe (*fa).at_const(gid).as_data.generic_param.bounds;
             // Before any bound reads the closure's captures (Send, Sync, the fn bound itself).
@@ -20939,7 +20986,11 @@ extend TypeChecker {
         cfs.reserve(caps.len as usize);
         for i in 0..caps.len {
             let cid = unsafe (*a).list(caps)[i as usize];
-            cfs.push(CapFact { name: unsafe (*a).decl_name_span(cid), ty: self.decl_type(cid) });
+            let ct = self.decl_type(cid);
+            if self.has_reg {
+                self.tc_no_reg(id, pick(self.tc_reg_type(ct), ct, self.tc_held_reg(ct, 0)));
+            }
+            cfs.push(CapFact { name: unsafe (*a).decl_name_span(cid), ty: ct });
         }
         // The signature as the C spelling reads it: each parameter's annotation type (the
         // parameter node's own when bare), then the return type, which an expression body carries
@@ -21746,6 +21797,9 @@ extend TypeChecker {
             self.err_exprs += 1;
         }
         unsafe (*self.cur_ast()).set_type(id, result);
+        if self.has_reg && (nk == NodeKind::NODE_ARRAY_LITERAL || nk == NodeKind::NODE_TUPLE || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST) {
+            self.tc_no_held_reg(id, result);
+        }
         if (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_ASSIGNMENT) && self.err_exprs == nx0 {
             self.tc_ct_check(id);
         }
@@ -22649,8 +22703,10 @@ extend TypeChecker {
         let value = unsafe (*a).at_const(id).as_data.let_stmt.value;
         let nm = unsafe (*a).at_const(id).as_data.let_stmt.name;
         let names = unsafe (*a).at_const(nm).as_data.pattern.children;
+        let tyn = unsafe (*a).at_const(id).as_data.let_stmt.ty;
+        let declared = pick(tyn != NODE_NONE, self.resolve_type(tyn), TYPE_NONE);
         self.icx.mret_call = NODE_NONE;
-        let vt = self.check_expr(value);
+        let vt = self.check_expr_w(value, declared);
         let stashed = value != NODE_NONE && self.icx.mret_call == value;
         if vt == TYPE_ERROR && !stashed {
             for i in 0..names.len {
@@ -22658,10 +22714,35 @@ extend TypeChecker {
             }
             return;
         }
+        // An annotation types the bindings: a tuple value converts to it as a single binding's would;
+        // a multi-value call's results do not convert, so the annotation must name their types.
+        if declared != TYPE_NONE && stashed {
+            let mut dargs = Tys8 {};
+            let dn = self.tuple_args_of(self.strip(declared), &mut dargs[0], 4);
+            let mut same = dn == self.icx.mret_total as i32 && dn <= self.icx.mret_n as i32;
+            for i in 0..pick(same, dn as usize, 0) {
+                same = same && unsafe (dargs[i] == self.icx.mret_types[i]);
+            }
+            if !same {
+                let sp = unsafe (*a).at_const(tyn).span;
+                self.errors.emit_span(
+                    sp,
+                    format("the annotation of a multi-value call's bindings must name its result types"),
+                );
+                return;
+            }
+        } else if declared != TYPE_NONE && !self.compatible(declared, value) {
+            self.err_mismatch(value, declared);
+            return;
+        }
         let mut targs = Tys8 {};
         let mut tn: i32 = -1;
         if !stashed && value != NODE_NONE {
-            tn = self.tuple_args_of(self.strip(unsafe (*a).type_of(value)), &mut targs[0], 4);
+            tn = self.tuple_args_of(
+                self.strip(pick(declared != TYPE_NONE, declared, unsafe (*a).type_of(value))),
+                &mut targs[0],
+                4,
+            );
         }
         let mut returns = NodeList { start: 0, len: 0 };
         let mut ok = false;
@@ -22890,8 +22971,9 @@ extend TypeChecker {
         }
     }
 
-    // The constant-expression arguments of `owner`'s attributes: each is checked against the type
-    // its attribute declares (`attr_expr_type`), must fold like a constant initializer, and its
+    // The constant-expression arguments of `owner`'s attributes (`attr_expr_args`): each is checked
+    // against its argument kind and must fold like a constant initializer (a byte count over the
+    // function's parameters excepted), then the attribute's own rules apply (`tc_attr_value`); the
     // value is recorded for the readers after the check (`Ast::attr_value`).
     fn tc_attr_exprs(self: &mut Self, owner: NodeId) {
         let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
@@ -22901,15 +22983,216 @@ extend TypeChecker {
                 continue;
             }
             let arg = unsafe (*at).arg;
-            let want = Ast::builtin(attr_expr_type(unsafe (*at).kind));
-            let mut v: i64 = 0;
-            let ok = self.tc_attr_arg(arg, want, &mut v) && self.tc_attr_value(ks[i], arg, v as u64);
-            unsafe (*self.cur_ast()).set_attr_value(owner, ks[i], ok, v as u64);
+            let args = attr_expr_args(ks[i] as u8);
+            let n = attr_arity(args);
+            let mut v: u64 = 0;
+            let mut w: [u64; 2] = [0, 0];
+            let mut ok = true;
+            for k in 0..n {
+                let e = if n == 1 {
+                    arg;
+                } else {
+                    unsafe (*self.cur_ast()).list(unsafe (*self.cur_ast()).at_const(arg).as_data.array_literal.elements)[k as usize];
+                };
+                ok = self.tc_attr_arg(owner, ks[i], e, args >> 4 * k & 15, k, &mut v, &mut w) && ok;
+            }
+            ok = ok && self.tc_attr_value(owner, ks[i], arg, &mut v, &w);
+            unsafe (*self.cur_ast()).set_attr_value(owner, ks[i], ok, v, w);
         }
     }
 
+    // Argument `k` of attribute `kind` of `owner`, node `e` of argument kind `ak` (`AA_*`): checked and
+    // folded into `v` or `w` (see `AttrVal`); false after an error.
+    fn tc_attr_arg(
+        self: &mut Self,
+        owner: NodeId,
+        kind: AttrKind,
+        e: NodeId,
+        ak: u32,
+        k: u32,
+        v: &mut u64,
+        w: &mut [u64; 2],
+    ) bool {
+        let a = self.cur_ast();
+        let sp = unsafe (*a).at_const(e).span;
+        if ak == AA_PARAM {
+            // A parameter of the function, by name: a raw pointer, and `*mut` for a write.
+            let d = unsafe (*a).resolution_def(e);
+            let ps = unsafe (*a).at_const(owner).as_data.function.params;
+            let mut pi: u32 = ps.len;
+            for j in 0..ps.len {
+                if unsafe (*a).at_const(e).kind == NodeKind::NODE_IDENTIFIER && d.module == self.cur_module() && d.node == unsafe (*a).list(
+                    ps,
+                )[j as usize] {
+                    pi = j;
+                }
+            }
+            if pi == ps.len {
+                self.errors.emit_span(
+                    sp,
+                    format("'{}' is not a parameter of this function", diag::span_str(self.source, sp.start, sp.end)),
+                );
+                return false;
+            }
+            let y = *self.type_at(self.decl_type(unsafe (*a).list(ps)[pi as usize]));
+            let writes = kind == AttrKind::ATTR_C_WRITES;
+            if y.kind != TypeKind::TYPE_POINTER || writes && y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "parameter '{}' of '@c.{}' must be a {} pointer",
+                        diag::span_str(self.source, sp.start, sp.end),
+                        pick(writes, "writes", "reads"),
+                        pick(writes, "'*mut'", "raw"),
+                    ),
+                );
+                return false;
+            }
+            *v = pi;
+            return true;
+        }
+        if ak == AA_BYTES && self.tc_names_param(owner, e) {
+            // An expression over the function's other `usize` parameters: a count each call computes.
+            let ps = unsafe (*a).at_const(owner).as_data.function.params;
+            let ptr = if *v < ps.len as u64 {
+                unsafe (*a).list(ps)[(*v) as usize];
+            } else {
+                NODE_NONE;
+            };
+            if !self.tc_bytes_ok(e, ptr, 0) {
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "the byte count is a 'usize' constant or an expression over the function's other 'usize' parameters",
+                    ),
+                );
+                return false;
+            }
+            let ne = self.errors.errors.len();
+            let want = Ast::builtin(BuiltinType::BT_USIZE);
+            self.check_expr_w(e, want);
+            if !self.compatible(want, e) {
+                self.err_mismatch(e, want);
+            }
+            w[1] = 1;
+            return self.errors.errors.len() == ne;
+        }
+        if ak == AA_FEATURES {
+            let gt = unsafe (*a).gt;
+            let ne = self.errors.errors.len();
+            let t = self.check_expr(e);
+            if self.errors.errors.len() != ne || gt == null {
+                return false;
+            }
+            let y = *self.type_at(t);
+            let fd = unsafe (*gt).cpu_feature;
+            let ok = y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && y.as_data.arr.len != 0 && self.type_at(
+                y.as_data.arr.elem,
+            ).kind == TypeKind::TYPE_ENUM && self.type_at(y.as_data.arr.elem).module == fd.module && self.type_at(
+                y.as_data.arr.elem,
+            ).as_data.decl == fd.node;
+            if !ok {
+                let tb = self.type_buf(t);
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "expected a nonempty list of 'cpu::Feature' values, e.g. '[cpu::Feature::Simd128]', found '{}'",
+                        str::from_cstr(&tb[0]),
+                    ),
+                );
+                return false;
+            }
+            let ceptr = self.cir();
+            let mut lst = Vector::<u64>::new();
+            self.eng_hold(true);
+            let st = unsafe (*ceptr).eval_list(self.cur_module(), e, &mut lst);
+            self.eng_hold(false);
+            if st != 0 {
+                self.errors.emit_span(sp, format("attribute argument cannot be evaluated at compile time"));
+                return false;
+            }
+            for j in 0..lst.len() {
+                unsafe w[(lst[j] / 64) as usize] |= 1u64 << lst[j] % 64;
+            }
+            return true;
+        }
+        let want = if ak == AA_OP {
+            let gt = unsafe (*a).gt;
+            if gt == null {
+                return false;
+            }
+            self.named_type_of(unsafe (*gt).simd_op.module, unsafe (*gt).simd_op.node);
+        } else {
+            Ast::builtin(pick(ak == AA_U32, BuiltinType::BT_U32, BuiltinType::BT_USIZE));
+        };
+        let mut x: i64 = 0;
+        if !self.tc_attr_int(e, want, &mut x) {
+            return false;
+        }
+        if k == 0 {
+            *v = x as u64;
+        } else {
+            w[0] = x as u64;
+        }
+        return true;
+    }
+
+    // Whether expression `e` names a parameter of function `owner` (a `@c.reads` byte count over them).
+    // Whether byte count `e` uses only literals, constants, arithmetic and `usize` parameters other
+    // than the annotated pointer `ptr`.
+    fn tc_bytes_ok(self: &mut Self, e: NodeId, ptr: NodeId, depth: u32) bool {
+        let a = self.cur_ast();
+        let n = *unsafe (*a).at_const(e);
+        if depth > 32 {
+            return false;
+        }
+        if n.kind == NodeKind::NODE_BINARY {
+            return self.tc_bytes_ok(n.as_data.binary.left, ptr, depth + 1) && self.tc_bytes_ok(
+                n.as_data.binary.right,
+                ptr,
+                depth + 1,
+            );
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            return self.tc_bytes_ok(n.as_data.unary.operand, ptr, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_LITERAL {
+            return true;
+        }
+        if n.kind != NodeKind::NODE_IDENTIFIER {
+            return false;
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.cur_module() || d.node == NODE_NONE || unsafe (*a).at_const(d.node).kind != NodeKind::NODE_PARAMETER {
+            return true;
+        }
+        let t = self.decl_type(d.node);
+        return d.node != ptr && self.type_at(t).kind == TypeKind::TYPE_BUILTIN && self.type_at(t).as_data.builtin == BuiltinType::BT_USIZE;
+    }
+
+    fn tc_names_param(self: &Self, owner: NodeId, e: NodeId) bool {
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(e);
+        if n.kind == NodeKind::NODE_BINARY {
+            return self.tc_names_param(owner, n.as_data.binary.left) || self.tc_names_param(
+                owner,
+                n.as_data.binary.right,
+            );
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            return self.tc_names_param(owner, n.as_data.unary.operand);
+        }
+        if n.kind == NodeKind::NODE_CAST {
+            return self.tc_names_param(owner, n.as_data.cast.expression);
+        }
+        let d = unsafe (*a).resolution_def(e);
+        return n.kind == NodeKind::NODE_IDENTIFIER && d.module == self.cur_module() && d.node != NODE_NONE && unsafe (*a).at_const(
+            d.node,
+        ).kind == NodeKind::NODE_PARAMETER;
+    }
+
     // Check attribute argument `arg` against `want` and fold it into `out`; false after an error.
-    fn tc_attr_arg(self: &mut Self, arg: NodeId, want: TypeId, out: &mut i64) bool {
+    fn tc_attr_int(self: &mut Self, arg: NodeId, want: TypeId, out: &mut i64) bool {
         let ne = self.errors.errors.len();
         let cx0 = self.ct_ctx;
         self.ct_ctx = "attribute argument cannot be evaluated at compile time";
@@ -22940,12 +23223,392 @@ extend TypeChecker {
         return v.kind == iri::IV_INT;
     }
 
-    // Whether `v` is a valid value of attribute `kind`'s argument `arg`; reports the error otherwise.
-    fn tc_attr_value(self: &mut Self, kind: AttrKind, arg: NodeId, v: u64) bool {
-        if kind == AttrKind::ATTR_ALIGN && !c_align_ok(v) {
-            self.errors.emit_span(unsafe (*self.cur_ast()).at_const(arg).span, c_align_error(v));
+    // Whether the values `v` and `w` of attribute `kind` of `owner` (arguments `arg`) are valid;
+    // reports the error otherwise. `@simd_impl` adds its signature's key to `v` (see `AttrVal`).
+    fn tc_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, arg: NodeId, v: &mut u64, w: &[u64; 2]) bool {
+        let sp = unsafe (*self.cur_ast()).at_const(arg).span;
+        if kind == AttrKind::ATTR_ALIGN && !c_align_ok(*v) {
+            self.errors.emit_span(sp, c_align_error(*v));
             return false;
         }
+        if kind == AttrKind::ATTR_C_VALUE && (*v == 0 || !c_align_ok(w[0]) || *v % w[0] != 0) {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "'@c.value' needs a nonzero size that is a multiple of the alignment, a power of two; found ({}, {})",
+                    *v,
+                    w[0],
+                ),
+            );
+            return false;
+        }
+        if (kind == AttrKind::ATTR_C_READS || kind == AttrKind::ATTR_C_WRITES) && self.tc_attr(
+            self.cur_module(),
+            owner,
+            AttrKind::ATTR_C_LANE_ACCESS,
+        ) != null {
+            self.errors.emit_span(sp, format("'@c.lane_access' states no range: it takes no '@c.reads' or '@c.writes'"));
+            return false;
+        }
+        if kind != AttrKind::ATTR_TARGET_FEATURE && kind != AttrKind::ATTR_SIMD_IMPL {
+            return true;
+        }
+        let fs = cf::CpuFeatureSet { w: *w };
+        if kind == AttrKind::ATTR_SIMD_IMPL && !self.tc_in_std() {
+            self.errors.emit_span(sp, format("'@simd_impl' is reserved for the standard library"));
+            return false;
+        }
+        if kind == AttrKind::ATTR_SIMD_IMPL && cf::has(fs, cf::F_RELAXED_SIMD) {
+            self.errors.emit_span(
+                sp,
+                format("a '@simd_impl' entry cannot need 'relaxed-simd': its results differ between engines"),
+            );
+            return false;
+        }
+        // A method of a conformance is called through bounds and `dyn`, where no call site names it.
+        let pk = unsafe &*self.package;
+        let it = gitems::owner_of(pk, self.cur_module(), owner);
+        let ext = if it != loader::ITEM_NONE && pk.idx.items.at(it as usize).owner != loader::ITEM_NONE {
+            pk.idx.items.at(pk.idx.items.at(it as usize).owner as usize).node;
+        } else {
+            NODE_NONE;
+        };
+        let a = self.cur_ast();
+        let in_ext = ext != NODE_NONE && unsafe (*a).at_const(ext).kind == NodeKind::NODE_EXTEND;
+        if in_ext && unsafe (*a).at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a method of a conformance ('extend T as I') cannot need CPU features: a call through a bound does not name it",
+                ),
+            );
+            return false;
+        }
+        // Each feature belongs to an instruction set the `@arch` gates of the function and its extend
+        // allow.
+        let mut mask: u32 = 0;
+        let mut gated = false;
+        for g in [owner, pick(in_ext, ext, owner)] {
+            let gate = self.tc_attr(self.cur_module(), g, AttrKind::ATTR_ARCH);
+            if gate != null {
+                mask = pick(gated, mask & unsafe (*gate).arg, unsafe (*gate).arg);
+                gated = true;
+            }
+        }
+        for i in 0..cf::FEATURE_COUNT {
+            if cf::has(fs, i) && (mask >> cf::row(i).arch as u32 & 1) == 0 {
+                let an = par::axis_names(true)[cf::row(i).arch as usize];
+                self.errors.emit_span(
+                    sp,
+                    format("feature '{}' belongs to {}: the function needs '@arch({})'", cf::row(i).name, an, an),
+                );
+                return false;
+            }
+        }
+        return kind == AttrKind::ATTR_TARGET_FEATURE || self.tc_simd_shape(owner, (*v) as u32, v);
+    }
+
+    // Whether `t` is a register type: an opaque extern type with `@c.value`.
+    fn tc_reg_type(self: &Self, t: TypeId) bool {
+        let y = *self.type_at(t);
+        return y.kind == TypeKind::TYPE_OPAQUE && self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null;
+    }
+
+    // A register type is a local, a parameter or a result only: as the element, target, member or
+    // argument the type at node `id` makes it, it is an error. Its layout (a 32-byte register aligns
+    // to 32 in GCC and Clang) stays out of every storage layout.
+    fn tc_no_reg(self: &mut Self, id: NodeId, t: TypeId) {
+        if !self.tc_reg_type(t) {
+            return;
+        }
+        let tb = self.type_buf(t);
+        self.errors.emit_span(
+            unsafe (*self.cur_ast()).at_const(id).span,
+            format("`{}` is a register type; store it through `Simd<T, N>`", str::from_cstr(&tb[0])),
+        );
+    }
+
+    // The register type `t` holds as an element, a target or an argument (an array, a pointer, a
+    // reference, an instance: a slice, a tuple, a library type), or TYPE_NONE.
+    fn tc_held_reg(self: &Self, t: TypeId, depth: u32) TypeId {
+        if t == TYPE_NONE || t == TYPE_ERROR || depth > 16 {
+            return TYPE_NONE;
+        }
+        let y = *self.type_at(t);
+        let mut k: [TypeId; 8] = [TYPE_NONE; 8];
+        let mut n: u32 = 0;
+        if y.kind == TypeKind::TYPE_ARRAY {
+            k[0] = y.as_data.arr.elem;
+            n = 1;
+        } else if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            k[0] = y.as_data.elem;
+            n = 1;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            n = pick(it.n < 8, it.n, 8u8);
+            for i in 0..n {
+                unsafe k[i as usize] = unsafe it.args[i as usize];
+            }
+        }
+        for i in 0..n {
+            let e = unsafe k[i as usize];
+            let r = pick(self.tc_reg_type(e), e, self.tc_held_reg(e, depth + 1));
+            if r != TYPE_NONE {
+                return r;
+            }
+        }
+        return TYPE_NONE;
+    }
+
+    // `tc_no_reg` for a type the checker inferred at node `id`: one that holds a register type.
+    fn tc_no_held_reg(self: &mut Self, id: NodeId, t: TypeId) {
+        if self.has_reg {
+            let r = self.tc_held_reg(t, 0);
+            if r != TYPE_NONE {
+                self.tc_no_reg(id, r);
+            }
+        }
+    }
+
+    // One type of a `@simd_impl` signature: a vector (`SG_VEC`, lanes `n` of `bt`), a mask (`n`
+    // lanes), a scalar `bt`, a raw pointer to `bt` (`mutp`: `*mut`), or no type (`SG_UNIT`).
+    fn tc_sig_ty(self: &mut Self, t: TypeId) SigTy {
+        let y = *self.type_at(t);
+        let mut g = SigTy { k: SG_OTHER, n: 0, bt: BuiltinType::BT_COUNT, mutp: false };
+        if t == TYPE_NONE {
+            g.k = SG_UNIT;
+        } else if y.is_vec() {
+            g.k = pick(y.kind == TypeKind::TYPE_SIMD, SG_VEC, SG_MASK);
+            g.n = unsafe (*self.cur_ast()).lanes(&y);
+            if y.kind == TypeKind::TYPE_SIMD && self.type_at(y.as_data.arr.elem).kind == TypeKind::TYPE_BUILTIN {
+                g.bt = self.type_at(y.as_data.arr.elem).as_data.builtin;
+            }
+        } else if y.kind == TypeKind::TYPE_BUILTIN {
+            g.k = SG_SCALAR;
+            g.bt = y.as_data.builtin;
+        } else if y.kind == TypeKind::TYPE_POINTER && self.type_at(y.as_data.elem).kind == TypeKind::TYPE_BUILTIN {
+            g.k = SG_PTR;
+            g.bt = self.type_at(y.as_data.elem).as_data.builtin;
+            g.mutp = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+        }
+        return g;
+    }
+
+    // Whether the signature of `@simd_impl` entry `owner` has the shape of operation `op`
+    // (`ir::OP_*`): its parameters and result relate as the operation's operands and result do. On a
+    // match `key` gets the entry's key: `op | T << 16 | R << 24 | N << 32`, `T` and `N` the lanes of
+    // its vector operand (of the result for `iota` and `MaskToLanes`), `R` the result's lane or
+    // scalar type (BT_BOOL for a mask, BT_VOID for none; the index lanes' type for a run-time
+    // index). Reports the expected signature otherwise.
+    fn tc_simd_shape(self: &mut Self, owner: NodeId, op: u32, key: &mut u64) bool {
+        let a = self.cur_ast();
+        let fnd = unsafe (*a).at_const(owner).as_data.function;
+        let mut p: [SigTy; 4] = [[0] = SigTy {}];
+        let np = fnd.params.len;
+        for i in 0..np.min(4) {
+            unsafe p[i as usize] = self.tc_sig_ty(self.decl_type(unsafe (*a).list(fnd.params)[i as usize]));
+        }
+        let r = if fnd.returns.len == 1 {
+            self.tc_sig_ty(self.resolve_type(unsafe (*a).slot_type_node(unsafe (*a).list(fnd.returns)[0])));
+        } else {
+            self.tc_sig_ty(TYPE_NONE);
+        };
+        let sr = if op >= ir::OP_SIMD && op < ir::OP_CMP_LANES {
+            ir::simd_op((op - ir::OP_SIMD) as u8).rule;
+        } else {
+            255u8;
+        };
+        // The vector operand the key names, and the expected signature.
+        let mut v = p[0];
+        let mut ok = fnd.returns.len <= 1 && np <= 4;
+        let mut want: str<'static> = "";
+        if op < ir::OP_NEG || sr == ir::SR_VEC || sr == ir::SR_MASK {
+            let n = if op < ir::OP_NEG {
+                2u8;
+            } else if op < ir::OP_SIMD {
+                1u8;
+            } else {
+                ir::simd_op((op - ir::OP_SIMD) as u8).arity;
+            };
+            ok = ok && np == n as u32 && v.k == SG_VEC;
+            for i in 0..np.min(4) {
+                ok = ok && unsafe p[i as usize].same(&v);
+            }
+            let m = sr == ir::SR_MASK;
+            ok = ok && pick(m, r.k == SG_MASK && r.n == v.n, r.same(&v));
+            if n == 1 {
+                want = pick(m, "(Simd<T, N>) Mask<N>", "(Simd<T, N>) Simd<T, N>");
+            } else if n == 2 {
+                want = pick(m, "(Simd<T, N>, Simd<T, N>) Mask<N>", "(Simd<T, N>, Simd<T, N>) Simd<T, N>");
+            } else {
+                want = "(Simd<T, N>, Simd<T, N>, Simd<T, N>) Simd<T, N>";
+            }
+        } else if op == ir::OP_NEG || op == ir::OP_NOT {
+            ok = ok && np == 1 && v.k == SG_VEC && r.same(&v);
+            want = "(Simd<T, N>) Simd<T, N>";
+        } else if op == ir::OP_CAST || sr == ir::SR_LANES {
+            let n: u32 = if op == ir::OP_CAST {
+                1;
+            } else {
+                ir::simd_op((op - ir::OP_SIMD) as u8).arity;
+            };
+            ok = ok && np == n && v.k == SG_VEC && (n == 1 || p[1].same(&v)) && r.k == SG_VEC && r.n == v.n;
+            want = pick(n == 1, "(Simd<T, N>) Simd<U, N>", "(Simd<T, N>, Simd<T, N>) Simd<U, N>");
+        } else if op == ir::OP_SHL_SCALAR || op == ir::OP_SHR_SCALAR {
+            ok = ok && np == 2 && v.k == SG_VEC && p[1].k == SG_SCALAR && p[1].bt == v.bt && r.same(&v);
+            want = "(Simd<T, N>, T) Simd<T, N>";
+        } else if sr == ir::SR_CHOOSE || op == ir::OP_CHOOSE_LANES {
+            v = p[1];
+            let l = op == ir::OP_CHOOSE_LANES;
+            ok = ok && np == 3 && v.k == SG_VEC && p[2].same(&v) && r.same(&v) && pick(
+                l,
+                p[0].lanes_of(&v),
+                p[0].k == SG_MASK && p[0].n == v.n,
+            );
+            want = pick(
+                l,
+                "(Simd<U, N>, Simd<T, N>, Simd<T, N>) Simd<T, N>, U the unsigned type of T's width",
+                "(Mask<N>, Simd<T, N>, Simd<T, N>) Simd<T, N>",
+            );
+        } else if op >= ir::OP_CMP_LANES && op < ir::OP_CHOOSE_LANES {
+            ok = ok && np == 2 && v.k == SG_VEC && p[1].same(&v) && r.lanes_of(&v);
+            want = "(Simd<T, N>, Simd<T, N>) Simd<U, N>, U the unsigned type of T's width";
+        } else if op == ir::OP_LANES_TO_MASK || op == ir::OP_ANY_LANES || op == ir::OP_ALL_LANES {
+            let m = op == ir::OP_LANES_TO_MASK;
+            ok = ok && np == 1 && v.k == SG_VEC && v.lanes_of(&v) && pick(
+                m,
+                r.k == SG_MASK && r.n == v.n,
+                r.k == SG_SCALAR && r.bt == BuiltinType::BT_BOOL,
+            );
+            want = pick(m, "(Simd<U, N>) Mask<N>, U unsigned", "(Simd<U, N>) bool, U unsigned");
+        } else if op == ir::OP_MASK_TO_LANES || sr == ir::SR_ANY {
+            v = r;
+            let m = op == ir::OP_MASK_TO_LANES;
+            ok = ok && v.k == SG_VEC && pick(
+                m,
+                np == 1 && p[0].k == SG_MASK && p[0].n == v.n && v.lanes_of(&v),
+                np == 0,
+            );
+            want = pick(m, "(Mask<N>) Simd<U, N>, U unsigned", "() Simd<T, N>");
+        } else if sr == ir::SR_CHANGED {
+            ok = ok && np == 2 && v.k == SG_VEC && p[1].k == SG_VEC && p[1].n == v.n && r.k == SG_MASK && r.n == v.n;
+            want = "(Simd<T, N>, Simd<U, N>) Mask<N>";
+        } else if sr == ir::SR_BITCAST || sr == ir::SR_HALF || sr == ir::SR_CONCAT {
+            let n = pick(sr == ir::SR_CONCAT, 2u32, 1u32);
+            ok = ok && np == n && v.k == SG_VEC && (n == 1 || p[1].same(&v)) && r.k == SG_VEC;
+            ok = ok && if sr == ir::SR_BITCAST {
+                r.n * bt_bytes(r.bt) == v.n * bt_bytes(v.bt);
+            } else {
+                r.bt == v.bt && pick(sr == ir::SR_HALF, r.n * 2 == v.n, r.n == v.n * 2);
+            };
+            if sr == ir::SR_BITCAST {
+                want = "(Simd<T, N>) Simd<U, M>, of the same size";
+            } else if sr == ir::SR_HALF {
+                want = "(Simd<T, N>) Simd<T, N / 2>";
+            } else {
+                want = "(Simd<T, N>, Simd<T, N>) Simd<T, 2 * N>";
+            }
+        } else if op == ir::OP_SIMD + ir::SIMD_LOAD_MASKED as u32 {
+            v = r;
+            ok = ok && np == 3 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].bt == v.bt && p[1].k == SG_MASK && p[1].n == v.n && p[2].same(
+                &v,
+            );
+            want = "(*const T, Mask<N>, Simd<T, N>) Simd<T, N>, the active lanes at the pointer";
+        } else if op == ir::OP_SIMD + ir::SIMD_STORE_MASKED as u32 {
+            v = p[2];
+            ok = ok && np == 3 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].mutp && p[0].bt == v.bt && p[1].k == SG_MASK && p[1].n == v.n && r.k == SG_UNIT;
+            want = "(*mut T, Mask<N>, Simd<T, N>), the active lanes at the pointer";
+        } else if sr == ir::SR_LOAD {
+            v = r;
+            ok = ok && np == 1 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].bt == v.bt;
+            want = "(*const T) Simd<T, N>, the N elements at the pointer";
+        } else if sr == ir::SR_STORE {
+            v = p[1];
+            ok = ok && np == 2 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].mutp && p[0].bt == v.bt && r.k == SG_UNIT;
+            want = "(*mut T, Simd<T, N>), the N elements at the pointer";
+        } else if sr == ir::SR_RT_INDEX {
+            let m = op == ir::OP_SIMD + ir::SIMD_SWIZZLE_OOB as u32;
+            ok = ok && np == 2 && v.k == SG_VEC && p[1].k == SG_VEC && p[1].n == v.n && pick(
+                m,
+                r.k == SG_MASK && r.n == v.n,
+                r.same(&v),
+            );
+            want = pick(m, "(Simd<T, N>, Simd<U, N>) Mask<N>", "(Simd<T, N>, Simd<U, N>) Simd<T, N>");
+        } else if sr == ir::SR_REDUCE || sr == ir::SR_DOT {
+            let n = pick(sr == ir::SR_DOT, 2u32, 1u32);
+            let c = (op - ir::OP_SIMD) as u8;
+            let rt = if c == ir::SIMD_REDUCE_ADD_OVF || c == ir::SIMD_REDUCE_MUL_OVF {
+                BuiltinType::BT_BOOL;
+            } else if c >= ir::SIMD_ARG_MIN && c <= ir::SIMD_ARG_MAX_NUM {
+                BuiltinType::BT_USIZE;
+            } else {
+                v.bt;
+            };
+            // A dot product accumulates in a type of the lanes' kind at least as wide.
+            let dot_ok = bt_is_float(r.bt) == bt_is_float(v.bt) && bt_is_unsigned(r.bt) == bt_is_unsigned(v.bt) && bt_bytes(
+                r.bt,
+            ) >= bt_bytes(v.bt);
+            ok = ok && np == n && v.k == SG_VEC && (n == 1 || p[1].same(&v)) && r.k == SG_SCALAR && pick(
+                n == 1,
+                r.bt == rt,
+                dot_ok,
+            );
+            want = if n == 2 {
+                "(Simd<T, N>, Simd<T, N>) A, A of T's kind at least as wide";
+            } else if rt == BuiltinType::BT_BOOL {
+                "(Simd<T, N>) bool";
+            } else if rt == BuiltinType::BT_USIZE {
+                "(Simd<T, N>) usize";
+            } else {
+                "(Simd<T, N>) T";
+            };
+        } else {
+            ok = false;
+        }
+        // The lane class the operation takes.
+        let cls = if op >= ir::OP_SIMD && op < ir::OP_CMP_LANES {
+            ir::simd_op((op - ir::OP_SIMD) as u8).elem;
+        } else if op >= ir::OP_AND && op <= ir::OP_SHR || op == ir::OP_NOT || op == ir::OP_SHL_SCALAR || op == ir::OP_SHR_SCALAR {
+            ir::SE_INT;
+        } else if op == ir::OP_NEG {
+            ir::SE_SIGNED;
+        } else {
+            ir::SE_ANY;
+        };
+        let fl = bt_is_float(v.bt);
+        let sg = !fl && !bt_is_unsigned(v.bt);
+        if ok && !(cls == ir::SE_ANY || cls == ir::SE_INT && !fl || cls == ir::SE_FLOAT && fl || cls == ir::SE_SIGNED && (fl || sg) || cls == ir::SE_SINT && sg) {
+            let sp = unsafe (*a).at_const(owner).span;
+            let nm = ir::op_variant(op);
+            self.errors.emit_span(
+                sp,
+                format("'simd::Op::{}' does not apply to lanes of '{}'", nm.as_str(), bt_name(v.bt)),
+            );
+            return false;
+        }
+        if want.len() == 0 || !ok {
+            let sp = unsafe (*a).at_const(owner).span;
+            let nm = ir::op_variant(op);
+            if want.len() == 0 {
+                self.errors.emit_span(sp, format("'simd::Op::{}' has no '@simd_impl' form", nm.as_str()));
+            } else {
+                self.errors.emit_span(
+                    sp,
+                    format("a '@simd_impl(simd::Op::{}, ..)' entry has the signature `fn{}`", nm.as_str(), want),
+                );
+            }
+            return false;
+        }
+        let rb = if sr == ir::SR_RT_INDEX || sr == ir::SR_CHANGED {
+            p[1].bt; // the index lanes' or the cast result's type: the result is the source's lanes or a mask
+        } else if r.k == SG_VEC || r.k == SG_SCALAR {
+            r.bt;
+        } else if r.k == SG_MASK {
+            BuiltinType::BT_BOOL;
+        } else {
+            BuiltinType::BT_VOID;
+        };
+        *key = op as u64 | v.bt as u64 << 16 | rb as u64 << 24 | v.n << 32;
         return true;
     }
 
@@ -23403,6 +24066,7 @@ extend TypeChecker {
                 let annotated = tyn != NODE_NONE;
                 let valued = value != NODE_NONE;
                 let declared = pick(annotated, self.resolve_type(tyn), TYPE_NONE);
+                let ne = self.errors.errors.len();
                 if valued {
                     self.check_expr_w(value, declared);
                 }
@@ -23436,6 +24100,9 @@ extend TypeChecker {
                     );
                 }
                 unsafe (*self.cur_ast()).set_type(id, binding);
+                if !annotated && self.errors.errors.len() == ne {
+                    self.tc_no_held_reg(nm, binding);
+                }
                 if annotated && !valued {
                     // tc_type_is_free peels to the referent, so gate on the kind first: a `&String`
                     // binding borrows an owner, it does not become one.
@@ -24203,7 +24870,9 @@ extend TypeChecker {
                 let members = agg.members;
                 if agg.is_tuple {
                     for i in 0..members.len {
-                        self.resolve_type(unsafe (*self.cur_ast()).list(members)[i as usize]);
+                        let mid = unsafe (*self.cur_ast()).list(members)[i as usize];
+                        let ft = self.resolve_type(mid);
+                        self.tc_no_reg(mid, ft);
                     }
                 } else {
                     for i in 0..members.len {
@@ -24211,7 +24880,8 @@ extend TypeChecker {
                         let mn = *unsafe (*self.cur_ast()).at_const(mid);
                         if mn.kind == NodeKind::NODE_FIELD {
                             // The field's own record: every reader takes it from the slot.
-                            self.decl_type(mid);
+                            let ft = self.decl_type(mid);
+                            self.tc_no_reg(mn.as_data.field.ty, ft);
                         } else {
                             if mn.as_data.variant.value != NODE_NONE {
                                 let ct0 = self.ct_n;
@@ -24230,9 +24900,11 @@ extend TypeChecker {
                             for j in 0..payload.len {
                                 let plid = unsafe (*self.cur_ast()).list(payload)[j as usize];
                                 if unsafe (*self.cur_ast()).at_const(plid).kind == NodeKind::NODE_FIELD {
-                                    self.decl_type(plid);
+                                    let pt = self.decl_type(plid);
+                                    self.tc_no_reg(unsafe (*self.cur_ast()).at_const(plid).as_data.field.ty, pt);
                                 } else {
-                                    self.resolve_type(plid);
+                                    let pt = self.resolve_type(plid);
+                                    self.tc_no_reg(plid, pt);
                                 }
                             }
                         }
@@ -24327,6 +24999,7 @@ extend TypeChecker {
     // storage cannot represent.
     fn check_const_decl(self: &mut Self, id: NodeId, declared: TypeId) {
         let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
+        self.tc_no_reg(cd.ty, declared);
         let dtk = self.type_at(declared).kind;
         // An owning (Free) type IS representable: its object graph, heap blocks included,
         // materializes into static storage with relocations, exactly as a malloc'd graph does.
@@ -24939,4 +25612,41 @@ extend TypeChecker {
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }
+}
+
+// One type of a `@simd_impl` signature (`TypeChecker::tc_sig_ty`).
+const SG_OTHER: u8 = 0;
+const SG_VEC: u8 = 1;
+const SG_MASK: u8 = 2;
+const SG_SCALAR: u8 = 3;
+const SG_PTR: u8 = 4;
+const SG_UNIT: u8 = 5;
+
+struct SigTy {
+    pub k: u8,
+    pub n: u64,
+    pub bt: BuiltinType,
+    pub mutp: bool,
+}
+
+extend SigTy {
+    const fn same(self: &Self, o: &SigTy) bool {
+        return self.k == o.k && self.n == o.n && self.bt == o.bt;
+    }
+
+    // A vector of `v`'s lanes whose lane is the unsigned type of `v`'s lane width: a lane mask.
+    const fn lanes_of(self: &Self, v: &SigTy) bool {
+        return self.k == SG_VEC && self.n == v.n && bt_is_unsigned(self.bt) && bt_bytes(self.bt) == bt_bytes(v.bt);
+    }
+}
+
+// The size of lane type `bt`; 0 for a type that is no lane.
+const fn bt_bytes(bt: BuiltinType) u64 {
+    return switch bt {
+        BT_I8 | BT_U8 => 1,
+        BT_I16 | BT_U16 => 2,
+        BT_I32 | BT_U32 | BT_F32 => 4,
+        BT_I64 | BT_U64 | BT_F64 => 8,
+        _ => 0,
+    };
 }

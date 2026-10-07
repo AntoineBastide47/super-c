@@ -805,3 +805,38 @@ fn lint_explicit_prelude_import_is_the_prelude_module() {
     assert(!r.out_has("mismatched types"));
     assert_eq(r.exit, 0);
 }
+
+// An import that only an item gated out by `@arch` uses is not reported: another instruction set
+// compiles the item.
+@test
+fn arch_gated_uses_keep_imports() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import string as cstring;\n\n@arch(wasm32)\nfn len_of(s: str) usize {\n    return unsafe cstring::strlen(s.ptr() as *const char);\n}\n\n@arch(x86_64 | aarch64)\nfn len_of(s: str) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    return len_of(\"ab\") as i32 - 2;\n}\n",
+    );
+    let mut args = String::from_str("lint \"");
+    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(!r.out_has("unused import"), "the gated item uses it");
+    assert_eq(r.exit, 0);
+}
+
+// A byte pointer across the elements of a nested array or a vector stays inside one object, which
+// the pointer rules allow: the compile-time model cannot follow such a view, so it reports nothing,
+// and the program runs.
+@test
+fn byte_views_of_aggregates_are_no_provable_fault() {
+    let srcs: [str; 2] = [
+        "fn main() i32 {\n    let mut buf: [[u8; 32]; 2] = [[0; 32], [0; 32]];\n    let base = &mut buf as *mut [[u8; 32]; 2] as *mut u8;\n    for i in 0usize..32 {\n        unsafe *(base + 8 + i) = 1;\n    }\n    return buf[1][0] as i32 - 1;\n}\n",
+        "fn main() i32 {\n    let mut v = Simd::<u8, 64>::splat(0);\n    let base = &mut v as *mut Simd<u8, 64> as *mut u8;\n    unsafe *(base + 40) = 7;\n    return v[40] as i32 - 7;\n}\n",
+    ];
+    for src in srcs {
+        let p = cli::proj_new();
+        p.mkfile("main.spc", src);
+        let r = p.compile("main.spc");
+        assert(r.ok() && !r.out_has("undefined behavior"), "no compile-time fault");
+        assert(p.cc_build("").ok() && p.run_bin() == 0, "the run writes the bytes");
+    }
+}

@@ -25,7 +25,7 @@ struct Key {
     pub doc: str<'static>,
 }
 
-const KEYS: [Key; 25] = [
+const KEYS: [Key; 27] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
@@ -40,10 +40,12 @@ const KEYS: [Key; 25] = [
     Key { sec: "", name: "const-eval-steps", doc: "compile-time evaluation step budget" },
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
+    Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"simd128\"] (default: none)" },
     Key { sec: "profile.", name: "cflags", doc: "C compiler flags for this profile" },
     Key { sec: "profile.", name: "ldflags", doc: "linker flags for this profile" },
     Key { sec: "profile.", name: "strip", doc: "strip the linked binary (bool)" },
     Key { sec: "profile.", name: "overflow-checks", doc: "trap signed overflow (bool; default: opt-level < 2)" },
+    Key { sec: "profile.", name: "target-features", doc: "CPU features for this profile; replaces the build's list" },
     Key { sec: "command.", name: "run", doc: "the command line to run, as an array of strings" },
     Key { sec: "command.", name: "needs-build", doc: "build the project first (bool)" },
     Key { sec: "command.", name: "env", doc: "environment for the command, as an inline table" },

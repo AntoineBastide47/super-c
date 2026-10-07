@@ -65,9 +65,10 @@ ordering ("does not implement `Eq`; compare lanes"): `equal` and the other compa
 ## Lane operations
 
 Every lane operation applies the scalar rule of its lane type (operations.md) to each lane, as a
-constant and at run time alike. The emitted C is a lane loop with a constant trip count over the
-storage arrays, or `memcpy` for the operations that move bytes; it uses no target intrinsic and no
-C vector extension, and its result never depends on the C compiler vectorizing it.
+constant and at run time alike. Without a usable backend entry (Target features below) the
+emitted C is a lane loop with a constant trip count over the storage arrays, or `memcpy` for the
+operations that move bytes; it uses no target intrinsic and no C vector extension, and its result
+never depends on the C compiler vectorizing it.
 
 The lane interfaces bound the operations: `SimdInt` (`i8` to `u64`), `SimdSigned` (`i8` to `i64`,
 `f32`, `f64`) and `SimdFloat` (`f32`, `f64`). Only `std` implements them; a call on other lanes is
@@ -305,7 +306,87 @@ place ("use `get` or `set`"), and a mask is no condition ("use `.any()` or `.all
 
 ## Casts and evaluation
 
-`as` between `[T; N]` and `Simd<T, N>`, and between `Mask<N>` and `u64`, is legal
-only in `std`. The compile-time evaluator holds a vector as its array of lanes and a mask as an
+`as` between `[T; N]` and `Simd<T, N>`, and between `Mask<N>` and `u64`, is legal only in
+`std`. The compile-time evaluator holds a vector as its array of lanes and a mask as an
 integer; a vector constant is static data. `type_info` reports `TypeTag::Simd` (element and
 length as for an array) and `TypeTag::Mask` (element `Bool`, length `N`).
+
+## Target features and backends
+
+A CPU feature (`--target-feature`, build.toml `target-features`, see super-c-binary) only
+selects instructions: every vector operation gives the same lanes and the same traps with and
+without it. Three attributes, each with constant-expression arguments checked by type, connect
+the features to code:
+
+| Attribute | Where | Meaning |
+|-----------|-------|---------|
+| `@target_feature([cpu::Feature::X, ..])` | a function whose `@arch` gate (or its extend's) holds every feature's instruction set (checked at the parse for a list of `cpu::Feature` variants, so on every target alike); not a method of a conformance, which a bound or `dyn` calls unnamed | the function needs the features: a call or a function value of it is an error unless the build, or the calling function with what its features imply, holds them ("`f` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`)"); `main`, `@c.export`, `@test` and `@bench` functions need them in the build ("..; it is called from outside the program"); a function the build cannot call emits nothing; the compile-time evaluator has no value for it ("`f` has no compile-time value") |
+| `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | a function of `std` (else "'@simd_impl' is reserved for the standard library") | a backend entry: an implementation of operation `X` for the lane type and count of its signature, under the features. Never `RelaxedSimd` |
+| `@c.value(size, align)` | an opaque type (`type T;`) of an `extern "C"` block | a C register type (`v128_t`) with that layout, which a `_Static_assert` beside the header include checks: `Copy`, `sizeof`/`alignof` read it; a local, a parameter or a result only, never a field, variant payload, element, static, pointer or reference target, capture or generic argument, written or inferred (`[x, x]`, `(x, 1)`, `&x`, `\|\| x`, `id(x)`): "`v128_t` is a register type; store it through `Simd<T, N>`" |
+
+A misspelled variant is an error at the argument ("no variant, method, or constant 'Neonn'"),
+a value of another enum a type error. `std::cpu::Feature` follows the compiler's feature table
+and `std::simd::Op` its operation table, name and discriminant (`tests/target_feature_test.spc`
+asserts both at compile time).
+
+### Backend files
+
+`std/simd/backend/<x86|aarch64|wasm>.spc`, the file of the build's instruction set, loads with
+the prelude when it exists and the build has a feature (today: `wasm.spc`, header
+`<wasm_simd128.h>`, bindings in `ffi/wasm_simd128.spc`); it emits no unit of its own, so a
+program without vectors emits the same C with and without the features. Each entry is a plain
+function with `@arch` and `@simd_impl`; the file's helpers `reg` and `vec` move a vector into a
+register and back (`wasm_v128_load`, `wasm_v128_store`), and the compiler splices them into
+every entry:
+
+```superc
+@arch(wasm32)
+@simd_impl(simd::Op::Add, [cpu::Feature::Simd128])
+fn add_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return vec::<f32, 4>(wasm_f32x4_add(reg(a), reg(b)));
+}
+```
+
+The signature must have the operation's shape ("a '@simd_impl(simd::Op::Add, ..)' entry has
+the signature `fn(Simd<T, N>, Simd<T, N>) Simd<T, N>`"). The lane-mask forms take and give
+`Simd<U, N>`, `U` the unsigned type of the lane width, all ones for a true lane: `CmpEqLanes`
+to `CmpGeLanes`, `ChooseLanes`, `LanesToMask`, `MaskToLanes`, `AnyLanes`, `AllLanes`; a
+constant index list (`swizzle`, `shuffle`) has no entry: under the planner it is the C
+compiler's shuffle of the lanes (`__builtin_shufflevector`), one `i8x16.shuffle` per 16 result
+bytes; `LoadMasked` and
+`StoreMasked` take the elements' address, the mask and the fallback or stored vector, and touch
+an inactive lane's element never. A trapping operator has no entry of its own: its
+`OverflowAdd`, `OverflowSub` or `OverflowMul` entry names the failing lanes (a shift by a scalar
+count checks the count once), then its wrapping twin's entry computes the lanes. One entry per
+operation, lane type, lane count and feature count: two are an error naming both. An entry may
+call bindings, and functions of its file that inline (one that does not fails the build); it
+must give the operation's exact result for
+every input, NaN payloads aside (`tests/simd_entry_test.spc` compares every entry with the lane
+loop on boundary inputs in the wasm conformance lane).
+
+To add a backend: write the file with entries for the operations whose instructions match
+the lane rule exactly, and a binding module for the header; an operation without an entry
+keeps its lane loop.
+
+### Lowering planner
+
+`src/emit/simd_plan.spc` decides each vector statement from the backend table and the build's
+features alone: `Native` (an entry for the lanes), `Split` (the widest entry for a power-of-two
+fraction of the lanes, applied to each chunk in lane order; a reduction combines its chunks
+with the lane-wise entry its definition names), or `Scalar` (the lane loop). Among usable
+entries the one with the most features wins. A comparison read only by one `choose` keeps its
+lanes in lane-mask temporaries; one read only by `any`, `none`, `all` or `!all` (through copies
+and a cast to `u64`) reduces its lane masks with `AnyLanes` or `AllLanes`; otherwise it packs
+its lanes into the mask with `LanesToMask`. A choice of a stored mask unpacks it with
+`MaskToLanes`. A split reads every operand before it writes a chunk, so a pointer may alias a
+vector operand or the result. Entries render as `static inline` C functions, always inlined. A
+build under a memory checker never plans an entry that calls a `@c.lane_access` binding.
+
+### The wasm32 module
+
+`std::simd::wasm` holds the WebAssembly operations with no portable meaning, over the portable
+types: `relaxed_madd`, `relaxed_nmadd`, `relaxed_min`, `relaxed_max` (`_f32x4`, `_f64x2`),
+`relaxed_swizzle`, `relaxed_trunc`, `relaxed_dot_i8x16_i7x16_add` (each needs `RelaxedSimd`:
+the result can differ between engines), and `pmin`/`pmax` (`_f32x4`, `_f64x2`), `q15mulr_sat`,
+`dot_i16x8` (`Simd128`). A relaxed instruction appears only there: no portable operation
+uses one.

@@ -209,7 +209,9 @@ terminator / rvalue kind tables, and the replay-tape events are in
 whole-package typecheck, the obligation discharge and the first type publication; the
 measurement that rejected an earlier publication point, the consumer inventory and the
 replay-tape category table are in
-[core-ir-publication.md](references/core-ir-publication.md).
+[core-ir-publication.md](references/core-ir-publication.md). Vector operations reach target
+instructions through the CPU feature set, the `@simd_impl` backend table and the lowering
+planner: [simd-backends.md](references/simd-backends.md).
 
 **One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of `KeptBody`
 records (the elaborated body and its closures) keyed by body. Borrowck's lowerings are recycled into it, and emission's
