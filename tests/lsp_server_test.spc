@@ -9,6 +9,8 @@ import driver_shim as shim;
 import module::loader as loader;
 import lsp::json as json;
 import lsp::text as text;
+import lsp::features as feat;
+import ast::parser as par;
 
 // URI <-> path, the mapping every request is keyed on. A Windows drive letter is the trap: it sits exactly
 // where a URI's authority goes, so parsing `file://C:/x` as scheme+authority+path silently drops the drive
@@ -37,6 +39,33 @@ fn uri_path_roundtrip() {
     let uri = text::path_to_uri(p);
     uri_path_is(uri.as_str(), p);
     assert(uri.as_str().starts_with("file:///"), "the authority is empty and the path is absolute");
+}
+
+// Attribute hover reads the source text: the '@', any byte of a dotted name, and the byte after it
+// all hit; an argument, an unknown name and a name without '@' do not.
+@test
+fn attribute_hover_positions() {
+    let src = "@c.align(LINE)\n@intrinsic(\"simd.eq\")\n@nope\nfn test() {}\n";
+    let h = feat::attribute_hover(src, 0).unwrap();
+    assert(h.as_str().starts_with("```super-c\n@c.align(N)\n```\n\n"));
+    assert(feat::attribute_hover(src, 3).is_some());
+    assert(feat::attribute_hover(src, 8).is_some());
+    assert(feat::attribute_hover(src, 10).is_none());
+    assert(feat::attribute_hover(src, 18).unwrap().as_str().contains("@intrinsic"));
+    assert(feat::attribute_hover(src, 39).is_none());
+    assert(feat::attribute_hover(src, 46).is_none());
+}
+
+// Every attribute the parser accepts has hover documentation.
+@test
+fn attribute_hover_covers_parser_inventory() {
+    let mut names = Vector::<String>::new();
+    par::known_attributes(&mut names);
+    for i in 0..names.len() {
+        let mut src = String::from_str("@");
+        src.push_string(names.at(i));
+        assert(feat::attribute_hover(src.as_str(), 1).is_some(), "an attribute has no hover documentation");
+    }
 }
 
 const MAIN_ERR: str = "fn main() i32 {\n    let x: i32 = \"hello\";\n    return x;\n}\n";

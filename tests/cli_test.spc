@@ -8436,14 +8436,17 @@ fn dir_names(dir: str) Vector<String> {
     return out;
 }
 
-// The object cache namespace below cache root `cache` (the first one listed); empty when there is none.
+// The object cache namespace of a tree below cache root `cache` (the first one listed, not the shared
+// `script` one); empty when there is none.
 fn cache_ns(cache: str) String {
     let mut od = String::new();
     od.format_into("{}/o", cache);
     let names = dir_names(od.as_str());
     let mut out = String::new();
-    if names.len() != 0 {
-        out.format_into("{}/{}", od.as_str(), names.at(0).as_str());
+    for i in 0..names.len() {
+        if out.len() == 0 && names.at(i).as_str() != "script" {
+            out.format_into("{}/{}", od.as_str(), names.at(i).as_str());
+        }
     }
     return out;
 }
@@ -8505,7 +8508,7 @@ fn cache_version(p: &cli::Proj, v: i32) {
 
 // Object cache retention: an object tree's namespace keeps the objects its four newest key sets name,
 // whatever the number of versions built. A version inside that window rebuilds with no compile, an
-// older one compiles again.
+// older one compiles again once the shared `script` namespace no longer holds it either.
 @test
 fn object_cache_keeps_four_generations() {
     let p = cli::proj_new();
@@ -8526,7 +8529,11 @@ fn object_cache_keeps_four_generations() {
     }
     let mut od = String::new();
     od.format_into("{}/o", cache.as_str());
-    assert_eq(dir_names(od.as_str()).len(), 1);
+    let names = dir_names(od.as_str());
+    assert(names.len() == 2 && (names.at(0).as_str() == "script" || names.at(1).as_str() == "script"));
+    let mut sns = String::new();
+    sns.format_into("{}/script", od.as_str());
+    bsys::rm_rf(sns.as_str());
     // Version 2 is in the window (versions 2 to 5): every unit restores.
     cache_version(&p, 2);
     let r2 = cli::superc_env_in(root, "SC_BUILD_STATS", env.as_str(), "build");
@@ -8701,6 +8708,58 @@ fn object_cache_keeps_trees_apart() {
     other.format_into("{}/src/helper.h", ta.as_str());
     assert(d.as_str().find(own.as_str()) >= 0, "b's object depends on b's header");
     assert(d.as_str().find(other.as_str()) < 0, "b's object is not a's compile replayed");
+}
+
+// Two trees with byte-identical sources share their objects through the cache's `script` namespace,
+// with and without debug information (which names the working directory `.`): the second tree
+// compiles no unit, so its own namespace stays empty, its objects do not name the first tree, and its
+// binary runs.
+@test
+fn object_cache_shares_identical_units_across_trees() {
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    for d in ["a", "b"] {
+        let mut f = String::new();
+        f.format_into("{}/build.toml", d);
+        p.mkfile(f.as_str(), "bin = \"app\"\nroot = \"src/main.spc\"\n\n[profile.nodebug]\nopt-level = 1\n");
+        f.truncate(0);
+        f.format_into("{}/src/main.spc", d);
+        p.mkfile(f.as_str(), "fn main() i32 {\n    println(\"shared\");\n    return 3;\n}\n");
+    }
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    let mut ta = String::new();
+    ta.format_into("{}/a", root);
+    let mut tb = String::new();
+    tb.format_into("{}/b", root);
+    let mut od = String::new();
+    od.format_into("{}/o", cache.as_str());
+    for prof in ["nodebug", "dev"] {
+        let mut arg = String::new();
+        arg.format_into("build --profile={}", prof);
+        assert(cli::superc_env_in(ta.as_str(), "SC_CACHE_DIR", cache.as_str(), arg.as_str()).ok(), "tree a builds");
+        let before = dir_names(od.as_str());
+        arg.truncate(0);
+        arg.format_into("run --profile={}", prof);
+        assert(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), arg.as_str()).exit == 3, "tree b runs");
+        let after = dir_names(od.as_str());
+        assert(after.len() == before.len() + 1, "tree b has its own namespace");
+        for i in 0..after.len() {
+            let mut seen = false;
+            for j in 0..before.len() {
+                seen = seen || after.at(i).equals(before.at(j));
+            }
+            if !seen {
+                let mut ns = String::new();
+                ns.format_into("{}/{}", od.as_str(), after.at(i).as_str());
+                assert(cli::dir_count_suffix(ns.as_str(), ".o") == 0, "tree b compiles no unit");
+            }
+        }
+        let mut obj = String::new();
+        obj.format_into("{}/build/{}/obj/main.o", tb.as_str(), prof);
+        let ra = ocache::real_path(ta.as_str());
+        assert(cli::read_text(obj.as_str()).as_str().find(ra.as_str()) < 0, "tree b's object does not name tree a");
+    }
 }
 
 // An object restored from the cache relinks the binary like a compiled one: the copy's mtime need not be

@@ -20,7 +20,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -42,7 +42,7 @@ jobs:
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: compiler-windows
           path: super-c.exe
@@ -65,7 +65,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -83,7 +83,7 @@ jobs:
           Add-MpPreference -ExclusionProcess "ld.exe"
           Add-MpPreference -ExclusionProcess "super-c.exe"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: compiler-windows
 
@@ -106,7 +106,7 @@ jobs:
     name: linux compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -121,7 +121,7 @@ jobs:
       - name: Build the compiler
         run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: compiler-linux
           path: super-c
@@ -146,7 +146,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -154,7 +154,7 @@ jobs:
           cache: ccache-linux-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: compiler-linux
 
@@ -199,7 +199,7 @@ jobs:
     name: wasm compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -218,7 +218,7 @@ jobs:
       - name: Build the wasm compiler
         run: ./super-c build --target=wasm --profile=release -o super-c.wasm
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: compiler-wasm
           path: |
@@ -236,7 +236,7 @@ jobs:
           cp -R std ffi "dist/${name}/"
           tar -C dist -czf "${name}.tar.gz" "${name}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wasm
           path: super-c-wasm32-wasip1.tar.gz
@@ -255,7 +255,7 @@ jobs:
             cache_shard: 2
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -263,7 +263,7 @@ jobs:
           cache: ccache-wasm-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: compiler-wasm
 

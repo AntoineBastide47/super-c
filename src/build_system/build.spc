@@ -127,19 +127,26 @@ pub fn rm_rf(path: str) {
 }
 
 // The global object cache: ~/.super-c/cache, content-addressed
-// A translation unit whose C text, quoted-include closure, compiler version and flags all match a
-// previous compile of the same local object tree reuses that compile's object instead of running
-// the C compiler again. The key hashes content, so the cache needs no invalidation story: different
-// content is a different key. The content includes paths: every unit includes __sc_fwd.h, which
-// names the runtime headers by absolute path, so a tree at another path gets other keys. System
-// headers (<...>) are outside the key; the compiler-version fingerprint stands in for them, the same
-// bet ccache's direct mode makes.
+// A translation unit whose C text, quoted-include closure, compiler version and compile command all
+// match a previous compile reuses that compile's object instead of running the C compiler again.
+// The key hashes content, so the cache needs no invalidation story: different content is a
+// different key. The content includes paths: the emitted headers name the runtime and extern-block
+// headers by absolute path, so a unit that includes a tree's own header gets other keys in a tree
+// at another path. System headers (<...>) are outside the key; the compiler-version fingerprint
+// stands in for them, the same bet ccache's direct mode makes.
 //
 // Retention: each local object tree (a profile directory such as build/dev) owns the namespace
 // `<root>/o/<hash of its real path>`. A successful build writes the key set of its units as a
 // generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
 // every object and dependency list no kept generation names (`obj_cache_commit`). A sweep every two hours
 // removes dead namespaces and idle linker caches (`cache_sweep`).
+// A unit whose object records no path (no coverage or profile instrumentation, `instruments`; debug
+// information names the working directory `.`, `dmap`) also goes to the script namespace every tree
+// shares, and a miss in the tree's namespace reads it there: another tree that compiled the same text
+// with the same command (the runtime of every test fixture) serves it. The key holds the whole command
+// but the directory map, so the object is the one this tree's compile would write; an object whose
+// bytes still name the working directory (a compiler that ignored the map) stays out of the shared
+// namespace.
 // The key, the cache root and the namespace that script builds share live in build_system::objcache.
 
 /// The generations an object cache namespace keeps: the current build and three older ones.
@@ -888,6 +895,7 @@ struct Pend {
     pub cmdpath: String, // <obj>.cmd: fingerprint, last duration, cache key (empty when not cacheable)
     pub prev_ms: i64, // last recorded duration; longest-first scheduling shrinks the tail
     pub cobj: String, // global-cache install target for the object; empty = not cacheable
+    pub sobj: String, // its install target in the shared script namespace; empty = none
     pub oout: String, // the object this compile writes (the install source)
     pub dout: String, // its .d sibling
     pub seq: usize, // queue order: the tiebreak among equal durations
@@ -901,17 +909,18 @@ struct Job {
     pub cmdpath: String,
     pub start_ns: u64,
     pub cobj: String, // see Pend: the global-cache install, performed on success
+    pub sobj: String,
     pub oout: String,
     pub dout: String,
 }
 
 extend Job {
     // On success, persist fingerprint, duration and cache key, and install the object into the global
-    // cache, via a temp named by key and pid + rename, so concurrent builds never write the same temp
-    // file. On failure, report the exit status and replay a bounded part of the captured compiler
-    // output; the log file stays for inspection (the unit's next successful compile removes it).
+    // cache (`cache_install`), in the tree's namespace and the shared one. On failure, report the exit
+    // status and replay a bounded part of the captured compiler output; the log file stays for
+    // inspection (the unit's next successful compile removes it).
     // `gen` is the gen root, which the portable .d rewrite replaces.
-    fn finish(self: &mut Self, code: i32, gen: str) i32 {
+    fn finish(self: &mut Self, code: i32, gen: str, cwds: &Vector<String>) i32 {
         let end_ns = platform::now_ns();
         bst::cc_job(self.start_ns, end_ns);
         if code != 0 {
@@ -926,30 +935,55 @@ extend Job {
                 cache_key(self.cobj.as_str()),
             );
             let _ = write_file_atomic(self.cmdpath.as_str(), rec.as_str());
-            if self.cobj.len() != 0 {
-                let pid = unsafe shim::sc_getpid();
-                let mut tmp = format("{}.{}.tmp", self.cobj.as_str(), pid);
-                let mut oc = self.cobj.clone();
-                if !copy_file(self.oout.as_str(), tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), oc.cstr()) != 0 {
-                    let _ = unsafe shim::sc_unlink(tmp.cstr());
-                }
-                let dep = loader::read_file(self.dout.as_str());
-                if !dep.is_none() {
-                    let d = dep.unwrap();
-                    let port = dep_portable(d.as_str(), gen);
-                    let mut dtmp = format("{}.{}.d.tmp", self.cobj.as_str(), pid);
-                    let mut cd = self.cobj.clone();
-                    cd.truncate(cd.len() - 2);
-                    cd.push_str(".d");
-                    if !write_file(dtmp.as_str(), port.as_str()) || unsafe shim::sc_rename(dtmp.cstr(), cd.cstr()) != 0 {
-                        let _ = unsafe shim::sc_unlink(dtmp.cstr());
-                    }
-                }
+            cache_install(self.cobj.as_str(), self.oout.as_str(), self.dout.as_str(), gen);
+            if self.sobj.len() != 0 && !names_any(self.oout.as_str(), cwds) {
+                cache_install(self.sobj.as_str(), self.oout.as_str(), self.dout.as_str(), gen);
             }
         }
         unsafe shim::sc_unlink(self.log.cstr());
         return code;
     }
+}
+
+// Install object `oout` and its dependency list `dout` (made portable: `gen` is the gen root) as cache
+// entry `cobj` (none when empty), each through a temp named by the key and the pid and a rename, so
+// concurrent builds never write the same temp file.
+fn cache_install(cobj: str, oout: str, dout: str, gen: str) {
+    if cobj.len() == 0 {
+        return;
+    }
+    let pid = unsafe shim::sc_getpid();
+    let mut tmp = format("{}.{}.tmp", cobj, pid);
+    let mut oc = String::from_str(cobj);
+    if !copy_file(oout, tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), oc.cstr()) != 0 {
+        let _ = unsafe shim::sc_unlink(tmp.cstr());
+    }
+    let dep = loader::read_file(dout);
+    if !dep.is_none() {
+        let d = dep.unwrap();
+        let port = dep_portable(d.as_str(), gen);
+        let mut dtmp = format("{}.{}.d.tmp", cobj, pid);
+        let mut cd = String::from_str(cobj.slice(0, cobj.len() - 2));
+        cd.push_str(".d");
+        if !write_file(dtmp.as_str(), port.as_str()) || unsafe shim::sc_rename(dtmp.cstr(), cd.cstr()) != 0 {
+            let _ = unsafe shim::sc_unlink(dtmp.cstr());
+        }
+    }
+}
+
+// Whether file `path` contains one of `words` (true when it cannot be read).
+fn names_any(path: str, words: &Vector<String>) bool {
+    let t = loader::read_file(path);
+    if t.is_none() {
+        return true;
+    }
+    let b = t.unwrap();
+    for i in 0..words.len() {
+        if b.as_str().find(words.at(i).as_str()) >= 0 {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The cache key of install target `cobj` (`<namespace>/<key>.o`); empty when not cacheable.
@@ -1092,6 +1126,9 @@ struct CcStream {
     pub marked: bool, // this build wrote `pending`
     pub ret: i32,
     pub cache: String, // this object tree's namespace of the global object cache; empty = disabled
+    pub shared: String, // the script namespace, when the objects record no path; empty = not shared
+    pub cwds: Vector<String>, // the working directory's spellings, which no shared object may contain
+    pub dmap: Vector<String>, // under debug information: each of `cwds` mapped to `.`
     pub keys: Vector<String>, // the cache key of every planned unit that has one (`obj_cache_commit`)
     pub rewritten: Set<String>, // gen-relative files whose content changed in this build's sync
     pub mtimes: Map<String, i64>, // dependency path (as a depfile spells it) -> its mtime, stat once per build
@@ -1168,6 +1205,28 @@ extend CcStream {
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
             mkdir_p(self.cache.as_str());
+            if !instruments(&self.prefix_args) {
+                self.shared = script_ns(object_cache_dir().as_str());
+                mkdir_p(self.shared.as_str());
+            }
+        }
+        // The compiler spells the working directory as `$PWD` when that names it, else as its real
+        // path (with `\` on Windows): under debug information each maps to `.`, so the object does not
+        // depend on the tree it was compiled in.
+        if self.shared.len() != 0 {
+            self.cwds.push(self.ccdb_dir.clone());
+            let pwd = stdlib::getenv("PWD");
+            if pwd != null && real_path(str::from_cstr(pwd)).as_str() == self.ccdb_dir.as_str() && str::from_cstr(pwd) != self.ccdb_dir.as_str() {
+                self.cwds.push(String::from_cstr(pwd));
+            }
+            if self.ccdb_dir.len() > 2 && self.ccdb_dir.as_str()[1] == b':' {
+                let mut bs = self.ccdb_dir.clone();
+                bs.replace_byte(b'/', b'\\');
+                self.cwds.push(bs);
+            }
+            for i in 0..pick(debug_info(&self.prefix_args), self.cwds.len(), 0) {
+                self.dmap.push(format("-fdebug-prefix-map={}=.", self.cwds.at(i).as_str()));
+            }
         }
     }
 
@@ -1374,6 +1433,9 @@ extend CcStream {
         fp.push_str(" | ");
         let rendered = render_cmd(&args);
         fp.push_string(&rendered);
+        for i in 0..self.dmap.len() {
+            args.push(self.dmap.at(i).clone());
+        }
         push_used(&mut fp, &self.probes.used);
         // compile_commands.json row (every unit, stale or not): tooling attaches to the generated
         // tree through it, so it reflects the exact argv this build would run.
@@ -1425,11 +1487,14 @@ extend CcStream {
             }
             mkdir_p(loader::dirname_of(opath.as_str()));
             let mut cobj = String::new();
+            let mut sobj = String::new();
             if self.cache.len() != 0 {
+                // The whole command (the unit's and the object's paths too), so a tree that shares the
+                // key compiled exactly this.
                 let mut h1 = FNV_BASIS;
                 let mut h2: u64 = 0x9e3779b97f4a7c15;
                 ch_mix_bytes(&mut h1, &mut h2, self.ccver.as_str().ptr(), self.ccver.len());
-                ch_mix_bytes(&mut h1, &mut h2, self.cc_tail.as_str().ptr(), self.cc_tail.len());
+                ch_mix_bytes(&mut h1, &mut h2, rendered.as_str().ptr(), rendered.len());
                 if ch_hash_file(cpath.as_str(), &mut h1, &mut h2, 0, &mut self.hmemo, &mut self.hpool) {
                     let mut keyname = String::new();
                     hex64(h1, &mut keyname);
@@ -1440,6 +1505,15 @@ extend CcStream {
                     if self.cache_restore(&cobj, opath.as_str(), dpath.as_str(), &fp) {
                         self.objs.push(opath.clone());
                         return;
+                    }
+                    if self.shared.len() != 0 {
+                        sobj = loader::join2(self.shared.as_str(), keyname.as_str());
+                        if self.cache_restore(&sobj, opath.as_str(), dpath.as_str(), &fp) {
+                            // The mtime is the entry's last use: the trim deletes the least recently used.
+                            let _ = unsafe shim::sc_touch(sobj.cstr());
+                            self.objs.push(opath.clone());
+                            return;
+                        }
                     }
                 }
             }
@@ -1453,6 +1527,7 @@ extend CcStream {
                     cmdpath: cmdpath,
                     prev_ms: prev_ms,
                     cobj: cobj,
+                    sobj: sobj,
                     oout: opath.clone(),
                     dout: dpath.clone(),
                     seq: self.stale_n,
@@ -1525,7 +1600,7 @@ extend CcStream {
                     break;
                 }
                 let mut j = self.window.remove(idx as usize).unwrap();
-                if j.finish(code, self.gen.as_str()) != 0 {
+                if j.finish(code, self.gen.as_str(), &self.cwds) != 0 {
                     self.ret = 1;
                 }
             }
@@ -1555,6 +1630,7 @@ extend CcStream {
                 cmdpath: replace(&mut w.cmdpath, String::new()),
                 start_ns: platform::now_ns(),
                 cobj: replace(&mut w.cobj, String::new()),
+                sobj: replace(&mut w.sobj, String::new()),
                 oout: replace(&mut w.oout, String::new()),
                 dout: replace(&mut w.dout, String::new()),
             },
@@ -1621,7 +1697,7 @@ extend CcStream {
                 break;
             }
             let mut j = self.window.remove(idx as usize).unwrap();
-            if j.finish(code, self.gen.as_str()) != 0 {
+            if j.finish(code, self.gen.as_str(), &self.cwds) != 0 {
                 self.ret = 1;
             }
         }
@@ -2546,6 +2622,9 @@ fn cc_stream(
         marked: false,
         ret: 0,
         cache: cache,
+        shared: String::new(),
+        cwds: Vector::<String>::new(),
+        dmap: Vector::<String>::new(),
         keys: Vector::<String>::new(),
         rewritten: Set::<String>::new(),
         mtimes: Map::<String, i64>::new(),
@@ -2862,6 +2941,9 @@ fn engine_build_i(
             let now = time::now();
             if stream.cache.len() != 0 {
                 obj_cache_commit(stream.cache.as_str(), &mut stream.keys, pdir.as_str(), now);
+            }
+            if stream.shared.len() != 0 && stream.stale_n != 0 {
+                script_trim(stream.shared.as_str(), now);
             }
             let croot = cache_root();
             if croot.len() != 0 {
@@ -3515,8 +3597,8 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
     // The fixture builds of one suite run share one object cache (SC_TEST_CACHE_DIR, read by the
-    // harness): the runtime and std units they emit identically compile once, and the cache stays out
-    // of the user's global one. Absolute: tests change directory.
+    // harness): the runtime and std units they emit identically compile once (through its script
+    // namespace), and the cache stays out of the user's global one. Absolute: tests change directory.
     let mut fxc = real_path(m.out_dir.as_str());
     if fxc.len() != 0 {
         fxc.push_str("/test/fixture-cache");

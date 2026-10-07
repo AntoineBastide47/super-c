@@ -2,6 +2,11 @@
 // are (line, character) with character counted in UTF-16 code units (1 unit per BMP scalar, 2 per 4-byte
 // astral scalar).
 
+/// True for a byte of an identifier: an ASCII letter, digit or '_'.
+pub const fn ident_byte(b: u8) bool {
+    return b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9';
+}
+
 /// An LSP position: 0-based line, `character` counted in UTF-16 code units (not bytes).
 pub struct Pos {
     pub line: u32,

@@ -4826,16 +4826,12 @@ extend Parser {
 
 /// Every attribute spelling this parser classifies, exactly as written after `@` (namespace-qualified
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
-/// three together when an attribute is added; LSP completion serves this list.
+/// three together when an attribute is added; LSP completion serves this list, and LSP hover
+/// documents each entry (`ATTR_DOCS` in src/lsp/features.spc).
 pub fn known_attributes(out: &mut Vector<String>) {
-    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip unsafe(safe) unsafe(const) unsafe(safe, const) intrinsic target_feature simd_impl";
-    let mut it = names.split(" ");
-    loop {
-        let w = it.next();
-        if w.is_none() {
-            break;
-        }
-        out.push(String::from_str(w.unwrap()));
+    let names: []str = ATTR_NAMES;
+    for i in 0..names.len() {
+        out.push(String::from_str(names[i]));
     }
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
@@ -4863,6 +4859,28 @@ fn known_attr_name(kind: u8, out: &mut String) {
         }
     }
 }
+
+// The attributes outside the `c.` namespace, as `known_attributes` gives them.
+const ATTR_NAMES: [str<'static>; 18] = [
+    "emit_macro",
+    "bench",
+    "test",
+    "test_init",
+    "test_free",
+    "blocking",
+    "no_const",
+    "derive",
+    "reflect",
+    "platform",
+    "arch",
+    "fmt.skip",
+    "unsafe(safe)",
+    "unsafe(const)",
+    "unsafe(safe, const)",
+    "intrinsic",
+    "target_feature",
+    "simd_impl",
+];
 
 // The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
 // `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,

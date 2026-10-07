@@ -295,9 +295,170 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
     return out;
 }
 
-/// Markdown hover for the position: the expression's rendered type, then the resolved declaration's
-/// head. None when the position carries neither.
+// One attribute for hover: its spelling after '@' (as `par::known_attributes` gives it, `unsafe`
+// for the `unsafe(..)` forms), its written form and what it does.
+struct AttrDoc {
+    pub name: str<'static>,
+    pub sig: str<'static>,
+    pub doc: str<'static>,
+}
+
+const ATTR_DOCS: [AttrDoc; 34] = [
+    AttrDoc {
+        name: "emit_macro",
+        sig: "@emit_macro",
+        doc: "Also writes the generic struct or enum as a C macro, for use from plain C.",
+    },
+    AttrDoc {
+        name: "bench",
+        sig: "@bench(log_results = false)",
+        doc: "A benchmark that `super-c bench` runs. `log_results = false` drops the line the runner prints.",
+    },
+    AttrDoc {
+        name: "test",
+        sig: "@test(should_panic, timeout = N)",
+        doc: "A test that `super-c test` runs. `should_panic` expects a panic; `timeout` sets the limit in seconds.",
+    },
+    AttrDoc {
+        name: "test_init",
+        sig: "@test_init",
+        doc: "Makes a new fixture for each test that takes one as a parameter.",
+    },
+    AttrDoc { name: "test_free", sig: "@test_free", doc: "Releases a fixture after each test that takes one." },
+    AttrDoc { name: "blocking", sig: "@blocking", doc: "Runs the extern function on the blocking thread pool." },
+    AttrDoc {
+        name: "no_const",
+        sig: "@no_const",
+        doc: "A struct, union or enum whose values never exist at compile time.",
+    },
+    AttrDoc {
+        name: "derive",
+        sig: "@derive(I, ..)",
+        doc: "Adds an empty `extend T as I {}` for each interface: the type gets the default bodies.",
+    },
+    AttrDoc {
+        name: "reflect",
+        sig: "@reflect(key, key = value, ..)",
+        doc: "Adds metadata to the type's reflection descriptor. A key without a value is `true`.",
+    },
+    AttrDoc {
+        name: "platform",
+        sig: "@platform(P)",
+        doc: "Keeps the item only for the platforms `P` names: `|` is a union, `!` a negation.",
+    },
+    AttrDoc {
+        name: "arch",
+        sig: "@arch(A)",
+        doc: "Keeps the item only for the instruction sets `A` names: `x86_64`, `aarch64`, `wasm32`.",
+    },
+    AttrDoc { name: "fmt.skip", sig: "@fmt.skip", doc: "The formatter keeps the item as written." },
+    AttrDoc {
+        name: "unsafe",
+        sig: "@unsafe(safe, const)",
+        doc: "Unverified claims on an extern function. `safe`: callable without `unsafe`. `const`: its body models it at compile time.",
+    },
+    AttrDoc {
+        name: "intrinsic",
+        sig: "@intrinsic(\"simd.<name>\")",
+        doc: "`std` only: a function without a body. A call is the operation the name gives.",
+    },
+    AttrDoc {
+        name: "target_feature",
+        sig: "@target_feature([cpu::Feature::X, ..])",
+        doc: "The function needs these CPU features: callable only where the build or the caller has them.",
+    },
+    AttrDoc {
+        name: "simd_impl",
+        sig: "@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])",
+        doc: "`std` only: a backend entry of vector operation `X` for these CPU features.",
+    },
+    AttrDoc { name: "c.inline", sig: "@c.inline", doc: "Asks the C compiler to inline the function." },
+    AttrDoc { name: "c.always_inline", sig: "@c.always_inline", doc: "Forces the C compiler to inline the function." },
+    AttrDoc { name: "c.noinline", sig: "@c.noinline", doc: "Prevents the C compiler from inlining the function." },
+    AttrDoc { name: "c.cold", sig: "@c.cold", doc: "Tells the C compiler that calls to the function are rare." },
+    AttrDoc { name: "c.noreturn", sig: "@c.noreturn", doc: "The function never returns." },
+    AttrDoc { name: "c.packed", sig: "@c.packed", doc: "Removes the padding between the fields of the struct." },
+    AttrDoc { name: "c.used", sig: "@c.used", doc: "Prevents dead-code elimination of the item." },
+    AttrDoc { name: "c.unused", sig: "@c.unused", doc: "Suppresses unused warnings for the item." },
+    AttrDoc {
+        name: "c.align",
+        sig: "@c.align(N)",
+        doc: "Sets the alignment: a power of two from 1 to 2^28. `N` is a constant expression of type `u32`.",
+    },
+    AttrDoc { name: "c.export", sig: "@c.export(\"sym\")", doc: "Gives the item exactly this C symbol name." },
+    AttrDoc { name: "c.import", sig: "@c.import(\"sym\")", doc: "Binds the item to exactly this C symbol name." },
+    AttrDoc { name: "c.section", sig: "@c.section(\"s\")", doc: "Puts the item in this object file section." },
+    AttrDoc {
+        name: "c.source",
+        sig: "@c.source(\"file.c\")",
+        doc: "The C file that implements the extern block, relative to this file.",
+    },
+    AttrDoc {
+        name: "c.link",
+        sig: "@c.link(\"lib\")",
+        doc: "Links the extern block's library: `-l<lib>`, or the value as written when it starts with `-`.",
+    },
+    AttrDoc {
+        name: "c.value",
+        sig: "@c.value(size, align)",
+        doc: "The opaque extern type is a C register type of this size and alignment.",
+    },
+    AttrDoc {
+        name: "c.reads",
+        sig: "@c.reads(p, bytes)",
+        doc: "The extern function reads only `bytes` bytes through pointer parameter `p`.",
+    },
+    AttrDoc {
+        name: "c.writes",
+        sig: "@c.writes(p, bytes)",
+        doc: "The extern function writes only `bytes` bytes through pointer parameter `p`.",
+    },
+    AttrDoc {
+        name: "c.lane_access",
+        sig: "@c.lane_access",
+        doc: "The extern function accesses memory lane by lane, at addresses that depend on the lane.",
+    },
+];
+
+/// Markdown hover for the attribute name at `off` (the '@' or a byte of the name), None when `off`
+/// is not on a known attribute.
+pub fn attribute_hover(src: str, off: u32) Option<String> {
+    let mut s = off as usize;
+    if s < src.len() && src[s] == b'@' {
+        s += 1;
+    }
+    while s > 0 && (ltext::ident_byte(src[s - 1]) || src[s - 1] == b'.') {
+        s -= 1;
+    }
+    if s == 0 || src[s - 1] != b'@' {
+        return Option::<String>::None;
+    }
+    let mut e = s;
+    while e < src.len() && (ltext::ident_byte(src[e]) || src[e] == b'.') {
+        e += 1;
+    }
+    let name = src.slice(s, e);
+    let docs: []AttrDoc = ATTR_DOCS;
+    for i in 0..docs.len() {
+        let d = docs.at(i);
+        if d.name == name {
+            let mut out = String::from_str("```super-c\n");
+            out.push_str(d.sig);
+            out.push_str("\n```\n\n");
+            out.push_str(d.doc);
+            return Option::<String>::Some(out);
+        }
+    }
+    return Option::<String>::None;
+}
+
+/// Markdown hover for the position: the attribute's documentation, else the expression's rendered
+/// type, then the resolved declaration's head. None when the position carries none of them.
 pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
+    let ah = attribute_hover(p.modules.at(mi).source.as_str(), off);
+    if ah.is_some() {
+        return ah;
+    }
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
     if id == NODE_NONE {

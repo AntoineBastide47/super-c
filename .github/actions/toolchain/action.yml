@@ -23,7 +23,7 @@ runs:
     # Each job keeps its own ccache so parallel jobs can save all their compiled inputs; a job without a
     # cache of its own starts from its platform's newest one. CCACHE_DIR pins one workspace path on all OSes.
     - name: Cache ccache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: .ccache
         key: ${{ inputs.cache }}-${{ inputs.sha }}
@@ -44,7 +44,7 @@ runs:
 
     - name: Cache Homebrew downloads (macOS)
       if: runner.os == 'macOS'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/Library/Caches/Homebrew
@@ -54,7 +54,7 @@ runs:
 
     - name: Cache apt archives (Linux)
       if: runner.os == 'Linux'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: /var/cache/apt/archives
         key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
@@ -86,7 +86,7 @@ runs:
 
     - name: Cache mingw-w64 install (Windows)
       if: runner.os == 'Windows'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           C:\ProgramData\chocolatey\lib\mingw
@@ -127,7 +127,7 @@ runs:
 
     - name: Cache wasi toolchain
       if: inputs.target == 'wasm'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/wasi-sdk

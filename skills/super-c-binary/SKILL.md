@@ -402,9 +402,16 @@ leaves behind.
 
 The object cache lives under the same root at `o/<namespace>`, one namespace per local
 object tree (hash of the real path of the profile directory, such as `build/dev`); a
-unit's key hashes the compiler version line, the compile flags, and the text of the unit
-and of every quoted include (the emitted headers name the runtime headers by absolute
-path, so a tree at another path gets other keys). Each unit's `.cmd` records its key.
+unit's key hashes the compiler version line, the whole compile command, and the text of
+the unit and of every quoted include (the emitted headers name the runtime and extern-block
+headers by absolute path, so a unit that includes a tree's own header gets other keys in a
+tree at another path). Each unit's `.cmd` records its key. Under `-g` the compile maps the
+working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
+sources relative to the project directory: a debugger started elsewhere needs a source map.
+Without coverage or profile instrumentation, each compiled object whose bytes do not name the
+working directory also goes to the shared `script` namespace, and a miss in the tree's
+namespace reads it there: trees that emit a unit identically (the runtime of every test
+fixture) compile it once.
 After a successful build, the engine writes the key set of all units as generation file
 `g<seq>` when the set changed, keeps the newest four generations (the current build and
 three older), and deletes each object and dependency list that no kept generation names

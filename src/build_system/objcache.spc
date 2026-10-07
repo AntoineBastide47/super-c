@@ -1,6 +1,6 @@
 // The content-addressed object cache shared by the build engine and script builds: the cache root,
 // the 128-bit unit key (compiler version, flags, the unit's text and its quoted-include closure), and
-// the shared namespace script builds compile through (`compile_units`). Entries are installed whole
+// the shared namespace script builds compile through (`compile_units`) and engine builds share. Entries are installed whole
 // through a temp file and a rename, so a reader never sees a torn object, and an entry another build
 // deleted is compiled again. The engine's per-tree namespaces and their retention live in
 // build_system::build.
@@ -290,16 +290,32 @@ pub const SCRIPT_NS: str<'static> = "script";
 
 /// Whether `flags` make an object depend on the directory it was compiled in or on the object's path:
 /// debug information (`-g` other than `-g0`, which records the compile directory) and coverage or
-/// profile instrumentation (which records where its data goes). Such a unit's key holds its tree's path.
+/// profile instrumentation (`instruments`). Such a unit's key holds its tree's path.
 pub fn records_dir(flags: &Vector<String>) bool {
+    return debug_info(flags) || instruments(flags);
+}
+
+/// Whether `flags` ask for debug information (`-g` other than `-g0`).
+pub fn debug_info(flags: &Vector<String>) bool {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
-        if f.starts_with("-g") && f != "-g0" || f == "--coverage" || f == "-ftest-coverage" || f == "-fprofile-arcs" {
+        if f.starts_with("-g") && f != "-g0" {
             return true;
         }
-        if f.starts_with("-fprofile-generate") || f.starts_with("-fprofile-instr-generate") || f.starts_with(
-            "-fcoverage-mapping",
-        ) || f.starts_with("-fcs-profile-generate") {
+    }
+    return false;
+}
+
+/// Whether `flags` ask for coverage or profile instrumentation, which records where its data goes.
+pub fn instruments(flags: &Vector<String>) bool {
+    for i in 0..flags.len() {
+        let f = flags.at(i).as_str();
+        if f == "--coverage" || f == "-ftest-coverage" || f == "-fprofile-arcs" || f.starts_with("-fprofile-generate") {
+            return true;
+        }
+        if f.starts_with("-fprofile-instr-generate") || f.starts_with("-fcoverage-mapping") || f.starts_with(
+            "-fcs-profile-generate",
+        ) {
             return true;
         }
     }
@@ -770,7 +786,7 @@ const fn obj_use_older(a: &ObjUse, b: &ObjUse) i32 {
 // Keep namespace `ns` within SCRIPT_OBJ_MAX objects: above it, delete the least recently used down to
 // SCRIPT_OBJ_KEEP, and every temp file older than TMP_IDLE. Builds may trim at once: an object one of
 // them deletes is compiled again by the next build that needs it, never read torn.
-fn script_trim(ns: str, now: i64) {
+pub fn script_trim(ns: str, now: i64) {
     let names = list_dir(ns, false).unwrap_or(Vector::<String>::new());
     let mut objs = Vector::<ObjUse>::new();
     for i in 0..names.len() {

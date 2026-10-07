@@ -33,7 +33,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
@@ -64,7 +64,7 @@ jobs:
             sh bench/simd_baseline/record.sh ${cstd:+"$cstd"}
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: simd-baseline-${{ matrix.target }}
           path: bench/simd_baseline/*.tsv

@@ -2425,10 +2425,6 @@ extend Server {
         return list;
     }
 
-    const fn ident_byte(b: u8) bool {
-        return b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9';
-    }
-
     // The attribute argument context at `off`: scanning back inside an unclosed '(' whose head word
     // is preceded by '@' yields that attribute's name ("" = not in an attribute argument list).
     fn attr_arg_context(txt: str, off: u32) String {
@@ -2455,7 +2451,7 @@ extend Server {
         // The word (possibly dotted) before the '('.
         let e = i - 1;
         let mut s = e;
-        while s > 0 && (Server::ident_byte(txt[s - 1]) || txt[s - 1] == b'.') {
+        while s > 0 && (text::ident_byte(txt[s - 1]) || txt[s - 1] == b'.') {
             s -= 1;
         }
         if s == e || s == 0 || txt[s - 1] != b'@' {
@@ -2508,7 +2504,7 @@ extend Server {
         // precedes it: '@' (attribute), an attribute argument list, '.', '::', a leading
         // `import`, or a label quote. Everything else is general scope completion.
         let mut ws = off as usize;
-        while ws > 0 && Server::ident_byte(txt[ws - 1]) {
+        while ws > 0 && text::ident_byte(txt[ws - 1]) {
             ws -= 1;
         }
         let prev = if ws > 0 {
@@ -2518,7 +2514,7 @@ extend Server {
         };
         // An attribute path may continue with '.': "@c.al<cursor>" walks back over "c."
         let mut attr_ws = ws;
-        while attr_ws > 0 && (Server::ident_byte(txt[attr_ws - 1]) || txt[attr_ws - 1] == b'.') {
+        while attr_ws > 0 && (text::ident_byte(txt[attr_ws - 1]) || txt[attr_ws - 1] == b'.') {
             attr_ws -= 1;
         }
         let at_attr = attr_ws > 0 && txt[attr_ws - 1] == b'@';
