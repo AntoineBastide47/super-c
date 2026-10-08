@@ -508,9 +508,9 @@ const fn ndk_host_tag() str<'static> {
 /// own defaults, then the flags of the enabled CPU `features` in table order. Nothing here overrides
 /// the manifest: these come first, manifest flags after. Callers split the result on whitespace
 /// (`split_args`), so no quoting: a sysroot path must hold no space.
-pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32, features: cf::CpuFeatureSet) {
+pub fn push_sdk_flags(cmd: &mut String, target: i32, sdk: i32, arch: i32, features: cf::CpuFeatureSet) {
     push_triple(cmd, sdk, arch);
-    cf::push_c_flags(features, cmd);
+    cf::push_c_flags(features, target, cmd);
 }
 
 fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {

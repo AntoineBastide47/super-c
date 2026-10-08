@@ -4201,6 +4201,13 @@ extend Lowerer {
             self.avput(argv);
             return r;
         }
+        // A constant receiver (`2.0 * v` through `extend f32 as Mul<V>`) borrows a temporary.
+        if self.body.operands.at(lop as usize).kind == ir::OP_CONST && self.param_is_ref(
+            DefId { module: m, node: decl },
+            0,
+        ) {
+            argv[0] = self.copy_op(self.spill(lop, sp));
+        }
         if rhs != NODE_NONE {
             let mut rop = self.lower_expr(rhs);
             if rop == ir::IR_NONE {
@@ -5097,6 +5104,15 @@ extend Lowerer {
         }
         let c = k as u8;
         let kind = k >> 8;
+        let shift = c == tt::TokenType::LeftShift as u8 || c == tt::TokenType::RightShift as u8;
+        if kind == ir::SI_BINARY && !shift && self.f.ty(self.body.operands.at(ops[1] as usize).ty).kind != TypeKind::TYPE_SIMD {
+            // A lane scalar right of a vector operator (`v * s`): the vector of `s` in every lane.
+            let arr = self.rv_temp(ir::rv(ir::RV_REPEAT, ops[1], self.lanes_op(ty, sp), 0, self.vec_array_ty(ty)), sp);
+            ops.set(
+                1,
+                self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, self.copy_op(arr), ir::CAST_SIMD_ARRAY, 0, ty), sp)),
+            );
+        }
         if kind == ir::SI_BINARY || kind == ir::SI_UNARY || kind == ir::SI_CAST {
             let rv = if kind == ir::SI_BINARY {
                 ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty);

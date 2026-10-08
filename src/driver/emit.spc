@@ -252,6 +252,12 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
 
 // Whether module `m` emits a unit: it has an AST, is not an unreachable prelude module (`live`), and
 // is not the vector backend file, whose entries render apart (`cemit_simd_entries`).
+// The module whose files hold module `m`'s definitions: the core module for the backend file, which
+// emits no unit of its own.
+fn emit_owner(p: &loader::Package, m: ModuleId) ModuleId {
+    return pick(p.modules[m as usize].backend, p.core_module, m);
+}
+
 fn module_emits(p: &loader::Package, live: *const bool, m: usize) bool {
     return p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !p.modules[m].backend;
 }
@@ -4695,7 +4701,7 @@ pub fn cemit_package(
             let em2 = cem.stat_items.at(si).em;
             let cdef = cem.stat_items.at(si).def;
             cdefs.close(cd_own9);
-            cd_own9 = cdef.module;
+            cd_own9 = emit_owner(p, cdef.module);
             cem.mg.mark_ctx = mbe::CTX_INST | cd_own9 as i64;
             let csym = cem.stat_items.at(si).sym.clone();
             let cda = unsafe &*p.module_ast_const(cdef.module);
@@ -5605,12 +5611,18 @@ fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         return;
     }
     let pi = unsafe (*g).parent;
+    let s0 = out.len();
     st_path(p, mg, cev, name, pi, out);
     let pg = cev.static_at(pi);
     let pshape = unsafe (*pg).shape;
     let pslot = unsafe (*g).pslot;
-    if pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP {
-        out.push_str(mbe::if_s(unsafe (*pg).vt != TYPE_NONE, ".l[", "["));
+    if (pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP) && unsafe (*pg).vt != TYPE_NONE {
+        // A vector's lane through a pointer to its lane type: a register-sized vector's has no address.
+        let v = String::from_str(out.as_str().slice(s0, out.len()));
+        out.truncate(s0);
+        out.format_into("((__typeof__({}.l[0]) *)&{})[{}]", v.as_str(), v.as_str(), pslot);
+    } else if pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP {
+        out.push_str("[");
         out.push_u64(pslot);
         out.push_str("]");
     } else if pshape == iri::SS_STRUCT {
@@ -5660,12 +5672,14 @@ fn st_rel(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: st
         if r.toff == 0 && !vec {
             out.push_str("(void *)");
             st_path(p, &mut cem.mg, cev, name, r.target, out);
+        } else if vec {
+            let mut v = String::new();
+            st_path(p, &mut cem.mg, cev, name, r.target, &mut v);
+            out.format_into("(void *)((__typeof__({}.l[0]) *)&{} + {})", v.as_str(), v.as_str(), r.toff);
         } else {
             out.push_str("(void *)&");
             st_path(p, &mut cem.mg, cev, name, r.target, out);
-            out.push_str(mbe::if_s(vec, ".l[", "["));
-            out.push_u64(r.toff);
-            out.push_str("]");
+            out.format_into("[{}]", r.toff);
         }
         return true;
     }
@@ -6061,6 +6075,8 @@ fn cemit_simd_entries(
     let mut sc = cbe::CEmit::new(p);
     // An entry's own vector operations keep their lane loops: no entry calls another.
     sc.simd_on = false;
+    // A constant an entry addresses queues its definition (merged into `cem` below).
+    sc.collect_demand = true;
     sc.mg.agg_on = true;
     sc.mg.share_short(&mut cem.mg);
     for k in 0..ext_keys.len() {
@@ -6071,7 +6087,8 @@ fn cemit_simd_entries(
         if !cf::contains(p.features, en.fs) {
             continue;
         }
-        // A unit may call any usable entry: one that does not render is a build error.
+        // A unit (a replayed one too) may call any usable entry: one that does not render is a build
+        // error.
         let mut lw = irl::Lowerer::new(p, en.module, en.node);
         let mut nm = String::from_str("__sc_si_");
         let tg = sc.mg.method_target(en.module, en.node);
@@ -6117,6 +6134,29 @@ fn cemit_simd_entries(
     }
     for i in 0..sc.refused.len() {
         cem.refused.push(sc.refused[i]);
+    }
+    // The constants the entries address (a shuffle's index table): defined with every other one.
+    for j in 0..sc.stat_items.len() {
+        let k = sc.stat_items.at(j).sym.as_str().hash(); // before the move below
+        if cem.stat_seen.contains(&k) {
+            continue;
+        }
+        cem.stat_seen.insert(k);
+        let sr = replace(
+            sc.stat_items.index_mut(j),
+            cbe::StatRef {
+                em: 0,
+                def: DefId { module: 0, node: NODE_NONE },
+                sym: String::new(),
+                ty: TYPE_NONE,
+                args: Vector::<mbe::MSub>::new(),
+            },
+        );
+        cem.stat_items.push(sr);
+        cem.stat_decls.push_str(
+            sc.stat_decls.as_str().slice(cap_pe(&sc.stat_end, j as u32) as usize, sc.stat_end[j] as usize),
+        );
+        cem.stat_end.push(cem.stat_decls.len() as u32);
     }
     // The vector structs the definitions spell: each written when a written entry needs it.
     *packs = replace(&mut sc.mg.pack_reqs, Vector::<mbe::WrapReq>::new());
@@ -6732,6 +6772,13 @@ fn cemit_assemble(
         line.push_str(";\n");
         fd.add(si_names.at(i).as_str(), line.as_str(), d);
     }
+    // A backend constant (defined with the core module's) is declared in each header that names it.
+    for j in 0..cem.stat_items.len() {
+        if p.modules[cem.stat_items.at(j).def.module as usize].backend {
+            let sl = cem.stat_decls.as_str().slice(cap_pe(&cem.stat_end, j as u32) as usize, cem.stat_end[j] as usize);
+            fd.add(cem.stat_items.at(j).sym.as_str(), sl, ANY_HOME);
+        }
+    }
     let nd = ds.key.len();
     let mut def_used = Vector::<u8>::new();
     def_used.resize_default(nd);
@@ -6807,7 +6854,7 @@ fn cemit_assemble(
     }
     for j in 0..cem.stat_items.len() {
         let sl = cem.stat_decls.as_str().slice(cap_pe(&cem.stat_end, j as u32) as usize, cem.stat_end[j] as usize);
-        ph.index_mut(cem.stat_items.at(j).def.module as usize).push_str(sl);
+        ph.index_mut(emit_owner(p, cem.stat_items.at(j).def.module) as usize).push_str(sl);
     }
     for i in 0..tdecl.end.len() {
         ph.index_mut(tdecl.own[i] as usize).push_str(tdecl.at(i));

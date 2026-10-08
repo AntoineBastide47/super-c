@@ -357,7 +357,7 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `expect_const_runtime_parity(label, decls, expr, ty)` | Require `expr` to give the same value or trap as a `const` and at run time |
 | `expect_run(label, src, arg, msg)` | Build `src` (dev profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
-| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` |
+| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`) |
 
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
 filtering for the host like a real build, except the three differential oracles, which build
@@ -416,12 +416,23 @@ threads). The release workflow's wasm job runs
 `SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_`,
 then the same with `--filter=gen_vector_seeds`.
 
+On an aarch64 host every build calls the Neon entries (`neon` is the baseline), so without the
+lane `expect_run` builds again with `SC_SIMD_SCALAR=1` and requires the same output, the entry
+model runs over `std/simd/backend/aarch64.spc`, and the `ubsan` profile is `opt-level = 1` with
+UBSan (an entry must survive the C compiler's folds). `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm`
+adds features to every differential build: the conformance run on Linux aarch64 (the `gcc:13`
+arm64 Docker image, the compiler bootstrapped from its emitted C) uses the default set and that
+one. An entry whose key another entry holds with other features is called in one of the two
+sets only (`dot` with and without `dotprod`): the model accepts it uncalled when its sibling is
+called.
+
 - `tests/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
-  entry of `std/simd/backend/wasm.spc`, through four vector model cases of each operation that
-  reaches it at its lane count and at the most lanes, and a choice or masked access over at most
-  four lanes under every mask, built planned and with `SC_SIMD_SCALAR=1`; each case's value or
+  entry of `std/simd/backend/wasm.spc` (in the lane) or `aarch64.spc` (on an aarch64 host), through four vector model cases of each operation that
+  reaches it at its lane count and at the most lanes (a `less_than` entry also through `count` and a
+  `choose` of narrower lanes), and a choice, compress, expand or masked access over at most four
+  lanes under every mask, built planned and with `SC_SIMD_SCALAR=1`; each case's value or
   trap must be equal, and the C of the first build must call every entry. Loads, stores and the `any`/`all`
-  forms go through one extra program. Without the lane the tests return at once.
+  forms go through one extra program. Elsewhere the tests return at once.
 - `tests/simd_wasm_test.spc`: the C of a program without vectors is byte-identical with and without
   the features; `expect_asm` checks that kernels use their SIMD128 instructions (`f32x4.add`,
   `i8x16.eq`, `v128.bitselect`, `i8x16.bitmask`, `v128.any_true`, `v128.load32_lane`) with no

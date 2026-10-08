@@ -37,14 +37,14 @@ fn sdk_cc_selects_a_toolchain_per_sdk() {
 fn sdk_flags_carry_the_triple() {
     // Each SDK contributes its own leading flags; the iOS triple carries the TLS-capable floor.
     let mut ios = String::new();
-    util::push_sdk_flags(&mut ios, 1, 1, cf::baseline(1));
+    util::push_sdk_flags(&mut ios, 4, 1, 1, cf::baseline(4, 1));
     assert(ios.as_str().contains("-target"), "ios sdk flags include a target triple");
     let mut wasm = String::new();
-    util::push_sdk_flags(&mut wasm, 3, 2, cf::baseline(2));
+    util::push_sdk_flags(&mut wasm, 3, 3, 2, cf::baseline(3, 2));
     assert(!wasm.as_str().contains("-msimd128"), "wasm32 has no feature by default");
     // The features' flags follow the triple, in table order.
     let mut rel = String::new();
-    util::push_sdk_flags(&mut rel, 3, 2, cf::close(cf::with(cf::baseline(2), cf::F_RELAXED_SIMD)));
+    util::push_sdk_flags(&mut rel, 3, 3, 2, cf::close(cf::with(cf::baseline(3, 2), cf::F_RELAXED_SIMD)));
     assert(rel.as_str().ends_with(" -msimd128 -mrelaxed-simd"), "relaxed-simd implies simd128");
 }
 
@@ -53,7 +53,7 @@ fn wasi_sysroot_is_one_unquoted_argument() {
     // The flag string is split on whitespace into argv, so a quote would reach the compiler verbatim.
     let _ = unsafe shim::sc_setenv("WASI_SDK_PATH".ptr() as *const char, "/opt/wasi".ptr() as *const char);
     let mut fl = String::new();
-    util::push_sdk_flags(&mut fl, 3, 2, cf::baseline(2));
+    util::push_sdk_flags(&mut fl, 3, 3, 2, cf::baseline(3, 2));
     let mut args = Vector::<String>::new();
     util::split_args(&mut args, fl.as_str());
     let mut found = false;

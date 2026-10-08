@@ -1,0 +1,6427 @@
+// The Advanced SIMD (Neon) entries of the portable vector operations (`@simd_impl`), one per
+// operation, lane type and lane count: 128 bits, and for a conversion the 256 bits whose other side
+// is 128. The lowering planner splits a wider vector into these; an operation without an entry keeps
+// its lane loop. Each entry gives the operation's exact result for every input: a trapping operator's
+// `Overflow` entry, or its count check, runs before its wrapping twin.
+import std::cpu;
+import std::simd;
+import arm_neon as *;
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_s8(x: i8x16) int8x16_t {
+    return unsafe vld1q_s8(((&x) as *const i8x16) as *const i8);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_s8(r: int8x16_t) i8x16 {
+    let mut x = unsafe zeroed::<i8x16>();
+    unsafe vst1q_s8(((&mut x) as *mut i8x16) as *mut i8, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_u8(x: u8x16) uint8x16_t {
+    return unsafe vld1q_u8(((&x) as *const u8x16) as *const u8);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_u8(r: uint8x16_t) u8x16 {
+    let mut x = unsafe zeroed::<u8x16>();
+    unsafe vst1q_u8(((&mut x) as *mut u8x16) as *mut u8, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_s16(x: i16x8) int16x8_t {
+    return unsafe vld1q_s16(((&x) as *const i16x8) as *const i16);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_s16(r: int16x8_t) i16x8 {
+    let mut x = unsafe zeroed::<i16x8>();
+    unsafe vst1q_s16(((&mut x) as *mut i16x8) as *mut i16, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_u16(x: u16x8) uint16x8_t {
+    return unsafe vld1q_u16(((&x) as *const u16x8) as *const u16);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_u16(r: uint16x8_t) u16x8 {
+    let mut x = unsafe zeroed::<u16x8>();
+    unsafe vst1q_u16(((&mut x) as *mut u16x8) as *mut u16, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_s32(x: i32x4) int32x4_t {
+    return unsafe vld1q_s32(((&x) as *const i32x4) as *const i32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_s32(r: int32x4_t) i32x4 {
+    let mut x = unsafe zeroed::<i32x4>();
+    unsafe vst1q_s32(((&mut x) as *mut i32x4) as *mut i32, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_u32(x: u32x4) uint32x4_t {
+    return unsafe vld1q_u32(((&x) as *const u32x4) as *const u32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_u32(r: uint32x4_t) u32x4 {
+    let mut x = unsafe zeroed::<u32x4>();
+    unsafe vst1q_u32(((&mut x) as *mut u32x4) as *mut u32, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_s64(x: i64x2) int64x2_t {
+    return unsafe vld1q_s64(((&x) as *const i64x2) as *const i64);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_s64(r: int64x2_t) i64x2 {
+    let mut x = unsafe zeroed::<i64x2>();
+    unsafe vst1q_s64(((&mut x) as *mut i64x2) as *mut i64, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_u64(x: u64x2) uint64x2_t {
+    return unsafe vld1q_u64(((&x) as *const u64x2) as *const u64);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_u64(r: uint64x2_t) u64x2 {
+    let mut x = unsafe zeroed::<u64x2>();
+    unsafe vst1q_u64(((&mut x) as *mut u64x2) as *mut u64, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_f32(x: f32x4) float32x4_t {
+    return unsafe vld1q_f32(((&x) as *const f32x4) as *const f32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_f32(r: float32x4_t) f32x4 {
+    let mut x = unsafe zeroed::<f32x4>();
+    unsafe vst1q_f32(((&mut x) as *mut f32x4) as *mut f32, r);
+    return x;
+}
+
+// Vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn q_f64(x: f64x2) float64x2_t {
+    return unsafe vld1q_f64(((&x) as *const f64x2) as *const f64);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn v_f64(r: float64x2_t) f64x2 {
+    let mut x = unsafe zeroed::<f64x2>();
+    unsafe vst1q_f64(((&mut x) as *mut f64x2) as *mut f64, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_s8(x: Simd<i8, 8>) int8x8_t {
+    return unsafe vld1_s8(((&x) as *const Simd<i8, 8>) as *const i8);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_s8(r: int8x8_t) Simd<i8, 8> {
+    let mut x = unsafe zeroed::<Simd<i8, 8>>();
+    unsafe vst1_s8(((&mut x) as *mut Simd<i8, 8>) as *mut i8, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_u8(x: Simd<u8, 8>) uint8x8_t {
+    return unsafe vld1_u8(((&x) as *const Simd<u8, 8>) as *const u8);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_u8(r: uint8x8_t) Simd<u8, 8> {
+    let mut x = unsafe zeroed::<Simd<u8, 8>>();
+    unsafe vst1_u8(((&mut x) as *mut Simd<u8, 8>) as *mut u8, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_s16(x: Simd<i16, 4>) int16x4_t {
+    return unsafe vld1_s16(((&x) as *const Simd<i16, 4>) as *const i16);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_s16(r: int16x4_t) Simd<i16, 4> {
+    let mut x = unsafe zeroed::<Simd<i16, 4>>();
+    unsafe vst1_s16(((&mut x) as *mut Simd<i16, 4>) as *mut i16, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_u16(x: Simd<u16, 4>) uint16x4_t {
+    return unsafe vld1_u16(((&x) as *const Simd<u16, 4>) as *const u16);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_u16(r: uint16x4_t) Simd<u16, 4> {
+    let mut x = unsafe zeroed::<Simd<u16, 4>>();
+    unsafe vst1_u16(((&mut x) as *mut Simd<u16, 4>) as *mut u16, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_s32(x: Simd<i32, 2>) int32x2_t {
+    return unsafe vld1_s32(((&x) as *const Simd<i32, 2>) as *const i32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_s32(r: int32x2_t) Simd<i32, 2> {
+    let mut x = unsafe zeroed::<Simd<i32, 2>>();
+    unsafe vst1_s32(((&mut x) as *mut Simd<i32, 2>) as *mut i32, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_u32(x: Simd<u32, 2>) uint32x2_t {
+    return unsafe vld1_u32(((&x) as *const Simd<u32, 2>) as *const u32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_u32(r: uint32x2_t) Simd<u32, 2> {
+    let mut x = unsafe zeroed::<Simd<u32, 2>>();
+    unsafe vst1_u32(((&mut x) as *mut Simd<u32, 2>) as *mut u32, r);
+    return x;
+}
+
+// 64-bit vector `x` in a register, and back.
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn d_f32(x: Simd<f32, 2>) float32x2_t {
+    return unsafe vld1_f32(((&x) as *const Simd<f32, 2>) as *const f32);
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Neon])
+fn w_f32(r: float32x2_t) Simd<f32, 2> {
+    let mut x = unsafe zeroed::<Simd<f32, 2>>();
+    unsafe vst1_f32(((&mut x) as *mut Simd<f32, 2>) as *mut f32, r);
+    return x;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vaddq_u8(vreinterpretq_u8_s8(q_s8(a)), vreinterpretq_u8_s8(q_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vsubq_u8(vreinterpretq_u8_s8(q_s8(a)), vreinterpretq_u8_s8(q_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vmulq_u8(vreinterpretq_u8_s8(q_s8(a)), vreinterpretq_u8_s8(q_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vaddq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vsubq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vmulq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(vaddq_u16(vreinterpretq_u16_s16(q_s16(a)), vreinterpretq_u16_s16(q_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(vsubq_u16(vreinterpretq_u16_s16(q_s16(a)), vreinterpretq_u16_s16(q_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(vmulq_u16(vreinterpretq_u16_s16(q_s16(a)), vreinterpretq_u16_s16(q_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vaddq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vsubq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vmulq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(vaddq_u32(vreinterpretq_u32_s32(q_s32(a)), vreinterpretq_u32_s32(q_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(vsubq_u32(vreinterpretq_u32_s32(q_s32(a)), vreinterpretq_u32_s32(q_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(vmulq_u32(vreinterpretq_u32_s32(q_s32(a)), vreinterpretq_u32_s32(q_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vaddq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vsubq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vmulq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u64(vaddq_u64(vreinterpretq_u64_s64(q_s64(a)), vreinterpretq_u64_s64(q_s64(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u64(vsubq_u64(vreinterpretq_u64_s64(q_s64(a)), vreinterpretq_u64_s64(q_s64(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vaddq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vsubq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Add, [cpu::Feature::Neon])
+fn add_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vaddq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sub, [cpu::Feature::Neon])
+fn sub_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vsubq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Mul, [cpu::Feature::Neon])
+fn mul_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vmulq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Div, [cpu::Feature::Neon])
+fn div_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vdivq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Add, [cpu::Feature::Neon])
+fn add_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vaddq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sub, [cpu::Feature::Neon])
+fn sub_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vsubq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Mul, [cpu::Feature::Neon])
+fn mul_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vmulq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Div, [cpu::Feature::Neon])
+fn div_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vdivq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i8x16(a: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vsubq_u8(vreinterpretq_u8_s8(vdupq_n_s8(0)), vreinterpretq_u8_s8(q_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vqaddq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vqsubq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vandq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vorrq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(veorq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i8x16(a: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vmvnq_u8(vreinterpretq_u8_s8(q_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vminq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i8x16(a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vmaxq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vreinterpretq_u8_s8(vabdq_s8(q_s8(a), q_s8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i8x16(a: i8x16) i8x16 {
+    return v_s8(vclzq_s8(q_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i8x16(a: i8x16) i8x16 {
+    return v_s8(vabsq_s8(q_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i8x16(a: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vcntq_u8(vreinterpretq_u8_s8(q_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i8x16(a: i8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vrbitq_u8(vreinterpretq_u8_s8(q_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i8x16(a: i8x16) i8x16 {
+    return v_s8(vclzq_s8(vreinterpretq_s8_u8(vrbitq_u8(vreinterpretq_u8_s8(q_s8(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i8x16(a: i8x16, n: i8) i8x16 {
+    return v_s8(vshlq_s8(q_s8(a), vdupq_n_s8(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i8x16(a: i8x16, n: i8) i8x16 {
+    return v_s8(vshlq_s8(q_s8(a), vdupq_n_s8(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i8x16(a: i8x16, n: i8x16) i8x16 {
+    return v_s8(vshlq_s8(q_s8(a), vandq_s8(q_s8(n), vdupq_n_s8(7))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i8x16(a: i8x16, n: i8x16) i8x16 {
+    return v_s8(vshlq_s8(q_s8(a), vnegq_s8(vandq_s8(q_s8(n), vdupq_n_s8(7)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i8x16(a: i8x16, n: i8x16) i8x16 {
+    let k = vandq_s8(q_s8(n), vdupq_n_s8(7));
+    let x = vreinterpretq_u8_s8(q_s8(a));
+    return v_s8(vreinterpretq_s8_u8(vorrq_u8(vshlq_u8(x, k), vshlq_u8(x, vnegq_s8(vsubq_s8(vdupq_n_s8(8), k))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i8x16(a: i8x16, n: i8x16) i8x16 {
+    let k = vandq_s8(q_s8(n), vdupq_n_s8(7));
+    let x = vreinterpretq_u8_s8(q_s8(a));
+    return v_s8(vreinterpretq_s8_u8(vorrq_u8(vshlq_u8(x, vsubq_s8(vdupq_n_s8(8), k)), vshlq_u8(x, vnegq_s8(k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u8x16(a: u8x16) u8x16 {
+    return v_u8(vsubq_u8(vdupq_n_u8(0), q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vqaddq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vqsubq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vandq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vorrq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(veorq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u8x16(a: u8x16) u8x16 {
+    return v_u8(vmvnq_u8(q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vminq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vmaxq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vabdq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u8x16(a: u8x16) u8x16 {
+    return v_u8(vclzq_u8(q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u8x16(a: u8x16) u8x16 {
+    return v_u8(vcntq_u8(q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u8x16(a: u8x16) u8x16 {
+    return v_u8(vrbitq_u8(q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u8x16(a: u8x16) u8x16 {
+    return v_u8(vclzq_u8(vrbitq_u8(q_u8(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u8x16(a: u8x16, n: u8) u8x16 {
+    return v_u8(vshlq_u8(q_u8(a), vdupq_n_s8(n as i8)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u8x16(a: u8x16, n: u8) u8x16 {
+    return v_u8(vshlq_u8(q_u8(a), vdupq_n_s8(-(n as i8))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u8x16(a: u8x16, n: u8x16) u8x16 {
+    return v_u8(vshlq_u8(q_u8(a), vandq_s8(vreinterpretq_s8_u8(q_u8(n)), vdupq_n_s8(7))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u8x16(a: u8x16, n: u8x16) u8x16 {
+    return v_u8(vshlq_u8(q_u8(a), vnegq_s8(vandq_s8(vreinterpretq_s8_u8(q_u8(n)), vdupq_n_s8(7)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u8x16(a: u8x16, n: u8x16) u8x16 {
+    let k = vandq_s8(vreinterpretq_s8_u8(q_u8(n)), vdupq_n_s8(7));
+    let x = q_u8(a);
+    return v_u8(vorrq_u8(vshlq_u8(x, k), vshlq_u8(x, vnegq_s8(vsubq_s8(vdupq_n_s8(8), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u8x16(a: u8x16, n: u8x16) u8x16 {
+    let k = vandq_s8(vreinterpretq_s8_u8(q_u8(n)), vdupq_n_s8(7));
+    let x = q_u8(a);
+    return v_u8(vorrq_u8(vshlq_u8(x, vsubq_s8(vdupq_n_s8(8), k)), vshlq_u8(x, vnegq_s8(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i16x8(a: i16x8) i16x8 {
+    return v_s16(
+        vreinterpretq_s16_u16(vsubq_u16(vreinterpretq_u16_s16(vdupq_n_s16(0)), vreinterpretq_u16_s16(q_s16(a)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vqaddq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vqsubq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vandq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vorrq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(veorq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i16x8(a: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u8(vmvnq_u8(vreinterpretq_u8_s16(q_s16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vminq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i16x8(a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vmaxq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_s16(vabdq_s16(q_s16(a), q_s16(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i16x8(a: i16x8) i16x8 {
+    return v_s16(vclzq_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i16x8(a: i16x8) i16x8 {
+    return v_s16(vabsq_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i16x8(a: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s16(q_s16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i16x8(a: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u8(vrev16q_u8(vrbitq_u8(vreinterpretq_u8_s16(q_s16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_i16x8(a: i16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u8(vrev16q_u8(vreinterpretq_u8_s16(q_s16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i16x8(a: i16x8) i16x8 {
+    return v_s16(vclzq_s16(vreinterpretq_s16_u8(vrev16q_u8(vrbitq_u8(vreinterpretq_u8_s16(q_s16(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i16x8(a: i16x8, n: i16) i16x8 {
+    return v_s16(vshlq_s16(q_s16(a), vdupq_n_s16(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i16x8(a: i16x8, n: i16) i16x8 {
+    return v_s16(vshlq_s16(q_s16(a), vdupq_n_s16(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i16x8(a: i16x8, n: i16x8) i16x8 {
+    return v_s16(vshlq_s16(q_s16(a), vandq_s16(q_s16(n), vdupq_n_s16(15))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i16x8(a: i16x8, n: i16x8) i16x8 {
+    return v_s16(vshlq_s16(q_s16(a), vnegq_s16(vandq_s16(q_s16(n), vdupq_n_s16(15)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i16x8(a: i16x8, n: i16x8) i16x8 {
+    let k = vandq_s16(q_s16(n), vdupq_n_s16(15));
+    let x = vreinterpretq_u16_s16(q_s16(a));
+    return v_s16(
+        vreinterpretq_s16_u16(vorrq_u16(vshlq_u16(x, k), vshlq_u16(x, vnegq_s16(vsubq_s16(vdupq_n_s16(16), k))))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i16x8(a: i16x8, n: i16x8) i16x8 {
+    let k = vandq_s16(q_s16(n), vdupq_n_s16(15));
+    let x = vreinterpretq_u16_s16(q_s16(a));
+    return v_s16(
+        vreinterpretq_s16_u16(vorrq_u16(vshlq_u16(x, vsubq_s16(vdupq_n_s16(16), k)), vshlq_u16(x, vnegq_s16(k)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u16x8(a: u16x8) u16x8 {
+    return v_u16(vsubq_u16(vdupq_n_u16(0), q_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vqaddq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vqsubq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vandq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vorrq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(veorq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u16x8(a: u16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_u8(vmvnq_u8(vreinterpretq_u8_u16(q_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vminq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vmaxq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vabdq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u16x8(a: u16x8) u16x8 {
+    return v_u16(vclzq_u16(q_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u16x8(a: u16x8) u16x8 {
+    return v_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u16(q_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u16x8(a: u16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_u8(vrev16q_u8(vrbitq_u8(vreinterpretq_u8_u16(q_u16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_u16x8(a: u16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_u8(vrev16q_u8(vreinterpretq_u8_u16(q_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u16x8(a: u16x8) u16x8 {
+    return v_u16(vclzq_u16(vreinterpretq_u16_u8(vrev16q_u8(vrbitq_u8(vreinterpretq_u8_u16(q_u16(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u16x8(a: u16x8, n: u16) u16x8 {
+    return v_u16(vshlq_u16(q_u16(a), vdupq_n_s16(n as i16)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u16x8(a: u16x8, n: u16) u16x8 {
+    return v_u16(vshlq_u16(q_u16(a), vdupq_n_s16(-(n as i16))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u16x8(a: u16x8, n: u16x8) u16x8 {
+    return v_u16(vshlq_u16(q_u16(a), vandq_s16(vreinterpretq_s16_u16(q_u16(n)), vdupq_n_s16(15))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u16x8(a: u16x8, n: u16x8) u16x8 {
+    return v_u16(vshlq_u16(q_u16(a), vnegq_s16(vandq_s16(vreinterpretq_s16_u16(q_u16(n)), vdupq_n_s16(15)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u16x8(a: u16x8, n: u16x8) u16x8 {
+    let k = vandq_s16(vreinterpretq_s16_u16(q_u16(n)), vdupq_n_s16(15));
+    let x = q_u16(a);
+    return v_u16(vorrq_u16(vshlq_u16(x, k), vshlq_u16(x, vnegq_s16(vsubq_s16(vdupq_n_s16(16), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u16x8(a: u16x8, n: u16x8) u16x8 {
+    let k = vandq_s16(vreinterpretq_s16_u16(q_u16(n)), vdupq_n_s16(15));
+    let x = q_u16(a);
+    return v_u16(vorrq_u16(vshlq_u16(x, vsubq_s16(vdupq_n_s16(16), k)), vshlq_u16(x, vnegq_s16(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i32x4(a: i32x4) i32x4 {
+    return v_s32(
+        vreinterpretq_s32_u32(vsubq_u32(vreinterpretq_u32_s32(vdupq_n_s32(0)), vreinterpretq_u32_s32(q_s32(a)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vqaddq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vqsubq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vandq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vorrq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(veorq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i32x4(a: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u8(vmvnq_u8(vreinterpretq_u8_s32(q_s32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vminq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i32x4(a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vmaxq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_s32(vabdq_s32(q_s32(a), q_s32(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i32x4(a: i32x4) i32x4 {
+    return v_s32(vclzq_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i32x4(a: i32x4) i32x4 {
+    return v_s32(vabsq_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i32x4(a: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s32(q_s32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i32x4(a: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u8(vrev32q_u8(vrbitq_u8(vreinterpretq_u8_s32(q_s32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_i32x4(a: i32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u8(vrev32q_u8(vreinterpretq_u8_s32(q_s32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i32x4(a: i32x4) i32x4 {
+    return v_s32(vclzq_s32(vreinterpretq_s32_u8(vrev32q_u8(vrbitq_u8(vreinterpretq_u8_s32(q_s32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i32x4(a: i32x4, n: i32) i32x4 {
+    return v_s32(vshlq_s32(q_s32(a), vdupq_n_s32(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i32x4(a: i32x4, n: i32) i32x4 {
+    return v_s32(vshlq_s32(q_s32(a), vdupq_n_s32(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i32x4(a: i32x4, n: i32x4) i32x4 {
+    return v_s32(vshlq_s32(q_s32(a), vandq_s32(q_s32(n), vdupq_n_s32(31))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i32x4(a: i32x4, n: i32x4) i32x4 {
+    return v_s32(vshlq_s32(q_s32(a), vnegq_s32(vandq_s32(q_s32(n), vdupq_n_s32(31)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i32x4(a: i32x4, n: i32x4) i32x4 {
+    let k = vandq_s32(q_s32(n), vdupq_n_s32(31));
+    let x = vreinterpretq_u32_s32(q_s32(a));
+    return v_s32(
+        vreinterpretq_s32_u32(vorrq_u32(vshlq_u32(x, k), vshlq_u32(x, vnegq_s32(vsubq_s32(vdupq_n_s32(32), k))))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i32x4(a: i32x4, n: i32x4) i32x4 {
+    let k = vandq_s32(q_s32(n), vdupq_n_s32(31));
+    let x = vreinterpretq_u32_s32(q_s32(a));
+    return v_s32(
+        vreinterpretq_s32_u32(vorrq_u32(vshlq_u32(x, vsubq_s32(vdupq_n_s32(32), k)), vshlq_u32(x, vnegq_s32(k)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u32x4(a: u32x4) u32x4 {
+    return v_u32(vsubq_u32(vdupq_n_u32(0), q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vqaddq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vqsubq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vandq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vorrq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(veorq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u32x4(a: u32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(q_u32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vminq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vmaxq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vabdq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u32x4(a: u32x4) u32x4 {
+    return v_u32(vclzq_u32(q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u32x4(a: u32x4) u32x4 {
+    return v_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u32(q_u32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u32x4(a: u32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vrev32q_u8(vrbitq_u8(vreinterpretq_u8_u32(q_u32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_u32x4(a: u32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(q_u32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u32x4(a: u32x4) u32x4 {
+    return v_u32(vclzq_u32(vreinterpretq_u32_u8(vrev32q_u8(vrbitq_u8(vreinterpretq_u8_u32(q_u32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u32x4(a: u32x4, n: u32) u32x4 {
+    return v_u32(vshlq_u32(q_u32(a), vdupq_n_s32(n as i32)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u32x4(a: u32x4, n: u32) u32x4 {
+    return v_u32(vshlq_u32(q_u32(a), vdupq_n_s32(-(n as i32))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u32x4(a: u32x4, n: u32x4) u32x4 {
+    return v_u32(vshlq_u32(q_u32(a), vandq_s32(vreinterpretq_s32_u32(q_u32(n)), vdupq_n_s32(31))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u32x4(a: u32x4, n: u32x4) u32x4 {
+    return v_u32(vshlq_u32(q_u32(a), vnegq_s32(vandq_s32(vreinterpretq_s32_u32(q_u32(n)), vdupq_n_s32(31)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u32x4(a: u32x4, n: u32x4) u32x4 {
+    let k = vandq_s32(vreinterpretq_s32_u32(q_u32(n)), vdupq_n_s32(31));
+    let x = q_u32(a);
+    return v_u32(vorrq_u32(vshlq_u32(x, k), vshlq_u32(x, vnegq_s32(vsubq_s32(vdupq_n_s32(32), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u32x4(a: u32x4, n: u32x4) u32x4 {
+    let k = vandq_s32(vreinterpretq_s32_u32(q_u32(n)), vdupq_n_s32(31));
+    let x = q_u32(a);
+    return v_u32(vorrq_u32(vshlq_u32(x, vsubq_s32(vdupq_n_s32(32), k)), vshlq_u32(x, vnegq_s32(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i64x2(a: i64x2) i64x2 {
+    return v_s64(
+        vreinterpretq_s64_u64(vsubq_u64(vreinterpretq_u64_s64(vdupq_n_s64(0)), vreinterpretq_u64_s64(q_s64(a)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vqaddq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vqsubq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vandq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vorrq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i64x2(a: i64x2, b: i64x2) i64x2 {
+    return v_s64(veorq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i64x2(a: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u8(vmvnq_u8(vreinterpretq_u8_s64(q_s64(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i64x2(a: i64x2, b: i64x2) i64x2 {
+    let x = q_s64(a);
+    let y = q_s64(b);
+    let g = vcgtq_s64(x, y);
+    return v_s64(vbslq_s64(g, y, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i64x2(a: i64x2, b: i64x2) i64x2 {
+    let x = q_s64(a);
+    let y = q_s64(b);
+    let g = vcgtq_s64(x, y);
+    return v_s64(vbslq_s64(g, x, y));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i64x2(a: i64x2, b: i64x2) u64x2 {
+    let x = q_s64(a);
+    let y = q_s64(b);
+    let g = vcgtq_s64(x, y);
+    return v_u64(
+        vreinterpretq_u64_s64(
+            vreinterpretq_s64_u64(
+                vsubq_u64(vreinterpretq_u64_s64(vbslq_s64(g, x, y)), vreinterpretq_u64_s64(vbslq_s64(g, y, x))),
+            ),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i64x2(a: i64x2) i64x2 {
+    return v_s64(vabsq_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i64x2(a: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u64(vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(q_s64(a))))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i64x2(a: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u8(vrev64q_u8(vrbitq_u8(vreinterpretq_u8_s64(q_s64(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_i64x2(a: i64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u8(vrev64q_u8(vreinterpretq_u8_s64(q_s64(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i64x2(a: i64x2, n: i64) i64x2 {
+    return v_s64(vshlq_s64(q_s64(a), vdupq_n_s64(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i64x2(a: i64x2, n: i64) i64x2 {
+    return v_s64(vshlq_s64(q_s64(a), vdupq_n_s64(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i64x2(a: i64x2, n: i64x2) i64x2 {
+    return v_s64(vshlq_s64(q_s64(a), vandq_s64(q_s64(n), vdupq_n_s64(63))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i64x2(a: i64x2, n: i64x2) i64x2 {
+    return v_s64(vshlq_s64(q_s64(a), vnegq_s64(vandq_s64(q_s64(n), vdupq_n_s64(63)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i64x2(a: i64x2, n: i64x2) i64x2 {
+    let k = vandq_s64(q_s64(n), vdupq_n_s64(63));
+    let x = vreinterpretq_u64_s64(q_s64(a));
+    return v_s64(
+        vreinterpretq_s64_u64(vorrq_u64(vshlq_u64(x, k), vshlq_u64(x, vnegq_s64(vsubq_s64(vdupq_n_s64(64), k))))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i64x2(a: i64x2, n: i64x2) i64x2 {
+    let k = vandq_s64(q_s64(n), vdupq_n_s64(63));
+    let x = vreinterpretq_u64_s64(q_s64(a));
+    return v_s64(
+        vreinterpretq_s64_u64(vorrq_u64(vshlq_u64(x, vsubq_s64(vdupq_n_s64(64), k)), vshlq_u64(x, vnegq_s64(k)))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u64x2(a: u64x2) u64x2 {
+    return v_u64(vsubq_u64(vdupq_n_u64(0), q_u64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vqaddq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vqsubq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vandq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vorrq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(veorq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u64x2(a: u64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(q_u64(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u64x2(a: u64x2, b: u64x2) u64x2 {
+    let x = q_u64(a);
+    let y = q_u64(b);
+    let g = vcgtq_u64(x, y);
+    return v_u64(vbslq_u64(g, y, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u64x2(a: u64x2, b: u64x2) u64x2 {
+    let x = q_u64(a);
+    let y = q_u64(b);
+    let g = vcgtq_u64(x, y);
+    return v_u64(vbslq_u64(g, x, y));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u64x2(a: u64x2, b: u64x2) u64x2 {
+    let x = q_u64(a);
+    let y = q_u64(b);
+    let g = vcgtq_u64(x, y);
+    return v_u64(vsubq_u64(vbslq_u64(g, x, y), vbslq_u64(g, y, x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u64x2(a: u64x2) u64x2 {
+    return v_u64(vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u64(q_u64(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u64x2(a: u64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vrev64q_u8(vrbitq_u8(vreinterpretq_u8_u64(q_u64(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_u64x2(a: u64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vrev64q_u8(vreinterpretq_u8_u64(q_u64(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u64x2(a: u64x2, n: u64) u64x2 {
+    return v_u64(vshlq_u64(q_u64(a), vdupq_n_s64(n as i64)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u64x2(a: u64x2, n: u64) u64x2 {
+    return v_u64(vshlq_u64(q_u64(a), vdupq_n_s64(-(n as i64))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u64x2(a: u64x2, n: u64x2) u64x2 {
+    return v_u64(vshlq_u64(q_u64(a), vandq_s64(vreinterpretq_s64_u64(q_u64(n)), vdupq_n_s64(63))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u64x2(a: u64x2, n: u64x2) u64x2 {
+    return v_u64(vshlq_u64(q_u64(a), vnegq_s64(vandq_s64(vreinterpretq_s64_u64(q_u64(n)), vdupq_n_s64(63)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u64x2(a: u64x2, n: u64x2) u64x2 {
+    let k = vandq_s64(vreinterpretq_s64_u64(q_u64(n)), vdupq_n_s64(63));
+    let x = q_u64(a);
+    return v_u64(vorrq_u64(vshlq_u64(x, k), vshlq_u64(x, vnegq_s64(vsubq_s64(vdupq_n_s64(64), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u64x2(a: u64x2, n: u64x2) u64x2 {
+    let k = vandq_s64(vreinterpretq_s64_u64(q_u64(n)), vdupq_n_s64(63));
+    let x = q_u64(a);
+    return v_u64(vorrq_u64(vshlq_u64(x, vsubq_s64(vdupq_n_s64(64), k)), vshlq_u64(x, vnegq_s64(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Neg, [cpu::Feature::Neon])
+fn neg_f32x4(a: f32x4) f32x4 {
+    return v_f32(vnegq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Abs, [cpu::Feature::Neon])
+fn abs_f32x4(a: f32x4) f32x4 {
+    return v_f32(vabsq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sqrt, [cpu::Feature::Neon])
+fn sqrt_f32x4(a: f32x4) f32x4 {
+    return v_f32(vsqrtq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Ceil, [cpu::Feature::Neon])
+fn ceil_f32x4(a: f32x4) f32x4 {
+    return v_f32(vrndpq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Floor, [cpu::Feature::Neon])
+fn floor_f32x4(a: f32x4) f32x4 {
+    return v_f32(vrndmq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Trunc, [cpu::Feature::Neon])
+fn trunc_f32x4(a: f32x4) f32x4 {
+    return v_f32(vrndq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RoundEven, [cpu::Feature::Neon])
+fn round_even_f32x4(a: f32x4) f32x4 {
+    return v_f32(vrndnq_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Fma, [cpu::Feature::Neon])
+fn fma_f32x4(a: f32x4, b: f32x4, c: f32x4) f32x4 {
+    return v_f32(vfmaq_f32(q_f32(c), q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Minimum, [cpu::Feature::Neon])
+fn minimum_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vminq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Maximum, [cpu::Feature::Neon])
+fn maximum_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vmaxq_f32(q_f32(a), q_f32(b)));
+}
+
+// `min_num`, `max_num` and their reductions: `fmax(x, x)` quiets a signaling NaN, for which `fminnm`
+// and `fmaxnm` would return NaN; Clang and GCC keep it (they fold `x * 1.0` and `fminnm(x, x)`). A NaN
+// `y` selects `x` quieted, as the lane rule does: the C compilers may swap `fminnm`'s operands, so
+// its choice between two NaNs is not the first.
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_num_f32x4(a: f32x4, b: f32x4) f32x4 {
+    let x = q_f32(a);
+    let y = q_f32(b);
+    let qx = vmaxq_f32(x, x);
+    return v_f32(vbslq_f32(vceqq_f32(y, y), vminnmq_f32(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_num_f32x4(a: f32x4, b: f32x4) f32x4 {
+    let x = q_f32(a);
+    let y = q_f32(b);
+    let qx = vmaxq_f32(x, x);
+    return v_f32(vbslq_f32(vceqq_f32(y, y), vmaxnmq_f32(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Copysign, [cpu::Feature::Neon])
+fn copysign_f32x4(a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vbslq_f32(vreinterpretq_u32_f32(vdupq_n_f32(-0.0)), q_f32(b), q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Neg, [cpu::Feature::Neon])
+fn neg_f64x2(a: f64x2) f64x2 {
+    return v_f64(vnegq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Abs, [cpu::Feature::Neon])
+fn abs_f64x2(a: f64x2) f64x2 {
+    return v_f64(vabsq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sqrt, [cpu::Feature::Neon])
+fn sqrt_f64x2(a: f64x2) f64x2 {
+    return v_f64(vsqrtq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Ceil, [cpu::Feature::Neon])
+fn ceil_f64x2(a: f64x2) f64x2 {
+    return v_f64(vrndpq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Floor, [cpu::Feature::Neon])
+fn floor_f64x2(a: f64x2) f64x2 {
+    return v_f64(vrndmq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Trunc, [cpu::Feature::Neon])
+fn trunc_f64x2(a: f64x2) f64x2 {
+    return v_f64(vrndq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RoundEven, [cpu::Feature::Neon])
+fn round_even_f64x2(a: f64x2) f64x2 {
+    return v_f64(vrndnq_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Fma, [cpu::Feature::Neon])
+fn fma_f64x2(a: f64x2, b: f64x2, c: f64x2) f64x2 {
+    return v_f64(vfmaq_f64(q_f64(c), q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Minimum, [cpu::Feature::Neon])
+fn minimum_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vminq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Maximum, [cpu::Feature::Neon])
+fn maximum_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vmaxq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_num_f64x2(a: f64x2, b: f64x2) f64x2 {
+    let x = q_f64(a);
+    let y = q_f64(b);
+    let qx = vmaxq_f64(x, x);
+    return v_f64(vbslq_f64(vceqq_f64(y, y), vminnmq_f64(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_num_f64x2(a: f64x2, b: f64x2) f64x2 {
+    let x = q_f64(a);
+    let y = q_f64(b);
+    let qx = vmaxq_f64(x, x);
+    return v_f64(vbslq_f64(vceqq_f64(y, y), vmaxnmq_f64(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Copysign, [cpu::Feature::Neon])
+fn copysign_f64x2(a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vbslq_f64(vreinterpretq_u64_f64(vdupq_n_f64(-0.0)), q_f64(b), q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vceqq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vcltq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vcleq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vcgtq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vcgeq_s8(q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i8x16(a: i8x16, b: i8x16) u8x16 {
+    return v_u8(vmvnq_u8(vceqq_s8(q_s8(a), q_s8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i8x16(m: u8x16, a: i8x16, b: i8x16) i8x16 {
+    return v_s8(vbslq_s8(q_u8(m), q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vceqq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vcltq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vcleq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vcgtq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vcgeq_u8(q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u8x16(a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vmvnq_u8(vceqq_u8(q_u8(a), q_u8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u8x16(m: u8x16, a: u8x16, b: u8x16) u8x16 {
+    return v_u8(vbslq_u8(q_u8(m), q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vceqq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vcltq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vcleq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vcgtq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vcgeq_s16(q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i16x8(a: i16x8, b: i16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_u8(vmvnq_u8(vreinterpretq_u8_u16(vceqq_s16(q_s16(a), q_s16(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i16x8(m: u16x8, a: i16x8, b: i16x8) i16x8 {
+    return v_s16(vbslq_s16(q_u16(m), q_s16(a), q_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vceqq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vcltq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vcleq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vcgtq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vcgeq_u16(q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u16x8(a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_u8(vmvnq_u8(vreinterpretq_u8_u16(vceqq_u16(q_u16(a), q_u16(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u16x8(m: u16x8, a: u16x8, b: u16x8) u16x8 {
+    return v_u16(vbslq_u16(q_u16(m), q_u16(a), q_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vceqq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vcltq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vcleq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vcgtq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vcgeq_s32(q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i32x4(a: i32x4, b: i32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(vceqq_s32(q_s32(a), q_s32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i32x4(m: u32x4, a: i32x4, b: i32x4) i32x4 {
+    return v_s32(vbslq_s32(q_u32(m), q_s32(a), q_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vceqq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vcltq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vcleq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vcgtq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vcgeq_u32(q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u32x4(a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(vceqq_u32(q_u32(a), q_u32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u32x4(m: u32x4, a: u32x4, b: u32x4) u32x4 {
+    return v_u32(vbslq_u32(q_u32(m), q_u32(a), q_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vceqq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vcltq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vcleq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vcgtq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vcgeq_s64(q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i64x2(a: i64x2, b: i64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_s64(q_s64(a), q_s64(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i64x2(m: u64x2, a: i64x2, b: i64x2) i64x2 {
+    return v_s64(vbslq_s64(q_u64(m), q_s64(a), q_s64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vceqq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vcltq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vcleq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vcgtq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vcgeq_u64(q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u64x2(a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_u64(q_u64(a), q_u64(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u64x2(m: u64x2, a: u64x2, b: u64x2) u64x2 {
+    return v_u64(vbslq_u64(q_u64(m), q_u64(a), q_u64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vceqq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vcltq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vcleq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vcgtq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vcgeq_f32(q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(vceqq_f32(q_f32(a), q_f32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_f32x4(m: u32x4, a: f32x4, b: f32x4) f32x4 {
+    return v_f32(vbslq_f32(q_u32(m), q_f32(a), q_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vceqq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vcltq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vcleq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vcgtq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vcgeq_f64(q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_f64(q_f64(a), q_f64(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_f64x2(m: u64x2, a: f64x2, b: f64x2) f64x2 {
+    return v_f64(vbslq_f64(q_u64(m), q_f64(a), q_f64(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u8x16(m: u8x16) mask16 {
+    let t = vandq_u8(q_u8(m), q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u8x16(m: u8x16) bool {
+    return vmaxvq_u32(vreinterpretq_u32_u8(q_u8(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u8x16(m: u8x16) bool {
+    return vminvq_u8(q_u8(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u8x16(m: mask16) u8x16 {
+    return v_u8(
+        vtstq_u8(
+            vcombine_u8(vdup_n_u8((m as u64) as u8), vdup_n_u8((m as u64 >> 8) as u8)),
+            q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u16x8(m: u16x8) mask8 {
+    let t = vandq_u16(q_u16(m), q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u16x8(m: u16x8) bool {
+    return vmaxvq_u32(vreinterpretq_u32_u16(q_u16(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u16x8(m: u16x8) bool {
+    return vminvq_u16(q_u16(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u16x8(m: mask8) u16x8 {
+    return v_u16(vtstq_u16(vdupq_n_u16((m as u64) as u16), q_u16([1, 2, 4, 8, 16, 32, 64, 128])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u32x4(m: u32x4) mask4 {
+    let t = vandq_u32(q_u32(m), q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u32x4(m: u32x4) bool {
+    return vmaxvq_u32(q_u32(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u32x4(m: u32x4) bool {
+    return vminvq_u32(q_u32(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u32x4(m: mask4) u32x4 {
+    return v_u32(vtstq_u32(vdupq_n_u32((m as u64) as u32), q_u32([1, 2, 4, 8])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u64x2(m: u64x2) mask2 {
+    let t = vandq_u64(q_u64(m), q_u64([1, 2]));
+    return vaddvq_u64(t) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u64x2(m: u64x2) bool {
+    return vmaxvq_u32(vreinterpretq_u32_u64(q_u64(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u64x2(m: u64x2) bool {
+    return vminvq_u32(vreinterpretq_u32_u64(q_u64(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u64x2(m: mask2) u64x2 {
+    return v_u64(vtstq_u64(vdupq_n_u64(m as u64), q_u64([1, 2])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i8x16(a: i8x16, b: i8x16) mask16 {
+    let x = q_s8(a);
+    let y = q_s8(b);
+    let bad = vmvnq_u8(
+        vceqq_s8(vqaddq_s8(x, y), vreinterpretq_s8_u8(vaddq_u8(vreinterpretq_u8_s8(x), vreinterpretq_u8_s8(y)))),
+    );
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i8x16(a: i8x16, b: i8x16) mask16 {
+    let x = q_s8(a);
+    let y = q_s8(b);
+    let bad = vmvnq_u8(
+        vceqq_s8(vqsubq_s8(x, y), vreinterpretq_s8_u8(vsubq_u8(vreinterpretq_u8_s8(x), vreinterpretq_u8_s8(y)))),
+    );
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i8x16(a: i8x16, b: i8x16) mask16 {
+    let x = q_s8(a);
+    let y = q_s8(b);
+    let lo = vmull_s8(vget_low_s8(x), vget_low_s8(y));
+    let hi = vmull_high_s8(x, y);
+    let bad = vmvnq_u8(
+        vuzp1q_u8(
+            vreinterpretq_u8_u16(vceqq_s16(vmovl_s8(vqmovn_s16(lo)), lo)),
+            vreinterpretq_u8_u16(vceqq_s16(vmovl_s8(vqmovn_s16(hi)), hi)),
+        ),
+    );
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u8x16(a: u8x16, b: u8x16) mask16 {
+    let x = q_u8(a);
+    let y = q_u8(b);
+    let bad = vmvnq_u8(vceqq_u8(vqaddq_u8(x, y), vaddq_u8(x, y)));
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u8x16(a: u8x16, b: u8x16) mask16 {
+    let x = q_u8(a);
+    let y = q_u8(b);
+    let bad = vmvnq_u8(vceqq_u8(vqsubq_u8(x, y), vsubq_u8(x, y)));
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u8x16(a: u8x16, b: u8x16) mask16 {
+    let x = q_u8(a);
+    let y = q_u8(b);
+    let lo = vmull_u8(vget_low_u8(x), vget_low_u8(y));
+    let hi = vmull_high_u8(x, y);
+    let bad = vmvnq_u8(
+        vuzp1q_u8(
+            vreinterpretq_u8_u16(vceqq_u16(vmovl_u8(vqmovn_u16(lo)), lo)),
+            vreinterpretq_u8_u16(vceqq_u16(vmovl_u8(vqmovn_u16(hi)), hi)),
+        ),
+    );
+    let t = vandq_u8(bad, q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]));
+    let p = vpaddq_u8(t, t);
+    let q = vpaddq_u8(p, p);
+    let r = vpaddq_u8(q, q);
+    return ((unsafe vgetq_lane_u16(vreinterpretq_u16_u8(r), 0)) as u64) as mask16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i16x8(a: i16x8, b: i16x8) mask8 {
+    let x = q_s16(a);
+    let y = q_s16(b);
+    let bad = vreinterpretq_u16_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u16(
+                vceqq_s16(
+                    vqaddq_s16(x, y),
+                    vreinterpretq_s16_u16(vaddq_u16(vreinterpretq_u16_s16(x), vreinterpretq_u16_s16(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i16x8(a: i16x8, b: i16x8) mask8 {
+    let x = q_s16(a);
+    let y = q_s16(b);
+    let bad = vreinterpretq_u16_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u16(
+                vceqq_s16(
+                    vqsubq_s16(x, y),
+                    vreinterpretq_s16_u16(vsubq_u16(vreinterpretq_u16_s16(x), vreinterpretq_u16_s16(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i16x8(a: i16x8, b: i16x8) mask8 {
+    let x = q_s16(a);
+    let y = q_s16(b);
+    let lo = vmull_s16(vget_low_s16(x), vget_low_s16(y));
+    let hi = vmull_high_s16(x, y);
+    let bad = vreinterpretq_u16_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u16(
+                vuzp1q_u16(
+                    vreinterpretq_u16_u32(vceqq_s32(vmovl_s16(vqmovn_s32(lo)), lo)),
+                    vreinterpretq_u16_u32(vceqq_s32(vmovl_s16(vqmovn_s32(hi)), hi)),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u16x8(a: u16x8, b: u16x8) mask8 {
+    let x = q_u16(a);
+    let y = q_u16(b);
+    let bad = vreinterpretq_u16_u8(vmvnq_u8(vreinterpretq_u8_u16(vceqq_u16(vqaddq_u16(x, y), vaddq_u16(x, y)))));
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u16x8(a: u16x8, b: u16x8) mask8 {
+    let x = q_u16(a);
+    let y = q_u16(b);
+    let bad = vreinterpretq_u16_u8(vmvnq_u8(vreinterpretq_u8_u16(vceqq_u16(vqsubq_u16(x, y), vsubq_u16(x, y)))));
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u16x8(a: u16x8, b: u16x8) mask8 {
+    let x = q_u16(a);
+    let y = q_u16(b);
+    let lo = vmull_u16(vget_low_u16(x), vget_low_u16(y));
+    let hi = vmull_high_u16(x, y);
+    let bad = vreinterpretq_u16_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u16(
+                vuzp1q_u16(
+                    vreinterpretq_u16_u32(vceqq_u32(vmovl_u16(vqmovn_u32(lo)), lo)),
+                    vreinterpretq_u16_u32(vceqq_u32(vmovl_u16(vqmovn_u32(hi)), hi)),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u16(bad, q_u16([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddvq_u16(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i32x4(a: i32x4, b: i32x4) mask4 {
+    let x = q_s32(a);
+    let y = q_s32(b);
+    let bad = vreinterpretq_u32_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u32(
+                vceqq_s32(
+                    vqaddq_s32(x, y),
+                    vreinterpretq_s32_u32(vaddq_u32(vreinterpretq_u32_s32(x), vreinterpretq_u32_s32(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i32x4(a: i32x4, b: i32x4) mask4 {
+    let x = q_s32(a);
+    let y = q_s32(b);
+    let bad = vreinterpretq_u32_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u32(
+                vceqq_s32(
+                    vqsubq_s32(x, y),
+                    vreinterpretq_s32_u32(vsubq_u32(vreinterpretq_u32_s32(x), vreinterpretq_u32_s32(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i32x4(a: i32x4, b: i32x4) mask4 {
+    let x = q_s32(a);
+    let y = q_s32(b);
+    let lo = vmull_s32(vget_low_s32(x), vget_low_s32(y));
+    let hi = vmull_high_s32(x, y);
+    let bad = vreinterpretq_u32_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u32(
+                vuzp1q_u32(
+                    vreinterpretq_u32_u64(vceqq_s64(vmovl_s32(vqmovn_s64(lo)), lo)),
+                    vreinterpretq_u32_u64(vceqq_s64(vmovl_s32(vqmovn_s64(hi)), hi)),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u32x4(a: u32x4, b: u32x4) mask4 {
+    let x = q_u32(a);
+    let y = q_u32(b);
+    let bad = vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(vceqq_u32(vqaddq_u32(x, y), vaddq_u32(x, y)))));
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u32x4(a: u32x4, b: u32x4) mask4 {
+    let x = q_u32(a);
+    let y = q_u32(b);
+    let bad = vreinterpretq_u32_u8(vmvnq_u8(vreinterpretq_u8_u32(vceqq_u32(vqsubq_u32(x, y), vsubq_u32(x, y)))));
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u32x4(a: u32x4, b: u32x4) mask4 {
+    let x = q_u32(a);
+    let y = q_u32(b);
+    let lo = vmull_u32(vget_low_u32(x), vget_low_u32(y));
+    let hi = vmull_high_u32(x, y);
+    let bad = vreinterpretq_u32_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u32(
+                vuzp1q_u32(
+                    vreinterpretq_u32_u64(vceqq_u64(vmovl_u32(vqmovn_u64(lo)), lo)),
+                    vreinterpretq_u32_u64(vceqq_u64(vmovl_u32(vqmovn_u64(hi)), hi)),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u32(bad, q_u32([1, 2, 4, 8]));
+    return (vaddvq_u32(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i64x2(a: i64x2, b: i64x2) mask2 {
+    let x = q_s64(a);
+    let y = q_s64(b);
+    let bad = vreinterpretq_u64_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u64(
+                vceqq_s64(
+                    vqaddq_s64(x, y),
+                    vreinterpretq_s64_u64(vaddq_u64(vreinterpretq_u64_s64(x), vreinterpretq_u64_s64(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u64(bad, q_u64([1, 2]));
+    return vaddvq_u64(t) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i64x2(a: i64x2, b: i64x2) mask2 {
+    let x = q_s64(a);
+    let y = q_s64(b);
+    let bad = vreinterpretq_u64_u8(
+        vmvnq_u8(
+            vreinterpretq_u8_u64(
+                vceqq_s64(
+                    vqsubq_s64(x, y),
+                    vreinterpretq_s64_u64(vsubq_u64(vreinterpretq_u64_s64(x), vreinterpretq_u64_s64(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vandq_u64(bad, q_u64([1, 2]));
+    return vaddvq_u64(t) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u64x2(a: u64x2, b: u64x2) mask2 {
+    let x = q_u64(a);
+    let y = q_u64(b);
+    let bad = vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_u64(vqaddq_u64(x, y), vaddq_u64(x, y)))));
+    let t = vandq_u64(bad, q_u64([1, 2]));
+    return vaddvq_u64(t) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u64x2(a: u64x2, b: u64x2) mask2 {
+    let x = q_u64(a);
+    let y = q_u64(b);
+    let bad = vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_u64(vqsubq_u64(x, y), vsubq_u64(x, y)))));
+    let t = vandq_u64(bad, q_u64([1, 2]));
+    return vaddvq_u64(t) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x4_i32x4(a: f32x4) i32x4 {
+    return v_s32(vcvtq_s32_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_f32x4(a: i32x4) f32x4 {
+    return v_f32(vcvtq_f32_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x4_u32x4(a: f32x4) u32x4 {
+    return v_u32(vcvtq_u32_f32(q_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_f32x4(a: u32x4) f32x4 {
+    return v_f32(vcvtq_f32_u32(q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x2_i64x2(a: f64x2) i64x2 {
+    return v_s64(vcvtq_s64_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x2_f64x2(a: i64x2) f64x2 {
+    return v_f64(vcvtq_f64_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x2_u64x2(a: f64x2) u64x2 {
+    return v_u64(vcvtq_u64_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x2_f64x2(a: u64x2) f64x2 {
+    return v_f64(vcvtq_f64_u64(q_u64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x16_u8x16(a: i8x16) u8x16 {
+    return v_u8(vreinterpretq_u8_s8(q_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x16_i8x16(a: u8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(q_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x8_u16x8(a: i16x8) u16x8 {
+    return v_u16(vreinterpretq_u16_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x8_i16x8(a: u16x8) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(q_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_u32x4(a: i32x4) u32x4 {
+    return v_u32(vreinterpretq_u32_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_i32x4(a: u32x4) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x2_u64x2(a: i64x2) u64x2 {
+    return v_u64(vreinterpretq_u64_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x2_i64x2(a: u64x2) i64x2 {
+    return v_s64(vreinterpretq_s64_u64(q_u64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x16_i16x16(a: i8x16) i16x16 {
+    let x = q_s8(a);
+    return simd::concat(v_s16(vmovl_s8(vget_low_s8(x))), v_s16(vmovl_high_s8(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x16_u16x16(a: i8x16) u16x16 {
+    let x = q_s8(a);
+    return simd::concat(
+        v_u16(vreinterpretq_u16_s16(vmovl_s8(vget_low_s8(x)))),
+        v_u16(vreinterpretq_u16_s16(vmovl_high_s8(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x16_u16x16(a: u8x16) u16x16 {
+    let x = q_u8(a);
+    return simd::concat(v_u16(vmovl_u8(vget_low_u8(x))), v_u16(vmovl_high_u8(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x16_i16x16(a: u8x16) i16x16 {
+    let x = q_u8(a);
+    return simd::concat(
+        v_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(x)))),
+        v_s16(vreinterpretq_s16_u16(vmovl_high_u8(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x8_i32x8(a: i16x8) i32x8 {
+    let x = q_s16(a);
+    return simd::concat(v_s32(vmovl_s16(vget_low_s16(x))), v_s32(vmovl_high_s16(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x8_u32x8(a: i16x8) u32x8 {
+    let x = q_s16(a);
+    return simd::concat(
+        v_u32(vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(x)))),
+        v_u32(vreinterpretq_u32_s32(vmovl_high_s16(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x8_u32x8(a: u16x8) u32x8 {
+    let x = q_u16(a);
+    return simd::concat(v_u32(vmovl_u16(vget_low_u16(x))), v_u32(vmovl_high_u16(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x8_i32x8(a: u16x8) i32x8 {
+    let x = q_u16(a);
+    return simd::concat(
+        v_s32(vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(x)))),
+        v_s32(vreinterpretq_s32_u32(vmovl_high_u16(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_i64x4(a: i32x4) i64x4 {
+    let x = q_s32(a);
+    return simd::concat(v_s64(vmovl_s32(vget_low_s32(x))), v_s64(vmovl_high_s32(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_u64x4(a: i32x4) u64x4 {
+    let x = q_s32(a);
+    return simd::concat(
+        v_u64(vreinterpretq_u64_s64(vmovl_s32(vget_low_s32(x)))),
+        v_u64(vreinterpretq_u64_s64(vmovl_high_s32(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_u64x4(a: u32x4) u64x4 {
+    let x = q_u32(a);
+    return simd::concat(v_u64(vmovl_u32(vget_low_u32(x))), v_u64(vmovl_high_u32(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_i64x4(a: u32x4) i64x4 {
+    let x = q_u32(a);
+    return simd::concat(
+        v_s64(vreinterpretq_s64_u64(vmovl_u32(vget_low_u32(x)))),
+        v_s64(vreinterpretq_s64_u64(vmovl_high_u32(x))),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x16_i8x16(a: i16x16) i8x16 {
+    return v_s8(
+        vreinterpretq_s8_u8(
+            vuzp1q_u8(vreinterpretq_u8_s16(q_s16(a.low_half())), vreinterpretq_u8_s16(q_s16(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x16_u8x16(a: i16x16) u8x16 {
+    return v_u8(vuzp1q_u8(vreinterpretq_u8_s16(q_s16(a.low_half())), vreinterpretq_u8_s16(q_s16(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x16_i8x16(a: u16x16) i8x16 {
+    return v_s8(
+        vreinterpretq_s8_u8(
+            vuzp1q_u8(vreinterpretq_u8_u16(q_u16(a.low_half())), vreinterpretq_u8_u16(q_u16(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x16_u8x16(a: u16x16) u8x16 {
+    return v_u8(vuzp1q_u8(vreinterpretq_u8_u16(q_u16(a.low_half())), vreinterpretq_u8_u16(q_u16(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x8_i16x8(a: i32x8) i16x8 {
+    return v_s16(
+        vreinterpretq_s16_u16(
+            vuzp1q_u16(vreinterpretq_u16_s32(q_s32(a.low_half())), vreinterpretq_u16_s32(q_s32(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x8_u16x8(a: i32x8) u16x8 {
+    return v_u16(vuzp1q_u16(vreinterpretq_u16_s32(q_s32(a.low_half())), vreinterpretq_u16_s32(q_s32(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x8_i16x8(a: u32x8) i16x8 {
+    return v_s16(
+        vreinterpretq_s16_u16(
+            vuzp1q_u16(vreinterpretq_u16_u32(q_u32(a.low_half())), vreinterpretq_u16_u32(q_u32(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x8_u16x8(a: u32x8) u16x8 {
+    return v_u16(vuzp1q_u16(vreinterpretq_u16_u32(q_u32(a.low_half())), vreinterpretq_u16_u32(q_u32(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x4_i32x4(a: i64x4) i32x4 {
+    return v_s32(
+        vreinterpretq_s32_u32(
+            vuzp1q_u32(vreinterpretq_u32_s64(q_s64(a.low_half())), vreinterpretq_u32_s64(q_s64(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x4_u32x4(a: i64x4) u32x4 {
+    return v_u32(vuzp1q_u32(vreinterpretq_u32_s64(q_s64(a.low_half())), vreinterpretq_u32_s64(q_s64(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x4_i32x4(a: u64x4) i32x4 {
+    return v_s32(
+        vreinterpretq_s32_u32(
+            vuzp1q_u32(vreinterpretq_u32_u64(q_u64(a.low_half())), vreinterpretq_u32_u64(q_u64(a.high_half()))),
+        ),
+    );
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x4_u32x4(a: u64x4) u32x4 {
+    return v_u32(vuzp1q_u32(vreinterpretq_u32_u64(q_u64(a.low_half())), vreinterpretq_u32_u64(q_u64(a.high_half()))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x4_f64x4(a: f32x4) f64x4 {
+    let x = q_f32(a);
+    return simd::concat(v_f64(vcvt_f64_f32(vget_low_f32(x))), v_f64(vcvt_high_f64_f32(x)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x4_f32x4(a: f64x4) f32x4 {
+    return v_f32(vcvt_high_f32_f64(vcvt_f32_f64(q_f64(a.low_half())), q_f64(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i16x16_i8x16(a: i16x16) i8x16 {
+    return v_s8(vqmovn_high_s16(vqmovn_s16(q_s16(a.low_half())), q_s16(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i16x16_u8x16(a: i16x16) u8x16 {
+    return v_u8(vqmovun_high_s16(vqmovun_s16(q_s16(a.low_half())), q_s16(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u16x16_u8x16(a: u16x16) u8x16 {
+    return v_u8(vqmovn_high_u16(vqmovn_u16(q_u16(a.low_half())), q_u16(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i32x8_i16x8(a: i32x8) i16x8 {
+    return v_s16(vqmovn_high_s32(vqmovn_s32(q_s32(a.low_half())), q_s32(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i32x8_u16x8(a: i32x8) u16x8 {
+    return v_u16(vqmovun_high_s32(vqmovun_s32(q_s32(a.low_half())), q_s32(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u32x8_u16x8(a: u32x8) u16x8 {
+    return v_u16(vqmovn_high_u32(vqmovn_u32(q_u32(a.low_half())), q_u32(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i64x4_i32x4(a: i64x4) i32x4 {
+    return v_s32(vqmovn_high_s64(vqmovn_s64(q_s64(a.low_half())), q_s64(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i64x4_u32x4(a: i64x4) u32x4 {
+    return v_u32(vqmovun_high_s64(vqmovun_s64(q_s64(a.low_half())), q_s64(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u64x4_u32x4(a: u64x4) u32x4 {
+    return v_u32(vqmovn_high_u64(vqmovn_u64(q_u64(a.low_half())), q_u64(a.high_half())));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i8x16(p: *const i8) i8x16 {
+    return v_s8(unsafe vld1q_s8(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i8x16(p: *mut i8, v: i8x16) {
+    unsafe vst1q_s8(p, q_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i8x16(p: *const i8, m: mask16, fb: i8x16) i8x16 {
+    let bits = m as u64;
+    if bits == 65535 {
+        return v_s8(unsafe vld1q_s8(p));
+    }
+    let mut r = q_s8(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 7, r, 7);
+    }
+    if (bits >> 8 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 8, r, 8);
+    }
+    if (bits >> 9 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 9, r, 9);
+    }
+    if (bits >> 10 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 10, r, 10);
+    }
+    if (bits >> 11 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 11, r, 11);
+    }
+    if (bits >> 12 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 12, r, 12);
+    }
+    if (bits >> 13 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 13, r, 13);
+    }
+    if (bits >> 14 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 14, r, 14);
+    }
+    if (bits >> 15 & 1) != 0 {
+        r = unsafe vld1q_lane_s8(p + 15, r, 15);
+    }
+    return v_s8(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i8x16(p: *mut i8, m: mask16, v: i8x16) {
+    let bits = m as u64;
+    if bits == 65535 {
+        unsafe vst1q_s8(p, q_s8(v));
+        return;
+    }
+    let x = q_s8(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_s8(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 7, x, 7);
+    }
+    if (bits >> 8 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 8, x, 8);
+    }
+    if (bits >> 9 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 9, x, 9);
+    }
+    if (bits >> 10 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 10, x, 10);
+    }
+    if (bits >> 11 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 11, x, 11);
+    }
+    if (bits >> 12 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 12, x, 12);
+    }
+    if (bits >> 13 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 13, x, 13);
+    }
+    if (bits >> 14 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 14, x, 14);
+    }
+    if (bits >> 15 & 1) != 0 {
+        unsafe vst1q_lane_s8(p + 15, x, 15);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u8x16(p: *const u8) u8x16 {
+    return v_u8(unsafe vld1q_u8(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u8x16(p: *mut u8, v: u8x16) {
+    unsafe vst1q_u8(p, q_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u8x16(p: *const u8, m: mask16, fb: u8x16) u8x16 {
+    let bits = m as u64;
+    if bits == 65535 {
+        return v_u8(unsafe vld1q_u8(p));
+    }
+    let mut r = q_u8(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 7, r, 7);
+    }
+    if (bits >> 8 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 8, r, 8);
+    }
+    if (bits >> 9 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 9, r, 9);
+    }
+    if (bits >> 10 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 10, r, 10);
+    }
+    if (bits >> 11 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 11, r, 11);
+    }
+    if (bits >> 12 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 12, r, 12);
+    }
+    if (bits >> 13 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 13, r, 13);
+    }
+    if (bits >> 14 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 14, r, 14);
+    }
+    if (bits >> 15 & 1) != 0 {
+        r = unsafe vld1q_lane_u8(p + 15, r, 15);
+    }
+    return v_u8(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u8x16(p: *mut u8, m: mask16, v: u8x16) {
+    let bits = m as u64;
+    if bits == 65535 {
+        unsafe vst1q_u8(p, q_u8(v));
+        return;
+    }
+    let x = q_u8(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_u8(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 7, x, 7);
+    }
+    if (bits >> 8 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 8, x, 8);
+    }
+    if (bits >> 9 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 9, x, 9);
+    }
+    if (bits >> 10 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 10, x, 10);
+    }
+    if (bits >> 11 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 11, x, 11);
+    }
+    if (bits >> 12 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 12, x, 12);
+    }
+    if (bits >> 13 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 13, x, 13);
+    }
+    if (bits >> 14 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 14, x, 14);
+    }
+    if (bits >> 15 & 1) != 0 {
+        unsafe vst1q_lane_u8(p + 15, x, 15);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i16x8(p: *const i16) i16x8 {
+    return v_s16(unsafe vld1q_s16(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i16x8(p: *mut i16, v: i16x8) {
+    unsafe vst1q_s16(p, q_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i16x8(p: *const i16, m: mask8, fb: i16x8) i16x8 {
+    let bits = m as u64;
+    if bits == 255 {
+        return v_s16(unsafe vld1q_s16(p));
+    }
+    let mut r = q_s16(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1q_lane_s16(p + 7, r, 7);
+    }
+    return v_s16(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i16x8(p: *mut i16, m: mask8, v: i16x8) {
+    let bits = m as u64;
+    if bits == 255 {
+        unsafe vst1q_s16(p, q_s16(v));
+        return;
+    }
+    let x = q_s16(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_s16(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1q_lane_s16(p + 7, x, 7);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u16x8(p: *const u16) u16x8 {
+    return v_u16(unsafe vld1q_u16(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u16x8(p: *mut u16, v: u16x8) {
+    unsafe vst1q_u16(p, q_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u16x8(p: *const u16, m: mask8, fb: u16x8) u16x8 {
+    let bits = m as u64;
+    if bits == 255 {
+        return v_u16(unsafe vld1q_u16(p));
+    }
+    let mut r = q_u16(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1q_lane_u16(p + 7, r, 7);
+    }
+    return v_u16(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u16x8(p: *mut u16, m: mask8, v: u16x8) {
+    let bits = m as u64;
+    if bits == 255 {
+        unsafe vst1q_u16(p, q_u16(v));
+        return;
+    }
+    let x = q_u16(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_u16(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1q_lane_u16(p + 7, x, 7);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i32x4(p: *const i32) i32x4 {
+    return v_s32(unsafe vld1q_s32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i32x4(p: *mut i32, v: i32x4) {
+    unsafe vst1q_s32(p, q_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i32x4(p: *const i32, m: mask4, fb: i32x4) i32x4 {
+    let bits = m as u64;
+    if bits == 15 {
+        return v_s32(unsafe vld1q_s32(p));
+    }
+    let mut r = q_s32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_s32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_s32(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_s32(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_s32(p + 3, r, 3);
+    }
+    return v_s32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i32x4(p: *mut i32, m: mask4, v: i32x4) {
+    let bits = m as u64;
+    if bits == 15 {
+        unsafe vst1q_s32(p, q_s32(v));
+        return;
+    }
+    let x = q_s32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_s32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_s32(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_s32(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_s32(p + 3, x, 3);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u32x4(p: *const u32) u32x4 {
+    return v_u32(unsafe vld1q_u32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u32x4(p: *mut u32, v: u32x4) {
+    unsafe vst1q_u32(p, q_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u32x4(p: *const u32, m: mask4, fb: u32x4) u32x4 {
+    let bits = m as u64;
+    if bits == 15 {
+        return v_u32(unsafe vld1q_u32(p));
+    }
+    let mut r = q_u32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_u32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_u32(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_u32(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_u32(p + 3, r, 3);
+    }
+    return v_u32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u32x4(p: *mut u32, m: mask4, v: u32x4) {
+    let bits = m as u64;
+    if bits == 15 {
+        unsafe vst1q_u32(p, q_u32(v));
+        return;
+    }
+    let x = q_u32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_u32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_u32(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_u32(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_u32(p + 3, x, 3);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i64x2(p: *const i64) i64x2 {
+    return v_s64(unsafe vld1q_s64(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i64x2(p: *mut i64, v: i64x2) {
+    unsafe vst1q_s64(p, q_s64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i64x2(p: *const i64, m: mask2, fb: i64x2) i64x2 {
+    let bits = m as u64;
+    if bits == 3 {
+        return v_s64(unsafe vld1q_s64(p));
+    }
+    let mut r = q_s64(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_s64(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_s64(p + 1, r, 1);
+    }
+    return v_s64(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i64x2(p: *mut i64, m: mask2, v: i64x2) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1q_s64(p, q_s64(v));
+        return;
+    }
+    let x = q_s64(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_s64(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_s64(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u64x2(p: *const u64) u64x2 {
+    return v_u64(unsafe vld1q_u64(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u64x2(p: *mut u64, v: u64x2) {
+    unsafe vst1q_u64(p, q_u64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u64x2(p: *const u64, m: mask2, fb: u64x2) u64x2 {
+    let bits = m as u64;
+    if bits == 3 {
+        return v_u64(unsafe vld1q_u64(p));
+    }
+    let mut r = q_u64(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_u64(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_u64(p + 1, r, 1);
+    }
+    return v_u64(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u64x2(p: *mut u64, m: mask2, v: u64x2) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1q_u64(p, q_u64(v));
+        return;
+    }
+    let x = q_u64(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_u64(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_u64(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_f32x4(p: *const f32) f32x4 {
+    return v_f32(unsafe vld1q_f32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_f32x4(p: *mut f32, v: f32x4) {
+    unsafe vst1q_f32(p, q_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_f32x4(p: *const f32, m: mask4, fb: f32x4) f32x4 {
+    let bits = m as u64;
+    if bits == 15 {
+        return v_f32(unsafe vld1q_f32(p));
+    }
+    let mut r = q_f32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_f32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_f32(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1q_lane_f32(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1q_lane_f32(p + 3, r, 3);
+    }
+    return v_f32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_f32x4(p: *mut f32, m: mask4, v: f32x4) {
+    let bits = m as u64;
+    if bits == 15 {
+        unsafe vst1q_f32(p, q_f32(v));
+        return;
+    }
+    let x = q_f32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_f32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_f32(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1q_lane_f32(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1q_lane_f32(p + 3, x, 3);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_f64x2(p: *const f64) f64x2 {
+    return v_f64(unsafe vld1q_f64(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_f64x2(p: *mut f64, v: f64x2) {
+    unsafe vst1q_f64(p, q_f64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_f64x2(p: *const f64, m: mask2, fb: f64x2) f64x2 {
+    let bits = m as u64;
+    if bits == 3 {
+        return v_f64(unsafe vld1q_f64(p));
+    }
+    let mut r = q_f64(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1q_lane_f64(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1q_lane_f64(p + 1, r, 1);
+    }
+    return v_f64(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_f64x2(p: *mut f64, m: mask2, v: f64x2) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1q_f64(p, q_f64(v));
+        return;
+    }
+    let x = q_f64(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1q_lane_f64(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1q_lane_f64(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_i8x16(a: i8x16, idx: u8x16) i8x16 {
+    return v_s8(vreinterpretq_s8_u8(vqtbl1q_u8(vreinterpretq_u8_s8(q_s8(a)), q_u8(idx))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_i8x32(a: i8x32, idx: u8x32) i8x32 {
+    let t = unsafe vld1q_u8_x2(((&a) as *const i8x32) as *const u8);
+    let i = ((&idx) as *const u8x32) as *const u8;
+    let mut r = unsafe zeroed::<i8x32>();
+    let o = ((&mut r) as *mut i8x32) as *mut i8;
+    unsafe vst1q_s8(o + 0, vreinterpretq_s8_u8(vqtbl2q_u8(t, unsafe vld1q_u8(i + 0))));
+    unsafe vst1q_s8(o + 16, vreinterpretq_s8_u8(vqtbl2q_u8(t, unsafe vld1q_u8(i + 16))));
+    return r;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_i8x64(a: i8x64, idx: u8x64) i8x64 {
+    let t = unsafe vld1q_u8_x4(((&a) as *const i8x64) as *const u8);
+    let i = ((&idx) as *const u8x64) as *const u8;
+    let mut r = unsafe zeroed::<i8x64>();
+    let o = ((&mut r) as *mut i8x64) as *mut i8;
+    unsafe vst1q_s8(o + 0, vreinterpretq_s8_u8(vqtbl4q_u8(t, unsafe vld1q_u8(i + 0))));
+    unsafe vst1q_s8(o + 16, vreinterpretq_s8_u8(vqtbl4q_u8(t, unsafe vld1q_u8(i + 16))));
+    unsafe vst1q_s8(o + 32, vreinterpretq_s8_u8(vqtbl4q_u8(t, unsafe vld1q_u8(i + 32))));
+    unsafe vst1q_s8(o + 48, vreinterpretq_s8_u8(vqtbl4q_u8(t, unsafe vld1q_u8(i + 48))));
+    return r;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_u8x16(a: u8x16, idx: u8x16) u8x16 {
+    return v_u8(vqtbl1q_u8(q_u8(a), q_u8(idx)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_u8x32(a: u8x32, idx: u8x32) u8x32 {
+    let t = unsafe vld1q_u8_x2(((&a) as *const u8x32) as *const u8);
+    let i = ((&idx) as *const u8x32) as *const u8;
+    let mut r = unsafe zeroed::<u8x32>();
+    let o = ((&mut r) as *mut u8x32) as *mut u8;
+    unsafe vst1q_u8(o + 0, vqtbl2q_u8(t, unsafe vld1q_u8(i + 0)));
+    unsafe vst1q_u8(o + 16, vqtbl2q_u8(t, unsafe vld1q_u8(i + 16)));
+    return r;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Neon])
+fn swizzle_or_zero_u8x64(a: u8x64, idx: u8x64) u8x64 {
+    let t = unsafe vld1q_u8_x4(((&a) as *const u8x64) as *const u8);
+    let i = ((&idx) as *const u8x64) as *const u8;
+    let mut r = unsafe zeroed::<u8x64>();
+    let o = ((&mut r) as *mut u8x64) as *mut u8;
+    unsafe vst1q_u8(o + 0, vqtbl4q_u8(t, unsafe vld1q_u8(i + 0)));
+    unsafe vst1q_u8(o + 16, vqtbl4q_u8(t, unsafe vld1q_u8(i + 16)));
+    unsafe vst1q_u8(o + 32, vqtbl4q_u8(t, unsafe vld1q_u8(i + 32)));
+    unsafe vst1q_u8(o + 48, vqtbl4q_u8(t, unsafe vld1q_u8(i + 48)));
+    return r;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i8x16(v: i8x16) i8 {
+    return vaddvq_u8(vreinterpretq_u8_s8(q_s8(v))) as i8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i8x16(v: i8x16) i8 {
+    return vminvq_s8(q_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i8x16(v: i8x16) i8 {
+    return vmaxvq_s8(q_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u8x16(v: u8x16) u8 {
+    return vaddvq_u8(q_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u8x16(v: u8x16) u8 {
+    return vminvq_u8(q_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u8x16(v: u8x16) u8 {
+    return vmaxvq_u8(q_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i16x8(v: i16x8) i16 {
+    return vaddvq_u16(vreinterpretq_u16_s16(q_s16(v))) as i16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i16x8(v: i16x8) i16 {
+    return vminvq_s16(q_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i16x8(v: i16x8) i16 {
+    return vmaxvq_s16(q_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u16x8(v: u16x8) u16 {
+    return vaddvq_u16(q_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u16x8(v: u16x8) u16 {
+    return vminvq_u16(q_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u16x8(v: u16x8) u16 {
+    return vmaxvq_u16(q_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i32x4(v: i32x4) i32 {
+    return vaddvq_u32(vreinterpretq_u32_s32(q_s32(v))) as i32;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i32x4(v: i32x4) i32 {
+    return vminvq_s32(q_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i32x4(v: i32x4) i32 {
+    return vmaxvq_s32(q_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u32x4(v: u32x4) u32 {
+    return vaddvq_u32(q_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u32x4(v: u32x4) u32 {
+    return vminvq_u32(q_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u32x4(v: u32x4) u32 {
+    return vmaxvq_u32(q_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i64x2(v: i64x2) i64 {
+    return vaddvq_u64(vreinterpretq_u64_s64(q_s64(v))) as i64;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u64x2(v: u64x2) u64 {
+    return vaddvq_u64(q_u64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinNum, [cpu::Feature::Neon])
+fn reduce_min_num_f32x4(v: f32x4) f32 {
+    let x = q_f32(v);
+    return vminnmvq_f32(vmaxq_f32(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaxNum, [cpu::Feature::Neon])
+fn reduce_max_num_f32x4(v: f32x4) f32 {
+    let x = q_f32(v);
+    return vmaxnmvq_f32(vmaxq_f32(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinimum, [cpu::Feature::Neon])
+fn reduce_minimum_f32x4(v: f32x4) f32 {
+    return vminvq_f32(q_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaximum, [cpu::Feature::Neon])
+fn reduce_maximum_f32x4(v: f32x4) f32 {
+    return vmaxvq_f32(q_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAddTree, [cpu::Feature::Neon])
+fn reduce_add_tree_f32x4(v: f32x4) f32 {
+    let x = q_f32(v);
+    let h = vadd_f32(vget_low_f32(x), vget_high_f32(x));
+    return unsafe vget_lane_f32(h, 0) + unsafe vget_lane_f32(h, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMulTree, [cpu::Feature::Neon])
+fn reduce_mul_tree_f32x4(v: f32x4) f32 {
+    let x = q_f32(v);
+    let h = vmul_f32(vget_low_f32(x), vget_high_f32(x));
+    return unsafe vget_lane_f32(h, 0) * unsafe vget_lane_f32(h, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinNum, [cpu::Feature::Neon])
+fn reduce_min_num_f64x2(v: f64x2) f64 {
+    let x = q_f64(v);
+    return vminnmvq_f64(vmaxq_f64(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaxNum, [cpu::Feature::Neon])
+fn reduce_max_num_f64x2(v: f64x2) f64 {
+    let x = q_f64(v);
+    return vmaxnmvq_f64(vmaxq_f64(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinimum, [cpu::Feature::Neon])
+fn reduce_minimum_f64x2(v: f64x2) f64 {
+    return vminvq_f64(q_f64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaximum, [cpu::Feature::Neon])
+fn reduce_maximum_f64x2(v: f64x2) f64 {
+    return vmaxvq_f64(q_f64(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAddTree, [cpu::Feature::Neon])
+fn reduce_add_tree_f64x2(v: f64x2) f64 {
+    let x = q_f64(v);
+    return unsafe vgetq_lane_f64(x, 0) + unsafe vgetq_lane_f64(x, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMulTree, [cpu::Feature::Neon])
+fn reduce_mul_tree_f64x2(v: f64x2) f64 {
+    let x = q_f64(v);
+    return unsafe vgetq_lane_f64(x, 0) * unsafe vgetq_lane_f64(x, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Dot, [cpu::Feature::Neon, cpu::Feature::Dotprod])
+fn dot_i8x16_i32_dotprod(a: i8x16, b: i8x16) i32 {
+    return vaddvq_s32(vdotq_s32(vdupq_n_s32(0), q_s8(a), q_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Dot, [cpu::Feature::Neon])
+fn dot_i8x16_i32(a: i8x16, b: i8x16) i32 {
+    let x = q_s8(a);
+    let y = q_s8(b);
+    return vaddvq_s32(vpadalq_s16(vpaddlq_s16(vmull_s8(vget_low_s8(x), vget_low_s8(y))), vmull_high_s8(x, y)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Dot, [cpu::Feature::Neon, cpu::Feature::Dotprod])
+fn dot_u8x16_u32_dotprod(a: u8x16, b: u8x16) u32 {
+    return vaddvq_u32(vdotq_u32(vdupq_n_u32(0), q_u8(a), q_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Dot, [cpu::Feature::Neon])
+fn dot_u8x16_u32(a: u8x16, b: u8x16) u32 {
+    let x = q_u8(a);
+    let y = q_u8(b);
+    return vaddvq_u32(vpadalq_u16(vpaddlq_u16(vmull_u8(vget_low_u8(x), vget_low_u8(y))), vmull_high_u8(x, y)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vadd_u8(vreinterpret_u8_s8(d_s8(a)), vreinterpret_u8_s8(d_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vsub_u8(vreinterpret_u8_s8(d_s8(a)), vreinterpret_u8_s8(d_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vmul_u8(vreinterpret_u8_s8(d_s8(a)), vreinterpret_u8_s8(d_s8(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vadd_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vsub_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vmul_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vadd_u16(vreinterpret_u16_s16(d_s16(a)), vreinterpret_u16_s16(d_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vsub_u16(vreinterpret_u16_s16(d_s16(a)), vreinterpret_u16_s16(d_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vmul_u16(vreinterpret_u16_s16(d_s16(a)), vreinterpret_u16_s16(d_s16(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vadd_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vsub_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vmul_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vadd_u32(vreinterpret_u32_s32(d_s32(a)), vreinterpret_u32_s32(d_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vsub_u32(vreinterpret_u32_s32(d_s32(a)), vreinterpret_u32_s32(d_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vmul_u32(vreinterpret_u32_s32(d_s32(a)), vreinterpret_u32_s32(d_s32(b)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAdd, [cpu::Feature::Neon])
+fn wrapping_add_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vadd_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingSub, [cpu::Feature::Neon])
+fn wrapping_sub_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vsub_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingMul, [cpu::Feature::Neon])
+fn wrapping_mul_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vmul_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Add, [cpu::Feature::Neon])
+fn add_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vadd_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sub, [cpu::Feature::Neon])
+fn sub_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vsub_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Mul, [cpu::Feature::Neon])
+fn mul_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vmul_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Div, [cpu::Feature::Neon])
+fn div_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vdiv_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vsub_u8(vreinterpret_u8_s8(vdup_n_s8(0)), vreinterpret_u8_s8(d_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vqadd_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vqsub_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vand_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vorr_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(veor_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vmvn_u8(vreinterpret_u8_s8(d_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vmin_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vmax_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vreinterpret_u8_s8(vabd_s8(d_s8(a), d_s8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vclz_s8(d_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vabs_s8(d_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vcnt_u8(vreinterpret_u8_s8(d_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vrbit_u8(vreinterpret_u8_s8(d_s8(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i8x8(a: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vclz_s8(vreinterpret_s8_u8(vrbit_u8(vreinterpret_u8_s8(d_s8(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i8x8(a: Simd<i8, 8>, n: i8) Simd<i8, 8> {
+    return w_s8(vshl_s8(d_s8(a), vdup_n_s8(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i8x8(a: Simd<i8, 8>, n: i8) Simd<i8, 8> {
+    return w_s8(vshl_s8(d_s8(a), vdup_n_s8(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i8x8(a: Simd<i8, 8>, n: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vshl_s8(d_s8(a), vand_s8(d_s8(n), vdup_n_s8(7))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i8x8(a: Simd<i8, 8>, n: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vshl_s8(d_s8(a), vneg_s8(vand_s8(d_s8(n), vdup_n_s8(7)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i8x8(a: Simd<i8, 8>, n: Simd<i8, 8>) Simd<i8, 8> {
+    let k = vand_s8(d_s8(n), vdup_n_s8(7));
+    let x = vreinterpret_u8_s8(d_s8(a));
+    return w_s8(vreinterpret_s8_u8(vorr_u8(vshl_u8(x, k), vshl_u8(x, vneg_s8(vsub_s8(vdup_n_s8(8), k))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i8x8(a: Simd<i8, 8>, n: Simd<i8, 8>) Simd<i8, 8> {
+    let k = vand_s8(d_s8(n), vdup_n_s8(7));
+    let x = vreinterpret_u8_s8(d_s8(a));
+    return w_s8(vreinterpret_s8_u8(vorr_u8(vshl_u8(x, vsub_s8(vdup_n_s8(8), k)), vshl_u8(x, vneg_s8(k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vsub_u8(vdup_n_u8(0), d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vqadd_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vqsub_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vand_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vorr_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(veor_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vmvn_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vmin_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vmax_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vabd_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vclz_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vcnt_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vrbit_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u8x8(a: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vclz_u8(vrbit_u8(d_u8(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u8x8(a: Simd<u8, 8>, n: u8) Simd<u8, 8> {
+    return w_u8(vshl_u8(d_u8(a), vdup_n_s8(n as i8)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u8x8(a: Simd<u8, 8>, n: u8) Simd<u8, 8> {
+    return w_u8(vshl_u8(d_u8(a), vdup_n_s8(-(n as i8))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u8x8(a: Simd<u8, 8>, n: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vshl_u8(d_u8(a), vand_s8(vreinterpret_s8_u8(d_u8(n)), vdup_n_s8(7))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u8x8(a: Simd<u8, 8>, n: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vshl_u8(d_u8(a), vneg_s8(vand_s8(vreinterpret_s8_u8(d_u8(n)), vdup_n_s8(7)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u8x8(a: Simd<u8, 8>, n: Simd<u8, 8>) Simd<u8, 8> {
+    let k = vand_s8(vreinterpret_s8_u8(d_u8(n)), vdup_n_s8(7));
+    let x = d_u8(a);
+    return w_u8(vorr_u8(vshl_u8(x, k), vshl_u8(x, vneg_s8(vsub_s8(vdup_n_s8(8), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u8x8(a: Simd<u8, 8>, n: Simd<u8, 8>) Simd<u8, 8> {
+    let k = vand_s8(vreinterpret_s8_u8(d_u8(n)), vdup_n_s8(7));
+    let x = d_u8(a);
+    return w_u8(vorr_u8(vshl_u8(x, vsub_s8(vdup_n_s8(8), k)), vshl_u8(x, vneg_s8(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vsub_u16(vreinterpret_u16_s16(vdup_n_s16(0)), vreinterpret_u16_s16(d_s16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vqadd_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vqsub_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vand_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vorr_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(veor_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u8(vmvn_u8(vreinterpret_u8_s16(d_s16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vmin_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vmax_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_s16(vabd_s16(d_s16(a), d_s16(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vclz_s16(d_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vabs_s16(d_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vpaddl_u8(vcnt_u8(vreinterpret_u8_s16(d_s16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u8(vrev16_u8(vrbit_u8(vreinterpret_u8_s16(d_s16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u8(vrev16_u8(vreinterpret_u8_s16(d_s16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i16x4(a: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vclz_s16(vreinterpret_s16_u8(vrev16_u8(vrbit_u8(vreinterpret_u8_s16(d_s16(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i16x4(a: Simd<i16, 4>, n: i16) Simd<i16, 4> {
+    return w_s16(vshl_s16(d_s16(a), vdup_n_s16(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i16x4(a: Simd<i16, 4>, n: i16) Simd<i16, 4> {
+    return w_s16(vshl_s16(d_s16(a), vdup_n_s16(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i16x4(a: Simd<i16, 4>, n: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vshl_s16(d_s16(a), vand_s16(d_s16(n), vdup_n_s16(15))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i16x4(a: Simd<i16, 4>, n: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vshl_s16(d_s16(a), vneg_s16(vand_s16(d_s16(n), vdup_n_s16(15)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i16x4(a: Simd<i16, 4>, n: Simd<i16, 4>) Simd<i16, 4> {
+    let k = vand_s16(d_s16(n), vdup_n_s16(15));
+    let x = vreinterpret_u16_s16(d_s16(a));
+    return w_s16(vreinterpret_s16_u16(vorr_u16(vshl_u16(x, k), vshl_u16(x, vneg_s16(vsub_s16(vdup_n_s16(16), k))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i16x4(a: Simd<i16, 4>, n: Simd<i16, 4>) Simd<i16, 4> {
+    let k = vand_s16(d_s16(n), vdup_n_s16(15));
+    let x = vreinterpret_u16_s16(d_s16(a));
+    return w_s16(vreinterpret_s16_u16(vorr_u16(vshl_u16(x, vsub_s16(vdup_n_s16(16), k)), vshl_u16(x, vneg_s16(k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vsub_u16(vdup_n_u16(0), d_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vqadd_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vqsub_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vand_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vorr_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(veor_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(d_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vmin_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vmax_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vabd_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vclz_u16(d_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vpaddl_u8(vcnt_u8(vreinterpret_u8_u16(d_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_u8(vrev16_u8(vrbit_u8(vreinterpret_u8_u16(d_u16(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_u8(vrev16_u8(vreinterpret_u8_u16(d_u16(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u16x4(a: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vclz_u16(vreinterpret_u16_u8(vrev16_u8(vrbit_u8(vreinterpret_u8_u16(d_u16(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u16x4(a: Simd<u16, 4>, n: u16) Simd<u16, 4> {
+    return w_u16(vshl_u16(d_u16(a), vdup_n_s16(n as i16)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u16x4(a: Simd<u16, 4>, n: u16) Simd<u16, 4> {
+    return w_u16(vshl_u16(d_u16(a), vdup_n_s16(-(n as i16))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u16x4(a: Simd<u16, 4>, n: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vshl_u16(d_u16(a), vand_s16(vreinterpret_s16_u16(d_u16(n)), vdup_n_s16(15))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u16x4(a: Simd<u16, 4>, n: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vshl_u16(d_u16(a), vneg_s16(vand_s16(vreinterpret_s16_u16(d_u16(n)), vdup_n_s16(15)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u16x4(a: Simd<u16, 4>, n: Simd<u16, 4>) Simd<u16, 4> {
+    let k = vand_s16(vreinterpret_s16_u16(d_u16(n)), vdup_n_s16(15));
+    let x = d_u16(a);
+    return w_u16(vorr_u16(vshl_u16(x, k), vshl_u16(x, vneg_s16(vsub_s16(vdup_n_s16(16), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u16x4(a: Simd<u16, 4>, n: Simd<u16, 4>) Simd<u16, 4> {
+    let k = vand_s16(vreinterpret_s16_u16(d_u16(n)), vdup_n_s16(15));
+    let x = d_u16(a);
+    return w_u16(vorr_u16(vshl_u16(x, vsub_s16(vdup_n_s16(16), k)), vshl_u16(x, vneg_s16(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vsub_u32(vreinterpret_u32_s32(vdup_n_s32(0)), vreinterpret_u32_s32(d_s32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vqadd_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vqsub_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vand_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vorr_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(veor_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u8(vmvn_u8(vreinterpret_u8_s32(d_s32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vmin_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vmax_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_s32(vabd_s32(d_s32(a), d_s32(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vclz_s32(d_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingAbs, [cpu::Feature::Neon])
+fn wrapping_abs_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vabs_s32(d_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vpaddl_u16(vpaddl_u8(vcnt_u8(vreinterpret_u8_s32(d_s32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u8(vrev32_u8(vrbit_u8(vreinterpret_u8_s32(d_s32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u8(vrev32_u8(vreinterpret_u8_s32(d_s32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_i32x2(a: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vclz_s32(vreinterpret_s32_u8(vrev32_u8(vrbit_u8(vreinterpret_u8_s32(d_s32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_i32x2(a: Simd<i32, 2>, n: i32) Simd<i32, 2> {
+    return w_s32(vshl_s32(d_s32(a), vdup_n_s32(n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_i32x2(a: Simd<i32, 2>, n: i32) Simd<i32, 2> {
+    return w_s32(vshl_s32(d_s32(a), vdup_n_s32(-n)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_i32x2(a: Simd<i32, 2>, n: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vshl_s32(d_s32(a), vand_s32(d_s32(n), vdup_n_s32(31))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_i32x2(a: Simd<i32, 2>, n: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vshl_s32(d_s32(a), vneg_s32(vand_s32(d_s32(n), vdup_n_s32(31)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_i32x2(a: Simd<i32, 2>, n: Simd<i32, 2>) Simd<i32, 2> {
+    let k = vand_s32(d_s32(n), vdup_n_s32(31));
+    let x = vreinterpret_u32_s32(d_s32(a));
+    return w_s32(vreinterpret_s32_u32(vorr_u32(vshl_u32(x, k), vshl_u32(x, vneg_s32(vsub_s32(vdup_n_s32(32), k))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_i32x2(a: Simd<i32, 2>, n: Simd<i32, 2>) Simd<i32, 2> {
+    let k = vand_s32(d_s32(n), vdup_n_s32(31));
+    let x = vreinterpret_u32_s32(d_s32(a));
+    return w_s32(vreinterpret_s32_u32(vorr_u32(vshl_u32(x, vsub_s32(vdup_n_s32(32), k)), vshl_u32(x, vneg_s32(k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingNeg, [cpu::Feature::Neon])
+fn wrapping_neg_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vsub_u32(vdup_n_u32(0), d_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingAdd, [cpu::Feature::Neon])
+fn saturating_add_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vqadd_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SaturatingSub, [cpu::Feature::Neon])
+fn saturating_sub_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vqsub_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::And, [cpu::Feature::Neon])
+fn and_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vand_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Or, [cpu::Feature::Neon])
+fn or_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vorr_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Xor, [cpu::Feature::Neon])
+fn xor_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(veor_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Not, [cpu::Feature::Neon])
+fn not_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(d_u32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vmin_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vmax_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AbsDiff, [cpu::Feature::Neon])
+fn abs_diff_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vabd_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LeadingZeros, [cpu::Feature::Neon])
+fn leading_zeros_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vclz_u32(d_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CountOnes, [cpu::Feature::Neon])
+fn count_ones_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vpaddl_u16(vpaddl_u8(vcnt_u8(vreinterpret_u8_u32(d_u32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReverseBits, [cpu::Feature::Neon])
+fn reverse_bits_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vrev32_u8(vrbit_u8(vreinterpret_u8_u32(d_u32(a))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::SwapBytes, [cpu::Feature::Neon])
+fn swap_bytes_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vrev32_u8(vreinterpret_u8_u32(d_u32(a)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::TrailingZeros, [cpu::Feature::Neon])
+fn trailing_zeros_u32x2(a: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vclz_u32(vreinterpret_u32_u8(vrev32_u8(vrbit_u8(vreinterpret_u8_u32(d_u32(a)))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShlScalar, [cpu::Feature::Neon])
+fn shl_scalar_u32x2(a: Simd<u32, 2>, n: u32) Simd<u32, 2> {
+    return w_u32(vshl_u32(d_u32(a), vdup_n_s32(n as i32)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ShrScalar, [cpu::Feature::Neon])
+fn shr_scalar_u32x2(a: Simd<u32, 2>, n: u32) Simd<u32, 2> {
+    return w_u32(vshl_u32(d_u32(a), vdup_n_s32(-(n as i32))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShl, [cpu::Feature::Neon])
+fn wrapping_shl_u32x2(a: Simd<u32, 2>, n: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vshl_u32(d_u32(a), vand_s32(vreinterpret_s32_u32(d_u32(n)), vdup_n_s32(31))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::WrappingShr, [cpu::Feature::Neon])
+fn wrapping_shr_u32x2(a: Simd<u32, 2>, n: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vshl_u32(d_u32(a), vneg_s32(vand_s32(vreinterpret_s32_u32(d_u32(n)), vdup_n_s32(31)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateLeft, [cpu::Feature::Neon])
+fn rotate_left_u32x2(a: Simd<u32, 2>, n: Simd<u32, 2>) Simd<u32, 2> {
+    let k = vand_s32(vreinterpret_s32_u32(d_u32(n)), vdup_n_s32(31));
+    let x = d_u32(a);
+    return w_u32(vorr_u32(vshl_u32(x, k), vshl_u32(x, vneg_s32(vsub_s32(vdup_n_s32(32), k)))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RotateRight, [cpu::Feature::Neon])
+fn rotate_right_u32x2(a: Simd<u32, 2>, n: Simd<u32, 2>) Simd<u32, 2> {
+    let k = vand_s32(vreinterpret_s32_u32(d_u32(n)), vdup_n_s32(31));
+    let x = d_u32(a);
+    return w_u32(vorr_u32(vshl_u32(x, vsub_s32(vdup_n_s32(32), k)), vshl_u32(x, vneg_s32(k))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Neg, [cpu::Feature::Neon])
+fn neg_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vneg_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Abs, [cpu::Feature::Neon])
+fn abs_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vabs_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Sqrt, [cpu::Feature::Neon])
+fn sqrt_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vsqrt_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Ceil, [cpu::Feature::Neon])
+fn ceil_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vrndp_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Floor, [cpu::Feature::Neon])
+fn floor_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vrndm_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Trunc, [cpu::Feature::Neon])
+fn trunc_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vrnd_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::RoundEven, [cpu::Feature::Neon])
+fn round_even_f32x2(a: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vrndn_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Fma, [cpu::Feature::Neon])
+fn fma_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>, c: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vfma_f32(d_f32(c), d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Minimum, [cpu::Feature::Neon])
+fn minimum_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vmin_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Maximum, [cpu::Feature::Neon])
+fn maximum_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vmax_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Min, [cpu::Feature::Neon])
+fn min_num_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    let x = d_f32(a);
+    let y = d_f32(b);
+    let qx = vmax_f32(x, x);
+    return w_f32(vbsl_f32(vceq_f32(y, y), vminnm_f32(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Max, [cpu::Feature::Neon])
+fn max_num_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    let x = d_f32(a);
+    let y = d_f32(b);
+    let qx = vmax_f32(x, x);
+    return w_f32(vbsl_f32(vceq_f32(y, y), vmaxnm_f32(qx, y), qx));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Copysign, [cpu::Feature::Neon])
+fn copysign_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vbsl_f32(vreinterpret_u32_f32(vdup_n_f32(-0.0)), d_f32(b), d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vceq_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vclt_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vcle_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vcgt_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vcge_s8(d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vmvn_u8(vceq_s8(d_s8(a), d_s8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i8x8(m: Simd<u8, 8>, a: Simd<i8, 8>, b: Simd<i8, 8>) Simd<i8, 8> {
+    return w_s8(vbsl_s8(d_u8(m), d_s8(a), d_s8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vceq_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vclt_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vcle_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vcgt_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vcge_u8(d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vmvn_u8(vceq_u8(d_u8(a), d_u8(b))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u8x8(m: Simd<u8, 8>, a: Simd<u8, 8>, b: Simd<u8, 8>) Simd<u8, 8> {
+    return w_u8(vbsl_u8(d_u8(m), d_u8(a), d_u8(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vceq_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vclt_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vcle_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vcgt_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vcge_s16(d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vceq_s16(d_s16(a), d_s16(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i16x4(m: Simd<u16, 4>, a: Simd<i16, 4>, b: Simd<i16, 4>) Simd<i16, 4> {
+    return w_s16(vbsl_s16(d_u16(m), d_s16(a), d_s16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vceq_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vclt_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vcle_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vcgt_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vcge_u16(d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vceq_u16(d_u16(a), d_u16(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u16x4(m: Simd<u16, 4>, a: Simd<u16, 4>, b: Simd<u16, 4>) Simd<u16, 4> {
+    return w_u16(vbsl_u16(d_u16(m), d_u16(a), d_u16(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vceq_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vclt_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vcle_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vcgt_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vcge_s32(d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vceq_s32(d_s32(a), d_s32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_i32x2(m: Simd<u32, 2>, a: Simd<i32, 2>, b: Simd<i32, 2>) Simd<i32, 2> {
+    return w_s32(vbsl_s32(d_u32(m), d_s32(a), d_s32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vceq_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vclt_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vcle_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vcgt_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vcge_u32(d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vceq_u32(d_u32(a), d_u32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_u32x2(m: Simd<u32, 2>, a: Simd<u32, 2>, b: Simd<u32, 2>) Simd<u32, 2> {
+    return w_u32(vbsl_u32(d_u32(m), d_u32(a), d_u32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpEqLanes, [cpu::Feature::Neon])
+fn cmp_eq_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vceq_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLtLanes, [cpu::Feature::Neon])
+fn cmp_lt_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vclt_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpLeLanes, [cpu::Feature::Neon])
+fn cmp_le_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vcle_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGtLanes, [cpu::Feature::Neon])
+fn cmp_gt_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vcgt_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpGeLanes, [cpu::Feature::Neon])
+fn cmp_ge_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vcge_f32(d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::CmpNeLanes, [cpu::Feature::Neon])
+fn cmp_ne_lanes_f32x2(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vceq_f32(d_f32(a), d_f32(b))))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Neon])
+fn choose_lanes_f32x2(m: Simd<u32, 2>, a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {
+    return w_f32(vbsl_f32(d_u32(m), d_f32(a), d_f32(b)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u8x8(m: Simd<u8, 8>) mask8 {
+    let t = vand_u8(d_u8(m), d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u8x8(m: Simd<u8, 8>) bool {
+    return vmaxv_u32(vreinterpret_u32_u8(d_u8(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u8x8(m: Simd<u8, 8>) bool {
+    return vminv_u8(d_u8(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u8x8(m: mask8) Simd<u8, 8> {
+    return w_u8(vtst_u8(vdup_n_u8((m as u64) as u8), d_u8([1, 2, 4, 8, 16, 32, 64, 128])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u16x4(m: Simd<u16, 4>) mask4 {
+    let t = vand_u16(d_u16(m), d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u16x4(m: Simd<u16, 4>) bool {
+    return vmaxv_u32(vreinterpret_u32_u16(d_u16(m))) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u16x4(m: Simd<u16, 4>) bool {
+    return vminv_u16(d_u16(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u16x4(m: mask4) Simd<u16, 4> {
+    return w_u16(vtst_u16(vdup_n_u16((m as u64) as u16), d_u16([1, 2, 4, 8])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LanesToMask, [cpu::Feature::Neon])
+fn lanes_to_mask_u32x2(m: Simd<u32, 2>) mask2 {
+    let t = vand_u32(d_u32(m), d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AnyLanes, [cpu::Feature::Neon])
+fn any_lanes_u32x2(m: Simd<u32, 2>) bool {
+    return vmaxv_u32(d_u32(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::AllLanes, [cpu::Feature::Neon])
+fn all_lanes_u32x2(m: Simd<u32, 2>) bool {
+    return vminv_u32(d_u32(m)) != 0;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::MaskToLanes, [cpu::Feature::Neon])
+fn mask_to_lanes_u32x2(m: mask2) Simd<u32, 2> {
+    return w_u32(vtst_u32(vdup_n_u32((m as u64) as u32), d_u32([1, 2])));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) mask8 {
+    let x = d_s8(a);
+    let y = d_s8(b);
+    let bad = vmvn_u8(
+        vceq_s8(vqadd_s8(x, y), vreinterpret_s8_u8(vadd_u8(vreinterpret_u8_s8(x), vreinterpret_u8_s8(y)))),
+    );
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) mask8 {
+    let x = d_s8(a);
+    let y = d_s8(b);
+    let bad = vmvn_u8(
+        vceq_s8(vqsub_s8(x, y), vreinterpret_s8_u8(vsub_u8(vreinterpret_u8_s8(x), vreinterpret_u8_s8(y)))),
+    );
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i8x8(a: Simd<i8, 8>, b: Simd<i8, 8>) mask8 {
+    let x = d_s8(a);
+    let y = d_s8(b);
+    let p = vmull_s8(x, y);
+    let bad = vmvn_u8(vmovn_u16(vceqq_s16(vmovl_s8(vqmovn_s16(p)), p)));
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) mask8 {
+    let x = d_u8(a);
+    let y = d_u8(b);
+    let bad = vmvn_u8(vceq_u8(vqadd_u8(x, y), vadd_u8(x, y)));
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) mask8 {
+    let x = d_u8(a);
+    let y = d_u8(b);
+    let bad = vmvn_u8(vceq_u8(vqsub_u8(x, y), vsub_u8(x, y)));
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u8x8(a: Simd<u8, 8>, b: Simd<u8, 8>) mask8 {
+    let x = d_u8(a);
+    let y = d_u8(b);
+    let p = vmull_u8(x, y);
+    let bad = vmvn_u8(vmovn_u16(vceqq_u16(vmovl_u8(vqmovn_u16(p)), p)));
+    let t = vand_u8(bad, d_u8([1, 2, 4, 8, 16, 32, 64, 128]));
+    return (vaddv_u8(t) as u64) as mask8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) mask4 {
+    let x = d_s16(a);
+    let y = d_s16(b);
+    let bad = vreinterpret_u16_u8(
+        vmvn_u8(
+            vreinterpret_u8_u16(
+                vceq_s16(
+                    vqadd_s16(x, y),
+                    vreinterpret_s16_u16(vadd_u16(vreinterpret_u16_s16(x), vreinterpret_u16_s16(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) mask4 {
+    let x = d_s16(a);
+    let y = d_s16(b);
+    let bad = vreinterpret_u16_u8(
+        vmvn_u8(
+            vreinterpret_u8_u16(
+                vceq_s16(
+                    vqsub_s16(x, y),
+                    vreinterpret_s16_u16(vsub_u16(vreinterpret_u16_s16(x), vreinterpret_u16_s16(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i16x4(a: Simd<i16, 4>, b: Simd<i16, 4>) mask4 {
+    let x = d_s16(a);
+    let y = d_s16(b);
+    let p = vmull_s16(x, y);
+    let bad = vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vmovn_u32(vceqq_s32(vmovl_s16(vqmovn_s32(p)), p)))));
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) mask4 {
+    let x = d_u16(a);
+    let y = d_u16(b);
+    let bad = vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vceq_u16(vqadd_u16(x, y), vadd_u16(x, y)))));
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) mask4 {
+    let x = d_u16(a);
+    let y = d_u16(b);
+    let bad = vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vceq_u16(vqsub_u16(x, y), vsub_u16(x, y)))));
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u16x4(a: Simd<u16, 4>, b: Simd<u16, 4>) mask4 {
+    let x = d_u16(a);
+    let y = d_u16(b);
+    let p = vmull_u16(x, y);
+    let bad = vreinterpret_u16_u8(vmvn_u8(vreinterpret_u8_u16(vmovn_u32(vceqq_u32(vmovl_u16(vqmovn_u32(p)), p)))));
+    let t = vand_u16(bad, d_u16([1, 2, 4, 8]));
+    return (vaddv_u16(t) as u64) as mask4;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) mask2 {
+    let x = d_s32(a);
+    let y = d_s32(b);
+    let bad = vreinterpret_u32_u8(
+        vmvn_u8(
+            vreinterpret_u8_u32(
+                vceq_s32(
+                    vqadd_s32(x, y),
+                    vreinterpret_s32_u32(vadd_u32(vreinterpret_u32_s32(x), vreinterpret_u32_s32(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) mask2 {
+    let x = d_s32(a);
+    let y = d_s32(b);
+    let bad = vreinterpret_u32_u8(
+        vmvn_u8(
+            vreinterpret_u8_u32(
+                vceq_s32(
+                    vqsub_s32(x, y),
+                    vreinterpret_s32_u32(vsub_u32(vreinterpret_u32_s32(x), vreinterpret_u32_s32(y))),
+                ),
+            ),
+        ),
+    );
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_i32x2(a: Simd<i32, 2>, b: Simd<i32, 2>) mask2 {
+    let x = d_s32(a);
+    let y = d_s32(b);
+    let p = vmull_s32(x, y);
+    let bad = vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vmovn_u64(vceqq_s64(vmovl_s32(vqmovn_s64(p)), p)))));
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowAdd, [cpu::Feature::Neon])
+fn overflow_add_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) mask2 {
+    let x = d_u32(a);
+    let y = d_u32(b);
+    let bad = vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vceq_u32(vqadd_u32(x, y), vadd_u32(x, y)))));
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowSub, [cpu::Feature::Neon])
+fn overflow_sub_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) mask2 {
+    let x = d_u32(a);
+    let y = d_u32(b);
+    let bad = vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vceq_u32(vqsub_u32(x, y), vsub_u32(x, y)))));
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::OverflowMul, [cpu::Feature::Neon])
+fn overflow_mul_u32x2(a: Simd<u32, 2>, b: Simd<u32, 2>) mask2 {
+    let x = d_u32(a);
+    let y = d_u32(b);
+    let p = vmull_u32(x, y);
+    let bad = vreinterpret_u32_u8(vmvn_u8(vreinterpret_u8_u32(vmovn_u64(vceqq_u64(vmovl_u32(vqmovn_u64(p)), p)))));
+    let t = vand_u32(bad, d_u32([1, 2]));
+    return (vaddv_u32(t) as u64) as mask2;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i8x8(p: *const i8) Simd<i8, 8> {
+    return w_s8(unsafe vld1_s8(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i8x8(p: *mut i8, v: Simd<i8, 8>) {
+    unsafe vst1_s8(p, d_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i8x8(p: *const i8, m: mask8, fb: Simd<i8, 8>) Simd<i8, 8> {
+    let bits = m as u64;
+    if bits == 255 {
+        return w_s8(unsafe vld1_s8(p));
+    }
+    let mut r = d_s8(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1_lane_s8(p + 7, r, 7);
+    }
+    return w_s8(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i8x8(p: *mut i8, m: mask8, v: Simd<i8, 8>) {
+    let bits = m as u64;
+    if bits == 255 {
+        unsafe vst1_s8(p, d_s8(v));
+        return;
+    }
+    let x = d_s8(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_s8(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1_lane_s8(p + 7, x, 7);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u8x8(p: *const u8) Simd<u8, 8> {
+    return w_u8(unsafe vld1_u8(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u8x8(p: *mut u8, v: Simd<u8, 8>) {
+    unsafe vst1_u8(p, d_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u8x8(p: *const u8, m: mask8, fb: Simd<u8, 8>) Simd<u8, 8> {
+    let bits = m as u64;
+    if bits == 255 {
+        return w_u8(unsafe vld1_u8(p));
+    }
+    let mut r = d_u8(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 3, r, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 4, r, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 5, r, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 6, r, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        r = unsafe vld1_lane_u8(p + 7, r, 7);
+    }
+    return w_u8(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u8x8(p: *mut u8, m: mask8, v: Simd<u8, 8>) {
+    let bits = m as u64;
+    if bits == 255 {
+        unsafe vst1_u8(p, d_u8(v));
+        return;
+    }
+    let x = d_u8(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_u8(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 3, x, 3);
+    }
+    if (bits >> 4 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 4, x, 4);
+    }
+    if (bits >> 5 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 5, x, 5);
+    }
+    if (bits >> 6 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 6, x, 6);
+    }
+    if (bits >> 7 & 1) != 0 {
+        unsafe vst1_lane_u8(p + 7, x, 7);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i16x4(p: *const i16) Simd<i16, 4> {
+    return w_s16(unsafe vld1_s16(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i16x4(p: *mut i16, v: Simd<i16, 4>) {
+    unsafe vst1_s16(p, d_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i16x4(p: *const i16, m: mask4, fb: Simd<i16, 4>) Simd<i16, 4> {
+    let bits = m as u64;
+    if bits == 15 {
+        return w_s16(unsafe vld1_s16(p));
+    }
+    let mut r = d_s16(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_s16(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_s16(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1_lane_s16(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1_lane_s16(p + 3, r, 3);
+    }
+    return w_s16(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i16x4(p: *mut i16, m: mask4, v: Simd<i16, 4>) {
+    let bits = m as u64;
+    if bits == 15 {
+        unsafe vst1_s16(p, d_s16(v));
+        return;
+    }
+    let x = d_s16(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_s16(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_s16(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1_lane_s16(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1_lane_s16(p + 3, x, 3);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u16x4(p: *const u16) Simd<u16, 4> {
+    return w_u16(unsafe vld1_u16(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u16x4(p: *mut u16, v: Simd<u16, 4>) {
+    unsafe vst1_u16(p, d_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u16x4(p: *const u16, m: mask4, fb: Simd<u16, 4>) Simd<u16, 4> {
+    let bits = m as u64;
+    if bits == 15 {
+        return w_u16(unsafe vld1_u16(p));
+    }
+    let mut r = d_u16(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_u16(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_u16(p + 1, r, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        r = unsafe vld1_lane_u16(p + 2, r, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        r = unsafe vld1_lane_u16(p + 3, r, 3);
+    }
+    return w_u16(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u16x4(p: *mut u16, m: mask4, v: Simd<u16, 4>) {
+    let bits = m as u64;
+    if bits == 15 {
+        unsafe vst1_u16(p, d_u16(v));
+        return;
+    }
+    let x = d_u16(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_u16(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_u16(p + 1, x, 1);
+    }
+    if (bits >> 2 & 1) != 0 {
+        unsafe vst1_lane_u16(p + 2, x, 2);
+    }
+    if (bits >> 3 & 1) != 0 {
+        unsafe vst1_lane_u16(p + 3, x, 3);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_i32x2(p: *const i32) Simd<i32, 2> {
+    return w_s32(unsafe vld1_s32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_i32x2(p: *mut i32, v: Simd<i32, 2>) {
+    unsafe vst1_s32(p, d_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_i32x2(p: *const i32, m: mask2, fb: Simd<i32, 2>) Simd<i32, 2> {
+    let bits = m as u64;
+    if bits == 3 {
+        return w_s32(unsafe vld1_s32(p));
+    }
+    let mut r = d_s32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_s32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_s32(p + 1, r, 1);
+    }
+    return w_s32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_i32x2(p: *mut i32, m: mask2, v: Simd<i32, 2>) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1_s32(p, d_s32(v));
+        return;
+    }
+    let x = d_s32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_s32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_s32(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_u32x2(p: *const u32) Simd<u32, 2> {
+    return w_u32(unsafe vld1_u32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_u32x2(p: *mut u32, v: Simd<u32, 2>) {
+    unsafe vst1_u32(p, d_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_u32x2(p: *const u32, m: mask2, fb: Simd<u32, 2>) Simd<u32, 2> {
+    let bits = m as u64;
+    if bits == 3 {
+        return w_u32(unsafe vld1_u32(p));
+    }
+    let mut r = d_u32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_u32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_u32(p + 1, r, 1);
+    }
+    return w_u32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_u32x2(p: *mut u32, m: mask2, v: Simd<u32, 2>) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1_u32(p, d_u32(v));
+        return;
+    }
+    let x = d_u32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_u32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_u32(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Load, [cpu::Feature::Neon])
+fn load_f32x2(p: *const f32) Simd<f32, 2> {
+    return w_f32(unsafe vld1_f32(p));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Store, [cpu::Feature::Neon])
+fn store_f32x2(p: *mut f32, v: Simd<f32, 2>) {
+    unsafe vst1_f32(p, d_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::LoadMasked, [cpu::Feature::Neon])
+fn load_masked_f32x2(p: *const f32, m: mask2, fb: Simd<f32, 2>) Simd<f32, 2> {
+    let bits = m as u64;
+    if bits == 3 {
+        return w_f32(unsafe vld1_f32(p));
+    }
+    let mut r = d_f32(fb);
+    if (bits >> 0 & 1) != 0 {
+        r = unsafe vld1_lane_f32(p, r, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        r = unsafe vld1_lane_f32(p + 1, r, 1);
+    }
+    return w_f32(r);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::StoreMasked, [cpu::Feature::Neon])
+fn store_masked_f32x2(p: *mut f32, m: mask2, v: Simd<f32, 2>) {
+    let bits = m as u64;
+    if bits == 3 {
+        unsafe vst1_f32(p, d_f32(v));
+        return;
+    }
+    let x = d_f32(v);
+    if (bits >> 0 & 1) != 0 {
+        unsafe vst1_lane_f32(p, x, 0);
+    }
+    if (bits >> 1 & 1) != 0 {
+        unsafe vst1_lane_f32(p + 1, x, 1);
+    }
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i8x8(v: Simd<i8, 8>) i8 {
+    return vaddv_u8(vreinterpret_u8_s8(d_s8(v))) as i8;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i8x8(v: Simd<i8, 8>) i8 {
+    return vminv_s8(d_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i8x8(v: Simd<i8, 8>) i8 {
+    return vmaxv_s8(d_s8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u8x8(v: Simd<u8, 8>) u8 {
+    return vaddv_u8(d_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u8x8(v: Simd<u8, 8>) u8 {
+    return vminv_u8(d_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u8x8(v: Simd<u8, 8>) u8 {
+    return vmaxv_u8(d_u8(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i16x4(v: Simd<i16, 4>) i16 {
+    return vaddv_u16(vreinterpret_u16_s16(d_s16(v))) as i16;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i16x4(v: Simd<i16, 4>) i16 {
+    return vminv_s16(d_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i16x4(v: Simd<i16, 4>) i16 {
+    return vmaxv_s16(d_s16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u16x4(v: Simd<u16, 4>) u16 {
+    return vaddv_u16(d_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u16x4(v: Simd<u16, 4>) u16 {
+    return vminv_u16(d_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u16x4(v: Simd<u16, 4>) u16 {
+    return vmaxv_u16(d_u16(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_i32x2(v: Simd<i32, 2>) i32 {
+    return vaddv_u32(vreinterpret_u32_s32(d_s32(v))) as i32;
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_i32x2(v: Simd<i32, 2>) i32 {
+    return vminv_s32(d_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_i32x2(v: Simd<i32, 2>) i32 {
+    return vmaxv_s32(d_s32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Neon])
+fn reduce_add_u32x2(v: Simd<u32, 2>) u32 {
+    return vaddv_u32(d_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMin, [cpu::Feature::Neon])
+fn reduce_min_u32x2(v: Simd<u32, 2>) u32 {
+    return vminv_u32(d_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMax, [cpu::Feature::Neon])
+fn reduce_max_u32x2(v: Simd<u32, 2>) u32 {
+    return vmaxv_u32(d_u32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinNum, [cpu::Feature::Neon])
+fn reduce_min_num_f32x2(v: Simd<f32, 2>) f32 {
+    let x = d_f32(v);
+    return vminnmv_f32(vmax_f32(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaxNum, [cpu::Feature::Neon])
+fn reduce_max_num_f32x2(v: Simd<f32, 2>) f32 {
+    let x = d_f32(v);
+    return vmaxnmv_f32(vmax_f32(x, x));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMinimum, [cpu::Feature::Neon])
+fn reduce_minimum_f32x2(v: Simd<f32, 2>) f32 {
+    return vminv_f32(d_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMaximum, [cpu::Feature::Neon])
+fn reduce_maximum_f32x2(v: Simd<f32, 2>) f32 {
+    return vmaxv_f32(d_f32(v));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceAddTree, [cpu::Feature::Neon])
+fn reduce_add_tree_f32x2(v: Simd<f32, 2>) f32 {
+    let x = d_f32(v);
+    return unsafe vget_lane_f32(x, 0) + unsafe vget_lane_f32(x, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::ReduceMulTree, [cpu::Feature::Neon])
+fn reduce_mul_tree_f32x2(v: Simd<f32, 2>) f32 {
+    let x = d_f32(v);
+    return unsafe vget_lane_f32(x, 0) * unsafe vget_lane_f32(x, 1);
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x2_i32x2(a: Simd<f32, 2>) Simd<i32, 2> {
+    return w_s32(vcvt_s32_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x2_f32x2(a: Simd<i32, 2>) Simd<f32, 2> {
+    return w_f32(vcvt_f32_s32(d_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x2_u32x2(a: Simd<f32, 2>) Simd<u32, 2> {
+    return w_u32(vcvt_u32_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x2_f32x2(a: Simd<u32, 2>) Simd<f32, 2> {
+    return w_f32(vcvt_f32_u32(d_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x8_u8x8(a: Simd<i8, 8>) Simd<u8, 8> {
+    return w_u8(vreinterpret_u8_s8(d_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x8_i8x8(a: Simd<u8, 8>) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x4_u16x4(a: Simd<i16, 4>) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_s16(d_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x4_i16x4(a: Simd<u16, 4>) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(d_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x2_u32x2(a: Simd<i32, 2>) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_s32(d_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x2_i32x2(a: Simd<u32, 2>) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(d_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x8_i16x8(a: Simd<i8, 8>) i16x8 {
+    return v_s16(vmovl_s8(d_s8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i8x8_u16x8(a: Simd<i8, 8>) u16x8 {
+    return v_u16(vreinterpretq_u16_s16(vmovl_s8(d_s8(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x8_u16x8(a: Simd<u8, 8>) u16x8 {
+    return v_u16(vmovl_u8(d_u8(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u8x8_i16x8(a: Simd<u8, 8>) i16x8 {
+    return v_s16(vreinterpretq_s16_u16(vmovl_u8(d_u8(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x4_i32x4(a: Simd<i16, 4>) i32x4 {
+    return v_s32(vmovl_s16(d_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x4_u32x4(a: Simd<i16, 4>) u32x4 {
+    return v_u32(vreinterpretq_u32_s32(vmovl_s16(d_s16(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x4_u32x4(a: Simd<u16, 4>) u32x4 {
+    return v_u32(vmovl_u16(d_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x4_i32x4(a: Simd<u16, 4>) i32x4 {
+    return v_s32(vreinterpretq_s32_u32(vmovl_u16(d_u16(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x2_i64x2(a: Simd<i32, 2>) i64x2 {
+    return v_s64(vmovl_s32(d_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x2_u64x2(a: Simd<i32, 2>) u64x2 {
+    return v_u64(vreinterpretq_u64_s64(vmovl_s32(d_s32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x2_u64x2(a: Simd<u32, 2>) u64x2 {
+    return v_u64(vmovl_u32(d_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x2_i64x2(a: Simd<u32, 2>) i64x2 {
+    return v_s64(vreinterpretq_s64_u64(vmovl_u32(d_u32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x8_i8x8(a: i16x8) Simd<i8, 8> {
+    return w_s8(vmovn_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i16x8_u8x8(a: i16x8) Simd<u8, 8> {
+    return w_u8(vreinterpret_u8_s8(vmovn_s16(q_s16(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i16x8_i8x8(a: i16x8) Simd<i8, 8> {
+    return w_s8(vqmovn_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i16x8_u8x8(a: i16x8) Simd<u8, 8> {
+    return w_u8(vqmovun_s16(q_s16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x8_i8x8(a: u16x8) Simd<i8, 8> {
+    return w_s8(vreinterpret_s8_u8(vmovn_u16(q_u16(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u16x8_u8x8(a: u16x8) Simd<u8, 8> {
+    return w_u8(vmovn_u16(q_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u16x8_u8x8(a: u16x8) Simd<u8, 8> {
+    return w_u8(vqmovn_u16(q_u16(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_i16x4(a: i32x4) Simd<i16, 4> {
+    return w_s16(vmovn_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x4_u16x4(a: i32x4) Simd<u16, 4> {
+    return w_u16(vreinterpret_u16_s16(vmovn_s32(q_s32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i32x4_i16x4(a: i32x4) Simd<i16, 4> {
+    return w_s16(vqmovn_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i32x4_u16x4(a: i32x4) Simd<u16, 4> {
+    return w_u16(vqmovun_s32(q_s32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_i16x4(a: u32x4) Simd<i16, 4> {
+    return w_s16(vreinterpret_s16_u16(vmovn_u32(q_u32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x4_u16x4(a: u32x4) Simd<u16, 4> {
+    return w_u16(vmovn_u32(q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u32x4_u16x4(a: u32x4) Simd<u16, 4> {
+    return w_u16(vqmovn_u32(q_u32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x2_i32x2(a: i64x2) Simd<i32, 2> {
+    return w_s32(vmovn_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i64x2_u32x2(a: i64x2) Simd<u32, 2> {
+    return w_u32(vreinterpret_u32_s32(vmovn_s64(q_s64(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i64x2_i32x2(a: i64x2) Simd<i32, 2> {
+    return w_s32(vqmovn_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_i64x2_u32x2(a: i64x2) Simd<u32, 2> {
+    return w_u32(vqmovun_s64(q_s64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x2_i32x2(a: u64x2) Simd<i32, 2> {
+    return w_s32(vreinterpret_s32_u32(vmovn_u64(q_u64(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u64x2_u32x2(a: u64x2) Simd<u32, 2> {
+    return w_u32(vmovn_u64(q_u64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Neon])
+fn narrow_saturating_u64x2_u32x2(a: u64x2) Simd<u32, 2> {
+    return w_u32(vqmovn_u64(q_u64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x2_f64x2(a: Simd<f32, 2>) f64x2 {
+    return v_f64(vcvt_f64_f32(d_f32(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x2_f32x2(a: f64x2) Simd<f32, 2> {
+    return w_f32(vcvt_f32_f64(q_f64(a)));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_i32x2_f64x2(a: Simd<i32, 2>) f64x2 {
+    return v_f64(vcvtq_f64_s64(vmovl_s32(d_s32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x2_i32x2(a: f64x2) Simd<i32, 2> {
+    return w_s32(vqmovn_s64(vcvtq_s64_f64(q_f64(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x2_i64x2(a: Simd<f32, 2>) i64x2 {
+    return v_s64(vcvtq_s64_f64(vcvt_f64_f32(d_f32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_u32x2_f64x2(a: Simd<u32, 2>) f64x2 {
+    return v_f64(vcvtq_f64_u64(vmovl_u32(d_u32(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f64x2_u32x2(a: f64x2) Simd<u32, 2> {
+    return w_u32(vqmovn_u64(vcvtq_u64_f64(q_f64(a))));
+}
+
+@arch(aarch64)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Neon])
+fn cast_f32x2_u64x2(a: Simd<f32, 2>) u64x2 {
+    return v_u64(vcvtq_u64_f64(vcvt_f64_f32(d_f32(a))));
+}

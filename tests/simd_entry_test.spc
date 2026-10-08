@@ -1,52 +1,84 @@
-// The backend entries of std/simd/backend/wasm.spc against the lane loops (tests/gen/simd_entry.spc),
-// on the vector conformance lane (`SC_SIMD_LANE=wasm`): every entry, in four parts that run in
-// parallel.
+// The backend entries against the lane loops (tests/gen/simd_entry.spc): std/simd/backend/wasm.spc on
+// the vector conformance lane (`SC_SIMD_LANE=wasm`), std/simd/backend/aarch64.spc on an aarch64 host;
+// every entry, in eight parts that run in parallel.
 import tests::gen::simd_entry as se;
 import tests::harness as h;
 import tests::cli_harness as cli;
+import driver_shim as shim;
 
-const BACKEND: str = "std/simd/backend/wasm.spc";
+// The backend file the differential builds use: the wasm one in the conformance lane, the aarch64 one
+// on an aarch64 host, none elsewhere.
+fn backend() str<'static> {
+    if h::simd_lane() {
+        return "std/simd/backend/wasm.spc";
+    }
+    if unsafe shim::sc_host_arch() == 1 {
+        return "std/simd/backend/aarch64.spc";
+    }
+    return "";
+}
 
 fn part(k: usize) {
-    if !h::simd_lane() {
+    if backend().len() == 0 {
         return;
     }
-    let text = cli::read_text(BACKEND);
+    let text = cli::read_text(backend());
     let n = se::entries(text.as_str()).len();
     assert(n > 200, "the backend file parses");
-    let r = se::check(text.as_str(), n * k / 4, n * (k + 1) / 4, 4);
+    let r = se::check(text.as_str(), n * k / 8, n * (k + 1) / 8, 4);
     if r.len() != 0 {
         eprintln("{}", r.as_str());
     }
     assert(r.len() == 0, "an entry differs from its lane loop");
 }
 
-@test
-fn entries_first_quarter() {
+// Each part builds and runs a program per few entries: on a 3-core CI runner a part takes up to 100 s.
+@test(timeout = 300)
+fn entries_first_eighth() {
     part(0);
 }
 
-@test
-fn entries_second_quarter() {
+@test(timeout = 300)
+fn entries_second_eighth() {
     part(1);
 }
 
-@test
-fn entries_third_quarter() {
+@test(timeout = 300)
+fn entries_third_eighth() {
     part(2);
 }
 
-@test
-fn entries_fourth_quarter() {
+@test(timeout = 300)
+fn entries_fourth_eighth() {
     part(3);
+}
+
+@test(timeout = 300)
+fn entries_fifth_eighth() {
+    part(4);
+}
+
+@test(timeout = 300)
+fn entries_sixth_eighth() {
+    part(5);
+}
+
+@test(timeout = 300)
+fn entries_seventh_eighth() {
+    part(6);
+}
+
+@test(timeout = 300)
+fn entries_eighth_eighth() {
+    part(7);
 }
 
 @test
 fn memory_and_mask_test_entries() {
-    if !h::simd_lane() {
+    if backend().len() == 0 {
         return;
     }
-    let r = se::check_memory(cli::read_text(BACKEND).as_str());
+    let r = se::check_memory(cli::read_text(backend()).as_str());
     if r.len() != 0 {
         eprintln("{}", r.as_str());
     }

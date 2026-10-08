@@ -220,7 +220,7 @@ const fn xop(name: str<'static>, cls: u8, tgt: u8, vbody: str<'static>, rbody: s
 }
 
 /// The operations of `XOPS`, from index 78.
-pub const XOPS: [XOp; 46] = [
+pub const XOPS: [XOp; 49] = [
     xop(
         "swizzle",
         C_ALL,
@@ -546,10 +546,33 @@ pub const XOPS: [XOp; 46] = [
         "let mut bx = y.to_array(); let k = simd::compress_store(bx, $Xusize, Mask::<$N>::from_bits_truncate(m), x); return hmix($E(Simd::<$T, $N>::from_array(bx)), k as u64);",
         "let st = $Xusize; let mut r = b; let mut k = 0usize; for i in 0..$Nusize { if $K { k += 1; } } if st > $Nusize || k > $Nusize - st { panic(format(\"index out of bounds: {} lanes from {} but the length is {}\", k, st, $Nusize).as_str()); } let mut j = st; for i in 0..$Nusize { if $K { r[j] = a[i]; j += 1; } } hr = hmix($E(Simd::<$T, $N>::from_array(r)), k as u64);",
     ),
+    // `count` of a comparison, and its `choose` of narrower integer lanes.
+    xop(
+        "count_compare",
+        C_ALL,
+        U_NONE,
+        "return x.less_than(y).count() as u64;",
+        "let mut r = 0u64; for i in 0..$Nusize { if a[i] < b[i] { r += 1; } } hr = r;",
+    ),
+    xop(
+        "choose_narrower",
+        C_ALL,
+        U_NARROWER,
+        "let p = x.cast::<$U>(); let q = y.cast::<$U>(); return $A(x.less_than(y).choose(p, q));",
+        "let mut r = [0 as $U; $N]; for i in 0..$Nusize { r[i] = if a[i] < b[i] { a[i] as $U; } else { b[i] as $U; }; } hr = $A(Simd::<$U, $N>::from_array(r));",
+    ),
+    // `gather` without the check: a lane whose index is past the end is inactive.
+    xop(
+        "gather_unchecked",
+        C_ALL,
+        U_INDEX,
+        "let ax = x.to_array(); let l: [$U; $N] = $X; let mut bits = m; for i in 0..$Nusize { if unsafe l[i] as u64 >= $Nu64 { bits = bits & ~(1u64 << i as u64); } } return $E(unsafe simd::gather_unchecked(ax, Simd::<$U, $N>::from_array(l), Mask::<$N>::from_bits_truncate(bits), y));",
+        "let l: [$U; $N] = $X; let mut r = b; for i in 0..$Nusize { if $K && (l[i] as u64) < $Nu64 { r[i] = a[l[i] as usize]; } } $V",
+    ),
 ];
 
 /// Operations in all: VOPS, LANE_OPS, then XOPS.
-pub const OPS_N: u64 = 124;
+pub const OPS_N: u64 = 127;
 
 // The whole-function operation `op` (78 and up).
 fn xop_of(op: u8) XOp {

@@ -107,9 +107,27 @@ fn masked_loads_and_stores_match() {
     sweep([118, 119, 120, 123]);
 }
 
+// A store of a vector loaded from the same slice one element before writes the loaded lanes, as if
+// every lane were read before the first write.
+@test
+fn a_store_reads_its_vector_first() {
+    h::expect_run(
+        "overlapping load and store",
+        "import std::simd;\nfn main(args: Vector<str>) i32 {\n    let mut a = [0.0f32; 17];\n    let s: []mut f32 = a;\n    for k in 0..17usize {\n        s[k] = (k + args.len() - 1) as f32;\n    }\n    let v = simd::load::<f32, 16>(s, 0) + Simd::<f32, 16>::splat(100.0);\n    simd::store(s, 1, v);\n    for k in 1..17usize {\n        if s[k] != (k + 99) as f32 {\n            return 1;\n        }\n    }\n    return 0;\n}\n",
+        "",
+        "",
+    );
+}
+
 @test
 fn gathers_and_scatters_match() {
-    sweep([121, 122]);
+    sweep([121, 122, 126]);
+}
+
+// A comparison read by `count`, and by a `choose` of narrower lanes.
+@test
+fn comparison_reads_match() {
+    sweep([124, 125]);
 }
 
 @test
@@ -117,9 +135,9 @@ fn operator_misuse_is_diagnosed() {
     let main = "\nfn main() i32 {\n    return 0;\n}\n";
     let cases: [[str; 2]; 11] = [
         ["fn f(a: i32x4, b: f32x4) { let _ = a + b; }", "mismatched types"],
-        ["fn f(a: f32x4) { let _ = a + 1.0; }", "use `Simd::splat`"],
+        ["fn f(a: f32x4, b: f64) { let _ = a + b; }", "the right operand is the vector type or its lane type"],
         ["fn f(a: f32x4) { let _ = 1.0 + a; }", "use `Simd::splat`"],
-        ["fn f(a: i32x4) { let _ = a << 1u32; }", "a shift count is the vector type or its lane type"],
+        ["fn f(a: i32x4) { let _ = a << 1u32; }", "the right operand is the vector type or its lane type"],
         ["fn f(a: f32x4) { let _ = a << a; }", "unsatisfied interface bounds"],
         ["fn f(a: f32x4) { let _ = a % a; }", "unsatisfied interface bounds"],
         ["fn f(a: f32x4) { let _ = ~a; }", "unsatisfied interface bounds"],
@@ -159,6 +177,36 @@ fn operator_misuse_is_diagnosed() {
         "fn main() i32 {\n    let v = Simd::<i32, 2>::splat(1).low_half();\n    return v[0];\n}\n",
         "low_half: the vector needs at least 4 lanes",
     );
+}
+
+// A lane scalar right of an operator is the scalar in every lane: a variable, a literal and literal-only
+// arithmetic, in concrete code and in code generic over the lanes.
+@test
+fn a_lane_scalar_operand_is_splat() {
+    let src = M"(import std::simd;
+fn axpy<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
+    return x * a + y;
+}
+fn twice<T: SimdInt, const N: usize>(x: Simd<T, N>) Simd<T, N> {
+    return x + x;
+}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as f32;
+    let v = Simd::<f32, 8>::splat(k + 1.0);
+    let a = v * 3.0 + k - 0.5;
+    let q = v / (1.0 + 3.0);
+    let w = Simd::<u8, 16>::splat(args.len() as u8 * 200);
+    let b = w ^ (3 | 4) * 2;
+    let c = (w % 7 & 6 | 1) - 1u8;
+    let r = axpy::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
+    let t = twice::<i16, 8>(Simd::<i16, 8>::splat(3));
+    if a[7] != 6.5 || q[0] != 0.5 || b[15] != 198 || c[3] != 4 || r[2] != 3.0 || t[7] != 6 {
+        return 1;
+    }
+    return 0;
+}
+)";
+    h::expect_run("a lane scalar operand", src, "", "");
 }
 
 // Vector operators through generic code over a bound (`Add`, `SimdSigned`), a free generic function as

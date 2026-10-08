@@ -229,6 +229,38 @@ fn elaborated(p: &loader::Package, name: str, lw: &mut irl::Lowerer) {
     ird::insert_drops(&mut lw.body, &mut ecx, &forest);
 }
 
+// A temporary of the right operand of `||` holds a value only when that operand runs: its flag is
+// false at entry and set by the call that writes it, so the guarded drop never frees an unwritten
+// value.
+@test
+fn conditional_temporary_flag_starts_clear() {
+    let p = typed_package(
+        "fn mk() String { return String::new(); }\nfn f(c: bool) bool { return c || mk().len() > 1; }\nfn main() i32 { return f(true) as i32 - 1; }",
+    );
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, NODE_NONE);
+    elaborated(&p, "f", &mut lw);
+    let b = &lw.body;
+    let mut fl: u32 = 0xFFFFFFFF;
+    for bi in 0..b.blocks.len() {
+        let t = b.blocks.at(bi).term;
+        if t.kind == irc::TM_DROP && t.args_len == 1 {
+            fl = t.args_start;
+        }
+    }
+    assert(fl != 0xFFFFFFFF, "the temporary gets a guarded drop");
+    let entry = *b.blocks.at(b.entry as usize);
+    let mut init: i64 = -1;
+    for si in 0..entry.stmt_len {
+        let st = *b.statements.at((entry.stmt_start + si) as usize);
+        if init < 0 && st.kind == irc::ST_ASSIGN && b.places.at(st.place as usize).base == fl {
+            let rv = *b.rvalues.at(st.rvalue as usize);
+            init = b.constants.at(b.operands.at(rv.a as usize).data as usize).val;
+        }
+    }
+    assert(init == 0, "the flag is clear at entry");
+}
+
 @test
 fn verifier_rejects_tampered_drops() {
     // The elaborated body passes; removing the guard of the flag-guarded drop (an unguarded drop

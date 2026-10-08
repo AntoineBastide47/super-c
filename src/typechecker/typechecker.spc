@@ -6653,10 +6653,18 @@ extend<'a> TypeChecker<'a> {
 
     // Whether the module under check belongs to `std`, the only code that may write a cast that
     // exposes a vector's or a mask's storage, or implement `SimdElement`.
-    const fn tc_in_std(self: &Self) bool {
+    fn tc_in_std(self: &Self) bool {
         let pk = unsafe &*self.package;
         let m = &pk.modules[self.cur_module() as usize];
-        return m.prelude || m.path.as_str().starts_with("std::") && pk.std_root.len() != 0 && m.file.as_str().starts_with(
+        // The backend file loads from the std directory whatever spelling the driver gave it; a file
+        // named relative to the working directory (`lint std/..`) compares by its real path.
+        if m.prelude || m.backend {
+            return true;
+        }
+        if !m.path.as_str().starts_with("std::") || pk.std_root.len() == 0 {
+            return false;
+        }
+        return m.file.as_str().starts_with(pk.std_root.as_str()) || loader::real_path_of(m.file.as_str()).as_str().starts_with(
             pk.std_root.as_str(),
         );
     }
@@ -9107,10 +9115,35 @@ extend<'a> TypeChecker<'a> {
         return sc;
     }
 
+    // `t` without one reference wrapper.
+    const fn tc_peel_ref(self: &Self, t: TypeId) TypeId {
+        let y = self.type_at(t);
+        return pick(y.kind == TypeKind::TYPE_REFERENCE, y.as_data.elem, t);
+    }
+
     // One parameter position's score contribution.
-    fn tc_score_param(self: &mut Self, sc: &mut CandScore, pt: TypeId, at: TypeId, lc: u8) {
-        if pt == TYPE_NONE || self.tc_infer_ty_open(pt) {
-            // Unknown parameter side: this position does not constrain the choice.
+    fn tc_score_param(self: &mut Self, sc: &mut CandScore, pt0: TypeId, at: TypeId, lc: u8) {
+        let mut pt = pt0;
+        if pt == TYPE_NONE {
+            return;
+        }
+        if self.tc_infer_ty_open(pt) {
+            // A parameter over type parameters: the argument's own type matches it (`v + w` in a body
+            // generic over `v`'s lanes), and a type parameter the inference left fixed neither takes nor
+            // is another kind of type (`Add<T>` against a vector, `Add<Self>` against a `T`). Else the
+            // position does not constrain the choice.
+            if at == TYPE_NONE {
+                return;
+            }
+            let pe = self.tc_peel_ref(pt);
+            let ae = self.tc_peel_ref(at);
+            if pt == at {
+                sc.exact += 1;
+            } else if pe == ae {
+                sc.radj += 1;
+            } else if self.type_at(pe).kind == TypeKind::TYPE_GENERIC != (self.type_at(ae).kind == TypeKind::TYPE_GENERIC) {
+                sc.viable = false;
+            }
             return;
         }
         if at != TYPE_NONE {
@@ -9138,6 +9171,11 @@ extend<'a> TypeChecker<'a> {
             }
             sc.viable = false;
             return;
+        }
+        // A literal reaches a by-reference parameter through a temporary (`m + 5` with `other: &i32`).
+        if lc != 0 && self.type_at(pt).kind == TypeKind::TYPE_REFERENCE {
+            pt = self.type_at(pt).as_data.elem;
+            sc.radj += 1;
         }
         if lc == 1 {
             // An unsuffixed integer literal: any integer parameter takes it by adaptation; the
@@ -15307,7 +15345,8 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    fn check_arith_overload(self: &mut Self, id: NodeId, l: TypeId, out: &mut TypeId) bool {
+    // `lk`: the left operand's literal-only kind (tc_lit_kind).
+    fn check_arith_overload(self: &mut Self, id: NodeId, l: TypeId, lk: u8, out: &mut TypeId) bool {
         let op = unsafe (*self.cur_ast()).at_const(id).as_data.binary.op;
         let m = op.op_method();
         if m.len() == 0 {
@@ -15341,6 +15380,9 @@ extend TypeChecker {
             }
             return true;
         }
+        if lt.kind == TypeKind::TYPE_BUILTIN {
+            return self.tc_scalar_left_op(id, ls, lk, m, right, out);
+        }
         if lt.kind != TypeKind::TYPE_STRUCT && lt.kind != TypeKind::TYPE_INSTANCE && !lt.is_vec() {
             return false;
         }
@@ -15355,10 +15397,11 @@ extend TypeChecker {
                 let mut rt = Tys8 {};
                 let mut rl = Lits8 {};
                 rt[0] = unsafe (*self.cur_ast()).type_of(right);
-                if lt.is_vec() && self.tc_lit_kind(right) != 0 {
-                    // A literal shift count is any lane's: its class picks `Shl<T>` over `Shl<Self>`.
+                let rk = self.tc_lit_kind(right);
+                if lt.is_vec() && rk != 0 {
+                    // A literal operand is any lane's: its class picks `Mul<T>` over `Mul<Self>`.
                     rt[0] = TYPE_NONE;
-                    rl[0] = self.tc_peek_lit_class(right);
+                    rl[0] = rk;
                 }
                 let mut tie = false;
                 md = self.tc_pick_by_args(om, od, tok::Span::empty(), m, ls, md, &rt[0], &rl[0], 1, true, &mut tie);
@@ -15392,11 +15435,7 @@ extend TypeChecker {
                     self.err_mismatch(right, p1);
                     let rt = unsafe (*self.cur_ast()).type_of(right);
                     if lt.kind == TypeKind::TYPE_SIMD && rt != TYPE_NONE && self.type_at(rt).kind != TypeKind::TYPE_SIMD {
-                        if m == "shl" || m == "shr" {
-                            self.errors.note(format("a shift count is the vector type or its lane type"));
-                        } else {
-                            self.errors.note(format("a scalar does not convert to a vector: use `Simd::splat`"));
-                        }
+                        self.errors.note(format("the right operand is the vector type or its lane type"));
                     }
                 }
                 let ret = self.tc_method_ret(ls, md);
@@ -15406,6 +15445,94 @@ extend TypeChecker {
             }
         }
         return true;
+    }
+
+    // `x op r` for a builtin `x` of type `ls` and an aggregate `r` (node `right`): operator method `m`
+    // of the conformance of `x`'s type that accepts `r` (`extend f32 as Mul<V>`). A literal-only `x`
+    // of kind `lk` takes the one integer or float type with such a conformance. False when no
+    // conformance accepts `r`: the builtin operator then reports the operands.
+    fn tc_scalar_left_op(self: &mut Self, id: NodeId, ls: TypeId, lk: u8, m: str, right: NodeId, out: &mut TypeId) bool {
+        let mut rs = unsafe (*self.cur_ast()).type_of(right);
+        while rs != TYPE_NONE && self.type_at(rs).kind == TypeKind::TYPE_REFERENCE {
+            rs = self.type_at(rs).as_data.elem;
+        }
+        if rs == TYPE_NONE {
+            return false;
+        }
+        let rt = *self.type_at(rs);
+        if rt.kind != TypeKind::TYPE_STRUCT && rt.kind != TypeKind::TYPE_INSTANCE && rt.kind != TypeKind::TYPE_ENUM && !rt.is_vec() {
+            return false;
+        }
+        let mut md = DefId { module: 0, node: NODE_NONE };
+        let mut ty = ls;
+        let mut hits: u32 = 0;
+        for b in BuiltinType::BT_I8 as u8..BuiltinType::BT_F64 as u8 + 1 {
+            let bt = b as BuiltinType;
+            if lk == 0 && bt != self.bt_of(ls) || lk == 1 && !bt_is_int(bt) || lk == 2 && !bt_is_float(bt) {
+                continue;
+            }
+            let c = self.tc_scalar_op_fit(bt, m, rs, right);
+            if c.node != NODE_NONE {
+                md = c;
+                ty = Ast::builtin(bt);
+                hits += 1;
+            }
+        }
+        if hits == 0 {
+            return false;
+        }
+        let sp = unsafe (*self.cur_ast()).at_const(id).span;
+        if hits > 1 {
+            self.errors.emit_span(
+                sp,
+                format("the literal's type is ambiguous: {} types provide '{}' for this right operand", hits, m),
+            );
+            self.errors.note(format("give the literal a type suffix"));
+            *out = TYPE_NONE;
+            return true;
+        }
+        if lk != 0 {
+            let _ = self.lit_adopt(unsafe (*self.cur_ast()).at_const(id).as_data.binary.left, lk, ty);
+        }
+        if !self.method_extend_bounds_hold(ty, md) {
+            self.err_method_extend_bounds(sp, ty, md);
+            *out = TYPE_NONE;
+            return true;
+        }
+        unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+        *out = self.tc_method_ret(ty, md);
+        return true;
+    }
+
+    // The operator method `m` of builtin type `bt` whose parameter accepts `right` of type `rs`, or
+    // none.
+    fn tc_scalar_op_fit(self: &mut Self, bt: BuiltinType, m: str, rs: TypeId, right: NodeId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let core = unsafe (*self.package).core_module;
+        let decl = unsafe (*self.package).builtin_decl(bt);
+        if decl == NODE_NONE {
+            return none;
+        }
+        let ty = Ast::builtin(bt);
+        let mut md = self.find_method_cstr(core, decl, m);
+        if md.node == NODE_NONE {
+            return none;
+        }
+        let mut rt = Tys8 {};
+        let rl = Lits8 {};
+        rt[0] = rs;
+        let mut tie = false;
+        md = self.tc_pick_by_args(core, decl, tok::Span::empty(), m, ty, md, &rt[0], &rl[0], 1, false, &mut tie);
+        let p1 = self.tc_method_param(ty, md, 1);
+        let pe = if p1 != TYPE_NONE && self.type_at(p1).kind == TypeKind::TYPE_REFERENCE {
+            self.type_at(p1).as_data.elem;
+        } else {
+            p1;
+        };
+        if tie || p1 == TYPE_NONE || !self.compatible_in(pe, right, true) {
+            return none;
+        }
+        return md;
     }
 
     // Operator method `m` on a value of type parameter `ls`: the interface method a bound provides,
@@ -15673,7 +15800,7 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Plus || op == TokenType::Minus {
             let mut ov: TypeId = TYPE_NONE;
-            if self.check_arith_overload(id, l, &mut ov) {
+            if self.check_arith_overload(id, l, lk, &mut ov) {
                 return ov;
             }
             let mut handled = false;
@@ -15685,14 +15812,14 @@ extend TypeChecker {
         }
         if op == TokenType::Star || op == TokenType::Slash || op == TokenType::Percent {
             let mut ov: TypeId = TYPE_NONE;
-            if self.check_arith_overload(id, l, &mut ov) {
+            if self.check_arith_overload(id, l, lk, &mut ov) {
                 return ov;
             }
             return self.binary_numeric(id, l, ln, lk, r, rn, rlk, false);
         }
         if op == TokenType::Ampersand || op == TokenType::Pipe || op == TokenType::Caret || op == TokenType::LeftShift || op == TokenType::RightShift {
             let mut ov: TypeId = TYPE_NONE;
-            if self.check_arith_overload(id, l, &mut ov) {
+            if self.check_arith_overload(id, l, lk, &mut ov) {
                 return ov;
             }
             return self.binary_numeric(id, l, ln, lk, r, rn, rlk, true);
@@ -20849,7 +20976,7 @@ extend TypeChecker {
             // A vector `v op= r` picks its operator as `v op r` does: a shift count may be a lane.
             self.check_expr(bd.right);
             let mut out = TYPE_NONE;
-            let _ = self.check_arith_overload(id, l, &mut out);
+            let _ = self.check_arith_overload(id, l, 0, &mut out);
             if !self.is_assignable(bd.left) {
                 self.errors.emit_span(unsafe (*a).at_const(bd.left).span, format("cannot assign to this expression"));
             }
@@ -23457,7 +23584,7 @@ extend TypeChecker {
         } else if op == ir::OP_SHL_SCALAR || op == ir::OP_SHR_SCALAR {
             ok = ok && np == 2 && v.k == SG_VEC && p[1].k == SG_SCALAR && p[1].bt == v.bt && r.same(&v);
             want = "(Simd<T, N>, T) Simd<T, N>";
-        } else if sr == ir::SR_CHOOSE || op == ir::OP_CHOOSE_LANES {
+        } else if sr == ir::SR_CHOOSE || sr == ir::SR_MASKED || op == ir::OP_CHOOSE_LANES {
             v = p[1];
             let l = op == ir::OP_CHOOSE_LANES;
             ok = ok && np == 3 && v.k == SG_VEC && p[2].same(&v) && r.same(&v) && pick(

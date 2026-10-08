@@ -492,6 +492,7 @@ never version text.
 | `thread-local` | all | `_Thread_local` accepted |
 | `cpuid-count` | x86_64 | `<cpuid.h>` `__get_cpuid_count` accepted |
 | `getauxval`, `at-hwcap2`, `at-hwcap3` | Linux and Android aarch64 | `getauxval` links; each `AT_HWCAP*` constant compiles |
+| `aarch64-features` | aarch64 | `<arm_neon.h>` compiles under the build's flags, whose one `-march`/`-mcpu` carries the optional features |
 | `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
@@ -505,9 +506,9 @@ before the transpile, one child per spelling, all at once. A build that measured
 leaves the record unchanged. The results a build used end every object and link
 fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
 "thin"`, and the probe of each CPU feature it enables that has one (`wasm-simd128`,
-`wasm-relaxed-simd`); a rejected feature probe fails the build before any compile ("build:
-the C compiler 'cc' rejects '-msimd128': target feature 'simd128' needs a compiler that
-supports it"). The emitted C uses no probe result, so the emit stamp holds none.
+`wasm-relaxed-simd`, `aarch64-features`); a rejected feature probe fails the build before any
+compile, once per probe with the features it checks ("build: the C compiler 'cc' rejects
+'-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.
 
 ```sh
 super-c build --print-probes                    # the table for the dev profile and the host target
@@ -532,6 +533,33 @@ by `std::cpu::Feature`:
 | `relaxed-simd` | wasm32 | `simd128` | `-mrelaxed-simd` | `wasm-relaxed-simd` | off |
 | `sse2` | x86_64 | | | | always on |
 | `neon` | aarch64 | | | | always on |
+| `fp16` | aarch64 | `neon`, `rdm` | `+fp16` | `aarch64-features` | macOS |
+| `dotprod` | aarch64 | `neon`, `rdm` | `+dotprod` | `aarch64-features` | macOS |
+| `rdm` | aarch64 | `neon`, `crc`, `lse` | (Armv8.1-A) | `aarch64-features` | macOS |
+| `i8mm` | aarch64 | `neon`, `rdm` | `+i8mm` | `aarch64-features` | off |
+| `bf16` | aarch64 | `neon`, `rdm` | `+bf16` | `aarch64-features` | off |
+| `aes` | aarch64 | `neon` | `+aes` | `aarch64-features` | macOS, iOS |
+| `sha2` | aarch64 | `neon` | `+sha2` | `aarch64-features` | macOS, iOS |
+| `sha3` | aarch64 | `neon`, `rdm`, `sha2` | `+sha3` | `aarch64-features` | macOS |
+| `crc` | aarch64 | | `+crc` | `aarch64-features` | macOS |
+| `lse` | aarch64 | | `+lse` | `aarch64-features` | macOS |
+| `sve` | aarch64 | `fp16`, `rdm` | `+sve` | `aarch64-features` | off |
+| `sve2` | aarch64 | `sve` | `+sve2` | `aarch64-features` | off |
+
+The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
+CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
+the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` and `sve2` are
+detected only: no vector operation uses them, and no macOS or iOS build takes them (no Apple core
+has them). A feature whose flag raises the architecture implies the Armv8.1-A features that
+architecture brings (`rdm`, `crc`, `lse`), so the set names what the C compiler enables. The
+features beyond the baseline make one C flag:
+on macOS `-mcpu=apple-m1+<f>...`; elsewhere `-march=` the lowest architecture whose assembler
+and intrinsics take them all (`armv8.2-a` for `fp16`, `dotprod`, `i8mm`, `bf16`, `sha3`,
+`sve`, which only Armv8.2 cores have; `armv8.1-a` for `rdm`, whose intrinsics Clang guards
+with Armv8.1; else `armv8-a`), then each enabled extension that architecture lacks (Armv8.1-A
+has `rdm`, `lse` and `crc`). GCC 13 with binutils 2.40 rejects `+dotprod`, `+i8mm` and `+sha3`
+on `armv8-a`, and `+rdm` (it spells `+rdma`). The `aarch64-features` probe runs only for a
+build with features beyond the baseline, and its error names that flag.
 
 A build starts from its instruction set's baseline (the rows that are always on), applies
 the build.toml `target-features` list (a profile's list replaces the build-level one), then
@@ -539,7 +567,8 @@ the `--target-feature=L` list (repeated flags join in order). Each list item is 
 `name` (enable) or `-name` (disable), applied in order; the implications close the set
 after the last item. An unknown name is an error before anything builds ("unknown target
 feature 'avx2' for wasm32; the wasm32 features are: simd128, relaxed-simd"), and so is a
-baseline feature disabled ("target feature 'sse2' is part of every x86_64 build"). A
+baseline feature disabled ("target feature 'sse2' is part of every x86_64 build"; "target
+feature 'dotprod' is part of every aarch64 build for macos"). A
 build.toml list may name features of several instruction sets: a build skips the others';
 on the command line another instruction set's feature is an error ("no target feature
 'neon' for wasm32; .."). The set adds each enabled feature's C flag to every compile, after
@@ -552,7 +581,11 @@ holds its features.
 ```sh
 super-c build --target=wasm --target-feature=+simd128
 super-c build --target=wasm --target-feature=+relaxed-simd   # simd128 too
+super-c build --target-feature=+i8mm,+bf16                   # on macOS: -mcpu=apple-m1+i8mm+bf16
 ```
+
+`std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.c`), with
+the build's set included: a program can choose code at run time, never a result.
 
 ### Common flags
 

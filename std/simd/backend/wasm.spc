@@ -286,8 +286,11 @@ fn maximum_f32x4(a: f32x4, b: f32x4) f32x4 {
 fn min_f32x4(a: f32x4, b: f32x4) f32x4 {
     let x = reg(a);
     let y = reg(b);
-    let m = wasm_v128_bitselect(y, wasm_f32x4_min(x, y), wasm_f32x4_ne(x, x));
-    return vec::<f32, 4>(wasm_v128_bitselect(x, m, wasm_f32x4_ne(y, y)));
+    let nx = wasm_f32x4_ne(x, x);
+    let m = wasm_v128_bitselect(y, wasm_f32x4_min(x, y), nx);
+    // Two NaNs give `x` quieted.
+    let xq = wasm_v128_bitselect(wasm_v128_or(x, wasm_i32x4_splat(0x400000)), x, nx);
+    return vec::<f32, 4>(wasm_v128_bitselect(xq, m, wasm_f32x4_ne(y, y)));
 }
 
 @arch(wasm32)
@@ -295,8 +298,11 @@ fn min_f32x4(a: f32x4, b: f32x4) f32x4 {
 fn max_f32x4(a: f32x4, b: f32x4) f32x4 {
     let x = reg(a);
     let y = reg(b);
-    let m = wasm_v128_bitselect(y, wasm_f32x4_max(x, y), wasm_f32x4_ne(x, x));
-    return vec::<f32, 4>(wasm_v128_bitselect(x, m, wasm_f32x4_ne(y, y)));
+    let nx = wasm_f32x4_ne(x, x);
+    let m = wasm_v128_bitselect(y, wasm_f32x4_max(x, y), nx);
+    // Two NaNs give `x` quieted.
+    let xq = wasm_v128_bitselect(wasm_v128_or(x, wasm_i32x4_splat(0x400000)), x, nx);
+    return vec::<f32, 4>(wasm_v128_bitselect(xq, m, wasm_f32x4_ne(y, y)));
 }
 
 @arch(wasm32)
@@ -388,8 +394,11 @@ fn maximum_f64x2(a: f64x2, b: f64x2) f64x2 {
 fn min_f64x2(a: f64x2, b: f64x2) f64x2 {
     let x = reg(a);
     let y = reg(b);
-    let m = wasm_v128_bitselect(y, wasm_f64x2_min(x, y), wasm_f64x2_ne(x, x));
-    return vec::<f64, 2>(wasm_v128_bitselect(x, m, wasm_f64x2_ne(y, y)));
+    let nx = wasm_f64x2_ne(x, x);
+    let m = wasm_v128_bitselect(y, wasm_f64x2_min(x, y), nx);
+    // Two NaNs give `x` quieted.
+    let xq = wasm_v128_bitselect(wasm_v128_or(x, wasm_i64x2_splat(0x8000000000000)), x, nx);
+    return vec::<f64, 2>(wasm_v128_bitselect(xq, m, wasm_f64x2_ne(y, y)));
 }
 
 @arch(wasm32)
@@ -397,8 +406,11 @@ fn min_f64x2(a: f64x2, b: f64x2) f64x2 {
 fn max_f64x2(a: f64x2, b: f64x2) f64x2 {
     let x = reg(a);
     let y = reg(b);
-    let m = wasm_v128_bitselect(y, wasm_f64x2_max(x, y), wasm_f64x2_ne(x, x));
-    return vec::<f64, 2>(wasm_v128_bitselect(x, m, wasm_f64x2_ne(y, y)));
+    let nx = wasm_f64x2_ne(x, x);
+    let m = wasm_v128_bitselect(y, wasm_f64x2_max(x, y), nx);
+    // Two NaNs give `x` quieted.
+    let xq = wasm_v128_bitselect(wasm_v128_or(x, wasm_i64x2_splat(0x8000000000000)), x, nx);
+    return vec::<f64, 2>(wasm_v128_bitselect(xq, m, wasm_f64x2_ne(y, y)));
 }
 
 @arch(wasm32)
@@ -1412,6 +1424,331 @@ fn cast_f64x4_f32x4(a: f64x4) f32x4 {
     return vec::<f32, 4>(unsafe wasm_i64x2_shuffle(lo, hi, 0, 2));
 }
 
+// The truncating narrowing casts: the low bytes of each lane of both halves, one shuffle.
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i32x8_i16x8(a: i32x8) i16x8 {
+    return vec::<i16, 8>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            4,
+            5,
+            8,
+            9,
+            12,
+            13,
+            16,
+            17,
+            20,
+            21,
+            24,
+            25,
+            28,
+            29,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i32x8_u16x8(a: i32x8) u16x8 {
+    return vec::<u16, 8>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            4,
+            5,
+            8,
+            9,
+            12,
+            13,
+            16,
+            17,
+            20,
+            21,
+            24,
+            25,
+            28,
+            29,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u32x8_i16x8(a: u32x8) i16x8 {
+    return vec::<i16, 8>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            4,
+            5,
+            8,
+            9,
+            12,
+            13,
+            16,
+            17,
+            20,
+            21,
+            24,
+            25,
+            28,
+            29,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u32x8_u16x8(a: u32x8) u16x8 {
+    return vec::<u16, 8>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            4,
+            5,
+            8,
+            9,
+            12,
+            13,
+            16,
+            17,
+            20,
+            21,
+            24,
+            25,
+            28,
+            29,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i16x16_i8x16(a: i16x16) i8x16 {
+    return vec::<i8, 16>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            2,
+            4,
+            6,
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i16x16_u8x16(a: i16x16) u8x16 {
+    return vec::<u8, 16>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            2,
+            4,
+            6,
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u16x16_i8x16(a: u16x16) i8x16 {
+    return vec::<i8, 16>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            2,
+            4,
+            6,
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u16x16_u8x16(a: u16x16) u8x16 {
+    return vec::<u8, 16>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            2,
+            4,
+            6,
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i64x4_i32x4(a: i64x4) i32x4 {
+    return vec::<i32, 4>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            2,
+            3,
+            8,
+            9,
+            10,
+            11,
+            16,
+            17,
+            18,
+            19,
+            24,
+            25,
+            26,
+            27,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_i64x4_u32x4(a: i64x4) u32x4 {
+    return vec::<u32, 4>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            2,
+            3,
+            8,
+            9,
+            10,
+            11,
+            16,
+            17,
+            18,
+            19,
+            24,
+            25,
+            26,
+            27,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u64x4_i32x4(a: u64x4) i32x4 {
+    return vec::<i32, 4>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            2,
+            3,
+            8,
+            9,
+            10,
+            11,
+            16,
+            17,
+            18,
+            19,
+            24,
+            25,
+            26,
+            27,
+        ),
+    );
+}
+
+@arch(wasm32)
+@simd_impl(simd::Op::Cast, [cpu::Feature::Simd128])
+fn cast_u64x4_u32x4(a: u64x4) u32x4 {
+    return vec::<u32, 4>(
+        unsafe wasm_i8x16_shuffle(
+            reg(a.low_half()),
+            reg(a.high_half()),
+            0,
+            1,
+            2,
+            3,
+            8,
+            9,
+            10,
+            11,
+            16,
+            17,
+            18,
+            19,
+            24,
+            25,
+            26,
+            27,
+        ),
+    );
+}
+
 @arch(wasm32)
 @simd_impl(simd::Op::NarrowSaturating, [cpu::Feature::Simd128])
 fn narrow_saturating_i16x16_i8x16(a: i16x16) i8x16 {
@@ -1619,12 +1956,11 @@ fn reduce_mul_tree_f64x2(v: f64x2) f64 {
 @arch(wasm32)
 @simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Simd128])
 fn reduce_add_i8x16(v: i8x16) i8 {
-    let mut x = reg(v);
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 4, 5, 6, 7, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    return unsafe wasm_i8x16_extract_lane(x, 0);
+    // The byte lanes summed exactly in four u32 lanes, then those; the low byte is the wrapping sum.
+    let mut x = wasm_u32x4_extadd_pairwise_u16x8(wasm_u16x8_extadd_pairwise_u8x16(reg(v)));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 2, 3, 2, 3));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 1, 1, 2, 3));
+    return (unsafe wasm_u32x4_extract_lane(x, 0)) as i8;
 }
 
 @arch(wasm32)
@@ -1652,12 +1988,11 @@ fn reduce_max_i8x16(v: i8x16) i8 {
 @arch(wasm32)
 @simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Simd128])
 fn reduce_add_u8x16(v: u8x16) u8 {
-    let mut x = reg(v);
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 4, 5, 6, 7, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    x = wasm_i8x16_add(x, unsafe wasm_i8x16_shuffle(x, x, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    return unsafe wasm_u8x16_extract_lane(x, 0);
+    // The byte lanes summed exactly in four u32 lanes, then those; the low byte is the wrapping sum.
+    let mut x = wasm_u32x4_extadd_pairwise_u16x8(wasm_u16x8_extadd_pairwise_u8x16(reg(v)));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 2, 3, 2, 3));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 1, 1, 2, 3));
+    return (unsafe wasm_u32x4_extract_lane(x, 0)) as u8;
 }
 
 @arch(wasm32)
@@ -1685,11 +2020,11 @@ fn reduce_max_u8x16(v: u8x16) u8 {
 @arch(wasm32)
 @simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Simd128])
 fn reduce_add_i16x8(v: i16x8) i16 {
-    let mut x = reg(v);
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 4, 5, 6, 7, 4, 5, 6, 7));
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 2, 3, 2, 3, 4, 5, 6, 7));
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 1, 1, 2, 3, 4, 5, 6, 7));
-    return unsafe wasm_i16x8_extract_lane(x, 0);
+    // The lanes summed exactly in four u32 lanes, then those; the low half is the wrapping sum.
+    let mut x = wasm_u32x4_extadd_pairwise_u16x8(reg(v));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 2, 3, 2, 3));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 1, 1, 2, 3));
+    return (unsafe wasm_u32x4_extract_lane(x, 0)) as i16;
 }
 
 @arch(wasm32)
@@ -1715,11 +2050,11 @@ fn reduce_max_i16x8(v: i16x8) i16 {
 @arch(wasm32)
 @simd_impl(simd::Op::ReduceAdd, [cpu::Feature::Simd128])
 fn reduce_add_u16x8(v: u16x8) u16 {
-    let mut x = reg(v);
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 4, 5, 6, 7, 4, 5, 6, 7));
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 2, 3, 2, 3, 4, 5, 6, 7));
-    x = wasm_i16x8_add(x, unsafe wasm_i16x8_shuffle(x, x, 1, 1, 2, 3, 4, 5, 6, 7));
-    return unsafe wasm_u16x8_extract_lane(x, 0);
+    // The lanes summed exactly in four u32 lanes, then those; the low half is the wrapping sum.
+    let mut x = wasm_u32x4_extadd_pairwise_u16x8(reg(v));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 2, 3, 2, 3));
+    x = wasm_i32x4_add(x, unsafe wasm_i32x4_shuffle(x, x, 1, 1, 2, 3));
+    return (unsafe wasm_u32x4_extract_lane(x, 0)) as u16;
 }
 
 @arch(wasm32)

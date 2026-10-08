@@ -404,6 +404,10 @@ pub struct Mangler {
     pub tn_key: Vector<u64>,
     pub tn_row: Vector<u32>,
     pub tn_on: bool,
+    /// The build plans backend entries (`cbe::simd_enabled`): a vector of 2 to 16 bytes holds a C
+    /// vector (`vec_pack`), so the C ABI passes it in one register. Without, the C has no vector
+    /// extension.
+    pub vec_regs: bool,
     tn_seen: Vector<u64>, // direct-mapped filter over (row, key): most spellings repeat a recent one
     tn_pre: Vector<u64>, // direct-mapped filter over (row, concrete pool type, kind): skips the name hash
     tn_memo: Map<u64, u64>, // (module, decl) or concrete (module, type) -> C name FNV
@@ -628,6 +632,7 @@ extend Mangler {
             tn_key: Vector::<u64>::new(),
             tn_row: Vector::<u32>::new(),
             tn_on: false,
+            vec_regs: false,
             tn_seen: Vector::<u64>::new(),
             tn_pre: Vector::<u64>::new(),
             tn_memo: Map::<u64, u64>::new(),
@@ -3221,7 +3226,7 @@ extend Mangler {
     }
 
     /// The C struct of vector `t` (`y`, pool `pm`): `__sc_v<N>_<lane>`, defined once per mangler as a
-    /// pack (`pack_reqs`) holding `_Alignas(A) <lane> l[N]`, `A` the layout's alignment.
+    /// pack (`pack_reqs`, `vec_def`).
     fn vec_pack(self: &mut Self, pm: ModuleId, t: TypeId, y: &Ty, out: &mut String) bool {
         let n = self.arr_len(pm, y);
         let st = out.len();
@@ -3231,38 +3236,63 @@ extend Mangler {
         if !ok {
             return false;
         }
-        let h = out.as_str().slice(st, out.len()).hash();
+        let nm = String::from_str(out.as_str().slice(st, out.len()));
+        let lo = self.layout_sub(pm, t);
+        return lo.ok && self.vec_def(pm, y.as_data.arr.elem, nm.as_str(), n as u64, lo.size, lo.align);
+    }
+
+    /// The pack of vector struct `nm`, `n` lanes of `elem` (pool `pm`) in `size` bytes aligned to
+    /// `align`: `_Alignas(A) <lane> l[N]`. Under `vec_regs`, a vector of 2 to 16 bytes whose alignment
+    /// is its size holds `<lane> l __attribute__((vector_size(S)))` instead, so the C ABI passes it in
+    /// one vector register, not lane by lane (an aggregate of floats is a homogeneous aggregate, of
+    /// integers two words); its lanes have no address: code that takes one spells `((T *)&v)[i]`. A
+    /// wider one of 16-byte chunks also names them, `c[k]` in a union with `l`: a split operation
+    /// reads and writes its chunks in place.
+    fn vec_def(self: &mut Self, pm: ModuleId, elem: TypeId, nm: str, n: u64, size: u64, align: u64) bool {
+        let h = nm.hash();
         if !self.pack_seen.contains(&h) {
-            let nm = String::from_str(out.as_str().slice(st, out.len()));
+            let reg = self.vec_regs && n >= 2 && size <= 16 && align == size;
+            let k = size / 16;
+            let wide = self.vec_regs && size > 16 && size % 16 == 0 && align == 16 && n % k == 0 && n / k >= 2;
             let mut el = String::new();
-            let mut lane = String::from_str("l[");
-            lane.push_u64(n as u64);
-            lane.push_str("]");
-            if !self.ctype(pm, y.as_data.arr.elem, lane.as_str(), &mut el) {
+            let mut lane = String::from_str("l");
+            if !reg {
+                lane.format_into("[{}]", n);
+            }
+            if !self.ctype(pm, elem, lane.as_str(), &mut el) {
                 return false;
             }
-            let lo = self.layout_sub(pm, t);
-            if !lo.ok {
-                return false;
+            if reg {
+                el.format_into(" __attribute__((vector_size({})))", size);
+            } else {
+                el.insert_str(0, format("_Alignas({}) ", align).as_str());
+            }
+            if wide {
+                // `__sc_v<N>_<lane>` -> `__sc_v<N/k>_<lane>`, its 16-byte chunk.
+                let mut cn = format("__sc_v{}", n / k);
+                cn.push_str(nm.slice(6 + nm.slice(6, nm.len()).find("_") as usize, nm.len()));
+                if !self.vec_def(pm, elem, cn.as_str(), n / k, 16, 16) {
+                    return false;
+                }
+                el = format("union {{\n    {};\n    {} c[{}];\n  }}", el.as_str(), cn.as_str(), k);
             }
             // The lane check (`ir::CHECK_LANES`) names its index and lane count; every TU that
             // indexes a vector needs the vector complete, so its definition carries the helper.
             let body = format(
-                "typedef struct {} {};\nstruct {} {{\n  _Alignas({}) {};\n}};\n_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n{}",
-                nm.as_str(),
-                nm.as_str(),
-                nm.as_str(),
-                lo.align,
+                "typedef struct {} {};\nstruct {} {{\n  {};\n}};\n_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n{}",
+                nm,
+                nm,
+                nm,
                 el.as_str(),
-                nm.as_str(),
-                lo.size,
-                nm.as_str(),
-                lo.align,
-                nm.as_str(),
+                nm,
+                size,
+                nm,
+                align,
+                nm,
                 LANE_CHECK_C,
             );
             self.pack_seen.insert(h);
-            self.pack_reqs.push(WrapReq { h: h, elem: nm, body: body });
+            self.pack_reqs.push(WrapReq { h: h, elem: String::from_str(nm), body: body });
         }
         self.pack_use(h);
         return true;
@@ -3663,6 +3693,26 @@ static _Noreturn __attribute__((unused, cold, noinline)) void __sc_panic_lane(ui
 #define __sc_lane_ovf(f) ((void)(f), 0)
 #else
 #define __sc_lane_ovf(f) (f)
+#endif
+/* A NaN with its quiet bit set: `min_num`/`max_num` of two NaNs. */
+static __attribute__((unused)) inline float __sc_qnan_float(float __x) {
+  union { float f; uint32_t u; } __v = { __x };
+  __v.u |= 0x400000u;
+  return __v.f;
+}
+static __attribute__((unused)) inline double __sc_qnan_double(double __x) {
+  union { double f; uint64_t u; } __v = { __x };
+  __v.u |= 0x8000000000000ull;
+  return __v.f;
+}
+#define __sc_qnan(x) _Generic((x), float: __sc_qnan_float, double: __sc_qnan_double)(x)
+/* An accumulator's lane loop unrolls by eight at most: the accumulators stay in memory. */
+#if defined(__clang__)
+#define __SC_LANES _Pragma("clang loop unroll_count(8)")
+#elif defined(__GNUC__)
+#define __SC_LANES _Pragma("GCC unroll 8")
+#else
+#define __SC_LANES
 #endif
 #endif
 )";

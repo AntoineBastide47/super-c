@@ -1365,6 +1365,7 @@ OPTIONS:
         }
         let mut man = mo.unwrap();
         man.arch = co.arch;
+        man.target = co.target;
         if !bsys::check_features(&man, co.target_features.as_str()) {
             return 1;
         }
@@ -1418,6 +1419,7 @@ OPTIONS:
             let mut man = mo.unwrap();
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
+            man.target = co.target;
             if !bsys::check_features(&man, co.target_features.as_str()) {
                 return 1;
             }
@@ -1484,9 +1486,9 @@ OPTIONS:
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
     // A script build has no manifest: the baseline of the instruction set and the command line's list.
-    let mut feats = cf::baseline(co.arch);
+    let mut feats = cf::baseline(co.target, co.arch);
     let mut ferr = String::new();
-    if !cf::apply(co.target_features.as_str(), co.arch, true, &mut feats, &mut ferr) {
+    if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut feats, &mut ferr) {
         eprintln("error: {}", ferr.as_str());
         return 1;
     }

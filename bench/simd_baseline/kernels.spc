@@ -596,9 +596,10 @@ fn gather_sum_f32_v(xp: *const f32, ip: *const u32, n: usize) f32 {
     let mut lo = nz;
     let mut hi = nz;
     let mut i: usize = 0;
+    // Every index is below n (as the hand-written kernels assume): no index check.
     while i < m {
-        lo = lo + simd::gather(x, simd::load::<u32, 16>(idx, i), all, nz);
-        hi = hi + simd::gather(x, simd::load::<u32, 16>(idx, i + 16), all, nz);
+        lo = lo + unsafe simd::gather_unchecked(x, simd::load::<u32, 16>(idx, i), all, nz);
+        hi = hi + unsafe simd::gather_unchecked(x, simd::load::<u32, 16>(idx, i + 16), all, nz);
         i += TREE;
     }
     if i < n {
@@ -621,13 +622,12 @@ fn gather_sum_f32_v(xp: *const f32, ip: *const u32, n: usize) f32 {
 // Each row's ROW elements in the first lanes of one vector (`load_or`: the last row's lanes past x are
 // the fallback), scaled and stored to the row's first ROW elements; the other lanes stay unwritten.
 fn tail_load_f32_v(a: f32, xp: *const f32, yp: *mut f32, rows: usize) {
-    let x = view(xp, rows * ROW);
-    let y = view_mut(yp, rows * STRIDE);
     let av = Simd::<f32, 16>::splat(a);
     let fb = Simd::<f32, 16>::splat(0.0);
     let row = Mask::<16>::from_bits_truncate((1u64 << ROW as u64) - 1);
+    // Row r's ROW elements are inside both buffers (as the hand-written kernels assume): no range check.
     for r in 0..rows {
-        simd::store_masked(y, r * STRIDE, row, av * simd::load_or(x, r * ROW, fb));
+        unsafe simd::store_masked_ptr(yp + r * STRIDE, row, av * simd::load_masked_ptr(xp + r * ROW, row, fb));
     }
 }
 

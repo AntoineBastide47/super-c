@@ -137,6 +137,9 @@ pub struct Manifest<'a> {
     /// Cross-compilation toolchain: 0 none (host cc), 1 ios, 2 android, 3 wasm. Set by `--target=`; it
     /// selects the compiler, sysroot and triple, never the platform gate.
     pub sdk: i32,
+    /// Platform (`PLATFORM_NAMES` index) the build is for: the host, or `--target=`. Its baseline CPU
+    /// features and their C flag depend on it.
+    pub target: i32,
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
     pub root: String,
@@ -656,6 +659,7 @@ extend Manifest {
         return Manifest {
             arch: unsafe shim::sc_host_arch(),
             sdk: 0,
+            target: unsafe shim::sc_host_platform(),
             toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),
             root: String::new(),

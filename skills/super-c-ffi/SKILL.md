@@ -81,6 +81,15 @@ extern "C" "native.h" {         // native.c beside native.spc is compiled automa
 }
 ```
 
+`ffi/sc_cpu.{spc,h,c}` is the example of per-OS C behind one interface: the CPU feature
+detector selects its query with the preprocessor (`sysctlbyname` on Apple, `getauxval` on Linux
+and Android, `IsProcessorFeaturePresent` on Windows, none elsewhere), names the OS constants
+older headers lack by their documented values, treats a failing query as "absent", and reaches
+the build's own set through the C compiler's `__ARM_FEATURE_*` macros. A C constructor runs it
+before `main`; atomics with acquire and release publish the answer, so two first callers store
+equal words with no lock. Every program that loads the binding module compiles the `.c`, so a
+prelude module never imports it: `std::cpu::detect`, a module a program imports, does.
+
 ### Explicit source
 
 ```superc

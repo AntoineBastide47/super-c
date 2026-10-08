@@ -500,6 +500,64 @@ extend<T: SimdInt, const N: usize> Simd<T, N> as Shr<T> {
     pub fn shr(self: &Self, amount: T) Self;
 }
 
+// A lane scalar right of an operator: `v op s` is `v op Simd::splat(s)` (the lowering splats `s`).
+
+extend<T: SimdElement, const N: usize> Simd<T, N> as Add<T> {
+    type Output = Self;
+    /// Lane-wise `+` by `other` in every lane.
+    @intrinsic("simd.add")
+    pub fn add(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdElement, const N: usize> Simd<T, N> as Sub<T> {
+    type Output = Self;
+    /// Lane-wise `-` by `other` in every lane.
+    @intrinsic("simd.sub")
+    pub fn sub(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdElement, const N: usize> Simd<T, N> as Mul<T> {
+    type Output = Self;
+    /// Lane-wise `*` by `other` in every lane.
+    @intrinsic("simd.mul")
+    pub fn mul(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdElement, const N: usize> Simd<T, N> as Div<T> {
+    type Output = Self;
+    /// Lane-wise `/` by `other` in every lane.
+    @intrinsic("simd.div")
+    pub fn div(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdInt, const N: usize> Simd<T, N> as Rem<T> {
+    type Output = Self;
+    /// Lane-wise `%` by `other` in every lane.
+    @intrinsic("simd.rem")
+    pub fn rem(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdInt, const N: usize> Simd<T, N> as BitAnd<T> {
+    type Output = Self;
+    /// Lane-wise `&` by `other` in every lane.
+    @intrinsic("simd.and")
+    pub fn bit_and(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdInt, const N: usize> Simd<T, N> as BitOr<T> {
+    type Output = Self;
+    /// Lane-wise `|` by `other` in every lane.
+    @intrinsic("simd.or")
+    pub fn bit_or(self: &Self, other: &T) Self;
+}
+
+extend<T: SimdInt, const N: usize> Simd<T, N> as BitXor<T> {
+    type Output = Self;
+    /// Lane-wise `^` by `other` in every lane.
+    @intrinsic("simd.xor")
+    pub fn bit_xor(self: &Self, other: &T) Self;
+}
+
 // The free forms of the named operations: `simd::f(a, ..)` is `a.f(..)`.
 
 /// `a.equal(b)`.
@@ -1015,6 +1073,25 @@ pub fn gather<T: SimdElement, I: SimdInt, const N: usize>(s: []T, idx: Simd<I, N
     return gather_lanes(s, idx, m, fallback);
 }
 
+/// `gather` without the index check: the caller guarantees every active index below `s.len()`.
+pub unsafe fn gather_unchecked<T: SimdElement, I: SimdInt, const N: usize>(
+    s: []T,
+    idx: Simd<I, N>,
+    m: Mask<N>,
+    fallback: Simd<T, N>,
+) Simd<T, N> {
+    static_assert(sizeof(I) >= 4 && type_info::<I>().kind == type_info::<u8>().kind, "gather_unchecked: the indexes must be u32 or u64");
+    let bits = m.to_bits();
+    let mut p: [*const T; N] = [s.as_ptr(); N];
+    for i in 0..N {
+        // An inactive lane's pointer stays at the start: its index may be past the end.
+        if (bits >> i as u64 & 1) != 0 {
+            p[i] = s.as_ptr() + idx[i] as usize;
+        }
+    }
+    return gather_ptr(p, m, fallback);
+}
+
 /// Store active lane `i` of `v` to `s[idx[i]]`, in lane order: of active lanes with one index, the
 /// highest is written last. Panics before any write: an active index past `s`.
 pub fn scatter<T: SimdElement, I: SimdInt, const N: usize>(s: []mut T, idx: Simd<I, N>, m: Mask<N>, v: Simd<T, N>) {
@@ -1032,7 +1109,8 @@ fn gather_lanes<T: SimdElement, I: SimdInt, const N: usize>(s: []T, idx: Simd<I,
 fn scatter_lanes<T: SimdElement, I: SimdInt, const N: usize>(s: []mut T, idx: Simd<I, N>, m: Mask<N>, v: Simd<T, N>);
 
 /// Store the active lanes of `v` in lane order to `s[start..start + count]` and return `count`, the
-/// active lane count; nothing past them is written. Panics before any write: `start + count` past `s`.
+/// active lane count; nothing past them changes (at most 8 elements after them may be rewritten with
+/// their own values). Panics before any write: `start + count` past `s`.
 @intrinsic("simd.compress_store")
 pub fn compress_store<T: SimdElement, const N: usize>(s: []mut T, start: usize, m: Mask<N>, v: Simd<T, N>) usize;
 

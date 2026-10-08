@@ -681,6 +681,10 @@ extern "C" "wasm_simd128.h" {
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
     @unsafe(safe)
+    pub fn wasm_u16x8_extadd_pairwise_u8x16(a: v128_t) v128_t;
+    @arch(wasm32)
+    @target_feature([cpu::Feature::Simd128])
+    @unsafe(safe)
     pub fn wasm_u16x8_extend_high_u8x16(a: v128_t) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
@@ -733,6 +737,10 @@ extern "C" "wasm_simd128.h" {
     @target_feature([cpu::Feature::Simd128])
     @unsafe(safe)
     pub fn wasm_u16x8_sub_sat(a: v128_t, b: v128_t) v128_t;
+    @arch(wasm32)
+    @target_feature([cpu::Feature::Simd128])
+    @unsafe(safe)
+    pub fn wasm_u32x4_extadd_pairwise_u16x8(a: v128_t) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
     @unsafe(safe)

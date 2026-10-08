@@ -1107,7 +1107,7 @@ struct CcStream {
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
     pub ccprobe_path: String, // <pdir>/.ccprobe, the ccache probe's discarded output
     pub probes: pr::Probes, // the toolchain probe record and the probes this build needs
-    pub feats: cf::CpuFeatureSet, // the build's CPU features: their flags' probes must accept them
+    pub feats: cf::CpuFeatureSet, // the build's CPU features beyond the baseline: their flags' probes must accept them
     pub feat_bad: bool, // a feature's flag was rejected: nothing compiles
     pub cc_args: Vector<String>, // resolved compiler argv ([ccache] + cc tokens); empty until ensure_cc
     pub prefix_args: Vector<String>, // cc_args + cc_tail tokens; empty until ensure_cc
@@ -1190,7 +1190,7 @@ extend CcStream {
         self.lto_resolve();
         // Each enabled feature's flag passed its probe: a rejected one fails the build here, before any
         // compile, and every result used joins the command fingerprint.
-        if !features_pass(&mut self.probes, self.feats, self.cc_raw.as_str()) {
+        if !features_pass(&mut self.probes, self.feats, self.target, self.cc_raw.as_str()) {
             self.ret = 1;
             self.feat_bad = true;
         }
@@ -2091,19 +2091,19 @@ pub struct BuildCtx<'a> {
 /// instruction set applies to another build) and the command line's list `cli` (strict) against the
 /// instruction set `m.arch`; false after printing the first error.
 pub fn check_features(m: &mf::Manifest, cli: str) bool {
-    let mut s = cf::baseline(m.arch);
+    let mut s = cf::baseline(m.target, m.arch);
     let mut err = String::new();
     let mut ok = true;
     for i in 0..m.target_features.len() {
-        ok = ok && cf::apply(m.target_features.at(i).as_str(), m.arch, false, &mut s, &mut err);
+        ok = ok && cf::apply(m.target_features.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
     }
     for k in 0..m.profiles.len() {
         let tf = &m.profiles.at(k).target_features;
         for i in 0..tf.len() {
-            ok = ok && cf::apply(tf.at(i).as_str(), m.arch, false, &mut s, &mut err);
+            ok = ok && cf::apply(tf.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
         }
     }
-    ok = ok && cf::apply(cli, m.arch, true, &mut s, &mut err);
+    ok = ok && cf::apply(cli, m.target, m.arch, true, &mut s, &mut err);
     if !ok {
         eprintln("error: {}", err.as_str());
     }
@@ -2137,7 +2137,7 @@ pub fn mem_checker(fl: str) bool {
 /// the profile's `target-features` (else the build's), then the command line's list `cli`, closed
 /// under `implies`. The lists passed `check_features`.
 pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
-    let mut s = cf::baseline(m.arch);
+    let mut s = cf::baseline(m.target, m.arch);
     let mut err = String::new();
     let pi = m.profile_index(prof_name);
     let tf = if pi >= 0 && m.profiles.at(pi as usize).has_features {
@@ -2146,9 +2146,9 @@ pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSe
         &m.target_features;
     };
     for i in 0..tf.len() {
-        let _ = cf::apply(tf.at(i).as_str(), m.arch, false, &mut s, &mut err);
+        let _ = cf::apply(tf.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
     }
-    let _ = cf::apply(cli, m.arch, true, &mut s, &mut err);
+    let _ = cf::apply(cli, m.target, m.arch, true, &mut s, &mut err);
     return cf::close(s);
 }
 
@@ -2412,33 +2412,47 @@ pub fn transpile_step(
     return Transpiled { rc: rc, skipped: false, cid: cid };
 }
 
-// The `need` bits of the probes of the features of `s`.
-// Whether every probe of a feature of `feats` accepted its flag (each result is marked used); prints
-// the rejection of each that did not, naming the C compiler `cc`.
-fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, cc: str) bool {
-    let mut ok = true;
+// Whether every probe of a feature of `feats` (the build's beyond the baseline of platform `target`)
+// accepted its flag (each result is marked used); prints the rejection of each that did not, naming
+// the C compiler `cc`, the flag and the features it checks.
+fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32, cc: str) bool {
+    let mut bad: u64 = 0;
     for i in 0..cf::FEATURE_COUNT {
         let k = pr::index_of(cf::row(i).probe);
         if !cf::has(feats, i) || k < 0 {
             continue;
         }
         probes.mark_used(k as usize);
-        if probes.res.at(k as usize).as_str() == "rejected" {
-            eprintln(
-                "build: the C compiler '{}' rejects '{}': target feature '{}' needs a compiler that supports it",
-                cc,
-                cf::row(i).c_flag,
-                cf::row(i).name,
-            );
-            ok = false;
-        }
+        bad |= (probes.res.at(k as usize).as_str() == "rejected") as u64 << k as u64;
     }
-    return ok;
+    for k in 0..pr::table().len() {
+        if (bad >> k as u64 & 1) == 0 {
+            continue;
+        }
+        let mut sub = cf::CpuFeatureSet { w: [0, 0] };
+        let mut names = String::new();
+        for i in 0..cf::FEATURE_COUNT {
+            if cf::has(feats, i) && pr::index_of(cf::row(i).probe) == k as i32 {
+                sub = cf::with(sub, i);
+                names.format_into("{}'{}'", pick(names.len() == 0, "", ", "), cf::row(i).name);
+            }
+        }
+        let mut fl = String::new();
+        cf::push_c_flags(sub, target, &mut fl);
+        eprintln(
+            "build: the C compiler '{}' rejects '{}': target feature {} needs a compiler that supports it",
+            cc,
+            fl.as_str().trim(),
+            names.as_str(),
+        );
+    }
+    return bad == 0;
 }
 
 /// `features_pass` for a build without a manifest: C compiler `cc` (words) with compile flags `flags`,
 /// the probe record in `pdir`.
-pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32, feats: cf::CpuFeatureSet) bool {
+pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32, all: cf::CpuFeatureSet) bool {
+    let feats = cf::beyond_baseline(all, target);
     let need = feature_probes(feats);
     if need == 0 {
         return true;
@@ -2456,7 +2470,7 @@ pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32,
     push_arg(&mut va, "--version");
     let ver = cc_version_argv(&mut va, pdir);
     probes.settle(&ver);
-    let ok = features_pass(&mut probes, feats, cc);
+    let ok = features_pass(&mut probes, feats, target, cc);
     probes.save();
     return ok;
 }
@@ -2517,7 +2531,7 @@ fn cc_stream(
     }
     // The cross triple and the CPU features' flags come first; manifest flags can override.
     let feats = features_for(m, prof.name, cx.target_features);
-    push_sdk_flags(&mut flags, m.sdk, m.arch, feats);
+    push_sdk_flags(&mut flags, m.target, m.sdk, m.arch, feats);
     push_all(&mut flags, &m.cflags);
     push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target, m.sdk);
     if prof.pgo_use {
@@ -2533,7 +2547,7 @@ fn cc_stream(
     tail.push_str(" -MMD -c");
     // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
     let mut ldbase = String::new();
-    push_sdk_flags(&mut ldbase, m.sdk, m.arch, feats);
+    push_sdk_flags(&mut ldbase, m.target, m.sdk, m.arch, feats);
     push_sdk_libs(&mut ldbase, m.sdk);
     // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
     if prof.strip && (m.sdk == 2 || m.sdk == 3) {
@@ -2578,7 +2592,7 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(feats),
+        need | feature_probes(cf::beyond_baseline(feats, cx.target)),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};
@@ -2595,7 +2609,7 @@ fn cc_stream(
         cc_raw: cc_raw,
         cc_tail: tail,
         ldbase: ldbase,
-        feats: feats,
+        feats: cf::beyond_baseline(feats, cx.target),
         feat_bad: false,
         target: cx.target,
         lto_req: lto_req,

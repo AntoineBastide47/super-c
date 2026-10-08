@@ -109,8 +109,8 @@ Each `Projection` carries the type **after** it applies.
 | `RV_USE` | `a` = OperandId; `b` = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array |
 | `RV_REF` | `&place`; `b` = 1 when mutable |
 | `RV_ADDR` | Raw address of place; `b` = 1 when `*mut` |
-| `RV_UNARY` / `RV_BINARY` | Operand(s) + token op; over vector types the operator applies its scalar rule to each lane (a `<<`/`>>` count may be a scalar of the lane type) |
-| `RV_CAST` | `b` = CastKind: `CAST_NUMERIC` (every `as` cast and every coercion with no library method: numeric, pointer, reference), `CAST_COERCE_FROM` (library `from`; `item` = selected method), `CAST_SIMD_ARRAY` (`[T; N]` to `Simd<T, N>` or back, the same lanes: an array literal with an expected vector type, and `std`'s casts; the emitter spells a `memcpy` statement, never an expression) or `CAST_MASK_BITS` (`Mask<N>` to `u64` or back, an integer conversion that truncates to the lane bits) |
+| `RV_UNARY` / `RV_BINARY` | Operand(s) + token op; over vector types the operator applies its scalar rule to each lane (a `<<`/`>>` count may be a scalar of the lane type; the lowering gives every other operator a lane scalar right operand, `Mul<T>` and the rest, as `RV_REPEAT` then `CAST_SIMD_ARRAY`) |
+| `RV_CAST` | `b` = CastKind: `CAST_NUMERIC` (every `as` cast and every coercion with no library method: numeric, pointer, reference), `CAST_COERCE_FROM` (library `from`; `item` = selected method), `CAST_SIMD_ARRAY` (`[T; N]` to `Simd<T, N>` or back, the same lanes: an array literal with an expected vector type, and `std`'s casts; the emitter spells a statement, a compound literal or a lane loop, never an expression) or `CAST_MASK_BITS` (`Mask<N>` to `u64` or back, an integer conversion that truncates to the lane bits) |
 | `RV_AGGREGATE` | Operand range; `c` = `AGG_STRUCT`/`AGG_TUPLE`/`AGG_ARRAY`/`AGG_VARIANT` |
 | `RV_REPEAT` | `[elem; count]`: `a` = element OperandId, `b` = count OperandId |
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |

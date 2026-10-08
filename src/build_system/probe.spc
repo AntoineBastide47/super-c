@@ -37,7 +37,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 16] = [
+const PROBES: [Probe; 17] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -191,6 +191,17 @@ const PROBES: [Probe; 16] = [
         archs: "aarch64",
         targets: "linux android",
     },
+    // The build's flags carry the aarch64 features' one `-march`/`-mcpu` flag.
+    Probe {
+        id: "aarch64-features",
+        step: "compile",
+        kind: "accept",
+        flags: "",
+        forms: "",
+        src: "#include <arm_neon.h>\nint32x4_t f(int32x4_t a) {\n    return vaddq_s32(a, a);\n}\n",
+        archs: "aarch64",
+        targets: "",
+    },
     Probe { id: "thin-lto", step: "lto", kind: "lto", flags: "", forms: "", src: "", archs: "", targets: "" },
 ];
 
@@ -210,10 +221,10 @@ pub fn index_of(id: str) i32 {
 }
 
 /// The ThinLTO probe's index.
-pub const LTO: usize = 15;
+pub const LTO: usize = 16;
 
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 16) - 1;
+pub const ALL: u64 = (1u64 << 17) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 fn nth(s: str, sep: u8, idx: usize) str {

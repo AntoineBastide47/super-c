@@ -61,6 +61,7 @@ pub struct Lexer<'a> {
     pub keep_trivia: bool, // emit comment tokens (the formatter); off for the parser path
     pub mt: Vector<MtFrame>, // matchertext literals paused at an interpolation hole, innermost last
     pub mt_stack: Vector<u8>, // open matchers of ALL paused templates (frames slice it via `base`)
+    pub vectors: bool, // an identifier names a vector type or the vector module (`vector_name`)
 }
 
 const fn is_id_start(b: u8) bool {
@@ -99,6 +100,36 @@ const fn hex_value(b: u8) i32 {
 
 const fn memeq(p: *const u8, text: str) bool {
     return unsafe cstring::memcmp(p, text.ptr(), text.len()) == 0;
+}
+
+// Whether identifier `p[..n]` (4 to 6 bytes; `in_path`: after `::`) names a vector type or the
+// vector module: `Simd` or `Mask` before `<` or `::` (a type, not `TypeTag::Simd`), `simd` next to
+// `::` (`simd::load`, `import std::simd as v`; not a field), a lane alias (`f32x4`, `u8x16`) or a
+// mask alias (`mask16`). The source is padded past its end, so the bytes after it are readable.
+const fn vector_name(p: *const u8, n: usize, in_path: bool) bool {
+    if n == 4 {
+        let path = unsafe p[4] == b':' && unsafe p[5] == b':';
+        if path || unsafe p[4] == b'<' {
+            return memeq(p, "Simd") || memeq(p, "Mask") || path && memeq(p, "simd");
+        }
+        return in_path && memeq(p, "simd");
+    }
+    let c = unsafe p[0];
+    if c == b'm' {
+        return memeq(p, "mask") && is_dec(unsafe p[4]) && (n == 5 || is_dec(unsafe p[5]));
+    }
+    if c != b'i' && c != b'u' && c != b'f' {
+        return false;
+    }
+    let mut i: usize = 1;
+    while i < n && is_dec(unsafe p[i]) {
+        i += 1;
+    }
+    let mut j = i + 1;
+    while j < n && is_dec(unsafe p[j]) {
+        j += 1;
+    }
+    return i > 1 && i + 1 < n && unsafe p[i] == b'x' && j == n;
 }
 
 // Keyword lookup bucketed by identifier length, then filtered on the first byte, so a miss costs at
@@ -337,6 +368,7 @@ extend Lexer {
             keep_trivia: false,
             mt: Vector::<MtFrame>::new(),
             mt_stack: Vector::<u8>::new(),
+            vectors: false,
         };
     }
 
@@ -451,6 +483,10 @@ extend Lexer {
         let mut kind = TokenType::Identifier;
         if 2 <= identifier_len && identifier_len <= 9 || identifier_len == 13 {
             kind = keywords(unsafe (self.bytes.ptr() + self.start), identifier_len);
+        }
+        if kind == TokenType::Identifier && identifier_len >= 4 && identifier_len <= 6 && !self.vectors {
+            let in_path = self.start >= 2 && self.at(self.start - 1) == b':' && self.at(self.start - 2) == b':';
+            self.vectors = vector_name(unsafe (self.bytes.ptr() + self.start), identifier_len, in_path);
         }
 
         // Contextual for-modifiers: `inline`/`parallel` fuse to a modifier token ONLY when the next word

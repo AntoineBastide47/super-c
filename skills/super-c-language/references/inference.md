@@ -202,6 +202,12 @@ than the turbofish names is not viable:
 5. More exact parameter matches.
 6. A more specific receiver or interface relation, where the language defines one.
 
+An unsuffixed literal argument reaches a by-reference parameter with one reference adjustment. In a
+generic body a parameter over type parameters scores against the argument's own type: the same type
+is an exact match (one reference adjustment through `&`), and a type parameter never takes, and is
+never taken by, an argument of another kind (`Add<T>` is not viable for a vector right operand, nor
+`Add<Self>` for a `T`).
+
 Two candidates with equal best scores are an ambiguity error; its notes name each candidate (or the
 conformances, or the bounds of a type parameter) at its source location. Source order and
 declaration order never break a tie. An error type never makes a candidate viable and never

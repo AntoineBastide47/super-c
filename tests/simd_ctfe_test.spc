@@ -41,7 +41,11 @@ fn signaling_nan_lanes_keep_their_bits() {
 const fn pick_nan(b: u32) u32 {
     let v = Simd::<f32, 2>::from_bits(Simd::<u32, 2>::from_array([b, 0x3f800000]));
     let o = Simd::<f32, 2>::splat(1.0);
-    return v.minimum(o).to_bits()[0] ^ o.maximum(v).to_bits()[0] ^ v.min_num(v).to_bits()[0];
+    // Two NaNs: `min_num` and `max_num` give `a` with its quiet bit set; a NaN `b` gives `a`.
+    let q = Simd::<f32, 2>::from_bits(Simd::<u32, 2>::from_array([0x7fc00005, 0x7f800001]));
+    let lo = v.min_num(q).to_bits();
+    let hi = q.max_num(v).to_bits();
+    return v.minimum(o).to_bits()[0] ^ o.maximum(v).to_bits()[0] ^ v.min_num(v).to_bits()[0] ^ lo[0] ^ lo[1] << 1 ^ hi[0] << 2 ^ hi[1] << 3;
 }
 const fn wide(x: f64) i64 {
     return Simd::<f64, 2>::splat(x).cast::<i64>()[1] ^ (x as i64);

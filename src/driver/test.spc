@@ -1607,7 +1607,7 @@ pub fn test_build_and_run(
     let base = "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types";
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();
-    push_sdk_flags(&mut fl, sdk, p.arch, p.features);
+    push_sdk_flags(&mut fl, target, sdk, p.arch, p.features);
     let mut pfl = String::from_str(base);
     pfl.push_str(fl.as_str());
     pfl.push_byte(b' ');

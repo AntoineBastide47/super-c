@@ -603,9 +603,10 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
         flag.push(NO_FLAG);
     }
     let sched = &cx.sched;
-    // Conditional drops test a REAL move flag: one bool temp per guarded local, true at entry and
-    // at every storage-live, false after every whole-value move; the guarded Drop carries the flag
-    // local in `args_start` (args_len 1 is the marker).
+    // Conditional drops test a REAL hold flag: one bool temp per guarded local, true while the local
+    // holds a value: at entry for an argument, after a whole-local store or a call that writes the
+    // local; false at entry for any other local, at every storage-live and after every whole-value
+    // move. The guarded Drop carries the flag local in `args_start` (args_len 1 is the marker).
     for d in 0..sched.drops.len() {
         let da = *sched.drops.at(d);
         if da.kind != DK_COND && da.kind != DK_OVERC {
@@ -775,7 +776,8 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
             let ns = b.statements.len() as u32;
             if bi as u32 == b.entry {
                 for i in 0..cond_f.len() {
-                    flag_stmt(b, cond_f[i], 1, b.locals.at(cond_l[i] as usize).span);
+                    let held = b.locals.at(cond_l[i] as usize).storage == ir::LS_ARG;
+                    flag_stmt(b, cond_f[i], held as i64, b.locals.at(cond_l[i] as usize).span);
                 }
             }
             if bi < nb {
@@ -787,7 +789,8 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                 let sx = blk.stmt_start + si;
                 let st = *b.statements.at(sx as usize);
                 b.statements.push(st);
-                // a storage-live or a whole-local store re-arms the local's flag
+                // a storage-live clears the local's flag (the slot holds nothing yet), a whole-local
+                // store sets it
                 let mut rl = NO_FLAG;
                 if st.kind == ir::ST_STORAGE_LIVE {
                     rl = st.a;
@@ -795,10 +798,19 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                     rl = b.places.at(st.place as usize).base;
                 }
                 if rl != NO_FLAG && flag[rl as usize] != NO_FLAG {
-                    flag_stmt(b, flag[rl as usize], 1, st.span);
+                    flag_stmt(b, flag[rl as usize], (st.kind == ir::ST_ASSIGN) as i64, st.span);
                 }
                 for c in ins_off[sx as usize]..ins_off[sx as usize + 1] {
                     flag_stmt(b, clr_fl[ins_idx[c as usize] as usize], 0, st.span);
+                }
+            }
+            // A call that writes a whole local sets its flag: the call returns holding the value.
+            if blk.term.kind == ir::TM_CALL {
+                for k in 0..blk.term.dests_len {
+                    let dp = *b.places.at(b.dest_pool[(blk.term.dests_start + k) as usize] as usize);
+                    if dp.proj_len == 0 && flag[dp.base as usize] != NO_FLAG {
+                        flag_stmt(b, flag[dp.base as usize], 1, blk.term.span);
+                    }
                 }
             }
             b.blocks[bi].stmt_start = ns;

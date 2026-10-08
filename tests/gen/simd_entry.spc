@@ -10,8 +10,8 @@ import tests::harness as h;
 import tests::cli_harness as cli;
 import driver_shim as shim;
 
-/// One entry: its function name, operation (the `simd::Op` variant), and the lane types and counts of
-/// its first parameter and its result (lane type 255: a mask or a scalar).
+/// One entry: its function name, operation (the `simd::Op` variant), the lane types and counts of its
+/// first parameter and its result (lane type 255: a mask or a scalar), and its feature count.
 pub struct Entry {
     pub name: String,
     pub op: String,
@@ -19,6 +19,7 @@ pub struct Entry {
     pub n: u64,
     pub u: u8,
     pub m: u64,
+    pub nf: u32,
 }
 
 // The model's lane type of name `s` (i8 0 .. i64 3, u8 4 .. u64 7, f32 8, f64 9), or 255.
@@ -32,13 +33,14 @@ fn lane_of(s: str) u8 {
     return 255;
 }
 
-// The lane type and count of type text `s`: `f32x4`, `Simd<i32, 2>`; 255 for any other type.
+// The lane type and count of type text `s`: `f32x4`, `Simd<i32, 2>`, a scalar lane type as one lane;
+// 255 for any other type.
 fn shape_of(s: str, t: &mut u8, n: &mut u64) {
     let ty = s.trim();
     let simd = ty.starts_with("Simd<");
     let x = ty.find(pick(simd, ",", "x"));
-    *t = 255;
-    *n = 0;
+    *t = lane_of(ty);
+    *n = pick(*t == 255, 0u64, 1);
     if x > 0 && !ty.starts_with("mask") {
         *t = lane_of(ty.slice(pick(simd, 5usize, 0), x as usize));
         *n = ty.slice(x as usize + 1, ty.len() - pick(simd, 1usize, 0)).trim().parse_u64().unwrap_or(0);
@@ -49,10 +51,18 @@ fn shape_of(s: str, t: &mut u8, n: &mut u64) {
 pub fn entries(text: str) Vector<Entry> {
     let mut v = Vector::<Entry>::new();
     let mut op = String::new();
+    let mut nf: u32 = 0;
     for line in text.lines() {
         if line.starts_with("@simd_impl(simd::Op::") {
             let rest = line.slice(21, line.len());
             op = String::from_str(rest.slice(0, rest.find(",") as usize));
+            nf = 0;
+            let mut at = line.find("cpu::Feature::");
+            while at >= 0 {
+                nf += 1;
+                let tail = line.slice(at as usize + 14, line.len());
+                at = pick(tail.find("cpu::Feature::") < 0, -1, at + 14 + tail.find("cpu::Feature::"));
+            }
             continue;
         }
         if op.len() == 0 || !line.starts_with("fn ") {
@@ -60,7 +70,15 @@ pub fn entries(text: str) Vector<Entry> {
         }
         let open = line.find("(") as usize;
         let close = line.find(") ") as usize;
-        let mut e = Entry { name: String::from_str(line.slice(3, open)), op: op.clone(), t: 255, n: 0, u: 255, m: 0 };
+        let mut e = Entry {
+            name: String::from_str(line.slice(3, open)),
+            op: op.clone(),
+            t: 255,
+            n: 0,
+            u: 255,
+            m: 0,
+            nf: nf,
+        };
         // The first vector parameter names the lanes: parameters split at `, ` outside `<..>`.
         let params = line.slice(open + 1, close);
         let mut depth: u32 = 0;
@@ -140,9 +158,12 @@ fn model_ops(e: &Entry) Vector<String> {
     for i in 0usize..6 {
         if op == unsafe cmp[i] {
             v.push(String::from_str(unsafe mask[i]));
-            // the comparison feeds a choice: the lane form, no mask in between
+            // the comparison feeds a choice: the lane form, no mask in between; or `count`, or a choice
+            // of narrower lanes
             if i == 2 {
                 v.push(String::from_str("mask_choose"));
+                v.push(String::from_str("count_compare"));
+                v.push(String::from_str("choose_narrower"));
             }
             return v;
         }
@@ -176,7 +197,7 @@ fn model_ops(e: &Entry) Vector<String> {
 
 /// The vector model cases of entries `lo..hi` of `es`: for each entry and each model operation that
 /// reaches it, `per` cases at its lane count and `per` at the most lanes, drawn from fixed seeds, and
-/// a choice or masked access over at most four lanes under every mask.
+/// a choice, compress, expand or masked access over at most four lanes under every mask.
 pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCase> {
     let mut cs = Vector::<vec::VCase>::new();
     for k in lo..hi {
@@ -199,7 +220,9 @@ pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCa
             let op = model_op(name);
             assert(op != 255, name);
             // a conversion's target is the result's lane type; an index vector is u8
-            let u: i32 = if vec::converts(op) && e.u != t {
+            let u: i32 = if name == "choose_narrower" {
+                -1; // any narrower integer lanes
+            } else if vec::converts(op) && e.u != t {
                 e.u;
             } else if vec::converts(op) {
                 4;
@@ -225,8 +248,9 @@ pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCa
                     cs.push(c);
                     got += 1;
                 }
-                // Every mask of a choice or a masked access over at most four lanes.
-                if ln <= 4 && (name == "choose" || name == "load_masked" || name == "store_masked") {
+                // Every mask of a choice, compress, expand or masked access over at most four lanes.
+                let masked = name == "choose" || name == "compress" || name == "expand" || name == "load_masked";
+                if ln <= 4 && (masked || name == "store_masked") {
                     for pat in 0u64..1u64 << ln {
                         let mut c = vec::VCase {};
                         if vec::draw_case(&mut rng, op, t, ln, u, &mut c) {
@@ -243,10 +267,29 @@ pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCa
 }
 
 // The program of the operations the vector model lacks (loads, stores, `any` and `all` of a
-// comparison) over 128 bits of each lane type, with inputs chosen at run time.
+// comparison) over 128 bits of each lane type and 64 bits of each but the 64-bit ones, with inputs
+// chosen at run time.
 fn memory_program() String {
-    let names: []str = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"];
-    let lanes: []usize = [16, 8, 4, 2, 16, 8, 4, 2, 4, 2];
+    let names: []str = [
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "u8",
+        "u16",
+        "u32",
+        "f32",
+    ];
+    let lanes: []usize = [16, 8, 4, 2, 16, 8, 4, 2, 4, 2, 8, 4, 2, 8, 4, 2, 2];
     let mut s = String::from_str("import std::simd;\nfn main(args: Vector<str>) i32 {\n    let k = args.len();\n");
     for i in 0..names.len() {
         let t = names[i];
@@ -327,6 +370,20 @@ fn emitted_c(b: &h::DiffBuild, prof: str) String {
     return s;
 }
 
+// Whether a called entry of `es` has entry `k`'s operation and shapes and other features: the build
+// picks that one (with more features: the build has them; with fewer: it lacks `k`'s), and a build of
+// the other feature set calls `k`.
+fn shadowed(es: &Vector<Entry>, k: usize, seen: &String) bool {
+    let e = es.at(k);
+    for j in 0..es.len() {
+        let o = es.at(j);
+        if o.op.equals(&e.op) && o.t == e.t && o.n == e.n && o.u == e.u && o.m == e.m && o.nf != e.nf && calls(seen, o) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Whether text `c` calls entry `e`.
 fn calls(c: &String, e: &Entry) bool {
     let mut call = String::new();
@@ -386,7 +443,7 @@ pub fn check(text: str, lo: usize, hi: usize, per: u64) String {
         }
     }
     for k in lo..top {
-        if model_ops(es.at(k)).len() != 0 && !calls(&seen, es.at(k)) {
+        if model_ops(es.at(k)).len() != 0 && !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }
     }

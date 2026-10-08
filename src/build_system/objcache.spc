@@ -51,12 +51,7 @@ pub fn cache_root() String {
 
 /// The real path of `p`; empty when it does not resolve.
 pub fn real_path(p: str) String {
-    let mut buf = PathBuf {};
-    let mut pp = String::from_str(p);
-    if unsafe shim::sc_realpath(pp.cstr(), &mut buf[0]) == null {
-        return String::new();
-    }
-    return String::from_cstr(&buf[0]);
+    return loader::real_path_of(p);
 }
 
 /// `name` starts with a cache key (32 lowercase hex digits) and a dot: `<key>.o`, `<key>.d`, or the

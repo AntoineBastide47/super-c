@@ -10,6 +10,7 @@ import std::simd;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import string as cstring;
+import driver_shim as shim;
 
 // The std enums follow the compiler's tables, name and discriminant: a mismatch fails the build of
 // the test suite.
@@ -48,30 +49,86 @@ static_assert(ops_match(), "std::simd::Op follows the compiler's operation table
 // implies; a name of another instruction set or an unknown one is an error listing the valid names.
 @test
 fn feature_lists_apply_in_order_and_close() {
-    let mut s = cf::baseline(2);
+    let mut s = cf::baseline(3, 2);
     let mut err = String::new();
     assert(cf::is_empty(s), "wasm32 has no baseline feature");
-    assert(cf::apply("+relaxed-simd", 2, true, &mut s, &mut err), "a known name");
+    assert(cf::apply("+relaxed-simd", 3, 2, true, &mut s, &mut err), "a known name");
     assert(!cf::has(s, cf::F_SIMD128) && cf::has(cf::close(s), cf::F_SIMD128), "relaxed-simd implies simd128");
-    assert(cf::apply("simd128,-relaxed-simd", 2, true, &mut s, &mut err), "in order");
+    assert(cf::apply("simd128,-relaxed-simd", 3, 2, true, &mut s, &mut err), "in order");
     assert(cf::has(s, cf::F_SIMD128) && !cf::has(s, cf::F_RELAXED_SIMD), "the later item wins");
-    assert(cf::apply("+relaxed-simd,-simd128", 2, true, &mut s, &mut err), "a disabled implication");
+    assert(cf::apply("+relaxed-simd,-simd128", 3, 2, true, &mut s, &mut err), "a disabled implication");
     assert(cf::has(cf::close(s), cf::F_SIMD128), "the closure runs after the list");
-    assert(!cf::apply("+simd128,+neon", 2, true, &mut s, &mut err), "another instruction set's feature");
+    assert(!cf::apply("+simd128,+neon", 3, 2, true, &mut s, &mut err), "another instruction set's feature");
     assert_eq(err.as_str(), "no target feature 'neon' for wasm32; the wasm32 features are: simd128, relaxed-simd");
     err.clear();
-    assert(!cf::apply("+bogus", 2, true, &mut s, &mut err), "an unknown feature");
+    assert(!cf::apply("+bogus", 3, 2, true, &mut s, &mut err), "an unknown feature");
     assert_eq(err.as_str(), "unknown target feature 'bogus' for wasm32; the wasm32 features are: simd128, relaxed-simd");
-    assert(cf::has(cf::baseline(0), 2) && cf::has(cf::baseline(1), 3), "sse2 and neon are the baselines");
+    assert(cf::has(cf::baseline(2, 0), 2) && cf::has(cf::baseline(2, 1), 3), "sse2 and neon are the baselines");
     err.clear();
-    assert(!cf::apply("-sse2", 0, true, &mut s, &mut err), "a baseline feature stays");
+    assert(!cf::apply("-sse2", 2, 0, true, &mut s, &mut err), "a baseline feature stays");
     assert_eq(err.as_str(), "target feature 'sse2' is part of every x86_64 build");
     // A lenient list (build.toml) skips another instruction set's features; an unknown name fails.
-    let mut h = cf::baseline(1);
-    assert(cf::apply("+simd128", 1, false, &mut h, &mut err) && h.w[0] == cf::baseline(1).w[0], "skipped");
+    let mut h = cf::baseline(2, 1);
+    assert(cf::apply("+simd128", 2, 1, false, &mut h, &mut err) && h.w[0] == cf::baseline(2, 1).w[0], "skipped");
     err.clear();
-    assert(!cf::apply("+simd128", -1, true, &mut h, &mut err), "an unknown instruction set");
+    assert(!cf::apply("+simd128", 2, -1, true, &mut h, &mut err), "an unknown instruction set");
     assert_eq(err.as_str(), "no target feature 'simd128' for this instruction set; it has none");
+}
+
+// The aarch64 baselines per platform, and the one C flag of the features beyond them: Apple platforms
+// name their default CPU, the others `armv8-a`; a platform's baseline feature stays.
+@test
+fn aarch64_baselines_and_c_flags() {
+    let mac = cf::baseline(1, 1);
+    let lin = cf::baseline(2, 1);
+    let ios = cf::baseline(4, 1);
+    assert(
+        cf::count(lin) == 1 && cf::count(ios) == 3 && cf::count(mac) == 9,
+        "neon; aes, sha2; fp16 dotprod rdm sha3 crc lse",
+    );
+    assert(cf::baseline(0, 1).w[0] == lin.w[0] && cf::baseline(5, 1).w[0] == lin.w[0], "Windows and Android: neon");
+    let mut f = String::new();
+    cf::push_c_flags(mac, 1, &mut f);
+    cf::push_c_flags(lin, 2, &mut f);
+    cf::push_c_flags(ios, 4, &mut f);
+    assert_eq(f.as_str(), "");
+    let mut s = lin;
+    let mut err = String::new();
+    assert(cf::apply("+dotprod,+i8mm,+rdm,+sve2", 2, 1, true, &mut s, &mut err), "optional features");
+    cf::push_c_flags(cf::close(s), 2, &mut f);
+    assert_eq(f.as_str(), " -march=armv8.2-a+fp16+dotprod+i8mm+sve+sve2");
+    f.clear();
+    cf::push_c_flags(cf::close(cf::join(mac, s)), 1, &mut f);
+    assert_eq(f.as_str(), " -mcpu=apple-m1+i8mm+sve+sve2");
+    f.clear();
+    cf::push_c_flags(cf::with(ios, cf::F_DOTPROD), 4, &mut f);
+    assert_eq(f.as_str(), " -march=armv8.2-a+dotprod+aes+sha2");
+    f.clear();
+    cf::push_c_flags(cf::close(cf::with(cf::with(lin, 6), 9)), 2, &mut f);
+    assert_eq(f.as_str(), " -march=armv8.1-a+aes");
+    // An Armv8.2-A feature implies the Armv8.1-A ones its flag brings; `sha3` implies `sha2`.
+    let d = cf::close(cf::with(lin, cf::F_DOTPROD));
+    assert(cf::has(d, 6) && cf::has(d, 12) && cf::has(d, 13), "dotprod: rdm, crc, lse");
+    f.clear();
+    cf::push_c_flags(cf::close(cf::with(lin, 11)), 2, &mut f);
+    assert_eq(f.as_str(), " -march=armv8.2-a+sha2+sha3");
+    let mut a = cf::baseline(1, 1);
+    assert(!cf::apply("+sve", 1, 1, true, &mut a, &mut err), "no Apple core has SVE");
+    assert_eq(err.as_str(), "target feature 'sve' exists on no macos machine");
+    err.clear();
+    let mut m = mac;
+    assert(!cf::apply("-dotprod", 1, 1, true, &mut m, &mut err), "a macOS baseline feature");
+    assert_eq(err.as_str(), "target feature 'dotprod' is part of every aarch64 build for macos");
+    assert(
+        cf::apply("+dotprod,-dotprod", 2, 1, true, &mut s, &mut err) && !cf::has(s, cf::F_DOTPROD),
+        "optional on Linux",
+    );
+    // The host C compiler takes the flag.
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    if unsafe shim::sc_host_arch() == 1 {
+        assert(p.compile_flags("--target-feature=+i8mm,+bf16", "main.spc").ok(), "the C flag builds");
+    }
 }
 
 // `target-features` in the build section and in a profile, which replaces it; the command line's
@@ -104,7 +161,7 @@ fn manifest_and_command_line_features() {
     // another build; an unknown name is an error.
     m.arch = 0;
     assert(bsys::check_features(&m, ""), "a native build of a project with a wasm32 list");
-    assert(bsys::features_for(&m, "relaxed", "").w[0] == cf::baseline(0).w[0], "the baseline alone");
+    assert(bsys::features_for(&m, "relaxed", "").w[0] == cf::baseline(m.target, 0).w[0], "the baseline alone");
     p.mkfile(
         "build.toml",
         "bin = \"app\"\nroot = \"main.spc\"\n[profile.web]\ntarget-features = [\"sse2\", \"bogus\"]\n",
@@ -316,7 +373,11 @@ fn simd_impl_entries_are_checked() {
         ],
         ["LanesToMask", "m: u32x4", "`fn(Simd<U, N>) Mask<N>, U unsigned`"],
         ["Load", "p: *const i32", "`fn(*const T) Simd<T, N>, the N elements at the pointer`"],
-        ["Compress", "m: mask4, a: f32x4, b: f32x4", "'simd::Op::Compress' has no '@simd_impl' form"],
+        [
+            "Compress",
+            "m: mask4, a: f32x4",
+            "a '@simd_impl(simd::Op::Compress, ..)' entry has the signature `fn(Mask<N>, Simd<T, N>, Simd<T, N>) Simd<T, N>`",
+        ],
         ["Swizzle", "a: f32x4, b: Simd<u8, 8>", "'simd::Op::Swizzle' has no '@simd_impl' form"],
     ];
     for c in cases {
@@ -337,7 +398,8 @@ fn simd_impl_entries_are_checked() {
     let relaxed = "@arch(wasm32)\n@simd_impl(Op::Add, [Feature::RelaxedSimd])\nfn e(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\nfn main() i32 {\n    return 0;\n}\n";
     let rr = h::compile_std(relaxed, 2, h::STAGE_TYPECHECK);
     assert(!rr.ok() && rr.msg_has("a '@simd_impl' entry cannot need 'relaxed-simd'"), "no relaxed entry");
-    let two = "@arch(x86_64)\n@simd_impl(Op::Add, [Feature::Sse2])\nfn e1(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\n@arch(x86_64)\n@simd_impl(Op::Add, [Feature::Sse2])\nfn e2(a: f32x4, b: f32x4) f32x4 {\n    return b;\n}\n@arch(aarch64)\n@simd_impl(Op::Add, [Feature::Neon])\nfn e1(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\n@arch(aarch64)\n@simd_impl(Op::Add, [Feature::Neon])\nfn e2(a: f32x4, b: f32x4) f32x4 {\n    return b;\n}\nfn main() i32 {\n    return 0;\n}\n";
+    // `Rem` has no entry in a backend file the build may load.
+    let two = "@arch(x86_64)\n@simd_impl(Op::Rem, [Feature::Sse2])\nfn e1(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\n@arch(x86_64)\n@simd_impl(Op::Rem, [Feature::Sse2])\nfn e2(a: f32x4, b: f32x4) f32x4 {\n    return b;\n}\n@arch(aarch64)\n@simd_impl(Op::Rem, [Feature::Neon])\nfn e1(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\n@arch(aarch64)\n@simd_impl(Op::Rem, [Feature::Neon])\nfn e2(a: f32x4, b: f32x4) f32x4 {\n    return b;\n}\nfn main() i32 {\n    return 0;\n}\n";
     let d = h::compile_std(two, -1, h::STAGE_TYPECHECK);
     assert(
         !d.ok() && d.msg_has(

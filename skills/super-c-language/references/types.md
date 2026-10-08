@@ -240,6 +240,13 @@ with the bound's arguments in every instance and at compile time, and its signat
 interface's parameters as those arguments, also through a superinterface (`T: J<bool>` with
 `J<B>: I<B>` calls `I<bool>`'s methods).
 
+An operator whose left operand has a builtin type and whose right operand has a struct, enum or
+vector type calls the conformance of the builtin type that accepts the right operand
+(`extend f32 as Mul<V>` makes `s * v` and `2.0 * v` legal). An unsuffixed literal or literal-only
+arithmetic on the left takes the one integer or float type with such a conformance; two such types
+are "the literal's type is ambiguous: 2 types provide 'mul' for this right operand" with the note
+"give the literal a type suffix". Without a conformance the builtin operator reports the operands.
+
 An operator on a type parameter dispatches through its bound the same way: `t + 5` for
 `T: Add<i32>` calls the `Add<i32>` conformance's `add` (with several bounds on the interface, the
 one whose parameter takes the right operand), and so do the other operator interfaces (`-`, `*`,

@@ -38,6 +38,11 @@ i64x2 i64x4 i64x8 u64x2 u64x4 u64x8`, and `mask2` to `mask64`.
 | `Simd<T, N>` | `sizeof(T) * N` | `max(alignof(T), min(size, 16))` | `struct __sc_v<N>_<lane> { _Alignas(A) T l[N]; }` |
 | `Mask<N>` | `max(1, N / 8)` | its size | `uint8_t` to `uint64_t` |
 
+In a build that plans backend entries, a vector of 2 to 16 bytes whose alignment is its size holds
+`T l __attribute__((vector_size(S)))` instead, with the same size and alignment: the C ABI passes it
+in one vector register, not lane by lane; a wider one of 16-byte chunks also names them in a union
+with `l`.
+
 A vector or mask is `Copy`, `Send` and `Sync`. Neither has a C ABI: an `extern "C"` or
 `@c.export` signature that names one is an error; pass `[T; N]` (`from_array`/`to_array`) or
 `u64` (`from_bits`/`to_bits`).
@@ -66,9 +71,10 @@ ordering ("does not implement `Eq`; compare lanes"): `equal` and the other compa
 
 Every lane operation applies the scalar rule of its lane type (operations.md) to each lane, as a
 constant and at run time alike. Without a usable backend entry (Target features below) the
-emitted C is a lane loop with a constant trip count over the storage arrays, or `memcpy` for the
-operations that move bytes; it uses no target intrinsic and no C vector extension, and its result
-never depends on the C compiler vectorizing it.
+emitted C is a lane loop with a constant trip count over the storage arrays (one loop for a load or
+lane operation and the loop that alone reads it), or `memmove` for a bitcast and a raw pointer;
+it never depends on the C compiler vectorizing it, and a build without entries uses no target
+intrinsic and no C vector extension.
 
 The lane interfaces bound the operations: `SimdInt` (`i8` to `u64`), `SimdSigned` (`i8` to `i64`,
 `f32`, `f64`) and `SimdFloat` (`f32`, `f64`). Only `std` implements them; a call on other lanes is
@@ -83,13 +89,15 @@ The lane interfaces bound the operations: `SimdInt` (`i8` to `u64`), `SimdSigned
 | `& \| ^ ~` | integers | bitwise |
 | `<< >>` | integers | the count is the same vector type, or a scalar of the lane type for every lane; traps when a count is below 0 or at least the width; `>>` is arithmetic on signed lanes |
 
-The operands of a binary operator have one vector type, and the compound forms (`+=`, `<<= 2`)
-follow the same rules. A scalar does not convert: `v + 1.0` is "mismatched types" and `1.0 + v`
-"operator requires numeric operands", both with the note "a scalar does not convert to a vector:
-use `Simd::splat`"; a shift count of another type notes "a shift count is the vector type or its
-lane type". The operators are the conformances `Add`, `Sub`,
-`Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl` and `Shr`, so a generic bound
-reaches them.
+The right operand of a binary operator is the left's vector type, or a scalar of its lane type that
+stands for that scalar in every lane (`v * 3.0`, `v * a`, `v ^ (3 | 4)`: an unsuffixed literal or
+literal-only arithmetic takes the lane type), and the compound forms (`+=`, `<<= 2`) follow the same
+rules. A right operand of another type is "mismatched types" with the note "the right operand is
+the vector type or its lane type". A scalar left operand does not convert: `1.0 + v` is "operator
+requires numeric operands" with the note "a scalar does not convert to a vector: use
+`Simd::splat`". The operators are the conformances `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`,
+`BitOr`, `BitXor`, `BitNot`, `Shl` and `Shr`, each also as `<T>` for a lane scalar, so a generic
+bound reaches them.
 
 ```text
 // SimdInt lanes
@@ -121,8 +129,8 @@ simd::iota::<T, N>()                    // lanes 0, 1, .., N - 1
 
 | Operation | A NaN operand | Zeros of both signs |
 |-----------|---------------|---------------------|
-| `min_num(a, b)` | the other operand; NaN only when both are | `-0.0` |
-| `max_num(a, b)` | the other operand; NaN only when both are | `+0.0` |
+| `min_num(a, b)` | the other operand; `a` with its quiet bit set when both are NaN | `-0.0` |
+| `max_num(a, b)` | the other operand; `a` with its quiet bit set when both are NaN | `+0.0` |
 | `minimum(a, b)` | NaN | `-0.0` |
 | `maximum(a, b)` | NaN | `+0.0` |
 
@@ -243,6 +251,7 @@ simd::store_masked(s: []mut T, start, m, v)
 simd::gather(s: []T, idx: Simd<I, N>, m, fallback) Simd<T, N>     // I is u32 or u64
 simd::scatter(s: []mut T, idx: Simd<I, N>, m, v)
 simd::compress_store(s: []mut T, start, m, v) usize
+unsafe simd::gather_unchecked(s: []T, idx: Simd<I, N>, m, fallback) Simd<T, N>
 unsafe simd::gather_ptr(p: [*const T; N], m, fallback)    unsafe simd::scatter_ptr(p: [*mut T; N], m, v)
 unsafe simd::load_masked_ptr(p: *const T, m, fallback)    unsafe simd::store_masked_ptr(p: *mut T, m, v)
 ```
@@ -262,10 +271,12 @@ but the length is 12" (from a start), "lane 1: index out of bounds: the index is
 is 6" (an index), and for `compress_store` the slice access text ("3 lanes from 10 but the length is
 12"). `start + i` never overflows: the check is `start <= len` and then `i < len - start`. Of
 active scatter lanes with one index, the highest writes last and wins (Rust's `scatter` and AVX-512
-order). `compress_store` writes exactly `count` elements, never past the active lanes. No masked
-store reads and writes back the whole vector: another thread may own an inactive element. A store
-borrows its slice mutably, a load shared; the raw forms are `unsafe`, and the caller guarantees each
-active lane's element.
+order). `compress_store` changes exactly `count` elements; it may rewrite at most 8 elements after
+them with their own values, since the slice is borrowed alone. No masked store reads and writes
+back the whole vector: another thread may own an inactive element. A store borrows its slice
+mutably, a load shared; the raw forms and `gather_unchecked` are `unsafe` and check nothing: the
+caller guarantees each active lane's element (every active index below `s.len()`), for input it
+trusts or after its own check.
 
 ## Mask operations
 
@@ -332,9 +343,12 @@ asserts both at compile time).
 ### Backend files
 
 `std/simd/backend/<x86|aarch64|wasm>.spc`, the file of the build's instruction set, loads with
-the prelude when it exists and the build has a feature (today: `wasm.spc`, header
-`<wasm_simd128.h>`, bindings in `ffi/wasm_simd128.spc`); it emits no unit of its own, so a
-program without vectors emits the same C with and without the features. Each entry is a plain
+the prelude when it exists, the build has a feature, and a module of the program names a vector
+(`Simd<`, `Mask<`, `simd::`, a lane or mask alias; std's `simd.spc` aside) (today: `wasm.spc`, header
+`<wasm_simd128.h>`, bindings in `ffi/wasm_simd128.spc`; `aarch64.spc`, header `<arm_neon.h>`,
+bindings in `ffi/arm_neon.spc`, which every aarch64 build may load since `neon` is its baseline);
+an entry's definition header is written only when a unit calls it, and the file emits no unit
+of its own, so a program without vectors emits the same C with and without the features. Each entry is a plain
 function with `@arch` and `@simd_impl`; the file's helpers `reg` and `vec` move a vector into a
 register and back (`wasm_v128_load`, `wasm_v128_store`), and the compiler splices them into
 every entry:
@@ -362,7 +376,28 @@ operation, lane type, lane count and feature count: two are an error naming both
 call bindings, and functions of its file that inline (one that does not fails the build); it
 must give the operation's exact result for
 every input, NaN payloads aside (`tests/simd_entry_test.spc` compares every entry with the lane
-loop on boundary inputs in the wasm conformance lane).
+loop on boundary inputs, in the wasm conformance lane and on an aarch64 host).
+
+The aarch64 file, the second worked example, has one register type per lane type and width
+(`int8x16_t` .. `float64x2_t`, `@c.value(16, 16)`; `int8x8_t` .. `float32x2_t`, `@c.value(8,
+8)`), so its helpers are one pair per type: `q_s8` loads a 128-bit vector with `vld1q_s8`, `v_s8`
+stores a register back with `vst1q_s8`, and `d_s8`/`w_s8` do the same for a 64-bit vector
+(`Simd<i8, 8>`) with `vld1_s8`/`vst1_s8`. A 64-bit vector has the lane-wise entries in `d` form
+and the conversions to and from 128 bits (`vmovl`, `vmovn`, `vqmovn`, `vcvt`). Its entries cover
+the 128-bit lane-wise arithmetic (signed wrapping `+ - *` and negation on the
+unsigned forms: GCC spells the signed ones as C arithmetic, whose overflow is undefined),
+saturating, min, max, bits (`count_ones`, `leading_zeros`, `trailing_zeros`, `reverse_bits`,
+`swap_bytes`, rotations), shifts (a scalar count after its check, a vector count wrapped),
+float rounding, `fma`, `min_num`/`max_num` (`bsl(y == y, fminnm(fmax(x, x), y), fmax(x, x))`: `fmax`
+quiets a signaling NaN, for which `fminnm` gives NaN, and the C compilers fold `x * 1.0` away; a NaN
+`y` selects `x` quieted, since the C compilers may swap `fminnm`'s operands), the lane-mask
+forms (`LanesToMask` sums each lane's power of two: `addv`, or three `addp` for byte lanes),
+overflow masks, conversions, saturating narrowing, loads, stores, masked accesses, run-time
+byte indexes (`tbl`, 16 to 64 bytes) and reductions. A float tree reduction adds the upper half
+onto the lower half (`vadd_f32` of the halves): never adjacent pairs (`faddp` over four lanes,
+`vaddvq_f32`), whose order differs. `dot::<i32>` of byte lanes has two entries: `sdot`/`udot`
+under `[Neon, Dotprod]`, and the widened products added pairwise under `[Neon]`; the planner
+takes the one with more features the build holds.
 
 To add a backend: write the file with entries for the operations whose instructions match
 the lane rule exactly, and a binding module for the header; an operation without an entry
@@ -381,6 +416,32 @@ its lanes into the mask with `LanesToMask`. A choice of a stored mask unpacks it
 `MaskToLanes`. A split reads every operand before it writes a chunk, so a pointer may alias a
 vector operand or the result. Entries render as `static inline` C functions, always inlined. A
 build under a memory checker never plans an entry that calls a `@c.lane_access` binding.
+
+### CPU detection
+
+`std::cpu::CpuFeatures { bits: [u64; 2] }` is a set of features (bit `i`: the variant of
+discriminant `i`) with `has(f)` and `contains(other)`. `std::cpu::detect` (a separate module, so
+a program that does not ask links no detector) reads the machine: `features()`, `has(f)`,
+`static_features()`, the set the C compiler enables for the build (its `__ARM_FEATURE_*`
+macros: the build's features and what the flag's architecture brings), which `features()`
+always contains, and `detected()`, a new OS query without the build's set. Detection runs
+once, before `main` (a C constructor) or at the first query, allocates nothing and takes no
+lock: `sysctlbyname` of `hw.optional.arm.FEAT_*` on macOS and iOS, `getauxval(AT_HWCAP)` and
+`AT_HWCAP2` on Linux and Android, `IsProcessorFeaturePresent` on Windows; a failing query means
+absent. On wasm32 `features()` equals `static_features()`: an engine rejects a module whose
+features it lacks. Detection selects code only: no result of the language depends on it, and
+the compile-time evaluator never reads it.
+
+### The aarch64 module
+
+`std::simd::aarch64` holds the Arm operations with no portable meaning, over the portable
+types, each needing its feature: `vdot_i32`, `vdot_u32` (`Dotprod`); `vmmla_i32`, `vmmla_u32`,
+`vusmmla_i32` (`I8mm`: the 2x2 product of 2x8 byte matrices); `vqrdmlah_*`, `vqrdmlsh_*` for
+`i16`, `i32` (`Rdm`); `aese`, `aesd`, `aesmc`, `aesimc` (`Aes`); `sha256h`, `sha256h2`,
+`sha256su0`, `sha256su1` (`Sha2`); `eor3`, `rax1`, `xar::<N>`, `bcax` (`Sha3`); `crc32b` ..
+`crc32x` and `crc32cb` .. `crc32cx` (`Crc`, from `<arm_acle.h>`); `table_lookup` over 16, 32,
+48 (`[u8; 48]`) and 64 bytes (`Neon`). They have no memory effect; each calls a C intrinsic,
+so the compile-time evaluator has no value for them.
 
 ### The wasm32 module
 

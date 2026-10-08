@@ -1155,6 +1155,18 @@ fn bug_regressions() {
         "struct Mat { pub s: i32 }\nstruct Vec3 { pub x: i32 }\nextend Mat as Mul {\n    type Output = Mat;\n    pub fn mul(self: &Mat, o: &Mat) Mat { return Mat { s: self.s * o.s }; }\n}\nextend Mat as Mul<Vec3> {\n    type Output = Vec3;\n    pub fn mul(self: &Mat, o: &Vec3) Vec3 { return Vec3 { x: self.s * o.x }; }\n}\nfn main() i32 { let m = Mat { s: 6 }; let sq = m * Mat { s: 7 }; let v = m * Vec3 { x: 5 }; return sq.s - 42 + v.x - 30; }\n",
         0,
     );
+    // A builtin left operand dispatches to its type's conformance (`extend f32 as Mul<V>`), and a
+    // literal-only one takes the one type whose conformance accepts the right operand.
+    h::expect_exit(
+        "builtin left operand of an operator conformance",
+        "struct V { pub x: f32 }\nstruct W { pub x: i64 }\nextend f32 as Mul<V> {\n    type Output = V;\n    pub fn mul(self: &f32, o: &V) V { return V { x: *self * o.x }; }\n}\nextend f32 as Sub<V> {\n    type Output = V;\n    pub fn sub(self: &f32, o: &V) V { return V { x: *self - o.x }; }\n}\nextend i64 as Add<W> {\n    type Output = W;\n    pub fn add(self: &i64, o: &W) W { return W { x: *self + o.x }; }\n}\nfn main() i32 { let s: f32 = 0.5; let d = s * V { x: 12.0 }; let e = 2.0 * d; let f = 10.0 - e; let g = 2 * 3 + W { x: 4 }; return (f.x != -2.0 || g.x != 10) as i32; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a literal left operand two types accept is ambiguous",
+        "struct V { pub x: f32 }\nextend f32 as Mul<V> {\n    type Output = V;\n    pub fn mul(self: &f32, o: &V) V { return V { x: *self * o.x }; }\n}\nextend f64 as Mul<V> {\n    type Output = V;\n    pub fn mul(self: &f64, o: &V) V { return V { x: o.x }; }\n}\nfn main() i32 { let d = 2.0 * V { x: 1.0 }; return d.x as i32 - 2; }\n",
+        "the literal's type is ambiguous",
+    );
     // Implicit conversion is LOSSLESS only: a narrowing width is refused, and a cast with no
     // conversion path is invalid rather than broken C.
     h::expect_err_msg(

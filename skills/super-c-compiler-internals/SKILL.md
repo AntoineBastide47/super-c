@@ -418,6 +418,11 @@ the move/init dataflow. Five classifications:
 | `DK_OVER` | Assignment overwrites an initialized value: free it first |
 | `DK_OVERC` | Overwrite of a maybe-moved value: the local's flag guards the free |
 
+A guard flag is true while its local holds a value: set at entry for an argument only, after a
+whole-local store and before a call that writes the whole local; cleared at entry for every other
+local, at its storage-live and after every whole-value move. A temporary of a short-circuit operand
+(`c || mk().ok()`) is therefore freed only when that operand ran.
+
 Type parameters own: the ownership oracle (`Owner::owns` / `param_owns` in
 `borrowck/facts.spc`, mirrored by the checker's `tc_type_is_free` / `tc_param_owns`) answers
 true for a type parameter unless its bounds reach `Copy` (inline, through the function's
@@ -661,3 +666,10 @@ longer emits.
    Parser, Ast, TypeChecker, ...); const tables are built by `const fn` and held by
    value. The lone `static mut` in the compiler proper is the loader's `G_LOAD_JOBS`
    worker-count knob.
+
+5. **Direct C.** The emitted C moves a value with an assignment, a compound literal or a lane
+   loop, never `memcpy` into a temporary, and declares no temporary that only copies a value:
+   a single-use result writes its reader's place (coalescing, `vec_forward`), and a single-use
+   pure value is spelled at its read (`sx_inline`, `vec_literals`, `vec_fusion`). `memcpy` and
+   `memmove` remain where C has no other legal spelling: an array copy, a bitcast (a type pun),
+   and a raw pointer that may overlap its operand.

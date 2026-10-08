@@ -659,11 +659,15 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     let exe = cli::superc_path(); // resolved before the chdir below
     let p = cli::proj_new();
     // wasm32 has no UndefinedBehaviorSanitizer runtime, and a large unoptimized function can pass
-    // the engines' limit of locals: the lane's `ubsan` profile optimizes lightly.
+    // the engines' limit of locals: the lane's `ubsan` profile optimizes lightly. On aarch64, whose
+    // builds call the Neon entries, it optimizes as lightly too: the C compiler's folds are part of
+    // what an entry must survive (an arithmetic step that quiets a signaling NaN folds away).
     p.mkfile(
         "build.toml",
         if simd_lane() {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\n";
+        } else if unsafe shim::sc_host_arch() == 1 {
+            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
         } else {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
         },
@@ -676,6 +680,12 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     let mut wasm = simd_lane();
     if wasm {
         cmd.push_str(" --target=wasm --target-feature=+simd128");
+    }
+    // `SC_SIMD_FEATURES`: more CPU features for every differential build (a conformance run with
+    // `+dotprod,+i8mm,+rdm`).
+    let more = stdlib::getenv("SC_SIMD_FEATURES");
+    if more != null && unsafe *more != 0 as char {
+        cmd.format_into(" --target-feature={}", str::from_cstr(more));
     }
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -713,11 +723,17 @@ pub fn expect_build_err(label: str, src: str, needle: str) {
 /// Assert that `src` builds and its run with argument `arg` traps with `msg` on stderr, or exits 0
 /// when `msg` is empty; a sanitizer report fails it either way.
 pub fn expect_run(label: str, src: str, arg: str, msg: str) {
-    if simd_lane() {
-        // The scalar lowering and the hardware entries give the same results.
-        let d = same_output(src, ["--target-feature=-simd128"], [], [arg]);
+    // The scalar lowering and the hardware entries give the same results: in the lane without the
+    // wasm feature, on an aarch64 host (Neon in every build) with the planner off.
+    let neon = !simd_lane() && unsafe shim::sc_host_arch() == 1;
+    if simd_lane() || neon {
+        let d = if neon {
+            same_output(src, ["SC_SIMD_SCALAR=1"], [], [arg]);
+        } else {
+            same_output(src, ["--target-feature=-simd128"], [], [arg]);
+        };
         if d.len() != 0 {
-            eprintln("{}: scalar and +simd128: {}", label, d.as_str());
+            eprintln("{}: scalar and vector entries: {}", label, d.as_str());
         }
         assert(d.len() == 0, label);
     }
@@ -1138,8 +1154,8 @@ pub fn asm_mnemonics(text: str, function: str) Vector<String> {
 /// Build `src` with `opts` (`diff_build` forms), compile the translation unit that defines C function
 /// `function` with the build's own C command plus `-S` (without `-c`, `-MMD` and LTO, which would
 /// print IR), and check its instruction mnemonics: every `contains` entry is a substring of one, no
-/// `absent` entry is a substring of any. Mnemonics only: register names never match. Describes every
-/// failed check; empty when all hold.
+/// `absent` entry is a substring of any (`=name`: equal to any). Mnemonics only: register names never
+/// match. Describes every failed check; empty when all hold.
 pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
     let mut r = String::new();
     let b = diff_build(src, opts);
@@ -1233,7 +1249,13 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
     }
     for bad in absent {
         for i in 0..names.len() {
-            if names.at(i).contains(bad) {
+            // `=name`: that mnemonic exactly (`=bl`, a call, is not `tbl`).
+            let hit = if bad.starts_with("=") {
+                names.at(i).as_str() == bad.slice(1, bad.len());
+            } else {
+                names.at(i).contains(bad);
+            };
+            if hit {
                 r.format_into("instruction '{}' of '{}' contains '{}'\n", names.at(i).as_str(), function, bad);
                 break;
             }

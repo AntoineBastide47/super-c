@@ -2810,6 +2810,9 @@ extend BodyArena {
 
 pub struct Ast {
     pub nodes: SplitVec<Node>,
+    /// An identifier of the module names a vector type or the vector module (the lexer's
+    /// `vector_name`): the build loads the vector backend file only then.
+    pub names_vectors: bool,
     pub children: SplitVec<u32>,
     /// The body arena (ids tagged NODE_BODY) and the sink `add`/`commit` write to: the parser
     /// turns it on for a releasable body, and a later stage that appends nodes sets it to the

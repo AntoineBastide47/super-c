@@ -5432,8 +5432,10 @@ extend Interp {
     // IEEE 754-2019 minimumNumber (`min`, else maximumNumber) of float lanes `a`, `c`, or with `nan`,
     // minimum (maximum): the C sequence `emit_vec_lanes` spells.
     const fn fminmax(a: f64, c: f64, min: bool, nan: bool) bool {
+        // A NaN: `minimum`/`maximum` take it, `a` first; `min_num`/`max_num` take the other operand (two
+        // NaNs: the caller quiets `a`).
         if a != a || c != c {
-            return a != a == nan;
+            return pick(nan, a != a, c != c);
         }
         if a != c {
             return a < c == min;
@@ -5684,6 +5686,10 @@ extend Interp {
                 // `a` is the lane already.
             } else if c == ir::SIMD_CAST_CHANGED {
                 r = iv_bool(tm, TYPE_NONE, self.lane_changed(a, bt, self.vlane(x1, i, om, ot), obt));
+            } else if fl && c >= ir::SIMD_MIN && c <= ir::SIMD_MAX && a.f != a.f && cv.f != cv.f {
+                // `min_num`, `max_num` of two NaNs: `a` with its quiet bit set (IEEE 754 minimumNumber).
+                let q = pick(bt == BuiltinType::BT_F32, 1u64 << 22, 1u64 << 51);
+                r = Interp::bits_lane(Interp::lane_bits(a, bt, pw) | q, bt, rem, ret, pw);
             } else if fl && c >= ir::SIMD_MIN && c <= ir::SIMD_MAX || fl && (c == ir::SIMD_MINIMUM || c == ir::SIMD_MAXIMUM) {
                 // The chosen operand itself, its NaN bits included, as the C picks it.
                 r = pick(

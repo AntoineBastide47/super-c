@@ -1130,6 +1130,7 @@ fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled
         return ParseResult { ast: Ast::new(0), ok: false, tokens: lx.take_tokens() };
     }
     let toks = lx.take_tokens();
+    let vectors = lx.vectors;
     let src = source.as_str(); // padding lives past len -> invisible to the parser
     let mut ps = parser::Parser::new(toks, src, file);
     ps.set_bootstrap_tags(bootstrap_tags);
@@ -1145,6 +1146,7 @@ fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled
     // engine may read a module's pool BEFORE its typecheck (a const initializer demanded by an
     // importer). The checker's init_types re-seeds identically.
     out.init_types();
+    out.names_vectors = vectors;
     return ParseResult { ast: out, ok: true, tokens: ps.take_tokens() };
 }
 
@@ -1297,6 +1299,21 @@ pub fn package_load_overlaid(
     return p;
 }
 
+/// The real path of file `path`, or empty when it does not resolve.
+pub fn real_path_of(path: str) String {
+    let mut pb = RealBuf {};
+    let mut rb = RealBuf {};
+    if path.len() >= 4096 {
+        return String::new();
+    }
+    unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), path.len());
+    unsafe pb.b[path.len()] = 0 as char;
+    if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) == null {
+        return String::new();
+    }
+    return String::from_cstr(&rb.b[0]);
+}
+
 /// An empty package with its import roots, for a driver that sets the build settings (`arch`,
 /// `test_build`, `profile`) before `load_root`: the prelude's build-constant module spells them.
 pub fn package_new(root_dir: str, alt_dir: str, std_dir: str) Package {
@@ -1399,7 +1416,7 @@ pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
 pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) Package {
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.arch = arch;
-    p.features = cf::baseline(arch);
+    p.features = cf::baseline(target, arch);
     p.load_prelude(std_dir, target);
     let mut source = String::from_str(src);
     let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
@@ -2413,7 +2430,7 @@ extend Package {
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
-            features: cf::baseline(unsafe shim::sc_host_arch()),
+            features: cf::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch()),
             build_module: -1,
             tt: Box::<TypePool>::new(TypePool {}),
             ok: true,
@@ -5370,10 +5387,17 @@ extend Package {
                 }
             }
         }
-        // The vector backend file of the instruction set, when std has one and the build has a
-        // feature: its `@simd_impl` entries are what the lowering planner calls.
+        // The vector backend file of the instruction set, when std has one, the build has a feature
+        // and a module names a vector (`Ast.names_vectors`; std's own simd.spc aside): its
+        // `@simd_impl` entries are what the lowering planner calls. A program without vectors
+        // loads none, so it pays nothing for it.
         let backends: [str<'static>; 3] = ["x86", "aarch64", "wasm"];
-        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) {
+        let mut vec_use = false;
+        for i in 0..self.modules.len() {
+            let md = &self.modules[i];
+            vec_use = vec_use || md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc");
+        }
+        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && vec_use {
             let bn = unsafe backends[self.arch as usize];
             let mut bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
             if unsafe shim::sc_mtime(bf.cstr()) != 0 {

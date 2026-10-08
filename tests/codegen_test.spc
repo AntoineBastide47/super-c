@@ -311,6 +311,12 @@ fn array_literals() {
         "fn probe(n: i32) u32 {\n    let mut s: u32 = 0;\n    for i in 0..n {\n        if i == 0 {\n            continue;\n        }\n        let mut fp: [u32; 4] = [[0] = 1];\n        s += fp[3] + fp[2];\n        fp[3] = 50;\n    }\n    return s;\n}\n",
         "memset(&fp, 0, sizeof(fp));",
     );
+    // A repeat spells its element at every element: an element that computes is computed once.
+    h::expect_c_absent(
+        "a repeat computes its element once",
+        "fn f(k: u8) u8 { let a = [k * 3; 4]; return a[3]; }\n",
+        "a[1] = __sc_mul_u8",
+    );
     h::expect_exit(
         "array literal argument reaches the callee by value",
         "extern \"C\" { fn exit(c: i32) void; }\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn f() i32 { return g([1, 2, 3]); }\nfn main() i32 { unsafe exit(f() - 4); }\n",

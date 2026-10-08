@@ -122,7 +122,11 @@ the header of the type it collides with.
   under its arguments in the dyn type's hierarchy, `dyn_iface_inst`), since no `<name>_ret` alias
   exists for an erased callee.
 - A vector is the struct `__sc_v<N>_<lane>` (`{ _Alignas(A) T l[N]; }`, `A` the layout
-  alignment), defined once per mangler as a pack (`Mangler::vec_pack`, `pack_reqs`) in its own
+  alignment; under `Mangler::vec_regs`, a build that plans backend entries, a vector of 2 to 16
+  bytes whose alignment is its size holds `T l __attribute__((vector_size(S)))`, so its lanes have
+  no address: a lane place or a constant's pointer to a lane spells `((T *)&v)[i]`, byte moves
+  `(char *)&v + off`; a wider one of 16-byte chunks also names them, `union { l; c[k]; }`, so a
+  split operation reads and writes `v.c[k]`; `Mangler::vec_def`), defined once per mangler as a pack (`Mangler::vec_pack`, `pack_reqs`) in its own
   definition header, which also carries the lane-check helper `__sc_lane` under an include
   guard, and asserts the layout model; a mask is its storage integer (`uint8_t` to `uint64_t`).
   In mangled names a vector is `__sc_v<N>_<lane>` and a mask `__sc_mask<N>`: the runtime's
