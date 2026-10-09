@@ -102,6 +102,7 @@ tests/errors_test.spc
 tests/float_test.spc
 tests/fmt_test.spc
 tests/gen_test.spc
+tests/generic_extend_test.spc
 tests/harness.spc
 tests/infer_test.spc
 tests/io_test.spc

@@ -2311,6 +2311,120 @@ extend Mangler {
         return unsafe (*self.p().module_ast_const(m)).at_const(ext).as_data.extend_def.generics.len != 0;
     }
 
+    /// Whether the extend that owns `fnode` is keyed (`ext_keyed`): a call names all of the extend's
+    /// arguments, in order, ahead of the method's own.
+    pub fn in_keyed_extend(self: &mut Self, m: ModuleId, fnode: NodeId) bool {
+        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
+        return ext != NODE_NONE && ext_keyed(unsafe &*self.p().module_ast_const(m), ext);
+    }
+
+    /// The keyed conformances (`ext_keyed`) of resolved receiver `(rm, rt)` to interface `iface` by
+    /// target, in module and item order, into `out`: the candidates the interface instance a call
+    /// goes through chooses among (`CEmit::bind_keyed`).
+    pub fn keyed_confs(self: &mut Self, rm: ModuleId, rt: TypeId, iface: DefId, out: &mut Vector<DefId>) {
+        out.clear();
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            it.decl = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_BUILTIN {
+            it.module = self.p().core_module;
+            it.decl = self.p().builtin_decl(y.as_data.builtin);
+        } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
+            return;
+        }
+        let x = &self.p().idx;
+        for m in 0..self.p().modules.len() {
+            let a = self.p().module_ast_const(m as ModuleId);
+            for i in x.mod_exts[m]..x.mod_exts[m + 1] {
+                let e = x.exts[i as usize];
+                let ed = unsafe (*a).at_const(e).as_data.extend_def;
+                if ed.interface_type == NODE_NONE || !ext_keyed(unsafe &*a, e) {
+                    continue;
+                }
+                let tr = unsafe (*a).resolution_def(ed.interface_type);
+                let tg = unsafe (*a).resolution_def(ed.target_type);
+                if tr.module == iface.module && tr.node == iface.node && tg.module == it.module && tg.node == it.decl {
+                    out.push(DefId { module: m as ModuleId, node: e });
+                }
+            }
+        }
+    }
+
+    /// The generic conformances (`ext_blanket`) to interface `iface` in the package, in module and
+    /// item order, into `out`.
+    pub fn blanket_confs(self: &mut Self, iface: DefId, out: &mut Vector<DefId>) {
+        out.clear();
+        let x = &self.p().idx;
+        for m in 0..self.p().modules.len() {
+            let a = self.p().module_ast_const(m as ModuleId);
+            for i in x.mod_exts[m]..x.mod_exts[m + 1] {
+                let e = x.exts[i as usize];
+                let ed = unsafe (*a).at_const(e).as_data.extend_def;
+                if ed.interface_type == NODE_NONE {
+                    continue;
+                }
+                let tr = unsafe (*a).resolution_def(ed.interface_type);
+                if tr.module != iface.module || tr.node != iface.node {
+                    continue;
+                }
+                if ext_blanket(unsafe &*a, unsafe (*a).type_of(ed.target_type), unsafe &*a, m as ModuleId, e) >= 0 {
+                    out.push(DefId { module: m as ModuleId, node: e });
+                }
+            }
+        }
+    }
+
+    /// The stem of method `fnode`'s (module `m`) symbols in a keyed extend; each instance appends its
+    /// arguments. A generic extend spells `[modpfx]<Interface>__<method>`, with the extend's position
+    /// among the module's generic conformances to that interface past the first; another keyed
+    /// extend spells as its target's method (`fn_sym`).
+    pub fn keyed_sym(self: &mut Self, m: ModuleId, fnode: NodeId, out: &mut String) bool {
+        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
+        let a = self.p().module_ast_const(m);
+        let ed = unsafe (*a).at_const(ext).as_data.extend_def;
+        let pat = unsafe (*a).type_of(ed.target_type);
+        if ext_blanket(unsafe &*a, pat, unsafe &*a, m, ext) < 0 {
+            return self.fn_sym(m, fnode, self.method_target(m, fnode), out);
+        }
+        let tr = unsafe (*a).resolution_def(ed.interface_type);
+        if tr.node == NODE_NONE {
+            return false;
+        }
+        self.modpfx(m, out);
+        let ia = self.p().module_ast_const(tr.module);
+        self.ident(
+            tr.module,
+            unsafe (*ia).at_const(unsafe (*ia).at_const(tr.node).as_data.interface_def.name).as_data.name.text,
+            out,
+        );
+        let mut ord: u32 = 0;
+        let x = &self.p().idx;
+        for i in x.mod_exts[m as usize]..x.mod_exts[m as usize + 1] {
+            let e = x.exts[i as usize];
+            if e == ext {
+                break;
+            }
+            let ee = unsafe (*a).at_const(e).as_data.extend_def;
+            let ep = unsafe (*a).type_of(ee.target_type);
+            let er = if ee.interface_type != NODE_NONE {
+                unsafe (*a).resolution_def(ee.interface_type);
+            } else {
+                DefId { module: 0, node: NODE_NONE };
+            };
+            if er.module == tr.module && er.node == tr.node && ext_blanket(unsafe &*a, ep, unsafe &*a, m, e) >= 0 {
+                ord += 1;
+            }
+        }
+        if ord != 0 {
+            out.push_str("__");
+            out.push_str(format("{}", ord).as_str());
+        }
+        out.push_str("__");
+        self.ident(m, unsafe (*a).at_const(unsafe (*a).at_const(fnode).as_data.function.name).as_data.name.text, out);
+        return true;
+    }
+
     /// The C symbol of const/static item `cnode` (module `m`): top-level items spell their qualified
     /// name, associated consts `<m prefix><Target>__<NAME>`; module `m` defines both.
     pub fn const_sym(self: &mut Self, m: ModuleId, cnode: NodeId, out: &mut String) bool {
@@ -2565,6 +2679,10 @@ extend Mangler {
         let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             it.decl = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_BUILTIN {
+            // A builtin's conformances target its core declaration.
+            it.module = self.p().core_module;
+            it.decl = self.p().builtin_decl(y.as_data.builtin);
         } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             return NODE_NONE;
         }

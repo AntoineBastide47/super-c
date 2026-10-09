@@ -732,3 +732,18 @@ fn generic_alias_literals() {
         "mismatched types: expected 'Pair<i32, u8>', found 'Pair<i32, i32>'",
     );
 }
+
+// A `null` branch or arm takes the pointer type of the others, wherever it stands.
+@test
+fn null_branches_take_the_pointer_type() {
+    h::expect_exit(
+        "null first and last",
+        "fn f(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        null;\n    } else {\n        p;\n    };\n    return q;\n}\nfn g(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        p;\n    } else {\n        null;\n    };\n    return q;\n}\nfn h(c: u8, p: *mut i32) *mut i32 {\n    let q = switch c {\n        0 => null,\n        1 => null,\n        _ => p,\n    };\n    return q;\n}\nfn main() i32 {\n    let mut x = 1;\n    return (f(true, &mut x) != null || g(false, &mut x) != null || h(0, &mut x) != null || h(2, &mut x) == null) as i32;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "null against a number",
+        "fn main() i32 {\n    let q = if true {\n        null;\n    } else {\n        1;\n    };\n    return q;\n}\n",
+        "mismatched types",
+    );
+}

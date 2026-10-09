@@ -212,6 +212,7 @@ struct ExtCursor {
     pub head: u32,
     pub at: u32,
     pub pass: u8,
+    pub blk: u32, // pass 2: the next of `ext_blankets`
 }
 
 /// Method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
@@ -392,6 +393,7 @@ pub struct TypeChecker<'a> {
     // (target module << 32 | target decl) to (first << 32 | last) indices of a list in `ext_hits`.
     ext_hits: Vector<ExtHit>,
     ext_heads: Map<u64, u64>,
+    ext_blankets: Vector<ExtHit>, // the generic extends of the extension scope (`ext_blanket`)
     ext_indexed: Vector<u8>, // per module: 1 once its extends are in `ext_hits`
     pub moved: [NodeId; 1024],
     pub nmoved: u32,
@@ -965,6 +967,7 @@ extend<'a> TypeChecker<'a> {
             const_init: 0,
             ext_hits: Vector::<ExtHit>::new(),
             ext_heads: Map::<u64, u64>::new(),
+            ext_blankets: Vector::<ExtHit>::new(),
             ext_indexed: Vector::<u8>::new(),
             nmoved: 0,
             nlate: 0,
@@ -1938,10 +1941,115 @@ extend<'a> TypeChecker<'a> {
         let ig = unsafe (*a).at_const(ext).as_data.extend_def.generics;
         let mut i: i32 = 0;
         while i < g && *k < 8 {
-            unsafe ps[(*k) as usize] = DefId { module: m, node: unsafe (*a).list(ig)[i as usize] };
-            unsafe ts[(*k) as usize] = ea[i as usize];
-            *k = *k + 1;
+            if ea[i as usize] != TYPE_NONE {
+                unsafe ps[(*k) as usize] = DefId { module: m, node: unsafe (*a).list(ig)[i as usize] };
+                unsafe ts[(*k) as usize] = ea[i as usize];
+                *k = *k + 1;
+            }
             i = i + 1;
+        }
+    }
+
+    // Solve the parameters of extend `ext` that `ka[0..kn]` leaves open (`tc_ext_bind`) for a call of
+    // its method `md`: the types of the call's arguments `args` against the method's parameters from
+    // `skip` on, under the receiver frame. Each solved one joins the frame (`rsubp`/`rsuba`, `nrsub`
+    // entries, returned grown); one left open is reported at `sp`.
+    fn tc_solve_call_open(
+        self: &mut Self,
+        md: DefId,
+        ext: NodeId,
+        ka: &mut Tys8,
+        kn: i32,
+        args: NodeList,
+        skip: u32,
+        rsubp: &mut Defs8,
+        rsuba: &mut Tys8,
+        nrsub: i32,
+        sp: tok::Span,
+    ) i32 {
+        let ea = self.mod_ast(md.module);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let params = unsafe (*ea).at_const(md.node).as_data.function.params;
+        let mut open = false;
+        for i in 0..kn {
+            open = open || ka[i as usize] == TYPE_NONE;
+        }
+        let mut n = nrsub;
+        if open {
+            let mut pats = Tys8 {};
+            let mut vals = Tys8 {};
+            let mut np: i32 = 0;
+            let a = self.cur_ast();
+            for i in 0..args.len {
+                if i + skip >= params.len || np >= 8 {
+                    break;
+                }
+                let pid = unsafe (*ea).list(params)[(i + skip) as usize];
+                pats[np as usize] = self.subst_type(self.decl_type_in(md.module, pid), &rsubp[0], &rsuba[0], nrsub);
+                vals[np as usize] = unsafe (*a).type_of(unsafe (*a).list(args)[i as usize]);
+                np += 1;
+            }
+            let before = *ka;
+            self.tc_solve_open(md.module, ext, ka, kn, &pats[0], &vals[0], np);
+            for i in 0..kn {
+                let gid = unsafe (*ea).list(gens)[i as usize];
+                if before[i as usize] != TYPE_NONE {
+                    continue;
+                }
+                if ka[i as usize] == TYPE_NONE {
+                    self.err_unresolved_generic(sp, md.module, gid);
+                    ka[i as usize] = TYPE_ERROR;
+                } else if n < 8 {
+                    rsubp[n as usize] = DefId { module: md.module, node: gid };
+                    rsuba[n as usize] = ka[i as usize];
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
+    // Record on call `id` of a keyed extend's method (`ext_keyed`) the extend's arguments `ka[0..kn]`,
+    // then the method's own `ga[0..gn]`: the instance the call names.
+    fn tc_record_keyed(self: &mut Self, id: NodeId, ka: &Tys8, kn: i32, ga: &Tys8, gn: i32) {
+        let mut all = Tys8 {};
+        let mut n: i32 = 0;
+        for i in 0..kn {
+            if n < 8 {
+                all[n as usize] = ka[i as usize];
+                n += 1;
+            }
+        }
+        for i in 0..gn {
+            if n < 8 {
+                all[n as usize] = ga[i as usize];
+                n += 1;
+            }
+        }
+        unsafe (*self.cur_ast()).set_type_args(id, &all[0], n as u8);
+    }
+
+    // `frame_ext` for receiver type `recv` (`tc_ext_bind`): a generic extend binds its target
+    // parameter to the receiver itself; the parameters the receiver does not solve stay unbound.
+    fn frame_ext_recv(
+        self: &mut Self,
+        m: ModuleId,
+        ext: NodeId,
+        recv: TypeId,
+        ps: *mut DefId,
+        ts: *mut TypeId,
+        k: &mut i32,
+    ) {
+        let mut ea = Tys8 {};
+        let g = self.tc_ext_bind(m, ext, recv, &mut ea[0]);
+        let a = self.mod_ast(m);
+        let ig = unsafe (*a).at_const(ext).as_data.extend_def.generics;
+        for i in 0..g {
+            if ea[i as usize] != TYPE_NONE && *k < 8 {
+                unsafe ps[(*k) as usize] = DefId { module: m, node: unsafe (*a).list(ig)[i as usize] };
+                unsafe ts[(*k) as usize] = ea[i as usize];
+                *k = *k + 1;
+            }
         }
     }
 
@@ -1975,15 +2083,27 @@ extend<'a> TypeChecker<'a> {
         let ea = self.mod_ast(m);
         let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
         let g = pick(gens.len < 8, gens.len, 8) as i32;
+        let pat = self.tc_ext_pattern(m, ext);
+        if ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*ea, m, ext) >= 0 {
+            return -1;
+        }
+        let free = ext_free_params(unsafe &*self.cur_ast(), pat, unsafe &*ea, m, ext);
         if self.tc_ext_identity(m, ext) {
             let mut i: i32 = 0;
             while i < g && i < tn {
                 unsafe out[i as usize] = unsafe ta[i as usize];
                 i += 1;
             }
-            return i;
+            if free == 0 {
+                return i;
+            }
+            // A target without arguments: the interface's arguments solve every parameter.
+            while i < g {
+                unsafe out[i as usize] = TYPE_NONE;
+                i += 1;
+            }
+            return g;
         }
-        let pat = self.tc_ext_pattern(m, ext);
         let mut it = TyInstance {};
         let _ = unsafe (*self.cur_ast()).targs_of(pat, &mut it);
         let np = ext_arity(unsafe &*ea, ext, it.n);
@@ -2020,11 +2140,125 @@ extend<'a> TypeChecker<'a> {
             unsafe out[x.par as usize] = v;
         }
         for i in 0..g {
-            if unsafe out[i as usize] == TYPE_NONE {
+            if unsafe out[i as usize] == TYPE_NONE && (free >> i as u64 & 1u64) == 0 {
                 return -1;
             }
         }
         return g;
+    }
+
+    // Extend `ext`'s (module `m`) arguments for receiver type `recv` (references peeled), into `out`
+    // (each of its generic parameters, in order): their count, or -1 when the extend does not apply. A
+    // generic extend binds its target parameter to `recv` and applies when the parameter's bounds hold
+    // for it; another binds what its target solves from `recv`'s instance (`tc_ext_args`). The
+    // parameters only the interface's arguments name stay TYPE_NONE.
+    fn tc_ext_bind(self: &mut Self, m: ModuleId, ext: NodeId, recv: TypeId, out: *mut TypeId) i32 {
+        let ea = self.mod_ast(m);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let g = pick(gens.len < 8, gens.len, 8) as i32;
+        let mut r = recv;
+        while r != TYPE_NONE && self.type_at(r).kind == TypeKind::TYPE_REFERENCE {
+            r = self.type_at(r).as_data.elem;
+        }
+        let pat = self.tc_ext_pattern(m, ext);
+        let b = ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*ea, m, ext);
+        if b >= 0 {
+            for i in 0..g {
+                unsafe out[i as usize] = TYPE_NONE;
+            }
+            if r == TYPE_NONE || b >= g {
+                return -1;
+            }
+            unsafe out[b as usize] = r;
+            return pick(self.ext_bounds_hold(m, ext, out, g, 0), g, -1);
+        }
+        let mut tm: ModuleId = 0;
+        let mut td = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if r == TYPE_NONE || !self.aggregate_of(r, &mut tm, &mut td, &mut gp, &mut ga, &mut gn) {
+            // No instance: only a target without arguments applies.
+            return self.tc_ext_args(m, ext, &ga[0], 0, out);
+        }
+        return self.tc_ext_args(m, ext, &ga[0], gn, out);
+    }
+
+    // `ext_keyed` for extend `ext` of module `m`, its target read from the syntax: the module of
+    // the extend may not be checked yet.
+    pub fn tc_ext_keyed(self: &mut Self, m: ModuleId, ext: NodeId) bool {
+        let pat = self.tc_ext_pattern(m, ext);
+        let ea = self.mod_ast(m);
+        return pat != TYPE_NONE && (ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*ea, m, ext) >= 0 || ext_free_params(
+            unsafe &*self.cur_ast(),
+            pat,
+            unsafe &*ea,
+            m,
+            ext,
+        ) != 0);
+    }
+
+    // Whether extend `ext` of module `m` is a generic extend (`ext_blanket`).
+    fn tc_ext_is_blanket(self: &mut Self, m: ModuleId, ext: NodeId) bool {
+        let pat = self.tc_ext_pattern(m, ext);
+        return ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*self.mod_ast(m), m, ext) >= 0;
+    }
+
+    // `tc_ext_args` for a receiver of type `ty` whose instance arguments are `ta[0..tn]`: a generic
+    // extend binds from the type itself (`tc_ext_bind`), and applies to none when `ty` is TYPE_NONE.
+    fn tc_ext_args_for(
+        self: &mut Self,
+        m: ModuleId,
+        ext: NodeId,
+        ty: TypeId,
+        ta: *const TypeId,
+        tn: i32,
+        out: *mut TypeId,
+    ) i32 {
+        if self.tc_ext_is_blanket(m, ext) {
+            return pick(ty == TYPE_NONE, -1, self.tc_ext_bind(m, ext, ty, out));
+        }
+        return self.tc_ext_args(m, ext, ta, tn, out);
+    }
+
+    // Solve the parameters of extend `ext` (module `m`) that `ea[0..g]` leaves open (TYPE_NONE) by
+    // inferring them from types `pats[k]` (over the extend's parameters) against `vals[k]`, k < `n`;
+    // a parameter no pair determines stays open.
+    fn tc_solve_open(
+        self: &mut Self,
+        m: ModuleId,
+        ext: NodeId,
+        ea: &mut Tys8,
+        g: i32,
+        pats: *const TypeId,
+        vals: *const TypeId,
+        n: i32,
+    ) {
+        let a = self.mod_ast(m);
+        let gens = unsafe (*a).at_const(ext).as_data.extend_def.generics;
+        let mark = self.icx.sv.probe_begin();
+        let mut slot = [0u32; 8];
+        for i in 0..g {
+            if ea[i as usize] == TYPE_NONE {
+                let gid = unsafe (*a).list(gens)[i as usize];
+                unsafe slot[i as usize] = self.icx.sv.map_param(
+                    DefId { module: m, node: gid },
+                    unsafe (*a).at_const(gid).as_data.generic_param.is_const,
+                );
+            }
+        }
+        for k in 0..n {
+            let v = unsafe vals[k as usize];
+            if v != TYPE_NONE && v != TYPE_ERROR {
+                self.tc_infer_ev(unsafe pats[k as usize], v, true);
+            }
+        }
+        for i in 0..g {
+            if ea[i as usize] == TYPE_NONE {
+                ea[i as usize] = self.icx.sv.s_resolve(unsafe slot[i as usize], it_conv_join);
+            }
+        }
+        self.icx.sv.probe_end(&mark);
     }
 
     // The value of FORM argument `x`'s parameter (of type `bt`) that makes the form equal argument `r`:
@@ -2140,6 +2374,10 @@ extend<'a> TypeChecker<'a> {
         if ext == NODE_NONE || self.tc_ext_identity(md.module, ext) {
             return true;
         }
+        let mut ea = Tys8 {};
+        if self.tc_ext_is_blanket(md.module, ext) {
+            return self.tc_ext_bind(md.module, ext, self.strip(recv), &mut ea[0]) >= 0;
+        }
         let mut tm: ModuleId = 0;
         let mut td = NODE_NONE;
         let mut gp = Defs8 {};
@@ -2148,7 +2386,6 @@ extend<'a> TypeChecker<'a> {
         if !self.aggregate_of(self.strip(recv), &mut tm, &mut td, &mut gp, &mut ga, &mut gn) {
             return true;
         }
-        let mut ea = Tys8 {};
         return self.tc_ext_args(md.module, ext, &ga[0], gn, &mut ea[0]) >= 0;
     }
 
@@ -2245,18 +2482,39 @@ extend<'a> TypeChecker<'a> {
         return DefId { module: 0, node: NODE_NONE };
     }
 
-    // An extend's target solves each of its generic parameters (`tc_ext_args`): every argument it
-    // constrains is one parameter, bare or in a const form `{c * N + k}` without a division, or names
-    // none of them, and each parameter appears in exactly one argument. `Free` conforms every instance
-    // of a type, so its extend binds positionally.
+    // An extend's target solves its generic parameters (`tc_ext_args`): every argument it constrains
+    // is one parameter, bare or in a const form `{c * N + k}` without a division, or names none of
+    // them, and each parameter appears in one argument at most. A conformance's interface arguments
+    // solve the parameters its target does not name; every parameter appears in one of the two. A
+    // target that is one of the parameters (a generic extend) is a conformance's, and not `Free`'s.
+    // `Free` conforms every instance of a type, so its extend binds positionally.
     fn tc_check_ext_target(self: &mut Self, id: NodeId) {
         let m = self.cur_module();
-        if self.tc_ext_identity(m, id) {
-            return;
-        }
         let a = self.cur_ast();
         let ed = unsafe (*a).at_const(id).as_data.extend_def;
         let pat = self.tc_ext_pattern(m, id);
+        let free = ext_free_params(unsafe &*a, pat, unsafe &*a, m, id);
+        if ext_blanket(unsafe &*a, pat, unsafe &*a, m, id) >= 0 {
+            let tsp = unsafe (*a).at_const(ed.target_type).span;
+            if ed.interface_type == NODE_NONE {
+                self.errors.emit_span(
+                    tsp,
+                    format("an extend whose target is one of its generic parameters must be a conformance"),
+                );
+                self.errors.note(format("write the interface it conforms to: `extend<T: Bound> T as Interface`"));
+                return;
+            }
+            if self.is_free_iface(unsafe (*a).resolution_def(ed.interface_type)) {
+                self.errors.emit_span(tsp, format("'Free' cannot be implemented for every type that satisfies a bound"));
+                return;
+            }
+            self.tc_check_free_params(id, free);
+            return;
+        }
+        if self.tc_ext_identity(m, id) {
+            self.tc_check_free_params(id, free);
+            return;
+        }
         let mut it = TyInstance {};
         let _ = unsafe (*a).targs_of(pat, &mut it);
         let np = ext_arity(unsafe &*a, id, it.n);
@@ -2300,10 +2558,45 @@ extend<'a> TypeChecker<'a> {
             }
         }
         // A parameter inside a rejected argument is reported with it.
-        for i in 0..ed.generics.len {
-            if !bad && i < 64 && (seen >> i as u64 & 1u64) == 0 {
-                let gid = unsafe (*a).list(ed.generics)[i as usize];
-                let gs = unsafe (*a).at_const(unsafe (*a).at_const(gid).as_data.generic_param.name).as_data.name.text;
+        if !bad {
+            self.tc_check_free_params(id, free & ~seen);
+        }
+        if ed.interface_type != NODE_NONE && self.is_free_iface(unsafe (*a).resolution_def(ed.interface_type)) {
+            self.errors.emit_span(
+                unsafe (*a).at_const(ed.target_type).span,
+                format(
+                    "'Free' is implemented for every instance of a type: write the target with the extend's parameters in order",
+                ),
+            );
+        }
+    }
+
+    // Each parameter of extend `id` in the bit set `free` (its target names none) appears in the
+    // interface arguments of its conformance, which solve it.
+    fn tc_check_free_params(self: &mut Self, id: NodeId, free: u64) {
+        if free == 0 {
+            return;
+        }
+        let m = self.cur_module();
+        let a = self.cur_ast();
+        let ed = unsafe (*a).at_const(id).as_data.extend_def;
+        let mut subp = Defs8 {};
+        let mut suba = Tys8 {};
+        let mut nsub: i32 = 0;
+        if ed.interface_type != NODE_NONE && unsafe (*a).resolution_def(ed.interface_type).node != NODE_NONE {
+            nsub = self.tc_extend_self_frame(id, unsafe (*a).resolution_def(ed.interface_type), &mut subp, &mut suba);
+        }
+        for i in 0..pick(ed.generics.len < 64, ed.generics.len, 64) {
+            let gid = unsafe (*a).list(ed.generics)[i as usize];
+            let mut named = false;
+            for k in 1..nsub {
+                named = named || self.tc_ty_names_param(suba[k as usize], m, gid, 0);
+            }
+            if (free >> i as u64 & 1u64) == 0 || named {
+                continue;
+            }
+            let gs = unsafe (*a).at_const(unsafe (*a).at_const(gid).as_data.generic_param.name).as_data.name.text;
+            if ed.interface_type == NODE_NONE {
                 self.errors.emit_span(
                     gs,
                     format(
@@ -2312,14 +2605,17 @@ extend<'a> TypeChecker<'a> {
                     ),
                 );
                 self.errors.note(format("an extend solves its parameters from its target's arguments"));
+                continue;
             }
-        }
-        if ed.interface_type != NODE_NONE && self.is_free_iface(unsafe (*a).resolution_def(ed.interface_type)) {
             self.errors.emit_span(
-                unsafe (*a).at_const(ed.target_type).span,
+                gs,
                 format(
-                    "'Free' is implemented for every instance of a type: write the target with the extend's parameters in order",
+                    "the generic parameter '{}' of this extend appears neither in its target nor in its interface's arguments",
+                    diag::span_str(self.source, gs.start, gs.end),
                 ),
+            );
+            self.errors.note(
+                format("a conformance solves its parameters from its target's and its interface's arguments"),
             );
         }
     }
@@ -3683,6 +3979,66 @@ fn rt_put_name(
     );
 }
 
+/// The interface instance a `dyn` type `t` erases to, as written in a bound or a conformance:
+/// `Mul<Simd<f32, 4>>`, `fn(i32) i32`.
+pub fn render_iface_into(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    t: TypeId,
+    buf: *mut char,
+    cap: usize,
+) {
+    let ty = *unsafe (*a).type_at(t);
+    rt_dyn_into(pkg, a, cur_src, &ty, buf, cap, "".ptr() as *const char, "".ptr() as *const char);
+}
+
+// `dyn` type `ty` between `pfx` and `sfx`.
+fn rt_dyn_into(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    ty: &Ty,
+    buf: *mut char,
+    cap: usize,
+    pfx: *const char,
+    sfx: *const char,
+) {
+    let ma = rt_ast(pkg, a, ty.module);
+    let dsig = unsafe (*a).dyn_fn_sig(ty);
+    if dsig != TYPE_NONE {
+        let mut sb = Buf96 {};
+        render_type_into(pkg, a, cur_src, dsig, &mut sb[0], 96);
+        unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, &sb[0], sfx);
+    } else {
+        let ddecl = unsafe (*a).dyn_decl_of(ty);
+        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
+        let di = *unsafe (*a).instance(ty.as_data.inst);
+        if di.n == 0 {
+            rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, sfx);
+        } else {
+            // A generic interface names its arguments: `&dyn I<bool>`, never a bare `&dyn I`.
+            let mut at = rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, "<".ptr() as *const char) as usize;
+            let mut i: u8 = 0;
+            while i < di.n && at < cap {
+                let mut argb = Buf96 {};
+                render_type_into(pkg, a, cur_src, unsafe di.args[i as usize], &mut argb[0], 64);
+                let sep = if i != 0 {
+                    ", ".ptr() as *const char;
+                } else {
+                    "".ptr() as *const char;
+                };
+                let w = unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &argb[0]);
+                at = at + w as usize;
+                i = i + 1;
+            }
+            if at < cap {
+                unsafe stdio::snprintf(buf + at, cap - at, ">%s".ptr() as *const char, sfx);
+            }
+        }
+    }
+}
+
 pub fn render_type_into(
     pkg: *const loader::Package,
     a: *const Ast,
@@ -3832,7 +4188,6 @@ pub fn render_type_into(
     } else if ty.kind == TypeKind::TYPE_FUNCTION {
         render_fn_sig_into(pkg, a, cur_src, &ty, buf, cap);
     } else if ty.kind == TypeKind::TYPE_DYN {
-        let ma = rt_ast(pkg, a, ty.module);
         let mut pfx = "Box<dyn ".ptr() as *const char;
         if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
             pfx = "&mut dyn ".ptr() as *const char;
@@ -3843,38 +4198,7 @@ pub fn render_type_into(
         if ty.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
             sfx = ">".ptr() as *const char;
         }
-        let dsig = unsafe (*a).dyn_fn_sig(&ty);
-        if dsig != TYPE_NONE {
-            let mut sb = Buf96 {};
-            render_type_into(pkg, a, cur_src, dsig, &mut sb[0], 96);
-            unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, &sb[0], sfx);
-        } else {
-            let ddecl = unsafe (*a).dyn_decl_of(&ty);
-            let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
-            let di = *unsafe (*a).instance(ty.as_data.inst);
-            if di.n == 0 {
-                rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, sfx);
-            } else {
-                // A generic interface names its arguments: `&dyn I<bool>`, never a bare `&dyn I`.
-                let mut at = rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, "<".ptr() as *const char) as usize;
-                let mut i: u8 = 0;
-                while i < di.n && at < cap {
-                    let mut argb = Buf96 {};
-                    render_type_into(pkg, a, cur_src, unsafe di.args[i as usize], &mut argb[0], 64);
-                    let sep = if i != 0 {
-                        ", ".ptr() as *const char;
-                    } else {
-                        "".ptr() as *const char;
-                    };
-                    let w = unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &argb[0]);
-                    at = at + w as usize;
-                    i = i + 1;
-                }
-                if at < cap {
-                    unsafe stdio::snprintf(buf + at, cap - at, ">%s".ptr() as *const char, sfx);
-                }
-            }
-        }
+        rt_dyn_into(pkg, a, cur_src, &ty, buf, cap, pfx, sfx);
     } else if ty.kind == TypeKind::TYPE_CONST {
         // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>`; the number is the
         // whole point of the diagnostic.
@@ -7938,6 +8262,17 @@ extend<'a> TypeChecker<'a> {
             if tg.node == NODE_NONE {
                 continue;
             }
+            if tg.module == m && unsafe (*a).at_const(tg.node).kind == NodeKind::NODE_GENERIC_PARAM {
+                // A generic extend targets every type: its parameter is its own (anything else
+                // named by the target is the scope's, an error the extend reports).
+                let gens = unsafe (*a).at_const(iid).as_data.extend_def.generics;
+                for g in 0..gens.len {
+                    if scoped && unsafe (*a).list(gens)[g as usize] == tg.node {
+                        self.ext_blankets.push(ExtHit { m: m, node: iid, next: EXT_END, scoped: true });
+                    }
+                }
+                continue;
+            }
             let key = tg.module as u64 << 32 | tg.node as u64;
             let at = self.ext_hits.len() as u64;
             self.ext_hits.push(ExtHit { m: m, node: iid, next: EXT_END, scoped: scoped });
@@ -7976,17 +8311,23 @@ extend<'a> TypeChecker<'a> {
             Some(v) => (*v >> 32) as u32,
             None => EXT_END,
         };
-        return ExtCursor { tmod: tmod, head: head, at: head, pass: 0 };
+        return ExtCursor { tmod: tmod, head: head, at: head, pass: 0, blk: 0 };
     }
 
-    /// The next extend of `c` (module + extend node), or NODE_NONE after the last.
+    /// The next extend of `c` (module + extend node), or NODE_NONE after the last: the target's own,
+    /// then the generic extends of the scope, which may apply to it.
     fn ext_next(self: &Self, c: &mut ExtCursor) DefId {
         loop {
-            if c.at == EXT_END {
-                if c.pass == 1 {
+            if c.pass == 2 {
+                if c.blk as usize >= self.ext_blankets.len() {
                     return DefId { module: 0, node: NODE_NONE };
                 }
-                c.pass = 1;
+                let h = self.ext_blankets[c.blk as usize];
+                c.blk += 1;
+                return DefId { module: h.m, node: h.node };
+            }
+            if c.at == EXT_END {
+                c.pass += 1;
                 c.at = c.head;
                 continue;
             }
@@ -8543,8 +8884,8 @@ extend<'a> TypeChecker<'a> {
             }
             let mut ea = Tys8 {};
             let mut eg: i32 = 0;
-            if agg {
-                eg = self.tc_ext_args(e.module, e.node, &sa[0], sn, &mut ea[0]);
+            if agg || self.tc_ext_is_blanket(e.module, e.node) {
+                eg = self.tc_ext_args_for(e.module, e.node, rs, &sa[0], sn, &mut ea[0]);
                 if eg < 0 {
                     continue;
                 }
@@ -8870,6 +9211,147 @@ extend<'a> TypeChecker<'a> {
         return cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && cn.as_data.specialization.expression == id;
     }
 
+    // The method an interface-qualified call `I::m(x, ..)` (member node `mem`, name `mname`) runs when
+    // `m` takes the receiver first: the one the type of the call's first argument `x` (references
+    // peeled) implements `I` with (its conformance's own method, or the default it inherits, its
+    // conformance recorded), or a type parameter's bound; node NODE_NONE otherwise. The argument is
+    // checked here, as overload selection checks one (`args_pre`).
+    fn tc_iface_path_impl(self: &mut Self, mem: NodeId, iface: DefId, mname: tok::Span, expected: TypeId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let nm = self.source.slice(mname.start as usize, mname.end as usize);
+        let im = self.find_interface_method(iface.module, iface.node, nm, 0);
+        if im.node == NODE_NONE {
+            return none;
+        }
+        let ia = self.mod_ast(im.module);
+        let ps = unsafe (*ia).at_const(im.node).as_data.function.params;
+        if ps.len == 0 || !span_is(
+            self.mod_src(im.module),
+            unsafe (*ia).at_const(unsafe (*ia).at_const(unsafe (*ia).list(ps)[0]).as_data.parameter.name).as_data.name.text,
+            "self",
+        ) {
+            return none;
+        }
+        let ca = self.icx.call_args;
+        let a0 = unsafe (*self.cur_ast()).list(ca)[0];
+        let mut at = unsafe (*self.cur_ast()).type_of(a0);
+        if (self.icx.args_pre & 1) == 0 {
+            let cta = self.icx.call_targs;
+            self.icx.call_args = NodeList { start: 0, len: 0 };
+            self.icx.call_targs = NodeList { start: 0, len: 0 };
+            at = self.check_expr_w(a0, TYPE_NONE);
+            self.icx.call_args = ca;
+            self.icx.call_targs = cta;
+            self.icx.args_pre = self.icx.args_pre | 1;
+        }
+        let rt = self.strip(at);
+        if untyped(rt) {
+            return none;
+        }
+        let y = *self.type_at(rt);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            let mut bi = DefId { module: 0, node: NODE_NONE };
+            return self.find_bound_method(y.module, y.as_data.decl, mname, &mut bi);
+        }
+        let mut tmod: ModuleId = 0;
+        let mut tdecl = NODE_NONE;
+        let mut ta = Tys8 {};
+        let mut tn: i32 = 0;
+        let mut gp = Defs8 {};
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            tmod = unsafe (*self.package).core_module;
+            tdecl = unsafe (*self.package).builtin_decl(y.as_data.builtin);
+        } else if !self.aggregate_of(rt, &mut tmod, &mut tdecl, &mut gp, &mut ta, &mut tn) {
+            return none;
+        }
+        // Every conformance of the type to `I`: one decides; several (`Conv<i64>`, `Conv<u8>`)
+        // choose by the expected result.
+        let mut pick_m = none;
+        let mut pick_c = TYPE_NONE;
+        let mut hits: u32 = 0;
+        let mut matched = false;
+        let mut c = self.ext_begin(tmod, tdecl);
+        loop {
+            let e = self.ext_next(&mut c);
+            if e.node == NODE_NONE {
+                break;
+            }
+            let xa = self.mod_ast(e.module);
+            let itn = unsafe (*xa).at_const(e.node).as_data.extend_def.interface_type;
+            if itn == NODE_NONE {
+                continue;
+            }
+            let tr = unsafe (*xa).resolution_def(itn);
+            let mut ea = Tys8 {};
+            let en = if tr.module == iface.module && tr.node == iface.node {
+                self.tc_ext_args_for(e.module, e.node, rt, &ta[0], tn, &mut ea[0]);
+            } else {
+                -1;
+            };
+            if en < 0 {
+                continue;
+            }
+            let own = self.tc_ext_method(e, nm);
+            if own.node == NODE_NONE && unsafe (*ia).at_const(im.node).as_data.function.body == NODE_NONE {
+                continue;
+            }
+            let conf = self.tc_ext_conf(e, iface, &ea[0], en);
+            let ret = if own.node != NODE_NONE {
+                self.tc_method_ret(rt, own);
+            } else {
+                self.tc_method_sig(rt, im, conf, -1);
+            };
+            let fits = expected != TYPE_NONE && ret == self.strip(expected);
+            if hits == 0 || fits && !matched {
+                pick_m = pick(own.node != NODE_NONE, own, im);
+                pick_c = pick(own.node != NODE_NONE, TYPE_NONE, conf);
+            }
+            matched = matched || fits;
+            hits += 1;
+        }
+        if pick_m.node == NODE_NONE {
+            return none;
+        }
+        if hits > 1 && !matched {
+            let tb = self.type_buf(rt);
+            let ina = self.mod_ast(iface.module);
+            let isp = unsafe (*ina).at_const(unsafe (*ina).at_const(iface.node).as_data.interface_def.name).as_data.name.text;
+            self.errors.emit_span(
+                mname,
+                format(
+                    "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
+                    nm,
+                    str::from_cstr(&tb[0]),
+                    diag::span_str(self.mod_src(iface.module), isp.start, isp.end),
+                ),
+            );
+            self.errors.note(format("annotate the expected result type to choose the conformance"));
+            return none;
+        }
+        if pick_m.module != im.module || pick_m.node != im.node {
+            self.tc_mark_method_used(pick_m);
+        } else if pick_c != TYPE_NONE {
+            // The inherited default runs under the chosen conformance.
+            self.dflt_conf.insert(mem, pick_c);
+        }
+        return pick_m;
+    }
+
+    // Whether function `md`'s first parameter is the receiver (`self`).
+    fn tc_takes_self(self: &Self, md: DefId) bool {
+        let fa = self.mod_ast(md.module);
+        let fnn = unsafe (*fa).at_const(md.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.params.len == 0 {
+            return false;
+        }
+        let p0 = unsafe (*fa).at_const(unsafe (*fa).list(fnn.as_data.function.params)[0]);
+        return span_is(
+            self.mod_src(md.module),
+            unsafe (*fa).at_const(p0.as_data.parameter.name).as_data.name.text,
+            "self",
+        );
+    }
+
     // Whether path member `id` (`X::f`) is qualified by `Self`.
     const fn tc_self_path(self: &Self, id: NodeId) bool {
         let a = self.cur_ast();
@@ -9063,6 +9545,19 @@ extend<'a> TypeChecker<'a> {
                 g += 1;
                 k += 1;
             }
+        } else if ext != NODE_NONE && self.tc_ext_keyed(c.module, ext) {
+            // A keyed extend's parameters the receiver does not solve: the arguments' evidence does.
+            let eg = unsafe (*ca).at_const(ext).as_data.extend_def.generics;
+            let epat = self.tc_ext_pattern(c.module, ext);
+            let free = ext_free_params(unsafe &*self.cur_ast(), epat, unsafe &*ca, c.module, ext);
+            let mut k: u32 = 0;
+            while g < 8 && k < eg.len {
+                if k < 64 && (free >> k as u64 & 1u64) != 0 {
+                    prm[g as usize] = DefId { module: c.module, node: unsafe (*ca).list(eg)[k as usize] };
+                    g += 1;
+                }
+                k += 1;
+            }
         }
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
@@ -9091,7 +9586,12 @@ extend<'a> TypeChecker<'a> {
             for j in 0..nargs {
                 let at = unsafe args[j as usize];
                 if at != TYPE_NONE {
-                    let pt0 = self.tc_method_sig(recv, c, conf, j + skip);
+                    let mut pt0 = self.tc_method_sig(recv, c, conf, j + skip);
+                    // A by-reference parameter takes a value argument by reference (an operator's
+                    // operand): the referenced type is the evidence.
+                    if pt0 != TYPE_NONE && self.type_at(pt0).kind == TypeKind::TYPE_REFERENCE && self.type_at(at).kind != TypeKind::TYPE_REFERENCE {
+                        pt0 = self.type_at(pt0).as_data.elem;
+                    }
                     self.tc_infer_ev(pt0, at, true);
                 }
             }
@@ -9113,6 +9613,25 @@ extend<'a> TypeChecker<'a> {
             self.tc_score_param(&mut sc, pt, unsafe args[j as usize], unsafe lits[j as usize]);
         }
         return sc;
+    }
+
+    // Whether types `p` and `a` (neither a type parameter) have one head: one kind, and for instances
+    // and `dyn` types one declaration; their arguments may still differ.
+    fn tc_heads_meet(self: &Self, p: TypeId, a: TypeId) bool {
+        let py = *self.type_at(p);
+        let ay = *self.type_at(a);
+        if py.kind != ay.kind {
+            return false;
+        }
+        if py.kind == TypeKind::TYPE_INSTANCE || py.kind == TypeKind::TYPE_DYN {
+            let pi = *unsafe (*self.cur_ast()).instance(py.as_data.inst);
+            let ai = *unsafe (*self.cur_ast()).instance(ay.as_data.inst);
+            return pi.module == ai.module && pi.decl == ai.decl;
+        }
+        if py.kind == TypeKind::TYPE_STRUCT || py.kind == TypeKind::TYPE_ENUM {
+            return py.module == ay.module && py.as_data.decl == ay.as_data.decl;
+        }
+        return true;
     }
 
     // `t` without one reference wrapper.
@@ -9142,6 +9661,8 @@ extend<'a> TypeChecker<'a> {
             } else if pe == ae {
                 sc.radj += 1;
             } else if self.type_at(pe).kind == TypeKind::TYPE_GENERIC != (self.type_at(ae).kind == TypeKind::TYPE_GENERIC) {
+                sc.viable = false;
+            } else if self.type_at(pe).kind != TypeKind::TYPE_GENERIC && !self.tc_heads_meet(pe, ae) {
                 sc.viable = false;
             }
             return;
@@ -9439,6 +9960,7 @@ extend<'a> TypeChecker<'a> {
         tmod: ModuleId,
         tdecl: NodeId,
         iface: DefId,
+        self_ty: TypeId,
         ta: *const TypeId,
         tn: i32,
         imod: &mut ModuleId,
@@ -9460,7 +9982,7 @@ extend<'a> TypeChecker<'a> {
             if tr.module != iface.module || tr.node != iface.node {
                 continue;
             }
-            let g = self.tc_ext_args(e.module, e.node, ta, tn, &mut ea[0]);
+            let g = self.tc_ext_args_for(e.module, e.node, self_ty, ta, tn, &mut ea[0]);
             if g >= 0 {
                 *imod = e.module;
                 *en = g;
@@ -9486,7 +10008,7 @@ extend<'a> TypeChecker<'a> {
         en: &mut i32,
     ) NodeId {
         if wn == 0 {
-            return self.tc_conform_ext(tmod, tdecl, iface, ta, tn, imod, ea, en);
+            return self.tc_conform_ext(tmod, tdecl, iface, self_ty, ta, tn, imod, ea, en);
         }
         let mut c = self.ext_begin(tmod, tdecl);
         loop {
@@ -9503,7 +10025,7 @@ extend<'a> TypeChecker<'a> {
             if tr.module != iface.module || tr.node != iface.node {
                 continue;
             }
-            let g = self.tc_ext_args(e.module, e.node, ta, tn, &mut ea[0]);
+            let g = self.tc_ext_args_for(e.module, e.node, self_ty, ta, tn, &mut ea[0]);
             if g >= 0 && self.tc_conf_args_match(e.module, e.node, iface, ea, g, self_ty, wa, wn) {
                 *imod = e.module;
                 *en = g;
@@ -9574,9 +10096,10 @@ extend<'a> TypeChecker<'a> {
                 continue;
             }
             let mth = self.find_interface_method(iff.module, iff.node, mname, 0);
-            if mth.module == dm.module && mth.node == dm.node && self.tc_ext_args(
+            if mth.module == dm.module && mth.node == dm.node && self.tc_ext_args_for(
                 e.module,
                 e.node,
+                self.strip(recv),
                 &ga[0],
                 gn,
                 &mut ea[0],
@@ -10878,7 +11401,12 @@ extend<'a> TypeChecker<'a> {
             if gk.kind == NodeKind::NODE_GENERIC_PARAM && gk.as_data.generic_param.is_const {
                 return true;
             }
-            return self.tc_param_entails(y.module, y.as_data.decl, iface, wa, wn);
+            return self.tc_param_entails(y.module, y.as_data.decl, iface, wa, wn) || self.tc_blanket_satisfies(
+                ty,
+                iface,
+                wa,
+                wn,
+            );
         }
         if y.kind == TypeKind::TYPE_DYN {
             let di = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
@@ -11046,6 +11574,11 @@ extend<'a> TypeChecker<'a> {
         }
         let mut g: u32 = 0;
         while g < gens.len && g as i32 < n {
+            if unsafe args[g as usize] == TYPE_NONE {
+                // A parameter the interface's arguments solve: its use checks it.
+                g = g + 1;
+                continue;
+            }
             let gb = unsafe (*a).at_const(unsafe (*a).list(gens)[g as usize]).as_data.generic_param.bounds;
             for b in 0..gb.len {
                 let bid = unsafe (*a).list(gb)[b as usize];
@@ -11312,7 +11845,7 @@ extend<'a> TypeChecker<'a> {
             let mut imod: ModuleId = 0;
             let mut ea = Tys8 {};
             let mut en: i32 = 0;
-            let extnode = self.tc_conform_ext(om, od, ci, &ga[0], gn, &mut imod, &mut ea, &mut en);
+            let extnode = self.tc_conform_ext(om, od, ci, TYPE_NONE, &ga[0], gn, &mut imod, &mut ea, &mut en);
             if extnode != NODE_NONE {
                 // Explicit `extend T as Send/Sync {}`: an unsafe override, but its own bounds still hold
                 // (e.g. `extend<T: Send + Sync> Arc<T> as Send` is Send only for a Send + Sync payload).
@@ -11899,6 +12432,10 @@ extend<'a> TypeChecker<'a> {
         if gens.len == 0 {
             return true;
         }
+        let mut ea = Tys8 {};
+        if self.tc_ext_is_blanket(md.module, extnode) {
+            return self.tc_ext_bind(md.module, extnode, self.strip(target), &mut ea[0]) >= 0;
+        }
         let mut tm: ModuleId = 0;
         let mut td = NODE_NONE;
         let mut gp = Defs8 {};
@@ -11907,7 +12444,6 @@ extend<'a> TypeChecker<'a> {
         if !self.aggregate_of(self.strip(target), &mut tm, &mut td, &mut gp, &mut ga, &mut gn) {
             return true;
         }
-        let mut ea = Tys8 {};
         let en = self.tc_ext_args(md.module, extnode, &ga[0], gn, &mut ea[0]);
         return en < 0 || en == gens.len as i32 && self.ext_bounds_hold(md.module, extnode, &ea[0], en, 0);
     }
@@ -12097,11 +12633,11 @@ extend<'a> TypeChecker<'a> {
                 continue;
             }
             let mut ea = Tys8 {};
-            let g = self.tc_ext_args(e.module, e.node, &ta[0], tn, &mut ea[0]);
+            let g = self.tc_ext_args_for(e.module, e.node, src, &ta[0], tn, &mut ea[0]);
             if g < 0 {
                 continue;
             }
-            if !self.tc_conf_args_eq(e.module, e.node, iface, &ea, g, di) {
+            if !self.tc_conf_args_eq(e.module, e.node, iface, &mut ea, g, di) {
                 if other.node == NODE_NONE {
                     other = e;
                 }
@@ -12141,7 +12677,7 @@ extend<'a> TypeChecker<'a> {
 
     // Whether extend `ext` of module `m`, its own parameters bound to `ea[0..g]`, conforms to `iface`
     // with exactly the arguments of `di` (type and const arguments, declared defaults filled in).
-    fn tc_conf_args_eq(self: &mut Self, m: ModuleId, ext: NodeId, iface: DefId, ea: &Tys8, g: i32, di: &TyInstance) bool {
+    fn tc_conf_args_eq(self: &mut Self, m: ModuleId, ext: NodeId, iface: DefId, ea: &mut Tys8, g: i32, di: &TyInstance) bool {
         return self.tc_conf_args_match(m, ext, iface, ea, g, TYPE_NONE, &di.args[0], di.n);
     }
 
@@ -12153,7 +12689,7 @@ extend<'a> TypeChecker<'a> {
         m: ModuleId,
         ext: NodeId,
         iface: DefId,
-        ea: &Tys8,
+        ea: &mut Tys8,
         g: i32,
         self_ty: TypeId,
         wa: *const TypeId,
@@ -12172,15 +12708,33 @@ extend<'a> TypeChecker<'a> {
         let gens = unsafe (*a).at_const(ext).as_data.extend_def.generics;
         let mut ps = Defs8 {};
         let mut pa = Tys8 {};
-        for i in 0..g {
-            ps[i as usize] = DefId { module: m, node: unsafe (*a).list(gens)[i as usize] };
-            pa[i as usize] = ea[i as usize];
-        }
-        let mut np = g;
-        if self_ty != TYPE_NONE && np < 8 {
-            ps[np as usize] = iface;
-            pa[np as usize] = self_ty;
-            np += 1;
+        let mut np: i32 = 0;
+        let mut open = false;
+        for pass in 0..2 {
+            np = 0;
+            for i in 0..g {
+                if ea[i as usize] != TYPE_NONE {
+                    ps[np as usize] = DefId { module: m, node: unsafe (*a).list(gens)[i as usize] };
+                    pa[np as usize] = ea[i as usize];
+                    np += 1;
+                } else {
+                    open = true;
+                }
+            }
+            if self_ty != TYPE_NONE && np < 8 {
+                ps[np as usize] = iface;
+                pa[np as usize] = self_ty;
+                np += 1;
+            }
+            if pass == 1 || !open {
+                break;
+            }
+            // The interface's arguments solve the parameters the target does not name.
+            let mut pats = Tys8 {};
+            for k in 0..cn {
+                pats[k as usize] = self.subst_type(ca[k as usize], &ps[0], &pa[0], np);
+            }
+            self.tc_solve_open(m, ext, ea, g, &pats[0], wa, cn);
         }
         for k in 0..cn {
             let w = unsafe wa[k as usize];
@@ -14811,7 +15365,62 @@ extend<'a> TypeChecker<'a> {
                 return;
             }
         }
+        if !self.tc_check_blanket_overlap(id, iface, &suba, nsub) {
+            return;
+        }
         self.check_interface_requirements(id, iface, suba[0], &subp[0], &suba[0], nsub, 0);
+    }
+
+    // A conformance and a generic one (`extend<T: B> T as I<..>`) to the same interface overlap when
+    // the generic one's arguments match the other's for its type: always for another generic one, and
+    // for a conformance by target when its type satisfies the generic one's bounds. Extend `id`
+    // (`Self` and interface arguments `suba[0..nsub]`) is checked against the generic conformances of
+    // the scope (another module's, and its own module's earlier ones); false after a report.
+    fn tc_check_blanket_overlap(self: &mut Self, id: NodeId, iface: DefId, suba: &Tys8, nsub: i32) bool {
+        let m = self.cur_module();
+        let mine = self.tc_ext_is_blanket(m, id);
+        let _ = self.ext_begin(m, NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            if h.m == m && h.node >= id {
+                continue;
+            }
+            let ha = self.mod_ast(h.m);
+            let hd = unsafe (*ha).at_const(h.node).as_data.extend_def;
+            let hr = unsafe (*ha).resolution_def(hd.interface_type);
+            if hr.module != iface.module || hr.node != iface.node {
+                continue;
+            }
+            let mut ka = Tys8 {};
+            let g = pick(hd.generics.len < 8, hd.generics.len, 8) as i32;
+            let kn = if mine {
+                for k in 0..g {
+                    ka[k as usize] = TYPE_NONE;
+                }
+                let pat = self.tc_ext_pattern(h.m, h.node);
+                ka[ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*ha, h.m, h.node) as usize] = suba[0];
+                g;
+            } else {
+                self.tc_ext_bind(h.m, h.node, suba[0], &mut ka[0]);
+            };
+            let wn = pick(nsub > 0, nsub - 1, 0);
+            if kn < 0 || !self.tc_conf_args_match(h.m, h.node, iface, &mut ka, kn, suba[0], &suba[1], wn) {
+                continue;
+            }
+            let sp = unsafe (*self.cur_ast()).at_const(
+                unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type,
+            ).span;
+            self.errors.emit_span(
+                sp,
+                format(
+                    "conflicting conformances to '{}': a generic conformance also applies to this type",
+                    diag::span_str(self.source, sp.start, sp.end),
+                ),
+            );
+            self.note_decl_site("the generic conformance is declared here", DefId { module: h.m, node: h.node });
+            return false;
+        }
+        return true;
     }
 
     fn method_recv_subst(self: &mut Self, recv: TypeId, md: DefId, rsubp: *mut DefId, rsuba: *mut TypeId) i32 {
@@ -14855,11 +15464,9 @@ extend<'a> TypeChecker<'a> {
         let mut ga = Tys8 {};
         let mut sn: i32 = 0;
         let agok = self.aggregate_of(self.strip(recv), &mut rmod, &mut rdecl, &mut gp, &mut ga, &mut sn);
-        if agok && sn > 0 {
-            let extnode = self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
-            if extnode != NODE_NONE {
-                self.frame_ext(md.module, extnode, &ga[0], sn, rsubp, rsuba, &mut nrsub);
-            }
+        let extnode = self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
+        if extnode != NODE_NONE && (agok && sn > 0 || self.tc_ext_keyed(md.module, extnode)) {
+            self.frame_ext_recv(md.module, extnode, recv, rsubp, rsuba, &mut nrsub);
         }
         return nrsub;
     }
@@ -15279,7 +15886,7 @@ extend TypeChecker {
             }
             self.errors.emit_span(sp, format("operator requires {} operands", str::from_cstr(w)));
             if self.type_at(self.strip(r)).kind == TypeKind::TYPE_SIMD {
-                self.errors.note(format("a scalar does not convert to a vector: use `Simd::splat`"));
+                self.errors.note(format("the left operand is the vector type or its lane type"));
             }
             return TYPE_NONE;
         }
@@ -15365,7 +15972,7 @@ extend TypeChecker {
         let lt = *self.type_at(ls);
         let right = unsafe (*self.cur_ast()).at_const(id).as_data.binary.right;
         if lt.kind == TypeKind::TYPE_GENERIC {
-            if !self.tc_bound_op(id, ls, m, right, out) {
+            if !self.tc_bound_op(id, ls, m, right, out) && !self.tc_blanket_op(id, ls, m, right, out) {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 let ty = self.type_buf(ls);
                 self.errors.emit_span(
@@ -15430,7 +16037,10 @@ extend TypeChecker {
                     *out = TYPE_NONE;
                     return true;
                 }
-                let p1 = self.tc_method_param(ls, md, 1);
+                let mut ka = Tys8 {};
+                let kn = self.tc_op_keyed_args(md, ls, right, &mut ka);
+                self.tc_record_op_keyed(id, md, &mut ka, kn);
+                let p1 = self.tc_keyed_sub(md, &ka, kn, self.tc_method_param(ls, md, 1));
                 if !self.operand_fits_param(p1, right) {
                     self.err_mismatch(right, p1);
                     let rt = unsafe (*self.cur_ast()).type_of(right);
@@ -15438,7 +16048,7 @@ extend TypeChecker {
                         self.errors.note(format("the right operand is the vector type or its lane type"));
                     }
                 }
-                let ret = self.tc_method_ret(ls, md);
+                let ret = self.tc_keyed_sub(md, &ka, kn, self.tc_method_ret(ls, md));
                 if ret != TYPE_NONE {
                     *out = ret;
                 }
@@ -15447,7 +16057,7 @@ extend TypeChecker {
         return true;
     }
 
-    // `x op r` for a builtin `x` of type `ls` and an aggregate `r` (node `right`): operator method `m`
+    // `x op r` for a builtin `x` of type `ls` and a non-numeric `r` (node `right`): operator method `m`
     // of the conformance of `x`'s type that accepts `r` (`extend f32 as Mul<V>`). A literal-only `x`
     // of kind `lk` takes the one integer or float type with such a conformance. False when no
     // conformance accepts `r`: the builtin operator then reports the operands.
@@ -15459,8 +16069,9 @@ extend TypeChecker {
         if rs == TYPE_NONE {
             return false;
         }
+        // A numeric right operand is the builtin operator's, a pointer the pointer arithmetic's.
         let rt = *self.type_at(rs);
-        if rt.kind != TypeKind::TYPE_STRUCT && rt.kind != TypeKind::TYPE_INSTANCE && rt.kind != TypeKind::TYPE_ENUM && !rt.is_vec() {
+        if rt.kind == TypeKind::TYPE_BUILTIN || rt.kind == TypeKind::TYPE_POINTER || rt.kind == TypeKind::TYPE_GENERIC {
             return false;
         }
         let mut md = DefId { module: 0, node: NODE_NONE };
@@ -15500,8 +16111,182 @@ extend TypeChecker {
             return true;
         }
         unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
-        *out = self.tc_method_ret(ty, md);
+        let mut ka = Tys8 {};
+        let kn = self.tc_op_keyed_args(md, ty, unsafe (*self.cur_ast()).at_const(id).as_data.binary.right, &mut ka);
+        self.tc_record_op_keyed(id, md, &mut ka, kn);
+        *out = self.tc_keyed_sub(md, &ka, kn, self.tc_method_ret(ty, md));
         return true;
+    }
+
+    // The arguments of operator method `md`'s keyed extend (`ext_keyed`) on receiver type `recv`, into
+    // `ka`: the receiver's (`tc_ext_bind`), then the ones the type of right operand `right` (NODE_NONE
+    // for none) solves through the method's parameter. Their count, or -1 when the extend is not keyed
+    // or does not apply.
+    fn tc_op_keyed_args(self: &mut Self, md: DefId, recv: TypeId, right: NodeId, ka: &mut Tys8) i32 {
+        let ext = self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
+        if ext == NODE_NONE || !self.tc_ext_keyed(md.module, ext) {
+            return -1;
+        }
+        let kn = self.tc_ext_bind(md.module, ext, recv, &mut ka[0]);
+        if kn < 0 || right == NODE_NONE {
+            return kn;
+        }
+        let mut p1 = self.tc_method_param(recv, md, 1);
+        let v = unsafe (*self.cur_ast()).type_of(right);
+        if p1 != TYPE_NONE && self.type_at(p1).kind == TypeKind::TYPE_REFERENCE && v != TYPE_NONE && self.type_at(v).kind != TypeKind::TYPE_REFERENCE {
+            p1 = self.type_at(p1).as_data.elem;
+        }
+        self.tc_solve_open(md.module, ext, ka, kn, &p1, &v, 1);
+        return kn;
+    }
+
+    // Type `t` of method `md`'s signature with its keyed extend's arguments `ka[0..kn]` substituted
+    // (`t` itself when `kn` is negative).
+    fn tc_keyed_sub(self: &mut Self, md: DefId, ka: &Tys8, kn: i32, t: TypeId) TypeId {
+        if kn <= 0 || t == TYPE_NONE {
+            return t;
+        }
+        let a = self.mod_ast(md.module);
+        let gens = unsafe (*a).at_const(self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND)).as_data.extend_def.generics;
+        let mut ps = Defs8 {};
+        let mut pa = Tys8 {};
+        let mut n: i32 = 0;
+        for i in 0..kn {
+            if ka[i as usize] != TYPE_NONE {
+                ps[n as usize] = DefId { module: md.module, node: unsafe (*a).list(gens)[i as usize] };
+                pa[n as usize] = ka[i as usize];
+                n += 1;
+            }
+        }
+        return self.subst_type(t, &ps[0], &pa[0], n);
+    }
+
+    // Record on operator node `id` the arguments `ka[0..kn]` of its method `md`'s keyed extend
+    // (`tc_op_keyed_args`), reporting each the operands leave open.
+    fn tc_record_op_keyed(self: &mut Self, id: NodeId, md: DefId, ka: &mut Tys8, kn: i32) {
+        if kn < 0 {
+            return;
+        }
+        let a = self.mod_ast(md.module);
+        let gens = unsafe (*a).at_const(self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND)).as_data.extend_def.generics;
+        for i in 0..kn {
+            if ka[i as usize] == TYPE_NONE {
+                self.err_unresolved_generic(
+                    unsafe (*self.cur_ast()).at_const(id).span,
+                    md.module,
+                    unsafe (*a).list(gens)[i as usize],
+                );
+                ka[i as usize] = TYPE_ERROR;
+            }
+        }
+        unsafe (*self.cur_ast()).set_type_args(id, &ka[0], kn as u8);
+    }
+
+    // The method named `name` of the first generic conformance of the scope (`ext_blanket`) that
+    // applies to type `recv` (a type parameter: its bounds entail the conformance's), marked used;
+    // node NODE_NONE when none does.
+    fn tc_blanket_method(self: &mut Self, recv: TypeId, name: str) DefId {
+        let _ = self.ext_begin(self.cur_module(), NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            let md = self.tc_ext_method(DefId { module: h.m, node: h.node }, name);
+            let mut ka = Tys8 {};
+            if md.node != NODE_NONE && self.tc_ext_bind(h.m, h.node, recv, &mut ka[0]) >= 0 {
+                self.tc_mark_method_used(md);
+                return md;
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    // Whether a generic conformance of the scope conforms type `ty` to `iface` with arguments
+    // `wa[0..wn]` (any when `wn` is zero): its bounds hold for `ty`.
+    fn tc_blanket_satisfies(self: &mut Self, ty: TypeId, iface: DefId, wa: *const TypeId, wn: i32) bool {
+        let _ = self.ext_begin(self.cur_module(), NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            let ha = self.mod_ast(h.m);
+            let hr = unsafe (*ha).resolution_def(unsafe (*ha).at_const(h.node).as_data.extend_def.interface_type);
+            if hr.module != iface.module || hr.node != iface.node {
+                continue;
+            }
+            let mut ka = Tys8 {};
+            let kn = self.tc_ext_bind(h.m, h.node, ty, &mut ka[0]);
+            if kn >= 0 && (wn == 0 || self.tc_conf_args_match(h.m, h.node, iface, &mut ka, kn, ty, wa, wn)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // After a bound on `iface` failed: a note at the generic conformance to it whose bounds the type
+    // does not satisfy, when one is in the scope.
+    fn tc_note_blanket_conf(self: &mut Self, iface: DefId) {
+        if iface.node == NODE_NONE {
+            return;
+        }
+        let _ = self.ext_begin(self.cur_module(), NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            let ha = self.mod_ast(h.m);
+            let hr = unsafe (*ha).resolution_def(unsafe (*ha).at_const(h.node).as_data.extend_def.interface_type);
+            if hr.module == iface.module && hr.node == iface.node {
+                self.note_decl_site(
+                    "a generic conformance to it requires these bounds",
+                    DefId { module: h.m, node: h.node },
+                );
+                return;
+            }
+        }
+    }
+
+    // The method named `name` of the first generic conformance of the scope, whatever its bounds;
+    // node NODE_NONE when none defines one.
+    fn tc_blanket_named(self: &mut Self, name: str) DefId {
+        let _ = self.ext_begin(self.cur_module(), NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            let md = self.tc_ext_method(DefId { module: h.m, node: h.node }, name);
+            if md.node != NODE_NONE {
+                return md;
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    // `x op r` for `x` of type parameter type `ls` through a generic conformance whose bounds its own
+    // entail (`extend<T: SimdElement, const N: usize> T as Mul<Simd<T, N>>`): operator method `m` of
+    // the first that accepts right operand `right`, recorded as `tc_scalar_left_op` does. False when
+    // none does.
+    fn tc_blanket_op(self: &mut Self, id: NodeId, ls: TypeId, m: str, right: NodeId, out: &mut TypeId) bool {
+        let _ = self.ext_begin(self.cur_module(), NODE_NONE);
+        for i in 0..self.ext_blankets.len() {
+            let h = self.ext_blankets[i];
+            let md = self.tc_ext_method(DefId { module: h.m, node: h.node }, m);
+            if md.node == NODE_NONE {
+                continue;
+            }
+            let mut ka = Tys8 {};
+            let kn = self.tc_op_keyed_args(md, ls, right, &mut ka);
+            if kn < 0 {
+                continue;
+            }
+            let p1 = self.tc_keyed_sub(md, &ka, kn, self.tc_method_param(ls, md, 1));
+            let pe = if p1 != TYPE_NONE && self.type_at(p1).kind == TypeKind::TYPE_REFERENCE {
+                self.type_at(p1).as_data.elem;
+            } else {
+                p1;
+            };
+            if right != NODE_NONE && (p1 == TYPE_NONE || !self.compatible_in(pe, right, true)) {
+                continue;
+            }
+            self.tc_mark_method_used(md);
+            unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+            self.tc_record_op_keyed(id, md, &mut ka, kn);
+            *out = self.tc_keyed_sub(md, &ka, kn, self.tc_method_ret(ls, md));
+            return true;
+        }
+        return false;
     }
 
     // The operator method `m` of builtin type `bt` whose parameter accepts `right` of type `rs`, or
@@ -15523,7 +16308,9 @@ extend TypeChecker {
         rt[0] = rs;
         let mut tie = false;
         md = self.tc_pick_by_args(core, decl, tok::Span::empty(), m, ty, md, &rt[0], &rl[0], 1, false, &mut tie);
-        let p1 = self.tc_method_param(ty, md, 1);
+        let mut ka = Tys8 {};
+        let kn = self.tc_op_keyed_args(md, ty, right, &mut ka);
+        let p1 = self.tc_keyed_sub(md, &ka, kn, self.tc_method_param(ty, md, 1));
         let pe = if p1 != TYPE_NONE && self.type_at(p1).kind == TypeKind::TYPE_REFERENCE {
             self.type_at(p1).as_data.elem;
         } else {
@@ -15691,8 +16478,12 @@ extend TypeChecker {
                 *out = TYPE_NONE;
                 return true;
             }
+            let mut ka = Tys8 {};
+            let mut kn: i32 = -1;
             if md.node != NODE_NONE {
                 unsafe (*self.cur_ast()).op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+                kn = self.tc_op_keyed_args(md, os, NODE_NONE, &mut ka);
+                self.tc_record_op_keyed(id, md, &mut ka, kn);
             }
             if md.node == NODE_NONE {
                 let ty = self.type_buf(os);
@@ -15703,7 +16494,7 @@ extend TypeChecker {
                 *out = TYPE_NONE;
                 return true;
             }
-            let ret = self.tc_method_ret(os, md);
+            let ret = self.tc_keyed_sub(md, &ka, kn, self.tc_method_ret(os, md));
             if ret != TYPE_NONE {
                 *out = ret;
             }
@@ -17523,7 +18314,21 @@ extend TypeChecker {
         if y.kind == TypeKind::TYPE_GENERIC {
             return y.module == m && y.as_data.decl == gid;
         }
-        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        if y.kind == TypeKind::TYPE_CONST_EXPR {
+            let l = unsafe (*self.cur_ast()).const_lin_at(y.as_data.inst);
+            for i in 0..l.n {
+                if !unsafe l.c[i as usize].is_zero() && unsafe l.p[i as usize].module == m && unsafe l.p[i as usize].node == gid {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if y.arr_like() {
+            // The element (a mask's lanes are none) and the length (an array's when symbolic).
+            let el = y.kind != TypeKind::TYPE_MASK && self.tc_ty_names_param(y.as_data.arr.elem, m, gid, depth + 1);
+            return el || (y.is_vec() || y.arr_sym()) && self.tc_ty_names_param(y.as_data.arr.len, m, gid, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
             return self.tc_ty_names_param(y.as_data.elem, m, gid, depth + 1);
         }
         if y.rec() != NO_REC {
@@ -18378,11 +19183,13 @@ extend TypeChecker {
             let mut sn: i32 = 0;
             let mdfn = md.node != NODE_NONE && unsafe (*self.mod_ast(md.module)).at_const(md.node).kind == NodeKind::NODE_FUNCTION;
             let agok = mdfn && self.aggregate_of(recvbase, &mut rmod, &mut rdecl, &mut gp, &mut ga, &mut sn);
-            if agok && sn > 0 {
-                let extnode = self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
-                if extnode != NODE_NONE {
-                    self.frame_ext(md.module, extnode, &ga[0], sn, &mut rsubp[0], &mut rsuba[0], &mut nrsub);
-                }
+            let extnode = if mdfn {
+                self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
+            } else {
+                NODE_NONE;
+            };
+            if extnode != NODE_NONE && (agok && sn > 0 || self.tc_ext_keyed(md.module, extnode)) {
+                self.frame_ext_recv(md.module, extnode, recvbase, &mut rsubp[0], &mut rsuba[0], &mut nrsub);
             }
             // Dyn receiver over an instantiated generic interface: interface generics -> dyn args.
             if nrsub == 0 {
@@ -18414,6 +19221,7 @@ extend TypeChecker {
             if tr != NODE_NONE {
                 let pobj = unsafe (*a).at_const(pcal).as_data.member.object;
                 let mut target = self.strip(unsafe (*a).type_of(pobj));
+                let mut iface_recv = false;
                 if target == TYPE_NONE {
                     // A bare `P::` base records no type; its resolution names the aggregate.
                     let ob = unsafe (*a).resolution_def(pobj);
@@ -18421,11 +19229,15 @@ extend TypeChecker {
                         let obk = unsafe (*self.mod_ast(ob.module)).at_const(ob.node).kind;
                         if obk == NodeKind::NODE_STRUCT || obk == NodeKind::NODE_ENUM {
                             target = self.named_type_of(ob.module, ob.node);
+                        } else if obk == NodeKind::NODE_INTERFACE && args.len != 0 && self.tc_takes_self(md) {
+                            // `I::m(x, ..)`: the receiver argument's type is Self.
+                            target = self.strip(unsafe (*a).type_of(unsafe (*a).list(args)[0]));
+                            iface_recv = true;
                         }
                     }
                 }
                 let ty2 = *self.type_at(target);
-                if ty2.kind == TypeKind::TYPE_STRUCT || ty2.kind == TypeKind::TYPE_ENUM || ty2.kind == TypeKind::TYPE_INSTANCE {
+                if ty2.kind == TypeKind::TYPE_STRUCT || ty2.kind == TypeKind::TYPE_ENUM || ty2.kind == TypeKind::TYPE_INSTANCE || iface_recv && (ty2.kind == TypeKind::TYPE_BUILTIN || ty2.is_vec()) {
                     rsubp[nrsub as usize] = DefId { module: md.module, node: tr };
                     rsuba[nrsub as usize] = target;
                     nrsub = nrsub + 1;
@@ -18478,13 +19290,23 @@ extend TypeChecker {
             if md.node != NODE_NONE {
                 tr = self.enclosing(md.module, md.node, NodeKind::NODE_INTERFACE);
             }
-            let ob = unsafe (*a).resolution_def(unsafe (*a).at_const(pcal).as_data.member.object);
+            let mut ob = unsafe (*a).resolution_def(unsafe (*a).at_const(pcal).as_data.member.object);
             let mut ob_kind = NodeKind::NODE_NONE_KIND;
             if ob.node != NODE_NONE {
                 ob_kind = unsafe (*self.mod_ast(ob.module)).at_const(ob.node).kind;
             }
             // An interface's `Self::f()` calls through the interface as `T::f()` does through a bound.
             let self_iface = ob_kind == NodeKind::NODE_INTERFACE && self.tc_self_path(pcal);
+            // `I::m(t, ..)` with `t` of a type parameter: as `T::m(t, ..)`.
+            if ob_kind == NodeKind::NODE_INTERFACE && !self_iface && tr != NODE_NONE && args.len != 0 && self.tc_takes_self(
+                md,
+            ) {
+                let r0 = *self.type_at(self.strip(unsafe (*a).type_of(unsafe (*a).list(args)[0])));
+                if r0.kind == TypeKind::TYPE_GENERIC {
+                    ob = DefId { module: r0.module, node: r0.as_data.decl };
+                    ob_kind = NodeKind::NODE_GENERIC_PARAM;
+                }
+            }
             if tr != NODE_NONE && ob.node != NODE_NONE && (ob_kind == NodeKind::NODE_GENERIC_PARAM || self_iface) {
                 rsubp[nrsub as usize] = DefId { module: md.module, node: tr };
                 rsuba[nrsub as usize] = self.named_type_of(ob.module, ob.node);
@@ -18526,6 +19348,43 @@ extend TypeChecker {
                     if ext != NODE_NONE {
                         self.frame_ext(md.module, ext, &ega2[0], egn2, &mut rsubp[0], &mut rsuba[0], &mut nrsub);
                     }
+                }
+            }
+        }
+        // A keyed extend's method (`ext_keyed`) names all of the extend's arguments at the call: the
+        // receiver's, then the ones the argument types solve through the method's parameters.
+        let mut kn: i32 = -1;
+        let mut ka = Tys8 {};
+        if cn_kind == NodeKind::NODE_MEMBER || pcal != callee_id {
+            let md = unsafe (*a).resolution_def(unsafe (*a).at_const(pcal).as_data.member.member);
+            let ext = if md.node != NODE_NONE && unsafe (*self.mod_ast(md.module)).at_const(md.node).kind == NodeKind::NODE_FUNCTION {
+                self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
+            } else {
+                NODE_NONE;
+            };
+            if ext != NODE_NONE && self.tc_ext_keyed(md.module, ext) {
+                let pobj = unsafe (*a).at_const(pcal).as_data.member.object;
+                let mut recv = self.strip(unsafe (*a).type_of(pobj));
+                if cdu != null && !p_path {
+                    recv = unsafe (*cdu).target;
+                }
+                if p_path && recv == TYPE_NONE {
+                    // `Type::f(..)`: the qualifying type, else the receiver argument's.
+                    let ob = unsafe (*a).resolution_def(pobj);
+                    let obk = if ob.node != NODE_NONE {
+                        unsafe (*self.mod_ast(ob.module)).at_const(ob.node).kind;
+                    } else {
+                        NodeKind::NODE_NONE_KIND;
+                    };
+                    if obk == NodeKind::NODE_STRUCT || obk == NodeKind::NODE_ENUM || obk == NodeKind::NODE_GENERIC_PARAM {
+                        recv = self.named_type_of(ob.module, ob.node);
+                    } else if args.len != 0 {
+                        recv = self.strip(unsafe (*a).type_of(unsafe (*a).list(args)[0]));
+                    }
+                }
+                kn = self.tc_ext_bind(md.module, ext, recv, &mut ka[0]);
+                if kn >= 0 {
+                    nrsub = self.tc_solve_call_open(md, ext, &mut ka, kn, args, skip, &mut rsubp, &mut rsuba, nrsub, sp);
                 }
             }
         }
@@ -18722,7 +19581,9 @@ extend TypeChecker {
                 }
             }
             if gn == g {
-                unsafe (*self.cur_ast()).set_type_args(id, &gargs[0], gn as u8);
+                if kn < 0 {
+                    unsafe (*self.cur_ast()).set_type_args(id, &gargs[0], gn as u8);
+                }
                 // Enforce bounds (best-effort; diagnostics).
                 self.check_generic_bounds(
                     id,
@@ -18737,6 +19598,9 @@ extend TypeChecker {
                     nrsub,
                 );
             }
+        }
+        if kn >= 0 {
+            self.tc_record_keyed(id, &ka, kn, &gargs, gn);
         }
         // Owner (extend) generics for a static/associated call: a constructor like `Box::new(w)` calls
         // `new`, which has NO generics of its own: `T`/`A` belong to `extend<T, A> Box<T, A>`. The
@@ -19165,6 +20029,7 @@ extend TypeChecker {
                     );
                     // Notes attach to the error emitted last: name the failing field(s).
                     let bi = unsafe (*fa).resolution_def(bid);
+                    self.tc_note_blanket_conf(bi);
                     let gy2 = *self.type_at(garg);
                     if bi.node != NODE_NONE && gy2.kind == TypeKind::TYPE_FIELD_PROJECTION && unsafe (*self.cur_ast()).type_concrete(
                         gy2.as_data.proj.owner,
@@ -19307,6 +20172,7 @@ extend TypeChecker {
                 }
                 let tn = self.type_buf(arg);
                 self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", str::from_cstr(&tn[0]), bs));
+                self.tc_note_blanket_conf(bi);
             }
         }
     }
@@ -19815,7 +20681,15 @@ extend TypeChecker {
                 }
             } else {
                 let mut iface = DefId { module: 0, node: NODE_NONE };
-                let m = self.find_bound_method(bt2.module, bt2.as_data.decl, name, &mut iface);
+                let mut m = self.find_bound_method(bt2.module, bt2.as_data.decl, name, &mut iface);
+                if m.node == NODE_NONE {
+                    // A generic conformance whose bounds the parameter's entail.
+                    m = self.tc_blanket_method(base, self.source.slice(name.start as usize, name.end as usize));
+                    if m.node != NODE_NONE {
+                        unsafe (*self.cur_ast()).set_resolution_def(mname, m);
+                        return self.decl_type_in(m.module, m.node);
+                    }
+                }
                 if m.node != NODE_NONE {
                     unsafe (*self.cur_ast()).set_resolution_def(mname, m);
                     if prefer_method {
@@ -19964,6 +20838,16 @@ extend TypeChecker {
                 cur = target;
             }
             deref_capped = du.n == 8;
+        }
+        // A generic conformance defines the method, but its bounds do not hold for the receiver.
+        let gmd = self.tc_blanket_named(self.source.slice(name.start as usize, name.end as usize));
+        if gmd.node != NODE_NONE {
+            self.err_method_extend_bounds(name, base, gmd);
+            self.note_decl_site(
+                "the generic conformance is declared here",
+                DefId { module: gmd.module, node: self.enclosing(gmd.module, gmd.node, NodeKind::NODE_EXTEND) },
+            );
+            return TYPE_NONE;
         }
         let ty = self.type_buf(base);
         self.errors.emit_span(
@@ -20237,6 +21121,14 @@ extend TypeChecker {
                         self.dflt_conf.insert(mem, bc);
                     }
                 }
+                return self.decl_type_in(m.module, m.node);
+            }
+        }
+        if bdecl != NODE_NONE && bd_kind == NodeKind::NODE_INTERFACE && self.tc_is_callee(id) && self.icx.call_args.len != 0 {
+            // `I::m(x, ..)` with a receiver first: `x`'s type implements the call.
+            let m = self.tc_iface_path_impl(mem, DefId { module: bmod, node: bdecl }, mname, expected);
+            if m.node != NODE_NONE {
+                unsafe (*self.cur_ast()).set_resolution_def(mem, m);
                 return self.decl_type_in(m.module, m.node);
             }
         }
@@ -21430,6 +22322,9 @@ extend TypeChecker {
                     result = body;
                     first = false;
                     lits = blit != NODE_NONE;
+                } else if result == TYPE_NONE && !untyped(body) && !body_never && self.tc_arms_take(arms, i, body) {
+                    // The earlier arms are untyped `null`s: they take this arm's pointer type.
+                    result = body;
                 } else if !body_never && result != body && !untyped(body) && !untyped(result) {
                     if blit != NODE_NONE && self.tc_branch_adopt(arm.body, blit, result, false) {
                         // this literal arm took the earlier arms' type
@@ -21452,23 +22347,33 @@ extend TypeChecker {
         return result;
     }
 
-    // The unpinned numeric literal that branch `br` yields (the branch itself or its block's tail),
-    // or NODE_NONE.
-    fn tc_branch_lit(self: &Self, br: NodeId) NodeId {
+    // The value branch `br` yields: the branch itself or its block's tail, or NODE_NONE.
+    fn tc_branch_tail(self: &Self, br: NodeId) NodeId {
         let a = self.cur_ast();
-        let mut v = br;
-        if unsafe (*a).at_const(v).kind == NodeKind::NODE_BLOCK {
-            let stmts = unsafe (*a).at_const(v).as_data.block.statements;
-            if stmts.len == 0 {
-                return NODE_NONE;
-            }
-            let last = unsafe (*a).at_const(unsafe (*a).list(stmts)[(stmts.len - 1) as usize]);
-            if last.kind != NodeKind::NODE_EXPRESSION_STATEMENT {
-                return NODE_NONE;
-            }
-            v = last.as_data.single.value;
+        if unsafe (*a).at_const(br).kind != NodeKind::NODE_BLOCK {
+            return br;
         }
-        return pick(self.tc_peek_lit_class(v) != 0, v, NODE_NONE);
+        let stmts = unsafe (*a).at_const(br).as_data.block.statements;
+        if stmts.len == 0 {
+            return NODE_NONE;
+        }
+        let last = unsafe (*a).at_const(unsafe (*a).list(stmts)[(stmts.len - 1) as usize]);
+        if last.kind != NodeKind::NODE_EXPRESSION_STATEMENT {
+            return NODE_NONE;
+        }
+        return last.as_data.single.value;
+    }
+
+    // The unpinned numeric literal that branch `br` yields, or NODE_NONE.
+    fn tc_branch_lit(self: &Self, br: NodeId) NodeId {
+        let v = self.tc_branch_tail(br);
+        return pick(v != NODE_NONE && self.tc_peek_lit_class(v) != 0, v, NODE_NONE);
+    }
+
+    // True when branch `br` yields an untyped value (`null`) that converts to `ty`.
+    fn tc_branch_takes(self: &mut Self, br: NodeId, ty: TypeId) bool {
+        let v = self.tc_branch_tail(br);
+        return v != NODE_NONE && unsafe (*self.cur_ast()).type_of(v) == TYPE_NONE && self.compatible(ty, v);
     }
 
     // Give branch `br`, whose value is the unpinned literal `lit`, the numeric type `ty` of the other
@@ -21485,6 +22390,17 @@ extend TypeChecker {
 
     // Arms [0, n) are all unpinned literals or diverge: give every literal arm the type `ty`, or
     // change nothing when one of them cannot take it.
+    fn tc_arms_take(self: &mut Self, arms: NodeList, n: u32, ty: TypeId) bool {
+        for j in 0..n {
+            let body = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(arms)[j as usize]).as_data.match_arm.body;
+            let bt = unsafe (*self.cur_ast()).type_of(body);
+            if (bt == TYPE_NONE || self.type_at(bt).kind != TypeKind::TYPE_NEVER) && !self.tc_branch_takes(body, ty) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn tc_arms_adopt(self: &mut Self, arms: NodeList, n: u32, ty: TypeId) bool {
         for pass in 0..2 {
             for j in 0..n {
@@ -22795,6 +23711,10 @@ extend TypeChecker {
             }
             self.err_mismatch(ifd.else_branch, then_ty);
             return TYPE_NONE;
+        }
+        // An untyped `null` first branch takes the other branch's pointer type.
+        if then_ty == TYPE_NONE && else_ty != TYPE_NONE && self.tc_branch_takes(ifd.then_branch, else_ty) {
+            return else_ty;
         }
         return then_ty;
     }

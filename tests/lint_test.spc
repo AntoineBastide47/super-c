@@ -840,3 +840,19 @@ fn byte_views_of_aggregates_are_no_provable_fault() {
         assert(p.cc_build("").ok() && p.run_bin() == 0, "the run writes the bytes");
     }
 }
+
+// A conformance uses its interface and the interfaces of its parameters' bounds, generic or not; an
+// interface nothing names, and a struct only an extend block names, stay unused.
+@test
+fn conformances_use_their_interfaces() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "interface Lane {}\nextend f32 as Lane {}\ninterface Twice { fn twice(self: &Self) i64; }\nextend<T: Lane> T as Twice { fn twice(self: &Self) i64 { return 2; } }\ninterface Never { fn n(self: &Self) i32; }\nstruct Lonely { pub x: i32 }\nextend Lonely { fn get(self: &Lonely) i32 { return self.x; } }\nfn main() i32 {\n    return (0.5f32.twice() != 2) as i32;\n}\n",
+    );
+    let mut args = String::new();
+    args.format_into("lint \"{}/main.spc\"", str::from_cstr(p.rootp()));
+    let r = p.run_raw(args.as_str());
+    assert(!r.out_has("unused interface 'Lane'") && !r.out_has("unused interface 'Twice'"), "conformed interfaces");
+    assert(r.out_has("unused interface 'Never'") && r.out_has("unused struct 'Lonely'"), "unused items");
+}

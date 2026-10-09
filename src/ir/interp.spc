@@ -16,6 +16,7 @@ import graph::items as gitems;
 import ir::core as ir;
 import ir::lower as irl;
 import ir::layout as lay;
+import borrowck::facts as bcf;
 import lexer::token as tok;
 import lexer::token_type as *;
 
@@ -899,10 +900,14 @@ fn gen_index(a: &Ast, dn: NodeId, nargs: u8, p: NodeId) i32 {
 }
 
 // Whether `list` binds every generic parameter `gens` (listed through `xa`) of an extend of module `xm`.
-fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, gens: NodeList) bool {
+fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, ext: NodeId) bool {
+    let gens = xa.at_const(ext).as_data.extend_def.generics;
+    let pat = xa.type_of(xa.at_const(ext).as_data.extend_def.target_type);
+    // The parameters only the interface's arguments name: the conformance search solves them.
+    let free = pick(pat == TYPE_NONE, 0u64, ext_free_params(xa, pat, xa, xm, ext));
     let gids = xa.list(gens);
     for j in 0..gens.len {
-        let mut bound = false;
+        let mut bound = j < 64 && (free >> j as u64 & 1u64) != 0;
         for k in 0..list.len() {
             if list.at(k).pmod == xm && list.at(k).pnode == unsafe gids[j as usize] {
                 bound = true;
@@ -1673,6 +1678,178 @@ extend Interp {
         return true;
     }
 
+    // Bind the parameters `gens` (module `gm`) that pattern type `pt` (module `pm`) names so that it
+    // equals type `at` (module `am`), into `list`: a parameter takes the type (or must equal its
+    // binding); an instance, vector, mask, array, slice, reference or pointer matches part by part;
+    // any other type must be the same. False when they cannot match.
+    fn iunify(
+        self: &mut Self,
+        pm: ModuleId,
+        pt: TypeId,
+        am: ModuleId,
+        at: TypeId,
+        gm: ModuleId,
+        gens: NodeList,
+        list: &mut Vector<ISub>,
+        depth: u32,
+    ) bool {
+        if depth > 8 || pt == TYPE_NONE || at == TYPE_NONE {
+            return false;
+        }
+        let pa = unsafe &*self.p().module_ast_const(pm);
+        let py = *pa.type_at(pt);
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        if !self.rty(am, at, &mut rm, &mut rt) {
+            return false;
+        }
+        if py.kind == TypeKind::TYPE_GENERIC && py.module == gm {
+            let ga = unsafe &*self.p().module_ast_const(gm);
+            for i in 0..gens.len {
+                if unsafe ga.list(gens)[i as usize] == py.as_data.decl {
+                    return self.subst_add(list, gm, py.as_data.decl, rm, rt);
+                }
+            }
+        }
+        if pa.type_concrete(pt) {
+            return self.teq(pm, pt, rm, rt);
+        }
+        let ra = unsafe &*self.p().module_ast_const(rm);
+        let ay = *ra.type_at(rt);
+        if py.kind != ay.kind {
+            return false;
+        }
+        if py.kind == TypeKind::TYPE_INSTANCE {
+            let pi = *pa.instance(py.as_data.inst);
+            let ai = *ra.instance(ay.as_data.inst);
+            if pi.module != ai.module || pi.decl != ai.decl || pi.n != ai.n {
+                return false;
+            }
+            for k in 0..pi.n {
+                if !self.iunify(
+                    pm,
+                    unsafe pi.args[k as usize],
+                    rm,
+                    unsafe ai.args[k as usize],
+                    gm,
+                    gens,
+                    list,
+                    depth + 1,
+                ) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if py.arr_like() {
+            if py.kind != TypeKind::TYPE_MASK && !self.iunify(
+                pm,
+                py.as_data.arr.elem,
+                rm,
+                ay.as_data.arr.elem,
+                gm,
+                gens,
+                list,
+                depth + 1,
+            ) {
+                return false;
+            }
+            if py.is_vec() || py.arr_sym() && ay.arr_sym() {
+                return self.iunify(pm, py.as_data.arr.len, rm, ay.as_data.arr.len, gm, gens, list, depth + 1);
+            }
+            if py.arr_sym() && !ay.arr_sym() {
+                // A concrete array holds its length as a count: a length parameter takes it as a
+                // constant of the parameter's type.
+                let ly = *pa.type_at(py.as_data.arr.len);
+                if ly.kind == TypeKind::TYPE_GENERIC && ly.module == gm {
+                    let bt = self.p().const_param_bt(gm, ly.as_data.decl);
+                    let ct = unsafe (*(self.p().module_ast_const(rm) as *mut Ast)).const_value(ay.as_data.arr.len, bt);
+                    return self.iunify(pm, py.as_data.arr.len, rm, ct, gm, gens, list, depth + 1);
+                }
+                return true;
+            }
+            return py.arr_sym() || py.as_data.arr.len == ay.as_data.arr.len;
+        }
+        if py.kind == TypeKind::TYPE_REFERENCE || py.kind == TypeKind::TYPE_POINTER || py.kind == TypeKind::TYPE_SLICE {
+            return self.iunify(pm, py.as_data.elem, rm, ay.as_data.elem, gm, gens, list, depth + 1);
+        }
+        return false;
+    }
+
+    // The generic conformance (`ext_blanket`) to the interface of member `fm`/`container` whose
+    // target parameter takes receiver `(sm, st)` and whose arguments match bound interface `iface`
+    // (a `dyn I<..>` type of `b`'s module; TYPE_NONE: any), its parameters bound into `obinds`; node
+    // NODE_NONE when none does. Bounds are the checker's: a well-typed call has exactly one.
+    fn keyed_conf(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        ifd: DefId,
+        iface: TypeId,
+        sm: ModuleId,
+        st: TypeId,
+        obinds: &mut Vector<ISub>,
+    ) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let mut di = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
+        if iface != TYPE_NONE {
+            let ba = unsafe &*self.p().module_ast_const(b.module);
+            di = *ba.instance(ba.type_at(iface).as_data.inst);
+        }
+        for xm in 0..self.p().modules.len() {
+            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            if xa.nodes.len() == 0 {
+                continue;
+            }
+            let items = xa.at_const(xa.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe xa.list(items)[i as usize];
+                if xa.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                let ed = xa.at_const(iid).as_data.extend_def;
+                if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
+                    continue;
+                }
+                let ir0 = xa.resolution_def(ed.interface_type);
+                let bp = ext_blanket(xa, xa.type_of(ed.target_type), xa, xm as ModuleId, iid);
+                if ir0.module != ifd.module || ir0.node != ifd.node || bp < 0 {
+                    continue;
+                }
+                let mut list = Vector::<ISub>::new();
+                if !self.subst_add(&mut list, xm as ModuleId, unsafe xa.list(ed.generics)[bp as usize], sm, st) {
+                    continue;
+                }
+                let dt = xa.type_of(ed.interface_type);
+                let mut ok = true;
+                if iface != TYPE_NONE && dt != TYPE_NONE {
+                    let ci = *xa.instance(xa.type_at(dt).as_data.inst);
+                    ok = ci.n == di.n;
+                    for k in 0..ci.n {
+                        let mut wm: ModuleId = 0;
+                        let mut wt = TYPE_NONE;
+                        ok = ok && self.rty(b.module, unsafe di.args[k as usize], &mut wm, &mut wt) && self.iunify(
+                            xm as ModuleId,
+                            unsafe ci.args[k as usize],
+                            wm,
+                            wt,
+                            xm as ModuleId,
+                            ed.generics,
+                            &mut list,
+                            0,
+                        );
+                    }
+                }
+                if ok && list.len() as u32 == ed.generics.len {
+                    for q in 0..list.len() {
+                        obinds.push(*list.at(q));
+                    }
+                    return DefId { module: xm as ModuleId, node: iid };
+                }
+            }
+        }
+        return none;
+    }
+
     // The receiver decl behind Self's static type at a call site (refs/pointers peeled).
     fn recv_of(
         self: &Self,
@@ -1777,7 +1954,7 @@ extend Interp {
                 }
             }
         }
-        return ext_all_bound(list, xa, xm, gens);
+        return ext_all_bound(list, xa, xm, extnode);
     }
 
     // `bind_extend` for an extend whose target `pat` is not its parameters in order: each argument the
@@ -1840,7 +2017,7 @@ extend Interp {
                 return false;
             }
         }
-        return ext_all_bound(list, xa, xm, gens);
+        return ext_all_bound(list, xa, xm, extnode);
     }
 
     // The zero value of `(m, t)`: builtins, pointers/references/functions (null), arrays and
@@ -2507,6 +2684,7 @@ extend Interp {
             }
         }
         let mut binds = Vector::<ISub>::new();
+        let mut ext_bound = false; // a keyed conformance search bound the extend's parameters
         let mut is_extern = false;
         {
             if Ast::in_body(fnode) {
@@ -2592,16 +2770,37 @@ extend Interp {
                 }
                 let fa0 = unsafe &*self.p().module_ast_const(fm);
                 let mnm = fa0.at_const(fa0.at_const(fnode).as_data.function.name).as_data.name.text;
+                if rb != BuiltinType::BT_COUNT {
+                    // A builtin receiver's conformances target its core declaration.
+                    rdm = self.p().core_module;
+                    rdn = self.p().builtin_decl(rb);
+                }
+                // The conformance's parameters the receiver does not solve (a generic extend's, or
+                // ones only its interface arguments name), bound by the conformance search.
+                let mut kbinds = Vector::<ISub>::new();
+                let mut kext = DefId { module: 0, node: NODE_NONE };
                 let md = if t.iface != TYPE_NONE {
                     // A bound call on a generic interface: the conformance with the bound's
                     // arguments supplies the method, or its default body runs under them.
-                    if rdn == NODE_NONE {
-                        return self.fail();
-                    }
                     let mut ext = DefId { module: 0, node: NODE_NONE };
-                    if !self.conf_by_args(b, t.iface, rdm, rdn, rn, &ram[0], &rat[0], &mut ext) {
-                        return self.fail();
+                    if rdn == NODE_NONE || !self.conf_by_args(
+                        b,
+                        t.iface,
+                        rdm,
+                        rdn,
+                        rn,
+                        &ram[0],
+                        &rat[0],
+                        &mut ext,
+                        &mut kbinds,
+                    ) {
+                        kbinds.clear();
+                        ext = self.keyed_conf(b, DefId { module: fm, node: container }, t.iface, sm2, st2, &mut kbinds);
+                        if ext.node == NODE_NONE {
+                            return self.fail();
+                        }
                     }
+                    kext = ext;
                     let own = self.ext_own_method(ext, fm, mnm);
                     if own.node == NODE_NONE {
                         let di = *(unsafe &*self.p().module_ast_const(b.module)).instance(
@@ -2626,8 +2825,46 @@ extend Interp {
                     }
                     own;
                 } else {
-                    self.iface_method(rdm, rdn, rb, DefId { module: fm, node: container }, b.module, fnode, mnm);
+                    let m0 = self.iface_method(
+                        rdm,
+                        rdn,
+                        rb,
+                        DefId { module: fm, node: container },
+                        b.module,
+                        fnode,
+                        mnm,
+                    );
+                    if m0.node == NODE_NONE {
+                        // No conformance by target: a generic one's own method, or its default.
+                        kext = self.keyed_conf(
+                            b,
+                            DefId { module: fm, node: container },
+                            TYPE_NONE,
+                            sm2,
+                            st2,
+                            &mut kbinds,
+                        );
+                    }
+                    pick(kext.node != NODE_NONE, self.ext_own_method(kext, fm, mnm), m0);
                 };
+                if md.node != NODE_NONE && kext.node != NODE_NONE && ext_keyed(
+                    unsafe &*self.p().module_ast_const(kext.module),
+                    kext.node,
+                ) {
+                    // A keyed conformance's method: every parameter of its extend is bound here.
+                    for q in 0..kbinds.len() {
+                        if !self.subst_add(
+                            &mut binds,
+                            kbinds.at(q).pmod,
+                            kbinds.at(q).pnode,
+                            kbinds.at(q).am,
+                            kbinds.at(q).at,
+                        ) {
+                            return self.fail();
+                        }
+                    }
+                    ext_bound = true;
+                }
                 if md.node != NODE_NONE {
                     fm = md.module;
                     fnode = md.node;
@@ -2658,7 +2895,7 @@ extend Interp {
             // generic bindings: the enclosing extend's parameters bind from the receiver's
             // instance, the function's own from the call's type arguments
             let mut ext = NODE_NONE;
-            if self.container_of(fm, fnode, &mut ext) == 1 {
+            if !ext_bound && self.container_of(fm, fnode, &mut ext) == 1 {
                 let xa = unsafe &*self.p().module_ast_const(fm);
                 let xgens = xa.at_const(ext).as_data.extend_def.generics;
                 if xgens.len != 0 {
@@ -6851,6 +7088,7 @@ extend Interp {
         ram: *const ModuleId,
         rat: *const TypeId,
         out: &mut DefId,
+        obinds: &mut Vector<ISub>,
     ) bool {
         let ba = unsafe &*self.p().module_ast_const(b.module);
         let di = *ba.instance(ba.type_at(iface).as_data.inst);
@@ -6892,32 +7130,28 @@ extend Interp {
                 if ci.n != di.n {
                     continue;
                 }
+                // The conformance's arguments match the bound's, binding the extend's parameters
+                // its target does not name.
                 let mut same = true;
                 for k in 0..ci.n {
-                    let mut cm = xm as ModuleId;
-                    let mut ct = unsafe ci.args[k as usize];
-                    let cy = *xa.type_at(ct);
-                    if cy.kind == TypeKind::TYPE_GENERIC {
-                        let mut hit = false;
-                        for q in 0..list.len() {
-                            if list.at(q).pmod == cy.module && list.at(q).pnode == cy.as_data.decl {
-                                cm = list.at(q).am;
-                                ct = list.at(q).at;
-                                hit = true;
-                            }
-                        }
-                        if !hit {
-                            return false;
-                        }
-                    } else if !xa.type_concrete(ct) {
-                        return false;
-                    }
-                    if !self.teq(cm, ct, unsafe wm[k as usize], unsafe wt[k as usize]) {
+                    if same && !self.iunify(
+                        xm as ModuleId,
+                        unsafe ci.args[k as usize],
+                        unsafe wm[k as usize],
+                        unsafe wt[k as usize],
+                        xm as ModuleId,
+                        ed.generics,
+                        &mut list,
+                        0,
+                    ) {
                         same = false;
                     }
                 }
                 if same {
                     *out = DefId { module: xm as ModuleId, node: iid };
+                    for q in 0..list.len() {
+                        obinds.push(*list.at(q));
+                    }
                     return true;
                 }
             }
@@ -6945,6 +7179,299 @@ extend Interp {
             return self.ext_own_method(ce, iface.module, name);
         }
         return self.find_method(rdm, rdn, rb, scope, iface.module, callee, name);
+    }
+
+    // Whether interface `iface` is the prelude's interface named `name`.
+    fn rt_iface_is(self: &Self, iface: DefId, name: str) bool {
+        let ia = unsafe &*self.p().module_ast_const(iface.module);
+        let n = ia.at_const(iface.node);
+        return n.kind == NodeKind::NODE_INTERFACE && self.p().modules.at(iface.module as usize).prelude && self.span_is(
+            iface.module,
+            ia.at_const(n.as_data.interface_def.name).as_data.name.text,
+            name,
+        );
+    }
+
+    // The member types of concrete aggregate `(m, t)` (fields, or every variant's payload), each a
+    // concrete type of pool `m` (an instance's member types ground through its arguments), into
+    // `out`. False for another kind of type, or a member type that does not ground.
+    fn rt_members(self: &Self, m: ModuleId, t: TypeId, out: &mut Vector<TypeId>) bool {
+        out.clear();
+        let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
+        let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            it.decl = y.as_data.decl;
+        } else if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        } else {
+            it = *(unsafe &*self.p().module_ast_const(m)).instance(y.as_data.inst);
+        }
+        let da = unsafe &*self.p().module_ast_const(it.module);
+        let dn = da.at_const(it.decl);
+        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
+            return false;
+        }
+        let gens = dn.as_data.aggregate.generics;
+        let mut gp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+        let mut gn: u32 = 0;
+        while gn < gens.len && gn < it.n as u32 && gn < 8 {
+            unsafe gp[gn as usize] = DefId { module: it.module, node: unsafe da.list(gens)[gn as usize] };
+            gn += 1;
+        }
+        let is_tuple = dn.as_data.aggregate.is_tuple;
+        let ms = dn.as_data.aggregate.members;
+        let mut tns = Vector::<NodeId>::new();
+        for i in 0..ms.len {
+            let mid = unsafe da.list(ms)[i as usize];
+            let mn = da.at_const(mid);
+            if dn.kind == NodeKind::NODE_STRUCT && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
+                tns.push(da.member_type_node(mid, is_tuple));
+            } else if mn.kind == NodeKind::NODE_VARIANT {
+                for k in 0..mn.as_data.variant.payload.len {
+                    let pid = unsafe da.list(mn.as_data.variant.payload)[k as usize];
+                    tns.push(
+                        pick(da.at_const(pid).kind == NodeKind::NODE_FIELD, da.at_const(pid).as_data.field.ty, pid),
+                    );
+                }
+            }
+        }
+        for i in 0..tns.len() {
+            let ft = da.type_of(*tns.at(i));
+            let mut g = TYPE_NONE;
+            if ft == TYPE_NONE || !self.p().ground_local(it.module, ft, m, &gp[0], &it.args[0], gn, &mut g, 0) {
+                return false;
+            }
+            out.push(g);
+        }
+        return true;
+    }
+
+    // Reflection's view of a generic conformance's bounds (`type_info` lists the methods of the
+    // generic conformances that apply): whether concrete type `(m, t)` satisfies interface `iface` as
+    // the checker decides it: `Copy`, `Send` and `Sync` from the type's shape, `Free` by the owner
+    // rule (`Owner::owns`), any other interface through a conformance by target whose parameters'
+    // bounds hold, else through a generic conformance whose bounds hold. A bound's interface
+    // arguments do not take part: the checker reported a conformance with other arguments.
+    fn rt_satisfies(self: &mut Self, own: &mut bcf::Owner, m: ModuleId, t: TypeId, iface: DefId, depth: u32) bool {
+        if depth > 8 || t == TYPE_NONE {
+            return false;
+        }
+        let ma = unsafe &*self.p().module_ast_const(m);
+        let y = *ma.type_at(t);
+        if self.rt_iface_is(iface, "Free") {
+            return own.owns(DefId { module: 0, node: NODE_NONE }, m, t);
+        }
+        let copy = self.rt_iface_is(iface, "Copy");
+        let send = self.rt_iface_is(iface, "Send");
+        let sync = self.rt_iface_is(iface, "Sync");
+        if copy || send || sync {
+            if y.kind == TypeKind::TYPE_BUILTIN || y.is_vec() {
+                return true;
+            }
+            if y.kind == TypeKind::TYPE_POINTER {
+                return copy;
+            }
+            if y.kind == TypeKind::TYPE_REFERENCE {
+                if copy {
+                    return y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+                }
+                let si = pick(sync, iface, self.rt_marker(iface, "Sync"));
+                return si.node != NODE_NONE && self.rt_satisfies(own, m, y.as_data.elem, si, depth + 1);
+            }
+            if y.kind == TypeKind::TYPE_DYN {
+                return copy && y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
+            }
+            if y.kind == TypeKind::TYPE_SLICE {
+                return self.rt_satisfies(own, m, y.as_data.elem, iface, depth + 1);
+            }
+            if y.kind == TypeKind::TYPE_ARRAY {
+                return self.rt_satisfies(own, m, y.as_data.arr.elem, iface, depth + 1);
+            }
+            if y.kind == TypeKind::TYPE_FUNCTION {
+                // A function pointer captures nothing; a closure is never reflected as a value.
+                return (unsafe &*self.p().module_ast_const(y.module)).at_const(y.as_data.decl).kind != NodeKind::NODE_CLOSURE;
+            }
+            if copy && own.owns(DefId { module: 0, node: NODE_NONE }, m, t) {
+                return false;
+            }
+            if !copy {
+                // An explicit `Send`/`Sync` conformance overrides the members; `UnsafeCell` is never
+                // `Sync`.
+                let mut rdm: ModuleId = 0;
+                let mut rdn = NODE_NONE;
+                if !self.rt_decl_of(m, t, &mut rdm, &mut rdn) {
+                    return false;
+                }
+                if sync && self.span_is(
+                    rdm,
+                    (unsafe &*self.p().module_ast_const(rdm)).at_const(
+                        (unsafe &*self.p().module_ast_const(rdm)).at_const(rdn).as_data.aggregate.name,
+                    ).as_data.name.text,
+                    "UnsafeCell",
+                ) && self.p().modules.at(rdm as usize).prelude {
+                    return false;
+                }
+                if self.conf_ext_of(rdm, rdn, BuiltinType::BT_COUNT, iface).node != NODE_NONE {
+                    return true;
+                }
+            }
+            let mut mt = Vector::<TypeId>::new();
+            if !self.rt_members(m, t, &mut mt) {
+                return false;
+            }
+            for i in 0..mt.len() {
+                if !self.rt_satisfies(own, m, *mt.at(i), iface, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // A conformance by target, its parameters' bounds holding for the instance.
+        let mut rdm: ModuleId = 0;
+        let mut rdn = NODE_NONE;
+        let mut rb = BuiltinType::BT_COUNT;
+        let mut rn: u8 = 0;
+        let mut ram: [ModuleId; OBJ_ARGS] = [[0] = 0];
+        let mut rat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            rb = y.as_data.builtin;
+        } else if !self.recv_of(m, t, &mut rdm, &mut rdn, &mut rn, &mut ram[0], &mut rat[0]) {
+            rdn = NODE_NONE;
+        }
+        if rb != BuiltinType::BT_COUNT || rdn != NODE_NONE {
+            let ext = self.conf_ext_of(rdm, rdn, rb, iface);
+            if ext.node != NODE_NONE {
+                let mut list = Vector::<ISub>::new();
+                return self.bind_extend(&mut list, ext.module, ext.node, rn, &ram[0], &rat[0]) && self.rt_bounds_hold(
+                    own,
+                    ext,
+                    &list,
+                    depth,
+                );
+            }
+        }
+        // A generic conformance: its target parameter is the type itself.
+        return self.rt_blanket_conf(own, m, t, iface, depth).node != NODE_NONE;
+    }
+
+    // The prelude marker interface `name` (`Sync`), found beside marker `peer`.
+    fn rt_marker(self: &Self, peer: DefId, name: str) DefId {
+        let ia = unsafe &*self.p().module_ast_const(peer.module);
+        let items = ia.at_const(ia.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe ia.list(items)[i as usize];
+            if ia.at_const(iid).kind == NodeKind::NODE_INTERFACE && self.span_is(
+                peer.module,
+                ia.at_const(ia.at_const(iid).as_data.interface_def.name).as_data.name.text,
+                name,
+            ) {
+                return DefId { module: peer.module, node: iid };
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    // The declaration behind concrete struct, enum or instance type `(m, t)`.
+    fn rt_decl_of(self: &Self, m: ModuleId, t: TypeId, dm: &mut ModuleId, dn: &mut NodeId) bool {
+        let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            *dm = y.module;
+            *dn = y.as_data.decl;
+            return true;
+        }
+        let mut it = TyInstance {};
+        if (unsafe &*self.p().module_ast_const(m)).targs_of(t, &mut it) {
+            *dm = it.module;
+            *dn = it.decl;
+            return true;
+        }
+        return false;
+    }
+
+    // Whether every bound of extend `ext`'s parameters holds for its bindings `list` (`rt_satisfies`);
+    // a parameter `list` leaves unbound (one only the interface's arguments name) is not checked.
+    fn rt_bounds_hold(self: &mut Self, own: &mut bcf::Owner, ext: DefId, list: &Vector<ISub>, depth: u32) bool {
+        let xa = unsafe &*self.p().module_ast_const(ext.module);
+        let gens = xa.at_const(ext.node).as_data.extend_def.generics;
+        for g in 0..gens.len {
+            let gid = unsafe xa.list(gens)[g as usize];
+            let mut bm: ModuleId = 0;
+            let mut bt = TYPE_NONE;
+            for q in 0..list.len() {
+                if list.at(q).pmod == ext.module && list.at(q).pnode == gid {
+                    bm = list.at(q).am;
+                    bt = list.at(q).at;
+                }
+            }
+            if bt == TYPE_NONE {
+                continue;
+            }
+            let bs = xa.at_const(gid).as_data.generic_param.bounds;
+            for b in 0..bs.len {
+                let bi = xa.resolution_def(unsafe xa.list(bs)[b as usize]);
+                if bi.node != NODE_NONE && (unsafe &*self.p().module_ast_const(bi.module)).at_const(bi.node).kind == NodeKind::NODE_INTERFACE && !self.rt_satisfies(
+                    own,
+                    bm,
+                    bt,
+                    bi,
+                    depth + 1,
+                ) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // The first generic conformance (`ext_blanket`) to `iface` (any interface when node NODE_NONE)
+    // whose bounds hold for concrete type `(m, t)` (`rt_satisfies`); node NODE_NONE when none does.
+    fn rt_blanket_conf(self: &mut Self, own: &mut bcf::Owner, m: ModuleId, t: TypeId, iface: DefId, depth: u32) DefId {
+        let mut out = Vector::<DefId>::new();
+        self.rt_blanket_confs(own, m, t, iface, depth, &mut out);
+        if out.len() == 0 {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        return *out.at(0);
+    }
+
+    // Every generic conformance to `iface` (any when node NODE_NONE) whose bounds hold for concrete
+    // type `(m, t)`, in module and item order, into `out`.
+    fn rt_blanket_confs(
+        self: &mut Self,
+        own: &mut bcf::Owner,
+        m: ModuleId,
+        t: TypeId,
+        iface: DefId,
+        depth: u32,
+        out: &mut Vector<DefId>,
+    ) {
+        for xm in 0..self.p().modules.len() {
+            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            if xa.nodes.len() == 0 {
+                continue;
+            }
+            let items = xa.at_const(xa.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe xa.list(items)[i as usize];
+                if xa.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                let ed = xa.at_const(iid).as_data.extend_def;
+                if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
+                    continue;
+                }
+                let ir0 = xa.resolution_def(ed.interface_type);
+                let bp = ext_blanket(xa, xa.type_of(ed.target_type), xa, xm as ModuleId, iid);
+                if bp < 0 || iface.node != NODE_NONE && (ir0.module != iface.module || ir0.node != iface.node) {
+                    continue;
+                }
+                let mut list = Vector::<ISub>::new();
+                list.push(ISub { pmod: xm as ModuleId, pnode: unsafe xa.list(ed.generics)[bp as usize], am: m, at: t });
+                if self.rt_bounds_hold(own, DefId { module: xm as ModuleId, node: iid }, &list, depth) {
+                    out.push(DefId { module: xm as ModuleId, node: iid });
+                }
+            }
+        }
     }
 
     // The extend conforming the receiver (aggregate `(rdm, rdn)`, or builtin `rb` for node NODE_NONE)
@@ -9626,6 +10153,34 @@ extend Interp {
                         if fail {
                             break;
                         }
+                    }
+                }
+                // The methods of the generic conformances whose bounds the type satisfies.
+                let mut own = bcf::Owner::new(self.pkg);
+                let mut bl = Vector::<DefId>::new();
+                self.rt_blanket_confs(&mut own, tm, tt, DefId { module: 0, node: NODE_NONE }, 0, &mut bl);
+                for bi in 0..bl.len() {
+                    if fail {
+                        break;
+                    }
+                    let ba = unsafe &*self.p().module_ast_const(bl.at(bi).module);
+                    let bms = ba.at_const(bl.at(bi).node).as_data.extend_def.items;
+                    for k2 in 0..bms.len {
+                        let mid = unsafe ba.list(bms)[k2 as usize];
+                        if ba.at_const(mid).kind != NodeKind::NODE_FUNCTION {
+                            continue;
+                        }
+                        let hv = self.ti_method(&cx, bl.at(bi).module, mid, mhty);
+                        if hv.kind != IV_OBJ || mety != TYPE_NONE && !self.ti_attach_meta(
+                            &cx,
+                            hv,
+                            bl.at(bi).module,
+                            mid,
+                        ) {
+                            fail = true;
+                            break;
+                        }
+                        hobjs.push(hv);
                     }
                 }
                 if fail {

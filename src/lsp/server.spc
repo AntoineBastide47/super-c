@@ -50,6 +50,9 @@ pub struct Root {
     pub last_used: u64, // server tick of the last build or input touching this root (LRU eviction order)
 }
 
+// The probe texts `Server::probe_text` makes.
+const PROBE_VARIANTS: i32 = 3;
+
 /// Whole-process server state: open documents, built roots, negotiated client capabilities and the
 /// per-URI semantic-token history that delta requests diff against.
 pub struct Server {
@@ -253,7 +256,7 @@ extend PubSet {
 /// (hierarchical symbols, versioned document edits) are negotiated and applied per response.
 pub fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
     let mut s = String::from_str(
-        "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\",\"[\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
+        "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\",\"[\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\",\"<\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
     );
     s.push_str(",\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll\"]");
     if resolve {
@@ -2184,13 +2187,16 @@ extend Server {
         respond(f, req.at_key("id"), &res);
     }
 
-    // The probe text: `txt` with `__lsp_c` (variant 1: `__lsp_c;`) spliced at the cursor.
+    // The probe text: `txt` with `__lsp_c` (variant 1: `__lsp_c;`, variant 2: `__lsp_c>` for a type
+    // argument list being typed) spliced at the cursor.
     fn probe_text(txt: str, off: u32, variant: i32) String {
         let mut synth = String::with_capacity(txt.len() + 9);
         synth.push_str(txt.slice(0, off as usize));
         synth.push_str("__lsp_c");
         if variant == 1 {
             synth.push_byte(b';');
+        } else if variant == 2 {
+            synth.push_byte(b'>');
         }
         synth.push_str(txt.slice(off as usize, txt.len()));
         return synth;
@@ -2210,7 +2216,7 @@ extend Server {
         return !ps.has_errors();
     }
 
-    // Completion through a probe: splice `__lsp_c` (then `__lsp_c;` if that still does not parse) at the
+    // Completion through a probe: splice `__lsp_c` (then `__lsp_c;`, then `__lsp_c>`, until one parses) at the
     // cursor: the mid-edit buffer rarely parses; the probe usually makes it. The owning root's live
     // package takes the parsing probe as one incremental round (a body edit: milliseconds), answers,
     // and takes the real buffers back in a second round. A document without a built root, the
@@ -2231,14 +2237,14 @@ extend Server {
         let ru = r as usize;
         let mut variant = 0;
         let mut synth = String::new();
-        while variant < 2 {
+        while variant < PROBE_VARIANTS {
             synth = Server::probe_text(txt, off, variant);
             if Server::probe_parses(&synth, path) {
                 break;
             }
             variant += 1;
         }
-        if variant == 2 {
+        if variant == PROBE_VARIANTS {
             return Vector::<feat::CompItem>::new();
         }
         let rf = self.roots.at(ru).root_file.clone();
@@ -2310,8 +2316,18 @@ extend Server {
     // A throwaway package with the probe overlay, its completions read and the package dropped.
     fn complete_via_fresh_probe(self: &Self, path: str, txt: str, off: u32, member: bool) Vector<feat::CompItem> {
         let mut out = Vector::<feat::CompItem>::new();
+        // The first probe that parses, else the first two in turn.
         let mut variant = 0;
-        while variant < 2 {
+        let mut last = 1;
+        for v in 0..PROBE_VARIANTS {
+            let synth = Server::probe_text(txt, off, v);
+            if Server::probe_parses(&synth, path) {
+                variant = v;
+                last = v;
+                break;
+            }
+        }
+        while variant <= last {
             let synth = Server::probe_text(txt, off, variant);
             let mut ovf = Vector::<String>::new();
             let mut ovt = Vector::<String>::new();
@@ -2561,14 +2577,17 @@ extend Server {
                     let path9 = String::from_str(path);
                     let txt9 = String::from_str(txt);
                     items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, true);
-                } else if have_ast {
+                } else if have_ast && feat::item_at(&self.roots.at(r as usize).pkg, m as usize, off) {
                     items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
                 } else {
-                    // Broken buffer: complete from a probe build; keywords alone if even that fails.
+                    // Broken buffer, or a declaration that did not parse: complete from a probe
+                    // build; the last analysis, or keywords alone, if even that fails.
                     let path9 = String::from_str(path);
                     let txt9 = String::from_str(txt);
                     items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, false);
-                    if items.len() == 0 {
+                    if items.len() == 0 && have_ast {
+                        items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
+                    } else if items.len() == 0 {
                         items = feat::complete_keywords();
                     }
                 }

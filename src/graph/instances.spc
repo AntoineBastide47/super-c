@@ -68,6 +68,7 @@ struct ExtShape {
     pub xs: u32, // its first `XSlot` in `xslots` (`np` of them)
     pub ss: u32, // its first `ESig` in `esigs`
     pub sn: u32, // its `ESig` count
+    pub keyed: bool, // `ext_keyed`: a use names every parameter, in order; no target instance binds them
 }
 
 // A non-generic method of an extend with a recorded signature (`Package::item_sig`): the types a
@@ -105,6 +106,7 @@ struct WalkCache {
     pub calls: Vector<u32>, // block ids whose terminator is a resolved TM_CALL
     pub meths: Vector<bool>, // per call: a call with a receiver of a generic extend's method
     pub meas: Vector<u32>, // statement ids assigning a `sizeof`/`alignof`
+    pub dyns: Vector<u32>, // rvalue ids of `dyn` erasures (`RV_DYN`)
 }
 
 /// An array length an instance folds outside 0..=4294967295: a compile error the driver reports,
@@ -133,6 +135,7 @@ pub struct InstGraph {
     // target lookups must not rescan the extend list.
     ext_of: Map<u64, u64>, // (module << 32 | fnode) -> the `exts` row of its owning extend
     ext_head: Map<u64, u32>, // (target module << 32 | decl) -> its first `exts` row
+    blanks: Vector<u32>, // the `exts` rows of generic extends (`ext_blanket`): no target declaration chains them
     ext_next: Vector<u32>, // per `exts` row: the next row with the same target (IG_NONE = last)
     shapes: Vector<ExtShape>, // per `exts` row
     xslots: Vector<XSlot>,
@@ -234,6 +237,7 @@ extend InstGraph {
             exts: Vector::<ExtRow>::new(),
             ext_of: Map::<u64, u64>::new(),
             ext_head: Map::<u64, u32>::new(),
+            blanks: Vector::<u32>::new(),
             ext_next: Vector::<u32>::new(),
             shapes: Vector::<ExtShape>::new(),
             xslots: Vector::<XSlot>::new(),
@@ -581,7 +585,7 @@ extend InstGraph {
             d = DefId { module: p.core_module, node: p.builtin_decl(y.as_data.builtin) };
         }
         let iface = iface_of_member(ia, ai.decl);
-        if d.node == NODE_NONE || iface == NODE_NONE {
+        if iface == NODE_NONE {
             return TYPE_NONE;
         }
         let want = self.g().intern_dyn_g(
@@ -593,11 +597,28 @@ extend InstGraph {
         );
         let an = ia.at_const(ia.at_const(ai.decl).as_data.type_alias.name).as_data.name.text;
         let aname = p.modules.at(ai.module as usize).source.as_str().slice(an.start as usize, an.end as usize);
-        let mut r = self.ext_first(d);
-        while r != IG_NONE {
-            let ri = r;
-            let row = *self.exts.at(r as usize);
-            r = *self.ext_next.at(r as usize);
+        let ry = *ia.type_at(ai.args[0]);
+        let rcv = ry.kind == TypeKind::TYPE_CONST;
+        let rk = ArgKey {
+            ty: ai.args[0],
+            val: pick(rcv, ry.as_data.value, 0),
+            has_val: rcv,
+            bt: pick(rcv, ry.cbt(), BuiltinType::BT_COUNT),
+        };
+        // The conformances by target, then the generic ones.
+        let mut r = pick(d.node == NODE_NONE, IG_NONE, self.ext_first(d));
+        let mut bk: usize = 0;
+        loop {
+            let mut ri = r;
+            if r != IG_NONE {
+                r = *self.ext_next.at(r as usize);
+            } else if bk < self.blanks.len() {
+                ri = *self.blanks.at(bk);
+                bk += 1;
+            } else {
+                break;
+            }
+            let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
             let ed = ea.at_const(row.enode).as_data.extend_def;
             if ed.interface_type == NODE_NONE {
@@ -605,16 +626,13 @@ extend InstGraph {
             }
             let ir = ea.resolution_def(ed.interface_type);
             let dt = ea.type_of(ed.interface_type);
-            if ir.module != ai.module || ir.node != iface || dt == TYPE_NONE || !self.ext_applies(
-                ri,
-                &keys,
-                0,
-                keys.len() as u32,
-            ) {
+            if ir.module != ai.module || ir.node != iface || dt == TYPE_NONE {
                 continue;
             }
             let mut frame = Vector::<Subst>::new();
-            let _ = self.bind_ext_keys(ri, &keys, 0, keys.len() as u32, &mut frame);
+            if !self.conf_bind(ri, rk, &keys, want, &mut frame) {
+                continue;
+            }
             if self.subst_intern(ea, dt, &frame, depth + 1) != want {
                 continue;
             }
@@ -1194,6 +1212,9 @@ extend InstGraph {
                     first = t.span;
                 }
             }
+            if first.end == 0 {
+                first = self.iface_demand_site(b, r);
+            }
             return first;
         }
         for i in 0..b.locals.len() {
@@ -1209,6 +1230,39 @@ extend InstGraph {
             }
             let rv = b.rvalues.at(st.rvalue as usize);
             if ty_names(a, rv.target, r.def, 0) {
+                return st.span;
+            }
+        }
+        return tok::Span { start: 0, end: 0 };
+    }
+
+    // The site in body `b` that demands conformance method `r` through its interface: the first
+    // interface call of the method's name, else the first `dyn` erasure. None when there is neither.
+    fn iface_demand_site(self: &Self, b: &ir::CoreBody, r: &InstRec) tok::Span {
+        let p = unsafe &*self.pkg;
+        let ra = unsafe &*p.module_ast_const(r.def.module);
+        let rd = ra.at_const(r.def.node);
+        if rd.kind != NodeKind::NODE_FUNCTION {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let rs = ra.at_const(rd.as_data.function.name).as_data.name.text;
+        let rname = p.modules.at(r.def.module as usize).source.as_str().slice(rs.start as usize, rs.end as usize);
+        for i in 0..b.blocks.len() {
+            let t = b.blocks.at(i).term;
+            if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || !self.iface_of.contains_key(
+                &skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64),
+            ) {
+                continue;
+            }
+            let ca = unsafe &*p.module_ast_const(t.callee.module);
+            let cs = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+            if p.modules.at(t.callee.module as usize).source.as_str().slice(cs.start as usize, cs.end as usize) == rname {
+                return t.span;
+            }
+        }
+        for i in 0..b.statements.len() {
+            let st = b.statements.at(i);
+            if st.kind == ir::ST_ASSIGN && st.span.end != 0 && b.rvalues.at(st.rvalue as usize).kind == ir::RV_DYN {
                 return st.span;
             }
         }
@@ -1505,10 +1559,105 @@ extend InstGraph {
             if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
                 continue;
             }
-            if t.targs_len != 0 && !self.note_iface_call(a, &t, b, frame) {
+            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             self.note_method(a, &t, b, frame);
+        }
+        for i in 0..b.rvalues.len() {
+            let rv = *b.rvalues.at(i);
+            if rv.kind == ir::RV_DYN {
+                self.note_dyn(a, &rv, b, frame);
+            }
+        }
+    }
+
+    // A `dyn` erasure `rv` (`RV_DYN`) of a source made concrete by `frame`: the methods of the
+    // source's keyed conformance to the erased interface (`ext_keyed`), which no target instance
+    // pairs (`cross_demand`), walk under the conformance's arguments, as its vtable calls them.
+    fn note_dyn(self: &mut Self, a: &Ast, rv: &ir::Rvalue, b: &ir::CoreBody, frame: &Vector<Subst>) {
+        let p = unsafe &*self.pkg;
+        let mut st = b.operands.at(rv.a as usize).ty;
+        let mut dt = rv.target;
+        for _ in 0..4 {
+            let sy = *a.type_at(st);
+            if sy.kind == TypeKind::TYPE_REFERENCE || sy.kind == TypeKind::TYPE_POINTER {
+                st = sy.as_data.elem;
+            }
+            let dy = *a.type_at(dt);
+            if dy.kind == TypeKind::TYPE_REFERENCE || dy.kind == TypeKind::TYPE_POINTER {
+                dt = dy.as_data.elem;
+            } else if dy.kind == TypeKind::TYPE_INSTANCE && a.instance(dy.as_data.inst).n != 0 {
+                // An owning box of the dyn value.
+                dt = a.instance(dy.as_data.inst).args[0];
+            }
+        }
+        if a.type_at(dt).kind != TypeKind::TYPE_DYN || !self.concrete_subst(a, st, frame, 0) || !self.concrete_subst(
+            a,
+            dt,
+            frame,
+            0,
+        ) {
+            return;
+        }
+        let sk = self.argkey_subst(a, st, frame);
+        let want = self.subst_intern(a, dt, frame, 0);
+        let di = *a.instance(a.type_at(want).as_data.inst);
+        let sy = *a.type_at(sk.ty);
+        let mut d = DefId { module: sy.module, node: NODE_NONE };
+        let mut keys = Vector::<ArgKey>::new();
+        let mut it = TyInstance {};
+        if sy.kind == TypeKind::TYPE_STRUCT || sy.kind == TypeKind::TYPE_ENUM {
+            d.node = sy.as_data.decl;
+        } else if a.targs_of(sk.ty, &mut it) {
+            d = DefId { module: it.module, node: it.decl };
+            for i in 0..it.n {
+                keys.push(self.argkey_subst(a, unsafe it.args[i as usize], frame));
+            }
+        } else if sy.kind == TypeKind::TYPE_BUILTIN {
+            d = DefId { module: p.core_module, node: p.builtin_decl(sy.as_data.builtin) };
+        }
+        let mut r = pick(d.node == NODE_NONE, IG_NONE, self.ext_first(d));
+        let mut bk: usize = 0;
+        loop {
+            let mut ri = r;
+            if r != IG_NONE {
+                r = *self.ext_next.at(r as usize);
+            } else if bk < self.blanks.len() {
+                ri = *self.blanks.at(bk);
+                bk += 1;
+            } else {
+                break;
+            }
+            let row = *self.exts.at(ri as usize);
+            let ea = unsafe &*p.module_ast_const(row.emod);
+            let ir = self.ext_interface(ea, row.enode);
+            if !self.shapes.at(ri as usize).keyed || ir.module != di.module || ir.node != di.decl {
+                continue;
+            }
+            let mut ef = Vector::<Subst>::new();
+            if !self.conf_bind(ri, sk, &keys, want, &mut ef) {
+                continue;
+            }
+            let ed = ea.at_const(row.enode).as_data.extend_def;
+            for j in 0..ed.items.len {
+                let hid = unsafe ea.list(ed.items)[j as usize];
+                if ea.at_const(hid).kind != NodeKind::NODE_FUNCTION || ea.at_const(hid).as_data.function.generics.len != 0 {
+                    continue;
+                }
+                self.argbuf.truncate(0);
+                for g in 0..ed.generics.len {
+                    let gid = unsafe ea.list(ed.generics)[g as usize];
+                    for f in 0..ef.len() {
+                        if ef.at(f).pmod == row.emod && ef.at(f).pdecl == gid {
+                            self.argbuf.push(ef.at(f).key);
+                        }
+                    }
+                }
+                let mut fresh = false;
+                let _ = self.add(IG_METHOD, DefId { module: row.emod, node: hid }, &mut fresh);
+            }
+            return;
         }
     }
 
@@ -1516,8 +1665,10 @@ extend InstGraph {
     // instance binds the extend's params; the method body walks under that frame. No extend search:
     // the checker already selected the method.
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
-        // Only a method of a generic extend.
-        if t.args_len != 0 && self.enclosing_row(t.callee) != IG_NONE {
+        // Only a method of a generic extend whose receiver binds it: a keyed extend's call names all
+        // of its arguments (`note_call`).
+        let x = self.enclosing_row(t.callee);
+        if t.args_len != 0 && x != IG_NONE && !self.shapes.at(x as usize).keyed {
             self.note_method_of(a, t, b, frame);
         }
     }
@@ -1571,7 +1722,7 @@ extend InstGraph {
         let p = unsafe &*self.pkg;
         let ca = unsafe &*p.module_ast_const(t.callee.module);
         let fg = ca.at_const(t.callee.node).as_data.function.generics;
-        if fg.len == 0 || t.targs_len < fg.len {
+        if t.targs_len < fg.len {
             return false;
         }
         let inode = switch self.iface_of.get(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
@@ -1622,25 +1773,38 @@ extend InstGraph {
         } else if ry.kind == TypeKind::TYPE_BUILTIN {
             d = DefId { module: p.core_module, node: p.builtin_decl(ry.as_data.builtin) };
         }
-        if d.node == NODE_NONE {
-            return true;
-        }
         let want = pick(t.iface != TYPE_NONE, self.subst_intern(a, t.iface, frame, 0), TYPE_NONE);
         let mn = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
         let mname = p.modules.at(t.callee.module as usize).source.as_str().slice(mn.start as usize, mn.end as usize);
+        // The conformances by target, then the generic ones.
         let mut r = self.ext_first(d);
-        while r != IG_NONE {
-            let ri = r;
-            let row = *self.exts.at(r as usize);
-            r = *self.ext_next.at(r as usize);
+        let mut bk: usize = 0;
+        loop {
+            let mut ri = r;
+            if r != IG_NONE {
+                r = *self.ext_next.at(r as usize);
+            } else if bk < self.blanks.len() {
+                ri = *self.blanks.at(bk);
+                bk += 1;
+            } else {
+                break;
+            }
+            let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
             let ed = ea.at_const(row.enode).as_data.extend_def;
             let ir = self.ext_interface(ea, row.enode);
-            if ir.module != t.callee.module || ir.node != inode || !self.ext_applies(ri, &keys, 0, keys.len() as u32) {
+            if ir.module != t.callee.module || ir.node != inode {
                 continue;
             }
             let mut ef = Vector::<Subst>::new();
-            let _ = self.bind_ext_keys(ri, &keys, 0, keys.len() as u32, &mut ef);
+            if !self.conf_bind(ri, rk, &keys, want, &mut ef) {
+                continue;
+            }
+            if fg.len == 0 && !self.shapes.at(ri as usize).keyed {
+                // A method without parameters of its own pairs through its declaration's demand
+                // (`cross_demand`); only a keyed extend, which no target instance binds, records here.
+                return true;
+            }
             let dt = ea.type_of(ed.interface_type);
             if want != TYPE_NONE && (dt == TYPE_NONE || self.subst_intern(ea, dt, &ef, 1) != want) {
                 continue;
@@ -1657,10 +1821,19 @@ extend InstGraph {
                     continue;
                 }
                 // The conformance's own method: the receiver's arguments (a generic extend's
-                // method), then the call's.
+                // method; every argument of a keyed extend's, in order), then the call's.
                 self.argbuf.truncate(0);
                 let generic = ed.generics.len != 0;
-                if generic {
+                if self.shapes.at(ri as usize).keyed {
+                    for g in 0..ed.generics.len {
+                        let gid = unsafe ea.list(ed.generics)[g as usize];
+                        for f in 0..ef.len() {
+                            if ef.at(f).pmod == row.emod && ef.at(f).pdecl == gid {
+                                self.argbuf.push(ef.at(f).key);
+                            }
+                        }
+                    }
+                } else if generic {
                     for k in 0..keys.len() {
                         self.argbuf.push(*keys.at(k));
                     }
@@ -2267,6 +2440,7 @@ extend InstGraph {
             xs: self.xslots.len() as u32,
             ss: self.esigs.len() as u32,
             sn: 0,
+            keyed: ext_keyed(a, ext),
         };
         // Signatures come from the package item metadata (params then returns, owner-pool TypeIds),
         // not from re-walking the item's syntax; non-function items record none, and generic methods
@@ -2297,6 +2471,9 @@ extend InstGraph {
                 self.xslots.push(sl);
             }
         }
+        if ext_blanket(a, pat, a, a.module, ext) >= 0 {
+            self.blanks.push(self.shapes.len() as u32);
+        }
         self.shapes.push(sh);
     }
 
@@ -2306,6 +2483,32 @@ extend InstGraph {
     // parameter to the value that inverts it. Returns the target's argument count (where a method's
     // own keys start).
     fn bind_ext_keys(self: &Self, x: u32, keys: &Vector<ArgKey>, start: u32, n: u32, frame: &mut Vector<Subst>) u32 {
+        let sh = *self.shapes.at(x as usize);
+        if sh.keyed {
+            // The keys are the extend's arguments, in order, then the member's own.
+            let row = *self.exts.at(x as usize);
+            let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
+            let gens = ea.at_const(row.enode).as_data.extend_def.generics;
+            for j in 0..gens.len {
+                if j < n {
+                    frame.push(
+                        Subst {
+                            pmod: row.emod,
+                            pdecl: unsafe ea.list(gens)[j as usize],
+                            key: *keys.at((start + j) as usize),
+                        },
+                    );
+                }
+            }
+            return gens.len;
+        }
+        return self.bind_target_keys(x, keys, start, n, frame);
+    }
+
+    // Bind the generic params of a conformance row `x` through its target's arguments to the `n` keys
+    // of `keys` from `start` on (an instance of its target), as a non-keyed extend's `bind_ext_keys`
+    // does; the target's argument count.
+    fn bind_target_keys(self: &Self, x: u32, keys: &Vector<ArgKey>, start: u32, n: u32, frame: &mut Vector<Subst>) u32 {
         let sh = *self.shapes.at(x as usize);
         if !sh.inst {
             return 0;
@@ -2336,11 +2539,152 @@ extend InstGraph {
         return sh.pn;
     }
 
+    // Bind conformance row `x` for a receiver of key `rk` (its instance's keys `keys`) whose call or
+    // associated type goes through interface instance `want` (a final `dyn I<..>` id; TYPE_NONE when
+    // unknown) into `frame`: a generic extend's target parameter to the receiver, a target's other
+    // parameters through its instance, and the ones only the interface's arguments name by unifying
+    // those with `want` (`gunify`). False when the row does not apply or a parameter stays unbound.
+    fn conf_bind(self: &Self, x: u32, rk: ArgKey, keys: &Vector<ArgKey>, want: TypeId, frame: &mut Vector<Subst>) bool {
+        let sh = *self.shapes.at(x as usize);
+        let row = *self.exts.at(x as usize);
+        let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
+        let ed = ea.at_const(row.enode).as_data.extend_def;
+        if !sh.keyed {
+            if !self.ext_applies(x, keys, 0, keys.len() as u32) {
+                return false;
+            }
+            let _ = self.bind_ext_keys(x, keys, 0, keys.len() as u32, frame);
+            return true;
+        }
+        let bp = ext_blanket(ea, ea.type_of(ed.target_type), ea, row.emod, row.enode);
+        if bp >= 0 {
+            frame.push(Subst { pmod: row.emod, pdecl: unsafe ea.list(ed.generics)[bp as usize], key: rk });
+        } else {
+            let _ = self.bind_target_keys(x, keys, 0, keys.len() as u32, frame);
+        }
+        let dt = ea.type_of(ed.interface_type);
+        if want != TYPE_NONE && (dt == TYPE_NONE || !self.gunify(ea, row.emod, dt, want, ed.generics, frame, 0)) {
+            return false;
+        }
+        for g in 0..ed.generics.len {
+            let gid = unsafe ea.list(ed.generics)[g as usize];
+            let mut hit = false;
+            for i in 0..frame.len() {
+                hit = hit || frame.at(i).pmod == row.emod && frame.at(i).pdecl == gid;
+            }
+            if !hit {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Bind the parameters `gens` (module `em`) that pattern type `pt` (of `ea`) names so that it is
+    // final type `wt`, into `frame`: a parameter takes the type (or must already be it); an instance,
+    // `dyn`, vector, mask, array, slice, reference or pointer matches part by part (a concrete array's
+    // count is a constant of the length parameter's type); any other type substitutes to `wt`. False
+    // when they cannot match.
+    fn gunify(
+        self: &Self,
+        ea: &Ast,
+        em: ModuleId,
+        pt: TypeId,
+        wt: TypeId,
+        gens: NodeList,
+        frame: &mut Vector<Subst>,
+        depth: i32,
+    ) bool {
+        if depth > 8 || pt == TYPE_NONE || wt == TYPE_NONE {
+            return false;
+        }
+        let py = *ea.type_at(pt);
+        let wy = *ea.type_at(wt);
+        if py.kind == TypeKind::TYPE_GENERIC && py.module == em {
+            for i in 0..gens.len {
+                if unsafe ea.list(gens)[i as usize] != py.as_data.decl {
+                    continue;
+                }
+                for f in 0..frame.len() {
+                    if frame.at(f).pmod == em && frame.at(f).pdecl == py.as_data.decl {
+                        return frame.at(f).key.ty == wt;
+                    }
+                }
+                let cv = wy.kind == TypeKind::TYPE_CONST;
+                frame.push(
+                    Subst {
+                        pmod: em,
+                        pdecl: py.as_data.decl,
+                        key: ArgKey {
+                            ty: wt,
+                            val: pick(cv, wy.as_data.value, 0),
+                            has_val: cv,
+                            bt: pick(cv, wy.cbt(), BuiltinType::BT_COUNT),
+                        },
+                    },
+                );
+                return true;
+            }
+        }
+        if ea.type_concrete(pt) {
+            return self.subst_intern(ea, pt, frame, 0) == wt;
+        }
+        if py.kind != wy.kind {
+            return false;
+        }
+        if py.kind == TypeKind::TYPE_INSTANCE || py.kind == TypeKind::TYPE_DYN {
+            let pi = *ea.instance(py.as_data.inst);
+            let wi = *ea.instance(wy.as_data.inst);
+            if pi.module != wi.module || pi.decl != wi.decl || pi.n != wi.n {
+                return false;
+            }
+            for k in 0..pi.n {
+                if !self.gunify(ea, em, unsafe pi.args[k as usize], unsafe wi.args[k as usize], gens, frame, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if py.arr_like() {
+            if py.kind != TypeKind::TYPE_MASK && !self.gunify(
+                ea,
+                em,
+                py.as_data.arr.elem,
+                wy.as_data.arr.elem,
+                gens,
+                frame,
+                depth + 1,
+            ) {
+                return false;
+            }
+            if py.is_vec() || py.arr_sym() && wy.arr_sym() {
+                return self.gunify(ea, em, py.as_data.arr.len, wy.as_data.arr.len, gens, frame, depth + 1);
+            }
+            if py.arr_sym() {
+                let ly = *ea.type_at(py.as_data.arr.len);
+                if ly.kind != TypeKind::TYPE_GENERIC {
+                    return true;
+                }
+                let bt = (unsafe &*self.pkg).const_param_bt(ly.module, ly.as_data.decl);
+                let ct = self.g().const_value_g(wy.as_data.arr.len, bt);
+                return self.gunify(ea, em, py.as_data.arr.len, ct, gens, frame, depth + 1);
+            }
+            return py.as_data.arr.len == wy.as_data.arr.len;
+        }
+        if py.kind == TypeKind::TYPE_REFERENCE || py.kind == TypeKind::TYPE_POINTER || py.kind == TypeKind::TYPE_SLICE {
+            return self.gunify(ea, em, py.as_data.elem, wy.as_data.elem, gens, frame, depth + 1);
+        }
+        return false;
+    }
+
     // Whether the extend of `exts` row `x` applies to the instance of its target whose arguments are
     // the `n` keys of `keys` from `start` on: every argument the target constrains matches
     // (`xarg_of`), a form exactly and in its parameter's type, a parameter bound twice to one key.
     fn ext_applies(self: &Self, x: u32, keys: &Vector<ArgKey>, start: u32, n: u32) bool {
         let sh = *self.shapes.at(x as usize);
+        if sh.keyed {
+            // No target instance's keys bind a keyed extend (`ext_keyed`): only its uses do.
+            return false;
+        }
         if sh.ident {
             return true;
         }
@@ -2529,6 +2873,11 @@ extend InstGraph {
                     self.wcache[ki as usize].meths.push(meth);
                 }
             }
+            for i in 0..b.rvalues.len() {
+                if b.rvalues.at(i).kind == ir::RV_DYN {
+                    self.wcache[ki as usize].dyns.push(i as u32);
+                }
+            }
             self.wcache[ki as usize].built = true;
         }
         self.bodies += 1;
@@ -2552,12 +2901,16 @@ extend InstGraph {
         }
         for i in 0..(unsafe &*wp).calls.len() {
             let t = b.blocks.at((*(unsafe &*wp).calls.at(i)) as usize).term;
-            if t.targs_len != 0 && !self.note_iface_call(a, &t, b, frame) {
+            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             if *(unsafe &*wp).meths.at(i) {
                 self.note_method_of(a, &t, b, frame);
             }
+        }
+        for i in 0..(unsafe &*wp).dyns.len() {
+            let rv = *b.rvalues.at((*(unsafe &*wp).dyns.at(i)) as usize);
+            self.note_dyn(a, &rv, b, frame);
         }
         self.cur_org = org0;
     }

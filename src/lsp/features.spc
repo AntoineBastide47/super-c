@@ -151,10 +151,18 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
             k += 1;
         }
         e = k as u32;
-    } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-        e = unsafe (*da).at_const(n.as_data.aggregate.name).span.end;
-    } else if n.kind == NodeKind::NODE_INTERFACE {
-        e = unsafe (*da).at_const(n.as_data.interface_def.name).span.end;
+    } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM || n.kind == NodeKind::NODE_INTERFACE {
+        // The head up to the generic parameter list's `>`, or the name.
+        let gs = decl_generics(n);
+        if gs.len == 0 {
+            e = unsafe (*da).at_const(decl_name(da, d.node)).span.end;
+        } else {
+            let mut k = (unsafe (*da).at_const(unsafe (*da).list(gs)[(gs.len - 1) as usize]).span.end) as usize;
+            while k < e as usize && src[k] != b'>' {
+                k += 1;
+            }
+            e = (k + 1) as u32;
+        }
     } else if n.kind == NodeKind::NODE_LET {
         e = unsafe (*da).at_const(n.as_data.let_stmt.name).span.end;
         if n.as_data.let_stmt.ty != NODE_NONE {
@@ -420,6 +428,193 @@ const ATTR_DOCS: [AttrDoc; 34] = [
     },
 ];
 
+// The compile-time reflection constructs no declaration documents: the intrinsics (std/reflect.spc
+// is their reference) and the members of the `inline for` binders.
+struct ReflectDoc {
+    pub name: str<'static>,
+    pub sig: str<'static>,
+    pub doc: str<'static>,
+}
+
+const REFLECT_INTRINSICS: [ReflectDoc; 5] = [
+    ReflectDoc {
+        name: "type_info",
+        sig: "type_info::<T>() TypeInfo",
+        doc: "A non-owning descriptor of `T`: name, kind, size, alignment, fields, variants, `@reflect` entries and methods. It folds at compile time; a run-time use reads static data. An opaque FFI type has none.",
+    },
+    ReflectDoc {
+        name: "zeroed",
+        sig: "unsafe zeroed::<T>() T",
+        doc: "A `T` of all-zero bytes, the value reflection constructors fill field by field. `unsafe`: zero bytes are not a valid value of every type.",
+    },
+    ReflectDoc {
+        name: "fields",
+        sig: "inline for f in fields(&v) { .. }   fields(&a, &b)",
+        doc: "The field binder of a struct, tuple or union: the body is checked once and emitted once per field, `f.value` at the field's own type. `&mut v` makes `f.value` writable; a second subject adds `f.other`.",
+    },
+    ReflectDoc {
+        name: "variants",
+        sig: "inline for v in variants(&e) { .. }   variants(&a, &b)",
+        doc: "The variant binder of an enum, in declaration order: one copy of the body per variant. `v.is_active` reads the subject; a second subject adds `v.other_active`.",
+    },
+    ReflectDoc {
+        name: "payloads",
+        sig: "inline for p in payloads(v) { .. }",
+        doc: "The payload binder of the active variant: it takes the variants binder itself and projects through its subjects.",
+    },
+];
+
+const FIELD_BINDER_DOCS: [ReflectDoc; 11] = [
+    ReflectDoc {
+        name: "name",
+        sig: "f.name: str<'static>",
+        doc: "The field's name (`_0`, `_1`, .. for a tuple): a per-copy constant.",
+    },
+    ReflectDoc { name: "index", sig: "f.index: usize", doc: "The field's position: a per-copy constant." },
+    ReflectDoc {
+        name: "value",
+        sig: "f.value",
+        doc: "The field itself, at its own type: `&f.value` reaches a generic callee that monomorphizes per field; `&mut f.value` through a `&mut` subject.",
+    },
+    ReflectDoc { name: "other", sig: "f.other", doc: "The second subject's same field (`fields(&a, &b)`), read-only." },
+    ReflectDoc { name: "offset", sig: "f.offset: usize", doc: "The field's byte offset in the C layout." },
+    ReflectDoc { name: "size", sig: "f.size: usize", doc: "The field's size in bytes (`sizeof`)." },
+    ReflectDoc { name: "kind", sig: "f.kind: TypeTag", doc: "The tag of the field's type." },
+    ReflectDoc {
+        name: "has_meta",
+        sig: "f.has_meta(\"key\") bool",
+        doc: "Whether the declaration carries the `@reflect` entry `key` (a string literal): a per-copy constant, so an `if` over it folds.",
+    },
+    ReflectDoc {
+        name: "meta_bool",
+        sig: "f.meta_bool(\"key\") bool",
+        doc: "The `Bool` value of the `@reflect` entry `key` (false when missing): a per-copy constant.",
+    },
+    ReflectDoc {
+        name: "meta_int",
+        sig: "f.meta_int(\"key\") i64",
+        doc: "The `Int` value of the `@reflect` entry `key` (0 when missing): a per-copy constant.",
+    },
+    ReflectDoc {
+        name: "meta_str",
+        sig: "f.meta_str(\"key\") str",
+        doc: "The `Str` value of the `@reflect` entry `key` (\"\" when missing): a per-copy constant.",
+    },
+];
+
+const VARIANT_BINDER_DOCS: [ReflectDoc; 11] = [
+    ReflectDoc { name: "name", sig: "v.name: str<'static>", doc: "The variant's name: a per-copy constant." },
+    ReflectDoc {
+        name: "index",
+        sig: "v.index: usize",
+        doc: "The variant's position in declaration order: a per-copy constant.",
+    },
+    ReflectDoc { name: "tag", sig: "v.tag: i32", doc: "The variant's discriminant (its C enum constant's value)." },
+    ReflectDoc { name: "payload", sig: "v.payload: usize", doc: "The variant's number of payload values." },
+    ReflectDoc {
+        name: "is_active",
+        sig: "v.is_active: bool",
+        doc: "Whether the subject holds this variant: the one member that reads the subject.",
+    },
+    ReflectDoc { name: "value", sig: "v.value", doc: "The subject, seen as this variant." },
+    ReflectDoc {
+        name: "other_active",
+        sig: "v.other_active: bool",
+        doc: "Whether the second subject (`variants(&a, &b)`) holds this variant.",
+    },
+    ReflectDoc {
+        name: "has_meta",
+        sig: "v.has_meta(\"key\") bool",
+        doc: "Whether the variant carries the `@reflect` entry `key` (a string literal): a per-copy constant.",
+    },
+    ReflectDoc {
+        name: "meta_bool",
+        sig: "v.meta_bool(\"key\") bool",
+        doc: "The `Bool` value of the `@reflect` entry `key` (false when missing): a per-copy constant.",
+    },
+    ReflectDoc {
+        name: "meta_int",
+        sig: "v.meta_int(\"key\") i64",
+        doc: "The `Int` value of the `@reflect` entry `key` (0 when missing): a per-copy constant.",
+    },
+    ReflectDoc {
+        name: "meta_str",
+        sig: "v.meta_str(\"key\") str",
+        doc: "The `Str` value of the `@reflect` entry `key` (\"\" when missing): a per-copy constant.",
+    },
+];
+
+// The markdown block of reflection construct `d`.
+fn reflect_doc_md(d: &ReflectDoc) String {
+    let mut out = String::from_str("```super-c\n");
+    out.push_str(d.sig);
+    out.push_str("\n```\n\n");
+    out.push_str(d.doc);
+    return out;
+}
+
+/// Markdown hover for the reflection construct at `off` in module `mi` that no declaration
+/// documents: an unresolved intrinsic name (`type_info`, `zeroed`, `fields`, `variants`,
+/// `payloads`), or a member of an `inline for` binder (`f.name`, `v.tag`, `f.has_meta`). None
+/// elsewhere.
+pub fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
+    let a = mod_ast(p, mi);
+    let src = p.modules.at(mi).source.as_str();
+    let id = node_at_or_before(a, off);
+    if id == NODE_NONE || unsafe (*a).at_const(id).kind != NodeKind::NODE_IDENTIFIER {
+        return Option::<String>::None;
+    }
+    let sp = unsafe (*a).at_const(id).as_data.name.text;
+    let name = src.slice(sp.start as usize, sp.end as usize);
+    // A binder member: the member access whose name this is, on a binder variable.
+    let n = unsafe (*a).nnodes();
+    for i0 in 1..n {
+        let i = unsafe (*a).nth_id(i0);
+        let mn = unsafe (*a).at_const(i);
+        if mn.kind != NodeKind::NODE_MEMBER || mn.as_data.member.member != id || mn.as_data.member.path {
+            continue;
+        }
+        let ob = mn.as_data.member.object;
+        if unsafe (*a).at_const(ob).kind != NodeKind::NODE_IDENTIFIER {
+            return Option::<String>::None;
+        }
+        let blid = unsafe (*a).resolution(ob);
+        if blid == NODE_NONE || unsafe (*a).at_const(blid).kind != NodeKind::NODE_INLINE_FOR {
+            return Option::<String>::None;
+        }
+        let it = unsafe (*a).at_const(blid).as_data.for_stmt.iterable;
+        let mut vmode = false;
+        if unsafe (*a).at_const(it).kind == NodeKind::NODE_CALL {
+            let cl = unsafe (*a).at_const(it).as_data.call.callee;
+            if unsafe (*a).at_const(cl).kind == NodeKind::NODE_IDENTIFIER {
+                let csp = unsafe (*a).at_const(cl).as_data.name.text;
+                vmode = src.slice(csp.start as usize, csp.end as usize) == "variants";
+            }
+        }
+        let docs: []ReflectDoc = if vmode {
+            VARIANT_BINDER_DOCS;
+        } else {
+            FIELD_BINDER_DOCS;
+        };
+        for k in 0..docs.len() {
+            if docs.at(k).name == name {
+                return Option::<String>::Some(reflect_doc_md(docs.at(k)));
+            }
+        }
+        return Option::<String>::None;
+    }
+    if unsafe (*a).resolution_def(id).node != NODE_NONE {
+        return Option::<String>::None;
+    }
+    let ins: []ReflectDoc = REFLECT_INTRINSICS;
+    for k in 0..ins.len() {
+        if ins.at(k).name == name {
+            return Option::<String>::Some(reflect_doc_md(ins.at(k)));
+        }
+    }
+    return Option::<String>::None;
+}
+
 /// Markdown hover for the attribute name at `off` (the '@' or a byte of the name), None when `off`
 /// is not on a known attribute.
 pub fn attribute_hover(src: str, off: u32) Option<String> {
@@ -469,14 +664,35 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     if unsafe (*a).valid(id) {
         t = unsafe (*a).type_of(id);
     }
+    let d = def_at(p, mi, off);
     if t != TYPE_NONE {
         let mut buf = HovBuf {};
-        tc::render_type_into(p, a, p.modules.at(mi).source.as_str(), t, &mut buf[0], 512);
+        let src = p.modules.at(mi).source.as_str();
+        // An interface name in a bound, a conformance or a `dyn` type: the interface instance with
+        // its defaulted arguments (`Mul<Simd<T, N>>`), not the erased value type that records it.
+        if d.node != NODE_NONE && unsafe (*a).type_at(t).kind == TypeKind::TYPE_DYN && unsafe (*mod_ast(
+            p,
+            d.module as usize,
+        )).at_const(d.node).kind == NodeKind::NODE_INTERFACE {
+            tc::render_iface_into(p, a, src, t, &mut buf[0], 512);
+        } else {
+            tc::render_type_into(p, a, src, t, &mut buf[0], 512);
+        }
         out.push_str("```super-c\n");
         out.push_str(str::from_cstr(&buf[0]));
         out.push_str("\n```");
     }
-    let d = def_at(p, mi, off);
+    if d.node == NODE_NONE {
+        // A reflection construct: its documentation after the rendered type.
+        let rh = reflect_hover(p, mi, off);
+        if rh.is_some() {
+            if out.len() != 0 {
+                out.push_str("\n\n---\n");
+            }
+            let rs = rh.unwrap();
+            out.push_string(&rs);
+        }
+    }
     if d.node != NODE_NONE {
         let sig = decl_signature(p, d);
         if sig.len() != 0 {
@@ -995,6 +1211,20 @@ pub fn complete_keywords() Vector<CompItem> {
     return out;
 }
 
+/// Whether a top-level item of module `mi` spans byte offset `off`: false between items, and where
+/// the parser dropped a declaration it could not read.
+pub fn item_at(p: &loader::Package, mi: usize, off: u32) bool {
+    let a = mod_ast(p, mi);
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let sp = unsafe (*a).at_const(unsafe (*a).list(items)[i as usize]).span;
+        if sp.start <= off && off <= sp.end {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// General identifier completion from the last good build: keywords, builtin type names, the module's
 /// own top-level declarations, import aliases, prelude publics, and locals in scope (the enclosing
 /// function's parameters and earlier bindings).
@@ -1035,6 +1265,21 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
                 if nm != NODE_NONE {
                     comp_push(&mut out, name_str(p, mi, nm), 9, String::new());
                 }
+            }
+        }
+        // The generic parameters of every declaration enclosing the cursor (a method's and its
+        // extend's), its header included.
+        let nn0 = unsafe (*a).nnodes();
+        for i0 in 1..nn0 {
+            let i = unsafe (*a).nth_id(i0);
+            let nd = unsafe (*a).at_const(i);
+            if nd.span.start > off || off > nd.span.end {
+                continue;
+            }
+            let gs = decl_generics(nd);
+            for k in 0..gs.len {
+                let gp = unsafe (*a).at_const(unsafe (*a).list(gs)[k as usize]);
+                comp_push(&mut out, name_str(p, mi, gp.as_data.generic_param.name), 25, String::new());
             }
         }
         // Locals, lexically scoped: the enclosing function's parameters, plus each binder whose
@@ -1487,9 +1732,188 @@ pub struct SigInfo {
     pub active: i32,
 }
 
+/// The generic parameters of declaration `n`: empty for a kind without them.
+fn decl_generics(n: &Node) NodeList {
+    if n.kind == NodeKind::NODE_FUNCTION {
+        return n.as_data.function.generics;
+    } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
+        return n.as_data.aggregate.generics;
+    } else if n.kind == NodeKind::NODE_INTERFACE {
+        return n.as_data.interface_def.generics;
+    } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
+        return n.as_data.type_alias.generics;
+    } else if n.kind == NodeKind::NODE_EXTEND {
+        return n.as_data.extend_def.generics;
+    }
+    return NodeList { start: 0, len: 0 };
+}
+
+// Whether top-level item `n` is visible outside its module.
+fn item_public(n: &Node) bool {
+    if n.kind == NodeKind::NODE_FUNCTION {
+        return n.as_data.function.is_public();
+    } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
+        return n.as_data.aggregate.is_public;
+    } else if n.kind == NodeKind::NODE_INTERFACE {
+        return n.as_data.interface_def.is_public;
+    } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
+        return n.as_data.type_alias.is_public;
+    }
+    return false;
+}
+
+// The generic declaration named `name` that module `mi` sees: unqualified, an item of `mi` or a
+// public item of a prelude module; qualified by `qual`, a public item of the module an import of
+// `mi` names `qual` (by its alias or its last segment). NODE_NONE when there is none.
+fn generic_decl_named(p: &loader::Package, mi: usize, qual: str, name: str) DefId {
+    let a = mod_ast(p, mi);
+    let mut mods = Vector::<usize>::new();
+    if qual.len() == 0 {
+        mods.push(mi);
+        for mm in 0..p.modules.len() {
+            if mm != mi && p.modules.at(mm).prelude {
+                mods.push(mm);
+            }
+        }
+    } else {
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let n = unsafe (*a).at_const(unsafe (*a).list(items)[i as usize]);
+            if n.kind != NodeKind::NODE_IMPORT || n.as_data.import_decl.path.len == 0 {
+                continue;
+            }
+            let parts = n.as_data.import_decl.path;
+            let mut nm = n.as_data.import_decl.alias;
+            if nm == NODE_NONE {
+                nm = unsafe (*a).list(parts)[(parts.len - 1) as usize];
+            }
+            if name_str(p, mi, nm) != qual {
+                continue;
+            }
+            let path = loader::join_parts(unsafe &*a, p.modules.at(mi).source.as_str(), parts, "::");
+            let target = p.find(path.as_str());
+            if target >= 0 {
+                mods.push(target as usize);
+            }
+        }
+    }
+    for k in 0..mods.len() {
+        let mm = mods[k];
+        if !p.modules.at(mm).has_ast {
+            continue;
+        }
+        let am = mod_ast(p, mm);
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*am).list(items)[i as usize];
+            let n = unsafe (*am).at_const(iid);
+            if decl_generics(n).len != 0 && (mm == mi || item_public(n)) && name_str(p, mm, decl_name(am, iid)) == name {
+                return DefId { module: mm as ModuleId, node: iid };
+            }
+        }
+    }
+    return DefId { module: 0, node: NODE_NONE };
+}
+
+// The bytes of a type argument list scan back from the cursor before it gives up.
+const TARG_SCAN: usize = 1024;
+
+/// Help for the type argument list enclosing byte offset `off` of module `mi` (`Mul<|`, `f::<|`):
+/// the declaration's head, its generic parameters as written (bounds and defaults included), and
+/// the active one. Read from the text, so a list still being typed is found. None outside one, or
+/// when the name before `<` names no generic declaration.
+pub fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
+    let src = p.modules.at(mi).source.as_str();
+    if off as usize > src.len() {
+        return Option::<SigInfo>::None;
+    }
+    // The unclosed `<` before the cursor; a closer seen first nests, an unclosed `(`, `[`, `{` or a
+    // `;` ends the search.
+    let mut i = off as usize;
+    let mut angle: u32 = 0;
+    let mut nest: u32 = 0;
+    let mut commas: i32 = 0;
+    let mut lt: usize = 0;
+    let mut found = false;
+    let lim = if i > TARG_SCAN {
+        i - TARG_SCAN;
+    } else {
+        0;
+    };
+    while i > lim && !found {
+        i -= 1;
+        let c = src[i];
+        if c == b'>' {
+            angle += 1;
+        } else if c == b'<' {
+            if angle == 0 && nest == 0 {
+                found = true;
+                lt = i;
+            } else if angle != 0 {
+                angle -= 1;
+            }
+        } else if c == b')' || c == b']' || c == b'}' {
+            nest += 1;
+        } else if c == b'(' || c == b'[' || c == b'{' {
+            if nest == 0 {
+                return Option::<SigInfo>::None;
+            }
+            nest -= 1;
+        } else if c == b';' {
+            return Option::<SigInfo>::None;
+        } else if c == b',' && angle == 0 && nest == 0 {
+            commas += 1;
+        }
+    }
+    if !found || lt > 0 && src[lt - 1] == b'<' {
+        return Option::<SigInfo>::None;
+    }
+    // The name before `<`, past a turbofish's `::`, and its qualifier.
+    let mut e = lt;
+    while e > 0 && (src[e - 1] == b' ' || src[e - 1] == b'\t') {
+        e -= 1;
+    }
+    if e >= 2 && src[e - 1] == b':' && src[e - 2] == b':' {
+        e -= 2;
+    }
+    let mut b = e;
+    while b > 0 && ltext::ident_byte(src[b - 1]) {
+        b -= 1;
+    }
+    if b == e {
+        return Option::<SigInfo>::None;
+    }
+    let mut qual = "";
+    if b >= 3 && src[b - 1] == b':' && src[b - 2] == b':' {
+        let mut qb = b - 2;
+        while qb > 0 && ltext::ident_byte(src[qb - 1]) {
+            qb -= 1;
+        }
+        qual = src.slice(qb, b - 2);
+    }
+    let d = generic_decl_named(p, mi, qual, src.slice(b, e));
+    if d.node == NODE_NONE {
+        return Option::<SigInfo>::None;
+    }
+    let da = mod_ast(p, d.module as usize);
+    let dsrc = p.modules.at(d.module as usize).source.as_str();
+    let gs = decl_generics(unsafe (*da).at_const(d.node));
+    let mut params = Vector::<String>::new();
+    for k in 0..gs.len {
+        let sp = unsafe (*da).at_const(unsafe (*da).list(gs)[k as usize]).span;
+        params.push(String::from_str(dsrc.slice(sp.start as usize, sp.end as usize)));
+    }
+    let active = pick(commas as usize >= params.len(), params.len() as i32 - 1, commas);
+    return Option::<SigInfo>::Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
+}
+
 /// Signature help for the call enclosing byte offset `off` of module `mi`: the callee's label, its
 /// parameter labels, and the active parameter; None outside a call.
 pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
+    let ta = type_args_help(p, mi, off);
+    if ta.is_some() {
+        return ta;
+    }
     let a = mod_ast(p, mi);
     let mut call: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;

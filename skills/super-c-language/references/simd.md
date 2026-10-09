@@ -93,11 +93,13 @@ The right operand of a binary operator is the left's vector type, or a scalar of
 stands for that scalar in every lane (`v * 3.0`, `v * a`, `v ^ (3 | 4)`: an unsuffixed literal or
 literal-only arithmetic takes the lane type), and the compound forms (`+=`, `<<= 2`) follow the same
 rules. A right operand of another type is "mismatched types" with the note "the right operand is
-the vector type or its lane type". A scalar left operand does not convert: `1.0 + v` is "operator
-requires numeric operands" with the note "a scalar does not convert to a vector: use
-`Simd::splat`". The operators are the conformances `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`,
-`BitOr`, `BitXor`, `BitNot`, `Shl` and `Shr`, each also as `<T>` for a lane scalar, so a generic
-bound reaches them.
+the vector type or its lane type". A lane scalar on the left is the scalar in every lane too (`3.0 * v`, `1u8 << w`, `a * x` in code
+generic over the lanes); a left operand of another type is "operator requires numeric operands" with
+the note "the left operand is the vector type or its lane type". The operators are the conformances
+`Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl` and `Shr`, each
+also as `<T>` for a lane scalar, and the generic conformances `extend<T: SimdElement, const N:
+usize> T as Mul<Simd<T, N>>` (and the others) for a scalar left operand, so a generic bound reaches
+them.
 
 ```text
 // SimdInt lanes
@@ -393,7 +395,9 @@ quiets a signaling NaN, for which `fminnm` gives NaN, and the C compilers fold `
 `y` selects `x` quieted, since the C compilers may swap `fminnm`'s operands), the lane-mask
 forms (`LanesToMask` sums each lane's power of two: `addv`, or three `addp` for byte lanes),
 overflow masks, conversions, saturating narrowing, loads, stores, masked accesses, run-time
-byte indexes (`tbl`, 16 to 64 bytes) and reductions. A float tree reduction adds the upper half
+byte indexes (`tbl`, 16 to 64 bytes), `compress` and `expand` of up to 8 lanes (`tbl` and `tbx`
+with byte indexes from a constant table indexed by the mask, 4 KiB at most) and reductions. A float
+tree reduction adds the upper half
 onto the lower half (`vadd_f32` of the halves): never adjacent pairs (`faddp` over four lanes,
 `vaddvq_f32`), whose order differs. `dot::<i32>` of byte lanes has two entries: `sdot`/`udot`
 under `[Neon, Dotprod]`, and the widened products added pairwise under `[Neon]`; the planner

@@ -336,7 +336,10 @@ extend Circle as Shape {
 `Self::f()`, `Self::K` and `Self { .. }` name the implementing type inside an extend or an
 interface default body. A call on a concrete receiver chooses by its arguments among the methods
 its extends define and the defaults its conformances inherit (see the generics section of
-[types.md](references/types.md)).
+[types.md](references/types.md)). An interface-qualified call (`Shape::area(&c)`, `Twice::base(&x)`)
+takes its implementing type from the receiver argument, a type parameter's bound included; among
+several conformances of the receiver to one generic interface the expected result type chooses
+("ambiguous call to 'conv': 'P' conforms to 'Conv' with several arguments that fit" without one).
 
 The prelude defaults of `Clone`, `Default`, `Eq` and `Ord` (what `@derive` and an empty `extend`
 use) work field by field. An enum must define `clone` and `default` itself, and a union also `eq`

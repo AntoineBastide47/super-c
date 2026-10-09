@@ -4243,7 +4243,10 @@ extend Lowerer {
         self.avput(argv);
         // Through a type parameter's bound: the conformance each instance dispatches to.
         let bc = self.proj_subst_ty(self.f.bound_call(id));
-        let res = self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, bc, TYPE_NONE, ty, sp);
+        // A keyed extend's operator (`ext_keyed`) names the extend's arguments, as a call does.
+        let ts = self.body.targ_pool.len() as u32;
+        let tn = self.copy_targs(id);
+        let res = self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, ts, tn, bc, TYPE_NONE, ty, sp);
         // The operator's implicit call is checked like an explicit one; a compound assignment checks
         // after it stores the result (`lower_assignment`).
         if self.f.node(id).kind != NodeKind::NODE_ASSIGNMENT {
@@ -4594,6 +4597,10 @@ extend Lowerer {
                     self.f.node(d.callee).as_data.member.member,
                 ) == null {
                     self.mark_user_move(rop);
+                }
+                // A constant receiver of a `&self` method (`7i64.twice()`) borrows a temporary.
+                if ptk1 == NodeKind::NODE_REFERENCE_TYPE && self.body.operands.at(rop as usize).kind == ir::OP_CONST {
+                    rop = self.copy_op(self.spill(rop, sp));
                 }
             }
             argv.push(rop);
@@ -5105,13 +5112,19 @@ extend Lowerer {
         let c = k as u8;
         let kind = k >> 8;
         let shift = c == tt::TokenType::LeftShift as u8 || c == tt::TokenType::RightShift as u8;
-        if kind == ir::SI_BINARY && !shift && self.f.ty(self.body.operands.at(ops[1] as usize).ty).kind != TypeKind::TYPE_SIMD {
-            // A lane scalar right of a vector operator (`v * s`): the vector of `s` in every lane.
-            let arr = self.rv_temp(ir::rv(ir::RV_REPEAT, ops[1], self.lanes_op(ty, sp), 0, self.vec_array_ty(ty)), sp);
-            ops.set(
-                1,
-                self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, self.copy_op(arr), ir::CAST_SIMD_ARRAY, 0, ty), sp)),
-            );
+        for i in 0..pick(kind == ir::SI_BINARY, 2usize, 0usize) {
+            // A lane scalar beside a vector operator (`v * s`, `s * v`): the vector of the scalar in
+            // every lane. A shift keeps a scalar count.
+            if self.f.ty(self.body.operands.at(ops[i] as usize).ty).kind != TypeKind::TYPE_SIMD && (i == 0 || !shift) {
+                let arr = self.rv_temp(
+                    ir::rv(ir::RV_REPEAT, ops[i], self.lanes_op(ty, sp), 0, self.vec_array_ty(ty)),
+                    sp,
+                );
+                ops.set(
+                    i,
+                    self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, self.copy_op(arr), ir::CAST_SIMD_ARRAY, 0, ty), sp)),
+                );
+            }
         }
         if kind == ir::SI_BINARY || kind == ir::SI_UNARY || kind == ir::SI_CAST {
             let rv = if kind == ir::SI_BINARY {

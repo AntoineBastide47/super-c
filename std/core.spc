@@ -3035,10 +3035,15 @@ pub enum MetaKind {
 /// owns nothing. Exactly one of `b`/`i`/`s` is meaningful, named by `kind`; the inactive slots
 /// read false / 0 / "".
 pub struct MetaInfo {
+    /// The entry's key (`hidden` in `@reflect(hidden)`).
     pub name: str<'static>,
+    /// Which of `b`, `i` and `s` holds the value.
     pub kind: MetaKind,
+    /// The value of a `Bool` entry (true for a bare key), else false.
     pub b: bool,
+    /// The value of an `Int` entry, else 0.
     pub i: i64,
+    /// The value of a `Str` entry (its raw source bytes), else "".
     pub s: str<'static>,
 }
 
@@ -3047,10 +3052,15 @@ pub struct MetaInfo {
 /// the field's own type (one level: reflect that type itself to go deeper). `meta` holds the
 /// declaration's `@reflect` entries, in written order.
 pub struct FieldInfo {
+    /// The field's name (`_0`, `_1`, .. for a tuple).
     pub name: str<'static>,
+    /// The field's byte offset in the C layout (0 for every field of a union).
     pub offset: usize,
+    /// The field's size in bytes.
     pub size: usize,
+    /// The tag of the field's type, one level deep.
     pub kind: TypeTag,
+    /// The field declaration's `@reflect` entries, in written order.
     pub meta: Slice<'static, MetaInfo>,
 }
 
@@ -3076,9 +3086,13 @@ extend FieldInfo {
 /// constant for a payload-less enum, the declaration index for an enum with payloads. `payload` is
 /// the variant's number of payload values (0 = a unit variant).
 pub struct VariantInfo {
+    /// The variant's name.
     pub name: str<'static>,
+    /// The variant's runtime value: the declared constant, or the declaration index with payloads.
     pub tag: i32,
+    /// The variant's number of payload values (0 for a unit variant).
     pub payload: usize,
+    /// The variant declaration's `@reflect` entries, in written order.
     pub meta: Slice<'static, MetaInfo>,
 }
 
@@ -3100,8 +3114,9 @@ extend VariantInfo {
     }
 }
 
-/// One method a reflected type declares in an `extend` block: inherent or conformance, `self`
-/// receiver or associated. ENUMERATION only: reflection cannot invoke a method (there is no value
+/// One method a reflected type declares in an `extend` block, or a generic conformance whose bounds
+/// it satisfies (`extend<T: B> T as I`) gives it: inherent or conformance, `self` receiver or
+/// associated. ENUMERATION only: reflection cannot invoke a method (there is no value
 /// call path through a descriptor); use the name to document, filter by `meta`, or dispatch by
 /// hand. `arity` counts the value parameters with the `self` receiver excluded; `ret` is the
 /// one-level tag of the return type (`Void` for none, for several, or for one that has no tag,
@@ -3109,10 +3124,15 @@ extend VariantInfo {
 /// declares no methods, so its defaults are not listed. `meta` holds the declaration's `@reflect`
 /// entries, in written order.
 pub struct MethodInfo {
+    /// The method's name.
     pub name: str<'static>,
+    /// The method's value parameters, the `self` receiver excluded.
     pub arity: usize,
+    /// Whether the method is `pub`.
     pub is_pub: bool,
+    /// The tag of the return type, one level deep (`Void` for none, several, or an untagged one).
     pub ret: TypeTag,
+    /// The method declaration's `@reflect` entries, in written order.
     pub meta: Slice<'static, MetaInfo>,
 }
 
@@ -3141,17 +3161,28 @@ extend MethodInfo {
 /// `Struct`/`Tuple`/`Union`; `variants` is empty unless `kind` is `Enum`; `elem` is the tag of the
 /// pointee/element type for `Pointer`/`Reference`/`Array`/`Slice` (else `Void`); `len` is the
 /// element count for `Array` (else 0). `methods` lists every `extend` function declared FOR a
-/// decl-backed or builtin type, across all modules, in declaration order.
+/// decl-backed or builtin type, across all modules, in declaration order, then the methods of the
+/// generic conformances whose bounds the type satisfies.
 pub struct TypeInfo {
+    /// The type's name: a builtin's spelling or the declaration's name ("" for an anonymous kind).
     pub name: str<'static>,
+    /// What sort of type it is.
     pub kind: TypeTag,
+    /// The tag of the pointee, element or lane type (`Void` for another kind).
     pub elem: TypeTag, // beside `kind`: two 4-byte tags share one 8-byte slot
+    /// The type's size in bytes.
     pub size: usize,
+    /// The type's alignment in bytes.
     pub align: usize,
+    /// An array's element count or a vector's lane count (0 for another kind).
     pub len: usize,
+    /// The fields of a struct, tuple or union, in declaration order.
     pub fields: Slice<'static, FieldInfo>,
+    /// The variants of an enum, in declaration order.
     pub variants: Slice<'static, VariantInfo>,
+    /// The type declaration's `@reflect` entries, in written order.
     pub meta: Slice<'static, MetaInfo>,
+    /// The methods the type declares, then those of the generic conformances that apply to it.
     pub methods: Slice<'static, MethodInfo>,
 }
 

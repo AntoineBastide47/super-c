@@ -4303,13 +4303,29 @@ extend Package {
                 let ir = unsafe (*ea).resolution_def(ed.interface_type);
                 let tg = unsafe (*ea).resolution_def(ed.target_type);
                 let dt = unsafe (*ea).type_of(ed.interface_type);
-                if ir.module != ai.module || ir.node != iface || tg.module != it.module || tg.node != it.decl || dt == TYPE_NONE {
+                let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
+                if ir.module != ai.module || ir.node != iface || bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE || ed.generics.len > 8 {
                     continue;
                 }
                 let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
                 let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
                 let mut ln: u32 = 0;
-                if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                if bp >= 0 {
+                    // A generic extend: its target parameter is the type itself.
+                    ln = ed.generics.len;
+                    for g in 0..ln {
+                        unsafe lp[g as usize] = DefId { module: em, node: unsafe (*ea).list(ed.generics)[g as usize] };
+                    }
+                    unsafe la[bp as usize] = ai.args[0];
+                } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                    continue;
+                }
+                // The parameters the target does not name: the bound's interface arguments solve them.
+                let mut open = false;
+                for g in 0..ln {
+                    open = open || unsafe la[g as usize] == TYPE_NONE;
+                }
+                if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
                     continue;
                 }
                 let mut g = TYPE_NONE;
@@ -4360,8 +4376,12 @@ extend Package {
             unsafe la[i as usize] = TYPE_NONE;
         }
         let pat = unsafe (*ea).type_of(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        let free = ext_free_params(unsafe &*ea, pat, unsafe &*ea, em, ext);
         if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
             for i in 0..gens.len {
+                if (free >> i as u64 & 1u64) != 0 {
+                    continue;
+                }
                 if i >= it.n as u32 {
                     return false;
                 }
@@ -4412,11 +4432,94 @@ extend Package {
             unsafe la[x.par as usize] = v;
         }
         for i in 0..gens.len {
-            if unsafe la[i as usize] == TYPE_NONE {
+            if unsafe la[i as usize] == TYPE_NONE && (free >> i as u64 & 1u64) == 0 {
                 return false;
             }
         }
         return true;
+    }
+
+    // Bind each parameter `gens` (module `em`) left TYPE_NONE in `la` that pattern type `pt` (module
+    // `em`) names so that it equals type `at` (pool `dm`): a parameter takes the type (or must equal
+    // its value), an instance, `dyn`, vector, mask, array, slice, reference or pointer matches part by
+    // part, and a type naming no parameter must be the same. False when they cannot match.
+    fn lunify(
+        self: &Self,
+        em: ModuleId,
+        pt: TypeId,
+        dm: ModuleId,
+        at: TypeId,
+        gens: NodeList,
+        la: *mut TypeId,
+        depth: u32,
+    ) bool {
+        if depth > 8 || pt == TYPE_NONE || at == TYPE_NONE {
+            return false;
+        }
+        let ea = self.module_ast_const(em);
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let py = *unsafe (*ea).type_at(pt);
+        if py.kind == TypeKind::TYPE_GENERIC && py.module == em {
+            for i in 0..gens.len {
+                if unsafe (*ea).list(gens)[i as usize] == py.as_data.decl {
+                    if unsafe la[i as usize] == TYPE_NONE {
+                        unsafe la[i as usize] = at;
+                    }
+                    return unsafe la[i as usize] == at;
+                }
+            }
+        }
+        if unsafe (*ea).type_concrete(pt) {
+            return unsafe (*da).reintern(unsafe &*ea, pt) == at;
+        }
+        let ay = *unsafe (*da).type_at(at);
+        if py.kind != ay.kind {
+            return false;
+        }
+        if py.kind == TypeKind::TYPE_INSTANCE || py.kind == TypeKind::TYPE_DYN {
+            let pi = *unsafe (*ea).instance(py.as_data.inst);
+            let ai = *unsafe (*da).instance(ay.as_data.inst);
+            if pi.module != ai.module || pi.decl != ai.decl || pi.n != ai.n {
+                return false;
+            }
+            for k in 0..pi.n {
+                if !self.lunify(em, unsafe pi.args[k as usize], dm, unsafe ai.args[k as usize], gens, la, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if py.arr_like() {
+            if py.kind != TypeKind::TYPE_MASK && !self.lunify(
+                em,
+                py.as_data.arr.elem,
+                dm,
+                ay.as_data.arr.elem,
+                gens,
+                la,
+                depth + 1,
+            ) {
+                return false;
+            }
+            if py.is_vec() || py.arr_sym() && ay.arr_sym() {
+                return self.lunify(em, py.as_data.arr.len, dm, ay.as_data.arr.len, gens, la, depth + 1);
+            }
+            if py.arr_sym() && !ay.arr_sym() {
+                // A concrete array holds its length as a count: a length parameter takes it as a
+                // constant of the parameter's type.
+                let ly = *unsafe (*ea).type_at(py.as_data.arr.len);
+                if ly.kind == TypeKind::TYPE_GENERIC && ly.module == em {
+                    let ct = unsafe (*da).const_value(ay.as_data.arr.len, self.const_param_bt(em, ly.as_data.decl));
+                    return self.lunify(em, py.as_data.arr.len, dm, ct, gens, la, depth + 1);
+                }
+                return true;
+            }
+            return py.arr_sym() || py.as_data.arr.len == ay.as_data.arr.len;
+        }
+        if py.kind == TypeKind::TYPE_REFERENCE || py.kind == TypeKind::TYPE_POINTER || py.kind == TypeKind::TYPE_SLICE {
+            return self.lunify(em, py.as_data.elem, dm, ay.as_data.elem, gens, la, depth + 1);
+        }
+        return false;
     }
 
     /// `(pm, t)` with the parameters `lp[i]` bound to `la[i]` (`ln` of them, concrete types of pool

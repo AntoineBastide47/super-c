@@ -1527,3 +1527,113 @@ fn lsp_build_constants() {
     assert(r6.contains("\"result\":null"));
     assert(o.contains("unknown Platform variant 'Macos'"));
 }
+
+// The response that starts at byte `at` of session output `o`, up to the next frame header.
+fn one_response<'a>(o: str<'a>, at: isize) str<'a> {
+    let r = o.slice(at as usize, o.len());
+    let e = r.find("Content-Length");
+    if e < 0 {
+        return r;
+    }
+    return r.slice(0, e as usize);
+}
+
+// Hover documents the compile-time reflection constructs: the intrinsics and the binder members,
+// which no declaration documents, and the descriptors' fields and methods, whose own docs travel.
+const REFLECT_SRC: str = "struct P {\n    @reflect(hidden)\n    pub x: i32,\n}\n\nfn count<T>(v: &T) usize {\n    let ti = type_info::<T>();\n    let mut n = ti.methods.len;\n    inline for f in fields(v) {\n        if f.has_meta(\"hidden\") {\n            n += f.index;\n        }\n    }\n    return n;\n}\n\nenum E {\n    A,\n    B,\n}\n\nfn tag(e: &E) i32 {\n    let mut t = 0;\n    inline for v in variants(e) {\n        if v.is_active {\n            t = v.tag;\n        }\n    }\n    return t;\n}\n\nfn main() i32 {\n    let p = P { x: 1 };\n    let m = type_info::<P>().method(\"none\");\n    return count(&p) as i32 + tag(&E::A) + m.is_some() as i32;\n}\n";
+
+@test
+fn lsp_reflection_hover() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", REFLECT_SRC);
+    let root = str::from_cstr(p.rootp());
+
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", REFLECT_SRC);
+    push_req_at(&mut ses, root, "src/main.spc", 10, "textDocument/hover", 6, 14);
+    push_req_at(&mut ses, root, "src/main.spc", 11, "textDocument/hover", 7, 20);
+    push_req_at(&mut ses, root, "src/main.spc", 12, "textDocument/hover", 8, 21);
+    push_req_at(&mut ses, root, "src/main.spc", 13, "textDocument/hover", 9, 14);
+    push_req_at(&mut ses, root, "src/main.spc", 14, "textDocument/hover", 10, 20);
+    push_req_at(&mut ses, root, "src/main.spc", 15, "textDocument/hover", 24, 14);
+    push_req_at(&mut ses, root, "src/main.spc", 16, "textDocument/hover", 25, 19);
+    push_req_at(&mut ses, root, "src/main.spc", 17, "textDocument/hover", 33, 30);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    let h10 = o.find("\"id\":10,");
+    assert(h10 >= 0 && one_response(o, h10).contains("A non-owning descriptor of `T`"), "hover 10");
+    let h11 = o.find("\"id\":11,");
+    assert(h11 >= 0 && one_response(o, h11).contains("The methods the type declares"), "hover 11");
+    let h12 = o.find("\"id\":12,");
+    assert(h12 >= 0 && one_response(o, h12).contains("The field binder of a struct"), "hover 12");
+    let h13 = o.find("\"id\":13,");
+    assert(
+        h13 >= 0 && one_response(o, h13).contains("Whether the declaration carries the `@reflect` entry"),
+        "hover 13",
+    );
+    let h14 = o.find("\"id\":14,");
+    assert(h14 >= 0 && one_response(o, h14).contains("The field's position"), "hover 14");
+    let h15 = o.find("\"id\":15,");
+    assert(h15 >= 0 && one_response(o, h15).contains("Whether the subject holds this variant"), "hover 15");
+    let h16 = o.find("\"id\":16,");
+    assert(h16 >= 0 && one_response(o, h16).contains("The variant's discriminant"), "hover 16");
+    let h17 = o.find("\"id\":17,");
+    assert(h17 >= 0 && one_response(o, h17).contains("The first method named"), "hover 17");
+}
+
+// Interface and type headers in the editor: hovering an interface in a conformance shows the
+// interface instance with its defaulted arguments; a type argument list being typed shows the
+// declaration's generic parameters, and completion inside a header offers the parameters in scope,
+// also while the header does not parse yet.
+const GENERIC_SRC: str = "interface Lane {}\nstruct V<T, const N: usize> { pub x: [T; N] }\nextend<T: Lane, const N: usize> V<T, N> as Mul {\n    type Output = V<T, N>;\n    fn mul(self: &Self, o: &V<T, N>) V<T, N> { return *o; }\n}\nfn main() i32 {\n    let q: V<i64, 2> = V::<i64, 2> { x: [1, 2] };\n    return q.x[0] as i32 - 1;\n}\n";
+const GENERIC_BROKEN: str = "interface Lane {}\nstruct V<T, const N: usize> { pub x: [T; N] }\nextend<T: Lane, const N: usize> V<T, N> as Mul< {\n    type Output = V<T, N>;\n    fn mul(self: &Self, o: &V<T, N>) V<T, N> { return *o; }\n}\nfn main() i32 {\n    let q: V<i64, 2> = V::<i64, 2> { x: [1, 2] };\n    return q.x[0] as i32 - 1;\n}\n";
+
+@test
+fn lsp_generic_headers() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", GENERIC_SRC);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", GENERIC_SRC);
+    push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 2, 44);
+    push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/signatureHelp", 7, 18);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    let h = one_response(o, o.find("\"id\":2,"));
+    assert(h.contains("Mul<V<T, N>>") && !h.contains("Box<") && h.contains("interface Mul<Rhs = Self>"), "hover");
+    let s = one_response(o, o.find("\"id\":3,"));
+    assert(s.contains("struct V<T, const N: usize>") && s.contains("\"activeParameter\":1"), "type arguments");
+
+    let q = cli::proj_new();
+    q.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    q.mkfile("src/main.spc", GENERIC_BROKEN);
+    let qroot = str::from_cstr(q.rootp());
+    let mut qs = String::new();
+    push_init(&mut qs, qroot);
+    push_open(&mut qs, qroot, "src/main.spc", GENERIC_BROKEN);
+    push_req_at(&mut qs, qroot, "src/main.spc", 2, "textDocument/signatureHelp", 2, 47);
+    push_completion(&mut qs, qroot, "src/main.spc", 3, 2, 47);
+    push_shutdown_exit(&mut qs, 9);
+    q.mkfile("session.bin", qs.as_str());
+    assert_eq(lsp_run(qroot), 0);
+    let qout = read_out(qroot);
+    let qo = qout.as_str();
+    let qh = one_response(qo, qo.find("\"id\":2,"));
+    assert(qh.contains("\"label\":\"Rhs = Self\""), "the interface's parameter");
+    let qc = one_response(qo, qo.find("\"id\":3,"));
+    assert(
+        qc.contains("{\"label\":\"T\",\"kind\":25") && qc.contains("{\"label\":\"N\",\"kind\":25"),
+        "the extend's parameters",
+    );
+}

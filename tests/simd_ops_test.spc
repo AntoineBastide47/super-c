@@ -136,7 +136,7 @@ fn operator_misuse_is_diagnosed() {
     let cases: [[str; 2]; 11] = [
         ["fn f(a: i32x4, b: f32x4) { let _ = a + b; }", "mismatched types"],
         ["fn f(a: f32x4, b: f64) { let _ = a + b; }", "the right operand is the vector type or its lane type"],
-        ["fn f(a: f32x4) { let _ = 1.0 + a; }", "use `Simd::splat`"],
+        ["fn f(a: f32x4, b: f64) { let _ = b + a; }", "the left operand is the vector type or its lane type"],
         ["fn f(a: i32x4) { let _ = a << 1u32; }", "the right operand is the vector type or its lane type"],
         ["fn f(a: f32x4) { let _ = a << a; }", "unsatisfied interface bounds"],
         ["fn f(a: f32x4) { let _ = a % a; }", "unsatisfied interface bounds"],
@@ -179,13 +179,16 @@ fn operator_misuse_is_diagnosed() {
     );
 }
 
-// A lane scalar right of an operator is the scalar in every lane: a variable, a literal and literal-only
-// arithmetic, in concrete code and in code generic over the lanes.
+// A lane scalar beside an operator is the scalar in every lane: a variable, a literal and literal-only
+// arithmetic, on either side, in concrete code and in code generic over the lanes.
 @test
 fn a_lane_scalar_operand_is_splat() {
     let src = M"(import std::simd;
 fn axpy<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
     return x * a + y;
+}
+fn axpy_left<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
+    return a * x + y;
 }
 fn twice<T: SimdInt, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     return x + x;
@@ -202,6 +205,14 @@ fn main(args: Vector<str>) i32 {
     let t = twice::<i16, 8>(Simd::<i16, 8>::splat(3));
     if a[7] != 6.5 || q[0] != 0.5 || b[15] != 198 || c[3] != 4 || r[2] != 3.0 || t[7] != 6 {
         return 1;
+    }
+    let l = 3.0 * v + k;
+    let m = 10.0 - v;
+    let s = 1u8 << Simd::<u8, 16>::splat(args.len() as u8 * 3);
+    let e = 200 - w ^ 1;
+    let rl = axpy_left::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
+    if l[0] != 7.0 || m[1] != 8.0 || s[2] != 8 || e[3] != 1 || rl[0] != 3.0 {
+        return 2;
     }
     return 0;
 }

@@ -1950,6 +1950,12 @@ extend tc::TypeChecker {
                 return false;
             }
         }
+        // A keyed extend's parameters (`ext_keyed`) are the target itself or solved by the interface's
+        // arguments: none is an element type of the receiver.
+        let ext = self.enclosing(md.module, md.node, NodeKind::NODE_EXTEND);
+        if ext != NODE_NONE && self.tc_ext_keyed(md.module, ext) {
+            return false;
+        }
         // Receiver-inherited type variable: is it a borrow-carrying type in THIS instantiation?
         // A capturing closure argument counts even when its substituted type is `dyn fn` (which
         // erases the captured borrow): the closure VALUE carries a borrow of its captured referent,

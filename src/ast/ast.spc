@@ -1545,10 +1545,14 @@ pub fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
 
 /// Whether extend `ext` of module `m` (syntax in `ea`) applies to every instance of its target and
 /// binds its generic parameters positionally: its target type `pat` (read through `a`) is not an
-/// instance, or the arguments it constrains are its parameters, bare and in order.
+/// instance, or the arguments it constrains are its parameters, bare and in order. A generic extend
+/// (`ext_blanket`) is not one: its target binds as a whole.
 pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) bool {
     let mut it = TyInstance {};
-    if pat == TYPE_NONE || !a.targs_of(pat, &mut it) {
+    if pat == TYPE_NONE || ext_blanket(a, pat, ea, m, ext) >= 0 {
+        return pat == TYPE_NONE;
+    }
+    if !a.targs_of(pat, &mut it) {
         return true;
     }
     let gens = ea.at_const(ext).as_data.extend_def.generics;
@@ -1562,6 +1566,69 @@ pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId)
         }
     }
     return true;
+}
+
+/// The position among extend `ext`'s generic parameters (module `m`, syntax in `ea`) of the one its
+/// target type `pat` (read through `a`) is: a generic extend (`extend<T: B> T as I`), the conformance
+/// of every type that satisfies the parameter's bounds. -1 for any other target.
+pub fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) i32 {
+    if pat == TYPE_NONE {
+        return -1;
+    }
+    let y = *a.type_at(pat);
+    if y.kind != TypeKind::TYPE_GENERIC || y.module != m {
+        return -1;
+    }
+    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    for i in 0..gens.len {
+        if unsafe ea.list(gens)[i as usize] == y.as_data.decl {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+/// The generic parameters of extend `ext` (module `m`, syntax in `ea`) that its target type `pat`
+/// (read through `a`) does not name, as bits by position: the parameters a conformance's interface
+/// arguments solve (`N` of `extend<const N: usize> f32 as Mul<V<N>>`), and every parameter but the
+/// target of a generic extend. At most 64 parameters.
+pub fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) u64 {
+    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    let all = pick(gens.len >= 64, ~0u64, (1u64 << gens.len as u64) - 1);
+    let b = ext_blanket(a, pat, ea, m, ext);
+    if b >= 0 {
+        return all & ~(1u64 << b as u64);
+    }
+    let mut it = TyInstance {};
+    if pat == TYPE_NONE || !a.targs_of(pat, &mut it) {
+        return all;
+    }
+    if ext_is_identity(a, pat, ea, m, ext) {
+        return 0;
+    }
+    let mut named: u64 = 0;
+    for j in 0..ext_arity(ea, ext, it.n) {
+        let x = xarg_of(a, unsafe it.args[j as usize], ea, m, gens);
+        if (x.kind == XA_PARAM || x.kind == XA_FORM) && x.par < 64 {
+            named = named | 1u64 << x.par as u64;
+        }
+    }
+    return all & ~named;
+}
+
+/// Whether every use of a member of extend `ext` (syntax and types in `ea`) names all of the
+/// extend's arguments, in declaration order, ahead of the member's own: a generic extend
+/// (`ext_blanket`), or one whose target does not name every parameter (`ext_free_params`). Any other
+/// extend's arguments are its receiver instance's.
+pub fn ext_keyed(ea: &Ast, ext: NodeId) bool {
+    let pat = ea.type_of(ea.at_const(ext).as_data.extend_def.target_type);
+    return pat != TYPE_NONE && (ext_blanket(ea, pat, ea, ea.module, ext) >= 0 || ext_free_params(
+        ea,
+        pat,
+        ea,
+        ea.module,
+        ext,
+    ) != 0);
 }
 
 /// Substitute a const-expression form's parameters and accumulate the result into `out`. `src` holds

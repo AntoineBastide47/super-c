@@ -563,6 +563,25 @@ Full monomorphization is the only generic backend.
   with `Self`, the conformance's arguments and the method's bound; the emitter
   (`iface_target_sym`, `IfTargs`) spells the same instance (`C__conv__u8`) and demands it
   (`demand_impl_targs`); the evaluator binds them in `call_in`.
+- **Keyed extends:** a generic extend (`ext_blanket`: its target is its own parameter) and an
+  extend with parameters only its interface's arguments name (`ext_free_params`) are keyed
+  (`ext_keyed`): no receiver instance binds them, so the checker records every argument of the
+  extend, in declaration order, ahead of the method's own on each call and operator node
+  (`tc_record_keyed`, `tc_record_op_keyed`; the lowering copies them, `lower_op_call_from`
+  included). The checker indexes generic extends apart (`ext_blankets`; `ext_next` yields them
+  after a target's own) and binds them from the receiver type (`tc_ext_bind`); its candidate
+  scoring and conformance matching solve the free parameters (`tc_solve_open`). The instance graph
+  binds a keyed extend's keys by position (`ExtShape.keyed`) and pairs no target instance with
+  it; the emitter spells `keyed_sym` and each argument (`[mod]<Interface>__<method>__<args>` for a
+  generic extend) and, through a bound or `dyn`, finds the conformance by target or among the
+  generic ones and binds it (`bind_keyed`, `unify_bind`); the evaluator (`conf_by_args`,
+  `keyed_conf`, `iunify`) and `Package::assoc_norm` (`lunify`) do the same. Every unifier
+  binds a const parameter from an array length too (`[f32; N]` against `[f32; 4]`). The instance
+  graph reaches the generic conformances a bound call (`note_iface_call`: `blanks`, `conf_bind`,
+  `gunify`) and a `dyn` erasure (`note_dyn`, `WalkCache.dyns`) demand, so their length faults are
+  located errors at the interface call (`iface_demand_site`). `type_info::<T>().methods` appends
+  the methods of each generic conformance whose bounds `T` satisfies (`rt_blanket_confs`,
+  `rt_satisfies`: conformances, `Copy`/`Send`/`Sync` structurally, `Free` through ownership facts).
 - **Emit order:** `Package::emit_order`: if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 

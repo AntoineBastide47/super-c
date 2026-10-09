@@ -182,7 +182,29 @@ constant for const parameter 'N', found type 'u64'", a value for a type paramete
 type for generic parameter 'T', found a constant", and a qualified path naming no constant is "no
 associated constant 'FOO' on 'u64'".
 
-An extend's generic parameters are solved from its target's arguments, as an impl's are in Rust.
+An extend's generic parameters are solved from its target's arguments and, for a conformance, from
+its interface's arguments, as an impl's are in Rust: `extend<const N: usize> f32 as Mul<V<N>>`
+gives `2.0 * v` with `v: V<3>` the instance `N = 3`, which the right operand's type solves at each
+use. A parameter that neither names is an error at the extend: "the generic parameter 'M' of this
+extend appears neither in its target nor in its interface's arguments" (for an extend without an
+interface, "the generic parameter 'U' of this extend does not appear in its target").
+
+A conformance whose target is one of its own parameters is generic: `extend<T: Lane> T as Twice
+{ .. }` conforms every type that satisfies `Lane`, a type parameter whose bounds entail `Lane`
+included, with `T` the type itself. Its methods, inherited defaults and associated types reach
+those types through a method call, an operator, a bound, a `dyn` value, a path call (`f32::twice(&x)`)
+and a constant alike; a type outside the bounds has none of them ("cannot call 'i32::twice':
+unsatisfied interface bounds" with a note at the generic conformance, "type 'u8' does not satisfy
+bound 'Twice'" with the same note). `type_info::<T>().methods` lists the methods of the generic
+conformances whose bounds `T` satisfies after its own. Only a conformance may be generic ("an extend
+whose target is one of its generic parameters must be a conformance"), and not `Free`'s ("'Free'
+cannot be implemented for every type that satisfies a bound"). A type conforms to an interface with
+given arguments once: two generic conformances of one interface whose arguments meet for a type,
+and a conformance of a type that also satisfies a generic one's bounds with arguments that meet, are
+"conflicting conformances to 'Twice': a generic conformance also applies to this type", with a note
+at the generic one.
+
+An extend's target arguments solve its parameters as follows.
 A bare parameter takes the instance's argument; a const form of one parameter without a division
 (`extend<const N: u64> F<{N + 3}>`, `F<{2 * N}>`) gives it the value that inverts the form, which
 must be an integer in the parameter's type; an argument that names no parameter (`extend P<u8>`,
@@ -191,8 +213,7 @@ solve: `F<{N + 3}>` gives `F<10>` its methods with `N = 7`, and `F<2>` has none 
 method 'get' on 'F<2>'"), nor its conformances. An argument that is itself a form or a parameter
 solves when every value it takes does (`F<{M + 3}>` in a generic of `M`, not `F<M>`). A target
 argument that places a parameter inside another type (`W<Vector<T>>`), a form of several parameters
-or with a division, a parameter written in two arguments and a parameter no argument names are
-errors at the extend. Only the arguments the target writes constrain it (an alias constrains all
+or with a division and a parameter written in two arguments are errors at the extend. Only the arguments the target writes constrain it (an alias constrains all
 of its instance's); `Free` is implemented for every instance, so its extend writes its parameters
 in order.
 

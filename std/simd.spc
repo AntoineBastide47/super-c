@@ -558,6 +558,78 @@ extend<T: SimdInt, const N: usize> Simd<T, N> as BitXor<T> {
     pub fn bit_xor(self: &Self, other: &T) Self;
 }
 
+// A lane scalar left of an operator: `s op v` is `Simd::splat(s) op v` (the lowering splats `s`).
+
+extend<T: SimdElement, const N: usize> T as Add<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `+`.
+    @intrinsic("simd.add")
+    pub fn add(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdElement, const N: usize> T as Sub<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `-`.
+    @intrinsic("simd.sub")
+    pub fn sub(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdElement, const N: usize> T as Mul<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `*`.
+    @intrinsic("simd.mul")
+    pub fn mul(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdElement, const N: usize> T as Div<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `/`.
+    @intrinsic("simd.div")
+    pub fn div(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as Rem<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `%`.
+    @intrinsic("simd.rem")
+    pub fn rem(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as BitAnd<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `&`.
+    @intrinsic("simd.and")
+    pub fn bit_and(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as BitOr<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `|`.
+    @intrinsic("simd.or")
+    pub fn bit_or(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as BitXor<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `^`.
+    @intrinsic("simd.xor")
+    pub fn bit_xor(self: &Self, other: &Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as Shl<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `<<`.
+    @intrinsic("simd.shl")
+    pub fn shl(self: &Self, amount: Simd<T, N>) Simd<T, N>;
+}
+
+extend<T: SimdInt, const N: usize> T as Shr<Simd<T, N>> {
+    type Output = Simd<T, N>;
+    /// `self` in every lane, then lane-wise `>>`.
+    @intrinsic("simd.shr")
+    pub fn shr(self: &Self, amount: Simd<T, N>) Simd<T, N>;
+}
+
 // The free forms of the named operations: `simd::f(a, ..)` is `a.f(..)`.
 
 /// `a.equal(b)`.

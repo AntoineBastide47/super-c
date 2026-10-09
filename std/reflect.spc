@@ -5,8 +5,9 @@
 //   type_info::<T>()   A non-owning `TypeInfo` descriptor of T (name, kind, size, align, fields,
 //                      variants, meta, methods; see std/core.spc). Folds at compile time; a runtime
 //                      use reads static data. Cannot describe an opaque FFI type. `methods` lists
-//                      every `extend` function declared for a decl-backed or builtin type
-//                      (enumeration only: a descriptor cannot invoke).
+//                      every `extend` function declared for a decl-backed or builtin type, then
+//                      those of the generic conformances whose bounds it satisfies (enumeration
+//                      only: a descriptor cannot invoke).
 //   zeroed::<T>()      An all-zero-bytes T. `unsafe`: zero bytes are not a valid value of every
 //                      type. It is the seed the reflection constructors fill field by field:
 //                      releasing an all-zero value is a no-op for every owning std type.

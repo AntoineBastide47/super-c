@@ -10411,6 +10411,8 @@ extend CEmit {
                         DefId { module: 0, node: NODE_NONE },
                         "",
                         IfTargs { m: rm, at: null, n: 0 },
+                        rm,
+                        null,
                         dst,
                     );
                 }
@@ -10426,6 +10428,8 @@ extend CEmit {
     // NODE_NONE for the method found by name; `csfx` then names that conformance (`<I>___<args>`),
     // and its default bodies spell `<Target>__<method>__<csfx>`: each conformance instantiates
     // them under its own interface arguments.
+    // `want` (pool `wm`, null when unknown) is the interface instance the call goes through: it
+    // solves a keyed conformance's parameters its target does not name.
     fn iface_target_sym(
         self: &mut Self,
         rm6: ModuleId,
@@ -10434,12 +10438,165 @@ extend CEmit {
         conf: DefId,
         csfx: str,
         tg: IfTargs,
+        wm: ModuleId,
+        want: *const TyInstance,
         dst: &mut String,
     ) bool {
         let mut sym = self.sget();
-        let ok = self.iface_target_sym_i(rm6, rt6, callee, conf, csfx, tg, &mut sym, dst);
+        let ok = self.iface_target_sym_i(rm6, rt6, callee, conf, csfx, tg, wm, want, &mut sym, dst);
         self.sput(sym);
         return ok;
+    }
+
+    // The binding of generic parameter `(pm, pnode)` in `snap` from `from` on (the latest), or -1.
+    const fn snap_find(snap: &Vector<mbe::MSub>, from: u32, pm: ModuleId, pnode: NodeId) i64 {
+        let mut i = snap.len();
+        while i > from as usize {
+            i -= 1;
+            if snap.at(i).pm == pm && snap.at(i).pnode == pnode {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+
+    // Bind the parameters of keyed conformance `ext` (module `em`, `ext_keyed`) for receiver
+    // `(rm, rt)` into `snap`: a generic extend's target parameter to the receiver, a target's own
+    // through its instance (`bind_recv`), and the ones only the interface's arguments name by unifying
+    // those with interface instance `want` (pool `wm`; null: none). False when one stays unbound.
+    fn bind_keyed(
+        self: &mut Self,
+        snap: &mut Vector<mbe::MSub>,
+        em: ModuleId,
+        ext: NodeId,
+        rm: ModuleId,
+        rt: TypeId,
+        wm: ModuleId,
+        want: *const TyInstance,
+    ) bool {
+        let ea = self.p().module_ast_const(em);
+        let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+        let l0 = snap.len() as u32;
+        let b = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
+        if b >= 0 {
+            self.push_bind(snap, em, unsafe (*ea).list(ed.generics)[b as usize], rm, rt, l0);
+        } else {
+            let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+            let mut it = TyInstance {};
+            if unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
+                self.bind_recv(snap, em, ext, rm, &it);
+            }
+            let _ = y;
+        }
+        let dt = unsafe (*ea).type_of(ed.interface_type);
+        if want != null && dt != TYPE_NONE && unsafe (*ea).type_at(dt).kind == TypeKind::TYPE_DYN {
+            let di = *unsafe (*ea).instance(unsafe (*ea).type_at(dt).as_data.inst);
+            let mut bp = Vector::<NodeId>::new();
+            let mut bm = Vector::<ModuleId>::new();
+            let mut bt = Vector::<TypeId>::new();
+            let mut k: u8 = 0;
+            while k < di.n && k < unsafe (*want).n {
+                self.unify_bind(
+                    em,
+                    unsafe di.args[k as usize],
+                    wm,
+                    unsafe (*want).args[k as usize],
+                    em,
+                    ed.generics,
+                    &mut bp,
+                    &mut bm,
+                    &mut bt,
+                    0,
+                );
+                k += 1;
+            }
+            for i in 0..bp.len() {
+                if CEmit::snap_find(snap, l0, em, bp[i]) < 0 {
+                    self.push_bind(snap, em, bp[i], bm[i], bt[i], l0);
+                }
+            }
+        }
+        for g in 0..ed.generics.len {
+            if CEmit::snap_find(snap, l0, em, unsafe (*ea).list(ed.generics)[g as usize]) < 0 {
+                return false;
+            }
+        }
+        if want == null || dt == TYPE_NONE || unsafe (*ea).type_at(dt).kind != TypeKind::TYPE_DYN {
+            return true;
+        }
+        // The conformance's arguments, grounded under the bindings, are the interface instance's.
+        for k in l0 as usize..snap.len() {
+            self.mg.push_msub(snap[k]);
+        }
+        let di = *unsafe (*ea).instance(unsafe (*ea).type_at(dt).as_data.inst);
+        let mut same = di.n == unsafe (*want).n;
+        let mut k: u8 = 0;
+        while same && k < di.n {
+            let mut g1 = TYPE_NONE;
+            let mut g2 = TYPE_NONE;
+            same = self.mg.ground(em, unsafe di.args[k as usize], wm, &mut g1) && self.mg.ground(
+                wm,
+                unsafe (*want).args[k as usize],
+                wm,
+                &mut g2,
+            ) && g1 == g2;
+            k += 1;
+        }
+        self.mg.pop_subs(snap.len() - l0 as usize);
+        return same;
+    }
+
+    // The symbol of method `md` of keyed extend `ext` (module `md.module`) whose parameters `snap`
+    // binds from `from` on, then the call's own arguments `tg`, into `sym` (`keyed_sym`, then each
+    // argument); its instance is demanded under `snap`.
+    fn keyed_call_sym(
+        self: &mut Self,
+        md: DefId,
+        ext: NodeId,
+        snap: Vector<mbe::MSub>,
+        from: u32,
+        tg: IfTargs,
+        sym: &mut String,
+    ) bool {
+        let mut sn = snap;
+        if !self.mg.keyed_sym(md.module, md.node, sym) {
+            return self.fail("keyed-sym");
+        }
+        let st = sym.len();
+        let ea = self.p().module_ast_const(md.module);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        for g in 0..gens.len {
+            let i = CEmit::snap_find(&sn, from, md.module, unsafe (*ea).list(gens)[g as usize]);
+            if i < 0 {
+                return self.fail("keyed-arg");
+            }
+            let b = *sn.at(i as usize);
+            sym.push_str("__");
+            if !self.mg.type_m(b.am, b.at, sym) {
+                return self.fail("keyed-arg");
+            }
+        }
+        if !self.push_targs(tg, sym) {
+            return false;
+        }
+        self.mg.mark_used(md.module);
+        let fd = unsafe (*ea).at_const(md.node);
+        if !self.collect_demand || fd.as_data.function.is_extern() || fd.as_data.function.body == NODE_NONE {
+            return true;
+        }
+        if !self.mg.rec_on {
+            let k0 = skey_mix(5, skey_mix(def_fp(md), sym.as_str().hash()));
+            if self.demand_seen.contains(&k0) {
+                return true;
+            }
+            self.demand_seen.insert(k0);
+        }
+        self.bind_targs(&mut sn, md.module, fd.as_data.function.generics, tg);
+        let sfx = String::from_str(sym.as_str().slice(st, sym.len()));
+        let d9 = Demand { def: md, sym: sym.clone(), dk: 0, subs: sn, sfx: sfx };
+        self.rec_demand(&d9, 0, 0);
+        self.demand.push(d9);
+        return true;
     }
 
     // `__<arg>` for each of the call's generic arguments `tg`, spelled under the active env; false
@@ -10474,6 +10631,8 @@ extend CEmit {
         conf: DefId,
         csfx: str,
         tg: IfTargs,
+        wm: ModuleId,
+        want: *const TyInstance,
         sym: &mut String,
         dst: &mut String,
     ) bool {
@@ -10487,15 +10646,80 @@ extend CEmit {
             // without its own, the conformance runs the default.
             let mut cm8: ModuleId = 0;
             let mut ce8 = conf.node;
+            let ifd8 = DefId { module: callee.module, node: self.mg.in_interface(callee.module, callee.node) };
             if ce8 != NODE_NONE {
                 cm8 = conf.module;
             } else {
-                ce8 = self.mg.conform_ext(
-                    rm6,
-                    rt6,
-                    DefId { module: callee.module, node: self.mg.in_interface(callee.module, callee.node) },
-                    &mut cm8,
-                );
+                ce8 = self.mg.conform_ext(rm6, rt6, ifd8, &mut cm8);
+            }
+            // A keyed conformance (`ext_keyed`): the one by target, else the generic conformance whose
+            // parameters bind for this receiver and interface instance; its method spells every
+            // argument of the extend.
+            let mut ksnap = mbe::subs_copy(&self.mg.subs);
+            let k0 = ksnap.len() as u32;
+            let mut keyed8 = ce8 != NODE_NONE && ext_keyed(unsafe &*self.p().module_ast_const(cm8), ce8);
+            if ce8 != NODE_NONE && !keyed8 && conf.node == NODE_NONE && want != null {
+                // The conformance by target serves another interface instance: a generic one below.
+                let mut chk = mbe::subs_copy(&self.mg.subs);
+                if !self.bind_keyed(&mut chk, cm8, ce8, rm6, rt6, wm, want) {
+                    ce8 = NODE_NONE;
+                }
+            }
+            if keyed8 && !self.bind_keyed(&mut ksnap, cm8, ce8, rm6, rt6, wm, want) {
+                // Another keyed conformance of the receiver, its parameters bound by the interface
+                // instance the call goes through.
+                let mut kc = Vector::<DefId>::new();
+                self.mg.keyed_confs(rm6, rt6, ifd8, &mut kc);
+                ce8 = NODE_NONE;
+                for i in 0..kc.len() {
+                    ksnap.truncate(k0 as usize);
+                    if self.bind_keyed(&mut ksnap, kc[i].module, kc[i].node, rm6, rt6, wm, want) {
+                        cm8 = kc[i].module;
+                        ce8 = kc[i].node;
+                        break;
+                    }
+                }
+                if ce8 == NODE_NONE {
+                    // None by target: a generic conformance below.
+                    keyed8 = false;
+                    ksnap.truncate(k0 as usize);
+                }
+            }
+            if ce8 == NODE_NONE {
+                let mut bl = Vector::<DefId>::new();
+                self.mg.blanket_confs(ifd8, &mut bl);
+                for i in 0..bl.len() {
+                    ksnap.truncate(k0 as usize);
+                    if self.bind_keyed(&mut ksnap, bl[i].module, bl[i].node, rm6, rt6, wm, want) {
+                        cm8 = bl[i].module;
+                        ce8 = bl[i].node;
+                        keyed8 = true;
+                        break;
+                    }
+                }
+            }
+            if keyed8 {
+                let mut km = DefId { module: 0, node: NODE_NONE };
+                let ka8 = self.p().module_ast_const(cm8);
+                let its = unsafe (*ka8).at_const(ce8).as_data.extend_def.items;
+                for j in 0..its.len {
+                    let iid = unsafe (*ka8).list(its)[j as usize];
+                    let inn = unsafe (*ka8).at_const(iid);
+                    let isp = unsafe (*ka8).at_const(inn.as_data.function.name).as_data.name.text;
+                    if inn.kind == NodeKind::NODE_FUNCTION && self.p().modules.at(cm8 as usize).source.as_str().slice(
+                        isp.start as usize,
+                        isp.end as usize,
+                    ) == mname8 {
+                        km = DefId { module: cm8, node: iid };
+                    }
+                }
+                if km.node != NODE_NONE {
+                    if !self.keyed_call_sym(km, ce8, ksnap, k0, tg, sym) {
+                        return false;
+                    }
+                    dst.push_string(sym);
+                    return true;
+                }
             }
             let found = if ce8 != NODE_NONE {
                 self.mg.method_in_ext(rm6, rt6, cm8, ce8, mname8, sym);
@@ -10936,6 +11160,8 @@ extend CEmit {
                 srt,
                 conf,
                 csfx.as_str(),
+                pm,
+                it,
                 tabs,
             );
             if ok {
@@ -11072,6 +11298,8 @@ extend CEmit {
                     srt,
                     DefId { module: 0, node: NODE_NONE },
                     "",
+                    pm,
+                    null,
                     &mut tabs,
                 );
                 slots.push_str(", ");
@@ -11402,6 +11630,8 @@ extend CEmit {
         srt: TypeId,
         conf: DefId,
         csfx: str,
+        wm: ModuleId,
+        want: *const TyInstance,
         tabs: &mut String,
     ) bool {
         let mut ret = String::new();
@@ -11478,6 +11708,8 @@ extend CEmit {
                     conf,
                     csfx,
                     IfTargs { m: dm, at: null, n: 0 },
+                    wm,
+                    want,
                     &mut head,
                 );
                 head.push_str("((");
@@ -11546,6 +11778,48 @@ extend CEmit {
                 at2 = ay.as_data.elem;
             }
             self.unify_bind(dm, dy.as_data.elem, am, at2, gm, gens, out_p, out_m, out_t, depth + 1);
+            return;
+        }
+        if dy.kind == ay.kind && dy.arr_like() {
+            // A vector, mask or array: its lane or element type, and its length (an array's when
+            // both are symbolic).
+            if dy.kind != TypeKind::TYPE_MASK {
+                self.unify_bind(
+                    dm,
+                    dy.as_data.arr.elem,
+                    am,
+                    ay.as_data.arr.elem,
+                    gm,
+                    gens,
+                    out_p,
+                    out_m,
+                    out_t,
+                    depth + 1,
+                );
+            }
+            if dy.is_vec() || dy.arr_sym() && ay.arr_sym() {
+                self.unify_bind(
+                    dm,
+                    dy.as_data.arr.len,
+                    am,
+                    ay.as_data.arr.len,
+                    gm,
+                    gens,
+                    out_p,
+                    out_m,
+                    out_t,
+                    depth + 1,
+                );
+            } else if dy.arr_sym() {
+                // A concrete array holds its length as a count: a length parameter takes it as a
+                // constant of the parameter's type.
+                let ly = *unsafe (*self.p().module_ast_const(dm)).type_at(dy.as_data.arr.len);
+                if ly.kind == TypeKind::TYPE_GENERIC && ly.module == gm {
+                    let bt = self.p().const_param_bt(gm, ly.as_data.decl);
+                    let ct = unsafe (*(self.p().module_ast_const(am) as *mut Ast)).const_value(ay.as_data.arr.len, bt);
+                    self.unify_bind(dm, dy.as_data.arr.len, am, ct, gm, gens, out_p, out_m, out_t, depth + 1);
+                }
+            }
             return;
         }
         if dy.kind == TypeKind::TYPE_INSTANCE && ay.kind == TypeKind::TYPE_INSTANCE {
@@ -12533,7 +12807,17 @@ extend CEmit {
             };
             let tg = IfTargs { m: b.module, at: tat, n: tn };
             if iface == TYPE_NONE {
-                return self.iface_target_sym(rm6, rt6, callee, DefId { module: 0, node: NODE_NONE }, "", tg, dst);
+                return self.iface_target_sym(
+                    rm6,
+                    rt6,
+                    callee,
+                    DefId { module: 0, node: NODE_NONE },
+                    "",
+                    tg,
+                    rm6,
+                    null,
+                    dst,
+                );
             }
             // A bound call on a generic interface: the conformance with the bound's arguments,
             // resolved under this instance (`conf_for_args`), and its default bodies' suffix.
@@ -12545,12 +12829,15 @@ extend CEmit {
             if !ok6 {
                 ok6 = self.fail("dyn-stem");
             } else {
-                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, csfx.as_str(), tg, dst);
+                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, csfx.as_str(), tg, b.module, &iit, dst);
             }
             self.sput(csfx);
             return ok6;
         }
-        let is_minst = self.mg.in_generic_extend(callee.module, callee.node);
+        // A keyed extend's method (`ext_keyed`): the call's arguments are the extend's, then the
+        // method's own, and spell the instance as a generic function's do.
+        let keyed = self.mg.in_keyed_extend(callee.module, callee.node);
+        let is_minst = self.mg.in_generic_extend(callee.module, callee.node) && !keyed;
         let mut rit = TyInstance { decl: NODE_NONE };
         let mut rpm = b.module; // the pool the receiver instance (and its args) live in
         let mut recv_targs = false; // the call's bound args NAME the receiver (turbofish assoc fn)
@@ -12680,6 +12967,10 @@ extend CEmit {
                     sym,
                 );
             }
+        } else if keyed {
+            if !self.mg.keyed_sym(callee.module, callee.node, sym) {
+                ok = self.fail("callee-sym");
+            }
         } else {
             let tgt = self.mg.method_target(callee.module, callee.node);
             if !self.mg.fn_sym(callee.module, callee.node, tgt, sym) {
@@ -12723,15 +13014,30 @@ extend CEmit {
                     let ext = self.mg.extend_of(callee.module, callee.node);
                     self.bind_recv(&mut snap, callee.module, ext, rpm, &rit);
                 }
+                let mut gskip: u32 = 0;
+                if keyed {
+                    let xg = unsafe (*ca).at_const(self.mg.extend_of(callee.module, callee.node)).as_data.extend_def.generics;
+                    while gskip < xg.len && gskip < targs_len {
+                        self.push_bind(
+                            &mut snap,
+                            callee.module,
+                            unsafe (*ca).list(xg)[gskip as usize],
+                            b.module,
+                            b.targ_pool[(targs_start + gskip) as usize],
+                            g0,
+                        );
+                        gskip += 1;
+                    }
+                }
                 let gens = fd.as_data.function.generics;
                 let mut gi2: u32 = 0;
-                while !recv_targs && gi2 < gens.len && gi2 < targs_len {
+                while !recv_targs && gi2 < gens.len && gskip + gi2 < targs_len {
                     self.push_bind(
                         &mut snap,
                         callee.module,
                         unsafe (*ca).list(gens)[gi2 as usize],
                         b.module,
-                        b.targ_pool[(targs_start + gi2) as usize],
+                        b.targ_pool[(targs_start + gskip + gi2) as usize],
                         g0,
                     );
                     gi2 += 1;

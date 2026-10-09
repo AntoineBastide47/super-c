@@ -9032,6 +9032,9 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
         }
         if it.kind == NodeKind::NODE_EXTEND {
             let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
+            // The header (target, interface, parameter bounds): a conformance uses its interface and
+            // the interfaces of its bounds, never reported itself.
+            ents.push(LintEnt { start: it.span.start, end: it.span.start + 1, node: iid, root: in_iface });
             let ms = it.as_data.extend_def.items;
             for j in 0..ms.len {
                 let mid = unsafe (*a).list(ms)[j as usize];
@@ -9277,10 +9280,15 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                 continue;
             }
             let ss = (starts[m] + ents[m][si as usize].node as usize) as u64;
+            let header = unsafe (*a).at_const(ents[m][si as usize].node).kind == NodeKind::NODE_EXTEND;
             for e in p.sched.fin_off[it] as usize..p.sched.fin_off[it + 1] as usize {
                 let tm = p.idx.items.at(p.sched.fin_edges[e] as usize);
                 let dm = tm.module as usize;
                 if dm >= nm || ents[dm].len() == 0 {
+                    continue;
+                }
+                if header && unsafe (*p.module_ast_const(tm.module)).at_const(tm.node).kind != NodeKind::NODE_INTERFACE {
+                    // An extend's target is not used by being extended.
                     continue;
                 }
                 let ta = p.module_ast_const(tm.module);
@@ -9533,8 +9541,9 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
         let iid = unsafe (*a).list(items)[i as usize];
         if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
             let d = unsafe (*a).resolution_def(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
-            if d.node == NODE_NONE || d.module != mid {
-                // Extends a foreign (or unresolved) type.
+            let tt = unsafe (*a).type_of(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
+            if d.node == NODE_NONE || d.module != mid || ext_blanket(unsafe &*a, tt, unsafe &*a, mid, iid) >= 0 {
+                // Extends a foreign (or unresolved) type, or every type a generic extend's bounds admit.
                 return true;
             }
         }
@@ -10384,6 +10393,12 @@ pub fn run_package(
         }
         err = true;
     }
+    // A failed emission leaves instances out: the C compiler must not see the units that call them.
+    let osink = if !err {
+        sink;
+    } else {
+        null;
+    };
     // Transitive TU pruning: keep scan-live modules, then everything a KEPT TU (or the always-
     // written instance TU) spells symbols from; dead prelude chains drop out entirely.
     // The edges come grouped by source in ascending order (modules, then 65534 as row n): row s
@@ -10486,7 +10501,7 @@ pub fn run_package(
             err = true;
         }
         man_line(&mut man, "h", root, fwdp.as_str(), w.h, 0xFFFF, 0, co.fwd_h.as_str(), "");
-        sink_notify(sink, &mut co.pr, fwdp.as_str(), 0);
+        sink_notify(osink, &mut co.pr, fwdp.as_str(), 0);
         keep.push(fwdp);
         if co.ext_h.len() != 0 {
             let extp = build_out_path(root, "__sc_ext", ".h");
@@ -10496,7 +10511,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, extp.as_str(), w.h, 0xFFFF, 0, co.ext_h.as_str(), "");
-            sink_notify(sink, &mut co.pr, extp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, extp.as_str(), 0);
             keep.push(extp);
         }
         for d in 0..co.defs_h.len() {
@@ -10513,7 +10528,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, hp.as_str(), w.h, co.defs_own[d], 0, co.defs_h.at(d).as_str(), "");
-            sink_notify(sink, &mut co.pr, hp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, hp.as_str(), 0);
             keep.push(hp);
         }
         for m in 0..n {
@@ -10527,7 +10542,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, hp.as_str(), w.h, m as u32, 0, co.protos_h.at(m).as_str(), "");
-            sink_notify(sink, &mut co.pr, hp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, hp.as_str(), 0);
             keep.push(hp);
         }
         let mut sg = ShardGroups::new();
@@ -10548,7 +10563,7 @@ pub fn run_package(
                     "";
                 };
                 if write_shard(&co, root, cp.as_str(), t, x as u8, false, tail, &sg, &mut man, &mut err) {
-                    sink_notify(sink, &mut co.pr, cp.as_str(), 1);
+                    sink_notify(osink, &mut co.pr, cp.as_str(), 1);
                     keep.push(cp);
                 }
             }
@@ -10566,7 +10581,7 @@ pub fn run_package(
                 }
                 let cp = build_out_path(root, stem.as_str(), ".c");
                 if write_shard(&co, root, cp.as_str(), q, x as u8, true, "", &sg, &mut man, &mut err) {
-                    sink_notify(sink, &mut co.pr, cp.as_str(), 1);
+                    sink_notify(osink, &mut co.pr, cp.as_str(), 1);
                     keep.push(cp);
                 }
             }
@@ -10579,7 +10594,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "r", root, rp.as_str(), w.h, 0xFFFF, 0, co.registry_c.as_str(), co.reg_inputs.as_str());
-            sink_notify(sink, &mut co.pr, rp.as_str(), 1);
+            sink_notify(osink, &mut co.pr, rp.as_str(), 1);
             keep.push(rp);
         }
     }

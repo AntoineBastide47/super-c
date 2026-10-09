@@ -157,7 +157,8 @@ modular return-lifetime check) run alongside.
 
 ## 7. Lint, Panic Check, Const Flush
 
-- `lint_unused_items` (when linting). A lint `fix` attaches to the last warning emitted
+- `lint_unused_items` (when linting). An extend header is an entity of its own: the interfaces
+  its conformance and its parameters' bounds name are used by it. A lint `fix` attaches to the last warning emitted
   (`Errors::last_warn`, `src/utils/errors.spc`), so call it right after the warning it
   repairs. When a lint disagrees with the compiler, suspect the lint first.
 - `check_always_panics`: an **error**, run on every build of user modules: one job per

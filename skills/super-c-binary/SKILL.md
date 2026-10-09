@@ -230,7 +230,14 @@ Advertised capabilities (`src/lsp/server.spc:capabilities_json`): push diagnosti
 hover, go-to-definition, type definition, implementation, references, document
 highlight, rename (with prepare), document formatting, code actions (quick fixes),
 completion, signature help, document and workspace symbols, folding ranges, selection
-ranges, inlay hints, and semantic tokens (full + range). The VS Code extension is in
+ranges, inlay hints, and semantic tokens (full + range). Hover documents the reflection
+constructs no declaration documents (`reflect_hover`): the intrinsics and the members of an
+`inline for` binder, by binder kind. Hover on an interface in a bound or a conformance shows the interface
+instance with its defaulted arguments (`Mul<V<T, N>>`); a type's signature shows its generic
+parameters. Signature help (also on `<`) covers a type argument list (`Mul<`, `f::<`), read from the
+text so a list still being typed is found (`type_args_help`). Completion offers the generic
+parameters of every declaration around the cursor; where no parsed item spans the cursor (a header
+that does not parse yet), it completes from a probe that splices `__lsp_c`, `__lsp_c;` or `__lsp_c>`. The VS Code extension is in
 `editors/vscode/`. Between analysis rounds the server keeps only the open documents' function
 bodies (and the bodies the constant engine demanded); a closed module's bodies parse back on
 demand (`syntax-ownership.md` in the compiler-internals skill). The server handles one message

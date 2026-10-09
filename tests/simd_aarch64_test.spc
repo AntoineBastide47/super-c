@@ -129,6 +129,13 @@ fn operations_lower_to_their_instructions() {
         [],
     );
     check(
+        "compress",
+        "fn k(m: u64, a: i32x4, b: i32x4) i32x4 {\n    return simd::compress(Mask::<4>::from_bits_truncate(m), a, b);\n}\n",
+        "k(n as u64, i32x4::splat(n as i32), i32x4::splat(1)).get(0)",
+        ["tbl"],
+        ["=bl"],
+    );
+    check(
         "compare and choose",
         "fn k(a: i8x16, b: i8x16, c: i8x16) i8x16 {\n    return a.less_than(b).choose(c, a);\n}\n",
         "k(i8x16::splat(n as i8), i8x16::splat(1), i8x16::splat(2)).get(0)",

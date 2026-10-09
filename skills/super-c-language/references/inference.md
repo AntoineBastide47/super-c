@@ -94,7 +94,8 @@ generic argument convert.
 - With an expected type, each branch of `if`/`switch` coerces to it independently.
 - Without one, all branch result types must be equal after `Never` absorption
   (a diverging branch adopts the other branch's type) and literal adoption (an
-  unsuffixed literal branch takes the other branches' numeric type).
+  unsuffixed literal branch takes the other branches' numeric type); a `null` branch or arm,
+  in any position, takes the other branches' pointer type.
 - A block that ends in `return`, `break`, `continue` or a diverging call has type `Never`.
 - There is no implicit least-upper-bound: `if c { 1i32; } else { 2i64; }` without an
   expected type is an error.
@@ -202,11 +203,16 @@ than the turbofish names is not viable:
 5. More exact parameter matches.
 6. A more specific receiver or interface relation, where the language defines one.
 
-An unsuffixed literal argument reaches a by-reference parameter with one reference adjustment. In a
+An unsuffixed literal argument reaches a by-reference parameter with one reference adjustment, and a
+by-reference parameter infers from a value argument through its referenced type (an operator's
+operand). The parameters of a candidate's extend that its receiver does not solve (`N` of
+`extend<const N: usize> f32 as Mul<V<N>>`) are inferred from the arguments with the candidate's
+own. In a
 generic body a parameter over type parameters scores against the argument's own type: the same type
 is an exact match (one reference adjustment through `&`), and a type parameter never takes, and is
 never taken by, an argument of another kind (`Add<T>` is not viable for a vector right operand, nor
-`Add<Self>` for a `T`).
+`Add<Self>` for a `T`); a parameter whose head differs from the argument's (`V<N>` against `W<4>`)
+is not viable either.
 
 Two candidates with equal best scores are an ambiguity error; its notes name each candidate (or the
 conformances, or the bounds of a type parameter) at its source location. Source order and
