@@ -100,12 +100,15 @@ extern "C" "driver_shim.h" {
     pub fn sc_chmod_exec(path: *const char) i32;
     /// Set `name`=`value` in this process's environment, overwriting any existing value.
     pub fn sc_setenv(name: *const char, value: *const char) i32;
+    /// Remove `name` from this process's environment.
+    pub fn sc_unsetenv(name: *const char) i32;
 
     /// Run `cmd` to completion and return its exit code (-1 if it could not start). The portable stand-in
     /// for `system()` plus shell redirection; the test harnesses use it so their command strings hold no
     /// shell syntax, which is what makes the suite run on Windows as well.
     /// `in_path` null reads nothing; `out_path` null discards stdout; `err_path` null merges stderr into
-    /// stdout; `env` is space-separated `NAME=VALUE` applied to the child only.
+    /// stdout; `env` is space-separated `NAME=VALUE` (a value in double quotes may hold spaces) applied
+    /// to the child only (at most 8; -1 without a start when it does not apply whole).
     pub fn sc_run(
         cmd: *const char,
         in_path: *const char,

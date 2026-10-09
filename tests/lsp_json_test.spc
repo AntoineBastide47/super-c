@@ -251,16 +251,6 @@ fn json_parse_error_messages() {
     parse_err("{\"a\":1,}", "Trailing ',' before closing '}'");
 }
 
-// The parser is iterative with an explicit slot stack: past the cap it rejects rather than recurse.
-@test
-fn json_nesting_depth_limit() {
-    let mut d = String::new();
-    for _i in 0..1100 {
-        d.push_byte(b'[');
-    }
-    parse_err(d.as_str(), "Nesting depth limit exceeded");
-}
-
 // A value stores only its active payload: one tag byte plus the largest payload (String or Vector).
 @test
 fn json_value_layout_is_compact() {

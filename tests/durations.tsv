@@ -1,6 +1,4 @@
 # super-c test --test-record-durations: seconds per test, read to balance --test-shard
-0.01	tests::ast_fprint_test::dump
-0.01	tests::ast_test::arena
 0.01	tests::ast_test::interner
 0.00	tests::ast_test::interner_index_rebuilds_geometrically
 0.00	tests::ast_test::interner_survives_full_collisions
@@ -13,7 +11,6 @@
 0.67	tests::bce_test::coalescing_groups_adjacent_checks
 1.08	tests::bce_test::coalescing_panic_parity
 2.14	tests::bce_test::inline_behavior_parity
-0.19	tests::bce_test::inline_deterministic_emission
 0.09	tests::bce_test::inline_fold_blocked_by_mutation
 0.07	tests::bce_test::inline_fold_canonical_at_loop
 0.56	tests::bce_test::inline_omitted_aggregate_members
@@ -24,7 +21,6 @@
 0.60	tests::bce_test::interval_widening_terminates_on_nested_loops
 0.78	tests::bce_test::join_versions_are_path_sound
 0.69	tests::bce_test::loop_header_kills_lengths_the_loop_writes
-1.06	tests::bce_test::removal_behavior_parity
 0.28	tests::bce_test::removal_canonical_loops
 0.44	tests::bce_test::removal_keeps_unproved
 1.69	tests::bce_test::safety_element_checks
@@ -41,7 +37,6 @@
 0.02	tests::bce_test::verifier_rejects_unvalidated_slice_end
 3.92	tests::bench_sys_test::a_sanitized_build_leaves_the_allocator_to_the_sanitizer
 0.03	tests::bench_sys_test::concurrent_allocation_counts_are_exact
-0.00	tests::bench_sys_test::counters_state_their_availability
 0.03	tests::bench_sys_test::cycles_cover_every_thread
 0.00	tests::bench_sys_test::disabled_accounting_counts_nothing
 0.00	tests::bench_sys_test::optimisation_barrier_holds
@@ -61,20 +56,14 @@
 0.05	tests::blocking_test::shutdown_with_an_abandoned_call_is_bounded
 0.06	tests::blocking_test::shutdown_with_an_unreturned_call_is_bounded
 1.01	tests::blocking_test::shutdown_with_an_unreturned_foreign_call_is_bounded
-0.04	tests::borrow_diff_test::diff_assign_under_borrow
 0.04	tests::borrow_diff_test::diff_closure_capture_accepted
 0.03	tests::borrow_diff_test::diff_closure_capture_conflict
-0.03	tests::borrow_diff_test::diff_conditional_uninit
 0.03	tests::borrow_diff_test::diff_double_move
-0.03	tests::borrow_diff_test::diff_double_mut_borrow
-0.03	tests::borrow_diff_test::diff_loop_move
 0.04	tests::borrow_diff_test::diff_out_param_store
 0.04	tests::borrow_diff_test::diff_partial_move_reviewed
 0.04	tests::borrow_diff_test::diff_return_field_move_reviewed
-0.04	tests::borrow_diff_test::diff_return_local_borrow
 0.04	tests::borrow_diff_test::diff_scope_dangle
 0.03	tests::borrow_diff_test::diff_use_after_free
-0.03	tests::borrow_diff_test::diff_use_after_move
 1.24	tests::borrow_gen_test::aliasing
 7.51	tests::borrow_gen_test::aliasing3
 0.50	tests::borrow_gen_test::closed_gaps
@@ -95,7 +84,6 @@
 0.02	tests::borrow_ir_test::branch_killed_loan_accepted
 0.02	tests::borrow_ir_test::conditional_move_rejected
 0.02	tests::borrow_ir_test::conditional_uninit_rejected
-0.02	tests::borrow_ir_test::disjoint_fields_accepted
 0.02	tests::borrow_ir_test::entry_point_has_no_loan_in_scope
 0.02	tests::borrow_ir_test::features_borrowed_param_holds_loans
 0.03	tests::borrow_ir_test::features_call_result_carrier_holds_loans
@@ -109,7 +97,6 @@
 0.02	tests::borrow_ir_test::loop_double_move_rejected
 0.02	tests::borrow_ir_test::loop_reassign_kills_accepted
 0.02	tests::borrow_ir_test::many_loans_scale
-0.02	tests::borrow_ir_test::nll_last_use_accepted
 0.02	tests::borrow_ir_test::overlapping_mut_borrows_rejected
 0.02	tests::borrow_ir_test::partial_move_whole_use_rejected
 0.02	tests::borrow_ir_test::raw_pointer_free_reads_pointer
@@ -118,14 +105,11 @@
 0.02	tests::borrow_ir_test::same_field_mut_rejected
 0.02	tests::borrow_ir_test::shared_then_write_rejected
 0.14	tests::borrow_ir_test::sparse_rows_agree_with_dense
-0.02	tests::borrow_ir_test::split_init_accepted
-0.02	tests::borrow_ir_test::two_phase_receiver_accepted
 0.02	tests::borrow_ir_test::use_after_move_rejected
 0.00	tests::cancel_test::a_group_drop_joins_its_children_with_a_request_pending
 0.00	tests::cancel_test::acceptance_inside_a_primitive_hands_its_value_back
 0.00	tests::cancel_test::an_accepted_real_scrutinee_is_freed_before_the_arms
 0.00	tests::cancel_test::barrier_cancel_breaks_generation_and_reset_recovers
-0.00	tests::cancel_test::blocking_call_c_cancel_abandons_job
 0.00	tests::cancel_test::blocking_completion_races_cancel_to_one_owner
 0.00	tests::cancel_test::cancel_point_stops_a_compute_task
 0.01	tests::cancel_test::channel_recv_cancel_takes_nothing
@@ -157,9 +141,7 @@
 0.00	tests::cancel_test::lock_c_switch_unwinds_before_its_arms
 0.00	tests::cancel_test::mask_defers_cancellation_until_exit
 0.00	tests::cancel_test::membership_follows_live_tasks
-0.00	tests::cancel_test::mutex_lock_c_cancel_never_returns_a_guard
 0.00	tests::cancel_test::mutex_unlock_passes_over_a_cancelled_waiter
-0.01	tests::cancel_test::notify_races_cancel_single_winner
 0.00	tests::cancel_test::one_task_many_sources
 0.00	tests::cancel_test::registration_during_cancel
 0.00	tests::cancel_test::request_cancel_is_idempotent
@@ -168,7 +150,7 @@
 0.00	tests::cancel_test::select_cancel_unregisters_every_arm
 0.00	tests::cancel_test::semaphore_cancel_consumes_no_permit
 0.00	tests::cancel_test::shutdown_cancels_detached_sleepers
-0.00	tests::cancel_test::shutdown_races_spawn_and_rejects_new_tasks
+0.00	tests::cancel_test::shutdown_settles_a_racing_task_and_a_later_launch_runs
 0.00	tests::cancel_test::sleep_cancel_wakes_and_reclaims
 0.02	tests::cancel_test::slot_reuse_is_not_a_member
 0.00	tests::cancel_test::snapshot_names_wait_kind_and_masked_state
@@ -180,9 +162,7 @@
 0.23	tests::cemit_test::arithmetic_and_branches_behave
 0.02	tests::cemit_test::assert_line_counts_every_line_end
 0.22	tests::cemit_test::calls_and_recursion_behave
-0.02	tests::cemit_test::deterministic_output
 0.03	tests::cemit_test::far_read_stays_declared
-0.23	tests::cemit_test::portable_subset_is_strict
 0.08	tests::cemit_test::structured_shape_isolated
 0.00	tests::channel_test::a_bounded_channel_is_one_allocation
 0.01	tests::channel_test::a_cancel_after_a_select_wake_keeps_the_wake
@@ -218,13 +198,9 @@
 6.71	tests::cli_codegen_paths_test::loop_in_a_cancellable_task_gets_a_safepoint
 3.82	tests::cli_codegen_paths_test::struct_array_const_header_includes_its_element_type
 1.42	tests::cli_codegen_paths_test::test_build_with_a_global_fixture
-0.53	tests::cli_conv_widen_test::implicit_int_widening_runs
-0.48	tests::cli_conv_widen_test::implicit_uint_widening_runs
 3.25	tests::cli_devcheck_test::core_ir_gate_accepts_a_valid_build
 3.30	tests::cli_devcheck_test::facts_check_gate_accepts_a_valid_build
 3.18	tests::cli_devcheck_test::layout_gate_accepts_a_valid_build
-0.11	tests::cli_fmt_test::fmt_check_a_feature_dense_file
-0.08	tests::cli_fmt_test::fmt_check_accepts_canonical
 0.11	tests::cli_fmt_test::fmt_check_reports_unformatted
 0.10	tests::cli_fmt_test::fmt_missing_file_errors
 0.10	tests::cli_fmt_test::fmt_recurses_a_directory
@@ -234,14 +210,10 @@
 0.10	tests::cli_fmt_test::fmt_unparseable_file_is_not_rewritten
 0.22	tests::cli_project_test::lint_recurses_a_directory
 0.10	tests::cli_project_test::whole_project_fmt_check_flags_an_unformatted_file
-0.10	tests::cli_project_test::whole_project_fmt_check_passes_when_canonical
 0.25	tests::cli_project_test::whole_project_lint_is_clean
-3.07	tests::cli_stats_test::bce_stats_prints_a_per_owner_line
 3.06	tests::cli_stats_test::build_mem_records_allocation_counters
-3.19	tests::cli_stats_test::build_stats_prints_one_json_record
-3.17	tests::cli_stats_test::cemit_stats_prints_stage_timings
 0.79	tests::cli_stats_test::inline_splices_a_void_callee
-3.09	tests::cli_stats_test::inline_stats_prints_decisions
+3.19	tests::cli_stats_test::stats_switches_report_in_one_build
 0.81	tests::cli_subcommands_test::clean_keeps_a_user_build_directory
 1.17	tests::cli_subcommands_test::clean_removes_build_outputs
 0.10	tests::cli_subcommands_test::command_env_keeps_quotes
@@ -298,10 +270,8 @@
 1.92	tests::cli_test::cache_restored_object_relinks
 0.41	tests::cli_test::call_free_constant_failures
 1.81	tests::cli_test::channel_batch_send_recv
-1.80	tests::cli_test::channel_mpmc
 1.84	tests::cli_test::channel_parking_oversubscribed
 1.86	tests::cli_test::channel_unbounded_and_timeouts
-0.46	tests::cli_test::compiles_file
 1.71	tests::cli_test::const_eval_flag
 3.03	tests::cli_test::const_fn_semantics
 2.73	tests::cli_test::const_generic_overflow_is_an_error
@@ -327,7 +297,6 @@
 0.00	tests::cli_test::cwd_free_rejects_relative_paths
 1.99	tests::cli_test::data_parallel_api
 1.91	tests::cli_test::data_parallel_guided_schedule
-1.99	tests::cli_test::data_parallel_nesting
 0.19	tests::cli_test::data_parallel_rejects_mutating_body
 0.90	tests::cli_test::deep_aggregate_constant_chain
 0.71	tests::cli_test::deep_constant_chain_failures
@@ -370,7 +339,6 @@
 0.32	tests::cli_test::item_jobs_publish_diagnostics_in_declaration_order
 1.26	tests::cli_test::language_demo_emits_valid_c
 0.57	tests::cli_test::launch_rejects_borrowed_capture
-1.83	tests::cli_test::launch_runtime
 4.65	tests::cli_test::leak_tracker
 5.28	tests::cli_test::library_int_overflow_follows_the_profile
 2.90	tests::cli_test::literal_arithmetic_is_computed_in_its_type
@@ -400,7 +368,6 @@
 0.46	tests::cli_test::per_extend_bound_filtering
 0.25	tests::cli_test::platform_gates_ext_c
 0.63	tests::cli_test::platform_gates_tests
-1.53	tests::cli_test::platform_substrate
 2.22	tests::cli_test::preemption_yields_a_spinning_task
 0.46	tests::cli_test::prelude_output_is_demand_driven
 0.00	tests::cli_test::probe_cas16_kind
@@ -410,7 +377,6 @@
 1.16	tests::cli_test::raii_free_glue_tuple_fields
 1.18	tests::cli_test::raii_free_glue_untouched_fields
 2.07	tests::cli_test::reactor_many_connections
-2.17	tests::cli_test::reactor_tcp_echo
 4.00	tests::cli_test::reactor_udp_and_typed_errors
 2.21	tests::cli_test::reflect_bound_chain_past_sixteen_hops
 1.32	tests::cli_test::reflect_derives
@@ -435,7 +401,6 @@
 0.54	tests::cli_test::std_prefixed_user_module_keeps_safepoints
 1.44	tests::cli_test::std_reflection_defaults
 1.19	tests::cli_test::string_non_default_allocator
-1.97	tests::cli_test::sync_primitives
 1.29	tests::cli_test::tagless_variants_and_meta_elision
 1.87	tests::cli_test::task_aware_locks
 3.66	tests::cli_test::task_diagnostics
@@ -461,7 +426,6 @@
 0.84	tests::cli_test::vendor_copies_and_imports_resolve
 1.41	tests::cli_test::vendor_strips_submodule_git_and_follows_the_ref
 1.27	tests::cli_test::warning_clean_unused_emission
-1.84	tests::cli_test::work_stealing_imbalance
 6.87	tests::cli_test::worker_count_keeps_instance_shard_includes
 1.13	tests::cli_test::zero_length_arrays_emit_valid_c
 2.51	tests::codegen_run_test::arithmetic
@@ -552,7 +516,6 @@
 1.48	tests::codegen_run_test::prelude_call_inside_generic_body
 0.64	tests::codegen_run_test::qualified_const_generic_arguments
 0.52	tests::codegen_run_test::question_moves_a_free_payload
-0.47	tests::codegen_run_test::recursion
 0.68	tests::codegen_run_test::ref_mutability_mangles_apart
 0.88	tests::codegen_run_test::results_spelled_around_the_declarator
 0.16	tests::codegen_run_test::scalar_instance_drops_nothing
@@ -578,12 +541,9 @@
 0.66	tests::codegen_test::array_literals
 0.71	tests::codegen_test::attributes
 0.10	tests::codegen_test::bare_pointer_is_const
-0.50	tests::codegen_test::binding_constness
 0.73	tests::codegen_test::branch_hints
 0.71	tests::codegen_test::broad
-0.41	tests::codegen_test::callback_specialization
 0.51	tests::codegen_test::const_generics
-0.49	tests::codegen_test::constness
 0.22	tests::codegen_test::control
 0.92	tests::codegen_test::enums
 1.13	tests::codegen_test::errors
@@ -601,8 +561,6 @@
 0.36	tests::codegen_test::str
 5.64	tests::codegen_test::structured_backend
 0.53	tests::codegen_test::switch_ranges
-0.04	tests::core_ir_test::aggregates_and_field_places
-0.03	tests::core_ir_test::arithmetic_and_return
 0.03	tests::core_ir_test::calls_are_terminators
 0.53	tests::core_ir_test::closure_frees_by_value_params
 0.83	tests::core_ir_test::comparison_operands_are_read_not_moved
@@ -613,7 +571,6 @@
 0.62	tests::core_ir_test::inclusive_range_ends_at_type_max
 0.43	tests::core_ir_test::inlined_repeat_keeps_its_count
 0.04	tests::core_ir_test::intrinsic_calls_are_tagged
-0.03	tests::core_ir_test::iterator_for_lowers_to_next_calls
 0.43	tests::core_ir_test::large_alignment_layout_is_stable
 1.14	tests::core_ir_test::long_else_if_chains_compile
 0.41	tests::core_ir_test::long_sum_compiles
@@ -625,7 +582,6 @@
 0.49	tests::core_ir_test::question_error_path_frees_owned_locals
 0.03	tests::core_ir_test::question_lowers_explicitly
 0.53	tests::core_ir_test::temporary_receivers_and_places_are_freed
-0.00	tests::core_ir_test::terminator_and_block_sizes_are_fixed
 0.04	tests::core_ir_test::typed_facts_boundary
 0.05	tests::core_ir_test::verifier_rejects_malformed_intrinsic_tags
 0.53	tests::core_ir_test::wide_shared_member_type_compiles
@@ -634,7 +590,6 @@
 0.00	tests::cross_target_helpers_test::sdk_cc_selects_a_toolchain_per_sdk
 0.00	tests::cross_target_helpers_test::sdk_flags_carry_the_triple
 0.00	tests::cross_target_helpers_test::size_parser_rejects_overflow
-0.00	tests::cross_target_helpers_test::target_record_pointer_width
 0.01	tests::cross_target_helpers_test::tu_cache_event_ref_outside_the_table_rejects
 0.00	tests::cross_target_helpers_test::wasi_sysroot_is_one_unquoted_argument
 0.00	tests::cross_target_helpers_test::wasm_links_with_the_native_stack_size
@@ -645,15 +600,13 @@
 0.56	tests::ctfe_reflect_test::constants_keep_every_instance_argument
 0.50	tests::ctfe_reflect_test::deep_aggregate_constant_chain_evaluates_without_nesting
 3.15	tests::ctfe_reflect_test::deep_constant_chain_evaluates_without_nesting
-0.49	tests::ctfe_reflect_test::enum_variant_count_through_type_info
 0.70	tests::ctfe_reflect_test::runtime_call_of_a_const_fn_that_cannot_fold
 0.07	tests::ctfe_reflect_test::tuple_field_binder_names_each_element
-0.42	tests::ctfe_reflect_test::typed_const_arithmetic_folds
 0.83	tests::differential_test::asm_cross_architecture
 2.48	tests::differential_test::asm_host_function
 0.00	tests::differential_test::asm_mnemonics_skip_labels_directives_and_registers
 0.00	tests::differential_test::asm_wasm32
-0.11	tests::differential_test::f64_literal_contexts_spell_doubles
+0.11	tests::differential_test::f64_literal_contexts_keep_double_precision
 4.67	tests::differential_test::parity_float_literals
 4.22	tests::differential_test::parity_mixed_cases
 3.99	tests::differential_test::parity_reports_missing_runtime_check
@@ -699,7 +652,6 @@
 0.03	tests::drops_test::tuple_partial_move_field_drops
 0.03	tests::drops_test::verifier_rejects_tampered_drops
 0.00	tests::errors_test::caret_clamping
-0.00	tests::errors_test::emit_collects
 0.00	tests::errors_test::file_in_location
 0.00	tests::errors_test::line_col_and_carets
 0.00	tests::errors_test::line_starts_crlf
@@ -724,7 +676,6 @@
 0.16	tests::fmt_test::emitted_c_identical
 0.00	tests::fmt_test::golden_attribute_expression
 0.00	tests::fmt_test::golden_bare_instance_constant_arguments
-0.00	tests::fmt_test::golden_basic
 0.00	tests::fmt_test::golden_brace_in_member_comment
 0.00	tests::fmt_test::golden_braced_const_arguments
 0.00	tests::fmt_test::golden_closure_return_type
@@ -774,7 +725,6 @@
 1.69	tests::infer_test::literal_contexts_and_signed_minimum
 0.17	tests::infer_test::literal_defaults
 1.92	tests::infer_test::literals_under_references
-0.14	tests::infer_test::local_declarations
 0.82	tests::infer_test::overload_and_receiver
 1.68	tests::infer_test::repeated_generic_params
 0.02	tests::infer_unit_test::const_conflicts_are_recorded
@@ -829,7 +779,7 @@
 0.00	tests::io_test::close_under_a_wait_settles_it_at_once
 0.13	tests::io_test::closes_racing_the_reactor_start_keep_their_count
 0.33	tests::io_test::event_and_deadline_race_settles_every_round
-0.16	tests::io_test::idle_descriptors_do_not_delay_an_active_one
+0.16	tests::io_test::idle_descriptors_leave_an_active_one_served
 0.00	tests::io_test::read_and_write_waits_on_one_socket_are_independent
 0.01	tests::io_test::shutdown_settles_a_pending_wait
 0.00	tests::io_test::two_readers_on_one_socket_both_wake
@@ -872,7 +822,6 @@
 0.26	tests::lint_test::redundant_cast_lint_covers_all_implicits
 0.83	tests::lint_test::redundant_coalescing_cast_lint_and_fix
 1.05	tests::lint_test::standalone_file_lint_and_fix
-0.26	tests::lint_test::standalone_file_lint_clean
 0.23	tests::lint_test::tuple_let_element_mut_lint
 0.27	tests::lint_test::type_path_call_marks_a_private_associated_function_used
 0.26	tests::lint_test::union_free_lint
@@ -901,7 +850,6 @@
 0.00	tests::lsp_json_test::json_dump_escapes
 0.00	tests::lsp_json_test::json_dump_roundtrip
 0.02	tests::lsp_json_test::json_get_i64_out_of_range_panics
-0.00	tests::lsp_json_test::json_nesting_depth_limit
 0.00	tests::lsp_json_test::json_numbers
 0.00	tests::lsp_json_test::json_numbers_rounding_and_range
 0.00	tests::lsp_json_test::json_parse_basic
@@ -978,13 +926,11 @@
 0.00	tests::mutex_test::a_lock_in_a_vector_is_reached_through_the_arc
 0.00	tests::mutex_test::a_lock_may_be_destroyed_at_its_last_unlock_and_its_address_reused
 0.21	tests::mutex_test::a_plain_acquisition_is_not_a_cancellation_point
-0.01	tests::mutex_test::an_idle_lock_may_move
 0.01	tests::mutex_test::coroutines_never_overlap_in_the_critical_section
 0.01	tests::mutex_test::repeated_cancellation_leaves_the_lock_usable
 0.00	tests::mutex_test::the_guard_hands_back_the_payload_exactly_once
 0.00	tests::mutex_test::the_raw_handle_is_the_same_address_every_time
 0.01	tests::mutex_test::threads_and_coroutines_never_overlap
-0.01	tests::mutex_test::try_lock_returns_without_waiting_while_another_caller_holds
 0.00	tests::mutex_test::try_lock_takes_a_free_lock_and_refuses_a_held_one
 0.00	tests::parser_test::associated_new_name
 0.00	tests::parser_test::attribute_constant_expression
@@ -1036,7 +982,6 @@
 0.56	tests::pattern_test::tuple_patterns_destructure_tuples
 0.60	tests::pattern_test::tuple_patterns_evaluate_at_compile_time
 0.04	tests::pattern_test::usefulness_verdicts
-0.01	tests::queue_test::double_park_hand_off_is_complete_before_reuse
 0.03	tests::queue_test::external_submission_against_stealing_workers
 0.00	tests::queue_test::overflow_spills_to_the_injection_queue
 0.00	tests::queue_test::shutdown_drains_cleanup_in_flight
@@ -1057,7 +1002,6 @@
 0.01	tests::resolver_test::missing_associated_type
 0.01	tests::resolver_test::namespace_separation
 0.01	tests::resolver_test::nearest_shadow
-0.03	tests::resolver_test::resolves
 0.03	tests::thread_test::blocking_pool_lock_allocation_failure_is_fatal
 0.04	tests::thread_test::blocking_pool_without_any_thread_is_fatal
 0.05	tests::thread_test::detach_failure_is_fatal
@@ -1086,18 +1030,15 @@
 0.02	tests::timer_test::equal_deadlines_keep_arm_order_under_replay
 0.00	tests::timer_test::overflowing_deadline_saturates
 0.21	tests::timer_test::repeated_cancellation_finds_its_entry
-0.02	tests::timer_test::shutdown_drains_armed_timers
-0.05	tests::timer_test::sleeps_end_in_order_and_never_early
+0.05	tests::timer_test::sleeps_never_end_early
 0.00	tests::timer_test::zero_wait_returns_at_once
 0.00	tests::token_test::packing
-0.00	tests::token_test::spans
 0.00	tests::toml_test::manifest_bootstrap_skips_unknown
 0.00	tests::toml_test::manifest_profile_lto_mode
 0.00	tests::toml_test::manifest_profile_opt_level_and_link_args
 0.00	tests::toml_test::manifest_profile_overflow_checks
 0.00	tests::toml_test::manifest_validation_messages
 0.00	tests::toml_test::toml_error_messages
-0.00	tests::toml_test::toml_rejects_malformed
 0.00	tests::toml_test::toml_scalars
 0.00	tests::toml_test::toml_sections_arrays_tables
 0.00	tests::toml_test::toml_string_escapes
@@ -1251,7 +1192,6 @@
 0.31	tests::typechecker_test::zero_argument_overload_ambiguity
 2.46	tests::typechecker_test::zero_length_arrays
 0.00	tests::vector_test::at_get_set
-0.00	tests::vector_test::bool_elements
 0.00	tests::vector_test::box_map_borrows
 0.00	tests::vector_test::capacity_growth
 0.04	tests::vector_test::capacity_overflow_panics

@@ -23,11 +23,11 @@ fn loop_in_a_cancellable_task_gets_a_safepoint() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/main.spc",
-        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::channel as chan;\nimport std::parallel::time as time;\nfn main() i32 {\n    rt::set_worker_count(2);\n    let kch = chan::Channel::<rt::TaskKey>::bounded(1);\n    let ktx = kch.sender();\n    let krx = kch.receiver();\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        defer w.done();\n        let _ = ktx.send(rt::current_key());\n        let mut s: i64 = 0;\n        for i in 0..1000000000 {\n            s += i;\n        }\n        let _ = s;\n    };\n    let key = krx.recv().unwrap();\n    time::sleep(time::Duration::from_millis(5));\n    let _ = rt::request_cancel(key, rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n",
+        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::channel as chan;\nimport std::parallel::time as time;\nstatic mut FINISHED: bool = false;\nfn main() i32 {\n    rt::set_worker_count(2);\n    let kch = chan::Channel::<rt::TaskKey>::bounded(1);\n    let ktx = kch.sender();\n    let krx = kch.receiver();\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        defer w.done();\n        let _ = ktx.send(rt::current_key());\n        let mut s: i64 = 0;\n        for i in 0..1000000000 {\n            s += i;\n        }\n        let _ = s;\n        unsafe FINISHED = true;\n    };\n    let key = krx.recv().unwrap();\n    time::sleep(time::Duration::from_millis(5));\n    let _ = rt::request_cancel(key, rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    if unsafe FINISHED {\n        return 1;\n    }\n    return 0;\n}\n",
     );
-    // Build only: the point is that the cancellable loop lowers its safepoint without error.
-    let r = cli::superc_env_in(str::from_cstr(p.rootp()), "SC_NO_EMIT_CACHE", "1", "build");
-    assert(r.ok(), "the cancellable-loop program builds");
+    // The loop's safepoint sees the cancel: the task ends before the loop does.
+    let r = cli::superc_env_in(str::from_cstr(p.rootp()), "SC_NO_EMIT_CACHE", "1", "run");
+    assert_eq(r.exit, 0);
 }
 
 @test

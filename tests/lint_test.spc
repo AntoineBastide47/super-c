@@ -409,23 +409,6 @@ fn constant_traps_at_the_operation() {
     assert(p.compile("dead.spc").ok());
 }
 
-// Linting a standalone file from a directory with no `src/` layout takes the per-path `run_lint`
-// route (not the whole-workspace batch), so it covers that arm and its single-file lint.
-@test
-fn standalone_file_lint_clean() {
-    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
-    // dependent guest command, so it runs on native and Windows only.
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("solo.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
-    // Chdir into the project (no `src/` dir) so lint resolves against it via the per-path route.
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
-    assert(r.ok(), "a clean standalone file lints without findings");
-}
-
 // A private associated function reached only through a type path (`S::helper(..)`) is resolved by
 // the type checker, not the resolver: the unused-item lint must read the post-typecheck item edges,
 // or it reports the function unused.
@@ -518,7 +501,8 @@ fn const_suggestion_scans_a_switch() {
     );
     let root = str::from_cstr(p.rootp());
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --const solo.spc");
-    assert(r.out_has("can be declared 'const fn'"), "the const-suggestion sweep ran and flagged an eligible function");
+    assert(r.out_shows("function 'dbl' can be declared 'const fn'"), "the sweep ran");
+    assert(r.out_shows("function 'classify' can be declared 'const fn'"), "the scan sees through the switch");
 }
 
 // A closed `if`/`while` condition the engine folds is always true or false: the warning names

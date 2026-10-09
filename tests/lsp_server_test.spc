@@ -756,6 +756,11 @@ fn lsp_workspace_lifecycle() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
     let root = str::from_cstr(p.rootp());
+    // A second project, reachable only through the workspace folder the session adds.
+    let q = cli::proj_new();
+    q.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    q.mkfile("src/main.spc", "fn main() i32 {\n    let x: i32 = true;\n    return x;\n}\n");
+    let qroot = str::from_cstr(q.rootp());
 
     let mut ses = String::new();
     let mut b = String::new();
@@ -770,13 +775,14 @@ fn lsp_workspace_lifecycle() {
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
     frame(&mut ses, &b);
     b.clear();
-    // Open then close the document.
+    // Open the document with an error the file on disk does not have, then close it: the overlay
+    // reverts to the clean disk text.
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://",
     );
     b.push_str(root);
     b.push_str("/src/main.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":");
-    json::dump_escaped(MAIN_OK, &mut b);
+    json::dump_escaped(MAIN_ERR, &mut b);
     b.push_str("}}}");
     frame(&mut ses, &b);
     b.clear();
@@ -787,7 +793,8 @@ fn lsp_workspace_lifecycle() {
     b.push_str("/src/main.spc\"}}}");
     frame(&mut ses, &b);
     b.clear();
-    // A build.toml change arrives as a watched-file event: the manifest reloads.
+    // A build.toml change arrives as a watched-file event: the manifest reloads (the file is unchanged
+    // on disk, so only the server's answers after it show it was handled).
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/didChangeWatchedFiles\",\"params\":{\"changes\":[{\"uri\":\"file://",
     );
@@ -795,11 +802,11 @@ fn lsp_workspace_lifecycle() {
     b.push_str("/build.toml\",\"type\":2}]}}");
     frame(&mut ses, &b);
     b.clear();
-    // A workspace folder is added.
+    // The second project's folder is added: its own error is published.
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/didChangeWorkspaceFolders\",\"params\":{\"event\":{\"added\":[{\"uri\":\"file://",
     );
-    b.push_str(root);
+    b.push_str(qroot);
     b.push_str("\",\"name\":\"w\"}],\"removed\":[]}}}");
     frame(&mut ses, &b);
     b.clear();
@@ -818,4 +825,17 @@ fn lsp_workspace_lifecycle() {
     // The dynamic watcher registration was sent in response to `initialized`.
     assert(out.as_str().contains("client/registerCapability"), "watchers were registered");
     assert(out.as_str().contains("workspace/didChangeWatchedFiles"), "the watch registration names the method");
+    let o = out.as_str();
+    // The open overlay's error is published, and after the close the disk text's empty set.
+    let err = o.find("mismatched types: expected 'i32', found 'str'");
+    // The server names files by their real path, so match the tail: only this project's file can
+    // publish an empty set (the second project's always has its error).
+    let clean = "/src/main.spc\",\"diagnostics\":[]";
+    if err < 0 || o.slice(err as usize, o.len()).find(clean) < 0 {
+        eprintln("{}", o);
+    }
+    assert(err >= 0, "the open overlay's error is published");
+    assert(o.slice(err as usize, o.len()).find(clean) >= 0, "the close republishes the clean disk text");
+    assert(o.contains("mismatched types: expected 'i32', found 'bool'"), "the added folder is analyzed");
+    assert(o.contains("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}"), "the server answers after the manifest event");
 }

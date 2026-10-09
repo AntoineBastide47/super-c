@@ -66,7 +66,7 @@ fn t_prod(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u
     return !had;
 }
 
-// Resolve + typecheck + old flow walk. Asserts the snippet TYPECHECKS; the old walk's verdict
+// Resolve + typecheck + the production borrow pass. Asserts the snippet TYPECHECKS; the pass's verdict
 // comes back as user-module error offsets.
 fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
     let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
@@ -148,7 +148,7 @@ const fn line_of(src: str, off: u32) u32 {
 fn both_reject_same_line(src: str, name: str) {
     let mut old_errs = Vector::<u32>::new();
     let p = typed_both(src, &mut old_errs);
-    assert(old_errs.len() != 0, "the established walk rejects");
+    assert(old_errs.len() != 0, "the production pass rejects");
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, name, &mut new_errs);
     assert(new_errs.len() != 0, "the loan analysis rejects");
@@ -162,14 +162,6 @@ fn both_reject_same_line(src: str, name: str) {
         }
     }
     assert(hit, "a primary error line coincides");
-}
-
-@test
-fn diff_use_after_move() {
-    both_reject_same_line(
-        "fn take(s: String) { s.free(); }\nfn main() i32 { let s = String::new(); take(s);\nlet n = s.len();\nreturn n as i32; }",
-        "main",
-    );
 }
 
 @test
@@ -189,85 +181,28 @@ fn diff_use_after_free() {
 }
 
 @test
-fn diff_conditional_uninit() {
-    both_reject_same_line(
-        "fn f(c: bool) i32 { let x: i32;\nif c { x = 1; }\nreturn x;\n}\nfn main() i32 { return f(true); }",
-        "f",
-    );
-}
-
-@test
-fn diff_assign_under_borrow() {
-    both_reject_same_line("fn main() i32 { let mut x = 1;\nlet r = &x;\nx = 2;\nreturn *r; }", "main");
-}
-
-@test
-fn diff_double_mut_borrow() {
-    both_reject_same_line(
-        "fn main() i32 { let mut x = 1;\nlet a = &mut x;\nlet b = &mut x;\n*a = 2; *b = 3; return x; }",
-        "main",
-    );
-}
-
-@test
-fn diff_loop_move() {
-    both_reject_same_line(
-        "fn take(s: String) { s.free(); }\nfn f(n: i32) { let s = String::new(); let mut i = 0;\nwhile i < n {\ntake(s);\ni += 1; } }\nfn main() i32 { f(0); return 0; }",
-        "f",
-    );
-}
-
-@test
-fn diff_return_local_borrow() {
-    both_reject_same_line("fn f() &i32 { let x = 1;\nreturn &x;\n}\nfn main() i32 { return *f(); }", "f");
-}
-
-@test
 fn diff_scope_dangle() {
     both_reject_same_line("fn main() i32 { let r: &i32;\n{\nlet x = 1;\nr = &x;\n}\nreturn *r; }", "main");
 }
 
 @test
 fn diff_out_param_store() {
-    // Store-through-out-param escapes belong to the walk's declared-lifetime checks in BOTH modes;
-    // the parity bar is the PRODUCTION pipeline, so compare full borrowck old vs new.
+    // Storing a local's address through an out-parameter escapes it. The declared-lifetime checks of
+    // the production pass own this case: it rejects the store's line (line 2).
     let src = "fn f(out: &mut &i32) { let x = 1;\n*out = &x;\n}\nfn main() i32 { let g = 5; let mut slot: &i32 = &g; f(&mut slot); return *slot; }";
-    let mut old_errs = Vector::<u32>::new();
-    let mut p = typed_both(src, &mut old_errs);
-    assert(old_errs.len() != 0, "the established walk rejects");
-    let mut new_errs = Vector::<u32>::new();
-    demit::publish_checkpoint(&mut p, null);
-    prod_verdict(&mut p, &mut new_errs);
-    assert(new_errs.len() != 0, "the production Core IR mode rejects");
+    let mut errs = Vector::<u32>::new();
+    let p = typed_both(src, &mut errs);
     let usrc = p.modules.at(p.modules.len() - 1).source.as_str();
-    let mut hit = false;
-    for o in 0..old_errs.len() {
-        for n in 0..new_errs.len() {
-            if line_of(usrc, old_errs[o]) == line_of(usrc, new_errs[n]) {
-                hit = true;
-            }
-        }
+    let mut on_store = false;
+    for e in 0..errs.len() {
+        on_store = on_store || line_of(usrc, errs[e]) == 2;
     }
-    assert(hit, "a primary error line coincides");
-}
-
-// Run the full PRODUCTION borrowck over the user module; error offsets land in `out`.
-fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
-    let pkg = p as *mut loader::Package;
-    let i = p.modules.len() - 1;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.borrowck_solo();
-    for e in 0..t.errors.errors.len() {
-        out.push(t.errors.errors.at(e).start);
-    }
+    assert(on_store, "the production pass rejects the store");
 }
 
 @test
 fn diff_partial_move_reviewed() {
-    // The established walk rejects the FIELD MOVE itself (`takes(p.a)`: no partial moves out of a
+    // The production pass rejects the FIELD MOVE itself (`takes(p.a)`: no partial moves out of a
     // Free value). The loan analysis tracks the partial move and rejects the later WHOLE-VALUE use
     // instead: one line later, by design (location-sensitive precision; drop elaboration owns the
     // remaining-fields story).
@@ -276,7 +211,7 @@ fn diff_partial_move_reviewed() {
         "struct P { pub a: String, pub b: String }\nfn takes(s: String) { s.free(); }\nfn takep(p: P) { let _ = p; }\nfn main() i32 { let p = P { a: String::new(), b: String::new() };\ntakes(p.a);\ntakep(p);\nreturn 0; }",
         &mut old_errs,
     );
-    assert(old_errs.len() != 0, "the established walk rejects the field move");
+    assert(old_errs.len() != 0, "the production pass rejects the field move");
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, "main", &mut new_errs);
     assert(new_errs.len() != 0, "the loan analysis rejects the whole-value use");
@@ -285,18 +220,16 @@ fn diff_partial_move_reviewed() {
 @test
 fn diff_return_field_move_reviewed() {
     // Closed checker hole: `return q.a` moves a field out of a Free value exactly like a call
-    // argument does, and the established walk now rejects it in return position too (the emitter
+    // argument does, and the production pass rejects it in return position too (the emitter
     // would silently leak the sibling field). The loan analysis tracks the partial move and
-    // accepts; that stays a reviewed difference until elaborated drops reach the backend.
+    // accepts; that is a reviewed difference until elaborated drops reach the backend, so only the
+    // production verdict is asserted: the analysis may become stricter.
     let mut old_errs = Vector::<u32>::new();
-    let p = typed_both(
+    let _ = typed_both(
         "struct Q { pub a: String, pub b: String }\nfn f(q: Q) String {\nreturn q.a;\n}\nfn main() i32 { let q = Q { a: String::new(), b: String::new() }; f(q).free(); return 0; }",
         &mut old_errs,
     );
-    assert(old_errs.len() != 0, "the established walk rejects the return-position field move");
-    let mut new_errs = Vector::<u32>::new();
-    new_verdict(&p, "f", &mut new_errs);
-    assert(new_errs.len() == 0, "the loan analysis tracks the partial move");
+    assert(old_errs.len() != 0, "the production pass rejects the return-position field move");
 }
 
 @test

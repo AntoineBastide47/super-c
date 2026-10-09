@@ -743,6 +743,7 @@ fn attribute_constant_expression() {
     assert(src.slice(sp.start as usize, sp.end as usize) == "N * 2", "the record spans the argument text");
     assert(!c.ast.attrs[1].expr, "a lone integer literal keeps the literal form");
     assert_eq(c.ast.attrs[1].arg, 16);
+    // A size guard: one Attr record per attribute of every module; a growth must be deliberate.
     assert_eq(sizeof(Attr), 20);
     assert(h::parse_has_error("@c.align(8 9)\nstruct A { x: u8 }\n"), "a token after the argument rejected");
     let lit = h::parse_ast("@c.align(8 + 8)\nstruct A { x: u8 }\n@c.align(8 as u32)\nstruct B { x: u8 }\n");

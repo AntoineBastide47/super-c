@@ -105,6 +105,11 @@ extend<T> JoinHandle<T> {
     pub fn from_parts(handle: *mut void, cell: *mut Cell<T>) JoinHandle<T> {
         return JoinHandle::<T> { handle: handle, cell: cell };
     }
+    /// Whether the thread has finished: its value is published and it holds no reference to the result,
+    /// so a `join` returns at once and dropping the handle destroys the value here.
+    pub fn is_finished(self: &JoinHandle<T>) bool {
+        return unsafe atomic::load_i32(&mut unsafe (*self.cell).refs, 1) == 1;
+    }
     /// Block until the thread finishes and take its return value. Consumes the handle. A join the OS
     /// refuses is fatal: the value cannot be read and the cell cannot be released.
     pub fn join(self: JoinHandle<T>) T {
@@ -162,13 +167,15 @@ pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
     let mut h: *mut void = null;
     let rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, thread_entry::<F, T>, env);
     if rc != 0 {
-        // Nothing was published: take the payload back (freeing the closure and everything it owns),
-        // release the cell, then stop.
-        let payload = unsafe {
-            env[0];
-        };
-        unsafe g.dealloc(env, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
-        let _ = payload;
+        // Nothing was published: take the payload back and free it with the closure and everything
+        // it owns at the block's end (`panic` never returns, so no later scope end runs), release the
+        // cell, then stop.
+        {
+            let _payload = unsafe {
+                env[0];
+            };
+            unsafe g.dealloc(env, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
+        }
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
         panic("thread::spawn: the OS cannot create a thread");
     }

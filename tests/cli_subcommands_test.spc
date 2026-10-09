@@ -91,10 +91,12 @@ fn clean_removes_build_outputs() {
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
     let mut bdir = String::from_str(root);
     bdir.push_str("/build");
-    assert(cli::dir_count_suffix(bdir.as_str(), "") >= 0, "build dir exists");
-    // clean drops the outputs; a rebuild afterwards still works.
+    assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the build wrote its out-dir");
+    // clean removes the out-dir; a rebuild afterwards still works.
     assert(cli::superc_env_in(root, E, "1", "clean").ok(), "clean succeeds");
+    assert_eq(cli::dir_count_suffix(bdir.as_str(), ""), 0);
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "rebuild after clean works");
+    assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the rebuild wrote its out-dir again");
 }
 
 // `clean` removes the out-dir and the tree a bare build emits beside the sources; a directory the user

@@ -83,9 +83,9 @@ fn rejects_bad_input() {
 ```
 
 Passes only when the body aborts. Skipped under `--test-no-fork` (no fork to catch the
-signal). The runner counts any nonzero exit as the panic, so under `SC_LEAK_CHECK=fatal` a
-leak (exit 23) alone can make it pass. Run it once without that variable to confirm the
-intended panic.
+signal). A panic is SIGABRT, or exit code 134 from the stack-overflow report (Windows: exit code
+3 or 0xC0000409 from `abort()`, or 134). Any other end fails the test: a SIGSEGV, or a leak
+report's exit 23 under `SC_LEAK_CHECK=fatal`.
 
 ### Timeouts
 
@@ -296,9 +296,10 @@ construction, not by audit.
 SC_LEAK_CHECK=fatal super-c test --quiet
 ```
 
-A test's verdict never depends on that variable: a test that checks leak behaviour sets
-`SC_LEAK_CHECK` on the child it runs (`run_bin_env`, `compile_flags_env`, `compile_and_run_env`),
-so an unarmed `super-c test --quiet` gives the same result as the gate.
+Every process a harness helper starts (`cli::run_with`, under each run, build and compile helper)
+gets `SC_LEAK_CHECK=fatal` unless the test sets `SC_LEAK_CHECK` on it itself (`run_bin_env`,
+`compile_flags_env`, `compile_and_run_env`), so a leak in a program or compiler a test runs fails
+the test with or without the gate. Only a leak in the test process itself needs the gate.
 
 The wasm lane runs the same suite with `SC_TEST_SUPERC=ci/wasm-superc.sh`: the wrapper runs
 every transpile-class command (a script, `fmt`, `lint`, the transpile form an engine's
@@ -346,21 +347,22 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 
 | Helper | Purpose |
 |--------|---------|
-| `compile(src, stop)` | Compile source string up to the given stop stage |
+| `compile(src, stop)` | Compile source string up to the given stop stage (`STAGE_TYPECHECK` includes the borrow check; a failure only the borrow check reports has stage `STAGE_BORROWCK`) |
 | `compile_ast(src, stop)` | Parse + resolve up to the stop stage, return AST |
 | `parse_ast(src)` | Parse only, return AST |
 | `parse_ast_for_fmt(src)` | Parse with trivia for formatter tests |
-| `compile_c(src)` | Compile to C through the production backend; the returned text is every TU's part heads, buffer and tail plus the shared headers and instance TU, so a needle search sees every byte |
+| `compile_c(src)` | Compile to C through the production backend; the returned text is the shared headers, the snippet's own TU (part heads, buffer and tail) and the instance TU, without the prelude's TUs, so a needle cannot match a prelude function body |
+| `compile_c_user(src)` | `compile_c` with the snippet's own TU only |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
-| `expect_const_runtime_parity(label, decls, expr, ty)` | Require `expr` to give the same value or trap as a `const` and at run time |
 | `expect_run(label, src, arg, msg)` | Build `src` (dev profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
 | `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`) |
 
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
-filtering for the host like a real build, except the three differential oracles, which build
+filtering for the host and loads the vector backend for a snippet that names a vector, like a
+real build, except the three differential oracles, which build
 through the compiler under test (below).
 
 ### Differential oracles
@@ -401,6 +403,10 @@ compiler under wasmtime; the C compile and the program stay native.
   match. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
   `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
   which the wasm lane sets (`asm_wasm32` in `tests/differential_test.spc` returns early without it).
+  Its two halves serve many functions from one build: `asm_text(b, opts, function, out)` compiles
+  the unit of build `b` that defines `function` to assembly once, and `asm_match(text, function,
+  contains, absent)` checks any function of it (`tests/simd_aarch64_test.spc` builds all its
+  kernels as one program).
 
 ### The vector conformance lane
 
@@ -556,6 +562,9 @@ programs (scalar), two (loops) or one or two (vector: a rebuild without the trap
 - **Allocation-count tests divide over many runs** (64). Under `SC_LEAK_CHECK` the tracker
   itself allocates irregularly for the first few measurements of a shape, and a warm-up
   alone does not fix that.
+- **Restore what a test sets.** A test changes its own process environment through
+  `cli::set_env(name, value)`, whose guard puts the old value back (or removes the variable) when
+  it drops: under `--test-no-fork` every test shares one process.
 - **Unset, do not empty.** `sc_unsetenv` removes a variable; a variable set to `""` still
   passes a `getenv(..) != NULL` check. On Windows `sc_unsetenv` is `_putenv_s(name, "")`,
   which removes it.

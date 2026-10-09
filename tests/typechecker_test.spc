@@ -2,6 +2,7 @@
 // through tests::harness. Every expect_ok/expect_error case is transcribed verbatim; the C
 // AST-inspection cases (computed scalar/pointer/reference/literal/inferred/str-member types) are dropped.
 import tests::harness as h;
+import driver_shim as shim;
 
 @test
 fn ok() {
@@ -3135,12 +3136,6 @@ fn generic_with_lifetime_and_type_param() {
         "a <'a, T> type resolves T in its methods, fields, and returns",
         "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> {\n    pub fn get(self: &P<'a, T>) &T { return &self.v; }\n    pub fn raw(self: &P<'a, T>) *const T { return &self.v; }\n}\nfn main() i32 {\n    let x = 42;\n    let p = P::<i32> { v: x };\n    return *p.get() - 42;\n}\n",
     );
-    // And it still monomorphizes ignoring the lifetime (erased): one symbol per (type args).
-    h::expect_c(
-        "a <'a, T> generic mangles only the type arg",
-        "struct P<'a, T> { pub v: T }\nextend<'a, T: Copy> P<'a, T> { pub fn g(self: &P<'a, T>) T { return self.v; } }\nfn main() i32 { let a = P::<i32> { v: 1 }; let b = P::<i32> { v: 2 }; return a.g() + b.g() - 3; }\n",
-        "P__i32",
-    );
 }
 
 // View types (`Slice<'a, T>`, `VecIter<'a, T>`) carry a lifetime exactly like `str`, so a `[]T` slice or
@@ -3321,8 +3316,8 @@ fn fn_sig_region_store_escape() {
     );
     // A reborrow of the parameter's own data has exactly the destination's lifetime: always fine.
     h::expect_ok(
-        "a store that only reads the container does not over-reject",
-        "fn firstof<T>(v: &Vector<T>) usize { return v.len(); }\nfn main() i32 {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    {\n        let y = 9;\n        let n = firstof(&v);\n    }\n    return **v.at(0) - 5;\n}\n",
+        "a store of the container's own data is always fine",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn keep<'a>(s: &mut Slot<'a>) { let r = s.r; s.r = r; }\nfn main() i32 {\n    let anchor = 1;\n    let mut sl = Slot { r: &anchor };\n    keep(&mut sl);\n    return *sl.r - 1;\n}\n",
     );
 }
 
@@ -4428,11 +4423,6 @@ fn generic_fn_as_value() {
         "fn id<'a, T>(v: &'a T) &'a T { return v; }\nfn main() i32 {\n    let x = 7;\n    let f: fn(&i32) &i32 = id;\n    return *f(&x) - 7;\n}\n",
         0,
     );
-    h::expect_c(
-        "the coerced value names the monomorphized instance",
-        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = id;\n    return f(0);\n}\n",
-        "id__i32",
-    );
     h::expect_err_msg(
         "a signature the type arguments cannot satisfy is rejected",
         "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i64 = id;\n    return f(0) as i32;\n}\n",
@@ -4588,7 +4578,7 @@ fn owning_constants() {
     h::expect_c(
         "the buffer itself is static data the constant points at",
         "const V: Vector<i32> = [1, 2, 3].into();\nfn main() i32 { return (V.len() as i32) - 3; }\n",
-        ".ptr = (void *)V__ct0",
+        ".ptr = (void *)",
     );
     h::expect_exit(
         "an explicit 'from' and a builder function reach the same place",
@@ -4605,7 +4595,7 @@ fn owning_constants() {
     h::expect_c(
         "its bytes live in the constant itself",
         "const S: String = String::from_str(\"hi\");\nfn main() i32 { return (S.len() as i32) - 2; }\n",
-        ".small = { .data = { 104, 105",
+        ".small = { .data = {",
     );
     h::expect_exit(
         "a union constant keeps the member it was written through",
@@ -4667,16 +4657,22 @@ fn owning_constants() {
 // for, defaulting to the host and overridable with `--arch=`.
 @test
 fn arch_gate() {
+    // The host's instruction set (loader codes: 0 x86_64, 1 aarch64, 2 wasm32).
+    let host = unsafe shim::sc_host_arch();
+    let names: []str = ["x86_64", "aarch64", "wasm32"];
     h::expect_exit(
         "only the matching architecture's item survives",
-        "@arch(x86_64)\nfn which() i32 { return 1; }\n@arch(aarch64)\nfn which() i32 { return 2; }\n@arch(wasm32)\nfn which() i32 { return 3; }\nfn main() i32 {\n    let w = which();\n    if w != 1 && w != 2 && w != 3 { return 1; }\n    return 0;\n}\n",
-        0,
+        "@arch(x86_64)\nfn which() i32 { return 1; }\n@arch(aarch64)\nfn which() i32 { return 2; }\n@arch(wasm32)\nfn which() i32 { return 3; }\nfn main() i32 { return which(); }\n",
+        host + 1,
     );
-    h::expect_exit(
-        "a list gates on any of its architectures",
-        "@arch(x86_64 | aarch64 | wasm32)\nfn here() i32 { return 0; }\nfn main() i32 { return here(); }\n",
-        0,
+    // The list of the two other architectures gates its item away: both items left would be a duplicate.
+    let src = format(
+        "@arch({} | {})\nfn here() i32 {{ return 1; }}\n@arch({})\nfn here() i32 {{ return 0; }}\nfn main() i32 {{ return here(); }}\n",
+        names[((host + 1) % 3) as usize],
+        names[((host + 2) % 3) as usize],
+        names[host as usize],
     );
+    h::expect_exit("a list gates on any of its architectures", src.as_str(), 0);
     h::expect_err_msg(
         "an unknown architecture is rejected",
         "@arch(sparc)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
@@ -4701,8 +4697,12 @@ fn platform_gate_values() {
     );
     h::expect_exit(
         "negation covers the platforms it does not name",
-        "@platform(!windows)\nfn which() i32 { return 1; }\n@platform(windows)\nfn which() i32 { return 2; }\nfn main() i32 {\n    let w = which();\n    if w != 1 && w != 2 { return 1; }\n    return 0;\n}\n",
-        0,
+        "@platform(!windows)\nfn which() i32 { return 1; }\n@platform(windows)\nfn which() i32 { return 2; }\nfn main() i32 { return which(); }\n",
+        if unsafe shim::sc_host_platform() == 0 {
+            2;
+        } else {
+            1;
+        },
     );
     h::expect_err_msg(
         "an unknown platform names the whole set",

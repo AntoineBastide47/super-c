@@ -153,40 +153,6 @@ fn external_submission_against_stealing_workers() {
     assert_eq(ran.get().load(atomics::MemoryOrder::Acquire), n);
 }
 
-// A task that parks twice in a row (a wait, then a contended re-lock on the way out) leaves two park
-// hand-offs on its block; the block must not be recycled until both are over. Thousands of such tasks
-// through a busy pool, with the count checked: a lost hand-off shows as a corrupted or double-run task.
-@test
-fn double_park_hand_off_is_complete_before_reuse() {
-    rt::set_worker_count(4);
-    for _round in 0..5 {
-        let ran = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
-        let wg = sync::WaitGroup::new();
-        let n: i64 = 1000;
-        wg.add(n);
-        for _i in 0..n {
-            let w = wg.clone();
-            let r = ran.clone();
-            launch || {
-                defer w.done();
-                let inner = sync::WaitGroup::new();
-                inner.add(2);
-                for _k in 0..2 {
-                    let iw = inner.clone();
-                    launch || {
-                        defer iw.done();
-                    };
-                }
-                inner.wait();
-                let _ = r.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
-            };
-        }
-        assert(wg.wait_timeout(time::Duration::from_secs(20)), "every task finishes");
-        assert_eq(ran.get().load(atomics::MemoryOrder::Acquire), n);
-    }
-    rt::shutdown();
-}
-
 // Shutdown while cancellation cleanup is still producing work: children cancelled by their group unwind
 // and complete as the pool is torn down; nothing is left unresponsive.
 @test

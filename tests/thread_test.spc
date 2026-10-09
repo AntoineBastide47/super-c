@@ -14,6 +14,7 @@ import std::parallel::time as time;
 import std::parallel::platform as platform;
 import std::testing::bench_sys as sys;
 import tests::cli_harness as cli;
+import tests::harness as h;
 
 // Exact-destruction counter: every `free` of a Tracked bumps it, so a test can prove one destruction.
 static mut G_FREES: i64 = 0;
@@ -44,6 +45,28 @@ fn wait_frees(want: i64) bool {
     return true;
 }
 
+// Wait, bounded, until the thread behind `h` has finished.
+fn wait_finished<T>(h: &thread::JoinHandle<T>) bool {
+    let deadline = platform::now_ns() + 5000000000;
+    while !h.is_finished() {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        rt::sleep_ns(200000);
+    }
+    return true;
+}
+
+// A gate a spawned thread waits at, bounded, until the test opens it.
+static mut G_GATE: i64 = 0;
+
+fn gate_wait() {
+    let deadline = platform::now_ns() + 5000000000;
+    while unsafe atomic::load_i64(&mut unsafe G_GATE, 1) == 0 && platform::now_ns() < deadline {
+        rt::sleep_ns(200000);
+    }
+}
+
 // --- the result crosses once -----------------------------------------------------------------------------
 
 @test
@@ -53,7 +76,7 @@ fn join_after_completion_moves_the_value() {
             return Tracked { n: 7 };
         },
     );
-    rt::sleep_ns(20000000); // the thread finishes long before the join
+    assert(wait_finished(&h), "the thread finishes before the join");
     let v = h.join();
     assert_eq(v.n, 7);
     assert_eq(frees(), 0); // moved, not destroyed
@@ -93,12 +116,13 @@ fn drop_before_completion_detaches_and_the_thread_frees() {
     {
         let _h = thread::spawn(
             fn() Tracked {
-                rt::sleep_ns(30000000);
+                gate_wait();
                 return Tracked { n: 2 };
             },
         );
     }
-    assert_eq(frees(), 0); // still running when the handle went
+    assert_eq(frees(), 0); // still running at the gate when the handle went
+    unsafe atomic::store_i64(&mut unsafe G_GATE, 1, 2);
     assert(wait_frees(1), "the detached thread destroys its unclaimed result");
     rt::sleep_ns(10000000);
     assert_eq(frees(), 1);
@@ -111,7 +135,7 @@ fn drop_after_completion_frees_here() {
             return Tracked { n: 3 };
         },
     );
-    rt::sleep_ns(20000000);
+    assert(wait_finished(&h), "the thread finishes");
     assert_eq(frees(), 0); // the thread finished but the handle still owns the value
     {
         let _h = h;
@@ -137,24 +161,33 @@ fn zero_sized_result() {
 
 // --- failures are fatal, after release ------------------------------------------------------------------
 
-@test(should_panic)
-fn spawn_fails_when_the_os_refuses_a_thread() {
-    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_THREAD_CREATE, 1);
-    let _h = thread::spawn(
-        fn() Tracked {
-            return Tracked { n: 4 };
-        },
+// A program whose first `fail` operation fails spawns a thread over an owning capture: the spawn releases
+// the capture, then the process ends with its panic. A child process, so the panic's text is checked.
+fn spawn_failure(fail: str) {
+    let r = h::compile_and_run(
+        format(
+            "import sc_runtime;\nimport std::parallel::thread as thread;\nstruct T {{ pub n: i32 }}\nextend T as Free {{\n    pub fn free(self: &mut T) {{ eprintln(\"released\"); }}\n}}\nfn main() i32 {{\n    let t = T {{ n: 4 }};\n    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::{}, 1);\n    let _h = thread::spawn(|| t.n);\n    return 0;\n}}\n",
+            fail,
+        ).as_str(),
     );
+    assert(r.built, fail);
+    let out = str::from_cstr(r.out);
+    let rel = out.find("released");
+    let pan = out.find("panic: thread::spawn: the OS cannot create a thread");
+    if r.exit == 0 || rel < 0 || pan < rel {
+        eprintln("{}: exit {}: {}", fail, r.exit, out);
+    }
+    assert(r.exit != 0 && rel >= 0 && pan > rel, "the capture is released, then the spawn panics");
 }
 
-@test(should_panic)
+@test
+fn spawn_fails_when_the_os_refuses_a_thread() {
+    spawn_failure("FAIL_THREAD_CREATE");
+}
+
+@test
 fn spawn_fails_when_the_handle_cannot_be_allocated() {
-    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_ALLOC, 1);
-    let _h = thread::spawn(
-        fn() i32 {
-            return 1;
-        },
-    );
+    spawn_failure("FAIL_ALLOC");
 }
 
 @test(should_panic)

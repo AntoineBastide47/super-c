@@ -8,6 +8,9 @@ import graph::items as gitems;
 import ast::ast as *;
 import tests::cli_harness as cli;
 import driver_shim as shim;
+import resolver::resolver as res;
+import typechecker::typechecker as tc;
+import ir::interp as iri;
 
 const A0: str = M"(import b;
 import c;
@@ -304,16 +307,52 @@ fn index_edges_cover_reference_kinds() {
     }
 }
 
+// The workspace through the driver's order: resolve every module, build the index (its precheck
+// ranges hold the resolver's references), type-check, then finalize (the final ranges add what the
+// checker resolved).
+fn driver_order(ws: &Ws) loader::Package {
+    let mut p = loader::package_load(ws.root.as_str(), "std", false, unsafe shim::sc_host_platform());
+    assert(p.ok, "the workspace loads");
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
+    let n = p.modules.len();
+    for i in 0..n {
+        let m = &mut p.modules[i];
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let mut r = res::Resolver::new(
+            unsafe &mut *((&mut m.ast) as *mut Ast),
+            str::from_raw(src as *const u8, len),
+            pkg,
+        );
+        r.resolve();
+        assert(!r.has_errors(), "the workspace resolves");
+    }
+    gitems::build_serial(&mut p);
+    for i in 0..n {
+        let m = &mut p.modules[i];
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+        t.check();
+        assert(!t.has_errors(), "the workspace type-checks");
+    }
+    p.cir = null;
+    gitems::finalize(&mut p);
+    return p;
+}
+
 @test
 fn index_final_edges_carry_type_path_calls() {
     let ws = ws_new(A1, B1, C1);
-    let p = indexed(&ws, A1, B1, C1, true);
+    let p = driver_order(&ws);
     let am = mod_of(&p, "/a.spc");
     let run = item_named(&p, am, "run");
     let helper = item_named(&p, am, "helper");
     assert(run != loader::ITEM_NONE && helper != loader::ITEM_NONE, "items indexed");
-    // (The analysis this harness runs builds the index after the type check, so its precheck
-    // ranges already hold the checker's resolutions; the driver's differ.)
+    // `S::helper` resolves at the type check: the precheck ranges lack the edge, the final ones carry it.
+    assert(!pre(&p, run, helper), "the resolver leaves the type-path call unresolved");
     assert(fin(&p, run, helper), "the checker's resolution of the type-path call is a final edge");
 }
 
@@ -404,7 +443,7 @@ fn index_components_collapse_cycles() {
     let fact = item_named(&p, cm, "fact");
     let f5 = item_named(&p, cm, "F5");
     assert(fact != loader::ITEM_NONE && pre(&p, f5, fact), "a constant's initializer depends on its const fn");
-    assert(p.sched.comp[fact as usize] != p.sched.comp[f5 as usize], "recursion stays inside one component");
+    assert(p.sched.comp[fact as usize] != p.sched.comp[f5 as usize], "the constant is not in its const fn's component");
     let shape = item_named(&p, cm, "Shape");
     let sq = item_named(&p, cm, "Sq");
     let area = item_named(&p, cm, "area");
@@ -467,7 +506,8 @@ fn odd(n: i32) bool {
 }
 
 fn generic_id<T>(v: T) T {
-    return v;
+    let w = v;
+    return w;
 }
 
 fn main() i32 {
@@ -496,10 +536,12 @@ fn main() i32 {
     for e in 0..p0.sched.pre_edges.len() {
         assert(p0.sched.pre_edges[e] == p1.sched.pre_edges[e], "same precheck edges");
     }
+    // `sum`'s body lives in the body arena, but a generic's body stays in the module arena: the edit
+    // of `generic_id` gives `main`, declared after it, a new node id. The keys above held across it.
     let am = mod_of(&p0, "/a.spc");
-    let sum0 = item_named(&p0, am, "sum");
+    let main0 = item_named(&p0, am, "main");
     assert(
-        p0.idx.items.at(sum0 as usize).node != p1.idx.items.at(sum0 as usize).node || true,
+        p0.idx.items.at(main0 as usize).node != p1.idx.items.at(main0 as usize).node,
         "the edited body renumbers later nodes",
     );
 }
@@ -641,6 +683,7 @@ fn index_states_after_analysis() {
     let main = item_named(&p, am, "main");
     assert(p.item_state(am as ModuleId, p.idx.items.at(main as usize).node) == loader::IS_CHECKED, "the node query");
     assert(p.item_state(am as ModuleId, 1) == loader::IS_PARSED, "a node that is no item");
-    // The prelude's items (std/simd.spc's lane operations among them) are most of it.
-    assert(p.sched.retained() < 131072, "a small workspace holds a small index");
+    // The index stays a few dozen bytes per item (34 at the time of writing), the prelude's items
+    // (std/simd.spc's lane operations among them) most of them.
+    assert(p.sched.retained() < p.idx.items.len() * 64, "the index holds a small record per item");
 }

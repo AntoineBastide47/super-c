@@ -11,6 +11,7 @@ import build_system::build as bsys;
 import ir::layout as lay;
 import ir::cpu_features as cf;
 import driver_shim as shim;
+import tests::cli_harness as cli;
 
 @test
 fn sdk_cc_selects_a_toolchain_per_sdk() {
@@ -20,14 +21,14 @@ fn sdk_cc_selects_a_toolchain_per_sdk() {
     assert(ios.as_str().contains("xcrun"), "ios uses xcrun clang");
     assert(ios.as_str().contains("iphoneos"), "ios names the iphoneos sdk");
     // Android: the NDK prebuilt clang, located from ANDROID_NDK_HOME (covers the host-tag path).
-    let _ = unsafe shim::sc_setenv("ANDROID_NDK_HOME".ptr() as *const char, "/opt/ndk".ptr() as *const char);
+    let _env1 = cli::set_env("ANDROID_NDK_HOME", "/opt/ndk");
     let mut andr = String::new();
     util::sdk_cc(2, &mut andr);
     assert(andr.as_str().contains("/opt/ndk"), "android roots at the NDK home");
     assert(andr.as_str().contains("prebuilt/"), "android uses the prebuilt toolchain");
     assert(andr.as_str().contains("bin/clang"), "android ends at clang");
     // Wasm: wasi-sdk clang when WASI_SDK_PATH is set, else plain clang.
-    let _ = unsafe shim::sc_setenv("WASI_SDK_PATH".ptr() as *const char, "/opt/wasi".ptr() as *const char);
+    let _env2 = cli::set_env("WASI_SDK_PATH", "/opt/wasi");
     let mut w = String::new();
     util::sdk_cc(3, &mut w);
     assert(w.as_str().contains("/opt/wasi"), "wasm uses the wasi-sdk clang");
@@ -51,7 +52,7 @@ fn sdk_flags_carry_the_triple() {
 @test
 fn wasi_sysroot_is_one_unquoted_argument() {
     // The flag string is split on whitespace into argv, so a quote would reach the compiler verbatim.
-    let _ = unsafe shim::sc_setenv("WASI_SDK_PATH".ptr() as *const char, "/opt/wasi".ptr() as *const char);
+    let _env3 = cli::set_env("WASI_SDK_PATH", "/opt/wasi");
     let mut fl = String::new();
     util::push_sdk_flags(&mut fl, 3, 3, 2, cf::baseline(3, 2));
     let mut args = Vector::<String>::new();
@@ -77,11 +78,11 @@ fn wasm_links_with_the_native_stack_size() {
 
 @test
 fn build_mem_budget_suffixes() {
-    let _ = unsafe shim::sc_setenv("SC_BUILD_MEM_BUDGET".ptr() as *const char, "64M".ptr() as *const char);
+    let _env4 = cli::set_env("SC_BUILD_MEM_BUDGET", "64M");
     assert_eq(tctl::budget_from_env(), 64u64 << 20);
-    let _ = unsafe shim::sc_setenv("SC_BUILD_MEM_BUDGET".ptr() as *const char, "2g".ptr() as *const char);
+    let _env5 = cli::set_env("SC_BUILD_MEM_BUDGET", "2g");
     assert_eq(tctl::budget_from_env(), 2u64 << 30);
-    let _ = unsafe shim::sc_setenv("SC_BUILD_MEM_BUDGET".ptr() as *const char, "4096".ptr() as *const char);
+    let _env6 = cli::set_env("SC_BUILD_MEM_BUDGET", "4096");
     assert_eq(tctl::budget_from_env(), 4096u64);
 }
 
@@ -102,23 +103,15 @@ fn size_parser_rejects_overflow() {
 
 @test
 fn library_artifact_names_per_platform() {
-    // Static is lib<name>.a everywhere; shared is platform-shaped.
-    assert(bsys::lib_file("mylib", false, 1).as_str() == "libmylib.a", "static is lib<name>.a");
-    let dyn_macos = bsys::lib_file("mylib", true, 1);
-    assert(dyn_macos.as_str().contains("mylib"), "shared names the library");
-    // Every target's shared form carries the name and a platform extension.
-    let dyn_linux = bsys::lib_file("mylib", true, 2);
-    assert(dyn_linux.as_str().contains("mylib"), "linux shared names the library");
-    let dyn_win = bsys::lib_file("mylib", true, 0);
-    assert(dyn_win.as_str().contains("mylib"), "windows shared names the library");
-}
-
-@test
-fn target_record_pointer_width() {
-    // wasm32 (arch code 2) is a 4-byte-pointer target; the native archs are 8-byte.
-    assert_eq(lay::target_for(2).ptr, 4 as u8);
-    assert_eq(lay::target_for(0).ptr, 8 as u8);
-    assert_eq(lay::target_for(1).ptr, 8 as u8);
+    // Static is lib<name>.a everywhere; shared is platform-shaped (targets: 0 windows, 1 macos,
+    // 2 linux, 4 ios, 5 android).
+    assert(bsys::lib_file("mylib", false, 1).as_str() == "libmylib.a", "static on macos");
+    assert(bsys::lib_file("mylib", false, 0).as_str() == "libmylib.a", "static on windows");
+    assert(bsys::lib_file("mylib", true, 1).as_str() == "libmylib.dylib", "shared on macos");
+    assert(bsys::lib_file("mylib", true, 4).as_str() == "libmylib.dylib", "shared on ios");
+    assert(bsys::lib_file("mylib", true, 2).as_str() == "libmylib.so", "shared on linux");
+    assert(bsys::lib_file("mylib", true, 5).as_str() == "libmylib.so", "shared on android");
+    assert(bsys::lib_file("mylib", true, 0).as_str() == "mylib.dll", "shared on windows");
 }
 
 // A per-TU cache event whose type-table ref lies outside its section's table rejects the section instead

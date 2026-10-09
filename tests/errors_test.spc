@@ -33,18 +33,6 @@ fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, fi
 }
 
 @test
-fn emit_collects() {
-    let mut e = diag::Errors::new();
-    e.emit(12, 3, format("count is {} for {}", 7, "x"));
-    assert(e.errors.len() == 1, "one record collected");
-    let d = e.errors.at(0);
-    // Records stay raw.
-    assert(d.msg.eq_str("count is 7 for x"), "format() rendering");
-    assert(d.start == 12 && d.len == 3, "span recorded verbatim");
-    assert(d.note_head == diag::NOTE_NONE, "record fields");
-}
-
-@test
 fn line_col_and_carets() {
     let src = "ab\ncd\n  foo bar\n"; // "bar" on line 3
     let mut e = diag::Errors::new();

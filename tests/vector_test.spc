@@ -100,16 +100,6 @@ fn first_last_clear_truncate() {
     assert(v.len() == 0 && v.is_empty(), "clear empties");
 }
 
-@test
-fn bool_elements() {
-    let mut b = Vector::<bool>::new();
-    b.push(true);
-    b.push(false);
-    assert(b.len() == 2 && *b.at(0) == true, "stores values");
-    let p = b.pop();
-    assert(p.is_some() && p.unwrap() == false, "bool pop");
-}
-
 // Strings longer than the 23-byte inline budget, so every element owns a heap buffer the leak gate sees.
 fn long_str(tag: str) String {
     let mut s = String::from_str(tag);

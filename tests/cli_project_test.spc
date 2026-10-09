@@ -20,20 +20,6 @@ fn project(clean: bool) cli::Proj {
 }
 
 @test
-fn whole_project_fmt_check_passes_when_canonical() {
-    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
-    // dependent guest command, so it runs on native and Windows only.
-    if cli::on_wasm() {
-        return;
-    }
-    let p = project(true);
-    let root = str::from_cstr(p.rootp());
-    // No path: the sweep formats every source under the project root.
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "fmt --check");
-    assert(r.ok(), "a canonical project passes the whole-project check");
-}
-
-@test
 fn whole_project_fmt_check_flags_an_unformatted_file() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
     // dependent guest command, so it runs on native and Windows only.
@@ -57,7 +43,11 @@ fn whole_project_lint_is_clean() {
     let p = project(true);
     let root = str::from_cstr(p.rootp());
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
-    assert(r.ok(), "a clean project lints without warnings");
+    assert(r.ok() && !r.out_has("warning"), "a clean project lints without warnings");
+    // The sweep reaches a file nothing imports.
+    p.mkfile("lib/b.spc", "pub fn g() i32 {\n    let unused = 1;\n    return 0;\n}\n");
+    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(w.exit != 0 && w.out_shows("unused variable 'unused'") && w.out_shows("b.spc"), "the sweep lints every file");
 }
 
 @test
@@ -70,10 +60,13 @@ fn lint_recurses_a_directory() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import extra::util;\n\nfn main() i32 {\n    return extra::util::u();\n}\n");
-    p.mkfile("src/extra/util.spc", "pub fn u() i32 {\n    return 0;\n}\n");
+    p.mkfile("src/extra/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
     let root = str::from_cstr(p.rootp());
-    // Run from the project root so imports resolve against it; `lint src` recurses the directory.
+    // Run from the project root so imports resolve against it; `lint src` recurses the directory and
+    // reaches the nested file's warning.
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint src");
-    // A directory lints every .spc under it; a clean tree exits 0.
-    assert(r.ok(), "directory lint succeeds on a clean tree");
+    assert(
+        r.exit != 0 && r.out_shows("unused variable 'unused'") && r.out_shows("util.spc"),
+        "the nested file is linted",
+    );
 }

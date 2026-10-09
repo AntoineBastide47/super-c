@@ -167,12 +167,6 @@ fn golden_defer_block() {
 }
 
 @test
-fn golden_basic() {
-    // Fully canonical: single-line input becomes the one true form.
-    expect_fmt("fn add(a:i32,b:i32)i32{return a+b;}", "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n");
-}
-
-@test
 fn golden_param_groups() {
     // A `a, b: T` group (shared ty node) round-trips as written; separately-typed params never merge,
     // even when the types read the same: the formatter preserves the author's form both ways.

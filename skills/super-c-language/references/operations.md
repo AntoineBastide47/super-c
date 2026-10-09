@@ -6,7 +6,7 @@ results:
 | Result | Meaning |
 |--------|---------|
 | wraps | The result is the exact value modulo 2^N of the result type. |
-| traps | The program prints a message and aborts, in every profile. |
+| traps | The program prints a message, flushes every output stream and aborts, in every profile. |
 | checked trap | Traps in a profile with overflow checks; wraps in a profile without them. |
 | defined | A defined value, given in the row. |
 | undefined | The program has no defined behavior. A checking mode can report it; the compiler does not. |

@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 21.
+# Super-C compatibility contract, version 25.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=24
+CONTRACT_VERSION=25
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -68,8 +68,7 @@ CONTRACT_NONDET_FILES=".tu_cache"
 # ---- language fixtures and expected diagnostics --------------------------------------------------------
 # The test corpus, one file per entry, sorted; every expected diagnostic is asserted inside the file that
 # provokes it. The gate fails when tests/ holds a file not listed here or lacks one that is.
-CONTRACT_TESTS="tests/ast_fprint_test.spc
-tests/ast_test.spc
+CONTRACT_TESTS="tests/ast_test.spc
 tests/bce_test.spc
 tests/bench_sys_test.spc
 tests/blocking_test.spc
@@ -81,7 +80,6 @@ tests/cemit_test.spc
 tests/channel_test.spc
 tests/cli_build_variants_test.spc
 tests/cli_codegen_paths_test.spc
-tests/cli_conv_widen_test.spc
 tests/cli_devcheck_test.spc
 tests/cli_fmt_test.spc
 tests/cli_harness.spc

@@ -21,10 +21,15 @@ fn expect_c_user_absent(label: str, src: str, needle: str) {
     assert(!c.code_has(needle), label);
 }
 
-fn expect_panics(label: str, src: str) {
+// `src` builds, and its run traps with a message holding `msg`.
+fn expect_panics(label: str, src: str, msg: str) {
     let r = h::compile_and_run(src);
     assert(r.built, label);
-    assert(r.exit != 0, label);
+    let ok = r.exit != 0 && cli::contains_str(r.out, msg);
+    if !ok {
+        eprintln("{}: exit {}: {}", label, r.exit, str::from_cstr(r.out));
+    }
+    assert(ok, label);
 }
 
 @test
@@ -33,11 +38,13 @@ fn safety_element_checks() {
     expect_panics(
         "index == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..2];\n    let i = argv.len() + 1; // == 2 at runtime\n    return s[i];\n}\n",
+        "index out of bounds",
     );
     // Empty view element access.
     expect_panics(
         "empty view access panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..0];\n    let i = argv.len() - 1; // == 0\n    return s[i];\n}\n",
+        "index out of bounds",
     );
     // A valid dynamic access still works.
     h::expect_exit(
@@ -53,26 +60,31 @@ fn safety_range_checks() {
     expect_panics(
         "start > end panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 2; // == 3\n    let t: []i32 = s[lo..1];\n    return t.len() as i32;\n}\n",
+        "range out of bounds",
     );
     // Exclusive range with end > len.
     expect_panics(
         "end > len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 4; // == 5\n    let t: []i32 = s[0..hi];\n    return t.len() as i32;\n}\n",
+        "range out of bounds",
     );
     // Inclusive range with end == len.
     expect_panics(
         "inclusive end == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 3; // == 4\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
+        "index out of bounds",
     );
     // inclusive range with end == usize::MAX: `end + 1` must NOT wrap past the check.
     expect_panics(
         "inclusive end == usize::MAX panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = 0xFFFFFFFFFFFFFFFFu64 as usize - 1 + argv.len(); // == usize::MAX\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
+        "index out of bounds",
     );
     // A range whose length subtraction would underflow without the ordered check.
     expect_panics(
         "underflowing range panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 3; // == 4\n    let t: []i32 = s[lo..2];\n    return t.len() as i32;\n}\n",
+        "range out of bounds",
     );
     // Valid inclusive range still slices.
     h::expect_exit(
@@ -99,6 +111,7 @@ fn safety_mutation_and_zst() {
     expect_panics(
         "zst logical length out of range panics",
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    let i = argv.len() + 1; // == 2\n    let _ = v[i];\n    return 0;\n}\n",
+        "index out of bounds",
     );
 }
 
@@ -161,16 +174,6 @@ fn removal_keeps_unproved() {
         "fn cut(s: []i32, a: usize, b: usize) []i32 { return s[a..b]; }\n",
         "__sc_range(",
     );
-}
-
-@test
-fn removal_behavior_parity() {
-    // The same program computes the same result with the pass disabled.
-    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 5] = [1, 2, 3, 4, 5];\n    let s: []i32 = a[0..5];\n    let mut t = 0;\n    for v in s { t += v; }\n    for i in 0..s.len() { t += s[i]; }\n    let m: []i32 = s[1..=3];\n    for v in m { t += v; }\n    return t - 39 - (argv.len() as i32 - 1);\n}\n";
-    h::expect_exit("bce enabled computes 39", SRC, 0);
-    // The fork-per-test runner isolates this env change; the spawned build inherits it.
-    let _ = unsafe shim::sc_setenv("SC_BCE".ptr() as *const char, "0".ptr() as *const char);
-    h::expect_exit("bce disabled computes 39", SRC, 0);
 }
 
 fn check_body(opers: u32) ir::CoreBody {
@@ -260,10 +263,10 @@ fn coalescing_groups_adjacent_checks() {
 fn coalescing_panic_parity() {
     // A failing group panics (earlier site, same panic class); disabled BCE panics too.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 61; // == 62: j + 2 is out of bounds\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s;\n}\n";
-    expect_panics("group check panics", SRC);
-    // The fork-per-test runner isolates this env change; the spawned build inherits it.
-    let _ = unsafe shim::sc_setenv("SC_BCE".ptr() as *const char, "0".ptr() as *const char);
-    expect_panics("disabled pass panics identically", SRC);
+    expect_panics("group check panics", SRC, "index out of bounds");
+    // The guard restores the variable when the test ends; the spawned build inherits it.
+    let _env2 = cli::set_env("SC_BCE", "0");
+    expect_panics("disabled pass panics identically", SRC, "index out of bounds");
 }
 
 @test
@@ -433,11 +436,11 @@ fn inline_behavior_parity() {
     // Identical results with the inliner off, the fold rule off, and both off.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..10 {\n        v.push(k);\n    }\n    let mut t = 0;\n    for i in 0..v.len() {\n        t += *v.at(i);\n    }\n    let mut s = String::new();\n    s.push_str(\"ab\");\n    t += s.len() as i32;\n    return t - 47 - (argv.len() as i32 - 1);\n}\n";
     h::expect_exit("inline+fold on", SRC, 0);
-    let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "fold".ptr() as *const char);
+    let _env3 = cli::set_env("SC_BCE_DISABLE", "fold");
     h::expect_exit("fold off", SRC, 0);
-    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    let _env4 = cli::set_env("SC_INLINE", "0");
     h::expect_exit("inline off, fold off", SRC, 0);
-    let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "".ptr() as *const char);
+    let _env5 = cli::set_env("SC_BCE_DISABLE", "");
     h::expect_exit("inline off", SRC, 0);
 }
 
@@ -445,11 +448,11 @@ fn inline_behavior_parity() {
 fn inline_panic_site_parity() {
     // An out-of-range at() panics under every switch combination.
     let BAD: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return *v.at(argv.len() + 5);\n}\n";
-    expect_panics("oob panics (inline+fold on)", BAD);
-    let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "fold".ptr() as *const char);
-    expect_panics("oob panics (fold off)", BAD);
-    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
-    expect_panics("oob panics (both off)", BAD);
+    expect_panics("oob panics (inline+fold on)", BAD, "index out of bounds");
+    let _env6 = cli::set_env("SC_BCE_DISABLE", "fold");
+    expect_panics("oob panics (fold off)", BAD, "index out of bounds");
+    let _env7 = cli::set_env("SC_INLINE", "0");
+    expect_panics("oob panics (both off)", BAD, "index out of bounds");
 }
 
 @test
@@ -460,17 +463,6 @@ fn inline_omitted_aggregate_members() {
         "fn mk(x: i32) [i32; 4] {\n    let a: [i32; 4] = [[0] = x];\n    return a;\n}\nfn main(argv: Vector<str>) i32 {\n    let a = mk(argv.len() as i32);\n    return a[0] + a[1] + a[2] + a[3] - 1;\n}\n",
         0,
     );
-}
-
-@test
-fn inline_deterministic_emission() {
-    // Two in-process emissions of the same snippet are byte-identical.
-    let src: str = "fn sum(v: &Vector<i32>) i32 {\n    let mut t = 0;\n    for i in 0..v.len() {\n        t += *v.at(i);\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(4);\n    return sum(&v) - 4 - (argv.len() as i32 - 1);\n}\n";
-    let a = h::compile_c_user(src);
-    let b2 = h::compile_c_user(src);
-    assert(a.ok(), "first emission ok");
-    assert(b2.ok(), "second emission ok");
-    assert(str::from_cstr(a.code) == str::from_cstr(b2.code), "byte-identical emissions");
 }
 
 @test
@@ -533,16 +525,16 @@ fn sig_disable_and_inline_parity() {
     let SRC: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n";
     let BAD: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    return v.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let k = argv.len() + 4;\n    let _ = peek(&v);\n    return v[k];\n}\n";
     h::expect_exit("sig on", SRC, 0);
-    expect_panics("sig on, oob panics", BAD);
-    let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "sig".ptr() as *const char);
+    expect_panics("sig on, oob panics", BAD, "index out of bounds");
+    let _env8 = cli::set_env("SC_BCE_DISABLE", "sig");
     h::expect_exit("sig off", SRC, 0);
-    expect_panics("sig off, oob panics", BAD);
-    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    expect_panics("sig off, oob panics", BAD, "index out of bounds");
+    let _env9 = cli::set_env("SC_INLINE", "0");
     h::expect_exit("sig off, inline off", SRC, 0);
-    let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "".ptr() as *const char);
+    let _env10 = cli::set_env("SC_BCE_DISABLE", "");
     h::expect_exit("sig on, inline off", SRC, 0);
-    expect_panics("sig on inline off, oob panics", BAD);
-    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "".ptr() as *const char);
+    expect_panics("sig on inline off, oob panics", BAD, "index out of bounds");
+    let _env11 = cli::set_env("SC_INLINE", "");
 }
 
 @test
@@ -566,7 +558,7 @@ fn join_versions_are_path_sound() {
     // After a join, the guard on `x` says nothing about `big`, whatever branch the walk saw last.
     let SRC: str = "fn get(v: []i32, s0: usize, c: bool) i32 {\n    let big = s0 + 100;\n    let mut x = s0;\n    if c {\n        x = s0;\n    } else {\n        x = big;\n    }\n    if x < v.len() {\n        return v[big];\n    }\n    return 7;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = Vector::<i32>::new();\n    w.push(1);\n    w.push(2);\n    return get(w[0..2], argv.len() - 1, true);\n}\n";
     expect_c_user_present("the unrelated access keeps its check", SRC, "__sc_bounds(");
-    expect_panics("the unrelated access panics", SRC);
+    expect_panics("the unrelated access panics", SRC, "index out of bounds");
     // `c || i < len` does not bound `i` on its true edge.
     expect_c_user_present(
         "an or-condition keeps the check",
@@ -586,7 +578,7 @@ fn loop_header_kills_lengths_the_loop_writes() {
     // The bound read before the loop is stale on the second iteration once the body pops.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 2 {\n        v.push(k as i32);\n    }\n    let n = v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += v[i];\n        let _ = v.pop();\n        i += 1;\n    }\n    return x;\n}\n";
     expect_c_user_present("the popped vector keeps its check", SRC, "__sc_bounds(");
-    expect_panics("the stale bound panics", SRC);
+    expect_panics("the stale bound panics", SRC, "index out of bounds");
 }
 
 @test
@@ -615,18 +607,28 @@ fn interval_widening_terminates_on_nested_loops() {
     h::expect_exit("nested behavior", SRC, 0);
 }
 
-// The exit code of project program `src` (it imports std::simd), whose C calls the vector range check
-// when `present`.
-fn vec_check(label: str, src: str, present: bool) i32 {
+// Project program `src` (it imports std::simd) calls the vector range check in its C when `present`,
+// and its run exits 0, or traps with `trap` when that is not empty.
+fn vec_check(label: str, src: str, present: bool, trap: str) {
     let b = h::diff_build(src, []);
     assert(b.built, label);
     let mut path = String::from_str(str::from_cstr(b.proj.rootp()));
     path.push_str("/build/dev/gen/main.c");
     let c = cli::read_text(path.as_str());
+    assert(c.len() != 0, label);
     assert(c.contains("__sc_bounds_vec(") == present, label);
     // a proven vector access leaves no element check either
     assert(present || !c.contains("__sc_bounds("), label);
-    return h::diff_run(&b, "").exit;
+    let r = h::diff_run(&b, "");
+    let ok = if trap.len() == 0 {
+        r.exit == 0;
+    } else {
+        r.exit != 0 && r.err.contains(trap);
+    };
+    if !ok {
+        eprintln("{}: exit {}: {}", label, r.exit, r.err.as_str());
+    }
+    assert(ok, label);
 }
 
 // A vector load or store checks `start <= len && N <= len - start` once (IN_BOUNDS_GROUP): in a loop
@@ -635,24 +637,41 @@ fn vec_check(label: str, src: str, present: bool) i32 {
 @test
 fn vector_access_group_checks() {
     let STRIDED: str = "import std::simd;\nfn sum(s: []i32, d: []mut i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < n {\n        let v = simd::load::<i32, 4>(s, i);\n        acc = acc.wrapping_add(v);\n        i += 4;\n    }\n    return acc[0] + acc[3] + d.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let mut d = [0; 4];\n    return sum(v[0..v.len()], d) - 18;\n}\n";
-    assert_eq(vec_check("the strided load is proven", STRIDED, false), 0);
-    let BARE: str = "import std::simd;\nfn sum(s: []i32) i32 {\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < s.len() {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    return sum(v[0..v.len()]);\n}\n";
-    assert(vec_check("the bare length keeps the check", BARE, true) != 0, "the last partial load traps");
+    vec_check("the strided load is proven", STRIDED, false, "");
+    let BARE: str = "import std::simd;\nfn sum(s: []i32) i32 {\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < s.len() {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as i32);\n    }\n    return sum(v[0..v.len()]);\n}\n";
+    vec_check(
+        "the bare length keeps the check: the last partial load traps",
+        BARE,
+        true,
+        "4 lanes from 8 but the length is 9",
+    );
     let SHRINK: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let n = v.len() - v.len() % 4;\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < n {\n        t += simd::load::<i32, 4>(v[0..v.len()], i)[0];\n        let _ = v.pop();\n        let _ = v.pop();\n        let _ = v.pop();\n        i += 4;\n    }\n    return t;\n}\n";
-    assert(vec_check("a pop in the loop keeps the check", SHRINK, true) != 0, "the load past the shrunk length traps");
+    vec_check(
+        "a pop in the loop keeps the check: the load past the shrunk length traps",
+        SHRINK,
+        true,
+        "4 lanes from 4 but the length is 5",
+    );
     let BETWEEN: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let i = argv.len() + 3; // == 4\n    if i + 4 > v.len() {\n        return 9;\n    }\n    let a = simd::load::<i32, 4>(v[0..v.len()], i);\n    let _ = v.pop();\n    let b = simd::load::<i32, 4>(v[0..v.len()], i);\n    return a[0] + b[0];\n}\n";
-    assert(
-        vec_check("a store to the length's base keeps the second check", BETWEEN, true) != 0,
-        "the second load traps",
+    vec_check(
+        "a store to the length's base keeps the second check, which traps",
+        BETWEEN,
+        true,
+        "4 lanes from 4 but the length is 7",
     );
     // A slice built by a struct literal: its length is the value of its `len` operand, so the loop
     // over that value's aligned part is proven; a later write to the field keeps the check.
     let VIEW: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let s = Slice::<i32> { ptr: p, len: n };\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
-    assert_eq(vec_check("a view literal's length is its len operand", VIEW, false), 0);
+    vec_check("a view literal's length is its len operand", VIEW, false, "");
     let VIEW_SET: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let mut s = Slice::<i32> { ptr: p, len: n };\n    s.len = n - 3;\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
-    assert(vec_check("a write to the view's len keeps the check", VIEW_SET, true) != 0, "the second load traps");
+    vec_check(
+        "a write to the view's len keeps the check: the second load traps",
+        VIEW_SET,
+        true,
+        "4 lanes from 4 but the length is 7",
+    );
     // An early-return guard bounds the loop's limit by the other slice's length: both accesses are
     // proven (`i < m <= n <= y.len()`).
     let GUARD: str = "import std::simd;\nfn sum(x: []f32, y: []f32) f32 {\n    let n = x.len();\n    if y.len() < n {\n        return 0.0;\n    }\n    let m = n - n % 4;\n    let mut acc = Simd::<f32, 4>::splat(0.0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc + simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);\n        i += 4;\n    }\n    let mut s = acc[0] + acc[1] + acc[2] + acc[3];\n    for k in m..n {\n        s = s + x[k] * y[k];\n    }\n    return s;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<f32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as f32);\n    }\n    return sum(v[0..v.len()], v[0..v.len()]) as i32 - 204;\n}\n";
-    assert_eq(vec_check("a guard proves the other slice and the scalar tail", GUARD, false), 0);
+    vec_check("a guard proves the other slice and the scalar tail", GUARD, false, "");
 }

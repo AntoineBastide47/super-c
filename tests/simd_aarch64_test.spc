@@ -44,30 +44,133 @@ fn a_program_without_vectors_emits_the_same_c() {
     assert(emitted(asrc, "").contains("__sc_si_aarch64__add_f32x4"), "an aliased module");
 }
 
-const RELEASE: [str; 1] = ["--profile=release"];
-
-// Kernel `k` (`src`), called from `main` on `args` built from the run-time value `n`, lowers to
-// instructions holding each of `want` and none of `avoid`.
-fn check(label: str, src: str, args: str, want: []str, avoid: []str) {
-    let ops: []str = RELEASE;
-    let full = kernel(src, args);
-    h::expect_asm(label, full.as_str(), ops, "main__k", want, avoid);
-    // The instructions come from an entry, not from the lane loop the C compiler vectorized.
-    let b = h::diff_build(full.as_str(), ops);
-    let c = cli::read_text(format("{}/build/release/raw/main.c", str::from_cstr(b.proj.rootp())).as_str());
-    if !c.contains("__sc_si_aarch64__") {
-        eprintln("{}: no entry call in the C", label);
+// The in-process harness loads the backend and plans its entries as a build does, so its C checks see
+// the code an aarch64 build runs.
+@test
+fn harness_c_calls_the_backend_entries() {
+    if !aarch64_host() {
+        return;
     }
-    assert(c.contains("__sc_si_aarch64__"), label);
+    let c = h::compile_c(
+        "fn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return (v + v).get(0) as i32 - 2;\n}\n",
+    );
+    assert(c.ok());
+    assert(c.code_has("__sc_si_aarch64__add_f32x4("), "a vector operation calls its entry");
 }
 
-// `src` with a `main` that calls the kernel `k` on `args` built from a run-time value.
-fn kernel(src: str, args: str) String {
-    return format(
-        "import std::simd;\n@c.noinline\n{}fn main(args: Vector<str>) i32 {{\n    let n = args.len();\n    return ({}) as i32;\n}}\n",
-        src,
-        args,
-    );
+const RELEASE: [str; 1] = ["--profile=release"];
+
+// The kernels of one program: each its own `@c.noinline` function, called from `main` on arguments built
+// from the run-time value `n`. One build and one assembly compile serve every check.
+struct Kernels {
+    pub labels: Vector<String>,
+    pub want: Vector<Vector<String>>,
+    pub avoid: Vector<Vector<String>>,
+    pub decls: String,
+    pub calls: String,
+}
+
+extend Kernels {
+    fn new() Kernels {
+        return Kernels {
+            labels: Vector::<String>::new(),
+            want: Vector::<Vector<String>>::new(),
+            avoid: Vector::<Vector<String>>::new(),
+            decls: String::new(),
+            calls: String::new(),
+        };
+    }
+
+    // Kernel `k` (`src`, called as `args`) lowers to instructions holding each of `want` and none of
+    // `avoid` (`=name`: that mnemonic exactly).
+    fn add(self: &mut Kernels, label: str, src: str, args: str, want: []str, avoid: []str) {
+        let name = format("k{}", self.labels.len());
+        self.decls.format_into(
+            "@c.noinline\n{}",
+            String::from_str(src).replace("fn k(", format("fn {}(", name.as_str()).as_str()).as_str(),
+        );
+        self.calls.format_into("    t = t + ({}{}) as i32;\n", name.as_str(), args.slice(1, args.len()));
+        self.labels.push(String::from_str(label));
+        let mut w = Vector::<String>::new();
+        for x in want {
+            w.push(String::from_str(x));
+        }
+        self.want.push(w);
+        let mut a = Vector::<String>::new();
+        for x in avoid {
+            a.push(String::from_str(x));
+        }
+        self.avoid.push(a);
+    }
+
+    // Build the program under the release profile and check every kernel: its C calls an entry (the
+    // instructions come from it, not from a lane loop the C compiler vectorized), and its assembly.
+    fn run(self: &Kernels) {
+        let src = format(
+            "import std::simd;\n{}fn main(args: Vector<str>) i32 {{\n    let n = args.len();\n    let mut t: i32 = 0;\n{}    return t;\n}}\n",
+            self.decls.as_str(),
+            self.calls.as_str(),
+        );
+        let ops: []str = RELEASE;
+        let b = h::diff_build(src.as_str(), ops);
+        if !b.built {
+            eprintln("{}", b.diag.as_str());
+        }
+        assert(b.built, "the kernels build");
+        let c = cli::read_text(format("{}/build/release/raw/main.c", str::from_cstr(b.proj.rootp())).as_str());
+        let mut code = String::new();
+        let e = h::asm_text(&b, ops, "main__k0", &mut code);
+        assert(e.len() == 0, e.as_str());
+        let mut failed = false;
+        for i in 0..self.labels.len() {
+            let fname = format("main__k{}", i);
+            let label = self.labels.at(i).as_str();
+            if !fn_body(c.as_str(), fname.as_str()).contains("__sc_si_aarch64__") {
+                eprintln("{}: no entry call in the C of {}", label, fname.as_str());
+                failed = true;
+            }
+            for w in 0..self.want.at(i).len() {
+                let d = h::asm_match(code.as_str(), fname.as_str(), [self.want.at(i).at(w).as_str()], []);
+                if d.len() != 0 {
+                    eprintln("{}: {}", label, d.as_str());
+                    failed = true;
+                }
+            }
+            for a in 0..self.avoid.at(i).len() {
+                let d = h::asm_match(code.as_str(), fname.as_str(), [], [self.avoid.at(i).at(a).as_str()]);
+                if d.len() != 0 {
+                    eprintln("{}: {}", label, d.as_str());
+                    failed = true;
+                }
+            }
+        }
+        assert(!failed, "every kernel lowers to its instructions");
+    }
+}
+
+// The definition of C function `name` in `c`: from the line that opens it to its closing brace at
+// column 0; empty when `c` does not define it.
+fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
+    let head = format(" {}(", name);
+    let mut at: usize = 0;
+    loop {
+        let k = c.slice(at, c.len()).find(head.as_str());
+        if k < 0 {
+            return "";
+        }
+        let st = at + k as usize;
+        let rest = c.slice(st, c.len());
+        let eol = rest.find("\n");
+        if eol > 0 && rest.slice(0, eol as usize).ends_with("{") {
+            let end = rest.find("\n}\n");
+            return if end > 0 {
+                rest.slice(0, end as usize);
+            } else {
+                "";
+            };
+        }
+        at = st + head.len();
+    }
 }
 
 // Each kernel lowers to its Neon instructions with no call left: a required kernel that falls back to
@@ -77,7 +180,8 @@ fn operations_lower_to_their_instructions() {
     if !aarch64_host() {
         return;
     }
-    check(
+    let mut ks = Kernels::new();
+    ks.add(
         "lane-wise add",
         "fn k(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\n",
         "k(f32x4::splat(n as f32), f32x4::splat(1.0)).get(0)",
@@ -85,14 +189,14 @@ fn operations_lower_to_their_instructions() {
         ["=bl"],
     );
     // A 64-bit vector takes the `d` form of its entry.
-    check(
+    ks.add(
         "a 64-bit add",
         "fn k(a: Simd<f32, 2>, b: Simd<f32, 2>) Simd<f32, 2> {\n    return a + b;\n}\n",
         "k(Simd::<f32, 2>::splat(n as f32), Simd::<f32, 2>::splat(1.0)).get(0)",
         ["fadd"],
         ["=bl"],
     );
-    check(
+    ks.add(
         "fma",
         "fn k(a: f32x4, b: f32x4) f32x4 {\n    return a.fma(b, a);\n}\n",
         "k(f32x4::splat(n as f32), f32x4::splat(1.0)).get(0)",
@@ -100,70 +204,70 @@ fn operations_lower_to_their_instructions() {
         ["=bl"],
     );
     // A comparison whose one use is a choice stays in lanes: no mask in between.
-    check(
+    ks.add(
         "count of a comparison",
         "fn k(a: u8x64, b: u8x64) usize {\n    return a.equal(b).count();\n}\n",
         "k(u8x64::splat(n as u8), u8x64::splat(1))",
         ["cmeq", "addv"],
         ["=bl", "cnt"],
     );
-    check(
+    ks.add(
         "a choice of narrower lanes",
         "fn k(a: f32x16, b: f32x16, p: u8x16, q: u8x16) u8x16 {\n    return a.less_than(b).choose(p, q);\n}\n",
         "k(f32x16::splat(n as f32), f32x16::splat(1.0), u8x16::splat(2), u8x16::splat(3)).get(0)",
         ["fcmgt", "uzp1"],
         ["=bl", "addv"],
     );
-    check(
+    ks.add(
         "compress_store",
         "fn k(v: f32x16, t: f32x16) usize {\n    let mut a = [0.0f32; 32];\n    return simd::compress_store(a, 1, v.greater_than(t), v) + a[3] as usize;\n}\n",
         "k(f32x16::splat(n as f32), f32x16::splat(0.5))",
         ["tbl"],
         [],
     );
-    check(
+    ks.add(
         "gather's index check",
         "fn k(s: []f32, x: u32x16) f32 {\n    return simd::reduce_add_tree(simd::gather(s, x, Mask::<16>::splat(true), f32x16::splat(0.0)));\n}\n",
         "k([1.0f32; 64], u32x16::splat(n as u32)) as usize",
         ["cmhi", "umaxv"],
         [],
     );
-    check(
+    ks.add(
         "compress",
         "fn k(m: u64, a: i32x4, b: i32x4) i32x4 {\n    return simd::compress(Mask::<4>::from_bits_truncate(m), a, b);\n}\n",
         "k(n as u64, i32x4::splat(n as i32), i32x4::splat(1)).get(0)",
         ["tbl"],
         ["=bl"],
     );
-    check(
+    ks.add(
         "compare and choose",
         "fn k(a: i8x16, b: i8x16, c: i8x16) i8x16 {\n    return a.less_than(b).choose(c, a);\n}\n",
         "k(i8x16::splat(n as i8), i8x16::splat(1), i8x16::splat(2)).get(0)",
         ["cmgt"],
         ["=bl", "addv"],
     );
-    check(
+    ks.add(
         "compare to a mask",
         "fn k(a: u8x16, b: u8x16) u32 {\n    return a.equal(b).count() as u32;\n}\n",
         "k(u8x16::splat(n as u8), u8x16::splat(1))",
         ["cmeq", "addv"],
         ["=bl"],
     );
-    check(
+    ks.add(
         "any of a comparison",
         "fn k(a: i32x4, b: i32x4) bool {\n    return a.less_than(b).any();\n}\n",
         "k(i32x4::splat(n as i32), i32x4::splat(1))",
         ["cmgt", "umaxv"],
         ["=bl", "addv"],
     );
-    check(
+    ks.add(
         "all of a comparison",
         "fn k(a: u16x8, b: u16x8) bool {\n    return a.equal(b).all();\n}\n",
         "k(u16x8::splat(n as u16), u16x8::splat(1))",
         ["cmeq", "uminv"],
         ["=bl", "addv"],
     );
-    check(
+    ks.add(
         "a run-time index",
         "fn k(a: u8x16, b: u8x16) u8x16 {\n    return simd::swizzle_or_zero(a, b);\n}\n",
         "k(u8x16::splat(n as u8), u8x16::splat(1)).get(0)",
@@ -176,31 +280,32 @@ fn operations_lower_to_their_instructions() {
     let dargs = "k(i8x16::splat(n as i8), i8x16::splat(1))";
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     if PLATFORM == Platform::MacOS || more != null && str::from_cstr(more).contains("dotprod") {
-        check("a dot product", dot, dargs, ["sdot", "addv"], ["=bl"]);
+        ks.add("a dot product", dot, dargs, ["sdot", "addv"], ["=bl"]);
     } else {
-        check("a dot product", dot, dargs, ["smull", "addv"], ["=bl", "sdot"]);
+        ks.add("a dot product", dot, dargs, ["smull", "addv"], ["=bl", "sdot"]);
     }
-    check(
+    ks.add(
         "a load",
         "fn k(s: []f32) f32x4 {\n    return simd::load::<f32, 4>(s, 0) + f32x4::splat(1.0);\n}\n",
         "k([n as f32; 4]).get(0)",
         ["ldr", "fadd"],
         [],
     );
-    check(
+    ks.add(
         "a min_num reduction",
         "fn k(a: f32x4, b: f32x4) f32 {\n    return simd::reduce_min_num(a + b);\n}\n",
         "k(f32x4::splat(n as f32), f32x4::splat(1.0))",
         ["fminnmv"],
         ["=bl"],
     );
-    check(
+    ks.add(
         "a tree sum",
         "fn k(a: f32x4) f32 {\n    return simd::reduce_add_tree(a);\n}\n",
         "k(f32x4::splat(n as f32))",
         ["fadd"],
         ["=bl"],
     );
+    ks.run();
 }
 
 // The sum of [1e8, 1, -1e8, 1] by halves is (1e8 + -1e8) + (1 + 1) = 2; by adjacent pairs

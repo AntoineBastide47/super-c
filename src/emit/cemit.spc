@@ -3816,6 +3816,11 @@ extend CEmit {
             for si in 0..cblk.stmt_len {
                 let s = *b.statements.at((cblk.stmt_start + si) as usize);
                 if s.kind == ir::ST_ASSIGN && self.rvalue_reads_call_use(b, s.rvalue, root) {
+                    // A repeat spells its element at every element: the call keeps its temp and runs once.
+                    if b.rvalues.at(s.rvalue as usize).kind == ir::RV_REPEAT {
+                        before = true;
+                        break;
+                    }
                     // A use that emits no statement cannot receive the forwarded call. Keep the call
                     // as its own statement so its side effect remains, then elide the unused copy.
                     if !self.stmt_emits(b, &s) {
@@ -12034,19 +12039,19 @@ extend CEmit {
         }
         if kind == 1 {
             self.aux.push_str(
-                "static inline void __sc_assert_i64(int64_t l, int64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %lld\\n  right: %lld\\n  at %s:%llu\\n\", e, (long long)l, (long long)r, f, n); fflush(stderr); abort(); } }\n",
+                "static inline void __sc_assert_i64(int64_t l, int64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %lld\\n  right: %lld\\n  at %s:%llu\\n\", e, (long long)l, (long long)r, f, n); fflush(NULL); abort(); } }\n",
             );
         } else if kind == 2 {
             self.aux.push_str(
-                "static inline void __sc_assert_u64(uint64_t l, uint64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %llu\\n  right: %llu\\n  at %s:%llu\\n\", e, (unsigned long long)l, (unsigned long long)r, f, n); fflush(stderr); abort(); } }\n",
+                "static inline void __sc_assert_u64(uint64_t l, uint64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %llu\\n  right: %llu\\n  at %s:%llu\\n\", e, (unsigned long long)l, (unsigned long long)r, f, n); fflush(NULL); abort(); } }\n",
             );
         } else if kind == 3 {
             self.aux.push_str(
-                "static inline void __sc_assert_f64(double l, double r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %g\\n  right: %g\\n  at %s:%llu\\n\", e, l, r, f, n); fflush(stderr); abort(); } }\n",
+                "static inline void __sc_assert_f64(double l, double r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %g\\n  right: %g\\n  at %s:%llu\\n\", e, l, r, f, n); fflush(NULL); abort(); } }\n",
             );
         } else if kind == 4 {
             self.aux.push_str(
-                "static inline void __sc_assert_bool(bool l, bool r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %s\\n  right: %s\\n  at %s:%llu\\n\", e, l ? \"true\" : \"false\", r ? \"true\" : \"false\", f, n); fflush(stderr); abort(); } }\n",
+                "static inline void __sc_assert_bool(bool l, bool r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %s\\n  right: %s\\n  at %s:%llu\\n\", e, l ? \"true\" : \"false\", r ? \"true\" : \"false\", f, n); fflush(NULL); abort(); } }\n",
             );
         }
         self.aux_mark(1u64 | bit as u64 << 1, 0xFFFF);
@@ -15209,7 +15214,7 @@ extend CEmit {
             push_fmt_escaped(file, o);
             o.push_str(":");
             o.push_u64(line);
-            o.push_str("\\n\"); fflush(stderr); abort(); }\n");
+            o.push_str("\\n\"); fflush(NULL); abort(); }\n");
             return true;
         }
         if t.kind == ir::TM_SWITCH {

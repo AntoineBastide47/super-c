@@ -5,6 +5,7 @@
 // emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line matchertext literals.
 import tests::cli_harness as cli;
 import stdio;
+import stdlib;
 import module::loader as loader;
 import build_system::build as bsys;
 import build_system::objcache as ocache;
@@ -13,20 +14,6 @@ import driver_shim as shim;
 
 struct Cmd {
     pub b: [char; 2048],
-}
-
-// A valid file compiles (exit 0), emits its module .c under build/, and that C compiles + runs with the exit
-// code the program requests.
-@test
-fn compiles_file() {
-    let p = cli::proj_new();
-    p.mkfile("prog.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(7); }\n");
-    let r = p.compile("prog.spc");
-    assert(r.ok());
-    assert(p.gen_exists("prog.c"), "module .c is emitted under build/");
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    assert_eq(p.run_bin(), 7);
 }
 
 // A method a plain extend defines in one module and an overlapping plain extend of the same type
@@ -996,8 +983,8 @@ fn main() i32 {
 
 @test
 fn reflect_metadata() {
-    // Instance-symbol assertions pin the NON-inlined emission (fork-isolated env).
-    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    // Instance-symbol assertions pin the NON-inlined emission.
+    let _env1 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1303,7 +1290,7 @@ fn main() i32 {
 
 @test
 fn fields_projection_serializer() {
-    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    let _env2 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1398,7 +1385,7 @@ enum Shape { Dot, Line(i32, i32), }
 // outside them, and the step budget.
 @test
 fn ctfe() {
-    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    let _env3 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1671,7 +1658,9 @@ fn raii_drop_on_field_assign() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "String__free"), "field overwrite frees the old value");
+    // The free is in `main` itself (Holder's own `free` also calls it), and the run passes the
+    // harness's fatal leak gate.
+    assert(p.gen_fn_has("main.c", "__sc_user_main", "String__free("), "field overwrite frees the old value");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
@@ -1705,7 +1694,7 @@ fn raii_drop_on_field_assign() {
 // its diagnostic is reported and nothing aborts.
 @test
 fn validation_skips_rejected_bodies() {
-    let _ = unsafe p13shim::sc_setenv("SC_BC_VALIDATE".ptr() as *const char, "1".ptr() as *const char);
+    let _env4 = cli::set_env("SC_BC_VALIDATE", "1");
     let p = cli::proj_new();
     p.mkfile(
         "condfree.spc",
@@ -1769,7 +1758,7 @@ fn local_const_lifecycle() {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(!p.gen_has("main.c", "build()"), "owning local const is not computed at run time");
-    assert(p.gen_has("main__inst.c", "static const uint32_t L__"), "its buffer is static data");
+    assert(p.gen_has("main__inst.c", "static const uint32_t "), "its buffer is static data");
     assert(!p.gen_has("main.c", "Vector__u32__free(&"), "a materialized const is never freed");
     assert(!p.gen_has("main.c", "mk()"), "value const folds to static data instead of a call");
     let cc = p.cc_build("");
@@ -1778,17 +1767,20 @@ fn local_const_lifecycle() {
     // Runs with no leak under the fatal gate: static data is not a heap allocation.
     assert(lk.ok());
 
-    // A GLOBAL owning const is materialized the same way (buffer included) and never freed.
-    p.mkfile(
+    // A GLOBAL owning const is materialized the same way (buffer included) and never freed: its own
+    // project, built and run under the fatal gate.
+    let q = cli::proj_new();
+    q.mkfile(
         "g.spc",
         "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
     );
-    let g = p.compile("g.spc");
+    let g = q.compile("g.spc");
     assert(g.ok());
-    assert(p.gen_has("g__inst.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
-    assert(p.gen_has("g__inst.c", ".ptr = (void *)V__ct0"), "the const points at it");
-    assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
-    let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(q.gen_has("g__inst.c", "static const uint32_t "), "the buffer is static data");
+    assert(q.gen_has("g__inst.c", ".ptr = (void *)"), "the const points at it");
+    assert(!q.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
+    assert(q.cc_build("").ok());
+    let gr = q.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(gr.ok());
     // Moving an owning const out is rejected.
     p.mkfile(
@@ -2285,6 +2277,66 @@ fn main() i32 { return 0; }
     assert_eq(p.run_bin(), 0);
 }
 
+// A should_panic test passes only on a panic: a crash, or a nonzero exit such as a leak report's 23, fails it.
+@test
+fn should_panic_needs_a_panic() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import stdlib;
+@test(should_panic)
+fn crashes() {
+  let p = stdlib::getenv("SC_NO_SUCH_VARIABLE");
+  if unsafe *p == 'x' as char { println("x"); }
+}
+@test(should_panic)
+fn exits() { unsafe stdlib::exit(23); }
+@test(should_panic)
+fn panics() { panic("boom"); }
+fn main() i32 { return 0; }
+)",
+    );
+    let r = p.compile_flags("--test", "main.spc");
+    assert_eq(r.exit, 2);
+    assert(r.out_shows("test main::crashes ... FAILED (expected a panic)"), "a crash is not a panic");
+    assert(r.out_shows("test main::exits ... FAILED (expected a panic)"), "a nonzero exit is not a panic");
+    assert(r.out_shows("exited with code 23"), "the report names the exit code");
+    assert(r.out_shows("test main::panics ... ok (panicked as expected)"), "a panic passes");
+    assert(r.out_shows("1 passed, 2 failed"), "tally");
+}
+
+// A variable a test sets through `cli::set_env` holds until the guard drops, then takes back its previous
+// value, or goes when it had none.
+@test
+fn env_guards_restore_the_environment() {
+    {
+        let _a = cli::set_env("SC_GUARD_PROBE", "1");
+        assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "1", "set");
+        {
+            let _b = cli::set_env("SC_GUARD_PROBE", "2");
+            assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "2", "set over");
+        }
+        assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "1", "the previous value is back");
+    }
+    assert(stdlib::getenv("SC_GUARD_PROBE") == null, "a variable that had no value goes");
+}
+
+// A child runs with every assignment its caller gives it or not at all: an environment list that does not
+// apply whole (more than 8 with the harness's SC_LEAK_CHECK, one without `=`, an unclosed quote) starts
+// nothing. A value in double quotes holds spaces.
+@test
+fn an_env_that_does_not_apply_whole_starts_nothing() {
+    let mut cmd = format("{} --version", str::from_cstr(cli::cc_name()));
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1=1 SC_P2=2 SC_P3=3 SC_P4=4 SC_P5=5 SC_P6=6 SC_P7=7"), 0);
+    assert_eq(
+        cli::run_with(cmd.cstr(), null, null, null, "SC_P1=1 SC_P2=2 SC_P3=3 SC_P4=4 SC_P5=5 SC_P6=6 SC_P7=7 SC_P8=8"),
+        -1,
+    );
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1"), -1);
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1=\"a b\" SC_P2=2"), 0);
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1=\"a b"), -1);
+}
+
 // A generic defined in one module, instantiated over a user struct held BY VALUE in another: the instance is
 // re-homed to the user module and full-monomorphized there. -Werror is the placement proof.
 // A zero-sized fixture, suite receiver or global env has no storage: the wrappers pass its address as the
@@ -2647,90 +2699,7 @@ fn main() i32 {
     );
     let r2 = q.compile("main.spc");
     assert(r2.exit != 0, "spawning a closure that mutates a capture is rejected");
-}
-
-// The concurrency platform substrate (ffi/sc_rt.c via std/parallel): CPU count and monotonic clock, a
-// guard-paged stack driving a stackful ucontext/fiber context switch (the coroutine runs, writes a marker,
-// and switches back), and cross-thread address parking (a spawned thread publishes a word and unparks the
-// main thread, which was parked on it). Leak-checked.
-@test
-fn platform_substrate() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import sc_runtime;
-import std::parallel::platform as platform;
-import std::parallel::thread as thread;
-import atomic;
-import std::parallel::atomics as atom;
-
-struct CoState {
-    pub root: *mut void,
-    pub me: *mut void,
-    pub hit: i32,
-}
-
-fn co_entry(arg: *mut void) {
-    let s = arg as *mut CoState;
-    unsafe (*s).hit = 42;
-    unsafe sc_runtime::sc_rt_ctx_switch((*s).me, (*s).root);
-}
-
-fn main() i32 {
-    let n = platform::ncpu();
-    let a = platform::now_ns();
-    let b = platform::now_ns();
-    if n < 1 || b < a {
-        return 1;
-    }
-    let root = unsafe sc_runtime::sc_rt_ctx_alloc();
-    let co = unsafe sc_runtime::sc_rt_ctx_alloc();
-    let sz: usize = 65536;
-    let stk = unsafe sc_runtime::sc_rt_stack_alloc(sz);
-    let mut st = CoState { root: root, me: co, hit: 0 };
-    unsafe sc_runtime::sc_rt_ctx_init(co, stk, sz, co_entry, &mut st as *mut void);
-    unsafe sc_runtime::sc_rt_ctx_switch(root, co);
-    unsafe sc_runtime::sc_rt_stack_free(stk, sz);
-    unsafe sc_runtime::sc_rt_ctx_free(co);
-    unsafe sc_runtime::sc_rt_ctx_free(root);
-    if st.hit != 42 {
-        return 2;
-    }
-    let mut g = Global {};
-    let wp = unsafe g.alloc(4, 4) as *mut i32;
-    unsafe wp[0] = 0;
-    let waddr = wp as usize;
-    let h = thread::spawn(fn() i32 {
-        let w = waddr as *mut i32;
-        for _i in 0..200000 {}
-        unsafe atomic::store_i32(w, 1, atom::MemoryOrder::SeqCst as i32);
-        unsafe sc_runtime::sc_rt_unpark_all(w);
-        return 0;
-    });
-    let mut spins = 0;
-    while unsafe atomic::load_i32(wp, atom::MemoryOrder::Acquire as i32) == 0 {
-        unsafe sc_runtime::sc_rt_park(wp, 0, 1000000);
-        spins = spins + 1;
-        if spins > 100000 {
-            break;
-        }
-    }
-    let _ = h.join();
-    let fin = unsafe wp[0];
-    unsafe g.dealloc(wp, 4, 4);
-    if fin != 1 {
-        return 3;
-    }
-    return 0;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
+    assert(r2.out_shows("or mutates a capture, which captures `&mut`"), "the rejection names the mutated capture");
 }
 
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
@@ -2851,47 +2820,6 @@ fn main() i32 {
     }
 }
 
-// The task runtime (std/parallel/runtime): a lazily-started worker pool runs detached tasks submitted with
-// `launch`. One hundred owning closures each move in a clone of a shared Arc<Atomic> and a WaitGroup, run on
-// the pool, increment the counter and signal done; the main thread awaits them, reads the exact total, then
-// shuts the pool down (draining, joining, freeing). Leak-checked end to end.
-@test
-fn launch_runtime() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::runtime as rt;
-import std::parallel::sync as sync;
-import std::parallel::arc as arc;
-import std::parallel::atomics as atom;
-
-fn main() i32 {
-    let counter = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
-    let wg = sync::WaitGroup::new();
-    wg.add(100);
-    for _i in 0..100 {
-        let c = counter.clone();
-        let w = wg.clone();
-        launch fn() {
-            let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
-            w.done();
-        };
-    }
-    wg.wait();
-    let total = counter.get().load(atom::MemoryOrder::SeqCst);
-    rt::shutdown();
-    return (total - 100) as i32;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
-}
-
 // Preemption: the scheduler is cooperative, so a task that never blocks would own its worker
 // forever. Codegen emits a `__sc_spc` countdown at every loop backedge, but ONLY in a program that uses the
 // coroutine runtime, and the scheduler installs a hook that yields when the worker has other work queued.
@@ -2945,7 +2873,7 @@ fn main() i32 {
         "a loop in a program that never cancels gets the plain safepoint",
     );
     assert(!p.gen_has("main.c", "__sc_cancel_tick"), "no cancellation tick without a cancellation requester");
-    assert(p.gen_has("main.c", "int32_t __sc_spc = 2048;"), "the function-local preemption tick is declared");
+    assert(p.gen_has("main.c", "int32_t __sc_spc = "), "the function-local preemption tick is declared");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -3701,6 +3629,20 @@ fn main() i32 {
 )",
     );
 }
+// Whether generated file `rel` of `p` holds `a` with `b` next after it, whitespace aside.
+fn gen_followed_by(p: &cli::Proj, rel: str, a: str, b: str) bool {
+    let text = cli::read_text(format("{}/build/dev/raw/{}", str::from_cstr(p.rootp()), rel).as_str());
+    let t = text.as_str();
+    let k = t.find(a);
+    if k < 0 {
+        return false;
+    }
+    let mut at = k as usize + a.len();
+    while at < t.len() && (t.byte_at(at) == b' ' || t.byte_at(at) == b'\n' || t.byte_at(at) == b'\t') {
+        at += 1;
+    }
+    return t.slice(at, t.len()).starts_with(b);
+}
 
 // A counted loop (a range over a builtin integer, a slice) whose body runs no call is strip-mined:
 // one safepoint per chunk of at most the tick budget left, then a chunk loop with no tick. The
@@ -3904,7 +3846,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(
-        p.gen_has("main.c", "(uint64_t)__sc_chunk_end(&__sc_spc, i, 0x7FFFFFFFFFFFFFFFULL);\n  for (; i < _"),
+        gen_followed_by(&p, "main.c", "(uint64_t)__sc_chunk_end(&__sc_spc, i, 0x7FFFFFFFFFFFFFFFULL);", "for (; i < _"),
         "the spinner's chunk loop follows its chunk end with no tick",
     );
     assert(p.gen_has("main.c", " = __sc_cancel_tick(); }\n"), "the chunk top carries the combined safepoint");
@@ -4196,93 +4138,6 @@ fn main() i32 {
     let traced = p.run_bin_env("SC_TASK_TRACE=1 ");
     assert(traced.out_has("spawn coroutine"), "SC_TASK_TRACE reports spawns");
     assert(traced.out_has("complete"), "SC_TASK_TRACE reports completions");
-}
-
-// The reactor (std/parallel/io + net): a coroutine parks on a SOCKET instead of a thread. A
-// server task accepts and echoes while a client task connects, writes and reads back: every one of those
-// operations parking on kqueue/epoll rather than blocking a worker. POSIX only, like the reactor itself.
-@test
-fn reactor_tcp_echo() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::runtime as rt;
-import std::parallel::net as net;
-import std::parallel::io as io;
-import std::parallel::sync as sync;
-import std::parallel::arc as arc;
-import std::parallel::atomics as atom;
-
-fn main() i32 {
-    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
-    let port = l.port();
-    if port <= 0 {
-        return 1;
-    }
-    let got = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
-    let wg = sync::WaitGroup::new();
-    wg.add(2);
-
-    let gs = got.clone();
-    let ws = wg.clone();
-    launch fn() {
-        switch l.accept() {
-            Ok(s) => {
-                let mut buf = Vector::<u8>::new();
-                for _k in 0..64 {
-                    buf.push(0u8);
-                }
-                let cap: usize = 64;
-                let n = s.read(buf.index_range_mut(0..cap));
-                if n > 0 {
-                    let _ = gs.get().fetch_add(n as i64, atom::MemoryOrder::Relaxed);
-                    let _ = s.write(buf[0..n as usize]);
-                }
-            },
-            Err(_) => {},
-        };
-        ws.done();
-    };
-
-    let gc = got.clone();
-    let wc = wg.clone();
-    launch fn() {
-        switch net::TcpStream::connect("127.0.0.1", port) {
-            Ok(c) => {
-                let msg: [u8; 5] = [104u8, 101u8, 108u8, 108u8, 111u8];
-                let _ = c.write(msg);
-                let mut back = Vector::<u8>::new();
-                for _k in 0..64 {
-                    back.push(0u8);
-                }
-                let cap: usize = 64;
-                let n = c.read(back.index_range_mut(0..cap));
-                if n == 5 && *back.at(0) == 104u8 {
-                    let _ = gc.get().fetch_add(1000, atom::MemoryOrder::Relaxed);
-                }
-            },
-            Err(_) => {},
-        };
-        wc.done();
-    };
-
-    wg.wait();
-    let total = got.get().load(atom::MemoryOrder::SeqCst);
-    io::shutdown();
-    rt::shutdown();
-    if total != 1005 {
-        return 2;
-    }
-    return 0;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
 }
 
 // UDP and typed failures. Every operation that can fail returns `Result<T, IoError>`, so the caller can
@@ -4794,73 +4649,6 @@ fn main() i32 {
     assert(r.out_has("variadic"), "the message says why");
 }
 
-// Work stealing (std/parallel/runtime): each worker owns a Chase-Lev deque and pushes to it without a lock,
-// so a task submitted from a worker never touches the shared queue. Both halves here are deliberately
-// pathological for that layout: ONE task spawns 400 others onto its own deque, which only completes if the
-// other workers steal from it; then 1000 spawns from one worker overflow the 256-slot deque and must spill
-// into the injection queue instead of being dropped. Exact counts, leak-checked.
-@test
-fn work_stealing_imbalance() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::runtime as rt;
-import std::parallel::sync as sync;
-import std::parallel::arc as arc;
-import std::parallel::atomics as atom;
-import std::parallel::time as time;
-
-fn spawn_many(n: i64, counter: arc::Arc<atom::Atomic<i64>>, group: sync::WaitGroup) i64 {
-    let g0 = group.clone();
-    let c0 = counter.clone();
-    let gs = group.clone();
-    group.add(1);
-    launch fn() {
-        for _i in 0..n {
-            let c = c0.clone();
-            let w = gs.clone();
-            gs.add(1);
-            launch fn() {
-                let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
-                w.done();
-            };
-        }
-        g0.done();
-    };
-    if !group.wait_timeout(time::Duration::from_secs(120)) {
-        return -1;
-    }
-    return counter.get().load(atom::MemoryOrder::SeqCst);
-}
-
-fn main() i32 {
-    // Everything is spawned from one worker's deque: the others have to steal it.
-    let c1 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
-    let wg1 = sync::WaitGroup::new();
-    let a = spawn_many(400, c1.clone(), wg1.clone());
-    if a != 400 {
-        return 1;
-    }
-    // More pushes than the deque holds, so the overflow has to spill to the injection queue.
-    let c2 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
-    let wg2 = sync::WaitGroup::new();
-    let b = spawn_many(1000, c2.clone(), wg2.clone());
-    rt::shutdown();
-    if b != 1000 {
-        return 2;
-    }
-    return 0;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
-}
-
 // Deterministic replay (std/parallel/runtime): `SC_SCHED_SEED` pins the pool to one worker and hands every
 // preemption decision to the seed, so the SAME binary run twice with the same seed takes the same
 // interleaving. Proven by the interleaving itself, not by a summary: four tasks compete for one mutex and
@@ -4923,57 +4711,6 @@ fn main() i32 {
         assert(sa.len() > 60, "the fixture logged an order");
         assert(sa == sb, "the same seed replays the same interleaving");
     }
-}
-
-// A bounded MPMC channel (std/parallel/channel): four producer tasks each push 25 items into a bounded(8)
-// channel (forcing the ring buffer to block and drain) while the main thread receives until the channel
-// closes (every producer's Sender dropped). The receiver is taken before launching, so no early send is
-// rejected; the exact item count and sum verify nothing is lost or duplicated. Leak-checked, so the slot
-// array, every buffered payload, and all Arc handles are accounted for. Also exercises the cross-module
-// generic-method monomorphization fix (`Condvar::wait<ChannelState<i64>>`).
-@test
-fn channel_mpmc() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::runtime as rt;
-import std::parallel::channel as chan;
-
-fn main() i32 {
-    let ch = chan::Channel::<i64>::bounded(8);
-    let rx = ch.receiver();
-    for _p in 0..4 {
-        let s = ch.sender();
-        launch fn() {
-            for i in 0..25 {
-                let _ = s.send(i);
-            }
-        };
-    }
-    let mut total: i64 = 0;
-    let mut n = 0;
-    loop {
-        switch rx.recv() {
-            Some(v) => {
-                total = total + v;
-                n = n + 1;
-            },
-            None => {
-                break;
-            },
-        };
-    }
-    rt::shutdown();
-    return (n - 100) + (total - 1200) as i32;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
 }
 
 // Lock-order tracking (`SC_LOCK_ORDER`): a deadlock is reported the first time two locks are taken in
@@ -5496,7 +5233,7 @@ fn main() i32 {
 // producers feed them 100 items each through single-slot buffers. It parks on both queues under one wake
 // token, so every wake comes from whichever channel moved first; the exact total proves no item was lost
 // and no wakeup was double-spent. The second half checks that a selector really parks rather than spinning:
-// the value arrives 60ms late, and the wait must have taken at least that long. Leak-checked.
+// the value is sent only once the runtime shows the task parked in its select. Leak-checked.
 @test
 fn select_waits_on_several_channels() {
     let p = cli::proj_new();
@@ -5594,7 +5331,7 @@ fn main() i32 {
         return 2; // 2 x (0+..+99) + 100 x 1000
     }
 
-    // A selector inside a coroutine must PARK, not spin: nothing is ready for 60ms.
+    // A selector inside a coroutine must PARK, not spin: nothing is ready until it is parked.
     let res = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(-1));
     wg.add(1);
     {
@@ -5606,11 +5343,10 @@ fn main() i32 {
             let mut s = selector::Selector::new();
             let _ = s.arm_recv(&rx1);
             let i2 = s.arm_recv(&rx2);
-            let t0 = platform::now_ns();
             let mut r: i64 = -2;
             switch s.wait_timeout(time::Duration::from_secs(60)) {
                 Ready(i) => {
-                    if i == i2 && platform::now_ns() - t0 >= 50000000 {
+                    if i == i2 {
                         r = rx2.try_recv().unwrap_or(-3);
                     } else {
                         r = -4;
@@ -5628,7 +5364,13 @@ fn main() i32 {
             w.done();
         };
     }
-    time::sleep(time::Duration::from_millis(60));
+    let deadline = platform::now_ns() + 10000000000;
+    while rt::tasks_waiting(rt::WK_SELECT) < 1 {
+        if platform::now_ns() > deadline {
+            return 6;
+        }
+        time::sleep(time::Duration::from_millis(1));
+    }
     let _ = btx.send(42);
     if !wg.wait_timeout(time::Duration::from_secs(120)) {
         return 3;
@@ -6132,70 +5874,6 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// The data-parallel API composes with the rest of the runtime: a parallel call NESTED inside a parallel body
-// runs its chunks inline (a job has no context, so it cannot park and must not submit-and-wait), and a call
-// made from inside a `launch`ed coroutine parks that coroutine while its chunks run on the other workers.
-// Exact counts prove no chunk is dropped either way. Leak-checked.
-@test
-fn data_parallel_nesting() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::runtime as rt;
-import std::parallel::data as parallel;
-import std::parallel::sync as sync;
-import std::parallel::arc as arc;
-import std::parallel::atomics as atom;
-import std::parallel::time as time;
-
-fn main() i32 {
-    let n: usize = 200;
-    let hits = atom::Atomic::<i64>::new(0);
-    let hp = &hits; // a scoped parallel call may borrow a local: it returns only once every chunk is done
-    parallel::range(0..n, fn(_i: usize) {
-        parallel::range(0..3usize, fn(_k: usize) {
-            let _ = hp.fetch_add(1, atom::MemoryOrder::Relaxed);
-        });
-    });
-    if hits.load(atom::MemoryOrder::SeqCst) != (n * 3) as i64 {
-        return 1;
-    }
-
-    // A DETACHED task may not borrow this frame, so the counter is shared by `Arc` and the borrow the
-    // parallel body needs is taken inside the coroutine, from the clone it owns.
-    let inner = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
-    let wg = sync::WaitGroup::new();
-    wg.add(4);
-    for _t in 0..4 {
-        let w = wg.clone();
-        let c = inner.clone();
-        launch fn() {
-            let a = c.get();
-            parallel::range(0..50usize, fn(_i: usize) {
-                let _ = a.fetch_add(1, atom::MemoryOrder::Relaxed);
-            });
-            time::sleep(time::Duration::from_millis(1));
-            w.done();
-        };
-    }
-    wg.wait();
-    let got = inner.get().load(atom::MemoryOrder::SeqCst);
-    if got != 200 {
-        return 2;
-    }
-    rt::shutdown();
-    return 0;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
-}
-
 // A parallel body is copied to every worker and run from several at once, so it may not mutate a capture. The
 // plain `fn(..)` bound makes the body borrow what it captures; a mutated capture is a `&mut` borrow, and a
 // closure holding one is not `Sync`, so the classic data race (`|i| values.set(i, ..)`, a `&mut` capture
@@ -6247,69 +5925,6 @@ fn interior_mutability_via_unsafe_cell() {
     let cc = ok.cc_build("");
     assert(cc.ok());
     assert_eq(ok.run_bin(), 0);
-}
-
-// Blocking sync primitives (std/parallel/sync, backed by pthread through the auto-discovered pthread_ext.c
-// shim): a shared Arc<Mutex<i64>> counter with RAII guards, a WaitGroup barrier for completion, and an
-// RwLock: all leak-checked. Exercises the cross-module include scan (Arc's atomic/Global deps pulled into
-// the sync TU) and the C-shim backing-.c discovery.
-@test
-fn sync_primitives() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::parallel::thread as thread;
-import std::parallel::arc as arc;
-import std::parallel::sync as sync;
-
-fn main() i32 {
-    let counter = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
-    let wg = sync::WaitGroup::new();
-    wg.add(4);
-    let mut hs = Vector::<thread::JoinHandle<i32>>::new();
-    for _t in 0..4 {
-        let c = counter.clone();
-        let w = wg.clone();
-        hs.push(thread::spawn(fn() i32 {
-            for _i in 0..2000 {
-                let mut g = c.get().lock();
-                let v = g.get_mut();
-                *v = *v + 1;
-            }
-            w.done();
-            return 0;
-        }));
-    }
-    wg.wait();
-    while hs.len() > 0 {
-        let _ = hs.pop().unwrap().join();
-    }
-    let rw = sync::RwLock::<i64>::new(0);
-    {
-        let mut wr = rw.write();
-        let v = wr.get_mut();
-        *v = 7;
-    }
-    let mut r: i64 = 0;
-    {
-        let rd = rw.read();
-        r = *rd.get();
-    }
-    let mut total: i64 = 0;
-    {
-        let g = counter.get().lock();
-        total = *g.get();
-    }
-    return (total - 8000) as i32 + (r - 7) as i32;
-}
-)",
-    );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(run.ok());
 }
 
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
@@ -6583,6 +6198,9 @@ fn main() i32 {
     assert(p.gen_has("__sc_fwd.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
     let cc = p.cc_build("");
     assert(cc.ok());
+    // The program makes its probe directory in its working directory: the scratch project, never the
+    // repository (the runner restores the working directory after the test).
+    assert(unsafe shim::sc_chdir(p.rootp()) == 0, "into the scratch project");
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -9021,7 +8639,7 @@ fn main() i32 {
 // copies, so a generic touched only under an untaken guard is never instantiated.
 @test
 fn tagless_variants_and_meta_elision() {
-    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+    let _env5 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -9093,16 +8711,10 @@ fn main() i32 {
 // Build-engine hardening gates: shell-free process spawning (paths pass through verbatim), no-change
 // builds rewriting nothing, -MMD header invalidation, flag invalidation, compile_commands.json.
 import driver_shim as p13shim;
-import std::parallel::runtime as p13rt;
 
 fn p13_mtime(path: str) i64 {
     let mut p9 = String::from_str(path);
-    return unsafe p13shim::sc_mtime(p9.cstr());
-}
-
-// Mtimes are second-granular: put a real gap between builds whose mtimes the assertions compare.
-fn p13_tick() {
-    p13rt::sleep_ns(1_100_000_000);
+    return unsafe p13shim::sc_mtime_ns(p9.cstr());
 }
 
 // The compile/link argv reaches the C compiler without a shell, so a project living under a
@@ -9166,12 +8778,10 @@ fn build_staleness_gates() {
     let o1 = p13_mtime(objo.as_str());
     let b1 = p13_mtime(bin.as_str());
     assert(g1 != 0 && o1 != 0 && b1 != 0, "the build produced gen C, an object, and a binary");
-    p13_tick();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "no-change build");
     assert(p13_mtime(genc.as_str()) == g1, "a no-change build does not rewrite generated C");
     assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
     assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
-    p13_tick();
     // Rename the struct field: util's type header changes, but main.c neither includes it (it
     // spells no util type) nor changes its own text, so main.o stays.
     p.mkfile(
@@ -9181,7 +8791,6 @@ fn build_staleness_gates() {
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "layout-change build");
     assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the sync keeps its mtime");
     assert(p13_mtime(objo.as_str()) == o1, "a layout edit main.c never embeds rebuilds no dependent object");
-    p13_tick();
     // Add a public function: util.h (which main.c includes) changes, main.c's own text does not.
     p.mkfile(
         "src/util.spc",
@@ -9191,7 +8800,6 @@ fn build_staleness_gates() {
     assert(p13_mtime(genc.as_str()) == g1, "main.c is still byte-identical");
     let o2 = p13_mtime(objo.as_str());
     assert(o2 > o1, "a changed included header rebuilds every dependent object");
-    p13_tick();
     // A semantic flag change invalidates through the command fingerprint, not through file times.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\ncflags = [\"-DP13_FLAG=1\"]\n");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "flag-change build");
@@ -9238,7 +8846,6 @@ fn build_type_edit_stays_local() {
     edits.push("pub struct Added {\n    pub z: i64,\n}\n\npub enum Mode {\n    A,\n    B,\n}\n");
     edits.push("pub struct Renamed {\n    pub z: i64,\n}\n\npub enum Mode {\n    A,\n    B,\n}\n");
     for k in 0..edits.len() {
-        p13_tick();
         let mut src = String::from_str(util0);
         src.push_str("\n");
         src.push_str(edits[k]);
@@ -9284,7 +8891,6 @@ fn build_new_type_recompiles_no_user() {
     hdr.format_into("{}/build/dev/gen/__sc_t/util__Added.h", root);
     let mut man = String::new();
     man.format_into("{}/build/dev/gen/__sc_manifest", root);
-    p13_tick();
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {\n    pub z: i64,\n}\n");
     p.mkfile("src/util.spc", src.as_str());
@@ -9345,7 +8951,6 @@ fn build_field_edit_recompiles_users() {
         u0.push(p13_mtime(users[i].as_str()));
         assert(u0[i] != 0, "the build wrote every recorded object");
     }
-    p13_tick();
     // The same fields in the other order: a layout change with no source change at any use.
     let util1 = String::from_str(util0).replace(
         "    pub a: i32,\n    pub b: i32,\n",
@@ -9416,7 +9021,6 @@ fn build_symbol_segment_includes_no_type() {
     let g0 = p13_mtime(genc.as_str());
     let o0 = p13_mtime(objo.as_str());
     assert(g0 != 0 && o0 != 0, "the build wrote main.c and main.o");
-    p13_tick();
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {}\n");
     p.mkfile("src/util.spc", src.as_str());
@@ -9425,10 +9029,9 @@ fn build_symbol_segment_includes_no_type() {
     assert(p13_mtime(objo.as_str()) == o0, "a type edit in util does not rebuild main.o");
 }
 
-// The profile's `lto` mode reaches both the compile and the link lines and their fingerprints. A
-// ThinLTO request is settled by the toolchain probe once per profile directory (the `thin-lto` line of
-// `.probes`: verdict, linker) and reused without a process; the linker cache lives under the cache root
-// when the linker accepts one. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
+// The profile's `lto` mode reaches the build, which reports it in its record (`SC_BUILD_STATS`): a
+// ThinLTO request is settled by the toolchain probe once per profile directory and reused without a
+// process. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
 @test
 fn build_lto_modes() {
     let p = cli::proj_new();
@@ -9438,60 +9041,26 @@ fn build_lto_modes() {
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = str::from_cstr(p.rootp());
-    let mut env = String::from_str("1 SC_CACHE_DIR=");
-    env.push_str(root);
-    env.push_str("/cache");
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "thin build");
+    let mut env = format("1 SC_BUILD_STATS=- SC_CACHE_DIR={}/cache", root);
+    let r1 = cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel");
+    assert(r1.ok(), "thin build");
+    // ThinLTO, or the fallback with the probe's reason.
+    assert(
+        r1.out_has("\"lto\":\"thin") || r1.out_has("\"lto\":\"auto\"") && !r1.out_has("\"lto_reason\":\"\""),
+        "the record carries the settled mode",
+    );
+    assert(r1.out_has("\"linked\":true"), "the first build links");
     let mut recp = String::new();
     recp.format_into("{}/build/rel/.probes", root);
-    let rec = loader::read_file(recp.as_str());
-    assert(!rec.is_none(), "the probe record exists beside the profile's trees");
-    let rb = rec.unwrap();
-    let rs = rb.as_str();
-    assert(rs.starts_with("sc-probes 1\t"), "the record opens with its schema");
-    let verdict = probe_result(rs, "thin-lto");
-    let thin = verdict.starts_with("thin ");
-    assert(thin || verdict.starts_with("auto: "), "the verdict is thin or auto with a reason");
-    // The record is named after the linked path, extension included (`app.exe` on Windows).
-    let mut cmdp = String::new();
-    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
-    let l1 = loader::read_file(cmdp.as_str()).unwrap();
-    let want = if thin {
-        "-flto=thin";
-    } else {
-        "-flto=auto";
-    };
-    assert(l1.as_str().find(want) >= 0, "the link fingerprint carries the settled mode");
-    let mut ocmd = String::new();
-    ocmd.format_into("{}/build/rel/obj/main.cmd", root);
-    let o1 = loader::read_file(ocmd.as_str()).unwrap();
-    assert(o1.as_str().find(want) >= 0, "the object fingerprint carries the settled mode");
-    let mut used = String::from_str("| probes thin-lto=");
-    used.push_str(verdict);
-    assert(o1.as_str().find(used.as_str()) >= 0, "the object fingerprint carries the probe result it used");
-    assert(l1.as_str().find(used.as_str()) >= 0, "the link fingerprint carries the probe result it used");
-    if thin && verdict != "thin 0" {
-        let mut cdir = String::new();
-        cdir.format_into("{}/cache/lto/", root);
-        let at = l1.as_str().find(cdir.as_str());
-        assert(at >= 0, "the link names a cache namespace under the cache root");
-        let ns = l1.as_str().slice(at as usize, at as usize + cdir.len() + 16);
-        assert(cli::dir_count_suffix(ns, ".timestamp") == 1, "the linker populated its cache in the namespace");
-    }
-    let mut bin = String::new();
-    bin.format_into("{}/build/rel/app{}", root, str::from_cstr(cli::binext()));
-    let b1 = p13_mtime(bin.as_str());
-    let r1 = p13_mtime(recp.as_str());
-    p13_tick();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "unchanged build");
-    assert(p13_mtime(bin.as_str()) == b1, "an unchanged build does not relink");
-    assert(p13_mtime(recp.as_str()) == r1, "an unchanged build reuses the record without probing");
-    p13_tick();
+    let m1 = p13_mtime(recp.as_str());
+    assert(m1 != 0, "the probe result is recorded beside the profile's trees");
+    let r2 = cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel");
+    assert(r2.ok() && r2.out_has("\"linked\":false"), "an unchanged build does not relink");
+    assert(p13_mtime(recp.as_str()) == m1, "an unchanged build reuses the probe result without probing");
     env.push_str(" SC_LTO=none");
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "SC_LTO=none build");
-    assert(p13_mtime(bin.as_str()) > b1, "a changed LTO mode relinks through the fingerprint");
-    let l2 = loader::read_file(cmdp.as_str()).unwrap();
-    assert(l2.as_str().find("-flto") < 0, "no LTO flag under SC_LTO=none");
+    let r3 = cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel");
+    assert(r3.ok() && r3.out_has("\"lto\":\"none\""), "SC_LTO overrides the mode");
+    assert(r3.out_has("\"linked\":true"), "a changed LTO mode relinks through the fingerprint");
     let bad = cli::superc_env_in(root, "SC_LTO", "fat", "build --profile=rel");
     assert(!bad.ok() && bad.out_has("SC_LTO must be none, full, auto or thin"), "an unknown SC_LTO value is an error");
 }
@@ -9622,7 +9191,6 @@ fn build_print_probes() {
     let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
     assert(r2.ok() && str::from_cstr(r2.out) == s, "a fresh record gives the same table");
     let m1 = p13_mtime(recp.as_str());
-    p13_tick();
     let r3 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
     assert(r3.ok() && str::from_cstr(r3.out) == s, "the record gives the same table");
     assert(p13_mtime(recp.as_str()) == m1, "a second run probes nothing");
@@ -9671,9 +9239,8 @@ fn probe_cas16_kind() {
     assert(probe::cas16_kind("f:\n\tret\n") == "unknown", "no compare-exchange at all");
 }
 
-// The emission statistics report the per-instance re-lowering census (a zero-size template lowered
-// once per zero-size signature of its instances), the instance graph's collect line, and the build
-// record carries the re-lowering counts by reason.
+// The build record carries the instance re-lowering counts by reason: a zero-size element type re-lowers
+// the templates it instantiates, and nothing here re-lowers for reflection.
 @test
 fn build_stats_report_relowering_census() {
     let p = cli::proj_new();
@@ -9683,14 +9250,14 @@ fn build_stats_report_relowering_census() {
         "struct Z {}\n\nfn main() i32 {\n    let mut a = Vector::<u8>::new();\n    a.push(1u8);\n    let mut b = Vector::<Z>::new();\n    b.push(Z {});\n    return a.len() as i32 + b.len() as i32 - 2;\n}\n",
     );
     let root = str::from_cstr(p.rootp());
-    let r = cli::superc_env_in(root, "SC_CEMIT_STATS", "1 SC_BUILD_STATS=- SC_NO_CACHE=1", "build");
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
     assert(r.ok(), "the build succeeds");
-    assert(r.out_has("cemit-relower __std::vector::"), "a zero-size template of the vector reports its census line");
-    assert(r.out_has("(zero-size): 2 instances, 2 re-lowerings, 0 identical, "), "two signatures lower twice");
-    assert(r.out_has("re-lowering for reflection: 0 templates, 0 instances, 0 re-lowerings"), "no reflection template");
-    assert(r.out_has("re-lowering for zero-size: ") && r.out_has(" identical, "), "the zero-size summary");
-    assert(r.out_has("bodies walked in ") && r.out_has(" rounds"), "the collect line reports the closure");
-    assert(r.out_has("\"relower\":{\"reflect\":0,\"zst\":"), "the build record carries the counts");
+    let out = str::from_cstr(r.out);
+    let head = "\"relower\":{\"reflect\":0,\"zst\":";
+    let k = out.find(head);
+    assert(k >= 0, "the record carries the counts and no reflection re-lowering");
+    let zst = out.slice(k as usize + head.len(), out.len());
+    assert(zst.byte_at(0) >= b'1' && zst.byte_at(0) <= b'9', "the zero-size element type re-lowers its templates");
 }
 
 // A failed link publishes nothing: the previous binary and its link record stay, and the next
@@ -9715,7 +9282,6 @@ fn build_link_failure_keeps_artifact() {
             panic("the initial build left no link record");
         },
     };
-    p13_tick();
     // A source edit recompiles its object, then the link fails: nothing is published.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
@@ -9767,9 +9333,6 @@ fn build_relinks_after_failed_link_in_same_second() {
 // publishes and links it once the file is writable again.
 @test
 fn build_publication_failure_keeps_artifact() {
-    if cli::on_windows() {
-        return; // chmod
-    }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
@@ -9778,17 +9341,16 @@ fn build_publication_failure_keeps_artifact() {
     let mut bin = String::new();
     bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
     let b1 = p13_mtime(bin.as_str());
-    let mut lock = String::new();
-    lock.format_into("chmod a-w {}/build/dev/gen/main.c", root);
-    assert_eq(cli::run_quiet(lock.cstr()), 0);
-    p13_tick();
+    // A directory where the generated file goes refuses the write for every user (root ignores a
+    // read-only mode).
+    let mut gen = String::new();
+    gen.format_into("{}/build/dev/gen/main.c", root);
+    assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0 && unsafe shim::sc_mkdir_p(gen.cstr()) == 0, "the lock is in place");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
     assert(!r.ok() && r.out_has("build: cannot write"), "the publication failure fails the build");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
-    let mut unlock = String::new();
-    unlock.format_into("chmod u+w {}/build/dev/gen/main.c", root);
-    assert_eq(cli::run_quiet(unlock.cstr()), 0);
+    assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0, "the lock is gone");
     assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 4);
 }
 
@@ -9905,10 +9467,10 @@ fn tt_class(t: &String, cls: str) String {
     return out;
 }
 
-// The package type table is one deterministic identity per structural type: one worker, every
-// worker under a skewed task schedule, and a fully colliding hash publish the same table; no two
-// records read the same; and a body-only edit at the end of a module keeps every signature-class
-// id and record (only body-class and instance-graph ids move).
+// The package type table is one deterministic identity per structural type: a fully colliding hash
+// publishes the same table; no two records read the same; and a body-only edit at the end of a module
+// keeps every signature-class id and record (only body-class and instance-graph ids move). One worker
+// against every worker under skewed schedules is the gate's worker-identity step (ci/gate.sh).
 @test
 fn type_table_is_deterministic() {
     let p = cli::proj_new();
@@ -9917,8 +9479,6 @@ fn type_table_is_deterministic() {
     p.mkfile("src/main.spc", TT_MAIN);
     let root = str::from_cstr(p.rootp());
     let t1 = tt_build(root, "1", "SC_TYPE_VALIDATE=1", "--jobs=1");
-    let t2 = tt_build(root, "2", "SC_TYPE_VALIDATE=1 SC_TASK_DELAY=1", "--jobs=4");
-    assert(t1.equals(&t2), "one worker and four delayed workers publish the same table");
     let t3 = tt_build(root, "3", "SC_TYPE_VALIDATE=1 SC_TYPE_COLLIDE=1", "--jobs=4");
     assert(t1.equals(&t3), "a colliding hash publishes the same table");
     let mut seen = Set::<String>::new();

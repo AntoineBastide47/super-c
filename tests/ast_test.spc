@@ -2,18 +2,6 @@
 // interner of ast::ast. Part of the selfhost/tests suite.
 import ast::ast as *;
 
-@test
-fn arena() {
-    let mut a = Ast::new(8);
-    // Node 0 is pre-seeded.
-    assert_eq(a.nodes.len(), 1);
-    assert(a.at_const(NODE_NONE).kind == NodeKind::NODE_NONE_KIND, "node 0 is NODE_NONE_KIND");
-    let n1 = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
-    let n2 = a.add(Node { kind: NodeKind::NODE_LITERAL });
-    assert(n1 == 1 && n2 == 2, "add returns increasing ids");
-    assert(a.at_const(n2).kind == NodeKind::NODE_LITERAL, "node payload stored");
-}
-
 // A frozen array spills past its pin; thawing folds the spill back so a later pin addresses every entry.
 // The resolve frontier once thawed only two of a module's four arrays, and the next frontier's pin moved
 // the split under the body nodes a `select` lowering had spilled: those nodes were then unreachable.

@@ -30,26 +30,34 @@ fn same_output_reports_profile_dependent_overflow() {
 fn same_output_with_bounds_checks_forced() {
     let mut src = String::from_str(OPR);
     src.push_str(
-        "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    for k in 0..opr::<usize>(9) {\n        v.push(k as i64);\n    }\n    let mut acc: i64 = 0;\n    for i in 0..v.len() {\n        acc += v[i];\n    }\n    println(\"{}\", acc);\n    let mut i: usize = 0;\n    while i < 12 {\n        acc += v[i];\n        i += 4;\n    }\n    println(\"{}\", acc);\n    return 0;\n}\n",
+        "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    for k in 0..opr::<usize>(9) {\n        v.push(k as i64);\n    }\n    let mut acc: i64 = 0;\n    for i in 0..v.len() {\n        acc += v[i];\n    }\n    println(\"{}\", acc);\n    let mut i: usize = 0;\n    while i < 13 {\n        acc += v[i];\n        i += 4;\n    }\n    println(\"{}\", acc);\n    return 0;\n}\n",
     );
     h::expect_same_output("a strided loop past the end traps with and without BCE", src.as_str(), [], ["SC_BCE=0"]);
-    let d = h::same_output(src.as_str(), [], ["SC_BCE=0"], [""]);
-    assert(d.len() == 0, "same_output agrees with expect_same_output");
+    // The strided loop reads v[12] of 9: the run prints the full loop's sum, then traps.
+    let b = h::diff_build(src.as_str(), []);
+    assert(b.built);
+    let r = h::diff_run(&b, "");
+    assert(r.out.as_str() == "36\n" && r.err.contains("super-c: index out of bounds"), "the strided loop traps");
 }
 
+// An add, a wrapping add, a signed shift, a float division, a saturating cast and a const fn call: one
+// program, one build.
 @test
 fn parity_values() {
-    h::expect_const_runtime_parity("i32 add", "", "opq::<i32>(40) + opq::<i32>(2)", "i32");
-    h::expect_const_runtime_parity("u8 wrap", "", "opq::<u8>(200).wrapping_add(opq::<u8>(100))", "u8");
-    h::expect_const_runtime_parity("signed shift", "", "opq::<i64>(-1) << opq::<i64>(63)", "i64");
-    h::expect_const_runtime_parity("float division", "", "opq::<f64>(1.0) / opq::<f64>(3.0)", "f64");
-    h::expect_const_runtime_parity("saturating cast", "", "opq::<f64>(-1e300) as i32", "i32");
-    h::expect_const_runtime_parity(
-        "const fn",
+    let d = h::const_runtime_parity(
         "const fn sq(x: i64) i64 {\n    return x * x;\n}\n",
-        "sq(opq::<i64>(-7))",
-        "i64",
+        [
+            "opq::<i32>(40) + opq::<i32>(2)",
+            "opq::<u8>(200).wrapping_add(opq::<u8>(100))",
+            "opq::<i64>(-1) << opq::<i64>(63)",
+            "opq::<f64>(1.0) / opq::<f64>(3.0)",
+            "opq::<f64>(-1e300) as i32",
+            "sq(opq::<i64>(-7))",
+        ],
+        ["i32", "u8", "i64", "f64", "i32", "i64"],
+        [],
     );
+    assert(d.len() == 0, d.as_str());
 }
 
 // Float literals round once, at their context's type: f32 arguments and operands, f64 arguments,
@@ -76,28 +84,33 @@ fn parity_float_literals() {
     assert(d.len() == 0, d.as_str());
 }
 
-// An unsuffixed float literal in an f64 context is spelled as a C double, never an `f` float.
+// An unsuffixed float literal in an f64 context keeps double precision in every context: an argument,
+// an array literal, a repeat, a struct field, a nested array field, a negation. A literal rounded to
+// a C `float` on its way would change the bits.
 @test
-fn f64_literal_contexts_spell_doubles() {
-    let c = h::compile_c(
-        "fn g(x: f64) f64 {\n    return x;\n}\nstruct S { pub a: f64, pub b: [f64; 2] }\nfn main() i32 {\n  let w: [f64; 2] = [0.1, 0.2];\n  let r: [f64; 3] = [0.3; 3];\n  let s = S { a: 0.4, b: [0.5, 0.6] };\n  return (g(0.7) + w[1] + r[0] + s.a + s.b[0] + -0.8) as i32;\n}\n",
+fn f64_literal_contexts_keep_double_precision() {
+    h::expect_exit(
+        "f64 literal contexts",
+        "fn bits(x: f64) u64 {\n    return unsafe *((&x) as *const f64 as *const u64);\n}\nfn g(x: f64) f64 {\n    return x;\n}\nstruct S { pub a: f64, pub b: [f64; 2] }\nfn main() i32 {\n    let w: [f64; 2] = [0.1, 0.2];\n    let r: [f64; 3] = [0.3; 3];\n    let s = S { a: 0.4, b: [0.5, 0.6] };\n    let ok = bits(g(0.7)) == 0x3FE6666666666666 && bits(w[0]) == 0x3FB999999999999A && bits(w[1]) == 0x3FC999999999999A && bits(r[2]) == 0x3FD3333333333333 && bits(s.a) == 0x3FD999999999999A && bits(s.b[0]) == 0x3FE0000000000000 && bits(s.b[1]) == 0x3FE3333333333333 && bits(-0.8) == 0xBFE999999999999A;\n    return if ok { 0; } else { 1; };\n}\n",
+        0,
     );
-    assert(c.ok());
-    for lit in ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8"] {
-        assert(c.code_has(lit), lit);
-        let mut f = String::from_str(lit);
-        f.push_byte(b'f');
-        assert(!c.code_has(f.as_str()), f.as_str());
-    }
 }
 
 @test
 fn parity_traps() {
-    h::expect_const_runtime_parity("add overflow", "", "opq::<i32>(i32::MAX) + opq::<i32>(1)", "i32");
-    h::expect_const_runtime_parity("negation of MIN", "", "-opq::<i8>(i8::MIN)", "i8");
-    h::expect_const_runtime_parity("division by zero", "", "opq::<u16>(7) / opq::<u16>(0)", "u16");
-    h::expect_const_runtime_parity("remainder overflow", "", "opq::<i64>(i64::MIN) % opq::<i64>(-1)", "i64");
-    h::expect_const_runtime_parity("shift past the width", "", "opq::<u32>(1) << opq::<u32>(32)", "u32");
+    let d = h::const_runtime_parity(
+        "",
+        [
+            "opq::<i32>(i32::MAX) + opq::<i32>(1)",
+            "-opq::<i8>(i8::MIN)",
+            "opq::<u16>(7) / opq::<u16>(0)",
+            "opq::<i64>(i64::MIN) % opq::<i64>(-1)",
+            "opq::<u32>(1) << opq::<u32>(32)",
+        ],
+        ["i32", "i8", "u16", "i64", "u32"],
+        [],
+    );
+    assert(d.len() == 0, d.as_str());
 }
 
 // Several cases in one program: the trapping constants leave the program, the rest keep their values.

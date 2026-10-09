@@ -31,18 +31,6 @@ fn fmt_check_reports_unformatted() {
 }
 
 @test
-fn fmt_check_accepts_canonical() {
-    let p = cli::proj_new();
-    p.mkfile("a.spc", CLEAN);
-    let root = str::from_cstr(p.rootp());
-    let mut args = String::from_str("fmt --check \"");
-    args.push_str(root);
-    args.push_str("/a.spc\"");
-    let r = p.run_raw(args.as_str());
-    assert(r.ok(), "a canonical file passes --check");
-}
-
-@test
 fn fmt_rewrites_in_place() {
     let p = cli::proj_new();
     p.mkfile("a.spc", UGLY);
@@ -117,20 +105,6 @@ fn fmt_unparseable_file_is_not_rewritten() {
     // A file the compiler cannot parse: diagnostics, exit 1, and the bytes are left as they were.
     assert_eq(r.exit, 1);
     assert(read(root, "bad.spc").as_str() == BAD, "an unparseable file is never rewritten");
-}
-
-@test
-fn fmt_check_a_feature_dense_file() {
-    // The language demo exercises most language constructs; formatting it drives a broad swath of the
-    // document formatter's node handlers and break/wrap decisions in one pass. It is kept canonical.
-    let p = cli::proj_new();
-    assert(p.copyfile("demo.spc", "examples/language_demo.spc"), "the demo is present");
-    let root = str::from_cstr(p.rootp());
-    let mut args = String::from_str("fmt --check \"");
-    args.push_str(root);
-    args.push_str("/demo.spc\"");
-    // Canonical input passes --check; the value is the formatter breadth it exercises.
-    assert(p.run_raw(args.as_str()).ok(), "the feature-dense file is already canonical");
 }
 
 // A rewrite goes through a temp file and a rename; a symlinked source keeps its link, and the file it

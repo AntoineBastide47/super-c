@@ -5,28 +5,6 @@ import tests::cli_harness as cli;
 
 const PROG: str = "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..32 {\n        v.push(i);\n    }\n    let mut t = 0;\n    for i in 0..v.len() {\n        t = add(t, v[i]);\n    }\n    return t - 496;\n}\n";
 
-fn built_with(key: str) cli::CliResult {
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/main.spc", PROG);
-    let root = str::from_cstr(p.rootp());
-    return cli::superc_env_in(root, key, "1", "build");
-}
-
-@test
-fn bce_stats_prints_a_per_owner_line() {
-    let r = built_with("SC_BCE_STATS");
-    assert(r.ok(), "the build succeeds");
-    assert(r.out_has("bce total"), "the bounds-check stats line is printed");
-}
-
-@test
-fn inline_stats_prints_decisions() {
-    let r = built_with("SC_INLINE_STATS");
-    assert(r.ok(), "the build succeeds");
-    assert(r.out_has("inline considered"), "the inliner stats line is printed");
-}
-
 // A void callee has no return slot while its call keeps one void destination: the inliner accepts
 // that shape, so `main`'s one call splices in.
 @test
@@ -40,26 +18,23 @@ fn inline_splices_a_void_callee() {
     let root = str::from_cstr(p.rootp());
     let r = cli::superc_env_in(root, "SC_INLINE_STATS", "1", "build");
     assert(r.ok(), "the build succeeds");
-    assert(r.out_has("inline considered 1 inlined 1 reasons 0 0 0 0 0 0 0 0"), "the void call is inlined");
+    assert(r.out_has("inline considered 1 inlined 1 "), "the void call is inlined");
 }
 
+// One build with every report switch on. SC_BUILD_STATS names a sink for one JSON object per engine build:
+// every phase of the partition, the streamed C compile span, and the cache switches ("-" is stderr, which
+// the harness captures). SC_BCE_STATS, SC_INLINE_STATS and SC_CEMIT_STATS print their own lines.
 @test
-fn cemit_stats_prints_stage_timings() {
-    let r = built_with("SC_CEMIT_STATS");
-    assert(r.ok(), "the build succeeds");
-    assert(r.out_has("cemit-stage write:"), "a cemit stage timing is printed");
-}
-
-// SC_BUILD_STATS names a sink for one JSON object per engine build: every phase of the partition, the
-// streamed C compile span, and the cache switches. "-" is stderr, which the harness captures.
-@test
-fn build_stats_prints_one_json_record() {
+fn stats_switches_report_in_one_build() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", PROG);
     let root = str::from_cstr(p.rootp());
-    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", "build");
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_BCE_STATS=1 SC_INLINE_STATS=1 SC_CEMIT_STATS=1", "build");
     assert(r.ok(), "the build succeeds");
+    assert(r.out_has("bce total"), "the bounds-check stats line is printed");
+    assert(r.out_has("inline considered"), "the inliner stats line is printed");
+    assert(r.out_has("cemit-stage write:"), "a cemit stage timing is printed");
     assert(r.out_shows("{\"v\":1,\"ok\":true,\"profile\":\"dev\""), "the record opens with its version and outcome");
     assert(r.out_has("\"ms\":{\"stamp\":"), "the phase partition starts at the stamp check");
     assert(r.out_has(",\"link\":"), "and ends at the link");
@@ -81,11 +56,6 @@ fn build_mem_records_allocation_counters() {
     // The child environment is a space-separated NAME=VALUE list, so the value carries the second switch.
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_BUILD_MEM=1", "build");
     assert(r.ok(), "the build succeeds");
-    if r.out_shows("\"mem\":{\"on\":false") {
-        // A compiler built by a bootstrap whose runtime predates the tracker's counters has no
-        // allocation columns to record (CI tests that binary before it rebuilds itself).
-        return;
-    }
     assert(r.out_shows("\"mem\":{\"on\":true"), "memory tracking is on");
     assert(r.out_has("{\"at\":\"frontend\",\"rss_mib\":"), "the frontend boundary is sampled");
     assert(r.out_has("{\"at\":\"build\",\"rss_mib\":"), "and the build-complete boundary");

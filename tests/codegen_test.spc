@@ -1,13 +1,7 @@
-// Self-hosted port of tests/codegen_test.c: structural codegen coverage (emitted-C substring assertions)
-// driven in-process through tests::harness (compile_c), pinned to the Core-IR streaming backend's shapes.
+// Codegen coverage driven in-process through tests::harness: the C shapes that are a contract (plain
+// single-file names, pointer spellings, attributes, includes, exports) by substring, everything else by
+// the behavior of a built program.
 import tests::harness as h;
-import driver_shim as shim;
-
-// Call-shape assertions predate the Core IR inliner: they pin the NON-inlined emission, so the
-// tests that read call sites out of the C disable it for their snippets (fork-isolated).
-fn no_inline() {
-    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
-}
 
 const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  let q: *i32 = new i32;\n}\n";
 
@@ -27,13 +21,12 @@ const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g:
 // forwards return slots, instead of the raw block/goto CFG. These assertions pin the readable shape.
 const STRUCT: str = "fn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\nfn g(n: i32) i32 { let mut s: i32 = 0; let mut i: i32 = 0; while i < n { s = s + i; i = i + 1; } return s; }\nfn main() i32 { return f(1) + g(3) - 4; }\n";
 
-// `expect_c` scans the whole program including any prelude functions that use the goto-layout
-// fallback, so it cannot assert the absence of `goto bb_`; these pin the structured SHAPES the
-// backend produces, plus behavior. (The whole-program goto reduction is measured separately.)
+// These pin the structured SHAPES the backend produces, plus behavior. (The whole-program goto
+// reduction is measured separately.)
 @test
 fn structured_backend() {
     h::expect_c("branches emit structured if", STRUCT, "if (");
-    h::expect_c("loops emit a structured while", STRUCT, "while (1)");
+    h::expect_c("loops emit a structured while", STRUCT, "while (i < n)");
     h::expect_c("an early return forwards its value", STRUCT, "return 1LL;");
     h::expect_exit("structured straight-line + branch + loop behave", STRUCT, 0);
 
@@ -50,7 +43,7 @@ fn structured_backend() {
 
     // An early return inside a loop stays fully structured (a while plus an inner if).
     let EARLY: str = "fn e(n: i32) i32 { let mut i: i32 = 0; while i < n { if i == 5 { return i; } i = i + 1; } return -1; }\nfn main() i32 { return e(10) - 5; }\n";
-    h::expect_c("early-return-in-loop is structured", EARLY, "while (1)");
+    h::expect_c("early-return-in-loop is structured", EARLY, "while (i < n)");
     h::expect_exit("early-return-in-loop behaves", EARLY, 0);
 
     // A parameter named after a type in scope must not hide the typedef: the whole TU stays legal
@@ -87,28 +80,25 @@ fn structured_backend() {
 
 @test
 fn broad() {
-    no_inline();
+    // A single-file program keeps plain C names for its functions and types.
     h::expect_c("function", BROAD, "int32_t add(");
     h::expect_c("struct decl", BROAD, "struct Point");
     h::expect_c("struct field", BROAD, "int32_t x;");
-    h::expect_c("method proto", BROAD, "Point__get(");
-    h::expect_c("method call self", BROAD, "Point__get(&p");
-    h::expect_c(
-        "associated new call",
-        "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n",
-        "String__new()",
+    h::expect_exit(
+        "a method call, an associated constructor and a struct literal behave",
+        "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } fn new(x: i32) Point { return Point { x: x }; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p = Point { x: 1 };\n  let q = Point::new(5);\n  return p.get() + q.get() + add(1, 2) - 9;\n}\n",
+        0,
     );
-    h::expect_c("struct initializer", BROAD, "(Point){ .x = 1");
-    h::expect_c("if statement", BROAD, "if (");
-    h::expect_c("loops emit a structured while", BROAD, "while (1)");
-    h::expect_c("new", BROAD, "__sc_new(sizeof(int32_t))");
 }
 
 @test
 fn control() {
-    h::expect_c("for lowers to a structured while", CONTROL, "while (1)");
+    h::expect_c("a for over an array lowers to a counted C for", CONTROL, "for (size_t ");
     h::expect_c("switch lowered to if", CONTROL, "if (");
     h::expect_c("switch literal test", CONTROL, " == ");
+    let mut run = String::from_str(CONTROL);
+    run.push_str("fn main() i32 { return classify(0) * 100 + classify(7) * 10 + sum([1, 2, 3]) - 126; }\n");
+    h::expect_exit("the switch picks its arm and the for sums every element", run.as_str(), 0);
 }
 
 @test
@@ -124,19 +114,22 @@ fn ranges() {
 
 @test
 fn switch_ranges() {
-    h::expect_c("exclusive arm lower bound", SWITCH_RANGES, ">= 10LL");
-    h::expect_c("exclusive arm upper bound", SWITCH_RANGES, "< 20LL");
-    h::expect_c("inclusive arm upper bound", SWITCH_RANGES, "<= 30LL");
-    h::expect_c("open-start arm is upper-only", SWITCH_RANGES, "< 5LL");
-    h::expect_c_absent("open-start arm has no lower bound", SWITCH_RANGES, ">= 5LL");
-    h::expect_c("open-end arm is lower-only", SWITCH_RANGES, ">= 99LL");
-    h::expect_c_absent("open-end arm has no upper bound", SWITCH_RANGES, "< 99LL");
+    // Each arm takes exactly its range: both ends of the exclusive and inclusive arms, the open ends.
+    let mut run = String::from_str(SWITCH_RANGES);
+    run.push_str(
+        "fn main() i32 {\n  let ins = classify(10) == 1 && classify(19) == 1 && classify(20) == 2 && classify(30) == 2 && classify(4) == 3 && classify(99) == 4;\n  let outs = classify(9) == 0 && classify(31) == 0 && classify(5) == 0 && classify(98) == 0;\n  return if ins && outs { 0; } else { 1; };\n}\n",
+    );
+    h::expect_exit("every arm covers its range and nothing else", run.as_str(), 0);
 }
 
 @test
 fn pointer_arith() {
-    h::expect_c("pointer offset", "fn f(p: *i32) i32 { return unsafe *(p + 1); }\n", "+ 1LL)");
-    h::expect_c("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n", "(a - b)");
+    // A pointer offset and a pointer difference count elements, not bytes.
+    h::expect_exit(
+        "pointer offset and difference",
+        "fn main() i32 {\n  let a: [i32; 4] = [1, 2, 3, 4];\n  let p: *const i32 = &a[0];\n  let q: *const i32 = &a[3];\n  let second = unsafe *(p + 1);\n  let gap = unsafe (q - p);\n  return second + gap as i32 - 5;\n}\n",
+        0,
+    );
 }
 
 // An ordered raw-pointer comparison compares addresses as integers (C defines `<` only within one
@@ -224,70 +217,25 @@ fn externs() {
 
 @test
 fn str() {
-    no_inline();
-    h::expect_c("str forward typedef", STR, "typedef struct str str;");
-    h::expect_c("str body has the view pair", STR, "const uint8_t *ptr;");
-    h::expect_c("str param", STR, "size_t f(str ");
-    h::expect_c("str len() emits method call", STR, "str__len(&");
-    h::expect_c("str literal", STR, "(str){ (const uint8_t *)\"hi\", sizeof(\"hi\") - 1 }");
-}
-
-// Binding constness is a language rule the CHECKER enforces; the emitted locals are plain C
-// storage. What the C must preserve is reference/pointer const-ness (covered by `references`)
-// and behavior.
-@test
-fn constness() {
-    h::expect_exit(
-        "mutation through a mut binding only",
-        "fn f(a: i32) i32 {\n  let x: i32 = a;\n  let mut y: i32 = a;\n  y = y + 1;\n  return x + y;\n}\nfn main() i32 { return f(1) - 3; }\n",
-        0,
-    );
-}
-
-@test
-fn binding_constness() {
-    h::expect_exit(
-        "owning and scalar bindings behave",
-        "struct Buf { pub ptr: *mut u8, }\nfn main() i32 { let b: Buf = Buf { ptr: null, }; let mut m: Buf = Buf { ptr: null, };\n  let x: i32 = 5; let mut y: i32 = 6; y = y + 1; return x + y - 12; }\n",
-        0,
-    );
+    h::expect_exit("a str literal, a str parameter and len()", STR, 2);
 }
 
 @test
 fn alias_extend() {
-    let A: str = "pub type Token = u64;\nextend Token {\n  pub fn new(v: u32) Token { return v as u64; }\n  pub fn start(self: Self) u32 { return self as u32; }\n  pub fn next(self: Self) Token { return Token::new(self.start() + 1); }\n}\nfn main() i32 { let t = Token::new(3); let u = t.next(); return u.start() as i32; }\n";
-    h::expect_c("alias method mangles by the alias name", A, "uint64_t Token__new(");
-    h::expect_c("Self receiver spells the underlying value", A, "uint32_t Token__start(uint64_t");
-    h::expect_c("method call resolves to the alias symbol", A, "Token__start(");
-    h::expect_c_absent("no method dissolves into the underlying builtin", A, "u64__start");
-    h::expect_c_absent("no constructor dissolves into the underlying builtin", A, "u64__new");
+    // Methods on an alias of a builtin: an associated constructor, a `Self` receiver, a chained call.
+    h::expect_exit(
+        "alias methods",
+        "pub type Token = u64;\nextend Token {\n  pub fn new(v: u32) Token { return v as u64; }\n  pub fn start(self: Self) u32 { return self as u32; }\n  pub fn next(self: Self) Token { return Token::new(self.start() + 1); }\n}\nfn main() i32 { let t = Token::new(3); let u = t.next(); return u.start() as i32 - 4; }\n",
+        0,
+    );
 }
 
 @test
 fn enums() {
-    let PLAIN: str = "enum Color { Red, Green, Blue, }\nfn f(c: Color) i32 { return 0; }\n";
-    h::expect_c("payload-less enum is a C enum", PLAIN, "Color_Red");
-    h::expect_c("payload-less enum typedef", PLAIN, "} Color;");
-
-    let TAGGED: str = "enum Shape { Dot, Circle(i32), }\nfn f(s: Shape) i32 { return 0; }\n";
-    h::expect_c("tagged enum: tag type", TAGGED, "ShapeTag");
-    h::expect_c("tagged enum: tag constant", TAGGED, "Shape_Circle");
-    h::expect_c("tagged enum: union member", TAGGED, "union {");
-    h::expect_c("tagged enum: discriminant field", TAGGED, "tag;");
-
-    let CTOR: str = "enum E { A, B(i32), }\nfn f() E { return E::B(7); }\n";
-    h::expect_c("variant construct: tag", CTOR, ".tag = E_B");
-    h::expect_c("variant construct: payload", CTOR, ".payload.B = {");
-    h::expect_c("plain variant value", "enum C { Red, Green, }\nfn f() C { return C::Green; }\n", "C_Green");
-
-    let MATCH: str = "enum C { Red, Green, }\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, }; }\n";
-    h::expect_c("plain enum arm tests the tag", MATCH, "C_Red");
-    h::expect_c_absent("plain enum arm is not a binding", MATCH, "C Red =");
-
-    h::expect_c(
-        "explicit discriminant",
-        "enum Code { Ok = 0, Bad = 404, }\nfn f(c: Code) i32 { return c as i32; }\n",
-        "Code_Bad = 404",
+    h::expect_exit(
+        "plain and tagged enums: construction, matching, explicit discriminants",
+        "enum Color { Red, Green, Blue, }\nenum Shape { Dot, Circle(i32), }\nenum Code { Ok = 0, Bad = 404, }\nfn col(c: Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn area(s: Shape) i32 { return switch s { Dot => 0, Circle(r) => r * r, }; }\nfn main() i32 {\n  let ok = col(Color::Green) == 2 && area(Shape::Circle(3)) == 9 && area(Shape::Dot) == 0 && Code::Bad as i32 == 404 && Code::Ok as i32 == 0;\n  return if ok { 0; } else { 1; };\n}\n",
+        0,
     );
 }
 
@@ -297,46 +245,37 @@ fn if_expression() {
     h::expect_c("then arm assigns the result temp", SRC, "= 1LL;");
     h::expect_c("else arm assigns the result temp", SRC, "= 2LL;");
     h::expect_c("the chain branches structurally", SRC, "if (");
+    let mut run = String::from_str(SRC);
+    run.push_str("fn main() i32 { return f(5) * 10 + f(-5) - 12; }\n");
+    h::expect_exit("each arm gives its own value", run.as_str(), 0);
 }
 
 @test
 fn array_literals() {
-    h::expect_c(
-        "array literal initializes each element",
-        "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n",
-        "[3] = { 1LL, 2LL, 3LL };",
+    // Every element of a literal; a designated literal re-made in a loop zero-fills its tail each time
+    // (the 50 written into the tail must not survive into the next iteration); a repeat evaluates its
+    // element once, a call included; a literal argument reaches the callee by value.
+    h::expect_exit(
+        "array literals",
+        "static mut G: i32 = 0;\nfn tick() u8 {\n  unsafe G += 1;\n  return 3;\n}\nfn probe(n: i32) u32 {\n  let mut s: u32 = 0;\n  for i in 0..n {\n    if i == 0 {\n      continue;\n    }\n    let mut fp: [u32; 4] = [[0] = 1];\n    s += fp[3] + fp[2];\n    fp[3] = 50;\n  }\n  return s;\n}\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn rep(k: u8) u8 { let a = [k * 3; 4]; return a[0] + a[3]; }\nfn main() i32 {\n  let a: [i32; 3] = [1, 2, 3];\n  let t = [tick(); 4];\n  let ok = a[0] + a[1] + a[2] == 6 && probe(4) == 0 && rep(2) == 12 && t[0] + t[3] == 6 && unsafe G == 1 && g([1, 2, 3]) == 4;\n  return if ok { 0; } else { 1; };\n}\n",
+        0,
     );
-    h::expect_c(
-        "a designated literal stored in a loop zero-fills its tail",
-        "fn probe(n: i32) u32 {\n    let mut s: u32 = 0;\n    for i in 0..n {\n        if i == 0 {\n            continue;\n        }\n        let mut fp: [u32; 4] = [[0] = 1];\n        s += fp[3] + fp[2];\n        fp[3] = 50;\n    }\n    return s;\n}\n",
-        "memset(&fp, 0, sizeof(fp));",
-    );
-    // A repeat spells its element at every element: an element that computes is computed once.
+    // An emission property, not behavior: a repeat computes a pure element once and copies it.
     h::expect_c_absent(
         "a repeat computes its element once",
         "fn f(k: u8) u8 { let a = [k * 3; 4]; return a[3]; }\n",
         "a[1] = __sc_mul_u8",
     );
-    h::expect_exit(
-        "array literal argument reaches the callee by value",
-        "extern \"C\" { fn exit(c: i32) void; }\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn f() i32 { return g([1, 2, 3]); }\nfn main() i32 { unsafe exit(f() - 4); }\n",
-        0,
-    );
 }
 
 @test
 fn multi_return() {
-    let MR: str = "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\n";
-    h::expect_c("multi-return struct typedef", MR, "dm_ret");
-    h::expect_c("multi-return field", MR, "int32_t _0;");
-    h::expect_c("multi-return compound literal", MR, "(dm_ret){");
-
-    let DESTR: str = "@c.noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
-    h::expect_c("destructure reads _0", DESTR, "._0;");
-    h::expect_c("destructure reads _1", DESTR, "._1;");
-    // An inlined multi-return call's members are its return slots: no result struct is read.
-    let INL: str = "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
-    h::expect_c_absent("an inlined destructure reads no member", INL, "._1;");
+    // A multi-value return destructures in order, called and inlined.
+    h::expect_exit(
+        "multi-return",
+        "@c.noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn di(a: i32, b: i32) (i32, i32) { return a * b, a / b; }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0; } else { 1; };\n}\n",
+        0,
+    );
 }
 
 // A callee generic over a const parameter inlines with the parameter's value, and its
@@ -355,35 +294,23 @@ fn const_generic_callee_inlines() {
 
 @test
 fn slices_and_arrays() {
-    h::expect_c("slice param is Slice__T", "fn first(s: []i32) i32 { return s[0]; }\n", "first(Slice__i32 ");
-    h::expect_c("mut slice param is SliceMut__T", "fn set0(s: []mut i32) { s[0] = 1; }\n", "set0(SliceMut__i32 ");
-    h::expect_c(
-        "slice index emits an explicit bounds check",
-        "fn first(s: []i32) i32 { return s[0]; }\n",
-        "__sc_bounds(",
-    );
-    h::expect_c("slice index subscripts the typed ptr", "fn first(s: []i32) i32 { return s[0]; }\n", ".ptr[0]");
-    h::expect_c("array param keeps extent", "fn g(a: [i32; 3]) i32 { return a[0]; }\n", "[3])");
-    h::expect_c(
-        "array arg coerces to slice view",
-        "fn take(s: []i32) i32 { return s[0]; }\nfn m() i32 { let a: [i32; 2] = [4, 5]; return take(a); }\n",
-        ".len = 2 }",
+    // A slice parameter reads and writes through its view, an array parameter keeps its extent, and an
+    // array argument coerces to a view of its whole length.
+    h::expect_exit(
+        "slices and arrays",
+        "fn first(s: []i32) i32 { return s[0]; }\nfn set0(s: []mut i32) { s[0] = 7; }\nfn g(a: [i32; 3]) i32 { return a[2]; }\nfn len(s: []i32) usize { return s.len(); }\nfn main() i32 {\n  let mut a: [i32; 3] = [4, 5, 6];\n  set0(a);\n  return if first(a) == 7 && g(a) == 6 && len(a) == 3 { 0; } else { 1; };\n}\n",
+        0,
     );
 }
 
 @test
 fn errors() {
-    h::expect_c(
-        "defer lowers to scope-exit call",
-        "@c.noinline\nfn cleanup() {}\nfn run() { defer cleanup(); }\n",
-        "cleanup()",
+    // A defer runs at scope exit, after the body; a designated initializer fills its slots in order.
+    h::expect_exit(
+        "defer and designated initializers",
+        "static mut G: i32 = 0;\nfn cleanup() { unsafe G = unsafe G * 10 + 2; }\nfn run() { defer cleanup(); unsafe G = unsafe G * 10 + 1; }\nfn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2] * 10 + t[3]; }\nfn main() i32 {\n  run();\n  return if unsafe G == 12 && m(5) == 95 { 0; } else { 1; };\n}\n",
+        0,
     );
-    h::expect_c(
-        "designated array init",
-        "fn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2]; }\n",
-        "[2] = 9",
-    );
-    h::expect_c("static_assert lowers", "static_assert(1 == 1);\nfn m() i32 { return 0; }\n", "_Static_assert(");
     h::expect_exit(
         "local const reads fold or materialize",
         "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { const T: [i32; 2] = [1, 2]; return T[0]; }\nfn main() i32 { unsafe exit(m() - 1); }\n",
@@ -449,57 +376,34 @@ fn attributes() {
 
 @test
 fn generics() {
-    no_inline();
-    let ID: str = "fn id<T>(x: T) T { return x; }\nfn main() i32 { let a: i32 = id::<i32>(5); let b: bool = id::<bool>(true); return a; }\n";
-    h::expect_c("generic specialization with substituted return", ID, "int32_t id__i32(");
-    h::expect_c("second instantiation", ID, "id__bool(");
-    h::expect_c_absent("no generic template emitted", ID, " id(");
-
-    // Transitive same-module chain: expanding f<i32> records g<i32>, whose expansion must
-    // itself run to reach h<i32> (regression: the expand worklist must re-read its bound).
-    let CHAIN: str = "fn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nfn main() i32 { return f(41); }\n";
-    h::expect_c("transitive nested instantiation emits leaf", CHAIN, "int32_t h__i32(");
-
-    let ENUM: str = "enum Opt<T> { Some(T), None }\nfn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(1); let b: Opt<bool> = Opt::<bool>::None;\n  return switch a { Some(v) => v, None => 0, } + switch b { Some(_) => 1, None => 0, }; }\n";
-    h::expect_c("generic enum tag is include-guarded", ENUM, "SUPER_ENUMTAG_Opt");
-    h::expect_c("generic enum tag emitted once", ENUM, "} OptTag;");
+    // Two instances of one generic, a transitive chain whose leaf only the chain reaches, and a generic
+    // enum used at two types: each instance exists once and behaves.
+    h::expect_exit(
+        "generic instances",
+        "fn id<T>(x: T) T { return x; }\nfn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nenum Opt<T> { Some(T), None }\nfn main() i32 {\n  let a: i32 = id::<i32>(5);\n  let b: bool = id::<bool>(true);\n  let o: Opt<i32> = Opt::<i32>::Some(1);\n  let n: Opt<bool> = Opt::<bool>::None;\n  let s = switch o { Some(v) => v, None => 0, } + switch n { Some(_) => 1, None => 0, };\n  return if a == 5 && b && f(41) == 41 && s == 1 { 0; } else { 1; };\n}\n",
+        0,
+    );
 }
 
 @test
 fn literals() {
-    h::expect_c("binary literal reaches C11 in hex", "fn f() i32 { let a: i32 = 0b101; return a; }\n", "0x5");
-    h::expect_c("digit separators strip", "fn f() i32 { let a: i32 = 1_000; return a; }\n", "1000");
     h::expect_exit(
-        "C-keyword identifiers stay legal",
-        "extern \"C\" { fn exit(c: i32) void; }\nfn f() i32 { let register: i32 = 1; return register; }\nfn main() i32 { unsafe exit(f() - 1); }\n",
+        "binary literals, digit separators, C-keyword identifiers",
+        "fn main() i32 {\n  let a: i32 = 0b101;\n  let b: i32 = 1_000;\n  let register: i32 = 1;\n  return if a == 5 && b == 1000 && register == 1 { 0; } else { 1; };\n}\n",
         0,
     );
 }
 
 @test
 fn const_generics() {
-    let CG: str = "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 { let a = Buff::<i32, 4> { b: [1, 2, 3, 4] }; let c = Buff::<u8, 2> { b: [1u8, 2u8] }; return unsafe a.b[0] + unsafe c.b[1] as i32 + a.cap() as i32 + c.cap() as i32; }\n";
-    h::expect_c("const-generic instance name (i32, 4)", CG, "Buff__i32__4");
-    h::expect_c("const-generic instance name (u8, 2)", CG, "Buff__u8__2");
-    h::expect_c("const-generic array field sized (i32)", CG, "int32_t b[4]");
-    h::expect_c("const-generic array field sized (u8)", CG, "uint8_t b[2]");
-    h::expect_c_absent("const param does not leak as `N` into C", CG, "b[N]");
-    h::expect_c("const param value in method body (4)", CG, "= 4ULL");
-    h::expect_c("const param value in method body (2)", CG, "= 2ULL");
-}
-
-// The old backend specialized known-callee callbacks (`apply__cb_inc`); the streaming backend
-// keeps the pointer-taking original for BOTH shapes: one body, callee passed as a value.
-@test
-fn callback_specialization() {
-    let KNOWN: str = "extern \"C\" { fn putchar(c: i32) i32; }\nfn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\nfn inc(x: i32) i32 { unsafe putchar(0); return x + 1; }\nfn use() i32 { return apply(10, inc); }\n";
-    h::expect_c("the pointer-taking original emits", KNOWN, "int32_t apply(int32_t ");
-    h::expect_c("the callback passes as a value", KNOWN, "= inc;");
-    h::expect_c_absent("no specialization symbols", KNOWN, "__cb_");
-
-    let RUNTIME: str = "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\nfn inc(x: i32) i32 { return x + 1; }\nfn use() i32 { let k: fn(i32) i32 = inc; return apply(10, k); }\n";
-    h::expect_c("runtime callback keeps the pointer original", RUNTIME, "int32_t apply(int32_t ");
-    h::expect_c_absent("runtime callback is not specialized", RUNTIME, "__cb_");
+    // Two instances of a const-generic type: each array has its own extent and each method sees its own N.
+    let mut run = String::from_str(
+        "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\n",
+    );
+    run.push_str(
+        "fn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<u8, 2> { b: [1u8, 2u8] };\n  return if a.cap() == 4 && c.cap() == 2 && sizeof(Buff<i32, 4>) == 16 && sizeof(Buff<u8, 2>) == 2 && unsafe a.b[3] == 4 { 0; } else { 1; };\n}\n",
+    );
+    h::expect_exit("const generics", run.as_str(), 0);
 }
 
 // Lifetimes are ERASED before monomorphization: they are checked, then dropped. They must never
@@ -519,12 +423,10 @@ fn lifetimes_are_erased() {
     h::expect_c_absent("the lifetime never appears in the mangled name", MIX, "Pair__a");
 }
 
-// Prelude `likely`/`unlikely`: value-semantic identity hints; the streaming backend keeps the
-// calls (const-evaluable, inlined by C), so conditions still carry them.
+// Prelude `likely`/`unlikely`: value-semantic identity hints, const-evaluable; the inliner removes
+// the calls, so the emitted C carries no hint (std/core.spc).
 @test
 fn branch_hints() {
     let SRC: str = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
-    h::expect_c("unlikely threads the hint call", SRC, "unlikely(");
-    h::expect_c("likely threads the hint call", SRC, "likely(");
     h::expect_exit("branch hints keep value semantics", SRC, 0);
 }

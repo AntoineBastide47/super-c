@@ -46,9 +46,9 @@ fn gen_finds_planted_defect() {
     plant.push_str(str::from_cstr(cli::cstd()));
     plant.push_str(" -DSC_ARITH_WRAP");
     m.opts.push(plant);
-    let r = gen::run_seed(&mut m, 7); // seed 7 draws an overflowing case
+    let r = gen::run_seed(&mut m, 14); // seed 14 draws an overflowing case (6 reduction checks)
     eprintln("{}", r.as_str());
-    assert(r.contains("model 'scalar' seed 7 fails oracle 0"), "the seed and the oracle are named");
+    assert(r.contains("model 'scalar' seed 14 fails oracle 0"), "the seed and the oracle are named");
     assert(r.contains("const:    trap: arithmetic overflow"), "the constant traps");
     assert(r.contains("run time: value"), "the run time wraps");
     assert(r.contains("const PARITY_C0:"), "the reduced program keeps one case");

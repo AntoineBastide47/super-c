@@ -150,18 +150,18 @@ static inline __attribute__((unused)) int* __sc_errno_location(void){return &err
    happened in rather than just the process. Zero on a plain thread. */
 extern _Thread_local uint64_t __sc_task_id;
 void __sc_set_task_id(uint64_t __id);
-/* abort() does not flush, and stderr is only guaranteed unbuffered when it is a terminal -- captured into
-   a pipe it is block-buffered, and the diagnostic these print is exactly what is then lost. Flush first. */
+/* abort() does not flush, and stdout and stderr are block-buffered when captured into a pipe or a file:
+   the output printed before the trap and the diagnostic these print are then lost. Flush both first. */
 static _Noreturn __attribute__((unused, cold)) void __sc_panic(const char *__m) {
   if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
   else fprintf(stderr, "super-c: %s\n", __m);
-  fflush(stderr);
+  fflush(NULL);
   abort();
 }
 static _Noreturn __attribute__((unused, cold)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
   if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
   else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
-  fflush(stderr);
+  fflush(NULL);
   abort();
 }
 static _Noreturn __attribute__((unused)) void __sc_trap_order(void) {
@@ -576,7 +576,10 @@ static void sc_lk_double(void *p, const sc_lk_ent *snap, void *site) {
   sc_lk_site_print(snap->site);
   fprintf(stderr, "freed again at:\n");
   sc_lk_site_print(site);
-  if (sc_lk_get() == 3) abort();
+  if (sc_lk_get() == 3) {
+    fflush(NULL);
+    abort();
+  }
 }
 static void sc_lk_disable(void) {
   sc_lk_set(1);
@@ -645,7 +648,10 @@ static void sc_lk_report(void) {
   (free)(v);
   if (dbl != 0)
     fprintf(stderr, "== super-c double frees: %llu ==\n", (unsigned long long)dbl);
-  if (fatal && (n != 0 || dbl != 0)) _Exit(23);
+  if (fatal && (n != 0 || dbl != 0)) {
+    fflush(NULL); /* _Exit does not flush */
+    _Exit(23);
+  }
 }
 static int sc_lk_on(void) {
   int cur = sc_lk_get();
@@ -918,7 +924,10 @@ void *sc_lk_realloc(void *__p, size_t __n) {
       sc_lk_site_print(snap.site);
       fprintf(stderr, "reallocated again at:\n");
       sc_lk_site_print(site);
-      if (sc_lk_get() == 3) abort();
+      if (sc_lk_get() == 3) {
+        fflush(NULL);
+        abort();
+      }
       /* the history still holds the old block: hand back fresh memory with its contents */
       void *fresh = sc_lk_malloc(__n);
       if (fresh != NULL) memcpy(fresh, __p, snap.size < __n ? snap.size : __n);

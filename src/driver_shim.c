@@ -939,18 +939,50 @@ typedef struct {
   int had;
 } sc_env_save;
 
+/* Restore in reverse, so a name assigned twice gets back its value from before the first assignment. */
+static void sc_env_restore(sc_env_save *saves, int n) {
+  for (int i = n - 1; i >= 0; i--) {
+    if (saves[i].had && saves[i].old)
+      sc_setenv(saves[i].name, saves[i].old);
+    else
+      sc_unsetenv(saves[i].name);
+    free(saves[i].old);
+  }
+}
+
+/* Apply every NAME=VALUE of `env` (space separated; a VALUE in double quotes may hold spaces) and return
+   how many, or -1 with none left applied when one is malformed, there are more than `max`, or memory runs
+   out: a child never runs with part of the environment its caller asked for. */
 static int sc_env_apply(const char *env, sc_env_save *saves, int max) {
   int n = 0;
   const char *p = env;
-  while (p && *p && n < max) {
+  for (;;) {
     while (*p == ' ' || *p == '\t')
       p++;
-    const char *eq = strchr(p, '=');
-    if (!eq)
+    if (!*p)
+      return n;
+    const char *eq = p;
+    while (*eq && *eq != '=' && *eq != ' ' && *eq != '\t')
+      eq++;
+    if (*eq != '=' || n == max)
       break;
-    const char *end = eq;
-    while (*end && *end != ' ' && *end != '\t')
-      end++;
+    const char *v0 = eq + 1;
+    const char *v1;
+    const char *end;
+    if (*v0 == '"') {
+      v0++;
+      v1 = strchr(v0, '"');
+      if (!v1)
+        break;
+      end = v1 + 1;
+    } else {
+      v1 = v0;
+      while (*v1 && *v1 != ' ' && *v1 != '\t')
+        v1++;
+      end = v1;
+    }
+    if (*end && *end != ' ' && *end != '\t')
+      break;
     size_t nl = (size_t)(eq - p);
     if (nl == 0 || nl >= sizeof saves[0].name)
       break;
@@ -959,28 +991,22 @@ static int sc_env_apply(const char *env, sc_env_save *saves, int max) {
     const char *prev = getenv(saves[n].name);
     saves[n].had = prev != 0;
     saves[n].old = prev ? sc_strdup_local(prev) : 0;
-    size_t vl = (size_t)(end - eq - 1);
+    size_t vl = (size_t)(v1 - v0);
     char *val = (char *)malloc(vl + 1);
-    if (!val)
+    if (!val || (prev && !saves[n].old)) {
+      free(val);
+      free(saves[n].old);
       break;
-    memcpy(val, eq + 1, vl);
+    }
+    memcpy(val, v0, vl);
     val[vl] = 0;
     sc_setenv(saves[n].name, val);
     free(val);
     n++;
     p = end;
   }
-  return n;
-}
-
-static void sc_env_restore(sc_env_save *saves, int n) {
-  for (int i = 0; i < n; i++) {
-    if (saves[i].had && saves[i].old)
-      sc_setenv(saves[i].name, saves[i].old);
-    else
-      sc_unsetenv(saves[i].name);
-    free(saves[i].old);
-  }
+  sc_env_restore(saves, n);
+  return -1;
 }
 #endif
 
@@ -1091,6 +1117,8 @@ static HANDLE sc_open_for_child(const char *path, int write) {
 int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
   sc_env_save saves[8];
   const int nenv = env ? sc_env_apply(env, saves, 8) : 0;
+  if (nenv < 0)
+    return -1;
   HANDLE hin = sc_open_for_child(in_path, 0);
   HANDLE hout = sc_open_for_child(out_path, 1);
   HANDLE herr = err_path ? sc_open_for_child(err_path, 1) : INVALID_HANDLE_VALUE;
@@ -1166,6 +1194,8 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
   extern char **environ;
   sc_env_save saves[8];
   const int nenv = env ? sc_env_apply(env, saves, 8) : 0;
+  if (nenv < 0)
+    return -1;
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
   posix_spawn_file_actions_addopen(&fa, 0, in_path ? in_path : "/dev/null", O_RDONLY, 0);

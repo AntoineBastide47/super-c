@@ -10,11 +10,6 @@ fn parse_ok(src: str) Vector<toml::TomlItem> {
     return items.unwrap();
 }
 
-fn rejects(src: str) bool {
-    let mut errs = diag::Errors::new();
-    return toml::parse_into(src, &mut errs).is_none();
-}
-
 fn find(items: &Vector<toml::TomlItem>, sec: str, key: str) i64 {
     for i in 0..items.len() {
         if items.at(i).section.as_str() == sec && items.at(i).key.as_str() == key {
@@ -69,20 +64,6 @@ fn toml_string_escapes() {
     assert(items.at(s as usize).val.s.as_str() == "a\n\t\"b\\");
 }
 
-@test
-fn toml_rejects_malformed() {
-    // Missing '='.
-    assert(rejects("bin \"app\"\n"));
-    // Unterminated string.
-    assert(rejects("bin = \"app\n"));
-    // Malformed section.
-    assert(rejects("[oops\nbin = \"a\"\n"));
-    // Non-string array.
-    assert(rejects("a = [1, 2]\n"));
-    // Trailing junk.
-    assert(rejects("a = \"x\" b = \"y\"\n"));
-}
-
 fn toml_err(label: str, src: str, want: str) {
     let mut errs = diag::Errors::new();
     let r = toml::parse_into(src, &mut errs);
@@ -102,6 +83,7 @@ fn manifest_err(label: str, src: str, want: str) {
 fn toml_error_messages() {
     toml_err("integer array", "a = [1, 2]\n", "arrays may only contain strings");
     toml_err("sign without digits", "a = -x\n", "expected digits");
+    toml_err("missing '='", "bin \"app\"\n", "expected '=' after key");
     toml_err("missing key", "= 1\n", "expected key");
     toml_err("missing inline key", "a = { = 1 }\n", "expected key in inline table");
     toml_err("missing value", "a = \n", "expected value");

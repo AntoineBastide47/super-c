@@ -759,9 +759,10 @@ fn lsp_incremental_sync() {
 @test
 fn lsp_incremental_matches_full_sync() {
     // The same logical edit through ranged changes and through one full-text change must leave
-    // identical analysis results (the parity precondition for advertising sync kind 2).
+    // identical analysis results (the parity precondition for advertising sync kind 2). The edit
+    // leaves the text non-canonical, so the formatting answer shows the edited buffer.
     let src = "fn main() i32 {\n    let t = 1;\n    return t;\n}\n";
-    let edited = "fn main() i32 {\n    let t = 2;\n    return t;\n}\n";
+    let edited = "fn main() i32 {\n    let t =  2;\n    return t;\n}\n";
     let mut outs = Vector::<String>::new();
     for mode in 0..2 {
         let p = cli::proj_new();
@@ -777,7 +778,7 @@ fn lsp_incremental_matches_full_sync() {
                 root,
                 "src/main.spc",
                 2,
-                "[{\"range\":{\"start\":{\"line\":1,\"character\":12},\"end\":{\"line\":1,\"character\":13}},\"text\":\"2\"}]",
+                "[{\"range\":{\"start\":{\"line\":1,\"character\":12},\"end\":{\"line\":1,\"character\":13}},\"text\":\" 2\"}]",
             );
         } else {
             let mut chg = String::from_str("[{\"text\":");
@@ -792,7 +793,7 @@ fn lsp_incremental_matches_full_sync() {
         let out = read_out(root);
         outs.push(String::from_str(response_of(out.as_str(), "\"id\":7")));
     }
-    assert(outs.at(0).len() != 0);
+    assert(outs.at(0).as_str().contains("let t = 2;"), "the formatting edit holds the edited buffer");
     assert(outs.at(0).as_str() == outs.at(1).as_str());
 }
 

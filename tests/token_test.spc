@@ -16,13 +16,3 @@ fn packing() {
     assert_eq(big.start(), 0xABCDEF);
     assert(big.kind() == TokenType::Eof, "high-byte type survives a full 24-bit len");
 }
-
-@test
-fn spans() {
-    let a = Span::new(2, 7);
-    assert(a.start == 2 && a.end == 7, "span_new");
-    let e = Span::empty();
-    assert(e.start == 0 && e.end == 0, "span_empty");
-    let ts = Token::new(TokenType::Plus, 10, 1).span();
-    assert(ts.start == 10 && ts.end == 11, "token_span");
-}

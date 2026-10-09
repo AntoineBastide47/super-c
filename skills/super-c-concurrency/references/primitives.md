@@ -55,7 +55,9 @@ let handle = thread::spawn(fn() i32 {
 let result: i32 = handle.join();
 ```
 
-`thread::spawn<F: fn move() T + Send + 'static, T>(f)` returns a `JoinHandle<T>`.
+`thread::spawn<F: fn move() T + Send + 'static, T>(f)` returns a `JoinHandle<T>`. `h.is_finished()`
+is true once the thread has published its value: `join` then returns at once, and dropping the
+handle destroys the value on the dropping thread.
 (Anonymous functions spell the return type after the parameter list; there is no
 Rust-style `->`.)
 

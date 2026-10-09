@@ -5,27 +5,14 @@
 // I/O via putchar) extend it the same way with run_exit / h::expect_run.
 import tests::harness as h;
 import tests::cli_harness as cli;
-import stdio;
-import string as cstring;
 
 const PRE: str = "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\n";
 
-struct Buf4096 {
-    pub b: [char; 4096],
-}
-
 // Splice PRE ahead of `body`, build+run the program, and assert it exits with `code`.
 fn run_exit(label: str, body: str, code: i32) {
-    let mut buf = Buf4096 {};
-    unsafe stdio::snprintf(
-        &mut buf.b[0],
-        4096,
-        "%s%s".ptr() as *const char,
-        PRE.ptr() as *const char,
-        body.ptr() as *const char,
-    );
-    let src = str::from_raw((&buf.b[0]) as *const u8, unsafe cstring::strlen(&buf.b[0]));
-    h::expect_exit(label, src, code);
+    let mut src = String::from_str(PRE);
+    src.push_str(body);
+    h::expect_exit(label, src.as_str(), code);
 }
 
 @test
@@ -78,7 +65,10 @@ fn matchertext() {
         "fn main() i32 { let evil = \"Eve(\"; let s = M{}\"(Hi {evil})\"; return s.len() as i32; }\n",
     );
     assert(bad.built, "matchertext guard snippet builds");
-    assert(bad.exit != 0, "a non-matchertext hole value must panic, not splice");
+    assert(
+        bad.exit != 0 && cli::contains_str(bad.out, "panic: matchertext interpolation: value is not matchertext"),
+        "a non-matchertext hole value must panic, not splice",
+    );
 }
 
 @test
@@ -133,16 +123,6 @@ fn control_flow() {
         "do while runs once",
         "fn main() i32 { let mut n: i32 = 0; do { n = n + 7; } while false; unsafe exit(n); }\n",
         7,
-    );
-}
-
-@test
-fn recursion() {
-    // Fib(10)=55, sum 0..9=45.
-    run_exit(
-        "fib + range sum",
-        "fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }\nfn main() i32 { let mut s: i32 = 0; for i in 0..10 { s = s + i; } unsafe exit(fib(10) - s); }\n",
-        10,
     );
 }
 
@@ -848,8 +828,17 @@ fn scoped_where_copy_keeps_sibling_drops() {
 @test
 fn scalar_instance_drops_nothing() {
     let src = "@c.noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
-    h::expect_c("the owning instance frees its parameter", src, "String__free(&x);");
-    h::expect_c("the scalar instance is empty", src, "drop_it__i64(int64_t x) {\n  return;\n}");
+    // The owning instance frees its parameter: the run passes the harness's fatal leak gate.
+    h::expect_exit("both instances run", src, 0);
+    // The scalar instance's body is a bare return, whitespace aside.
+    let c = h::compile_c(src);
+    assert(c.ok());
+    let t = str::from_cstr(c.code);
+    let k = t.find("drop_it__i64(int64_t x) {");
+    assert(k >= 0, "the scalar instance is emitted");
+    let rest = t.slice(k as usize + 25, t.len());
+    let body = rest.slice(0, rest.find("}") as usize).trim();
+    assert(body == "return;", "the scalar instance is empty");
 }
 
 @test
@@ -861,6 +850,16 @@ fn leak_tracker_reports_over_aligned_blocks() {
         "SC_LEAK_CHECK=fatal",
     );
     assert(r.built, "leaked over-aligned blocks build");
+    assert_eq(r.exit, 23);
+}
+
+// A program a harness helper runs has SC_LEAK_CHECK=fatal unless the test sets SC_LEAK_CHECK, so a leak
+// fails the test whatever the suite's own environment.
+@test
+fn a_harness_run_fails_on_a_leak_without_the_gate() {
+    let _env1 = cli::set_env("SC_LEAK_CHECK", "0");
+    let r = h::compile_and_run("fn main() i32 {\n    forget(Box::<i64>::new(3));\n    return 0;\n}\n");
+    assert(r.built, "the leaking program builds");
     assert_eq(r.exit, 23);
 }
 

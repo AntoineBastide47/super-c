@@ -4,19 +4,8 @@
 // oracle asserts the checker agrees. A rejection must come FROM the typechecker (a borrow/type error),
 // never an unrelated earlier stage. Drives the real pipeline in-process through tests::harness.
 import tests::harness as h;
-import stdio;
-import string as cstring;
 
-// Scratch buffers (there is no `[v; N]` repeat literal, so wrap the array in a struct and `{}`-zero it).
-struct Buf64 {
-    pub b: [char; 64],
-}
-struct Buf2048 {
-    pub b: [char; 2048],
-}
-struct Buf8192 {
-    pub b: [char; 8192],
-}
+// A scenario index list (there is no `[v; N]` repeat literal, so wrap the array in a struct and `{}`-zero it).
 struct IdxBuf {
     pub b: [i32; 17],
 }
@@ -29,23 +18,17 @@ const CDEF: str = "struct C { pub n: i32 }\nextend C { fn bump(self: &mut C) { s
 const CDEF2: str = "struct H { pub v: i32 }\nextend H { fn geti(self: &H) &i32 { return &self.v; } fn seti(self: &mut H, n: i32) { self.v = n; } }\n";
 const SINK: str = "struct Own { pub id: i32 }\nextend Own as Free { fn free(self: &mut Own) { } }\nfn sink(v: Own) i32 { return v.id; }\n";
 
-// Make a `str` view over a filled, NUL-terminated buffer.
-fn buf_str<'a>(p: *const char) str<'a> {
-    return str::from_raw(p as *const u8, unsafe cstring::strlen(p));
-}
-
 // Two borrow-place overlap rules: whole `p` (index 0) overlaps everything; `p.a` (1) and `p.b` (2) are disjoint.
 const fn overlap(i: i32, j: i32) bool {
     return i == j || i == 0 || j == 0;
 }
 
 // An i32-valued use of reference binding `name` that borrows place `pi`: `name.a` (whole, auto-deref) or `*name`.
-fn use_ref(out: *mut char, name: str, pi: i32) {
-    let mut fmt = "*%s";
+fn use_ref(name: str, pi: i32) String {
     if pi == 0 {
-        fmt = "%s.a";
+        return format("{}.a", name);
     }
-    unsafe stdio::snprintf(out, 64, fmt.ptr() as *const char, name.ptr() as *const char);
+    return format("*{}", name);
 }
 
 // Compile through the typechecker only and assert the accept/reject verdict; a rejection must be a
@@ -53,54 +36,56 @@ fn use_ref(out: *mut char, name: str, pi: i32) {
 fn check_case(label: str, src: str, expect_ok: bool) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
     assert(c.ok() == expect_ok, label);
+    // A reject comes from the borrow check: a type error in the snippet is a broken case, not a verdict
+    // (`check_rejected_by_type_check` covers the rules the type checker owns).
     if !c.ok() && !expect_ok {
-        assert(c.stage == h::STAGE_TYPECHECK, label);
+        if c.stage != h::STAGE_BORROWCK {
+            eprintln("{}: stage {}: {}", label, c.stage, str::from_cstr(&c.first[0]));
+        }
+        assert(c.stage == h::STAGE_BORROWCK, label);
     }
+}
+
+// A rule the type checker owns (immutability, temporaries, Free-typed init): `src` fails the type check
+// itself, before the borrow check, with a first message holding `needle`.
+fn check_rejected_by_type_check(label: str, src: str, needle: str) {
+    let c = h::compile(src, h::STAGE_TYPECHECK);
+    let first = str::from_cstr(&c.first[0]);
+    if c.ok() || c.stage != h::STAGE_TYPECHECK || !first.contains(needle) {
+        eprintln("{}: stage {}: {}", label, c.stage, first);
+    }
+    assert(!c.ok() && c.stage == h::STAGE_TYPECHECK && first.contains(needle), label);
 }
 
 // Splice a prefix macro `pre` before a `body` snippet and check the verdict (the analog of the C
 // `snprintf(PREFIX ...)` in the fixed-case families).
 fn case_pre(pre: str, body: str, label: str, ok: bool) {
-    let mut src = Buf2048 {};
-    unsafe stdio::snprintf(
-        &mut src.b[0],
-        2048,
-        "%s%s".ptr() as *const char,
-        pre.ptr() as *const char,
-        body.ptr() as *const char,
-    );
-    check_case(label, buf_str(&src.b[0]), ok);
+    let src = format("{}{}", pre, body);
+    check_case(label, src.as_str(), ok);
 }
 
 // Family A: aliasing: two borrows of p, both kept live. Reject iff their places overlap and at least
 // one is `&mut`.
 @test
 fn aliasing() {
-    let kinds: [str; 2] = ["", "mut "];
-    let places: [str; 3] = ["p", "p.a", "p.b"];
+    let kinds: []str = ["", "mut "];
+    let places: []str = ["p", "p.a", "p.b"];
     for k1 in 0..2 {
         for k2 in 0..2 {
             for p1 in 0..3 {
                 for p2 in 0..3 {
-                    let mut u1 = Buf64 {};
-                    let mut u2 = Buf64 {};
-                    use_ref(&mut u1.b[0], "b1", p1);
-                    use_ref(&mut u2.b[0], "b2", p2);
-                    let mut src = Buf2048 {};
-                    unsafe stdio::snprintf(
-                        &mut src.b[0],
-                        2048,
-                        "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let keep = %s + %s; return keep; }\n".ptr() as *const char,
-                        PRE.ptr() as *const char,
-                        kinds[k1].ptr() as *const char,
-                        places[p1].ptr() as *const char,
-                        kinds[k2].ptr() as *const char,
-                        places[p2].ptr() as *const char,
-                        &u1.b[0],
-                        &u2.b[0],
+                    let src = format(
+                        "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let b1 = &{}{};\n  let b2 = &{}{};\n  let keep = {} + {}; return keep; }}\n",
+                        PRE,
+                        kinds[k1],
+                        places[p1],
+                        kinds[k2],
+                        places[p2],
+                        use_ref("b1", p1).as_str(),
+                        use_ref("b2", p2).as_str(),
                     );
                     let want = !(overlap(p1, p2) && (k1 != 0 || k2 != 0));
-                    check_case("aliasing", buf_str(&src.b[0]), want);
+                    check_case("aliasing", src.as_str(), want);
                 }
             }
         }
@@ -111,26 +96,21 @@ fn aliasing() {
 // Reject iff the read overlaps the borrow and the borrow is `&mut`.
 @test
 fn use_while_borrowed() {
-    let kinds: [str; 2] = ["", "mut "];
-    let places: [str; 3] = ["p", "p.a", "p.b"];
+    let kinds: []str = ["", "mut "];
+    let places: []str = ["p", "p.a", "p.b"];
     for k in 0..2 {
         for p1 in 0..3 {
             for p2 in 0..3 {
-                let mut ur = Buf64 {};
-                use_ref(&mut ur.b[0], "r", p1);
-                let mut src = Buf2048 {};
-                unsafe stdio::snprintf(
-                    &mut src.b[0],
-                    2048,
-                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let y = %s;\n  let keep = %s; return keep; }\n".ptr() as *const char,
-                    PRE.ptr() as *const char,
-                    kinds[k].ptr() as *const char,
-                    places[p1].ptr() as *const char,
-                    places[p2].ptr() as *const char,
-                    &ur.b[0],
+                let src = format(
+                    "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let r = &{}{};\n  let y = {};\n  let keep = {}; return keep; }}\n",
+                    PRE,
+                    kinds[k],
+                    places[p1],
+                    places[p2],
+                    use_ref("r", p1).as_str(),
                 );
                 let want = !(overlap(p1, p2) && k != 0);
-                check_case("use while borrowed", buf_str(&src.b[0]), want);
+                check_case("use while borrowed", src.as_str(), want);
             }
         }
     }
@@ -139,25 +119,20 @@ fn use_while_borrowed() {
 // Family C: NLL: identical to B but the reference's LAST use precedes the read, so EVERY case accepts.
 @test
 fn nll() {
-    let kinds: [str; 2] = ["", "mut "];
-    let places: [str; 3] = ["p", "p.a", "p.b"];
+    let kinds: []str = ["", "mut "];
+    let places: []str = ["p", "p.a", "p.b"];
     for k in 0..2 {
         for p1 in 0..3 {
             for p2 in 0..3 {
-                let mut ur = Buf64 {};
-                use_ref(&mut ur.b[0], "r", p1);
-                let mut src = Buf2048 {};
-                unsafe stdio::snprintf(
-                    &mut src.b[0],
-                    2048,
-                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let used = %s;\n  let y = %s; return used; }\n".ptr() as *const char,
-                    PRE.ptr() as *const char,
-                    kinds[k].ptr() as *const char,
-                    places[p1].ptr() as *const char,
-                    &ur.b[0],
-                    places[p2].ptr() as *const char,
+                let src = format(
+                    "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let r = &{}{};\n  let used = {};\n  let y = {}; return used; }}\n",
+                    PRE,
+                    kinds[k],
+                    places[p1],
+                    use_ref("r", p1).as_str(),
+                    places[p2],
                 );
-                check_case("nll", buf_str(&src.b[0]), true);
+                check_case("nll", src.as_str(), true);
             }
         }
     }
@@ -301,7 +276,7 @@ fn closed_gaps() {
     );
     check_case(
         "read scrutinee while &mut payload binding live",
-        "enum E { V(i32) }\nfn main() i32 { let mut e = E::V(1); let r = switch &mut e { V(y) => y, }; let z = e; *r = 2; return z; }\n",
+        "enum E { V(i32) }\nfn main() i32 { let mut e = E::V(1); let r = switch &mut e { V(y) => y, }; let z = switch &e { V(q) => *q, }; *r = 2; return z; }\n",
         false,
     );
     check_case(
@@ -412,7 +387,7 @@ fn ref_semantics() {
     );
     check_case(
         "B5 variable indices conservative",
-        "fn main() i32 { let mut a = [1, 2, 3]; let i = 0; let j = 1; let x = &mut a[i]; let y = &mut a[j]; return *x + *y; }\n",
+        "fn main() i32 { let mut a = [1, 2, 3]; let i = 0; let j = 1; let x = &mut unsafe a[i]; let y = &mut unsafe a[j]; return *x + *y; }\n",
         false,
     );
 }
@@ -548,11 +523,14 @@ fn third_audit() {
         "K11 move two distinct values",
         true,
     );
-    case_pre(
+    let k12 = format(
+        "{}fn make() P {{ return P {{ a: 1, b: 2 }}; }}\nfn main() i32 {{ let r = &make(); return r.a; }}\n",
         PRE,
-        "fn make() P { return P { a: 1, b: 2 }; }\nfn main() i32 { let r = &make(); return r.a; }\n",
+    );
+    check_rejected_by_type_check(
         "K12 address of call result",
-        false,
+        k12.as_str(),
+        "cannot take the address of a temporary value",
     );
     case_pre(PRE, "fn main() i32 { let r = &P { a: 1, b: 2 }; return r.a; }\n", "K12 address of struct literal", true);
     case_pre(
@@ -595,46 +573,39 @@ fn third_audit() {
 }
 
 // Family H: THREE simultaneous borrows of one variable, all kept live. Valid iff every overlapping pair
-// is shared+shared (no overlapping pair includes a `&mut`).
+// is shared+shared (no overlapping pair includes a `&mut`). The place triples are the ones a pairwise
+// family cannot express (b1 and b3 overlapping around a disjoint b2, a whole-value borrow beside both
+// parts, three borrows of one field), under every kind combination.
 @test
 fn aliasing3() {
-    let kinds: [str; 2] = ["", "mut "];
-    let places: [str; 3] = ["p", "p.a", "p.b"];
+    let kinds: []str = ["", "mut "];
+    let places: []str = ["p", "p.a", "p.b"];
+    let triples: [][i32; 3] = [[1, 2, 1], [2, 1, 2], [1, 2, 0], [0, 1, 2], [1, 1, 2], [2, 2, 2]];
     for k1 in 0..2 {
         for k2 in 0..2 {
             for k3 in 0..2 {
-                for p1 in 0..3 {
-                    for p2 in 0..3 {
-                        for p3 in 0..3 {
-                            let mut u1 = Buf64 {};
-                            let mut u2 = Buf64 {};
-                            let mut u3 = Buf64 {};
-                            use_ref(&mut u1.b[0], "b1", p1);
-                            use_ref(&mut u2.b[0], "b2", p2);
-                            use_ref(&mut u3.b[0], "b3", p3);
-                            let mut src = Buf2048 {};
-                            unsafe stdio::snprintf(
-                                &mut src.b[0],
-                                2048,
-                                "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let b3 = &%s%s;\n  let keep = %s + %s + %s; return keep; }\n".ptr() as *const char,
-                                PRE.ptr() as *const char,
-                                kinds[k1].ptr() as *const char,
-                                places[p1].ptr() as *const char,
-                                kinds[k2].ptr() as *const char,
-                                places[p2].ptr() as *const char,
-                                kinds[k3].ptr() as *const char,
-                                places[p3].ptr() as *const char,
-                                &u1.b[0],
-                                &u2.b[0],
-                                &u3.b[0],
-                            );
-                            let bad = overlap(p1, p2) && (k1 != 0 || k2 != 0) || overlap(p1, p3) && (k1 != 0 || k3 != 0) || overlap(
-                                p2,
-                                p3,
-                            ) && (k2 != 0 || k3 != 0);
-                            check_case("aliasing3", buf_str(&src.b[0]), !bad);
-                        }
-                    }
+                for t in 0..triples.len() {
+                    let p1 = triples[t][0];
+                    let p2 = triples[t][1];
+                    let p3 = triples[t][2];
+                    let src = format(
+                        "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let b1 = &{}{};\n  let b2 = &{}{};\n  let b3 = &{}{};\n  let keep = {} + {} + {}; return keep; }}\n",
+                        PRE,
+                        kinds[k1],
+                        places[p1],
+                        kinds[k2],
+                        places[p2],
+                        kinds[k3],
+                        places[p3],
+                        use_ref("b1", p1).as_str(),
+                        use_ref("b2", p2).as_str(),
+                        use_ref("b3", p3).as_str(),
+                    );
+                    let bad = overlap(p1, p2) && (k1 != 0 || k2 != 0) || overlap(p1, p3) && (k1 != 0 || k3 != 0) || overlap(
+                        p2,
+                        p3,
+                    ) && (k2 != 0 || k3 != 0);
+                    check_case("aliasing3", src.as_str(), !bad);
                 }
             }
         }
@@ -681,45 +652,23 @@ const fn snippet_ok(i: i32) bool {
 // Bundle snippets idx[0..n) into one program (each its own function; main sums them) and assert the verdict:
 // accepted iff EVERY bundled snippet is individually valid.
 fn bundle(idx: *const i32, n: i32, label: str) {
-    let mut src = Buf8192 {};
-    let mut calls = Buf2048 {};
-    let mut at: i32 = unsafe stdio::snprintf(&mut src.b[0], 8192, "%s".ptr() as *const char, PRE.ptr() as *const char);
-    let mut cat: i32 = 0;
+    let mut src = String::from_str(PRE);
+    let mut calls = String::new();
     let mut ok = true;
-    calls.b[0] = 0 as char;
     for i in 0..n {
         let bi = unsafe idx[i as usize];
-        at = at + unsafe stdio::snprintf(
-            &mut src.b[at as usize],
-            (8192 - at) as usize,
-            "fn s%d() i32 { %s }\n".ptr() as *const char,
-            i,
-            snippet_body(bi).ptr() as *const char,
-        );
-        let mut sep = "";
+        src.format_into("fn s{}() i32 {{ {} }}\n", i, snippet_body(bi));
         if i != 0 {
-            sep = " + ";
+            calls.push_str(" + ");
         }
-        cat = cat + unsafe stdio::snprintf(
-            &mut calls.b[cat as usize],
-            (2048 - cat) as usize,
-            "%ss%d()".ptr() as *const char,
-            sep.ptr() as *const char,
-            i,
-        );
+        calls.format_into("s{}()", i);
         ok = ok && snippet_ok(bi);
     }
-    let mut tail = "0".ptr() as *const char;
-    if n != 0 {
-        tail = &calls.b[0];
+    if n == 0 {
+        calls.push_str("0");
     }
-    unsafe stdio::snprintf(
-        &mut src.b[at as usize],
-        (8192 - at) as usize,
-        "fn main() i32 { return %s; }\n".ptr() as *const char,
-        tail,
-    );
-    check_case(label, buf_str(&src.b[0]), ok);
+    src.format_into("fn main() i32 {{ return {}; }}\n", calls.as_str());
+    check_case(label, src.as_str(), ok);
 }
 
 // Family I: composition: independent scenarios must not interfere, an invalid one must not be masked by
@@ -748,21 +697,19 @@ fn composition() {
             }
             unsafe idx.b[k as usize] = j;
             k = k + 1;
-            let mut lbuf = Buf2048 {};
-            unsafe stdio::snprintf(&mut lbuf.b[0], 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);
-            bundle(&idx.b[0], k, buf_str(&lbuf.b[0]));
+            bundle(&idx.b[0], k, format("bundle: valids + invalid #{}", j).as_str());
         }
     }
 
-    // Every ordered pair of scenarios -> accept iff both are valid.
-    for a in 0..16 {
-        for b in 0..16 {
-            let mut pair = IdxBuf {};
-            pair.b[0] = a;
-            pair.b[1] = b;
-            let mut lbuf = Buf2048 {};
-            unsafe stdio::snprintf(&mut lbuf.b[0], 2048, "bundle pair (%d,%d)".ptr() as *const char, a, b);
-            bundle(&pair.b[0], 2, buf_str(&lbuf.b[0]));
+    // Every invalid snippet FIRST, then all the valids -> reject: the order does not mask it either.
+    for j in 0..16 {
+        if !snippet_ok(j) {
+            let mut idx = IdxBuf {};
+            idx.b[0] = j;
+            for t in 0..nv {
+                unsafe idx.b[(t + 1) as usize] = unsafe av.b[t as usize];
+            }
+            bundle(&idx.b[0], nv + 1, format("bundle: invalid #{} + valids", j).as_str());
         }
     }
 }
@@ -795,15 +742,15 @@ fn split_init() {
         "fn f(v: i32) i32 { let x: i32; switch v { 1 => { x = 10; }, _ => { x = 20; } }; return x; }\nfn main() i32 { return f(1); }\n",
         true,
     );
-    check_case(
+    check_rejected_by_type_check(
         "split init free-typed rejected",
         "fn main() i32 { let v: Vector<i64>; v = Vector::<i64>::new(); let _ = &v; return 0; }\n",
-        false,
+        "a Free-typed binding must be initialized when declared",
     );
-    check_case(
+    check_rejected_by_type_check(
         "assign to initialized immutable still rejected",
         "fn main() i32 { let x: i32 = 1; x = 2; return x; }\n",
-        false,
+        "cannot assign to this expression",
     );
 }
 

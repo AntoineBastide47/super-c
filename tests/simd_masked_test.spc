@@ -151,9 +151,30 @@ fn pick3(ok: bool) i32 {
         let mut mc = String::from_str(str::from_cstr(b.proj.rootp()));
         mc.push_str("/build/dev/raw/main.c");
         let c = cli::read_text(mc.as_str());
-        let chk = c.as_str().find("__sc_mem_oob(");
-        let st = c.as_str().find("store_masked_i32x4(");
-        assert(chk >= 0 && st > chk, "the range check comes before the masked store");
+        // The store's own range check is the statement just before it: the last check before the store
+        // ends the only `;` between them (the scatter paths' checks sit earlier, statements away).
+        let t = c.as_str();
+        let st = t.find("store_masked_i32x4(");
+        assert(st >= 0, "the masked store calls its entry");
+        let mut chk: isize = -1;
+        let mut at: usize = 0;
+        loop {
+            let k = t.slice(at, st as usize).find("__sc_mem_oob(");
+            if k < 0 {
+                break;
+            }
+            chk = (at + k as usize) as isize;
+            at = chk as usize + 1;
+        }
+        assert(chk >= 0, "a range check precedes the masked store");
+        let between = t.slice(chk as usize, st as usize);
+        let mut semis = 0;
+        for i in 0..between.len() {
+            if between.byte_at(i) == b';' {
+                semis += 1;
+            }
+        }
+        assert(semis == 1, "the range check is the store's own, just before it");
     }
     let modes: [str; 3] = ["0", "1", "2"];
     for mi in pick_lane(lane)..3usize {

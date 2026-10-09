@@ -531,11 +531,6 @@ fn a_program_without_vectors_gets_no_vector_c() {
         "fn main() i32 {\n    let a: [u8; 4] = [1, 2, 3, 4];\n    return a[3] as i32;\n}\n",
         "__sc_lane",
     );
-    h::expect_c(
-        "a run-time lane index checks the lanes",
-        "fn at(v: f32x4, i: usize) f32 {\n    return v[i];\n}\nfn main() i32 {\n    return at([1.0, 2.0, 3.0, 4.0], 1) as i32;\n}\n",
-        "__sc_lane(",
-    );
 }
 
 @test

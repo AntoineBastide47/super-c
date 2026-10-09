@@ -400,6 +400,8 @@ its block, so its view cannot leave the block or be returned.
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
 zero-fills the rest), and a nested literal is checked against the element type at every level. A
+repeat `[e; n]` evaluates `e` once and copies the value into every element (`[f(); 4]` calls `f`
+once). A
 nested literal without an annotation takes its inner length from its elements
 (`[[1, 2], [3, 4]]` is `[[i32; 2]; 2]`), and its elements must agree on that length. A symbolic
 length (`[T; N]`, `[T; N * 2]` in the generic that declares `N`) is a type of its own: it equals

@@ -2,6 +2,8 @@
 // (the manifest test driver), and `[lib]` static and shared library builds (the library-artifact
 // naming and link path). All use native subcommands, so they run on every lane.
 import tests::cli_harness as cli;
+import build_system::build as bsys;
+import driver_shim as shim;
 
 const E: str = "SC_NO_EMIT_CACHE";
 
@@ -16,7 +18,7 @@ fn manifest_test_runs_the_tests_directory() {
     // `super-c test` builds the tests/ tree against the src closure and runs it.
     let r = cli::superc_env_in(root, E, "1", "test --quiet");
     assert(r.ok(), "the manifest test run succeeds");
-    assert(r.out_has("passed"), "the tally is printed");
+    assert(r.out_shows("1 passed, 0 failed"), "the tests/ test ran and passed");
 }
 
 // The shards of `super-c test` balance by tests/durations.tsv: the longest test first, each to the shard
@@ -50,31 +52,58 @@ fn manifest_test_shards_by_duration() {
     assert(!f.as_str().contains("tests::t::gone"), "a name the suite lost is dropped");
 }
 
+// A library whose public function nothing in it calls, beside a private function nothing calls.
+const LIB: str = "pub fn util() i32 {\n    return 42;\n}\n\nfn helper() i32 {\n    return 2;\n}\n";
+
+// Build a [lib] with the static and/or shared artifact: it builds each artifact under its platform
+// name and lints once. The private dead function is reported once; the public one is API and never
+// reported.
+fn library_build(stat: bool, shared: bool) {
+    let p = cli::proj_new();
+    let types = if stat && shared {
+        "\"static\", \"shared\"";
+    } else if stat {
+        "\"static\"";
+    } else {
+        "\"shared\"";
+    };
+    p.mkfile("build.toml", format("[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [{}]\n", types).as_str());
+    p.mkfile("src/lib.spc", LIB);
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, E, "1", "build");
+    assert(r.ok(), types);
+    let host = unsafe shim::sc_host_platform();
+    for kind in 0..2 {
+        let want = if kind == 0 {
+            stat;
+        } else {
+            shared;
+        };
+        let leaf = bsys::lib_file("mylib", kind == 1, host);
+        let rel = format("build/dev-lib/{}", leaf.as_str());
+        assert(r.out_has(format("built {}", rel.as_str()).as_str()) == want, leaf.as_str());
+        assert(cli::read_text(format("{}/{}", root, rel.as_str()).as_str()).len() != 0 == want, "the artifact exists");
+    }
+    let out = str::from_cstr(r.out);
+    let at = out.find("unused function 'helper'");
+    assert(at >= 0, "the private dead function is reported");
+    assert(out.slice(at as usize + 1, out.len()).find("unused function 'helper'") < 0, "once");
+    assert(!r.out_has("'util'"), "the public function is not reported");
+}
+
 @test
 fn static_library_build() {
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [\"static\"]\n");
-    p.mkfile("src/lib.spc", "pub fn util() i32 {\n    return 42;\n}\n");
-    let root = str::from_cstr(p.rootp());
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "a static library builds");
+    library_build(true, false);
 }
 
 @test
 fn shared_library_build() {
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [\"shared\"]\n");
-    p.mkfile("src/lib.spc", "pub fn util() i32 {\n    return 42;\n}\n");
-    let root = str::from_cstr(p.rootp());
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "a shared library builds");
+    library_build(false, true);
 }
 
 @test
 fn static_and_shared_library_build() {
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [\"static\", \"shared\"]\n");
-    p.mkfile("src/lib.spc", "pub fn util() i32 {\n    return 42;\n}\n");
-    let root = str::from_cstr(p.rootp());
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "both library artifacts build");
+    library_build(true, true);
 }
 
 // A failing C compile fails the build with the child's exit status, a bounded replay of its output, and
@@ -123,9 +152,27 @@ fn same_second_edit_recompiles() {
     assert_eq(second.exit, 4);
 }
 
+// How many C files module `main` emits into `dir`: `main.c` and its parts `main__p<k>.c`.
+fn shard_parts(dir: str) i32 {
+    let mut n: i32 = 0;
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    assert(dh != null, dir);
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        n += (nm == "main.c" || nm.starts_with("main__p") && nm.ends_with(".c")) as i32;
+    }
+    unsafe shim::sc_closedir(dh);
+    return n;
+}
+
 // The compiler decides a module's shard count from its emitted size (about one shard per 256 KiB
-// of C), records the counts in `__sc_shards` beside the manifest, keeps them across rebuilds,
-// and lets a `[shards]` entry in build.toml override them.
+// of C), keeps the count across rebuilds, and lets a `[shards]` entry in build.toml override it: the
+// emitted tree shows it as the module's part files.
 @test
 fn shard_counts_follow_emitted_size() {
     let p = cli::proj_new();
@@ -148,20 +195,15 @@ fn shard_counts_follow_emitted_size() {
     let root = str::from_cstr(p.rootp());
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.ok(), "the build succeeds");
-    let mut sp = String::from_str(root);
-    sp.push_str("/build/dev/gen/__sc_shards");
-    let meta = cli::read_text(sp.as_str());
-    assert(meta.as_str().starts_with("super-c-shards\t1\n"), "the shard file carries its version");
-    assert(meta.as_str().contains("\nmain\t"), "the large module has more than one shard");
-    let mut p1 = String::from_str(root);
-    p1.push_str("/build/dev/gen/main__p1.c");
-    assert(cli::read_text(p1.as_str()).len() > 0, "the second shard was written");
+    let mut gen = String::from_str(root);
+    gen.push_str("/build/dev/gen");
+    let parts = shard_parts(gen.as_str());
+    assert(parts >= 2, "the large module has more than one shard");
     let again = cli::superc_env_in(root, E, "1", "build");
     assert(again.ok(), "the rebuild succeeds");
-    assert(cli::read_text(sp.as_str()).equals(&meta), "a rebuild keeps the counts");
+    assert_eq(shard_parts(gen.as_str()), parts);
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n[shards]\n\"main\" = 1\n");
     let over = cli::superc_env_in(root, E, "1", "build");
     assert(over.ok(), "the override builds");
-    assert(!cli::read_text(sp.as_str()).as_str().contains("\nmain\t"), "the manifest's count wins");
-    assert(cli::read_text(p1.as_str()).len() == 0, "and the second shard is gone");
+    assert_eq(shard_parts(gen.as_str()), 1);
 }

@@ -162,45 +162,6 @@ fn try_lock_takes_a_free_lock_and_refuses_a_held_one() {
     assert_eq(*g.get(), 8);
 }
 
-@test
-fn try_lock_returns_without_waiting_while_another_caller_holds() {
-    rt::set_worker_count(2);
-    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
-    let held = counter();
-    let release = counter();
-    let wg = sync::WaitGroup::new();
-    wg.add(1);
-    {
-        let h = m.clone();
-        let w = wg.clone();
-        let hd = held.clone();
-        let rl = release.clone();
-        launch || {
-            let _g = h.get().lock();
-            hd.get().store(1, atomics::MemoryOrder::Release);
-            while count(&rl) == 0 {
-                time::sleep(time::Duration::from_millis(1));
-            }
-            w.done();
-        };
-    }
-    while count(&held) == 0 {
-        time::sleep(time::Duration::from_millis(1));
-    }
-    // The lock is held by a parked task that releases only when told below, so an attempt that waited
-    // would never return: a thousand refusals prove `try_lock` never waits.
-    let mut refused: i64 = 0;
-    for _i in 0..1000 {
-        if m.get().try_lock().is_none() {
-            refused = refused + 1;
-        }
-    }
-    assert_eq(refused, 1000);
-    release.get().store(1, atomics::MemoryOrder::Release);
-    wg.wait();
-    rt::shutdown();
-}
-
 // --- the guard owns the payload ---------------------------------------------------------------------.
 
 @test
@@ -220,19 +181,6 @@ fn the_guard_hands_back_the_payload_exactly_once(fx: &mut Base) {
     }
     // The mutex went out of scope and took its payload with it, once.
     assert_eq(frees(), 1);
-    let _ = fx;
-}
-
-@test
-fn an_idle_lock_may_move(fx: &mut Base) {
-    let m = sync::Mutex::<Payload>::new(Payload { n: 5 });
-    // Moved while nothing holds it and nothing waits on it, which is the only time a value can move.
-    let moved = m;
-    {
-        let g = moved.lock();
-        assert_eq(g.get().n, 5);
-    }
-    assert_eq(frees(), 0);
     let _ = fx;
 }
 

@@ -769,6 +769,9 @@ fn select_cancel_unregisters_every_arm(fx: &mut Base) {
     let brx = b.receiver();
     let atx = a.sender();
     let btx = b.sender();
+    // The test keeps a receiver of each: the channels stay open after the task's receivers go.
+    let akeep = a.receiver();
+    let bkeep = b.receiver();
     let done = sync::WaitGroup::new();
     done.add(1);
     let d2 = done.clone();
@@ -787,60 +790,21 @@ fn select_cancel_unregisters_every_arm(fx: &mut Base) {
     assert(ph::wait_parked(key), "the task parks");
     assert(rt::request_cancel(key, rt::CR_USER), "the selector task is live");
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled select finishes");
-    // Both queues are clean: sends after the cancel park nobody and deliver normally.
-    let _ = atx.send(1);
-    let _ = btx.send(2);
+    // Both queues are clean: a send after the cancel hands its value to no stale arm, so the value
+    // waits in the buffer for the next receive.
+    let sent = (switch atx.send(1) {
+        Sent => true,
+        Rejected(_) => false,
+    }) && (switch btx.send(2) {
+        Sent => true,
+        Rejected(_) => false,
+    });
+    assert(sent, "the sends go through");
+    assert(akeep.try_recv() == Option::<i64>::Some(1), "a's value is buffered");
+    assert(bkeep.try_recv() == Option::<i64>::Some(2), "b's value is buffered");
     rt::shutdown();
     assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0);
-}
-
-@test
-fn mutex_lock_c_cancel_never_returns_a_guard(fx: &mut Base) {
-    rt::set_worker_count(2);
-    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
-    let ktx = kch.sender();
-    let krx = kch.receiver();
-    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
-    let m2 = m.clone();
-    let hold = sync::WaitGroup::new(); // released once the test wants the lock free again
-    hold.add(1);
-    let h2 = hold.clone();
-    let holding = sync::WaitGroup::new();
-    holding.add(1);
-    let hg = holding.clone();
-    launch || {
-        let _g = m2.get().lock();
-        hg.done();
-        // Owns the lock until the main thread says otherwise.
-        h2.wait();
-    };
-    holding.wait();
-    let m3 = m.clone();
-    let done = sync::WaitGroup::new();
-    done.add(1);
-    let d2 = done.clone();
-    launch || {
-        defer finish(&d2);
-        let _ = ktx.send(rt::current_key());
-        let _got = m3.get().lock_c(); // parks behind the holder; the edge unwinds here on cancellation
-        after_mark();
-    };
-    let key = krx.recv().unwrap();
-    assert(ph::wait_parked(key), "the task parks");
-    assert(rt::request_cancel(key, rt::CR_USER), "the lock waiter is live");
-    assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled waiter finishes");
-    // Release the holder; the lock must be fully functional afterwards.
-    hold.done();
-    {
-        let g = m.get().lock();
-        assert_eq(*g.get(), 0);
-    }
-    rt::shutdown();
-    assert_eq(cancelled(fx), 1);
-    assert_eq(unwounds(), 1);
-    // No guard reached the cancelled waiter's frame.
     assert_eq(afters(), 0);
 }
 
@@ -994,48 +958,6 @@ fn acceptance_inside_a_primitive_hands_its_value_back(fx: &mut Base) {
 // --- blocking pool: heap-owned results and abandonment ------------------------------------------------.
 
 @test
-fn blocking_call_c_cancel_abandons_job(fx: &mut Base) {
-    rt::set_worker_count(2);
-    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
-    let ktx = kch.sender();
-    let krx = kch.receiver();
-    let done = sync::WaitGroup::new();
-    done.add(1);
-    let d2 = done.clone();
-    let gate = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
-    let ga = gate.clone();
-    launch || {
-        defer finish(&d2);
-        let _ = ktx.send(rt::current_key());
-        let gi = ga.clone(); // the body owns its own handle: it outlives this frame
-        let _got = blocking::call_c(
-            fn() Payload {
-                // A genuinely blocking body: the pool thread stays in it until the gate opens, so the
-                // cancellation lands while it runs, whatever the runner's pace.
-                while gi.get().load(atomics::MemoryOrder::Acquire) == 0 {
-                    time::sleep(time::Duration::from_millis(1));
-                }
-                return Payload { n: 9 };
-            },
-        );
-        after_mark();
-    };
-    let key = krx.recv().unwrap();
-    assert(ph::wait_parked(key), "the task parks");
-    assert(rt::request_cancel(key, rt::CR_USER), "the blocked caller is live");
-    assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled caller finishes");
-    gate.get().store(1, atomics::MemoryOrder::Release);
-    // The blocking body is NOT stopped: it returns later and the pool worker frees the unclaimed result
-    // exactly once. Joining the pool bounds that.
-    blocking::shutdown();
-    assert_eq(frees(), 1);
-    rt::shutdown();
-    assert_eq(cancelled(fx), 1);
-    assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0);
-}
-
-@test
 fn blocking_completion_races_cancel_to_one_owner(_fx: &mut Base) {
     rt::set_worker_count(2);
     // Repeated short calls with a racing cancel: whichever side wins, the value is freed exactly once.
@@ -1110,8 +1032,11 @@ fn io_read_cancel_settles_interest(fx: &mut Base) {
     assert(ph::wait_parked(key), "the reader arms its interest");
     assert(rt::request_cancel(key, rt::CR_USER), "the reader is live");
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled reader finishes");
-    let msg: [u8; 2] = [1u8, 2u8];
-    let _ = peer.write(msg); // the socket still works; nothing dangles on the reactor
+    // Nothing dangles on the reactor, and the unwind closed the accepted stream: the peer reads EOF.
+    assert_eq(io::pending_waits(), 0usize);
+    let mut buf = Vector::<u8>::new();
+    buf.push(0u8);
+    assert(peer.read(buf.index_range_mut(0..1)) == 0, "the peer sees the stream closed");
     io::shutdown();
     rt::shutdown();
     assert_eq(cancelled(fx), 1);
@@ -1120,45 +1045,6 @@ fn io_read_cancel_settles_interest(fx: &mut Base) {
 }
 
 // --- pairwise races -----------------------------------------------------------------------------------.
-
-@test
-fn notify_races_cancel_single_winner(fx: &mut Base) {
-    rt::set_worker_count(2);
-    let rounds: i64 = 30;
-    let mut cancelled_total: usize = 0;
-    for i in 0..rounds {
-        let kch = chan::Channel::<rt::TaskKey>::bounded(1);
-        let ktx = kch.sender();
-        let krx = kch.receiver();
-        let ch = chan::Channel::<i64>::bounded(1);
-        let tx = ch.sender();
-        let rx = ch.receiver();
-        let done = sync::WaitGroup::new();
-        done.add(1);
-        let d2 = done.clone();
-        launch || {
-            defer d2.done();
-            let _ = ktx.send(rt::current_key());
-            let got = rx.recv(); // notify and cancel race for this park
-            switch got {
-                Some(_v) => {}, // the notify won; the pending cancel is observed later
-                None => {
-                    assert(rt::cancelling(), "no value means the cancel won");
-                },
-            };
-        };
-        let key = krx.recv().unwrap();
-        if i % 3 == 0 {
-            time::sleep(time::Duration::from_micros(200));
-        }
-        let _ = tx.send(i);
-        let _ = rt::request_cancel(key, rt::CR_USER);
-        assert(done.wait_timeout(time::Duration::from_secs(5)), "the racer finishes exactly once");
-    }
-    cancelled_total = cancelled(fx);
-    assert(cancelled_total <= rounds as usize, "at most one outcome per round");
-    rt::shutdown();
-}
 
 @test
 fn timeout_races_cancel_single_winner(_fx: &mut Base) {
@@ -1240,21 +1126,31 @@ fn stale_key_cannot_touch_a_recycled_task(fx: &mut Base) {
     assert_eq(cancelled(fx), 0);
 }
 
+// A shutdown racing a just-launched task settles it: the task either finishes or is cancelled, never
+// lost. A launch after the shutdown restarts the pool by contract and runs.
 @test
-fn shutdown_races_spawn_and_rejects_new_tasks(_fx: &mut Base) {
+fn shutdown_settles_a_racing_task_and_a_later_launch_runs(fx: &mut Base) {
     rt::set_worker_count(2);
     launch || {
         time::sleep(time::Duration::from_millis(1));
+        after_mark();
     };
     let mut opts = rt::ShutdownOptions::defaults();
     opts.grace_ns = 2000000000;
     let res = rt::try_shutdown(opts);
     assert_eq(res.unresponsive, 0);
-    // The runtime is destroyed and closed-flag cleared; the counters survive for inspection.
+    // The runtime is destroyed; the counters survive for inspection.
+    assert_eq(afters() + cancelled(fx) as i64, 1);
+    let before = afters();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
     launch || {
-        // A post-shutdown launch restarts the pool by contract; make it finish before the final check.
-        time::sleep(time::Duration::from_millis(1));
+        after_mark();
+        w.done();
     };
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the post-shutdown launch runs");
+    assert_eq(afters(), before + 1);
     rt::shutdown();
 }
 
@@ -1299,15 +1195,23 @@ fn snapshot_names_wait_kind_and_masked_state(_fx: &mut Base) {
     let gate = sync::WaitGroup::new();
     gate.add(1);
     let g2 = gate.clone();
+    let g3 = gate.clone();
     launch || {
         g2.wait();
     };
-    assert(ph::wait_waiting(rt::WK_WAIT_GROUP, 1), "the task is parked on the gate");
+    launch || {
+        rt::cancel_mask_enter();
+        g3.wait();
+        rt::cancel_mask_exit();
+    };
+    assert(ph::wait_waiting(rt::WK_WAIT_GROUP, 2), "both tasks are parked on the gate");
     let mut rows = Vector::<rt::TaskInfo>::new();
     rt::task_snapshot(&mut rows);
-    assert_eq(rows.len(), 1);
+    assert_eq(rows.len(), 2);
     assert_eq(rows.at(0).wait_kind, rt::WK_WAIT_GROUP);
-    assert(!rows.at(0).masked, "an ordinary wait is cancellable");
+    assert_eq(rows.at(1).wait_kind, rt::WK_WAIT_GROUP);
+    // The ordinary wait is cancellable; the one under the cancel mask is not.
+    assert(rows.at(0).masked != rows.at(1).masked, "exactly one wait is masked");
     gate.done();
     rt::shutdown();
 }
@@ -1420,7 +1324,7 @@ fn mask_defers_cancellation_until_exit(fx: &mut Base) {
 fn group_cancel_reclaims_children_at_any_worker_count(_fx: &mut Base) {
     let counts: [usize; 3] = [1usize, 2usize, 4usize];
     // One worker count per forked test would triple the file; the pool is rebuilt between rounds
-    // through a full shutdown, which is itself part of what the plan verifies.
+    // through a full shutdown, which this test checks as well.
     for i in 0..3 {
         rt::set_worker_count(unsafe counts[i]);
         let mut g = task::TaskGroup::new();

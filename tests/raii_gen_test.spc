@@ -12,7 +12,8 @@
 // multiset check (not ASan) is what catches leaks / double-frees here.)
 //
 // FULL depth, matching tests/raii_gen_test.c (MAX_SWITCH_DEPTH=6, MAX_GENERAL_DEPTH=5): OR switch chains
-// through depth 6 and ORB general chains through depth 5: hundreds of scenarios per op. Scenarios batch
+// through depth 6 and ORB general chains through depth 5 (depth 3 for reassignment, Vector drop and pop,
+// see `run_general`): hundreds of scenarios per op. Scenarios batch
 // into programs (ID_CAP ids each) and the ops fork-parallelize across @tests; within a fork the batches
 // build+run serially (no OpenMP fan-out), so raii_gen is the slow part of the run: the cost of exhaustive
 // RAII coverage. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
@@ -462,11 +463,14 @@ fn run_switch(op: i32) {
     g.finish();
 }
 
-// Run every ORB general shape (through depth 5, matching tests/raii_gen_test.c's MAX_GENERAL_DEPTH) per op.
-fn run_general(op: i32) {
+// Run every ORB general shape through `depth` per op: depth 5 (tests/raii_gen_test.c's MAX_GENERAL_DEPTH)
+// where the operation itself depends on the shape. Reassignment, a Vector's element drop and a pop reach
+// the shape only through its drop glue, which `general_free` checks at depth 5: depth 3 keeps every
+// three-level nesting for them.
+fn run_general(op: i32, depth: i32) {
     let mut g = new_gen();
     let mut sh = Buf16 {};
-    enum_shapes(&mut g, &mut sh.b[0], 0, 5, "ORB".ptr() as *const char, op);
+    enum_shapes(&mut g, &mut sh.b[0], 0, depth, "ORB".ptr() as *const char, op);
     g.finish();
 }
 
@@ -484,29 +488,29 @@ fn switch_peek() {
 }
 @test
 fn general_free() {
-    run_general(OP_FREE);
+    run_general(OP_FREE, 5);
 }
 @test
 fn general_call() {
-    run_general(OP_CALL);
+    run_general(OP_CALL, 5);
 }
 @test
 fn general_cond_true() {
-    run_general(OP_COND_T);
+    run_general(OP_COND_T, 5);
 }
 @test
 fn general_cond_false() {
-    run_general(OP_COND_F);
+    run_general(OP_COND_F, 5);
 }
 @test
 fn general_reassign() {
-    run_general(OP_REASSIGN);
+    run_general(OP_REASSIGN, 3);
 }
 @test
 fn general_vector_pop() {
-    run_general(OP_VPOP);
+    run_general(OP_VPOP, 3);
 }
 @test
 fn general_vector() {
-    run_general(OP_VECTOR);
+    run_general(OP_VECTOR, 3);
 }

@@ -1333,7 +1333,7 @@ pub fn package_load_prelude(
     overlay_texts: Vector<String>,
 ) Package {
     let mut p = package_base(root_dir, alt_dir, std_dir, overlay_files, overlay_texts);
-    p.load_prelude(std_dir, target);
+    p.load_prelude(std_dir, target, false);
     p.seed_core();
     p.bind_types();
     return p;
@@ -1404,10 +1404,9 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 }
 
 /// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
-/// recursion: the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
-/// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
-/// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
-/// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
+/// recursion. The source parses first, as a real build loads its root before the prelude, so whether it
+/// names a vector decides the vector backend; the module is appended LAST, after the prelude: the user
+/// module is always `p.modules.len() - 1`. Used by tests.
 pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
     return package_from_source_arch(src, std_dir, target, unsafe shim::sc_host_arch());
 }
@@ -1417,9 +1416,9 @@ pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) 
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.arch = arch;
     p.features = cf::baseline(target, arch);
-    p.load_prelude(std_dir, target);
     let mut source = String::from_str(src);
     let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
+    p.load_prelude(std_dir, target, parsed.ast.names_vectors);
     let ok = parsed.ok;
     let id = p.add_module(
         String::from_str("main"),
@@ -1679,7 +1678,7 @@ extend Package {
         let rp = stem_of(root_file);
         let rf = String::from_str(root_file);
         self.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
-        self.load_prelude(std_dir, target);
+        self.load_prelude(std_dir, target, false);
         self.seed_core();
         self.bind_types();
     }
@@ -5420,7 +5419,8 @@ extend Package {
     // whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
     // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
     // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
-    fn load_prelude(self: &mut Self, std_dir: str, target: i32) {
+    // `user_vectors`: a module the caller loads after the prelude names a vector (`package_from_source_arch`).
+    fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
         if std_dir.len() == 0 {
             return;
         }
@@ -5495,7 +5495,7 @@ extend Package {
         // `@simd_impl` entries are what the lowering planner calls. A program without vectors
         // loads none, so it pays nothing for it.
         let backends: [str<'static>; 3] = ["x86", "aarch64", "wasm"];
-        let mut vec_use = false;
+        let mut vec_use = user_vectors;
         for i in 0..self.modules.len() {
             let md = &self.modules[i];
             vec_use = vec_use || md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc");

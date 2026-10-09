@@ -29,10 +29,12 @@ extern "C" {
     fn tmpfile() *mut stdio::FILE;
 }
 
-/// Pipeline stages `compile` can stop after.
+/// Pipeline stages `compile` can stop after (`STAGE_TYPECHECK` includes the borrow check). A failing
+/// compile reports `STAGE_BORROWCK` when only the borrow check failed.
 pub const STAGE_PARSE: i32 = 0;
 pub const STAGE_RESOLVE: i32 = 1;
 pub const STAGE_TYPECHECK: i32 = 2;
+pub const STAGE_BORROWCK: i32 = 3;
 
 // A stage result: how many errors the USER module produced, at which stage, and the first message text
 // (copied out before the compiler frees it). `ok()` is the accept/reject verdict the oracle asserts on.
@@ -156,14 +158,16 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32) Compiled {
             copy_msg(&mut r.first[0], &te);
         }
     }
-    if r.errors == 0 {
-        demit::publish_checkpoint(&mut p, null);
-        for i in 0..n {
-            h_borrowck(&mut p, i, uidx, &mut r, null);
-        }
-    }
     if r.errors != 0 {
         r.stage = STAGE_TYPECHECK;
+        return r;
+    }
+    demit::publish_checkpoint(&mut p, null);
+    for i in 0..n {
+        h_borrowck(&mut p, i, uidx, &mut r, null);
+    }
+    if r.errors != 0 {
+        r.stage = STAGE_BORROWCK;
     }
     return r;
 }
@@ -348,8 +352,10 @@ extend CompiledC as Free {
     }
 }
 
-// Run the full pipeline and emit module 0 to a string. On any pre-codegen error, `errors` is set and
-// `code` is null; codegen-stage diagnostics also set `errors` but the (partial) code is still returned.
+// Run the full pipeline and emit the snippet's C: the shared headers, the snippet's own translation unit
+// and the instance code, without the prelude's translation units: a needle cannot match a prelude
+// function body. On any pre-codegen error, `errors` is set and `code` is null; codegen-stage
+// diagnostics also set `errors` but the (partial) code is still returned.
 pub fn compile_c(src: str) CompiledC {
     return compile_c_of(src, false);
 }
@@ -382,6 +388,11 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         out.errors = rr.errors;
         return out;
     }
+    // The backend table, built after the type check as the driver builds it: the planner calls its entries.
+    if demit::build_simd_table(&mut p, n).len() != 0 {
+        out.errors = 1;
+        return out;
+    }
     let mut keep = irl::Keep::new();
     demit::publish_checkpoint(&mut p, &mut keep);
     for i in 0..n {
@@ -391,8 +402,8 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         out.errors = rr.errors;
         return out;
     }
-    // Whole-package emission through the production backend: every shared header plus every TU,
-    // concatenated so prelude definitions (`str`, monomorphized Slice/Box, ...) are inspectable.
+    // Whole-package emission through the production backend; the text keeps the shared headers (`str`,
+    // monomorphized Slice/Box, ...) and the instance code.
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
     demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut keep);
@@ -413,16 +424,11 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     }
     // A TU is its part heads, the shared body buffer, then the tail; the file writer interleaves
     // them per part, the needle search only needs every byte present.
-    for t in 0..n {
-        if user_only && t != uidx {
-            continue;
-        }
-        for x in 0..o.tu_heads.at(t).len() {
-            code.push_string(o.tu_heads.at(t).at(x));
-        }
-        code.push_string(o.tus.at(t));
-        code.push_string(o.tu_tail.at(t));
+    for x in 0..o.tu_heads.at(uidx).len() {
+        code.push_string(o.tu_heads.at(uidx).at(x));
     }
+    code.push_string(o.tus.at(uidx));
+    code.push_string(o.tu_tail.at(uidx));
     if !user_only {
         for q in 0..n {
             for x in 0..o.inst_heads.at(q).len() {
@@ -441,17 +447,6 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     unsafe buf[code.len()] = 0 as char;
     out.code = buf;
     return out;
-}
-
-// Path scratch buffers (`{}` zero-fills; no `[v;N]` repeat literal).
-struct Path256 {
-    pub b: [char; 256],
-}
-struct Path512 {
-    pub b: [char; 512],
-}
-struct Path1024 {
-    pub b: [char; 1024],
 }
 
 static mut R_SEQ: u64 = 0;
@@ -500,25 +495,20 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
     // Process-local: one forked process per test, and the name carries the pid.
     unsafe R_SEQ = unsafe R_SEQ + 1;
-    let pid = unsafe shim::sc_getpid();
-    let mut dir = Path256 {};
-    unsafe stdio::snprintf(
-        &mut dir.b[0],
-        256,
-        "%s/scr_%d_%llu_%llu".ptr() as *const char,
-        unsafe shim::sc_tmpdir(),
-        pid,
+    let mut dir = format(
+        "{}/scr_{}_{}_{}",
+        str::from_cstr(unsafe shim::sc_tmpdir()),
+        unsafe shim::sc_getpid(),
         unsafe R_SEQ,
         (unsafe shim::sc_ticks_ms()) as u64,
     );
-    let dirp = (&dir.b[0]) as *const char;
+    let dirp = dir.cstr();
     rm_dir(dirp); // a directory an aborted test left under a reused pid
     if unsafe shim::sc_mkdir_p(dirp) != 0 {
         return r;
     }
-    let mut spc = Path512 {};
-    unsafe stdio::snprintf(&mut spc.b[0], 512, "%s/main.spc".ptr() as *const char, dirp);
-    let wf = stdio::fopen(str::from_cstr(&spc.b[0]), "wb"); // binary: no Windows CRLF in emitted .spc sources
+    let d = dir.as_str();
+    let wf = stdio::fopen(format("{}/main.spc", d).as_str(), "wb"); // binary: no Windows CRLF in emitted .spc sources
     if wf == null {
         rm_dir(dirp);
         return r;
@@ -527,34 +517,24 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf);
     }
     unsafe stdio::fclose(wf);
-    let mut cmd = Path1024 {};
-    unsafe stdio::snprintf(
-        &mut cmd.b[0],
-        1024,
-        "\"%s\" build %s \"%s/main.spc\" -o \"%s/prog%s\"".ptr() as *const char,
-        cli::superc_path().ptr() as *const char,
-        cli::cstd_flag(),
-        dirp,
-        dirp,
-        cli::binext(),
+    let bin = format("{}/prog{}", d, str::from_cstr(cli::binext()));
+    let mut cmd = format(
+        "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
+        cli::superc_path(),
+        str::from_cstr(cli::cstd_flag()),
+        d,
+        bin.as_str(),
     );
-    let mut benv = cli::fixture_cache_env(str::from_cstr(dirp));
-    let brc = unsafe shim::sc_run(&cmd.b[0], null, null, null, benv.cstr());
-    if brc != 0 {
+    let benv = cli::fixture_cache_env(d);
+    if cli::run_with(cmd.cstr(), null, null, null, benv.as_str()) != 0 {
         rm_dir(dirp);
         return r;
     } // did not build
     r.built = true;
-    unsafe stdio::snprintf(&mut cmd.b[0], 1024, "\"%s/prog%s\"".ptr() as *const char, dirp, cli::binext());
-    let mut outp = Path512 {};
-    unsafe stdio::snprintf(&mut outp.b[0], 512, "%s/out".ptr() as *const char, dirp);
-    // `env` is a view with no terminator: copy it before it crosses into C.
-    let mut envb = Path512 {};
-    unsafe stdio::snprintf(&mut envb.b[0], 512, "%.*s".ptr() as *const char, env.len() as i32, env.ptr());
-    r.exit = unsafe shim::sc_run(&cmd.b[0], null, &outp.b[0], null, &envb.b[0]);
-    let mut op = Path512 {};
-    unsafe stdio::snprintf(&mut op.b[0], 512, "%s/out".ptr() as *const char, dirp);
-    r.out = slurp(&op.b[0]);
+    let mut run = format("\"{}\"", bin.as_str());
+    let mut outp = format("{}/out", d);
+    r.exit = cli::run_with(run.cstr(), null, outp.cstr(), null, env);
+    r.out = slurp(outp.cstr());
     rm_dir(dirp);
     return r;
 }
@@ -705,7 +685,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     // The engine reads build.toml from its working directory.
     let mut rc = -1;
     if unsafe shim::sc_chdir(root.cstr()) == 0 {
-        rc = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), null, env.cstr());
+        rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, env.as_str());
     }
     return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()), wasm: wasm };
 }
@@ -768,7 +748,7 @@ pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
     outp.format_into("{}/.out", root);
     let mut errp = String::new();
     errp.format_into("{}/.err", root);
-    let exit = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), errp.cstr(), null);
+    let exit = cli::run_with(cmd.cstr(), null, outp.cstr(), errp.cstr(), "");
     return DiffRun { exit: exit, out: cli::read_text(outp.as_str()), err: cli::read_text(errp.as_str()) };
 }
 
@@ -1086,16 +1066,6 @@ pub fn parity_program(decls: str, exprs: []str, tys: []str) String {
     return parity_source(decls, exprs, tys, &omit, &mut first);
 }
 
-/// Assert that `expr` of type `ty` under `decls` has the same value or trap as a constant and at run
-/// time (see `const_runtime_parity`).
-pub fn expect_const_runtime_parity(label: str, decls: str, expr: str, ty: str) {
-    let d = const_runtime_parity(decls, [expr], [ty], []);
-    if d.len() != 0 {
-        eprintln("{}: {}", label, d.as_str());
-    }
-    assert(d.len() == 0, label);
-}
-
 // True when C file `path` defines `function`: a line naming ` function(` that opens its body.
 fn c_defines(path: str, function: str) bool {
     let text = cli::read_text(path);
@@ -1157,12 +1127,23 @@ pub fn asm_mnemonics(text: str, function: str) Vector<String> {
 /// `absent` entry is a substring of any (`=name`: equal to any). Mnemonics only: register names never
 /// match. Describes every failed check; empty when all hold.
 pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
-    let mut r = String::new();
     let b = diff_build(src, opts);
     if !b.built {
-        r.format_into("the program does not build:\n{}", b.diag.as_str());
+        return format("the program does not build:\n{}", b.diag.as_str());
+    }
+    let mut code = String::new();
+    let r = asm_text(&b, opts, function, &mut code);
+    if r.len() != 0 {
         return r;
     }
+    return asm_match(code.as_str(), function, contains, absent);
+}
+
+/// The assembly of the translation unit of build `b` (built with `opts`) that defines C function
+/// `function`, into `out`: the unit's own C command plus `-S`, as `asm_check` describes. Returns the
+/// failure, empty on success. One unit's text serves every function it defines (`asm_match`).
+pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) String {
+    let mut r = String::new();
     let mut prof = "dev";
     for o in opts {
         if o.starts_with("--profile=") {
@@ -1227,13 +1208,21 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
     outp.format_into("{}/.asm", root);
     let mut rc = -1;
     if unsafe shim::sc_chdir(dir.cstr()) == 0 {
-        rc = unsafe shim::sc_run(cmd.cstr(), null, outp.cstr(), null, null);
+        rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "");
     }
     if rc != 0 {
         r.format_into("'{}' failed:\n{}", cmd.as_str(), cli::read_text(outp.as_str()).as_str());
         return r;
     }
-    let names = asm_mnemonics(cli::read_text(asmp.as_str()).as_str(), function);
+    *out = cli::read_text(asmp.as_str());
+    return r;
+}
+
+/// The mnemonic checks of `asm_check` on `function` in assembly text `code`. Describes every failed
+/// check; empty when all hold.
+pub fn asm_match(code: str, function: str, contains: []str, absent: []str) String {
+    let mut r = String::new();
+    let names = asm_mnemonics(code, function);
     if names.len() == 0 {
         r.format_into("no instructions of '{}' in the assembly", function);
         return r;

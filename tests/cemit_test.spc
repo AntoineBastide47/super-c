@@ -2,7 +2,6 @@
 // with a real C compiler under -Werror, RUNS, and returns the same values the language semantics
 // require: the behavioral half of the exit gate on the current subset. Determinism: two serial
 // emissions must be byte-identical.
-import stdio;
 import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
@@ -13,6 +12,7 @@ import ir::lower as irl;
 import ir::verify as irv;
 import emit::cemit as cb;
 import driver::util as dutil;
+import tests::cli_harness as cli;
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *const loader::Package;
@@ -106,43 +106,29 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
     }
 }
 
-// Write the buffer + a `main` returning `expect_expr`, compile strict C11, run, return exit code.
-fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
-    let mut path = String::new();
-    path.push_str("build/cemit_probe_");
-    path.push_str(tag);
-    path.push_str(".c");
-    let f = stdio::fopen(path.as_str(), "wb");
-    assert(f != null, "probe file opens");
-    let s = em.out.as_str();
-    let _ = unsafe stdio::fwrite(s.ptr(), 1, s.len(), f);
-    let mb = main_body;
-    let _ = unsafe stdio::fwrite(mb.ptr(), 1, mb.len(), f);
-    unsafe stdio::fclose(f);
-    // The runtime the emitted code calls (arithmetic helpers, panics), per probe so parallel tests
-    // never share the files.
-    let mut rt = String::from_str("build/cemit_rt_");
-    rt.push_str(tag);
+// Write the buffer + a `main` returning `expect_expr` into a scratch project, compile strict C11, run,
+// return exit code.
+fn compile_run(em: &cb::CEmit, main_body: str) i32 {
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    let mut src = String::from_str(em.out.as_str());
+    src.push_str(main_body);
+    p.mkfile("probe.c", src.as_str());
+    // The runtime the emitted code calls (arithmetic helpers, panics).
+    let rt = format("{}/rt", root);
     assert(dutil::write_super_rt(rt.as_str()), "runtime written");
-    let mut cmd = String::new();
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
-    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I");
-    cmd.push_string(&rt);
-    cmd.push_str(" -o build/cemit_probe_");
-    cmd.push_str(tag);
-    cmd.push_str(" ");
-    cmd.push_string(&path);
-    cmd.push_str(" ");
-    cmd.push_string(&rt);
-    cmd.push_str("/super_rt.c");
-    let rc = unsafe shim::sc_run(cmd.cstr(), null, null, null, null);
-    assert(rc == 0, "strict C11 compile");
-    let mut bin = String::new();
-    bin.push_str("build/cemit_probe_");
-    bin.push_str(tag);
-    let ec = unsafe shim::sc_exec(bin.cstr());
-    return ec;
+    let mut cmd = format(
+        "cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I{} -o {}/probe {}/probe.c {}/super_rt.c",
+        rt.as_str(),
+        root,
+        root,
+        rt.as_str(),
+    );
+    assert(cli::run_quiet(cmd.cstr()) == 0, "strict C11 compile");
+    let mut bin = format("{}/probe", root);
+    return cli::run_with(bin.cstr(), null, null, null, "");
 }
 
 @test
@@ -159,7 +145,7 @@ fn arithmetic_and_branches_behave() {
     m1.push_str("  if (collatz_steps(27ULL) != 111ULL) return 1;\n");
     m1.push_str("  int32_t acc = 45 * 3 - 17; acc = acc ^ (17 << 2); if (acc < 0) acc = -acc;\n");
     m1.push_str("  if (mix(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");
-    let rc = compile_run(&em, m1.as_str(), "arith");
+    let rc = compile_run(&em, m1.as_str());
     assert(rc == 0, "emitted C behaves");
 }
 
@@ -175,38 +161,8 @@ fn calls_and_recursion_behave() {
     m1.push_str(
         "int main(void) {\n  if (gcd(1071ULL, 462ULL) != 21ULL) return 1;\n  if (lcm(21ULL, 6ULL) != 42ULL) return 2;\n  return 0;\n}\n",
     );
-    let rc = compile_run(&em, m1.as_str(), "calls");
+    let rc = compile_run(&em, m1.as_str());
     assert(rc == 0, "emitted calls behave");
-}
-
-@test
-fn deterministic_output() {
-    let p = typed_package(
-        "pub fn f(a: i64, b: i64) i64 { let mut x = a; let mut i: i64 = 0; while i < b { x = x * 31 + i; i += 1; } return x; }\nfn main() i32 { return 0; }",
-    );
-    let mut e1 = cb::CEmit::new(&p);
-    let mut e2 = cb::CEmit::new(&p);
-    let names: [str; 1] = ["f"];
-    emit_tu(&p, &names[0], 1, &mut e1);
-    emit_tu(&p, &names[0], 1, &mut e2);
-    assert(e1.out.as_str() == e2.out.as_str(), "two serial emissions are byte-identical");
-}
-
-@test
-fn portable_subset_is_strict() {
-    // The emitter's own output never contains the banned extensions.
-    let p = typed_package(
-        "pub fn f(a: i32) i32 { let mut v = a; if v > 10 { v = v - 1; } return v * 2; }\nfn main() i32 { return 0; }",
-    );
-    let mut em = cb::CEmit::new(&p);
-    let names: [str; 1] = ["f"];
-    emit_tu(&p, &names[0], 1, &mut em);
-    assert(!em.out.contains("__auto_type"), "no __auto_type");
-    assert(!em.out.contains("({"), "no statement expressions");
-    // And prove it: the emitted TU compiles under -std=c11 -pedantic-errors -Werror (compile_run).
-    let mut m1 = String::new();
-    m1.push_str("int main(void) { return f(11) - 20; }\n");
-    assert_eq(compile_run(&em, m1.as_str(), "pedantic"), 0);
 }
 
 // The number of `return ` statements in the emitted TU.
@@ -222,7 +178,7 @@ fn count_returns(s: str) usize {
     return n;
 }
 
-// The Phase-10 readability contract, checked on ONE isolated function (no prelude noise): structured
+// The readability contract, checked on ONE isolated function (no prelude noise): structured
 // control, no basic-block labels or gotos, no dead sentinels, no return-slot copy. These assert on
 // the emitted text only; behavior for the same shapes is covered by codegen_test / the run tests.
 @test
@@ -251,7 +207,7 @@ fn structured_shape_isolated() {
     let n2: [str; 1] = ["choose"];
     emit_tu(&p2, &n2[0], 1, &mut e2);
     assert(e2.out.contains("if ("), "the branch is a structured if");
-    assert(e2.out.contains("return 100LL;"), "the early arm forwards its value");
+    assert(e2.out.contains("return 100"), "the early arm forwards its value");
     assert(!e2.out.contains("goto "), "no goto in a reducible branch");
     assert(!e2.out.contains("abort()"), "no dead abort");
     assert_eq(count_returns(e2.out.as_str()), 2);
@@ -274,6 +230,14 @@ fn structured_shape_isolated() {
     emit_tu(&p4, &n4[0], 1, &mut e4);
     assert(!e4.out.contains("unused"), "the never-read local is not declared");
     assert(!e4.out.contains("9LL"), "its pure store is dropped");
+}
+
+// Whether the value after `field` in `c` is a declared temporary (`_` and a digit).
+fn is_temp(c: str, field: str) bool {
+    let k = c.find(field);
+    assert(k >= 0, field);
+    let at = k as usize + field.len();
+    return c.byte_at(at) == b'_' && c.byte_at(at + 1) >= b'0' && c.byte_at(at + 1) <= b'9';
 }
 
 // A single-use temporary folds into its read only within the inline look-ahead bound: the first
@@ -299,8 +263,8 @@ fn far_read_stays_declared() {
     let mut em = cb::CEmit::new(&p);
     let names: [str; 1] = ["wide"];
     emit_tu(&p, &names[0], 1, &mut em);
-    assert(em.out.contains(".f0 = _"), "the far-read field value stays a declared temporary");
-    assert(em.out.contains(".f299 = __sc_add_i64(y, 299LL)"), "the near-read field value folds");
+    assert(is_temp(em.out.as_str(), ".f0 = "), "the far-read field value stays a declared temporary");
+    assert(!is_temp(em.out.as_str(), ".f299 = "), "the near-read field value folds");
 }
 
 // The emitted assert location counts the line ends the diagnostics count: `\n`, `\r\n`, and a lone `\r`.

@@ -216,7 +216,8 @@ compiler lowers itself, so an `import stdio;` used only for printing is unused. 
 unused-`pub` lint runs only where no external caller can exist: `super-c lint` of a project
 with `src/` whose `build.toml` declares no `[lib]`, and a script build with no `build.toml`
 in the working directory (`src/main.spc`); it never applies to std or ffi
-modules (`lint_pub_applies` in `src/driver/emit.spc`). `--const` never suggests prelude
+modules (`lint_pub_applies` in `src/driver/emit.spc`). A `[lib]` build lints its closure
+once: in the static pass when `type` holds `static`, else in the shared pass. `--const` never suggests prelude
 functions: a const prelude function turns a failed fold into an error in every downstream
 program (`cs_check_fn` in `src/driver/emit.spc`).
 

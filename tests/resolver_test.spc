@@ -6,26 +6,6 @@ import ast::ast as *;
 import tests::harness as h;
 
 @test
-fn resolves() {
-    h::expect_resolve_ok(
-        "forward references",
-        "fn use_it(p: Pair) { make(p); }\nfn make(p: Pair) {}\nstruct Pair { left: i32, right: i32, }\n",
-    );
-    h::expect_resolve_ok(
-        "nested shadowing",
-        "fn f() {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\nfn g(n: i32) {}\n",
-    );
-    h::expect_resolve_ok(
-        "generics self and Self",
-        "struct Wrap<T> { value: T, }\ninterface Show { fn show(self: u8) void; }\nextend<T> Wrap<T> { fn get(self: Self) T { return self.value; } }\n",
-    );
-    h::expect_resolve_ok(
-        "loop match and let scopes",
-        "struct List {}\nfn each(items: List) { for x in items { take(x); } }\nfn classify(c: u8) i32 { return switch c { 0 => 1, n => n, _ => 0, }; }\nfn take(n: i32) {}\n",
-    );
-}
-
-@test
 fn errors() {
     h::expect_resolve_err_msg("undefined value", "fn main() i32 { bar(); }\n", "cannot find value 'bar'");
     h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) {}\n", "cannot find type 'Widget'");

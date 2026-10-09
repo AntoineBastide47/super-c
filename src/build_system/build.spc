@@ -3105,7 +3105,7 @@ pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib:
     let mut matched = false;
     if m.lib_name.len() != 0 && (!selected || sel_lib) {
         matched = true;
-        // The static pass lints the closure; the shared pass does not lint it again.
+        // The first pass lints the closure: the static one when the library has it, else the shared one.
         let mut nolint = *cx;
         nolint.lint = false;
         for kind in 1..3 {
@@ -3122,7 +3122,7 @@ pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib:
                 "-lib",
                 leaf.as_str(),
                 kind,
-                if shared {
+                if shared && m.lib_static {
                     &nolint;
                 } else {
                     cx;

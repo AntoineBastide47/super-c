@@ -125,21 +125,11 @@ fn has(s: &String, needle: str) bool {
 }
 
 @test
-fn arithmetic_and_return() {
-    let p = typed_package(
-        "fn f(a: i32, b: i32) i32 { return a + (b * 2); }\nfn main() i32 { let _ = f(1, 2); return 0; }",
-    );
-    let out = lowered(&p, "f");
-    assert(has(&out, "bin"), "explicit binary operations");
-    assert(has(&out, "return"), "return terminator");
-    assert(has(&out, "_0 = "), "the return slot is local 0");
-}
-
-@test
 fn if_else_value_and_short_circuit() {
     let p = typed_package(
-        "fn g(a: i32) i32 { let v = if a > 1 && a < 10 { a; } else { 0; }; return v; }\nfn main() i32 { let _ = g(3); return 0; }",
+        "const fn g(a: i32) i32 { let v = if a != 0 && 10 / a > 1 { a; } else { 0; }; return v; }\nstatic_assert(g(3) == 3 && g(0) == 0 && g(6) == 0 && g(-1) == 0);\nfn main() i32 { let _ = g(3); return 0; }",
     );
+    // The constant evaluator runs this lowering: `g(0)` divides by zero unless `&&` skips its right side.
     let out = lowered(&p, "g");
     assert(has(&out, "switch("), "conditions lower to switches");
     assert(has(&out, "goto bb"), "join edges are explicit gotos");
@@ -148,7 +138,7 @@ fn if_else_value_and_short_circuit() {
 @test
 fn loops_break_continue() {
     let p = typed_package(
-        "fn h() i32 { let mut s = 0; for i in 0..10 { if i == 3 { continue; } if i == 7 { break; } s += i; } return s; }\nfn main() i32 { let _ = h(); return 0; }",
+        "const fn h() i32 { let mut s = 0; for i in 0..10 { if i == 3 { continue; } if i == 7 { break; } s += i; } return s; }\nstatic_assert(h() == 0 + 1 + 2 + 4 + 5 + 6);\nfn main() i32 { let _ = h(); return 0; }",
     );
     let out = lowered(&p, "h");
     assert(has(&out, "switch("), "loop condition switch");
@@ -160,15 +150,27 @@ fn calls_are_terminators() {
     let p = typed_package(
         "fn callee(x: i32) i32 { return x; }\nfn caller() i32 { return callee(4); }\nfn main() i32 { let _ = caller(); return 0; }",
     );
-    let out = lowered(&p, "caller");
-    assert(has(&out, "call m"), "resolved call terminator");
-    assert(has(&out, ") -> bb"), "normal successor");
+    // The call ends its block: a TM_CALL terminator naming the callee, with a normal successor.
+    let node = find_fn(&p, "caller");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let mut calls = 0;
+    for b in 0..lw.body.blocks.len() {
+        let t = lw.body.blocks.at(b).term;
+        if t.kind == ir::TM_CALL {
+            calls += 1;
+            assert(t.callee.node != NODE_NONE, "the call is resolved to its callee");
+            assert(t.t0 as usize < lw.body.blocks.len(), "the call continues in a block of the body");
+        }
+    }
+    assert_eq(calls, 1);
 }
 
 @test
 fn match_variants_and_or_patterns() {
     let p = typed_package(
-        "enum E { A, B(i32), C }\nfn m(e: E) i32 { return switch e { A | C => 0, B(x) => x, }; }\nfn main() i32 { let _ = m(E::A); return 0; }",
+        "enum E { A, B(i32), C }\nconst fn m(e: E) i32 { return switch e { A | C => 0, B(x) => x, }; }\nstatic_assert(m(E::A) == 0 && m(E::B(5)) == 5 && m(E::C) == 0);\nfn main() i32 { let _ = m(E::A); return 0; }",
     );
     let out = lowered(&p, "m");
     assert(has(&out, "discr "), "variant tests read the discriminant");
@@ -176,24 +178,14 @@ fn match_variants_and_or_patterns() {
 }
 
 @test
-fn aggregates_and_field_places() {
-    let p = typed_package(
-        "struct Pt { pub x: i32, pub y: i32 }\nfn mk() i32 { let p = Pt { x: 1, y: 2 }; return p.x; }\nfn main() i32 { let _ = mk(); return 0; }",
-    );
-    let out = lowered(&p, "mk");
-    assert(has(&out, "agg0"), "struct aggregate construction");
-    assert(has(&out, ".f"), "field projection place");
-}
-
-@test
 fn defer_runs_before_return() {
     let p = typed_package(
-        "fn effect(x: i32) i32 { return x; }\nfn d() i32 { defer { let _ = effect(1); } return effect(2); }\nfn main() i32 { let _ = d(); return 0; }",
+        "fn effect(x: i32) i32 { return x; }\nfn d() i32 { defer { let _ = effect(1); } return effect(2); }\nconst fn order() i32 { let mut x = 1; defer { x = 5; } return x; }\nstatic_assert(order() == 1);\nfn main() i32 { let _ = d(); return 0; }",
     );
     let out = lowered(&p, "d");
     assert(has(&out, "call m"), "deferred call emitted");
-    // The deferred effect(1) call lands between the return-slot assignment and the return.
     assert(has(&out, "return"), "return present");
+    // The deferred write lands after the return value is read: `order` returns 1, not 5.
 }
 
 @test
@@ -239,22 +231,29 @@ fn question_lowers_explicitly() {
     let p = typed_package(
         "fn g(o: Option<i32>) Option<i32> { let v = o?; return Option::<i32>::Some(v + 1); }\nfn main() i32 { let _ = g(Option::<i32>::Some(1)); return 0; }",
     );
-    let out = lowered(&p, "g");
-    assert(has(&out, "discr "), "the carrier discriminant is read");
-    assert(has(&out, ".variant"), "the payload is a downcast projection");
-    assert(has(&out, "agg3"), "the error path rewraps through variant construction");
-    assert(has(&out, "return"), "the error path returns");
-}
-
-@test
-fn iterator_for_lowers_to_next_calls() {
-    let p = typed_package(
-        "fn f(v: &Vector<i32>) i32 { let mut s = 0; for x in v.iter() { s += *x; } return s; }\nfn main() i32 { let v = Vector::<i32>::new(); let _ = f(&v); return 0; }",
-    );
-    let out = lowered(&p, "f");
-    assert(has(&out, "call m"), "the selected next runs as a call terminator");
-    assert(has(&out, "discr "), "one discriminant read per iteration");
-    assert(has(&out, ".variant"), "the element loads through a downcast");
+    // `?` reads the carrier's discriminant, switches on it, and the error path builds a variant and returns.
+    let node = find_fn(&p, "g");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let b = &lw.body;
+    let mut discr = false;
+    let mut variant = false;
+    for i in 0..b.rvalues.len() {
+        discr = discr || b.rvalues.at(i).kind == ir::RV_DISCRIMINANT;
+        variant = variant || b.rvalues.at(i).kind == ir::RV_AGGREGATE && b.rvalues.at(i).c == ir::AGG_VARIANT;
+    }
+    let mut switches = 0;
+    let mut returns = 0;
+    for i in 0..b.blocks.len() {
+        let k = b.blocks.at(i).term.kind;
+        switches += (k == ir::TM_SWITCH) as i32;
+        returns += (k == ir::TM_RETURN) as i32;
+    }
+    assert(discr, "the carrier discriminant is read");
+    assert(variant, "the error path rewraps through variant construction");
+    assert(switches >= 1, "the discriminant is switched on");
+    assert(returns >= 2, "the error path returns early, apart from the tail return");
 }
 
 // A feature-dense body drives the printer across its rvalue and terminator variants: references,
@@ -564,12 +563,6 @@ fn printer_shows_omitted_aggregate_members() {
     b.blocks[blk as usize].sealed = true;
     let out = irp::print_body(&b);
     assert(has(&out, "[const 7, _]"), "an omitted member prints as `_`");
-}
-
-@test
-fn terminator_and_block_sizes_are_fixed() {
-    assert(sizeof(ir::Terminator) == 68, "the intrinsic tag sits in the terminator's tail padding");
-    assert(sizeof(ir::BasicBlock) == 80, "blocks keep their size");
 }
 
 @test

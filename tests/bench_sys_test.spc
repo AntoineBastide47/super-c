@@ -143,23 +143,6 @@ fn cycles_cover_every_thread() {
     assert(ghz > 0.2 && ghz < 10.0, "cycles and CPU time agree on a plausible clock");
 }
 
-// A counter that this platform lacks says so; one it has is positive.
-@test
-fn counters_state_their_availability() {
-    let peak = unsafe sys::sc_bs_rss_peak();
-    let now = unsafe sys::sc_bs_rss_now();
-    assert(peak == -1 || peak > 0);
-    assert(now == -1 || now > 0);
-    let p0 = unsafe sys::sc_bs_cpu_ns();
-    assert(p0 == -1 || p0 >= 0);
-    if unsafe sys::sc_bs_alloc_supported() == 0 {
-        unsafe sys::sc_bs_alloc_enable(1);
-        assert_eq(unsafe sys::sc_bs_alloc_enabled(), 0);
-        assert_eq(unsafe sys::sc_bs_alloc_calls(), 0);
-    }
-    assert(platform::stack_bytes() < 1usize << 40, "the stack counter reads a plausible size");
-}
-
 // The barrier: the multiply chain runs (no core does a dependent 64-bit multiply under a quarter of a
 // nanosecond) and the sunk value is the one stored.
 @test

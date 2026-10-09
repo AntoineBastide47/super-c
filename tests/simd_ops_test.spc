@@ -5,6 +5,7 @@
 import tests::gen::driver as gen;
 import tests::gen::vector as vec;
 import tests::harness as h;
+import tests::cli_harness as cli;
 
 // Both oracles over every case of the operations `ops` (every lane type, 2, 4 and the most lanes, and
 // for a conversion every target), in programs of at most 256 cases.
@@ -447,11 +448,13 @@ fn vector_access_borrows_its_slice() {
     );
 }
 
-// The C of the vector operations is plain C: no target intrinsic header, no vector extension.
+// Without backend entries (SC_SIMD_SCALAR=1: the planner calls none, as on x86_64 and on wasm without
+// simd128) the C of the vector operations is plain C: no target intrinsic header, no vector extension.
 @test
 fn vector_c_is_portable() {
     let src = "fn main() i32 {\n    let v = Simd::<f32, 4>::splat(2.0);\n    let w = (v * v).sqrt().min_num(v);\n    return w[0] as i32 - 2;\n}\n";
     h::expect_exit("the program runs", src, 0);
+    let _env1 = cli::set_env("SC_SIMD_SCALAR", "1");
     for needle in ["immintrin", "arm_neon", "wasm_simd128", "vector_size", "__m128"] {
         h::expect_c_absent(needle, src, needle);
     }

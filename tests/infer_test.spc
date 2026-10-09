@@ -1,24 +1,6 @@
-// Inference regression corpus: locks the CURRENT accept/reject behavior of the special-case
-// inference paths before the constraint-engine rewrite. Cases marked "known gap" document behavior
-// the rewrite is allowed to change (each names the replacing rule); every other case must keep its
-// result through every phase of the rewrite.
+// Inference regression corpus: the accept/reject behavior of the inference paths, each case with
+// its result.
 import tests::harness as h;
-
-@test
-fn local_declarations() {
-    h::expect_ok("annotated local", "fn main() i32 { let x: i32 = 1; return x - 1; }\n");
-    h::expect_ok("inferred local", "fn main() i32 { let x = 1; let y: i32 = x; return y - 1; }\n");
-    h::expect_ok(
-        "inferred local from call",
-        "fn f() i64 { return 7; }\nfn main() i32 { let x = f(); return (x - 7) as i32; }\n",
-    );
-    h::expect_ok("split init keeps annotation", "fn main() i32 { let x: u8; x = 250; return (x - 250) as i32; }\n");
-    h::expect_err_msg(
-        "annotation conflict",
-        "fn main() i32 { let x: *const u8 = 1.5; return 0; }\n",
-        "mismatched types",
-    );
-}
 
 @test
 fn literal_defaults() {
@@ -130,11 +112,6 @@ fn literal_contexts_and_signed_minimum() {
         "fn main() i32 {\n    let a = -128i8;\n    let b = -32768i16;\n    let c = -2147483648i32;\n    let d = -9223372036854775808i64;\n    let e = -2147483648;\n    let f = -9223372036854775808;\n    static_assert(sizeof(e) == 4 && sizeof(f) == 8, \"i32, i64\");\n    let g: i8 = -128;\n    if a != i8::MIN || g != a || b != i16::MIN || c != i32::MIN || e != c || d != i64::MIN || f != d { return 1; }\n    return 0;\n}\n",
         0,
     );
-    h::expect_c(
-        "the i64 minimum is a valid C expression",
-        "fn main() i32 { let d = -9223372036854775808i64; return (d + 9223372036854775807 + 1) as i32; }\n",
-        "(-9223372036854775807LL - 1)",
-    );
     h::expect_err_msg(
         "past the minimum",
         "fn main() i32 { let a = -129i8; return 0; }\n",
@@ -237,7 +214,7 @@ fn const_generic_inference() {
         "array literal argument counts its elements",
         "fn len_of<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return len_of([1, 2]) as i32 - 2; }\n",
     );
-    // Bounded exact linear solving (plan section 10.5): a single-unknown undivided linear form
+    // Bounded exact linear solving: a single-unknown undivided linear form
     // solves against an exact value; a remainder leaves the parameter unresolved with a clean
     // call-site error.
     h::expect_exit(
@@ -260,7 +237,7 @@ fn const_generic_inference() {
         "fn half<const N: usize>(a: [i32; N * 2]) usize { return N; }\nfn main() i32 { let a: [i32; 5] = [1, 2, 3, 4, 5]; return half(a) as i32; }\n",
         "cannot infer the generic argument",
     );
-    // Fixed by the phase-2 engine (plan section 10.5): a later use whose exact const value
+    // A later use whose exact const value
     // disagrees with the existing binding is a conflict, not a silent first-binding win.
     h::expect_err_msg(
         "conflicting const lengths are a conflict",
@@ -301,7 +278,7 @@ fn expected_result_flow() {
         "interface assoc call takes the destination type",
         "fn main() i32 { let v: Vector<i32> = Default::default(); return v.len() as i32; }\n",
     );
-    // Phase-4 expected-result inference (plan section 11 step 5): a parameter the arguments left
+    // Expected-result inference: a parameter the arguments left
     // unresolved binds from the destination type, before declared and literal defaults.
     h::expect_exit(
         "generic result inferred from destination",
@@ -352,7 +329,7 @@ fn closure_inference() {
         "annotated closure through a generic call",
         "fn ap<T>(f: fn(T) T, x: T) T { return f(x); }\nfn main() i32 { return ap(|v: i32| v * 2, 10) - 20; }\n",
     );
-    // Phase-5 postponed closure (plan section 12): an unannotated closure argument of a generic
+    // Postponed closure: an unannotated closure argument of a generic
     // call is checked once, after the other arguments bind the call's parameters.
     h::expect_exit(
         "unannotated closure parameters from a generic call",
@@ -424,7 +401,7 @@ fn generic_argument_limits() {
 
 @test
 fn candidate_selection() {
-    // Phase-6 bounded candidate solving (plan section 13): a fully informed tie between distinct
+    // Bounded candidate solving: a fully informed tie between distinct
     // candidates is an ambiguity error; a unique fit wins in any declaration order; an adversarial
     // overload set stops at the documented candidate limit.
     h::expect_err_msg(

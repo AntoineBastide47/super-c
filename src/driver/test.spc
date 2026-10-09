@@ -1184,7 +1184,11 @@ int main(int argc, char **argv) {
         }
       }
       sc_note_duration(ti, sc_runner_now() - began);
-      const int crashed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+      /* A panic aborts (SIGABRT) and the stack-overflow report exits 134. Any other end of a should_panic
+         test, a SIGSEGV or a leak report's exit 23 included, fails it. */
+      const int as_declared = SC_TESTS[ti].should_panic
+                                  ? (WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT) || (WIFEXITED(st) && WEXITSTATUS(st) == 134)
+                                  : WIFEXITED(st) && WEXITSTATUS(st) == 0;
       if (timed_out) {
         printf("test %s ... FAILED (timed out)\n", SC_TESTS[ti].name);
         char why[64];
@@ -1193,7 +1197,7 @@ int main(int argc, char **argv) {
         fail_out[failed] = sc_slurp(cap);
         fail_why[failed] = sc_strdup(why);
         failed++;
-      } else if (crashed == SC_TESTS[ti].should_panic) {
+      } else if (as_declared) {
         if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
       } else {
@@ -1428,10 +1432,12 @@ int main(int argc, char **argv) {
           implicit_available = 1;
         }
       }
-      const int crashed = (code != 0);
+      /* A panic aborts: exit code 3, or 0xC0000409 when the CRT fails fast; the stack-overflow report
+         exits 134. Any other code fails a should_panic test. */
+      const int as_declared = SC_TESTS[ti].should_panic ? code == 3 || code == 134 || code == 0xC0000409 : code == 0;
       char cappath[MAX_PATH];
       sc_cap_path(cappath, sizeof cappath, tmpdir, ti);
-      if (!timed_out && crashed == SC_TESTS[ti].should_panic) {
+      if (!timed_out && as_declared) {
         if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
       } else {

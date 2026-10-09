@@ -166,7 +166,9 @@ fn early_return_and_loop() {
         "fn f(n: i32) i32 { let s = String::new(); let mut i = 0; while i < n { let t = String::new(); if i == 3 { return s.len() as i32 + t.len() as i32; } i += 1; } return s.len() as i32; }\nfn main() i32 { return f(0); }",
     );
     let c = schedule(&p, "f");
-    assert(c.uncond >= 3, "loop body, early return, and fall-off exits all drop");
+    // `s` and `t` at the early return, `t` at each iteration's end, `s` at the fall-off exit.
+    assert_eq(c.uncond, 4);
+    assert_eq(c.cond, 0);
 }
 
 @test
@@ -200,7 +202,11 @@ fn match_arm_payload() {
         "fn mk(c: bool) Option<String> { if c { return Option::<String>::Some(String::new()); } return Option::<String>::None; }\nfn main() i32 { switch mk(true) { Some(s) => { let n = s.len(); let _ = n; }, None => {} }; return 0; }",
     );
     let c = schedule(&p, "main");
-    assert(c.uncond >= 1, "the bound payload drops at its arm's end");
+    // One drop per path: `s` at the end of the `Some` arm, whose scrutinee is then only dead (its
+    // payload moved into `s`), and the scrutinee itself in the `None` arm.
+    assert_eq(c.uncond, 2);
+    assert_eq(c.cond, 0);
+    assert_eq(c.fields, 0);
 }
 
 @test

@@ -2,7 +2,7 @@
 // a descriptor number reused under a stale wait serves its new waiter, a readiness event and a deadline
 // race to a single winner on every round and every wait settles, cancellation and close reach the reactor
 // before a waiting frame ends, a descriptor that cannot be registered reports not ready, shutdown settles
-// what is still parked, and a thousand idle descriptors cost an active one nothing. Every test ends with
+// what is still parked, and a thousand idle descriptors leave an active one served. Every test ends with
 // no admitted wait left behind. Waits that readiness must end have no deadline, and the tests wait for
 // state through the parallel harness: a missed wake shows as a bounded wait that fails, never as a
 // duration a loaded runner exceeds.
@@ -17,6 +17,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
 import std::parallel::time as time;
 import tests::parallel_harness as ph;
+import tests::cli_harness as cli;
 import sc_io;
 
 // A connected pair: `a` is the client end, `b` the accepted end.
@@ -187,24 +188,29 @@ fn a_write_wait_arming_under_a_read_event_is_still_served() {
 @test
 fn a_reused_descriptor_number_serves_its_new_waiter() {
     rt::set_worker_count(2);
+    // The reactor's own descriptors exist before the pairs: the number a close frees is then the lowest
+    // free one, which the next socket takes.
+    let _ = io::ensure_reactor();
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let mut p = pair(&l);
     let fd = p.b.fd;
     // The first wait is armed and then settled by the close; the same descriptor number then carries a
-    // new socket and a new wait, which the byte written afterwards must reach.
+    // new socket and a new wait. The byte is written only after the first wait's deadline has passed,
+    // so a stale expiry would have removed the new registration by then.
     let first = sync::WaitGroup::new();
     first.add(1);
     let w1 = first.clone();
     launch || {
         defer w1.done();
-        let _ = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(2)));
+        let _ = io::wait_until(fd, false, time::deadline_in(time::Duration::from_millis(100)));
     };
     assert(wait_pending(1), "the first wait arms");
     p.b.close();
     p.a.close();
     assert(first.wait_timeout(time::Duration::from_secs(10)), "the first wait settles on the close");
-    let q = pair(&l); // the lowest free number is the one just closed
+    let q = pair(&l); // POSIX hands out the lowest free numbers: the two just closed, in order
     let fd2 = q.b.fd;
+    assert(cli::on_windows() || fd2 == fd, "the new socket reuses the number");
     let hits = counter();
     let wg = sync::WaitGroup::new();
     wg.add(1);
@@ -215,6 +221,7 @@ fn a_reused_descriptor_number_serves_its_new_waiter() {
         wait_ready(fd2, false, &h2);
     };
     assert(wait_pending(1), "the new wait arms on the reused number");
+    time::sleep(time::Duration::from_millis(200));
     write_one(&q.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the second wait finishes");
     assert_eq(count(&hits), 1);
@@ -387,6 +394,9 @@ fn cancellation_at_every_point_of_a_wait_reaches_the_reactor() {
 @test
 fn close_under_a_wait_settles_it_at_once() {
     rt::set_worker_count(2);
+    // The reactor's own descriptors exist before the pairs: the number a close frees is then the lowest
+    // free one, which the next socket takes.
+    let _ = io::ensure_reactor();
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let mut p = pair(&l);
     let fd = p.b.fd;
@@ -405,13 +415,14 @@ fn close_under_a_wait_settles_it_at_once() {
     p.b.close();
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the close ends the wait");
     assert_eq(count(&not_ready), 1);
-    // The reused number serves its new socket.
+    // The reused number serves its new socket: the connecting end takes the lowest free number (POSIX).
     let q = pair(&l);
     let hits = counter();
     wg.add(1);
     let w2 = wg.clone();
     let h = hits.clone();
-    let fd2 = q.b.fd;
+    let fd2 = q.a.fd;
+    assert(cli::on_windows() || fd2 == fd, "the new socket reuses the number");
     launch || {
         defer w2.done();
         if io::wait_readable(fd2) {
@@ -419,7 +430,7 @@ fn close_under_a_wait_settles_it_at_once() {
         }
     };
     assert(wait_pending(1), "the new wait arms");
-    write_one(&q.a);
+    write_one(&q.b);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the new wait ends");
     assert_eq(count(&hits), 1);
     finish();
@@ -539,7 +550,7 @@ fn shutdown_settles_a_pending_wait() {
 // active one is served, the idle ones stay parked, and one byte each wakes them all. How fast the round
 // trips go is the reactor benchmark's question.
 @test
-fn idle_descriptors_do_not_delay_an_active_one() {
+fn idle_descriptors_leave_an_active_one_served() {
     rt::set_worker_count(2);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let idle: i64 = 500; // pairs, so a thousand descriptors

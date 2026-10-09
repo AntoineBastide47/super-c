@@ -41,17 +41,13 @@ fn ran(n: i64) {
 
 // --- captures of every shape ------------------------------------------------------------------------------
 
-// A zero-sized closure: nothing to store; it still runs once.
+// A zero-sized closure (it captures nothing): nothing to store; it still runs once.
 @test
 fn zero_sized_closure_runs_once() {
-    let wg = sync::WaitGroup::new();
-    wg.add(1);
-    let w = wg.clone();
     launch || {
         ran(1);
-        w.done();
     };
-    wg.wait();
+    assert(ph::wait_quiescent(), "the task finishes");
     assert_eq(runs(), 1);
     rt::shutdown();
 }
