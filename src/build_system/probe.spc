@@ -37,7 +37,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 17] = [
+const PROBES: [Probe; 19] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -203,6 +203,30 @@ const PROBES: [Probe; 17] = [
         targets: "",
     },
     Probe { id: "thin-lto", step: "lto", kind: "lto", flags: "", forms: "", src: "", archs: "", targets: "" },
+    // The build's flags carry the x86_64 features' `-march=x86-64-vN` and `-m<feature>` flags.
+    Probe {
+        id: "x86-features",
+        step: "compile",
+        kind: "accept",
+        flags: "",
+        forms: "",
+        src: "#include <immintrin.h>\nint f(int a) {\n    return a + 1;\n}\n",
+        archs: "x86_64",
+        targets: "",
+    },
+    // Mingw-w64 GCC keeps 32- and 64-byte vectors in a stack it aligns to 16 bytes only and moves them
+    // with aligned instructions (GCC PR54412): an AVX function faults. GNU as 2.38+ encodes every aligned
+    // vector move as an unaligned one; clang, which realigns the stack, rejects the option.
+    Probe {
+        id: "unaligned-vector-move",
+        step: "compile",
+        kind: "accept",
+        flags: "-Wa,-muse-unaligned-vector-move",
+        forms: "",
+        src: "int f(int x) {\n    return x + 1;\n}\n",
+        archs: "x86_64",
+        targets: "windows",
+    },
 ];
 
 /// The probe table.
@@ -223,8 +247,11 @@ pub fn index_of(id: str) i32 {
 /// The ThinLTO probe's index.
 pub const LTO: usize = 16;
 
+/// The unaligned-vector-move probe's index.
+pub const UVM: usize = 18;
+
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 17) - 1;
+pub const ALL: u64 = (1u64 << 19) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 fn nth(s: str, sep: u8, idx: usize) str {

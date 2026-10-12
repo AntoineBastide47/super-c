@@ -4835,6 +4835,11 @@ extend Interp {
             if rv.b != ir::CAST_NUMERIC {
                 return self.bail(); // coerce-from conversions never fold here
             }
+            if v.kind == IV_FN {
+                // The address the linker gives it.
+                self.it_trap_text(IT_TRAP_UNSUPPORTED, format("a function's address has no compile-time value"));
+                return none();
+            }
             return self.cast(v, b.module, rv.target);
         }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {

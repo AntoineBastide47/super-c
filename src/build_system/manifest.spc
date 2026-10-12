@@ -164,6 +164,8 @@ pub struct Manifest<'a> {
     pub lib_shared: bool, // [lib] type contains "shared"
     pub shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
     pub target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
+    pub target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
+    pub simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -189,6 +191,7 @@ extend Manifest as Free {
         self.lib_root.free();
         self.shards.free();
         self.target_features.free();
+        self.target_cpu.free();
     }
 }
 
@@ -411,6 +414,13 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 set_str(it, &mut errs, &mut m.default_profile);
             } else if key == "target-features" {
                 take_arr(it, &mut errs, &mut m.target_features);
+            } else if key == "target-cpu" {
+                set_str(it, &mut errs, &mut m.target_cpu);
+            } else if key == "simd-width" {
+                set_u32(it, &mut errs, &mut m.simd_width);
+                if m.simd_width != 256 && m.simd_width != 512 {
+                    errs.emit(it.at, key.len() as u32, format("'simd-width' expects 256 or 512"));
+                }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown key '{}'", key));
             }
@@ -684,6 +694,8 @@ extend Manifest {
             lib_shared: false,
             shards: Vector::<loader::ShardRule>::new(),
             target_features: Vector::<String>::new(),
+            target_cpu: String::new(),
+            simd_width: 0,
         };
     }
 

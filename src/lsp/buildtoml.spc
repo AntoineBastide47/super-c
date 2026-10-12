@@ -25,7 +25,7 @@ struct Key {
     pub doc: str<'static>,
 }
 
-const KEYS: [Key; 27] = [
+const KEYS: [Key; 29] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
@@ -41,6 +41,12 @@ const KEYS: [Key; 27] = [
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
     Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"simd128\"] (default: none)" },
+    Key {
+        sec: "",
+        name: "target-cpu",
+        doc: "x86_64 level before the feature lists: x86-64, x86-64-v2, x86-64-v3, x86-64-v4",
+    },
+    Key { sec: "", name: "simd-width", doc: "vector width the planner prefers on AVX-512: 256 (default) or 512" },
     Key { sec: "profile.", name: "cflags", doc: "C compiler flags for this profile" },
     Key { sec: "profile.", name: "ldflags", doc: "linker flags for this profile" },
     Key { sec: "profile.", name: "strip", doc: "strip the linked binary (bool)" },

@@ -15,7 +15,10 @@ allowed-tools: Bash Read
 
 Super-C is a self-hosting compiler that transpiles `.spc` source to readable C99/C11,
 then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
-of contract) to produce a native binary. The single binary `super-c` drives every stage
+of contract) to produce a native binary. A Windows x86-64 build whose assembler takes
+`-Wa,-muse-unaligned-vector-move` (GNU as 2.38+; the `unaligned-vector-move` probe) passes it
+to every compile and the link: mingw GCC moves 32- and 64-byte stack vectors with aligned
+instructions on a 16-byte-aligned stack (GCC PR54412), and AVX code faults without it. The single binary `super-c` drives every stage
 of the workflow.
 
 ## Subcommands
@@ -197,7 +200,11 @@ super-c lint                 # default-on lints (errors on missing-free)
 super-c lint --fix           # apply machine fixes, re-lint to fixpoint
 super-c lint --const         # flag functions provably const-evaluable
 super-c lint --fix --const   # make those functions const, save compile time
+super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another target's items and features
 ```
+
+`lint` applies build.toml's `target-cpu` and `target-features` when the file exists, then the
+command line's, as a build does.
 
 Lints: unused imports/members/labels, unnecessary `mut`/`unsafe`/cast, unreachable
 statements/arms/branches (after a `return`, an `if` whose two branches both leave, a
@@ -210,6 +217,9 @@ pure results, redundant casts, owning unions without `Free`. A module whose code
 platform filter removed (a build-constant `if` or `switch`) skips the lints that count
 uses or reachability, as a module with `@platform` or `@arch` items skips the unused-import
 and unused-member lints.
+An `unsafe` whose only reason is a call or pointer of a `@target_feature` function is
+unnecessary where the caller's features hold the callee's; a build reports it with its other
+lints.
 
 `print`, `println`, `eprint` and `eprintln` are prelude functions (`std/string.spc`) the
 compiler lowers itself, so an `import stdio;` used only for printing is unused. The
@@ -289,6 +299,8 @@ The manifest file configures any Super-C project, not just the compiler.
 bin = "super-c"              # output binary name
 root = "src/main.spc"        # entry point
 target-features = []         # CPU features (see CPU features below)
+target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on another instruction set)
+simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static)
@@ -353,7 +365,10 @@ edit never moves a chunk between shards.
 
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
 character of each profile, not the verbatim flags. **Never profile the `dev` build**:
-sanitizer frames dominate the samples.
+sanitizer frames dominate the samples. An ASan program's runtime (`super_rt.c`,
+`__asan_default_options`) turns ASan's use-after-return fake stack off: GCC 13.3 to 15 put an
+object aligned above 32 bytes 32 bytes off in its frames, and AVX-512 code faults there.
+`ASAN_OPTIONS=detect_stack_use_after_return=1` turns it back on.
 
 Integer overflow (signed and unsigned) traps under `dev`, `debug`, `test` and `race` and wraps under
 `release`, `bench` and `pgogen` (language skill, `operations.md`). The
@@ -494,6 +509,7 @@ never version text.
 | `fp-contract-off` | all | `-ffp-contract=off` accepted |
 | `target-attr-x86_64` | x86_64 | the `target("...")` spelling that enables AVX2: `avx2` or `arch=haswell` |
 | `target-attr-aarch64` | aarch64 | the spelling that enables i8mm: `+i8mm`, `arch=armv8.6-a` or `i8mm` |
+| `x86-features` | x86_64 | `<immintrin.h>` compiles under the build's flags, which carry the features beyond the baseline |
 | `march-x86-64-v2`, `-v3`, `-v4` | x86_64 | `-march=x86-64-vN` accepted |
 | `wasm-simd128`, `wasm-relaxed-simd` | wasm32 | `-msimd128` (`-mrelaxed-simd`) with `<wasm_simd128.h>` accepted |
 | `cas16` | all | the 16-byte `__atomic_compare_exchange_n` form |
@@ -502,6 +518,7 @@ never version text.
 | `getauxval`, `at-hwcap2`, `at-hwcap3` | Linux and Android aarch64 | `getauxval` links; each `AT_HWCAP*` constant compiles |
 | `aarch64-features` | aarch64 | `<arm_neon.h>` compiles under the build's flags, whose one `-march`/`-mcpu` carries the optional features |
 | `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
+| `unaligned-vector-move` | Windows x86_64 | `-Wa,-muse-unaligned-vector-move` accepted (GNU as 2.38+; clang rejects it) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
 its first line holds the schema, a hash of the compiler path and mtime, the target, the
@@ -513,8 +530,9 @@ record does not hold it: the needed probes start beside the compiler version pro
 before the transpile, one child per spelling, all at once. A build that measured nothing
 leaves the record unchanged. The results a build used end every object and link
 fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
-"thin"`, and the probe of each CPU feature it enables that has one (`wasm-simd128`,
-`wasm-relaxed-simd`, `aarch64-features`); a rejected feature probe fails the build before any
+"thin"`, on Windows x86_64 `unaligned-vector-move` (accepted: every compile and the link take
+the flag), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
+`wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
 compile, once per probe with the features it checks ("build: the C compiler 'cc' rejects
 '-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.
 
@@ -540,6 +558,32 @@ by `std::cpu::Feature`:
 | `simd128` | wasm32 | | `-msimd128` | `wasm-simd128` | off |
 | `relaxed-simd` | wasm32 | `simd128` | `-mrelaxed-simd` | `wasm-relaxed-simd` | off |
 | `sse2` | x86_64 | | | | always on |
+| `sse3` | x86_64 | `sse2` | `-msse3` | `x86-features` | macOS, iOS, Android |
+| `ssse3` | x86_64 | `sse3` | `-mssse3` | `x86-features` | macOS, iOS, Android |
+| `sse4.1` | x86_64 | `ssse3` | `-msse4.1` | `x86-features` | Android |
+| `sse4.2` | x86_64 | `sse4.1`, `popcnt` | `-msse4.2` | `x86-features` | Android |
+| `popcnt` | x86_64 | | `-mpopcnt` | `x86-features` | Android |
+| `cx16` | x86_64 | | `-mcx16` | `x86-features` | macOS, iOS, Android |
+| `lahf-sahf` | x86_64 | | `-msahf` | `x86-features` | macOS, iOS |
+| `avx` | x86_64 | `sse4.2` | `-mavx` | `x86-features` | off |
+| `avx2` | x86_64 | `avx` | `-mavx2` | `x86-features` | off |
+| `fma` | x86_64 | `avx` | `-mfma` | `x86-features` | off |
+| `bmi1` | x86_64 | | `-mbmi` | `x86-features` | off |
+| `bmi2` | x86_64 | | `-mbmi2` | `x86-features` | off |
+| `f16c` | x86_64 | `avx` | `-mf16c` | `x86-features` | off |
+| `lzcnt` | x86_64 | | `-mlzcnt` | `x86-features` | off |
+| `movbe` | x86_64 | | `-mmovbe` | `x86-features` | off |
+| `avx512f` | x86_64 | `avx2`, `fma`, `f16c` | `-mavx512f` | `x86-features` | off |
+| `avx512bw`, `avx512cd`, `avx512dq`, `avx512vl` | x86_64 | `avx512f` | `-m<name>` | `x86-features` | off |
+| `avx512vbmi`, `avx512vbmi2`, `avx512bitalg`, `avx512fp16` | x86_64 | `avx512bw` | `-m<name>` | `x86-features` | off |
+| `avx512vpopcntdq`, `avx512vnni` | x86_64 | `avx512f` | `-m<name>` | `x86-features` | off |
+| `gfni` | x86_64 | `sse2` | `-mgfni` | `x86-features` | off |
+| `vaes` | x86_64 | `avx2`, `aes` | `-mvaes` | `x86-features` | off |
+| `vpclmulqdq` | x86_64 | `avx`, `pclmulqdq` | `-mvpclmulqdq` | `x86-features` | off |
+| `aes` | x86_64 | `sse2` | `-maes` | `x86-features` | off |
+| `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | `x86-features` | off |
+| `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | `x86-features` | off |
+| `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | `x86-features` | off |
 | `neon` | aarch64 | | | | always on |
 | `fp16` | aarch64 | `neon`, `rdm` | `+fp16` | `aarch64-features` | macOS |
 | `dotprod` | aarch64 | `neon`, `rdm` | `+dotprod` | `aarch64-features` | macOS |
@@ -553,6 +597,18 @@ by `std::cpu::Feature`:
 | `lse` | aarch64 | | `+lse` | `aarch64-features` | macOS |
 | `sve` | aarch64 | `fp16`, `rdm` | `+sve` | `aarch64-features` | off |
 | `sve2` | aarch64 | `sve` | `+sve2` | `aarch64-features` | off |
+
+The x86_64 baseline is `sse2` and, by platform, what the table's last column names (macOS and
+the iOS simulator: `core2`, which every C compiler for them assumes; Android: its ABI). The x86-64 psABI levels
+name sets: `x86-64` the baseline, `x86-64-v2` adds `sse3` to `lahf-sahf`, `x86-64-v3` adds `avx`
+to `movbe`, `x86-64-v4` adds `avx512f`, `avx512bw`, `avx512cd`, `avx512dq` and `avx512vl`. A
+feature list item may be a level name (x86_64 only; a build.toml list skips it on another
+instruction set), and `--target-cpu=L` or the build.toml key `target-cpu = "L"` puts a level before
+every feature list (the flag replaces the key, and the last flag wins; another name is an error, and
+so is the flag on another instruction set, which the key skips). The x86_64 features beyond the platform's baseline make the C flags
+`-march=x86-64-vN` (the highest level the set holds, when it is above the baseline) and then the
+`-m` flag of each feature beyond that level, in table order; the `x86-features` probe compiles
+`<immintrin.h>` under them.
 
 The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
@@ -590,7 +646,16 @@ holds its features.
 super-c build --target=wasm --target-feature=+simd128
 super-c build --target=wasm --target-feature=+relaxed-simd   # simd128 too
 super-c build --target-feature=+i8mm,+bf16                   # on macOS: -mcpu=apple-m1+i8mm+bf16
+super-c build --target-cpu=x86-64-v3                         # on Linux x86_64: -march=x86-64-v3
+super-c build --target-feature=x86-64-v2,+avx2               # -march=x86-64-v2 -mavx -mavx2
 ```
+
+On AVX-512 the vector planner prefers 256-bit entries: `--simd-width=512` or the build.toml key
+`simd-width = 512` lets it use 512-bit ones (the width is part of the emit stamp). A function's
+`@target_feature` adds its features to the build's set for that function alone: its C definition
+carries `__attribute__((target("...")))` of the features beyond the build's (aarch64: clang's
+`+ext` form, GCC's `arch=armv8.N-a+ext` form), and the planner serves its vector operations from
+the entries that set holds.
 
 `std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.c`), with
 the build's set included: a program can choose code at run time, never a result.
@@ -611,6 +676,8 @@ the build's set included: a program can choose code at run time, never a result.
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
+| `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
+| `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |

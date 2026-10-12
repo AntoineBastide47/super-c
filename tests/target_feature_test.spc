@@ -131,6 +131,55 @@ fn aarch64_baselines_and_c_flags() {
     }
 }
 
+// The x86_64 rows: the platform baselines, the psABI levels (`--target-cpu`) and their implications,
+// and the flags: `-march=` the largest level the features beyond the baseline reach, then each other
+// feature's flag.
+@test
+fn x86_levels_and_c_flags() {
+    let lin = cf::baseline(2, 0);
+    assert(
+        cf::count(lin) == 1 && cf::count(cf::baseline(1, 0)) == 5 && cf::count(cf::baseline(4, 0)) == 5 && cf::count(
+            cf::baseline(5, 0),
+        ) == 7,
+        "sse2; core2; core2; the Android ABI",
+    );
+    let cases: [[str; 3]; 6] = [
+        ["x86-64-v3", "2", " -march=x86-64-v3"],
+        ["x86-64-v2,+avx2", "2", " -march=x86-64-v2 -mavx -mavx2"],
+        ["x86-64-v4,+avx512vnni", "2", " -march=x86-64-v4 -mavx512vnni"],
+        ["+avx512f", "2", " -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mavx -mavx2 -mfma -mf16c -mavx512f"],
+        ["x86-64-v2", "1", " -march=x86-64-v2"],
+        ["+avx2", "5", " -mavx -mavx2"],
+    ];
+    for c in cases {
+        let t = (c[1].byte_at(0) - b'0') as i32;
+        let mut s = cf::baseline(t, 0);
+        let mut err = String::new();
+        assert(cf::apply(c[0], t, 0, true, &mut s, &mut err), c[0]);
+        let mut f = String::new();
+        cf::push_c_flags(cf::close(s), t, &mut f);
+        assert_eq(f.as_str(), c[2]);
+    }
+    let ten = cf::close(cf::with(lin, 47));
+    assert(cf::has(ten, 35) && cf::has(ten, 41) && !cf::has(ten, 48), "avx10.1: x86-64-v4 and fp16, not avx10.2");
+    let mut s = lin;
+    let mut err = String::new();
+    assert(!cf::apply("x86-64-v9", 2, 0, true, &mut s, &mut err), "an unknown level");
+    assert_eq(
+        err.as_str(),
+        "unknown target CPU 'x86-64-v9'; the x86_64 levels are: x86-64, x86-64-v2, x86-64-v3, x86-64-v4",
+    );
+    let mut a = cf::baseline(2, 1);
+    assert(cf::apply("x86-64-v3", 2, 1, false, &mut a, &mut err) && cf::count(a) == 1, "a lenient list skips it");
+    assert(cf::apply("aes", 2, 0, true, &mut s, &mut err) && cf::has(s, 45), "x86 aes");
+    assert(cf::apply("aes", 2, 1, true, &mut a, &mut err) && cf::has(a, 9), "aarch64 aes");
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    if unsafe shim::sc_host_arch() == 0 {
+        assert(p.compile_flags("--target-cpu=x86-64-v3", "main.spc").ok(), "the level's flag builds");
+    }
+}
+
 // `target-features` in the build section and in a profile, which replaces it; the command line's
 // list applies last; a bad name in either is an error before anything builds.
 @test
@@ -152,9 +201,9 @@ fn manifest_and_command_line_features() {
     assert(!bsys::check_features(&m, "+neon"), "the command line's names are checked");
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let r = p.compile_flags("--target=wasm --target-feature=+simd128,+avx2", "main.spc");
+    let r = p.compile_flags("--target=wasm --target-feature=+simd128,+avx3", "main.spc");
     assert(
-        !r.ok() && r.out_has("unknown target feature 'avx2' for wasm32; the wasm32 features are: simd128, relaxed-simd"),
+        !r.ok() && r.out_has("unknown target feature 'avx3' for wasm32; the wasm32 features are: simd128, relaxed-simd"),
         "the CLI error",
     );
     // A manifest list names features of every instruction set it builds for: another's apply to
@@ -403,7 +452,7 @@ fn simd_impl_entries_are_checked() {
     let d = h::compile_std(two, -1, h::STAGE_TYPECHECK);
     assert(
         !d.ok() && d.msg_has(
-            "two '@simd_impl' entries for one operation, lane type, lane count and feature count: this one and 'e1'",
+            "two '@simd_impl' entries for one operation, lane type, lane count and feature set: this one and 'e1'",
         ),
         "a duplicate key",
     );
@@ -472,8 +521,12 @@ fn outside_callers_and_implied_features() {
         r.out_has("`main` needs `+simd128` (`--target-feature=+simd128`); it is called from outside the program"),
         "main",
     );
-    assert(r.out_has("`exported` needs `+simd128`"), "an exported function");
-    assert(p.compile_flags("--target=wasm --target-feature=+simd128", "main.spc").ok(), "with the feature");
+    assert(
+        r.out_has("a '@c.export' function cannot need CPU features: C code calls it without a check"),
+        "an exported function",
+    );
+    let r2 = p.compile_flags("--target=wasm --target-feature=+simd128", "main.spc");
+    assert(!r2.ok() && !r2.out_has("`main` needs"), "with the feature, the export alone fails");
     p.mkfile(
         "main.spc",
         "import std::cpu;\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\nfn base() i32 {\n    return 1;\n}\n@arch(wasm32)\n@target_feature([cpu::Feature::RelaxedSimd])\nfn relaxed() i32 {\n    return base();\n}\nfn main() i32 {\n    return 0;\n}\n",

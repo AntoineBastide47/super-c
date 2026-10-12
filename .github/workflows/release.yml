@@ -184,6 +184,71 @@ jobs:
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
+  # The x86-64 levels beside the shards: every vector test at each level, each entry model run checking
+  # the entries the baseline run does not reach, and at x86-64-v4 both preferred widths where the
+  # runner has AVX-512. The shard cache serves the compiler's rebuild; a level's -march keys its own
+  # compiles apart, so the job saves no cache.
+  levels:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: levels (${{ matrix.target }}, ${{ matrix.level }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            level: x86-64-v2
+          - os: ubuntu-latest
+            target: linux
+            level: x86-64-v3
+          - os: ubuntu-latest
+            target: linux
+            level: x86-64-v4
+          - os: windows-latest
+            target: windows
+            level: x86-64-v2
+          - os: windows-latest
+            target: windows
+            level: x86-64-v3
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-1
+          sha: ${{ needs.resolve.outputs.sha }}
+          save: "false"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Vector tests at ${{ matrix.level }}
+        env:
+          SC_SIMD_FEATURES: ${{ matrix.level }}
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          if [ "$SC_SIMD_FEATURES" != x86-64-v4 ]; then
+            SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
+          elif grep -qw avx512bw /proc/cpuinfo; then
+            for w in 256 512; do
+              SC_SIMD_WIDTH=$w SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
+            done
+          else
+            echo "x86-64-v4: not run, the runner has no AVX-512"
+          fi
+
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:
     needs: [resolve, compile]
@@ -226,7 +291,7 @@ jobs:
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
-    needs: [resolve, compile, test, gate]
+    needs: [resolve, compile, test, levels, gate]
     if: github.actor == github.repository_owner
     name: package (${{ matrix.target }})
     strategy:

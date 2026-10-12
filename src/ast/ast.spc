@@ -113,11 +113,31 @@ pub const WHERE_IN: u8 = 2;
 pub const WHERE_OUT: u8 = 3;
 
 /// A call (at `span`) of function `callee`, which needs CPU features, from function `caller` of the
-/// module (NODE_NONE outside a function).
+/// module (NODE_NONE outside a function and in a closure), or a value use of it, inside `unsafe`
+/// (`in_unsafe`): its innermost `unsafe` marker starts at `marker - 1` (0: none, an `unsafe fn`).
 pub struct FeatureCall {
     pub span: tok::Span,
     pub callee: DefId,
     pub caller: NodeId,
+    pub marker: u32,
+    pub in_unsafe: bool,
+}
+
+/// A row `(feature, f)` of a tuple literal whose function `callee` needs CPU features (a
+/// `detect::dispatch` table): `f` runs where the machine has `feature` (a `cpu::Feature`
+/// discriminant), so that feature with the build's must imply every feature `f` needs. `span`: `f`.
+pub struct FeatureRow {
+    pub span: tok::Span,
+    pub feature: u32,
+    pub callee: DefId,
+}
+
+/// An `unsafe` marker at `start` whose only reason is a call of a function that needs CPU features:
+/// the lint reports it when no such call needs it (`fix_end`: the end of the keyword's removal for
+/// the prefix form, 0 for a block).
+pub struct UnsafeLint {
+    pub start: u32,
+    pub fix_end: u32,
 }
 
 /// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `Ast::where_scope`
@@ -2937,6 +2957,10 @@ pub struct Ast {
     /// The calls of a function that needs CPU features (`FN_FEATURES`), checked against the build's
     /// features once every module is typed.
     pub feature_calls: Vector<FeatureCall>,
+    /// The `(feature, f)` tuple rows of functions that need CPU features (`FeatureRow`).
+    pub feature_rows: Vector<FeatureRow>,
+    /// The `unsafe` markers whose only reason is such a call.
+    pub unsafe_lints: Vector<UnsafeLint>,
     /// The functions that call a `@c.lane_access` binding.
     pub lane_callers: Vector<NodeId>,
     /// The module declares a register type (`@c.value`).
@@ -3032,6 +3056,7 @@ extend Ast as Free {
         self.where_bounds.free();
         self.feature_calls.free();
         self.lane_callers.free();
+        self.unsafe_lints.free();
         self.call_info.free();
         self.op_method.free();
         self.pat_vals.free();

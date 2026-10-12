@@ -1303,17 +1303,24 @@ static void sc_rt_say_u64(uint64_t v) {
 
 /* The stack pointer at the moment of the fault, straight out of the signal context. */
 static uintptr_t sc_rt_fault_sp(void *uc) {
-  ucontext_t *c = (ucontext_t *)uc;
-#if defined(__APPLE__) && defined(__aarch64__)
-  return (uintptr_t)c->uc_mcontext->__ss.__sp;
-#elif defined(__APPLE__) && defined(__x86_64__)
-  return (uintptr_t)c->uc_mcontext->__ss.__rsp;
-#elif defined(__linux__) && defined(__aarch64__)
-  return (uintptr_t)c->uc_mcontext.sp;
-#elif defined(__linux__) && defined(__x86_64__)
-  return (uintptr_t)c->uc_mcontext.gregs[REG_RSP];
+#if defined(__APPLE__)
+  /* Darwin hands the handler a context aligned to 8 bytes while its type asks for 16: read the two fields
+     as bytes, not through the misaligned types. */
+  const char *mc;
+  uint64_t sp;
+  memcpy(&mc, (const char *)uc + offsetof(ucontext_t, uc_mcontext), sizeof mc);
+#if defined(__aarch64__)
+  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__sp), sizeof sp);
 #else
-  (void)c;
+  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__rsp), sizeof sp);
+#endif
+  return (uintptr_t)sp;
+#elif defined(__linux__) && defined(__aarch64__)
+  return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.sp;
+#elif defined(__linux__) && defined(__x86_64__)
+  return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RSP];
+#else
+  (void)uc;
   return 0; /* unknown layout: fall through to the default handler rather than guess */
 #endif
 }

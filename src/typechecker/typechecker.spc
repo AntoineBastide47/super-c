@@ -680,7 +680,7 @@ const fn tc_mt_content(src: str, s: tok::Span) tok::Span {
 const fn bt_is_float(b: BuiltinType) bool {
     return b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
 }
-const fn bt_is_complex(b: BuiltinType) bool {
+pub const fn bt_is_complex(b: BuiltinType) bool {
     return b == BuiltinType::BT_C32 || b == BuiltinType::BT_C64;
 }
 
@@ -11431,6 +11431,9 @@ extend<'a> TypeChecker<'a> {
         if self.is_send_iface(iface) {
             return self.tc_thread_marker(ty, false, depth);
         }
+        if self.iface_named(iface, "FnPtr") {
+            return unsafe (*self.package).fn_value_type(unsafe &*self.cur_ast(), ty);
+        }
         if self.is_sync_iface(iface) {
             return self.tc_thread_marker(ty, true, depth);
         }
@@ -11636,6 +11639,19 @@ extend<'a> TypeChecker<'a> {
     }
     const fn is_copy_iface(self: &Self, tr: DefId) bool {
         return self.iface_named(tr, "Copy");
+    }
+    // A function pointer type, or a type parameter whose bounds reach `FnPtr`.
+    fn tc_fn_ptr(self: &mut Self, t: TypeId) bool {
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            return unsafe (*self.package).fn_value_type(unsafe &*self.cur_ast(), t);
+        }
+        let h = unsafe (*self.package).prelude_lookup("FnPtr", true);
+        return y.kind == TypeKind::TYPE_GENERIC && h.node != NODE_NONE && self.type_satisfies(
+            t,
+            DefId { module: h.mid, node: h.node },
+            0,
+        );
     }
     // Structural `Copy`: may a value of `ty` be duplicated bitwise, leaving both copies usable? Scalars,
     // `str`, raw pointers, shared references and `&dyn`, `fn` pointers and closures that own nothing,
@@ -13735,10 +13751,7 @@ extend<'a> TypeChecker<'a> {
         }
         if f.as_data.function.needs_features() {
             // A pointer to it calls it: the same rule as a call (`check_feature_calls`).
-            let sp = unsafe (*self.cur_ast()).at_const(id).span;
-            unsafe (*self.cur_ast()).feature_calls.push(
-                FeatureCall { span: sp, callee: d, caller: self.icx.current_fn },
-            );
+            self.tc_feature_use(unsafe (*self.cur_ast()).at_const(id).span, d);
         }
         let ext = f.as_data.function.is_extern() && !self.tc_unsafe_claim(d.module, d.node, UNSAFE_SAFE);
         if (ext || f.as_data.function.is_unsafe()) && self.tc_needs_unsafe() {
@@ -13751,6 +13764,61 @@ extend<'a> TypeChecker<'a> {
                 },
             );
         }
+    }
+    // A function that needs CPU features passed, as itself or through any value of its type, for a
+    // parameter of a closure bound (`f: F`, `F: fn(..)`) of callee module `fmod`: the generic would call
+    // it with no check. A function pointer carries
+    // the check to the coercion (`tc_feature_use`).
+    fn tc_feature_bound_args(self: &mut Self, fmod: ModuleId, args: NodeList, params: NodeList, skip: u32) {
+        let a = self.cur_ast();
+        for i in 0..args.len {
+            if i + skip >= params.len {
+                return;
+            }
+            // By the argument's type: a function's own type, however the value reached the argument.
+            let ai = unsafe (*a).list(args)[i as usize];
+            let at = unsafe (*a).type_of(ai);
+            if at == TYPE_NONE {
+                continue;
+            }
+            let y = *self.type_at(at);
+            if y.kind != TypeKind::TYPE_FUNCTION || y.fn_sig() || unsafe (*self.mod_ast(y.module)).at_const(
+                y.as_data.decl,
+            ).kind != NodeKind::NODE_FUNCTION || !unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl).as_data.function.needs_features() {
+                continue;
+            }
+            let pt = self.decl_type_in(fmod, unsafe (*self.mod_ast(fmod)).list(params)[(i + skip) as usize]);
+            if pt != TYPE_NONE && self.type_at(pt).kind == TypeKind::TYPE_GENERIC && self.generic_fn_bound(
+                self.type_at(pt).module,
+                self.type_at(pt).as_data.decl,
+            ) != NODE_NONE {
+                let sp = unsafe (*a).at_const(ai).span;
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "`{}` needs CPU features: it is no value of a closure bound (`F: fn(..)`); pass a function pointer `fn(..)` instead",
+                        diag::span_str(self.source, sp.start, sp.end),
+                    ),
+                );
+            }
+        }
+    }
+
+    // A call or value use at `sp` of `callee`, which needs CPU features: decided once every module is
+    // typed (`check_feature_calls`). A closure's body is no part of its function's: it runs with the
+    // build's features.
+    fn tc_feature_use(self: &mut Self, sp: tok::Span, callee: DefId) {
+        let caller = pick(self.icx.closure_depth == 0, self.icx.current_fn, NODE_NONE);
+        unsafe (*self.cur_ast()).feature_calls.push(
+            FeatureCall {
+                span: sp,
+                callee: callee,
+                caller: caller,
+                marker: self.icx.unsafe_at,
+                in_unsafe: self.icx.unsafe_depth != 0,
+            },
+        );
+        self.icx.unsafe_feat += (self.icx.unsafe_at != 0) as u32;
     }
     const fn tc_path_static_mut(self: &Self, id: NodeId) bool {
         let d = self.tc_path_def(id);
@@ -15643,9 +15711,13 @@ extend TypeChecker {
             self.icx.addr_ctx = true;
         }
         let outer_unsafe_used = self.icx.unsafe_used;
+        let outer_at = self.icx.unsafe_at;
+        let outer_feat = self.icx.unsafe_feat;
         if op == TokenType::Unsafe {
             self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
             self.icx.unsafe_used = 0;
+            self.icx.unsafe_at = unsafe (*a).at_const(id).span.start + 1;
+            self.icx.unsafe_feat = 0;
         }
         // `&e` / `&mut e` expecting a reference or pointer: `e` expects the pointee; `unsafe e`
         // expects what the whole does.
@@ -15672,19 +15744,30 @@ extend TypeChecker {
             // Code the platform filter removed inside the operand may be what needs `unsafe`.
             if self.lint && self.icx.unsafe_used == 0 && !unsafe (*a).bc_cut_at(id, unsafe (*a).at_const(id).span) {
                 let usp = unsafe (*a).at_const(id).span;
-                self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
                 // Prefix form only: a bare block is not an expression, so `unsafe { .. }` keeps its marker.
                 // Delete only the keyword + trailing blanks: the operand span excludes dropped grouping
                 // parens, so deleting up to it would swallow a '(' (`unsafe (a + 1)`).
+                let mut fe: u32 = 0;
                 if unsafe (*a).at_const(operand).kind != NodeKind::NODE_BLOCK {
-                    let mut fe = usp.start + 6;
+                    fe = usp.start + 6;
                     while fe as usize < self.source.len() && (self.source[fe as usize] == b' ' || self.source[fe as usize] == b'\t') {
                         fe = fe + 1;
                     }
-                    self.errors.fix(usp.start, fe, 0);
+                }
+                if self.icx.unsafe_feat != 0 {
+                    // A call that needs CPU features needs `unsafe` only where the caller lacks them,
+                    // known once every module is typed (`lint_feature_unsafe`).
+                    unsafe (*self.cur_ast()).unsafe_lints.push(UnsafeLint { start: usp.start, fix_end: fe });
+                } else {
+                    self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+                    if fe != 0 {
+                        self.errors.fix(usp.start, fe, 0);
+                    }
                 }
             }
             self.icx.unsafe_used = outer_unsafe_used;
+            self.icx.unsafe_at = outer_at;
+            self.icx.unsafe_feat = outer_feat;
         }
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Minus {
@@ -18943,6 +19026,9 @@ extend TypeChecker {
         if fdecl != NODE_NONE && args.len != 0 {
             self.tc_index_list(fmod, fdecl, args);
         }
+        if named {
+            self.tc_feature_bound_args(fmod, args, params, skip);
+        }
         if named && (unsafe (*fa).at_const(fdecl).as_data.function.flags & FN_LANE_ACCESS) != 0 && self.icx.current_fn != NODE_NONE {
             // An entry that calls it is never planned under a memory checker (`build_simd_table`).
             unsafe (*self.cur_ast()).lane_callers.push(self.icx.current_fn);
@@ -18952,10 +19038,7 @@ extend TypeChecker {
             callee_id,
         ).node != fdecl;
         if named && !via_value && unsafe (*fa).at_const(fdecl).as_data.function.needs_features() {
-            let sp = unsafe (*a).at_const(id).span;
-            unsafe (*self.cur_ast()).feature_calls.push(
-                FeatureCall { span: sp, callee: DefId { module: fmod, node: fdecl }, caller: self.icx.current_fn },
-            );
+            self.tc_feature_use(unsafe (*a).at_const(id).span, DefId { module: fmod, node: fdecl });
         }
         // A method whose RESULT carries a borrow (`Option<&V>`, a view, ...) borrows its receiver
         // as much as one returning a bare `&T`. check_call_receiver can only inspect the
@@ -22534,6 +22617,17 @@ extend TypeChecker {
                         self.errors.emit_span(sp, format("casting a raw pointer to a reference requires 'unsafe'"));
                     }
                 }
+                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_BUILTIN && self.type_at(
+                    dst,
+                ).kind == TypeKind::TYPE_REFERENCE {
+                    let sp = unsafe (*a).at_const(id).span;
+                    self.errors.emit_span(
+                        sp,
+                        format(
+                            "a reference never comes from a number; cast to a raw pointer and dereference it inside 'unsafe'",
+                        ),
+                    );
+                }
                 // Forming a MUTABLE raw pointer from an IMMUTABLE reference launders the shared-borrow
                 // guarantee into mutation (interior mutability). Rejected everywhere except UnsafeCell::get,
                 // the one sanctioned hole: use `&mut`, or wrap the value in an `UnsafeCell`.
@@ -22591,7 +22685,15 @@ extend TypeChecker {
                         dst,
                         src,
                     );
-                    if aggregate && !enum_int && !fn_ptr || complex_lossy {
+                    // A function's address as `usize`, and back with `unsafe` (the address must be one of
+                    // a function of that signature).
+                    let usz = Ast::builtin(BuiltinType::BT_USIZE);
+                    let to_fn = src == usz && self.tc_fn_ptr(dst);
+                    let fn_addr = to_fn || dst == usz && self.tc_fn_ptr(src);
+                    if to_fn && self.tc_needs_unsafe() {
+                        self.err_unsafe(unsafe (*a).at_const(id).span, "casting an address to a function pointer");
+                    }
+                    if aggregate && !enum_int && !fn_ptr && !fn_addr || complex_lossy {
                         let s = self.type_buf(src);
                         let d = self.type_buf(dst);
                         let sp = unsafe (*a).at_const(id).span;
@@ -23733,16 +23835,58 @@ extend TypeChecker {
             wn = self.tuple_args_of(self.strip(expected), &mut wargs[0], 4);
         }
         let mut targs = Tys8 {};
+        let mut own = TYPE_NONE; // the second element's own type, before a coercion
         for i in 0..elems.len {
             let eid = unsafe (*a).list(elems)[i as usize];
             let et = self.check_expr(eid);
             targs[i as usize] = et;
+            if i == 1 {
+                own = et;
+            }
             if i as i32 < wn && et != wargs[i as usize] && self.compatible(wargs[i as usize], eid) {
                 targs[i as usize] = wargs[i as usize];
                 unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
             }
         }
+        if elems.len == 2 {
+            self.tc_feature_row(unsafe (*a).list(elems)[0], unsafe (*a).list(elems)[1], targs[0], own);
+        }
         return self.prelude_tuple_type(&targs[0], elems.len);
+    }
+
+    // A tuple `(feature, f)` of a constant `cpu::Feature` of type `ft` and a function `f` (of its own type
+    // `t1`) that needs CPU
+    // features, however `f` is spelled (`unsafe f`): a `detect::dispatch` row, which runs `f` where the
+    // machine has `feature` (`FeatureRow`, checked with the build's features by `check_feature_calls`).
+    fn tc_feature_row(self: &mut Self, e0: NodeId, e1: NodeId, ft: TypeId, t1: TypeId) {
+        let a = self.cur_ast();
+        let gt = unsafe (*a).gt;
+        if gt == null || ft == TYPE_NONE || t1 == TYPE_NONE {
+            return;
+        }
+        let fd = unsafe (*gt).cpu_feature;
+        let y0 = *self.type_at(ft);
+        let y1 = *self.type_at(t1);
+        if y0.kind != TypeKind::TYPE_ENUM || y0.module != fd.module || y0.as_data.decl != fd.node || y1.kind != TypeKind::TYPE_FUNCTION || y1.fn_sig() {
+            return;
+        }
+        let fnode = unsafe (*self.mod_ast(y1.module)).at_const(y1.as_data.decl);
+        if fnode.kind != NodeKind::NODE_FUNCTION || !fnode.as_data.function.needs_features() || self.cir() == null {
+            return;
+        }
+        self.eng_hold(true);
+        self.ev_err = false;
+        let v = self.ev(self.cur_module(), e0);
+        self.eng_hold(false);
+        if v.kind == iri::IV_INT {
+            unsafe (*self.cur_ast()).feature_rows.push(
+                FeatureRow {
+                    span: unsafe (*a).at_const(e1).span,
+                    feature: v.i as u32,
+                    callee: DefId { module: y1.module, node: y1.as_data.decl },
+                },
+            );
+        }
     }
 
     fn check_tuple_let(self: &mut Self, id: NodeId) {
@@ -24565,6 +24709,22 @@ extend TypeChecker {
             v = p[2];
             ok = ok && np == 3 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].mutp && p[0].bt == v.bt && p[1].k == SG_MASK && p[1].n == v.n && r.k == SG_UNIT;
             want = "(*mut T, Mask<N>, Simd<T, N>), the active lanes at the pointer";
+        } else if op == ir::OP_SIMD + ir::SIMD_GATHER as u32 || op == ir::OP_SIMD + ir::SIMD_SCATTER as u32 {
+            // The elements' base, the index lanes (`u32` or `u64`), the active lanes, the fallback or the
+            // stored vector.
+            let g = op == ir::OP_SIMD + ir::SIMD_GATHER as u32;
+            v = p[3];
+            let ix = p[1].bt == BuiltinType::BT_U32 || p[1].bt == BuiltinType::BT_U64;
+            ok = ok && np == 4 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].bt == v.bt && p[0].mutp != g && p[1].k == SG_VEC && p[1].n == v.n && ix && p[2].k == SG_MASK && p[2].n == v.n && pick(
+                g,
+                r.same(&v),
+                r.k == SG_UNIT,
+            );
+            want = pick(
+                g,
+                "(*const T, Simd<I, N>, Mask<N>, Simd<T, N>) Simd<T, N>, I u32 or u64",
+                "(*mut T, Simd<I, N>, Mask<N>, Simd<T, N>), I u32 or u64",
+            );
         } else if sr == ir::SR_LOAD {
             v = r;
             ok = ok && np == 1 && v.k == SG_VEC && p[0].k == SG_PTR && p[0].bt == v.bt;
@@ -24646,7 +24806,7 @@ extend TypeChecker {
             }
             return false;
         }
-        let rb = if sr == ir::SR_RT_INDEX || sr == ir::SR_CHANGED {
+        let rb = if sr == ir::SR_RT_INDEX || sr == ir::SR_CHANGED || op == ir::OP_SIMD + ir::SIMD_GATHER as u32 || op == ir::OP_SIMD + ir::SIMD_SCATTER as u32 {
             p[1].bt; // the index lanes' or the cast result's type: the result is the source's lanes or a mask
         } else if r.k == SG_VEC || r.k == SG_SCALAR {
             r.bt;

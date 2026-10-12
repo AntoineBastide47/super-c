@@ -357,15 +357,19 @@ extend CompiledC as Free {
 // function body. On any pre-codegen error, `errors` is set and `code` is null; codegen-stage
 // diagnostics also set `errors` but the (partial) code is still returned.
 pub fn compile_c(src: str) CompiledC {
-    return compile_c_of(src, false);
+    return compile_c_of(src, false, unsafe shim::sc_host_arch());
 }
 /// Only the user snippet's own translation unit (needle absence must not trip on std code).
 pub fn compile_c_user(src: str) CompiledC {
-    return compile_c_of(src, true);
+    return compile_c_of(src, true, unsafe shim::sc_host_arch());
 }
-fn compile_c_of(src: str, user_only: bool) CompiledC {
+/// `compile_c` for instruction set `arch` (0 x86_64, 1 aarch64): the C a build for it emits, on any host.
+pub fn compile_c_arch(src: str, arch: i32) CompiledC {
+    return compile_c_of(src, false, arch);
+}
+fn compile_c_of(src: str, user_only: bool, arch: i32) CompiledC {
     let mut out = CompiledC { errors: 0, code: null };
-    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
+    let mut p = loader::package_from_source_arch(src, "std", unsafe shim::sc_host_platform(), arch);
     if !p.ok {
         out.errors = 1;
         return out;
@@ -389,7 +393,8 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         return out;
     }
     // The backend table, built after the type check as the driver builds it: the planner calls its entries.
-    if demit::build_simd_table(&mut p, n).len() != 0 {
+    demit::check_feature_calls(&mut p, n);
+    if demit::build_simd_table(&mut p, n).len() != 0 || !p.ok {
         out.errors = 1;
         return out;
     }
@@ -662,10 +667,15 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
         cmd.push_str(" --target=wasm --target-feature=+simd128");
     }
     // `SC_SIMD_FEATURES`: more CPU features for every differential build (a conformance run with
-    // `+dotprod,+i8mm,+rdm`).
+    // `+dotprod,+i8mm,+rdm`, or an x86-64 level).
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     if more != null && unsafe *more != 0 as char {
         cmd.format_into(" --target-feature={}", str::from_cstr(more));
+    }
+    // `SC_SIMD_WIDTH`: the preferred width on AVX-512 (`--simd-width`), 512 for the 512-bit entries.
+    let width = stdlib::getenv("SC_SIMD_WIDTH");
+    if width != null && unsafe *width != 0 as char {
+        cmd.format_into(" --simd-width={}", str::from_cstr(width));
     }
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -1088,6 +1098,11 @@ fn asm_label_is(line: str, function: str) bool {
 /// the function's label (`name:` or Mach-O `_name:`) to the end of its body, without directives,
 /// labels and comments. Empty when the label is absent.
 pub fn asm_mnemonics(text: str, function: str) Vector<String> {
+    return asm_instructions(text, function, false);
+}
+
+/// `asm_mnemonics`, or with `whole` each instruction's whole text, its operands included.
+pub fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
     let mut names = Vector::<String>::new();
     let mut inside = false;
     for raw in text.lines() {
@@ -1115,7 +1130,15 @@ pub fn asm_mnemonics(text: str, function: str) Vector<String> {
         }
         let word = line.slice(0, w);
         if !word.ends_with(":") {
-            names.push(String::from_str(word));
+            names.push(
+                String::from_str(
+                    if whole {
+                        line;
+                    } else {
+                        word;
+                    },
+                ),
+            );
         }
     }
     return names;
@@ -1124,8 +1147,8 @@ pub fn asm_mnemonics(text: str, function: str) Vector<String> {
 /// Build `src` with `opts` (`diff_build` forms), compile the translation unit that defines C function
 /// `function` with the build's own C command plus `-S` (without `-c`, `-MMD` and LTO, which would
 /// print IR), and check its instruction mnemonics: every `contains` entry is a substring of one, no
-/// `absent` entry is a substring of any (`=name`: equal to any). Mnemonics only: register names never
-/// match. Describes every failed check; empty when all hold.
+/// `absent` entry is a substring of any (`=name`: equal to any; `%reg`: a substring of an instruction's
+/// operands, AT&T syntax). Describes every failed check; empty when all hold.
 pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
     let b = diff_build(src, opts);
     if !b.built {
@@ -1223,6 +1246,8 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
 pub fn asm_match(code: str, function: str, contains: []str, absent: []str) String {
     let mut r = String::new();
     let names = asm_mnemonics(code, function);
+    // An entry that starts with `%` matches a register operand (`%ymm`), in AT&T syntax.
+    let whole = asm_instructions(code, function, true);
     if names.len() == 0 {
         r.format_into("no instructions of '{}' in the assembly", function);
         return r;
@@ -1230,7 +1255,12 @@ pub fn asm_match(code: str, function: str, contains: []str, absent: []str) Strin
     for want in contains {
         let mut found = false;
         for i in 0..names.len() {
-            found = found || names.at(i).contains(want);
+            let hay = if want.starts_with("%") {
+                whole.at(i);
+            } else {
+                names.at(i);
+            };
+            found = found || hay.contains(want);
         }
         if !found {
             r.format_into("no instruction of '{}' contains '{}'\n", function, want);
@@ -1242,7 +1272,7 @@ pub fn asm_match(code: str, function: str, contains: []str, absent: []str) Strin
             let hit = if bad.starts_with("=") {
                 names.at(i).as_str() == bad.slice(1, bad.len());
             } else {
-                names.at(i).contains(bad);
+                bad.starts_with("%") && whole.at(i).contains(bad) || !bad.starts_with("%") && names.at(i).contains(bad);
             };
             if hit {
                 r.format_into("instruction '{}' of '{}' contains '{}'\n", names.at(i).as_str(), function, bad);

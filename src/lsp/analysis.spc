@@ -1263,6 +1263,20 @@ fn typecheck_set(
                 again.set(i, true);
             }
         }
+        // Driver-parity: the uses of functions that need CPU features, decided once every module is
+        // typed, and the `unsafe` only such a use needed.
+        for k in 0..order.len() {
+            let i = order[k];
+            if lint && !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
+                let mut errs = diag::Errors::new();
+                emit::feature_errors(p, i, &mut errs);
+                emit::feature_lints(p, i, &mut errs);
+                if errs.errors.len() != 0 || errs.warns.len() != 0 {
+                    errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+                    drain_errors(&errs, i as u32, nd);
+                }
+            }
+        }
         if panics {
             // Driver-parity post-typecheck phase: the always-panics check (an error) interprets
             // cross-module `const fn` bodies, so it only runs once every module is typed.

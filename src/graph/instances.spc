@@ -9,6 +9,7 @@ import ir::core as ir;
 import ir::lower as irl;
 import ir::layout as lay;
 import lexer::token as tok;
+import typechecker::typechecker as tc;
 
 /// Record kinds.
 pub const IG_AGG: u8 = 0; // generic struct/enum instantiation
@@ -107,6 +108,7 @@ struct WalkCache {
     pub meths: Vector<bool>, // per call: a call with a receiver of a generic extend's method
     pub meas: Vector<u32>, // statement ids assigning a `sizeof`/`alignof`
     pub dyns: Vector<u32>, // rvalue ids of `dyn` erasures (`RV_DYN`)
+    pub casts: Vector<u32>, // statement ids of `as` casts whose type names a generic parameter
 }
 
 /// An array length an instance folds outside 0..=4294967295: a compile error the driver reports,
@@ -1175,6 +1177,62 @@ extend InstGraph {
         if mt != TYPE_NONE && self.check_ty(a, mt, frame, 0) {
             self.take_check(a.module, st.span);
         }
+    }
+
+    // Check the cast statement `si` of body `b` under `frame`: a generic body's `as` gets its types per
+    // instance, where they must form a cast the checker accepts between concrete types (`cast_ok`).
+    fn check_cast(self: &mut Self, b: &ir::CoreBody, si: u32, a: &Ast, frame: &Vector<Subst>) {
+        let st = *b.statements.at(si as usize);
+        let rv = *b.rvalues.at(st.rvalue as usize);
+        let s0 = b.operands.at(rv.a as usize).ty;
+        if !self.concrete_subst(a, s0, frame, 0) || !self.concrete_subst(a, rv.target, frame, 0) {
+            return;
+        }
+        let s = self.subst_intern(a, s0, frame, 0);
+        let d = self.subst_intern(a, rv.target, frame, 0);
+        if cast_ok(unsafe &*self.pkg, a, s, d, self.fn_ptr_param(a, rv.target, b.owner.node)) {
+            return;
+        }
+        let mut sb = Array::<char, 128> {};
+        let mut db = Array::<char, 128> {};
+        let src = unsafe (&*self.pkg).modules.at(a.module as usize).source.as_str();
+        tc::render_type_into(self.pkg, a, src, s, &mut sb[0], 128);
+        tc::render_type_into(self.pkg, a, src, d, &mut db[0], 128);
+        self.fault_msg = format("invalid cast from '{}' to '{}'", str::from_cstr(&sb[0]), str::from_cstr(&db[0]));
+        self.take_fault(a.module, st.span);
+    }
+
+    // Whether type `t` of `a` is a type parameter that `FnPtr` bounds, in body `owner` (a `where`
+    // predicate of an enclosing extend holds inside its functions): an address casts to it under the
+    // checker's `unsafe` rule.
+    fn fn_ptr_param(self: &Self, a: &Ast, t: TypeId, owner: NodeId) bool {
+        let y = a.type_at(t);
+        if y.kind != TypeKind::TYPE_GENERIC {
+            return false;
+        }
+        let p = unsafe &*self.pkg;
+        let h = p.prelude_lookup("FnPtr", true);
+        if h.node == NODE_NONE {
+            return false;
+        }
+        let ga = unsafe &*p.module_ast_const(y.module);
+        if fn_ptr_bound(p, ga, ga.at_const(y.as_data.decl).as_data.generic_param.bounds, h, 0) {
+            return true;
+        }
+        let at = pick(y.module == a.module, owner, NODE_NONE);
+        for w in 0..ga.where_bounds.len() {
+            let sc = ga.where_scope(w, y.as_data.decl, at);
+            if (sc == WHERE_OWN || sc == WHERE_IN) && fn_ptr_bound(
+                p,
+                ga,
+                ga.at_const(ga.where_bounds.at(w).pred).as_data.where_predicate.bounds,
+                h,
+                0,
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Check the member types of concrete aggregate `decl`: the instances they hold are emitted with it.
@@ -2878,6 +2936,18 @@ extend InstGraph {
                     self.wcache[ki as usize].dyns.push(i as u32);
                 }
             }
+            for i in 0..b.statements.len() {
+                let st = b.statements.at(i);
+                if st.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let rv = b.rvalues.at(st.rvalue as usize);
+                if rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC && (!a.type_at(rv.target).concrete || !a.type_at(
+                    b.operands.at(rv.a as usize).ty,
+                ).concrete) {
+                    self.wcache[ki as usize].casts.push(i as u32);
+                }
+            }
             self.wcache[ki as usize].built = true;
         }
         self.bodies += 1;
@@ -2894,6 +2964,9 @@ extend InstGraph {
         }
         for i in 0..(unsafe &*wp).meas.len() {
             self.check_measured(b, *(unsafe &*wp).meas.at(i), a, frame);
+        }
+        for i in 0..(unsafe &*wp).casts.len() {
+            self.check_cast(b, *(unsafe &*wp).casts.at(i), a, frame);
         }
         for i in 0..(unsafe &*wp).consts.len() {
             let c = *b.constants.at((*(unsafe &*wp).consts.at(i)) as usize);
@@ -3131,4 +3204,65 @@ const fn measured(rv: &ir::Rvalue) TypeId {
         return rv.b;
     }
     return TYPE_NONE;
+}
+
+// Whether `as` from concrete `s` to `d` (types of `a`) is a cast the checker accepts: between numbers,
+// `bool`s, plain enums and pointers, vectors lane by lane, and between a function pointer and `usize`
+// (to a function pointer
+// only when `to_fn`: the target is a `F: FnPtr` parameter, whose `unsafe` the checker required).
+fn cast_ok(p: &loader::Package, a: &Ast, s: TypeId, d: TypeId, to_fn: bool) bool {
+    if s == d {
+        return true;
+    }
+    let sy = *a.type_at(s);
+    let dy = *a.type_at(d);
+    if sy.is_vec() || dy.is_vec() {
+        return true; // lane by lane (`Simd::cast`), checked by the vector operation's own rules
+    }
+    // A reference comes from a reference only: from an address or a raw pointer it would need the
+    // `unsafe` a generic body's cast cannot have shown.
+    if dy.kind == TypeKind::TYPE_REFERENCE && sy.kind != TypeKind::TYPE_REFERENCE {
+        return false;
+    }
+    let usz = Ast::builtin(BuiltinType::BT_USIZE);
+    if sy.kind == TypeKind::TYPE_FUNCTION || dy.kind == TypeKind::TYPE_FUNCTION {
+        return p.fn_value_type(a, s) && d == usz || to_fn && p.fn_value_type(a, d) && s == usz;
+    }
+    for y in [sy, dy] {
+        let num = y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin != BuiltinType::BT_VOID;
+        let ptr = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
+        let plain = y.kind == TypeKind::TYPE_ENUM && !(unsafe &*p.module_ast_const(y.module)).enum_has_payload(
+            y.as_data.decl,
+        );
+        if !num && !ptr && !plain {
+            return false;
+        }
+    }
+    // A complex number casts only to a complex number.
+    return !(sy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(sy.as_data.builtin) && !(dy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(
+        dy.as_data.builtin,
+    )));
+}
+
+// Whether bound list `bs` of `a` names `FnPtr` (`h`), directly or through an interface's own bounds (its
+// superinterfaces), at most 8 levels deep.
+fn fn_ptr_bound(p: &loader::Package, a: &Ast, bs: NodeList, h: loader::LookupHit, depth: u32) bool {
+    if depth > 8 {
+        return false;
+    }
+    for i in 0..bs.len {
+        let r = a.resolution_def(unsafe a.list(bs)[i as usize]);
+        if r.module == h.mid && r.node == h.node {
+            return true;
+        }
+        if r.node == NODE_NONE {
+            continue;
+        }
+        let ia = unsafe &*p.module_ast_const(r.module);
+        let n = ia.at_const(r.node);
+        if n.kind == NodeKind::NODE_INTERFACE && fn_ptr_bound(p, ia, n.as_data.interface_def.bounds, h, depth + 1) {
+            return true;
+        }
+    }
+    return false;
 }

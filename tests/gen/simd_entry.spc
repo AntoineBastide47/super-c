@@ -9,9 +9,12 @@ import tests::gen::vector as vec;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import driver_shim as shim;
+import ir::cpu_features as cf;
+import stdlib;
 
 /// One entry: its function name, operation (the `simd::Op` variant), the lane types and counts of its
-/// first parameter and its result (lane type 255: a mask or a scalar), and its feature count.
+/// first parameter and its result (lane type 255: a mask or a scalar), and its features, closed under
+/// `implies` (the backend table's order).
 pub struct Entry {
     pub name: String,
     pub op: String,
@@ -19,7 +22,7 @@ pub struct Entry {
     pub n: u64,
     pub u: u8,
     pub m: u64,
-    pub nf: u32,
+    pub fs: cf::CpuFeatureSet,
 }
 
 // The model's lane type of name `s` (i8 0 .. i64 3, u8 4 .. u64 7, f32 8, f64 9), or 255.
@@ -51,18 +54,27 @@ fn shape_of(s: str, t: &mut u8, n: &mut u64) {
 pub fn entries(text: str) Vector<Entry> {
     let mut v = Vector::<Entry>::new();
     let mut op = String::new();
-    let mut nf: u32 = 0;
+    let mut fs = cf::CpuFeatureSet { w: [0, 0] };
     for line in text.lines() {
         if line.starts_with("@simd_impl(simd::Op::") {
             let rest = line.slice(21, line.len());
             op = String::from_str(rest.slice(0, rest.find(",") as usize));
-            nf = 0;
+            fs = cf::CpuFeatureSet { w: [0, 0] };
             let mut at = line.find("cpu::Feature::");
             while at >= 0 {
-                nf += 1;
                 let tail = line.slice(at as usize + 14, line.len());
+                let mut e: usize = 0;
+                while e < tail.len() && (tail.byte_at(e) >= b'0' && tail.byte_at(e) <= b'9' || tail.byte_at(e) >= b'A' && tail.byte_at(
+                    e,
+                ) <= b'Z' || tail.byte_at(e) >= b'a' && tail.byte_at(e) <= b'z') {
+                    e += 1;
+                }
+                let v = cf::find_variant(tail.slice(0, e));
+                assert(v >= 0, tail.slice(0, e));
+                fs = cf::with(fs, v as usize);
                 at = pick(tail.find("cpu::Feature::") < 0, -1, at + 14 + tail.find("cpu::Feature::"));
             }
+            fs = cf::close(fs);
             continue;
         }
         if op.len() == 0 || !line.starts_with("fn ") {
@@ -77,12 +89,13 @@ pub fn entries(text: str) Vector<Entry> {
             n: 0,
             u: 255,
             m: 0,
-            nf: nf,
+            fs: fs,
         };
         // The first vector parameter names the lanes: parameters split at `, ` outside `<..>`.
         let params = line.slice(open + 1, close);
         let mut depth: u32 = 0;
         let mut a: usize = 0;
+        let mut last = params;
         for i in 0..params.len() + 1 {
             let ch = if i < params.len() {
                 params.byte_at(i);
@@ -101,12 +114,19 @@ pub fn entries(text: str) Vector<Entry> {
             }
             let prm = params.slice(a, i);
             a = i + 1;
+            last = prm.slice(prm.find(":") as usize + 1, prm.len());
             if e.t == 255 {
                 shape_of(prm.slice(prm.find(":") as usize + 1, prm.len()), &mut e.t, &mut e.n);
             }
         }
         let ret = line.slice(close + 1, line.len() - 1).trim();
         shape_of(ret, &mut e.u, &mut e.m);
+        // A gather's or scatter's index lanes are the first vector; its elements are the last.
+        if op.as_str() == "Gather" || op.as_str() == "Scatter" {
+            e.u = e.t;
+            e.m = e.n;
+            shape_of(last, &mut e.t, &mut e.n);
+        }
         v.push(e);
         op.clear();
     }
@@ -156,6 +176,14 @@ fn model_ops(e: &Entry) Vector<String> {
     let cmp: [str; 6] = ["CmpEqLanes", "CmpNeLanes", "CmpLtLanes", "CmpLeLanes", "CmpGtLanes", "CmpGeLanes"];
     let mask: [str; 6] = ["equal", "not_equal", "less_than", "less_equal", "greater_than", "greater_equal"];
     for i in 0usize..6 {
+        // the comparison into mask bits (`CmpEq`): the mask, or its `count`
+        if op == unsafe cmp[i].slice(0, cmp[i].len() - 5) {
+            v.push(String::from_str(unsafe mask[i]));
+            if i == 2 {
+                v.push(String::from_str("count_compare"));
+            }
+            return v;
+        }
         if op == unsafe cmp[i] {
             v.push(String::from_str(unsafe mask[i]));
             // the comparison feeds a choice: the lane form, no mask in between; or `count`, or a choice
@@ -168,7 +196,7 @@ fn model_ops(e: &Entry) Vector<String> {
             return v;
         }
     }
-    if op == "ChooseLanes" {
+    if op == "ChooseLanes" || op == "Choose" {
         v.push(String::from_str("mask_choose"));
         v.push(String::from_str("choose"));
     } else if op == "LanesToMask" {
@@ -195,12 +223,13 @@ fn model_ops(e: &Entry) Vector<String> {
     return v;
 }
 
-/// The vector model cases of entries `lo..hi` of `es`: for each entry and each model operation that
-/// reaches it, `per` cases at its lane count and `per` at the most lanes, drawn from fixed seeds, and
-/// a choice, compress, expand or masked access over at most four lanes under every mask.
-pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCase> {
+/// The vector model cases of the entries of `es` at the indexes `ks`: for each entry and each model
+/// operation that reaches it, `per` cases at its lane count and `per` at the most lanes, drawn from
+/// seeds fixed by the entry's index, and a choice, compress, expand or masked access over at most four
+/// lanes under every mask.
+pub fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCase> {
     let mut cs = Vector::<vec::VCase>::new();
-    for k in lo..hi {
+    for k in ks {
         let e = es.at(k);
         let ops = model_ops(e);
         // A choice, or an operation on a mask, has the result's lane type and count.
@@ -222,6 +251,8 @@ pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCa
             // a conversion's target is the result's lane type; an index vector is u8
             let u: i32 = if name == "choose_narrower" {
                 -1; // any narrower integer lanes
+            } else if name == "gather" || name == "scatter" {
+                e.u; // the entry's index lanes, which may be its element type
             } else if vec::converts(op) && e.u != t {
                 e.u;
             } else if vec::converts(op) {
@@ -267,8 +298,8 @@ pub fn cases(es: &Vector<Entry>, lo: usize, hi: usize, per: u64) Vector<vec::VCa
 }
 
 // The program of the operations the vector model lacks (loads, stores, `any` and `all` of a
-// comparison) over 128 bits of each lane type and 64 bits of each but the 64-bit ones, with inputs
-// chosen at run time.
+// comparison) over 128, 256 and 512 bits of each lane type and 64 bits of each but the 64-bit ones,
+// with inputs chosen at run time.
 fn memory_program() String {
     let names: []str = [
         "i8",
@@ -288,12 +319,73 @@ fn memory_program() String {
         "u16",
         "u32",
         "f32",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
     ];
-    let lanes: []usize = [16, 8, 4, 2, 16, 8, 4, 2, 4, 2, 8, 4, 2, 8, 4, 2, 2];
-    let mut s = String::from_str("import std::simd;\nfn main(args: Vector<str>) i32 {\n    let k = args.len();\n");
+    let lanes: []usize = [
+        16,
+        8,
+        4,
+        2,
+        16,
+        8,
+        4,
+        2,
+        4,
+        2,
+        8,
+        4,
+        2,
+        8,
+        4,
+        2,
+        2,
+        32,
+        16,
+        8,
+        4,
+        32,
+        16,
+        8,
+        4,
+        8,
+        4,
+        64,
+        32,
+        16,
+        8,
+        64,
+        32,
+        16,
+        8,
+        16,
+        8,
+    ];
+    // One function per vector: a body small enough for the inliner's budget, so each `any` and `all`
+    // reaches its test.
+    let mut s = String::from_str("import std::simd;\n");
     for i in 0..names.len() {
         let t = names[i];
         let n = lanes[i];
+        s.format_into("fn b{}(k: usize) {{\n", i);
         s.format_into(
             "    let mut a{} = [0 as {}; {}];\n    for j in 0..{}usize {{\n        unsafe a{}[j] = ((j * 37 + k) % 11) as {};\n    }}\n",
             i,
@@ -323,6 +415,11 @@ fn memory_program() String {
             2 * n,
             i,
         );
+        s.push_str("}\n");
+    }
+    s.push_str("fn main(args: Vector<str>) i32 {\n");
+    for i in 0..names.len() {
+        s.format_into("    b{}(args.len());\n", i);
     }
     s.push_str("    return 0;\n}\n");
     return s;
@@ -377,11 +474,56 @@ fn shadowed(es: &Vector<Entry>, k: usize, seen: &String) bool {
     let e = es.at(k);
     for j in 0..es.len() {
         let o = es.at(j);
-        if o.op.equals(&e.op) && o.t == e.t && o.n == e.n && o.u == e.u && o.m == e.m && o.nf != e.nf && calls(seen, o) {
+        if o.op.equals(&e.op) && o.t == e.t && o.n == e.n && o.u == e.u && o.m == e.m && (o.fs.w[0] != e.fs.w[0] || o.fs.w[1] != e.fs.w[1]) && calls(
+            seen,
+            o,
+        ) {
             return true;
         }
     }
     return false;
+}
+
+/// The features of the differential builds: the host's baseline and, when `with_more`,
+/// `SC_SIMD_FEATURES`, closed. An entry beyond them is not required to be called (another run of the
+/// lane checks it).
+pub fn run_features(with_more: bool) cf::CpuFeatureSet {
+    let t = unsafe shim::sc_host_platform();
+    let a = unsafe shim::sc_host_arch();
+    let mut s = cf::baseline(t, a);
+    let mut err = String::new();
+    let more = stdlib::getenv("SC_SIMD_FEATURES");
+    if with_more && more != null {
+        assert(cf::apply(str::from_cstr(more), t, a, true, &mut s, &mut err), err.as_str());
+    }
+    if h::simd_lane() {
+        s = cf::with(s, cf::F_SIMD128);
+    }
+    return cf::close(s);
+}
+
+// Whether the run prefers 512-bit vectors on AVX-512 (`SC_SIMD_WIDTH=512`).
+fn wide() bool {
+    let w = stdlib::getenv("SC_SIMD_WIDTH");
+    return w != null && str::from_cstr(w) == "512";
+}
+
+/// Whether the differential builds of features `run` must call entry `e`: the features hold its own,
+/// and an AVX-512 entry wider than the preferred width (512 bits when `wide`, else 256) splits.
+fn required(e: &Entry, run: cf::CpuFeatureSet, wide: bool) bool {
+    if !cf::contains(run, e.fs) {
+        return false;
+    }
+    if wide || !cf::has(e.fs, cf::F_AVX512F) {
+        return true;
+    }
+    let mut bytes = e.n * vec::lane_bytes(e.t);
+    if e.op.as_str() == "Gather" || e.op.as_str() == "Scatter" {
+        bytes = (e.n * 8).min(64);
+    } else if e.u != 255 && e.m * vec::lane_bytes(e.u) > bytes {
+        bytes = e.m * vec::lane_bytes(e.u);
+    }
+    return bytes <= 32;
 }
 
 // Whether text `c` calls entry `e`.
@@ -391,14 +533,29 @@ fn calls(c: &String, e: &Entry) bool {
     return c.contains(call.as_str());
 }
 
-/// The oracle over entries `lo..hi` of backend file `text` with a model operation (`per` cases per
-/// entry, operation and lane count, programs of at most 256 cases): empty when the planned and the
-/// lane-loop builds agree on every case and the planned C calls every entry, else each difference.
-pub fn check(text: str, lo: usize, hi: usize, per: u64) String {
+/// The oracle over part `k` of `parts` of the entries of backend file `text` the run's features reach
+/// (`required`; an entry beyond them would only compare lane loops with lane loops) and no run with
+/// fewer features reaches (the run without `SC_SIMD_FEATURES`, and at 512 bits the 256-bit run),
+/// with a model operation (`per` cases per entry, operation and lane count, programs of at most 256
+/// cases): empty when the planned and the lane-loop builds agree on every case and the planned C
+/// calls every entry, else each difference.
+pub fn check(text: str, k: usize, parts: usize, per: u64) String {
     let mut r = String::new();
     let es = entries(text);
-    let top = hi.min(es.len());
-    let cs = cases(&es, lo, top, per);
+    let run = run_features(true);
+    let base = run_features(false);
+    let more = !cf::contains(base, run);
+    let w = wide();
+    let mut sel = Vector::<usize>::new();
+    for i in 0..es.len() {
+        let e = es.at(i);
+        let before = more && required(e, base, false) || w && required(e, run, false);
+        if model_ops(e).len() != 0 && required(e, run, w) && !before {
+            sel.push(i);
+        }
+    }
+    let ks = sel.index_range(sel.len() * k / parts..sel.len() * (k + 1) / parts);
+    let cs = cases(&es, ks, per);
     let mut seen = String::new();
     let mut i: usize = 0;
     while i < cs.len() {
@@ -442,8 +599,8 @@ pub fn check(text: str, lo: usize, hi: usize, per: u64) String {
             r.push_str("a lane-loop build calls an entry\n");
         }
     }
-    for k in lo..top {
-        if model_ops(es.at(k)).len() != 0 && !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) {
+    for k in ks {
+        if !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }
     }
@@ -458,8 +615,9 @@ pub fn check_memory(text: str) String {
     let m = h::diff_build(src.as_str(), ["--profile=ubsan"]);
     let c = emitted_c(&m, "ubsan");
     let es = entries(text);
+    let run = run_features(true);
     for k in 0..es.len() {
-        if model_ops(es.at(k)).len() == 0 && !calls(&c, es.at(k)) {
+        if model_ops(es.at(k)).len() == 0 && required(es.at(k), run, wide()) && !calls(&c, es.at(k)) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }
     }

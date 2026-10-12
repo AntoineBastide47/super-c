@@ -33,6 +33,11 @@ pub interface Sync {}
 /// only where the structural rule already holds.
 pub interface Copy {}
 
+/// Marker: a function pointer type (`fn(A) R`). Conformance is STRUCTURAL: a closure or any other type
+/// never is. A value of a type parameter `F: FnPtr` casts to `usize` (its address), and `unsafe` back
+/// from one (`u as F`), as a `fn(A) R` value does.
+pub interface FnPtr: Copy {}
+
 /// A SIMD lane type (`Simd<T, N>`): `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32` or
 /// `f64`. Only `std` implements it.
 pub interface SimdElement: Copy {}

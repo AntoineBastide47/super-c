@@ -3,8 +3,13 @@
 // (the kernels lane operations express; the others run their scalar loops). Every implementation of a
 // kernel gives the scalar loop's bits, any NaN counting as one value: `first_mismatch` checks that on
 // every tail length, and the benchmark and tests/simd_baseline_test.spc run it. The benchmark fails when
-// a portable kernel runs more than 15% slower than its scalar loop. record.sh turns a run into the rows
-// of baseline.tsv and probes.tsv.
+// a portable kernel runs more than 15% slower than its scalar loop. On x86_64 the portable row names the
+// build's level (`portable`, `portable-avx2`, `portable-avx512`: `--target-cpu`), and a `simd_gap` row
+// reports its time over the hand-written kernel of that level (SSE2 for a baseline build): an arithmetic
+// kernel more than 10% slower fails the run (`ARITH`). record.sh turns a run into the rows of
+// baseline.tsv and probes.tsv. The `dispatch_*` benchmarks measure `detect::dispatch`.
+import std::cpu;
+import std::cpu::detect as detect;
 import std::float as fl;
 import std::simd;
 import std::testing::bench as bench;
@@ -99,6 +104,9 @@ const PORTABLE: Kernels = Kernels {
 
 // The kernels PORTABLE runs over vectors, by index.
 const PORTED: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+// The arithmetic kernels (wrapping integer operators): saxpy_f32, dot_f32_tree, sum_i32, abs_diff_u8. On
+// x86_64 each runs within 10% of the hand-written kernel of the build's level, or the benchmark fails.
+const ARITH: [usize; 4] = [0, 2, 4, 10];
 
 @arch(x86_64)
 extern "C" "sse2.h" {
@@ -144,9 +152,17 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
             return;
         }
         let reps = SIZES[2] / bytes; // every round processes 4 MiB
+        // The hand-written table of the portable build's level (x86_64).
+        let lv = level();
+        let tier = if lv.len() > 9 {
+            lv.slice(9, lv.len());
+        } else {
+            "sse2";
+        };
         for k in 0..KERNELS {
             let elements = reps * input.elements(k);
             let mut scalar_ns: f64 = 0.0;
+            let mut portable_ns: f64 = 0.0;
             for t in 0..tables.len() {
                 let table = tables[t];
                 let mut b = bench::Bencher::new(names()[k]);
@@ -158,7 +174,35 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
                 }
                 let mut s = b.samples().clone();
                 let ns = bench::summarize(&mut s).median * 1e9 / elements as f64;
-                println("simd\t{}\t{}\t{}\t{}", names()[k], str::from_cstr(table.name), bytes, ns);
+                let isa = if t == 1 {
+                    level();
+                } else {
+                    str::from_cstr(table.name);
+                };
+                println("simd\t{}\t{}\t{}\t{}", names()[k], isa, bytes, ns);
+                if t == 1 {
+                    portable_ns = ns;
+                }
+                if t > 1 && ported(k) && ARCH == Arch::X86_64 && isa == tier {
+                    println("simd_gap\t{}\t{}\t{}\t{}", names()[k], tier, bytes, portable_ns / ns);
+                    let mut arith = false;
+                    for a in ARITH {
+                        arith = arith || a == k;
+                    }
+                    if arith && portable_ns > ns * 1.10 {
+                        bench::fail(
+                            format(
+                                "portable {} at {} bytes: {} ns per element, the hand-written {} kernel {}",
+                                names()[k],
+                                bytes,
+                                portable_ns,
+                                tier,
+                                ns,
+                            ).as_str(),
+                        );
+                        return;
+                    }
+                }
                 if t == 0 {
                     scalar_ns = ns;
                 } else if t == 1 && ported(k) && ns > scalar_ns * 1.15 {
@@ -201,6 +245,85 @@ pub fn first_mismatch() String {
 /// The instruction sets this CPU runs besides the scalar loops and the portable vectors.
 pub fn isa_count() usize {
     return implementations().len() - 2;
+}
+
+// The portable row's name: on x86_64 with the build's level beyond SSE2 (`portable-avx2`).
+fn level() str<'static> {
+    let s = detect::static_features();
+    if ARCH != Arch::X86_64 || !s.has(cpu::Feature::Avx2) {
+        return "portable";
+    }
+    if s.has(cpu::Feature::Avx512f) {
+        return "portable-avx512";
+    }
+    return "portable-avx2";
+}
+
+static mut D: detect::Dispatch = detect::Dispatch::new();
+
+@c.noinline
+fn plus1(x: u64) u64 {
+    return x + 1;
+}
+
+@c.noinline
+fn plus2(x: u64) u64 {
+    return x + 2;
+}
+
+// `detect::dispatch` over a two-entry table: the first feature is never present on this machine's
+// instruction set, so the choice reads both entries.
+@c.noinline
+fn chosen(d: *mut detect::Dispatch) fn(u64) u64 {
+    let off = if ARCH == Arch::X86_64 {
+        cpu::Feature::Neon;
+    } else {
+        cpu::Feature::Avx2;
+    };
+    return unsafe detect::dispatch::<fn(u64) u64, 2>(d, [(off, plus2), (cpu::Feature::Simd128, plus2)], plus1);
+}
+
+/// A direct call of a function that does not inline: the reference of `dispatch_steady`.
+@bench
+pub fn dispatch_direct(b: &mut bench::Bencher) {
+    b.each(1024);
+    b.unit("call");
+    let mut x: u64 = 0;
+    while b.running() {
+        for _ in 0..1024 {
+            x = plus1(x);
+        }
+    }
+    bench::black_box(x);
+}
+
+/// A call through a resolved `detect::dispatch` choice: one acquire load and an indirect call.
+@bench
+pub fn dispatch_steady(b: &mut bench::Bencher) {
+    b.each(1024);
+    b.unit("call");
+    let mut x: u64 = 0;
+    while b.running() {
+        for _ in 0..1024 {
+            x = chosen(&mut unsafe D)(x);
+        }
+    }
+    bench::black_box(x);
+}
+
+/// A first `detect::dispatch` call: the detected features, the table read and the release store.
+@bench
+pub fn dispatch_first(b: &mut bench::Bencher) {
+    b.each(1024);
+    b.unit("call");
+    let mut x: u64 = 0;
+    while b.running() {
+        for _ in 0..1024 {
+            let mut d = detect::Dispatch::new();
+            x = chosen(&mut d)(x);
+        }
+    }
+    bench::black_box(x);
 }
 
 // Whether PORTABLE runs kernel `k` over vectors.

@@ -38,7 +38,8 @@ solving, closures, and overload ambiguity.
 
 See [simd.md](references/simd.md) for the vector and mask types `Simd<T, N>` and `Mask<N>`:
 their rules, layout, lane access, mask operations and diagnostics, and for CPU features,
-`@target_feature`, the `@simd_impl` backend files and the wasm32 module `std::simd::wasm`.
+`@target_feature`, the `@simd_impl` backend files, run-time detection and `detect::dispatch`, and
+the architecture modules `std::simd::x86`, `std::simd::aarch64` and `std::simd::wasm`.
 
 ## Bindings and Mutability
 
@@ -577,7 +578,7 @@ source text, values, and file:line on failure.
 | `@fmt.skip` | Exempt from formatter |
 | `@platform(P)` | Platform gate |
 | `@arch(A)` | Instruction-set gate: `x86_64`, `aarch64`, `wasm32` (see Build Constants and Platform Gating) |
-| `@target_feature([cpu::Feature::X, ..])` | The function needs CPU features: callable only where the build or the caller holds them (references/simd.md) |
+| `@target_feature([cpu::Feature::X, ..])` | The function needs CPU features (a list, or a level such as `cpu::X86_64_V3`): safe to call where the build or the caller holds them, else inside `unsafe` after a run-time check (an error on wasm32); its vector code uses them (references/simd.md) |
 | `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | `std` only: a backend entry of vector operation `X` (references/simd.md) |
 | `@c.value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |
 | `@c.reads(p, bytes)` / `@c.writes(p, bytes)` / `@c.lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |

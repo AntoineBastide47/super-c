@@ -96,6 +96,8 @@ pub struct CEmit {
     /// each operation without a native entry.
     pub simd_on: bool,
     simd_trace: bool,
+    /// The effective features of the function being emitted (`Package::fn_set`): the planner's.
+    pub fs: cf::CpuFeatureSet,
     /// Per local of the body being emitted: the statement of the one `choose` that reads it, when it
     /// is a comparison result nothing else reads (`lane_only`); IR_NONE otherwise. Empty until a
     /// comparison asks. `ml_chunks`: per such local the comparison rendered as lane-mask temps, their
@@ -370,6 +372,7 @@ extend CEmit {
             pkg: pkg,
             simd_on: simd_enabled(pk),
             simd_trace: st != null && str::from_cstr(st) == "1",
+            fs: pk.features,
             out: String::new(),
             err: "",
             refused: Vector::<Refusal>::new(),
@@ -5452,6 +5455,8 @@ extend CEmit {
     /// closure captures nothing; it is then a plain function taking only its params).
     pub fn emit_closure(self: &mut Self, b: &ir::CoreBody, cm: ModuleId, cnode: NodeId, sym: str, env_out: &mut String) bool {
         self.fn_attrs.truncate(0);
+        // A closure runs with the build's features, whatever its function's.
+        self.fs = self.p().features;
         self.err = "";
         self.arr_ret = false;
         let mark = self.out.len();
@@ -6947,7 +6952,8 @@ extend CEmit {
                 return ok;
             },
             _ => {
-                // A gather's or scatter's index check through the comparison entries.
+                // A gather's or scatter's index check through the comparison entries, then its entry
+                // (an indexed load or store of the active lanes) after it.
                 let mut checked = false;
                 if self.simd_on && (c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER) {
                     let mut xn: i64 = 0;
@@ -6960,11 +6966,35 @@ extend CEmit {
                     );
                     let m = unsafe sp[(op.arity - 2) as usize].as_str();
                     checked = self.index_check_planned(o, sp[0].as_str(), sp[1].as_str(), m, n, ib);
+                    let ge = self.ventry_whole(ir::OP_SIMD + c as u32, bt, ib, n as u64);
+                    if ge >= 0 {
+                        if !checked {
+                            index_bits(o, n, m, sp[1].as_str(), sp[0].as_str());
+                        }
+                        let mut call = String::new();
+                        self.entry_name(ge as u32, &mut call);
+                        call.format_into("({}.ptr, {}, (", sp[0].as_str(), sp[1].as_str());
+                        ok = self.entry_ty(ge as u32, 2, "", &mut call) && ok;
+                        call.format_into("){}, {})", m, sp[3].as_str());
+                        if c == ir::SIMD_GATHER {
+                            o.format_into("  {} = {};\n", d.as_str(), call.as_str());
+                        } else {
+                            o.format_into("  {};\n", call.as_str());
+                        }
+                        o.push_str("  }\n");
+                        self.sput(d);
+                        return ok;
+                    }
                 }
+                // 2: the AVX-512 form wrote the whole store; 1: the chunk form opened the lane loop's
+                // `else`.
+                let mut cs: u8 = 0;
                 if c == ir::SIMD_COMPRESS_STORE && self.simd_on {
-                    checked = self.compress_store_planned(o, &sp, n, bt);
+                    cs = self.compress_store_planned(o, &sp, n, bt, &mut ok);
                 }
-                self.emit_vec_mem(o, c, &sp, n, checked);
+                if cs != 2 {
+                    self.emit_vec_mem(o, c, &sp, n, cs == 1);
+                }
             },
         };
         if op.rule != ir::SR_MSTORE || c == ir::SIMD_COMPRESS_STORE {
@@ -7241,9 +7271,33 @@ extend CEmit {
     // the range check, when the slice holds a chunk past the written elements, each chunk's active
     // lanes are moved to its front by a table of byte indexes (one row per mask) and the whole chunk
     // is stored at the next free element; a chunk's tail is overwritten by the next chunk, and the
-    // last one's is restored from the elements read first (`s` is borrowed alone). Writes the opening of the `else` that `emit_vec_mem`'s lane
-    // loop closes; false when there is no such entry (nothing written).
-    fn compress_store_planned(self: &mut Self, o: &mut String, sp: &[String; 4], n: i64, bt: BuiltinType) bool {
+    // last one's is restored from the elements read first (`s` is borrowed alone): writes the opening
+    // of the `else` that `emit_vec_mem`'s lane loop closes, and gives 1. With `Compress` and
+    // `StoreMasked` entries (AVX-512), the active lanes compressed into a register and its first
+    // `count` lanes stored, the whole operation: 2. With neither, nothing: 0. A failed entry type
+    // clears `ok`.
+    fn compress_store_planned(self: &mut Self, o: &mut String, sp: &[String; 4], n: i64, bt: BuiltinType, ok: &mut bool) u8 {
+        let (s, st, m, v) = (sp[0].as_str(), sp[1].as_str(), sp[2].as_str(), sp[3].as_str());
+        // It writes exactly the elements it moves.
+        let ce = self.ventry_whole(ir::OP_SIMD + ir::SIMD_COMPRESS as u32, bt, bt, n as u64);
+        let me = self.ventry_whole(ir::OP_SIMD + ir::SIMD_STORE_MASKED as u32, bt, BuiltinType::BT_VOID, n as u64);
+        if ce >= 0 && me >= 0 {
+            o.format_into(
+                "  uint64_t __sc_c = (uint64_t)__builtin_popcountll({});\n  (void)__sc_bounds_vec({}, {}.len, __sc_c);\n  ",
+                m,
+                st,
+                s,
+            );
+            self.entry_name(me as u32, o);
+            o.format_into("({}.ptr + {}, (", s, st);
+            *ok = self.entry_ty(me as u32, 1, "", o) && *ok;
+            o.push_str(")(__sc_c ? ~0ULL >> (64 - __sc_c) : 0), ");
+            self.entry_name(ce as u32, o);
+            o.push_str("((");
+            *ok = self.entry_ty(ce as u32, 0, "", o) && *ok;
+            o.format_into("){}, {}, {}));\n", m, v, v);
+            return 2;
+        }
         let lb = lane_bytes(bt);
         let mut cb: u64 = pick(n as u64 * lb >= 16, 16u64, 8u64);
         let mut e = self.ventry(ir::OP_SIMD + ir::SIMD_SWIZZLE_ZERO as u32, BuiltinType::BT_U8, BuiltinType::BT_U8, cb);
@@ -7256,9 +7310,8 @@ extend CEmit {
         let ld = self.ventry(ir::OP_SIMD + ir::SIMD_LOAD as u32, BuiltinType::BT_U8, BuiltinType::BT_U8, cb);
         let sv = self.ventry(ir::OP_SIMD + ir::SIMD_STORE as u32, BuiltinType::BT_U8, BuiltinType::BT_VOID, cb);
         if e < 0 || ld < 0 || sv < 0 || cl > 8 || cl < 2 || n as u64 % cl != 0 {
-            return false;
+            return 0;
         }
-        let (s, st, m, v) = (sp[0].as_str(), sp[1].as_str(), sp[2].as_str(), sp[3].as_str());
         o.format_into(
             "  uint64_t __sc_c = (uint64_t)__builtin_popcountll({}), __sc_k = 0;\n  (void)__sc_bounds_vec({}, {}.len, __sc_c);\n",
             m,
@@ -7288,7 +7341,7 @@ extend CEmit {
             o.format_into("{}{}", pick(r == 0, "", ", "), r.count_ones());
         }
         o.format_into("}};\n  if ({}.len - {} - __sc_c >= {}u) {{\n  ", s, st, cl);
-        let ok = self.entry_ty(e as u32, 0, "__sc_o", o);
+        *ok = self.entry_ty(e as u32, 0, "__sc_o", o) && *ok;
         let (mut lds, mut sts, mut swz) = (String::new(), String::new(), String::new());
         self.entry_name(ld as u32, &mut lds);
         self.entry_name(sv as u32, &mut sts);
@@ -7315,7 +7368,7 @@ extend CEmit {
             );
         }
         o.format_into("  {}((uint8_t *)({}.ptr + {} + __sc_c), __sc_o);\n  }} else {{\n", sts.as_str(), s, st);
-        return ok;
+        return 1;
     }
 
     // A contiguous masked load or store of `emit_vec_ops` (`load_or`, `load_masked`, `store_masked` and
@@ -7618,7 +7671,7 @@ extend CEmit {
     // features; SC_SIMD_TRACE reports it when no single entry covers the lanes.
     fn vplan(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
         let pk = self.p();
-        let pl = sp::plan(&pk.simd_table, pk.features, pk.mem_check, op, t, r, n as u64);
+        let pl = sp::plan(&pk.simd_table, self.fs, pk.mem_check, op, t, r, n as u64, pk.simd_width);
         if self.simd_trace && pl.form != sp::PF_NATIVE {
             let nm = ir::op_variant(op);
             eprintln(
@@ -7632,9 +7685,35 @@ extend CEmit {
         return pl;
     }
 
+    // `vplan` without the trace: a probe for a preferred form.
+    fn vplan_quiet(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
+        let pk = self.p();
+        return sp::plan(&pk.simd_table, self.fs, pk.mem_check, op, t, r, n as u64, pk.simd_width);
+    }
+
     // The table index of the entry for `op` over `n` lanes of `t` with result `r`, or -1.
     fn ventry(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
-        return sp::find(&self.p().simd_table, self.p().features, self.p().mem_check, op, t, r, n);
+        return sp::find(
+            &self.p().simd_table,
+            self.fs,
+            self.p().mem_check,
+            op,
+            t,
+            r,
+            n,
+            sp::max_bits(self.fs, self.p().simd_width),
+        );
+    }
+
+    // `ventry`, else past the preferred width: an operation that cannot split (a gather,
+    // `compress_store`) takes the wider entry rather than the lane loop, as `simd_plan::plan` does.
+    fn ventry_whole(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
+        let e = self.ventry(op, t, r, n);
+        return if e >= 0 {
+            e;
+        } else {
+            sp::find(&self.p().simd_table, self.fs, self.p().mem_check, op, t, r, n, 512);
+        };
     }
 
     // The C name of table entry `e`, `__sc_si_<symbol>`, recorded as a need of the current context:
@@ -8004,6 +8083,12 @@ extend CEmit {
             op = ir::OP_CAST;
             r = rbt;
         } else if c >= ir::SIMD_CMP_EQ && c <= ir::SIMD_CMP_GE {
+            // An entry that gives the mask itself (AVX-512's mask registers) needs no lane masks.
+            vp.pl = self.vplan_quiet(ir::OP_SIMD + c as u32, bt, BuiltinType::BT_BOOL, n);
+            if vp.pl.form != sp::PF_SCALAR {
+                vp.res = VR_MASK;
+                return true;
+            }
             let u = lane_mask_bt(bt);
             vp.pl = self.vplan(ir::OP_CMP_LANES + (c - ir::SIMD_CMP_EQ) as u32, bt, u, n);
             if vp.pl.form == sp::PF_SCALAR {
@@ -8056,7 +8141,9 @@ extend CEmit {
                 return true;
             }
             vp.kinds[0] = VK_MASK;
-            if vp.pl.form != sp::PF_SCALAR {
+            // A stored mask: the entry that blends by the mask itself, else its lanes unpacked.
+            let bp = self.vplan_quiet(ir::OP_SIMD + c as u32, bt, bt, n);
+            if bp.form == sp::PF_SCALAR && vp.pl.form != sp::PF_SCALAR {
                 let u = lane_mask_bt(bt);
                 vp.warg = self.ventry(ir::OP_MASK_TO_LANES, u, u, vp.pl.chunk_lanes);
                 if vp.warg >= 0 {
@@ -8363,6 +8450,10 @@ extend CEmit {
         let mut n: i64 = 0;
         let mut bt = BuiltinType::BT_VOID;
         let _ = self.vec_ty(b, b.operands.at(b.oper_pool[rv.a as usize] as usize).ty, &mut n, &mut bt);
+        // A comparison into mask bits (AVX-512) writes the mask itself, as `vec_plan_of` plans it.
+        if self.vplan_quiet(ir::OP_SIMD + rv.c as u32, bt, BuiltinType::BT_BOOL, n).form != sp::PF_SCALAR {
+            return false;
+        }
         let cr = *b.rvalues.at(b.statements.at(ci as usize).rvalue as usize);
         let mut cn: i64 = 0;
         let mut cbt = BuiltinType::BT_VOID;
@@ -8371,14 +8462,24 @@ extend CEmit {
         let pk = self.p();
         let pl = sp::plan(
             &pk.simd_table,
-            pk.features,
+            self.fs,
             pk.mem_check,
             ir::OP_CMP_LANES + (rv.c - ir::SIMD_CMP_EQ) as u32,
             bt,
             u,
             n as u64,
+            pk.simd_width,
         );
-        let cp = sp::plan(&pk.simd_table, pk.features, pk.mem_check, ir::OP_CHOOSE_LANES, cbt, cbt, cn as u64);
+        let cp = sp::plan(
+            &pk.simd_table,
+            self.fs,
+            pk.mem_check,
+            ir::OP_CHOOSE_LANES,
+            cbt,
+            cbt,
+            cn as u64,
+            pk.simd_width,
+        );
         *to = lane_mask_bt(cbt);
         if pl.form == sp::PF_SCALAR || cp.form == sp::PF_SCALAR || cn != n {
             return false;
@@ -16210,7 +16311,7 @@ pub fn simd_enabled(pk: &loader::Package) bool {
         return false;
     }
     for i in 0..pk.simd_table.len() {
-        if cf::contains(pk.features, pk.simd_table.at(i).fs) {
+        if cf::contains(cf::join(pk.features, pk.fn_union), pk.simd_table.at(i).fs) {
             return true;
         }
     }

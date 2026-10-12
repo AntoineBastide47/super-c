@@ -108,6 +108,8 @@ pub struct InferenceContext {
     pub closure_depth: u32,
     pub unsafe_depth: u32,
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that required it (lint)
+    pub unsafe_at: u32, // the innermost 'unsafe' marker's start + 1; 0: none
+    pub unsafe_feat: u32, // calls of functions that need CPU features inside it (`FeatureCall`)
     pub mret_call: NodeId,
     pub mret_types: [TypeId; 8],
     pub mret_n: u8,

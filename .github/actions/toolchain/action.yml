@@ -13,6 +13,10 @@ inputs:
   sha:
     description: "the commit under test, the last part of the ccache key"
     required: true
+  save:
+    description: "whether the job saves its ccache: a job whose compiles no later run reuses only restores one"
+    required: false
+    default: "true"
   cstd:
     description: "the C standard flags of the Windows leg (mingw hides POSIX prototypes under -std=c11)"
     required: false
@@ -23,7 +27,19 @@ runs:
     # Each job keeps its own ccache so parallel jobs can save all their compiled inputs; a job without a
     # cache of its own starts from its platform's newest one. CCACHE_DIR pins one workspace path on all OSes.
     - name: Cache ccache
+      if: inputs.save == 'true'
       uses: actions/cache@v6
+      with:
+        path: .ccache
+        key: ${{ inputs.cache }}-${{ inputs.sha }}
+        restore-keys: |
+          ${{ inputs.cache }}-
+          ccache-${{ inputs.target }}-
+          ccache-linux-
+
+    - name: Restore ccache
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@v6
       with:
         path: .ccache
         key: ${{ inputs.cache }}-${{ inputs.sha }}

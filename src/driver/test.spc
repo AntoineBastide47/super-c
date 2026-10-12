@@ -1618,7 +1618,15 @@ pub fn test_build_and_run(
     pfl.push_str(fl.as_str());
     pfl.push_byte(b' ');
     pfl.push_str(ccflags);
-    if !bsys::features_accepted(loader::dirname_of(root), ccs.as_str(), pfl.as_str(), target, p.arch, p.features) {
+    if !bsys::features_accepted(
+        loader::dirname_of(root),
+        ccs.as_str(),
+        pfl.as_str(),
+        target,
+        p.arch,
+        p.features,
+        &mut fl,
+    ) {
         return 1;
     }
     let mut args = Vector::<String>::new();

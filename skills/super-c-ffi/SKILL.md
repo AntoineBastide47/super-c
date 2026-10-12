@@ -345,6 +345,12 @@ const A: i64 = unsafe llabs(-7);                      // evaluates the model
 
 `llabs` is not `safe`: `llabs(i64::MIN)` is undefined behavior in C.
 
+A C intrinsic with an immediate operand (`_mm_shuffle_epi32(a, imm)`, `vextq_s8(a, b, n)`) is not
+`safe` either: the C compiler rejects a non-constant or out-of-range operand, which Super-C cannot
+check at the binding. The bindings in `ffi/immintrin.spc` and `ffi/arm_neon.spc` leave such
+functions unsafe; a safe wrapper takes the operand as a const parameter and checks its range with
+`static_assert` (`std::simd::x86::clmul::<IMM>`, `std::simd::aarch64::xar::<N>`).
+
 - `safe`: a call needs no `unsafe`. The declaration is rejected when a safe call
   could hand C an unchecked value: a variadic function, a parameter that is or names a raw
   pointer (through a reference, slice, array or generic argument), or a returned borrow

@@ -333,7 +333,7 @@ the features to code:
 
 | Attribute | Where | Meaning |
 |-----------|-------|---------|
-| `@target_feature([cpu::Feature::X, ..])` | a function whose `@arch` gate (or its extend's) holds every feature's instruction set (checked at the parse for a list of `cpu::Feature` variants, so on every target alike); not a method of a conformance, which a bound or `dyn` calls unnamed | the function needs the features: a call or a function value of it is an error unless the build, or the calling function with what its features imply, holds them ("`f` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`)"); `main`, `@c.export`, `@test` and `@bench` functions need them in the build ("..; it is called from outside the program"); a function the build cannot call emits nothing; the compile-time evaluator has no value for it ("`f` has no compile-time value") |
+| `@target_feature([cpu::Feature::X, ..])` or `@target_feature(cpu::X86_64_V3)` | a function whose `@arch` gate (or its extend's) holds every feature's instruction set (checked at the parse for a list of `cpu::Feature` values, so on every target alike); not a method of a conformance, which a bound or `dyn` calls unnamed | the function needs the features, and its effective set is the build's and its own, closed under `implies` (on wasm32 the build's alone: features are per build there). A call or a function value of it is safe where the caller's effective set holds them; else, on x86_64 and aarch64, it needs `unsafe` after a run-time check (`std::cpu::detect::has`; "`f` needs `+avx2,..`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check"), and on wasm32, or for an extern binding or a `@c.always_inline` function (inlined into a C caller that lacks them), it is an error ("`f` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`)"). It is no value of a closure bound `F: fn(..)` ("pass a function pointer `fn(..)` instead"); `main`, `@test` and `@bench` functions need the features in the build ("..; it is called from outside the program"), and a `@c.export` function cannot have any. Its C definition carries the C target attribute of the features beyond the build's, the release inliner never inlines it into a caller whose set lacks them, and the planner serves its vector code from its own set. A function the build cannot call emits nothing; the compile-time evaluator has no value for it ("`f` has no compile-time value"). An `unsafe` whose only reason is such a use is unnecessary where the caller's set holds the features (a lint) |
 | `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | a function of `std` (else "'@simd_impl' is reserved for the standard library") | a backend entry: an implementation of operation `X` for the lane type and count of its signature, under the features. Never `RelaxedSimd` |
 | `@c.value(size, align)` | an opaque type (`type T;`) of an `extern "C"` block | a C register type (`v128_t`) with that layout, which a `_Static_assert` beside the header include checks: `Copy`, `sizeof`/`alignof` read it; a local, a parameter or a result only, never a field, variant payload, element, static, pointer or reference target, capture or generic argument, written or inferred (`[x, x]`, `(x, 1)`, `&x`, `\|\| x`, `id(x)`): "`v128_t` is a register type; store it through `Simd<T, N>`" |
 
@@ -344,11 +344,12 @@ asserts both at compile time).
 
 ### Backend files
 
-`std/simd/backend/<x86|aarch64|wasm>.spc`, the file of the build's instruction set, loads with
+`std/simd/backend/<x86_64|aarch64|wasm>.spc`, the file of the build's instruction set, loads with
 the prelude when it exists, the build has a feature, and a module of the program names a vector
-(`Simd<`, `Mask<`, `simd::`, a lane or mask alias; std's `simd.spc` aside) (today: `wasm.spc`, header
+(`Simd<`, `Mask<`, `simd::`, a lane or mask alias; std's `simd.spc` aside) (`wasm.spc`, header
 `<wasm_simd128.h>`, bindings in `ffi/wasm_simd128.spc`; `aarch64.spc`, header `<arm_neon.h>`,
-bindings in `ffi/arm_neon.spc`, which every aarch64 build may load since `neon` is its baseline);
+bindings in `ffi/arm_neon.spc`, which every aarch64 build may load since `neon` is its baseline;
+`x86_64.spc`, header `<immintrin.h>`, bindings in `ffi/immintrin.spc`, `sse2` its baseline);
 an entry's definition header is written only when a unit calls it, and the file emits no unit
 of its own, so a program without vectors emits the same C with and without the features. Each entry is a plain
 function with `@arch` and `@simd_impl`; the file's helpers `reg` and `vec` move a vector into a
@@ -374,11 +375,13 @@ bytes; `LoadMasked` and
 an inactive lane's element never. A trapping operator has no entry of its own: its
 `OverflowAdd`, `OverflowSub` or `OverflowMul` entry names the failing lanes (a shift by a scalar
 count checks the count once), then its wrapping twin's entry computes the lanes. One entry per
-operation, lane type, lane count and feature count: two are an error naming both. An entry may
+operation, lane type, lane count and feature set (closed under `implies`): two are an error
+naming both. An entry may
 call bindings, and functions of its file that inline (one that does not fails the build); it
 must give the operation's exact result for
 every input, NaN payloads aside (`tests/simd_entry_test.spc` compares every entry with the lane
-loop on boundary inputs, in the wasm conformance lane and on an aarch64 host).
+loop on boundary inputs, in the wasm conformance lane and on an aarch64 or x86_64 host; with
+`SC_SIMD_FEATURES` it requires the entries the run's features reach and the baseline does not).
 
 The aarch64 file, the second worked example, has one register type per lane type and width
 (`int8x16_t` .. `float64x2_t`, `@c.value(16, 16)`; `int8x8_t` .. `float32x2_t`, `@c.value(8,
@@ -403,17 +406,34 @@ onto the lower half (`vadd_f32` of the halves): never adjacent pairs (`faddp` ov
 under `[Neon, Dotprod]`, and the widened products added pairwise under `[Neon]`; the planner
 takes the one with more features the build holds.
 
+The x86_64 file has one entry per operation, lane shape and feature level whose instructions
+differ: SSE2 to SSE4.2 on 128 bits, AVX and AVX2 on 256 bits (FMA, F16C, BMI where an entry uses
+them), AVX-512 with the comparisons into mask bits (`CmpEq` .. `CmpGe`: the mask register is the
+result), the choice by mask bits (`Choose`), masked memory, `Compress` (a `compress_store` is a
+`Compress` and a masked store of the first `count` lanes), `Gather` and `Scatter` (index lanes
+widened to 64 bits: a `u32` index from 2^31 is no negative offset), on 128 to 512 bits with
+AVX512VL. Its helpers move a vector through unaligned loads and stores (`_mm_loadu_si128` ..
+`_mm512_storeu_si512`); a GCC register type without its feature may have a lower alignment, so
+the layout check of `@c.value` is a lower bound there. `scripts/x86gen/gen.py` generates it and `ffi/immintrin.spc` from GCC's
+prototypes (`protos.py`): change the generator, not the files, and run both scripts and `fmt` (the
+command is in the script's header). An intrinsic with an
+immediate operand is an unsafe binding (the operand must be a constant); `std::simd::x86` takes
+such operands as const parameters with a range check.
+
 To add a backend: write the file with entries for the operations whose instructions match
 the lane rule exactly, and a binding module for the header; an operation without an entry
 keeps its lane loop.
 
 ### Lowering planner
 
-`src/emit/simd_plan.spc` decides each vector statement from the backend table and the build's
-features alone: `Native` (an entry for the lanes), `Split` (the widest entry for a power-of-two
+`src/emit/simd_plan.spc` decides each vector statement from the backend table and the effective
+features of the function that holds it (the build's, with its `@target_feature`'s), and the
+preferred width (`--simd-width`: 256 bits unless 512; a wider operation splits, and one that
+cannot split takes the wider entry): `Native` (an entry for the lanes), `Split` (the widest entry for a power-of-two
 fraction of the lanes, applied to each chunk in lane order; a reduction combines its chunks
 with the lane-wise entry its definition names), or `Scalar` (the lane loop). Among usable
-entries the one with the most features wins. A comparison read only by one `choose` keeps its
+entries the one with the largest feature set wins (the table orders entries by it); a comparison
+or choice prefers the mask-bit form (`CmpEq`, `Choose`) where the set has one. A comparison read only by one `choose` keeps its
 lanes in lane-mask temporaries; one read only by `any`, `none`, `all` or `!all` (through copies
 and a cast to `u64`) reduces its lane masks with `AnyLanes` or `AllLanes`; otherwise it packs
 its lanes into the mask with `LanesToMask`. A choice of a stored mask unpacks it with
@@ -432,9 +452,41 @@ always contains, and `detected()`, a new OS query without the build's set. Detec
 once, before `main` (a C constructor) or at the first query, allocates nothing and takes no
 lock: `sysctlbyname` of `hw.optional.arm.FEAT_*` on macOS and iOS, `getauxval(AT_HWCAP)` and
 `AT_HWCAP2` on Linux and Android, `IsProcessorFeaturePresent` on Windows; a failing query means
-absent. On wasm32 `features()` equals `static_features()`: an engine rejects a module whose
-features it lacks. Detection selects code only: no result of the language depends on it, and
-the compile-time evaluator never reads it.
+absent. On x86_64 it reads CPUID: AVX and its successors only with OSXSAVE and the XCR0 SSE and
+AVX state bits, AVX-512 also with the opmask and ZMM state bits, which macOS enables per thread
+on first use, so there `sysctl hw.optional.avx512f` answers for them; AVX10 by its version leaf.
+`has_level(cpu::Level::V3)` holds when every feature of the level does (`cpu::X86_64_V2` ..
+`cpu::X86_64_V4`, `Level::features`). `SC_CPU_OFF=<mask>` (a test switch) reports the mask's
+detected features absent; `sc_cpu_query_count()` counts the OS queries. On wasm32 `features()` equals `static_features()`: an engine rejects a
+module whose features it lacks. Detection selects code only: no result of the language depends on
+it, and the compile-time evaluator never reads it.
+
+`detect::dispatch(d, table, fallback)` returns the first function of `table` (`[(cpu::Feature,
+F); K]`, `F: FnPtr`) whose feature the machine has, else `fallback`, chosen once per
+`detect::Dispatch` object (`static mut D: detect::Dispatch = detect::Dispatch::new();`): the
+first call detects and publishes the choice with a release store, every later one is one acquire
+load and the indirect call, inlined into the caller (the first call copies the table and calls the
+outlined `dispatch_first`; a toolchain whose default stack protector guards that copy adds its check). Two first callers
+store the same address. It is `unsafe`: the table's `@target_feature` functions coerce to `F` under
+it, valid because the call checks the row's feature first, so that feature must imply every feature
+its function needs (a level's function keyed by `Avx2` also needs `Fma`: key it by a feature only that
+level's machines have, or check `has_level` first; a lint reports a `(feature, f)` row that misses
+some); one object
+serves one entry point and its one table. Each instruction set gets its own `@arch`-gated entry
+point, so a table names only functions that exist there:
+
+```superc
+static mut SUM: detect::Dispatch = detect::Dispatch::new();
+
+@arch(x86_64)
+pub fn sum(data: []f32) f32 {
+    let f = unsafe detect::dispatch::<fn([]f32) f32, 2>(&mut unsafe SUM, [
+        (cpu::Feature::Avx512f, sum_avx512),
+        (cpu::Feature::Avx2, sum_avx2),
+    ], sum_sse2);
+    return f(data);
+}
+```
 
 ### The aarch64 module
 
@@ -446,6 +498,17 @@ types, each needing its feature: `vdot_i32`, `vdot_u32` (`Dotprod`); `vmmla_i32`
 `crc32x` and `crc32cb` .. `crc32cx` (`Crc`, from `<arm_acle.h>`); `table_lookup` over 16, 32,
 48 (`[u8; 48]`) and 64 bytes (`Neon`). They have no memory effect; each calls a C intrinsic,
 so the compile-time evaluator has no value for them.
+
+### The x86_64 module
+
+`std::simd::x86` holds the x86 operations with no portable meaning, over the portable types,
+each needing its features: `madd` (`pmaddwd`, Sse2), `maddubs` (Ssse3), `sad_u8` (Sse2),
+`clmul::<IMM>` (Pclmulqdq), `aesenc`, `aesenclast`, `aesdec`, `aesdeclast` (Aesni) and their
+two- and four-block forms (`aesenc_x2`, `aesenc_x4`, `aesdec_x2`, `aesdec_x4`: Vaes, Avx512f),
+`gf2p8affine::<B>`, `gf2p8mul` (Gfni), `dpbusd`, `dpwssd` (Avx512vnni), `permutex2var_i32`
+(Avx512f), `_i16` (Avx512bw), `_u8` (Avx512vbmi), `ternarylogic::<IMM>` (Avx512f), `conflict_u32`,
+`conflict_u64` (Avx512cd). They have no memory effect; each calls a C intrinsic, so the
+compile-time evaluator has no value for them.
 
 ### The wasm32 module
 

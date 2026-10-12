@@ -117,6 +117,14 @@ static _Noreturn void __sc_trap_order(void);
 #define SC_MO_LD(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
 #define SC_MO_ST(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==2?__ATOMIC_RELEASE:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
 #define SC_MO_CAS(so,fo) ((unsigned)(so)>4u?SC_MO_BAD:SC_MO_RMW((fo)==4?4:(fo)==1&&(so)==0?1:(fo)==1&&(so)==2?3:(so)))
+/* The aarch64 `target` attribute of a function's features: clang adds extensions (`+dotprod`); GCC
+   names the architecture level too (`arch=armv8.2-a+dotprod`), since binutils assembles an extension's
+   instructions only at its level. */
+#ifdef __clang__
+#define SC_TGT_A64(c, g) c
+#else
+#define SC_TGT_A64(c, g) g
+#endif
 #define SC_AT(T,S) \
 static inline T __sc_atomic_load_##S(const T*p,int mo){return __atomic_load_n(p,SC_MO_LD(mo));} \
 static inline void __sc_atomic_store_##S(T*p,T v,int mo){__atomic_store_n(p,v,SC_MO_ST(mo));} \
@@ -346,6 +354,20 @@ __attribute__((constructor)) static void __sc_binary_stdio(void) {
   (void)_setmode(_fileno(stdout), _O_BINARY);
   (void)_setmode(_fileno(stderr), _O_BINARY);
 }
+#endif
+
+/* ASan's use-after-return check moves frames to a fake stack, where GCC (13.3 to 15) places an object
+   aligned above 32 bytes 32 bytes off: an AVX-512 build faults on its aligned moves. The fake stack is
+   off by default; ASAN_OPTIONS still overrides it. */
+#if defined(__SANITIZE_ADDRESS__)
+#define SC_RT_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SC_RT_ASAN 1
+#endif
+#endif
+#if defined(SC_RT_ASAN)
+const char *__asan_default_options(void) { return "detect_stack_use_after_return=0"; }
 #endif
 
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */

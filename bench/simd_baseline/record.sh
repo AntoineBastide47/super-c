@@ -5,11 +5,15 @@
 #
 #   sh bench/simd_baseline/record.sh                 # the host's instruction sets, C compiler $CC (else cc)
 #   sh bench/simd_baseline/record.sh --target=wasm   # SIMD128 under wasmtime, C compiler $WASI_SDK_PATH/bin/clang
+#   sh bench/simd_baseline/record.sh --target-cpu=x86-64-v3   # the portable kernels at AVX2 (v4: AVX-512)
 set -eu
 dir=bench/simd_baseline
 sc=./super-c${BINEXT:-}
 cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sed -n 's/^model name[^:]*: //p' /proc/cpuinfo | head -n 1)
 machine="$(uname -s | sed 's/[-_].*//') $(uname -m) $cpu"
+case " $* " in
+*" --target-cpu="*) machine="$machine, $(printf ' %s' "$*" | sed 's/.* --target-cpu=\([^ ]*\).*/\1/')" ;;
+esac
 case " $* " in
 *" --target=wasm "*)
     cc=${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang

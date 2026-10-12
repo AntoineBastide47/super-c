@@ -362,7 +362,12 @@ fn arch_operations_need_their_feature() {
         "import std::simd::aarch64 as a64;\nfn main() i32 {\n    let a = u8x16::splat(1);\n    return a64::vmmla_u32(u32x4::splat(0), a, a).get(0) as i32 + a64::table_lookup(a, a).get(0) as i32 - 9;\n}\n",
     );
     let r = p.compile_flags("", "main.spc");
-    assert(!r.ok() && r.out_has("`vmmla_u32` needs `+i8mm` (`--target-feature=+i8mm`)"), "i8mm");
+    assert(
+        !r.ok() && r.out_has(
+            "`vmmla_u32` needs `+i8mm`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check",
+        ),
+        "i8mm",
+    );
     assert(!r.out_has("`table_lookup` needs"), "neon is there");
     assert(p.compile_flags("--target-feature=+i8mm", "main.spc").ok(), "with the feature");
 }
@@ -390,14 +395,15 @@ fn neon_memory_bindings_state_their_range() {
 
 // `std::cpu::detect`: the OS query alone (`detected`) reports every feature of the build on an aarch64
 // machine, and `dotprod` and `lse` on macOS arm64; `features` is that and the build's set, the same on
-// each call; a C constructor that asks before `main` gets the answer `main` gets.
+// each call; a C constructor that asks before `main` gets the answer `main` gets (`dotprod` and
+// `avx2`, so on either instruction set one of them can be present).
 @test
 fn detection_reports_the_machine() {
     let p = cli::proj_new();
-    p.mkfile("pre.h", "int pre_dotprod(void);\n");
+    p.mkfile("pre.h", "int pre_dotprod(void);\nint pre_avx2(void);\n");
     p.mkfile(
         "pre.c",
-        "#include \"pre.h\"\nint sc_cpu_has(int feature);\nstatic int g = -1;\n__attribute__((constructor)) static void pre(void) { g = sc_cpu_has(5); }\nint pre_dotprod(void) { return g; }\n",
+        "#include \"pre.h\"\nint sc_cpu_has(int feature);\nstatic int g = -1, h = -1;\n__attribute__((constructor)) static void pre(void) { g = sc_cpu_has(5); h = sc_cpu_has(24); }\nint pre_dotprod(void) { return g; }\nint pre_avx2(void) { return h; }\n",
     );
     p.mkfile(
         "main.spc",
@@ -405,6 +411,7 @@ fn detection_reports_the_machine() {
 import std::cpu::detect as detect;
 extern "C" "pre.h" {
     fn pre_dotprod() i32;
+    fn pre_avx2() i32;
 }
 fn main() i32 {
     let f = detect::features();
@@ -413,7 +420,7 @@ fn main() i32 {
     if f.bits[0] != (d.bits[0] | s.bits[0]) || detect::features().bits[0] != f.bits[0] || ARCH == Arch::AArch64 && !(d.has(cpu::Feature::Neon) && d.contains(s)) {
         return 1;
     }
-    if unsafe pre_dotprod() != detect::has(cpu::Feature::Dotprod) as i32 {
+    if unsafe pre_dotprod() != detect::has(cpu::Feature::Dotprod) as i32 || unsafe pre_avx2() != detect::has(cpu::Feature::Avx2) as i32 {
         return 2;
     }
     if PLATFORM == Platform::MacOS && ARCH == Arch::AArch64 && !(d.has(cpu::Feature::Dotprod) && d.has(cpu::Feature::Lse)) {

@@ -1,19 +1,23 @@
 // The backend entries against the lane loops (tests/gen/simd_entry.spc): std/simd/backend/wasm.spc on
-// the vector conformance lane (`SC_SIMD_LANE=wasm`), std/simd/backend/aarch64.spc on an aarch64 host;
-// every entry, in eight parts that run in parallel.
+// the vector conformance lane (`SC_SIMD_LANE=wasm`), the aarch64 or x86_64 file on such a host; every
+// entry the run's features allow (with `SC_SIMD_FEATURES`, those the baseline does not), in sixteen
+// parts that run in parallel.
 import tests::gen::simd_entry as se;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import driver_shim as shim;
 
-// The backend file the differential builds use: the wasm one in the conformance lane, the aarch64 one
-// on an aarch64 host, none elsewhere.
+// The backend file the differential builds use: the wasm one in the conformance lane, the host's own
+// elsewhere.
 fn backend() str<'static> {
     if h::simd_lane() {
         return "std/simd/backend/wasm.spc";
     }
     if unsafe shim::sc_host_arch() == 1 {
         return "std/simd/backend/aarch64.spc";
+    }
+    if unsafe shim::sc_host_arch() == 0 {
+        return "std/simd/backend/x86_64.spc";
     }
     return "";
 }
@@ -23,54 +27,94 @@ fn part(k: usize) {
         return;
     }
     let text = cli::read_text(backend());
-    let n = se::entries(text.as_str()).len();
-    assert(n > 200, "the backend file parses");
-    let r = se::check(text.as_str(), n * k / 8, n * (k + 1) / 8, 4);
+    assert(se::entries(text.as_str()).len() > 200, "the backend file parses");
+    let r = se::check(text.as_str(), k, 16, 4);
     if r.len() != 0 {
         eprintln("{}", r.as_str());
     }
     assert(r.len() == 0, "an entry differs from its lane loop");
 }
 
-// Each part builds and runs a program per few entries: on a 3-core CI runner a part takes up to 100 s.
+// Each part builds and runs a program per few entries the run's features reach: sixteen parts keep
+// one under its timeout when every x86_64 entry is reached (`x86-64-v4`).
 @test(timeout = 300)
-fn entries_first_eighth() {
+fn entries_part_00() {
     part(0);
 }
 
 @test(timeout = 300)
-fn entries_second_eighth() {
+fn entries_part_01() {
     part(1);
 }
 
 @test(timeout = 300)
-fn entries_third_eighth() {
+fn entries_part_02() {
     part(2);
 }
 
 @test(timeout = 300)
-fn entries_fourth_eighth() {
+fn entries_part_03() {
     part(3);
 }
 
 @test(timeout = 300)
-fn entries_fifth_eighth() {
+fn entries_part_04() {
     part(4);
 }
 
 @test(timeout = 300)
-fn entries_sixth_eighth() {
+fn entries_part_05() {
     part(5);
 }
 
 @test(timeout = 300)
-fn entries_seventh_eighth() {
+fn entries_part_06() {
     part(6);
 }
 
 @test(timeout = 300)
-fn entries_eighth_eighth() {
+fn entries_part_07() {
     part(7);
+}
+
+@test(timeout = 300)
+fn entries_part_08() {
+    part(8);
+}
+
+@test(timeout = 300)
+fn entries_part_09() {
+    part(9);
+}
+
+@test(timeout = 300)
+fn entries_part_10() {
+    part(10);
+}
+
+@test(timeout = 300)
+fn entries_part_11() {
+    part(11);
+}
+
+@test(timeout = 300)
+fn entries_part_12() {
+    part(12);
+}
+
+@test(timeout = 300)
+fn entries_part_13() {
+    part(13);
+}
+
+@test(timeout = 300)
+fn entries_part_14() {
+    part(14);
+}
+
+@test(timeout = 300)
+fn entries_part_15() {
+    part(15);
 }
 
 @test

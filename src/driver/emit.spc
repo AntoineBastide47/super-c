@@ -960,7 +960,7 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
                 p.simd_table.push(
                     cf::SimdEntry {
                         key: v.v,
-                        fs: cf::CpuFeatureSet { w: v.w },
+                        fs: cf::close(cf::CpuFeatureSet { w: v.w }),
                         module: i as u16,
                         node: at.owner,
                         lanes: lanes,
@@ -973,7 +973,7 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
     for k in 1..p.simd_table.len() {
         let x = *p.simd_table.at(k - 1);
         let y = *p.simd_table.at(k);
-        if x.key != y.key || cf::count(x.fs) != cf::count(y.fs) {
+        if x.key != y.key || x.fs.w[0] != y.fs.w[0] || x.fs.w[1] != y.fs.w[1] {
             continue;
         }
         let ya = &p.modules[y.module as usize].ast;
@@ -983,7 +983,7 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
         errs.emit_span(
             ya.at_const(y.node).span,
             format(
-                "two '@simd_impl' entries for one operation, lane type, lane count and feature count: this one and '{}' ({})",
+                "two '@simd_impl' entries for one operation, lane type, lane count and feature set: this one and '{}' ({})",
                 p.modules[x.module as usize].source.as_str().slice(xn.start as usize, xn.end as usize),
                 p.modules[x.module as usize].file.as_str(),
             ),
@@ -998,49 +998,25 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
     return first;
 }
 
-// Each call of a function that needs CPU features (`@target_feature`, `@simd_impl`) is valid only
-// where the build has them, or inside a function that needs them itself (it is never called
-// otherwise); a function the program's environment calls (`main`, `@c.export`, `@test`, `@bench`)
-// needs them in the build. Read after every module is typed, when every callee's attribute holds its
-// value.
-fn check_feature_calls(p: &mut loader::Package, n: usize) {
+// Each call or value use of a function that needs CPU features (`@target_feature`, `@simd_impl`) is
+// valid where the caller's effective features (`Package::fn_set`) hold them, else only inside `unsafe`
+// (`feature_use`); a function the program's environment calls (`main`, `@test`, `@bench`) needs them in
+// the build, and a `@c.export` function cannot need any. Read after every module is typed, when every
+// attribute holds its value.
+pub fn check_feature_calls(p: &mut loader::Package, n: usize) {
+    p.fn_union = p.features;
     for i in 0..n {
         let a = &p.modules[i].ast;
-        let mut errs = diag::Errors::new();
         for k in 0..a.attrs.len() {
             let at = *a.attrs.at(k);
-            if at.kind != AttrKind::ATTR_TARGET_FEATURE as u8 {
-                continue;
-            }
-            let f = at.owner;
-            let need = fn_features(p, i as ModuleId, f);
-            let ks: [AttrKind; 5] = [
-                AttrKind::ATTR_EXPORT,
-                AttrKind::ATTR_TEST,
-                AttrKind::ATTR_TEST_INIT,
-                AttrKind::ATTR_TEST_FREE,
-                AttrKind::ATTR_BENCH,
-            ];
-            let nsp = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
-            let mut outer = i == 0 && p.modules[i].source.as_str().slice(nsp.start as usize, nsp.end as usize) == "main";
-            for kd in ks {
-                outer = outer || a.attr_of(f, kd) != null;
-            }
-            if outer && !cf::contains(p.features, need) {
-                feature_err(p, &mut errs, nsp, i as ModuleId, f, need, "; it is called from outside the program");
+            // The entries a function of the program may call render; a binding's features say what
+            // its caller needs, not what any caller has.
+            if at.kind == AttrKind::ATTR_TARGET_FEATURE as u8 && !a.at_const(at.owner).as_data.function.is_extern() {
+                p.fn_union = cf::join(p.fn_union, p.fn_set(i as ModuleId, at.owner));
             }
         }
-        for k in 0..a.feature_calls.len() {
-            let fc = *a.feature_calls.at(k);
-            let need = fn_features(p, fc.callee.module, fc.callee.node);
-            if cf::contains(p.features, need) || fc.caller != NODE_NONE && cf::contains(
-                cf::close(fn_features(p, i as ModuleId, fc.caller)),
-                need,
-            ) {
-                continue;
-            }
-            feature_err(p, &mut errs, fc.span, fc.callee.module, fc.callee.node, need, "");
-        }
+        let mut errs = diag::Errors::new();
+        feature_errors(p, i, &mut errs);
         if errs.has_errors() {
             errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
             errs.log();
@@ -1049,8 +1025,137 @@ fn check_feature_calls(p: &mut loader::Package, n: usize) {
     }
 }
 
-// "`f` needs `+a,+b` (`--target-feature=+a,+b`)" at `sp`, then `why`: function `m`/`f` and the
-// features of `need` the build lacks.
+/// The errors of module `i`'s functions that need CPU features (`check_feature_calls`) into `errs`: the
+/// uses beyond their callers' features, and the functions called from outside the program.
+pub fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
+    let a = &p.modules[i].ast;
+    for k in 0..a.attrs.len() {
+        let at = *a.attrs.at(k);
+        if at.kind != AttrKind::ATTR_TARGET_FEATURE as u8 {
+            continue;
+        }
+        let f = at.owner;
+        let need = p.fn_features(i as ModuleId, f);
+        let ks: [AttrKind; 4] = [
+            AttrKind::ATTR_TEST,
+            AttrKind::ATTR_TEST_INIT,
+            AttrKind::ATTR_TEST_FREE,
+            AttrKind::ATTR_BENCH,
+        ];
+        let nsp = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
+        // `main`: the root module's top-level function of that name, no method.
+        let mut outer = false;
+        if i == 0 && p.modules[i].source.as_str().slice(nsp.start as usize, nsp.end as usize) == "main" {
+            let items = a.at_const(a.root).as_data.program.items;
+            for j in 0..items.len {
+                outer = outer || unsafe a.list(items)[j as usize] == f;
+            }
+        }
+        for kd in ks {
+            outer = outer || a.attr_of(f, kd) != null;
+        }
+        if a.attr_of(f, AttrKind::ATTR_EXPORT) != null {
+            errs.emit_span(
+                nsp,
+                format("a '@c.export' function cannot need CPU features: C code calls it without a check"),
+            );
+        } else if outer && !cf::contains(p.features, need) {
+            feature_err(p, errs, nsp, i as ModuleId, f, need, p.features, 2, "; it is called from outside the program");
+        }
+    }
+    for k in 0..a.feature_calls.len() {
+        let fc = *a.feature_calls.at(k);
+        let u = feature_use(p, i, &fc);
+        if u == 0 || u == 1 && fc.in_unsafe {
+            continue;
+        }
+        let need = p.fn_features(fc.callee.module, fc.callee.node);
+        feature_err(p, errs, fc.span, fc.callee.module, fc.callee.node, need, p.fn_set(i as ModuleId, fc.caller), u, "");
+    }
+}
+
+// How use `fc` of module `m` stands: 0 its caller's effective features hold the callee's; 1 it needs
+// `unsafe` (the program checks the features at run time); 2 it is an error even there: features are
+// per build on wasm32, and an extern binding or an `@c.always_inline` function inlines into its C
+// caller, which then lacks them.
+fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
+    // On wasm32 too a function's own features cover its calls: it is emitted only where the build
+    // has them.
+    let have = cf::close(cf::join(p.features, p.fn_features(m as ModuleId, fc.caller)));
+    if cf::contains(have, p.fn_features(fc.callee.module, fc.callee.node)) {
+        return 0;
+    }
+    let ca = &p.modules[fc.callee.module as usize].ast;
+    let inl = ca.at_const(fc.callee.node).as_data.function.is_extern() || ca.attr_of(
+        fc.callee.node,
+        AttrKind::ATTR_ALWAYS_INLINE,
+    ) != null;
+    return pick(p.arch == 2 || inl, 2u8, 1u8);
+}
+
+// Each reported module's `feature_lints`, as lints.
+fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
+            continue;
+        }
+        let mut errs = diag::Errors::new();
+        feature_lints(p, m, &mut errs);
+        lint_flush(p, m, &mut errs, fixes);
+    }
+}
+
+/// The lints of module `m`'s uses of functions that need CPU features, into `errs`: a dispatch row
+/// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
+/// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
+pub fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
+    let a = &p.modules[m].ast;
+    // A dispatch row runs its function where the machine has the row's feature: that feature, with the
+    // build's and what they imply, must hold the function's.
+    for k in 0..a.feature_rows.len() {
+        let fr = *a.feature_rows.at(k);
+        let need = p.fn_features(fr.callee.module, fr.callee.node);
+        let have = cf::close(cf::with(p.features, fr.feature as usize));
+        if p.arch != 2 && !cf::contains(have, need) {
+            let mut miss = String::new();
+            for b in 0..cf::FEATURE_COUNT {
+                if cf::has(need, b) && !cf::has(have, b) {
+                    miss.format_into("{}+{}", mbe::if_s(miss.len() == 0, "", ","), cf::row(b).name);
+                }
+            }
+            errs.warn_span(
+                fr.span,
+                format(
+                    "the row's feature `{}` does not imply `{}`, which this function needs: a machine without them would run it; key the row by a feature that implies them, or check them first (`detect::has_level`)",
+                    cf::row(fr.feature as usize).name,
+                    miss.as_str(),
+                ),
+            );
+        }
+    }
+    if a.unsafe_lints.len() == 0 {
+        return;
+    }
+    let mut need = Set::<u32>::new();
+    for k in 0..a.feature_calls.len() {
+        let fc = *a.feature_calls.at(k);
+        if fc.marker != 0 && feature_use(p, m, &fc) != 0 {
+            need.insert(fc.marker - 1);
+        }
+    }
+    for k in 0..a.unsafe_lints.len() {
+        let ul = *a.unsafe_lints.at(k);
+        if !need.contains(&ul.start) {
+            errs.warn(ul.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+            if ul.fix_end != 0 {
+                errs.fix(ul.start, ul.fix_end, 0);
+            }
+        }
+    }
+}
+
+// The error of use `sp` of function `m`/`f`, whose features `need` the caller's `have` lacks: `u` from
+// `feature_use`, then `why`.
 fn feature_err(
     p: &loader::Package,
     errs: &mut diag::Errors,
@@ -1058,11 +1163,13 @@ fn feature_err(
     m: ModuleId,
     f: NodeId,
     need: cf::CpuFeatureSet,
+    have: cf::CpuFeatureSet,
+    u: u8,
     why: str,
 ) {
     let mut miss = String::new();
     for k in 0..cf::FEATURE_COUNT {
-        if cf::has(need, k) && !cf::has(p.features, k) {
+        if cf::has(need, k) && !cf::has(have, k) {
             miss.push_str(
                 if miss.len() == 0 {
                     "+";
@@ -1075,30 +1182,31 @@ fn feature_err(
     }
     let ca = &p.modules[m as usize].ast;
     let nm = ca.at_const(ca.at_const(f).as_data.function.name).as_data.name.text;
-    errs.emit_span(
-        sp,
-        format(
-            "`{}` needs `{}` (`--target-feature={}`){}",
-            p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize),
-            miss.as_str(),
-            miss.as_str(),
-            why,
-        ),
-    );
-}
-
-pub fn fn_features(p: &loader::Package, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
-    let a = &p.modules[m as usize].ast;
-    let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
-    for k in ks {
-        if a.attr_of(f, k) != null {
-            let v = a.attr_value(f, k);
-            if v.ok {
-                return cf::CpuFeatureSet { w: v.w };
-            }
-        }
+    let fname = p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize);
+    if p.arch == 2 || why.len() != 0 {
+        errs.emit_span(
+            sp,
+            format("`{}` needs `{}` (`--target-feature={}`){}", fname, miss.as_str(), miss.as_str(), why),
+        );
+    } else if u == 2 {
+        errs.emit_span(
+            sp,
+            format(
+                "`{}` needs `{}` and inlines into its caller: call it from a function whose `@target_feature` enables it",
+                fname,
+                miss.as_str(),
+            ),
+        );
+    } else {
+        errs.emit_span(
+            sp,
+            format(
+                "`{}` needs `{}`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check (`std::cpu::detect::has`)",
+                fname,
+                miss.as_str(),
+            ),
+        );
     }
-    return cf::CpuFeatureSet { w: [0, 0] };
 }
 
 // Turn the evaluator lock and every module's interner lock on or off around a parallel stage.
@@ -1615,6 +1723,15 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut Strin
         g.push_str("section(\"");
         g.push_str(p.modules.at(m as usize).source.as_str().slice(sec.start as usize, sec.end as usize));
         g.push_str("\")");
+    }
+    // The features the function states beyond the build's: the C compiler's `target` attribute.
+    let mut ta = String::new();
+    cf::push_target_attr(p.fn_set(m, nid), p.features, p.build_target, &mut ta);
+    if ta.len() != 0 {
+        if g.len() != 0 {
+            g.push_str(", ");
+        }
+        g.push_string(&ta);
     }
     if g.len() != 0 {
         out.push_str("__attribute__((");
@@ -2281,12 +2398,12 @@ fn cemit_seed_module(
         if n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
             continue;
         }
-        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !cf::contains(
+        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || p.arch == 2 && !cf::contains(
             p.features,
-            fn_features(p, m as ModuleId, nid),
+            p.fn_features(m as ModuleId, nid),
         )) {
-            // No call can reach it in this build, and its body may name what the build lacks; an
-            // entry's definition is its definition header (`cemit_simd_entries`).
+            // On wasm32 no call can reach it in this build, and its body may name what the build
+            // lacks; an entry's definition is its definition header (`cemit_simd_entries`).
             continue;
         }
         if !testing && is_test_item(a, nid) {
@@ -2333,6 +2450,7 @@ fn cemit_seed_module(
         cem.noret = a.attr_of(nid, AttrKind::ATTR_NORETURN) != null;
         cem.fn_attrs.truncate(0);
         cemit_fn_attrs(p, m as ModuleId, nid, &mut cem.fn_attrs);
+        cem.fs = p.fn_set(m as ModuleId, nid);
         if cem.emit_fn(&lw.body, sym.as_str()) {
             acc.seeds += 1;
             if is_main {
@@ -2862,6 +2980,7 @@ fn cemit_drain_demand(
     cem.out.clear();
     cem.fn_attrs.truncate(0);
     cemit_fn_attrs(p, d_def.module, d_def.node, &mut cem.fn_attrs);
+    cem.fs = p.fn_set(d_def.module, d_def.node);
     // The instance lands in its generic's module instance shard: spell under that context.
     cem.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
     let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
@@ -3095,6 +3214,7 @@ fn cemit_drain_slice_one(
     sh.out.clear();
     sh.fn_attrs.truncate(0);
     cemit_fn_attrs(p, d_def.module, d_def.node, &mut sh.fn_attrs);
+    sh.fs = p.fn_set(d_def.module, d_def.node);
     let bodyp = if var_on {
         &o.dvars.at(vix as usize).body;
     } else {
@@ -4629,6 +4749,9 @@ pub fn cemit_package(
                             &mut msym,
                         );
                         cem.out.clear();
+                        cem.fn_attrs.truncate(0);
+                        cemit_fn_attrs(p, m9 as ModuleId, mid9, &mut cem.fn_attrs);
+                        cem.fs = p.fn_set(m9 as ModuleId, mid9);
                         if cem.emit_fn(&mlw.body, msym.as_str()) {
                             proto_of(&cem.out, &mut mb_dec);
                             mb_def.push_string(&cem.out);
@@ -6084,7 +6207,7 @@ fn cemit_simd_entries(
     }
     for e in 0..p.simd_table.len() {
         let en = *p.simd_table.at(e);
-        if !cf::contains(p.features, en.fs) {
+        if !cf::contains(cf::join(p.features, p.fn_union), en.fs) {
             continue;
         }
         // A unit (a replayed one too) may call any usable entry: one that does not render is a build
@@ -6094,7 +6217,13 @@ fn cemit_simd_entries(
         let tg = sc.mg.method_target(en.module, en.node);
         sc.out.clear();
         sc.fn_attrs.clear();
-        sc.fn_attrs.push_str("static inline __attribute__((always_inline)) ");
+        sc.fn_attrs.push_str("static inline __attribute__((always_inline");
+        let mut ta = String::new();
+        cf::push_target_attr(cf::close(cf::join(p.features, en.fs)), p.features, p.build_target, &mut ta);
+        if ta.len() != 0 {
+            sc.fn_attrs.format_into(", {}", ta.as_str());
+        }
+        sc.fn_attrs.push_str(")) ");
         let mut ok = cemit_take_body(g, p, en.module, en.node, false, &mut lw, &mut dow.pr) && sc.mg.fn_sym(
             en.module,
             en.node,
@@ -6173,7 +6302,7 @@ fn extern_block_gated(p: &loader::Package, m: ModuleId, items: NodeList, lacking
     for j in 0..items.len {
         let f = unsafe a.list(items)[j as usize];
         if a.at_const(f).kind == NodeKind::NODE_FUNCTION {
-            let fs = fn_features(p, m, f);
+            let fs = p.fn_features(m, f);
             if cf::is_empty(fs) || lacking && cf::contains(p.features, fs) {
                 return false;
             }
@@ -6270,7 +6399,8 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 line.push_str(htxt);
                 line.push_str(mbe::if_s(local, "\"\n", ">\n"));
             }
-            // Each register type's layout (`@c.value`) is the header's: the C compiler checks it.
+            // Each register type's layout (`@c.value`) is the header's: the C compiler checks it. The
+            // alignment is a lower bound: GCC aligns `__m256` to 16 bytes without AVX, to 32 with it.
             for j in 0..eb.items.len {
                 let tid = unsafe a.list(eb.items)[j as usize];
                 if a.attr_of(tid, AttrKind::ATTR_C_VALUE) == null {
@@ -6281,7 +6411,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                     let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
                     let nm = src.slice(tn.start as usize, tn.end as usize);
                     line.format_into(
-                        "_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"@c.value of {}\");\n",
+                        "_Static_assert(sizeof({}) == {} && _Alignof({}) >= {}, \"@c.value of {}\");\n",
                         nm,
                         av.v,
                         nm,
@@ -7145,13 +7275,25 @@ fn cemit_assemble(
     // value (the by-value graph is acyclic, so no header needs its own include), its typedef
     // line, copies of the other declarations it spells, the body, its layout checks.
     let mut deps = Vector::<u32>::new();
-    // The used entries' vector structs: lazy packs a used entry spells by value.
-    for d in si0..nd {
-        if def_used[d] == 0 {
+    // The used entries' vector structs: lazy packs a used entry spells by value, then the 16-byte
+    // chunk pack a used wide one names (`Mangler::vec_def`), which names no pack.
+    let ne = nd - si0;
+    let lazy = if lp0 < si0 {
+        si0 - lp0;
+    } else {
+        0;
+    };
+    for j in 0..ne + lazy {
+        let x = if j < ne {
+            si0 + j;
+        } else {
+            lp0 + j - ne;
+        };
+        if def_used[x] == 0 {
             continue;
         }
         deps.clear();
-        fd.scan_def(ds.body.at(d), d as u32, 2, &mut incd, &mut deps);
+        fd.scan_def(ds.body.at(x), x as u32, pick(j < ne, 2u32, 1u32), &mut incd, &mut deps);
         for k in 0..deps.len() {
             def_used.set(deps[k] as usize, 1);
             incd.set(deps[k] as usize, 0);
@@ -10076,6 +10218,7 @@ pub fn lint_package(
         lint_unused_members(p, lint_mod as i32);
     }
     lint_unused_imports(p, lint_mod as i32, fixes);
+    lint_feature_unsafe(p, lint_mod as i32, fixes);
     if suggest_const {
         lint_const_suggest(p, lint_mod as i32, fixes);
     }
@@ -10246,6 +10389,7 @@ pub fn run_package(
     stage_ms(tstat, &mut tp0, "phase verify+layout");
     if lint {
         lint_unused_items(p, -1);
+        lint_feature_unsafe(p, -1, null);
         stage_ms(tstat, &mut tp0, "phase lint");
     }
     // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.

@@ -39,6 +39,142 @@ pub enum Feature {
     Sve,
     /// SVE2 (aarch64; `sve2`; implies `sve`): detected only.
     Sve2,
+    /// SSE3 (x86_64; `sse3`).
+    Sse3,
+    /// SSSE3 (x86_64; `ssse3`).
+    Ssse3,
+    /// SSE4.1 (x86_64; `sse4.1`).
+    Sse41,
+    /// SSE4.2 (x86_64; `sse4.2`).
+    Sse42,
+    /// POPCNT (x86_64; `popcnt`).
+    Popcnt,
+    /// The 16-byte compare-exchange `cmpxchg16b` (x86_64; `cx16`).
+    Cx16,
+    /// LAHF and SAHF in 64-bit mode (x86_64; `lahf-sahf`).
+    LahfSahf,
+    /// AVX (x86_64; `avx`).
+    Avx,
+    /// AVX2 (x86_64; `avx2`).
+    Avx2,
+    /// The fused multiply-add FMA3 (x86_64; `fma`).
+    Fma,
+    /// BMI1 (x86_64; `bmi1`).
+    Bmi1,
+    /// BMI2 (x86_64; `bmi2`).
+    Bmi2,
+    /// The half-precision conversions F16C (x86_64; `f16c`).
+    F16c,
+    /// LZCNT (x86_64; `lzcnt`).
+    Lzcnt,
+    /// MOVBE (x86_64; `movbe`).
+    Movbe,
+    /// AVX-512 Foundation (x86_64; `avx512f`).
+    Avx512f,
+    /// AVX-512 byte and word lanes (x86_64; `avx512bw`).
+    Avx512bw,
+    /// AVX-512 conflict detection (x86_64; `avx512cd`).
+    Avx512cd,
+    /// AVX-512 doubleword and quadword (x86_64; `avx512dq`).
+    Avx512dq,
+    /// AVX-512 at 128 and 256 bits (x86_64; `avx512vl`).
+    Avx512vl,
+    /// AVX-512 byte permutes (x86_64; `avx512vbmi`).
+    Avx512vbmi,
+    /// AVX-512 compress and shift of bytes and words (x86_64; `avx512vbmi2`).
+    Avx512vbmi2,
+    /// AVX-512 bit algorithms (x86_64; `avx512bitalg`).
+    Avx512bitalg,
+    /// AVX-512 population count of 32 and 64-bit lanes (x86_64; `avx512vpopcntdq`).
+    Avx512vpopcntdq,
+    /// AVX-512 vector neural network instructions (x86_64; `avx512vnni`).
+    Avx512vnni,
+    /// AVX-512 half precision (x86_64; `avx512fp16`).
+    Avx512fp16,
+    /// Galois field instructions (x86_64; `gfni`).
+    Gfni,
+    /// The AES rounds on 256 and 512 bits (x86_64; `vaes`).
+    Vaes,
+    /// The carry-less multiply on 256 and 512 bits (x86_64; `vpclmulqdq`).
+    Vpclmulqdq,
+    /// The AES rounds AES-NI (x86_64; `aes`).
+    Aesni,
+    /// The carry-less multiply (x86_64; `pclmulqdq`).
+    Pclmulqdq,
+    /// AVX10.1: `x86-64-v4` and the AVX-512 extensions (x86_64; `avx10.1`).
+    Avx101,
+    /// AVX10.2 (x86_64; `avx10.2`).
+    Avx102,
+}
+
+/// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).
+pub const X86_64_V2: [Feature; 7] = [
+    Feature::Sse3,
+    Feature::Ssse3,
+    Feature::Sse41,
+    Feature::Sse42,
+    Feature::Popcnt,
+    Feature::Cx16,
+    Feature::LahfSahf,
+];
+/// `x86-64-v3`: `x86-64-v2` and AVX2.
+pub const X86_64_V3: [Feature; 15] = [
+    Feature::Sse3,
+    Feature::Ssse3,
+    Feature::Sse41,
+    Feature::Sse42,
+    Feature::Popcnt,
+    Feature::Cx16,
+    Feature::LahfSahf,
+    Feature::Avx,
+    Feature::Avx2,
+    Feature::Fma,
+    Feature::Bmi1,
+    Feature::Bmi2,
+    Feature::F16c,
+    Feature::Lzcnt,
+    Feature::Movbe,
+];
+/// `x86-64-v4`: `x86-64-v3` and the AVX-512 F, BW, CD, DQ and VL subsets.
+pub const X86_64_V4: [Feature; 20] = [
+    Feature::Sse3,
+    Feature::Ssse3,
+    Feature::Sse41,
+    Feature::Sse42,
+    Feature::Popcnt,
+    Feature::Cx16,
+    Feature::LahfSahf,
+    Feature::Avx,
+    Feature::Avx2,
+    Feature::Fma,
+    Feature::Bmi1,
+    Feature::Bmi2,
+    Feature::F16c,
+    Feature::Lzcnt,
+    Feature::Movbe,
+    Feature::Avx512f,
+    Feature::Avx512bw,
+    Feature::Avx512cd,
+    Feature::Avx512dq,
+    Feature::Avx512vl,
+];
+
+/// An x86-64 psABI level (`std::cpu::detect::has_level`).
+pub enum Level {
+    V2,
+    V3,
+    V4,
+}
+
+extend Level {
+    /// The level's features beyond the baseline.
+    pub const fn features(self: Level) []'static Feature {
+        return switch self {
+            V2 => X86_64_V2,
+            V3 => X86_64_V3,
+            V4 => X86_64_V4,
+        };
+    }
 }
 
 /// A set of features: bit `i` of `bits` is the variant of discriminant `i`.

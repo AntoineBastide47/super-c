@@ -34,6 +34,7 @@ fn run_file(
     target: i32,
     arch: i32,
     features: cf::CpuFeatureSet,
+    simd_width: u32,
     bootstrap_tags: bool,
     lint: bool,
     cflags: str,
@@ -49,6 +50,7 @@ fn run_file(
     let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
     p.arch = arch;
     p.features = features;
+    p.simd_width = pick(simd_width != 0, simd_width, 256);
     p.mem_check = bsys::mem_checker(cflags);
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
@@ -680,6 +682,8 @@ struct CommonOpts {
     pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     pub bad: bool, // malformed argument list: print usage and exit 1
     pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
+    pub target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
+    pub simd_width: u32, // --simd-width=256|512 (0: the manifest's)
 }
 
 extend CommonOpts {
@@ -735,6 +739,11 @@ extend CommonOpts {
                 self.target_features.push_byte(b',');
             }
             self.target_features.push_str(arg[17..]);
+        } else if arg.starts_with("--target-cpu=") {
+            self.target_cpu = String::from_str(arg[13..]);
+        } else if arg.starts_with("--simd-width=") {
+            self.simd_width = pick(arg[13..] == "512", 512u32, pick(arg[13..] == "256", 256u32, 0));
+            self.bad = self.bad || self.simd_width == 0;
         } else if arg == "--bootstrap-tags" {
             self.bootstrap_tags = true;
         } else if arg == "--no-lint" {
@@ -1207,6 +1216,8 @@ OPTIONS:
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
+    --target-cpu=C         x86_64 level whose features come first: x86-64, x86-64-v2, x86-64-v3, x86-64-v4
+    --simd-width=W         vector width the planner prefers on AVX-512: 256 (default) or 512
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
@@ -1297,7 +1308,35 @@ OPTIONS:
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
+    // `--target-cpu` names a level of the build's instruction set.
+    let mut cerr = String::new();
+    let mut cpu_set = cf::baseline(co.target, co.arch);
+    if !cf::level(co.target_cpu.as_str(), co.arch, true, &mut cpu_set, &mut cerr) {
+        eprintln("error: {}", cerr.as_str());
+        return 1;
+    }
     if mode == Mode::MODE_LINT {
+        // The instruction set's gates and the features' rules apply as in a build: build.toml's, when
+        // there is one, then the command line's.
+        let mut lf = cpu_set;
+        let mut lerr = String::new();
+        let lm = bman::load("build.toml", false);
+        if !lm.is_none() {
+            let mut man = lm.unwrap();
+            man.arch = co.arch;
+            man.target = co.target;
+            if co.target_cpu.len() != 0 {
+                man.target_cpu = co.target_cpu.clone();
+            }
+            if !bsys::check_features(&man, co.target_features.as_str()) {
+                return 1;
+            }
+            lf = bsys::features_for(&man, bo.profile, co.target_features.as_str());
+        } else if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut lf, &mut lerr) {
+            eprintln("error: {}", lerr.as_str());
+            return 1;
+        }
+        loader::set_load_target(co.arch, cf::close(lf));
         let mut rc = 0;
         if lint_alt().len() != 0 {
             // Manifest layout: every path resolves against the project root, so ALL listed paths share
@@ -1366,6 +1405,9 @@ OPTIONS:
         let mut man = mo.unwrap();
         man.arch = co.arch;
         man.target = co.target;
+        if co.target_cpu.len() != 0 {
+            man.target_cpu = co.target_cpu.clone();
+        }
         if !bsys::check_features(&man, co.target_features.as_str()) {
             return 1;
         }
@@ -1392,6 +1434,7 @@ OPTIONS:
             lint: co.lint,
             transpiler: "",
             target_features: co.target_features.as_str(),
+            simd_width: co.simd_width,
         };
         return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
     }
@@ -1420,6 +1463,9 @@ OPTIONS:
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
             man.target = co.target;
+            if co.target_cpu.len() != 0 {
+                man.target_cpu = co.target_cpu.clone();
+            }
             if !bsys::check_features(&man, co.target_features.as_str()) {
                 return 1;
             }
@@ -1444,6 +1490,7 @@ OPTIONS:
                 lint: co.lint,
                 transpiler: transpiler,
                 target_features: co.target_features.as_str(),
+                simd_width: co.simd_width,
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);
@@ -1486,7 +1533,7 @@ OPTIONS:
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
     // A script build has no manifest: the baseline of the instruction set and the command line's list.
-    let mut feats = cf::baseline(co.target, co.arch);
+    let mut feats = cpu_set;
     let mut ferr = String::new();
     if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut feats, &mut ferr) {
         eprintln("error: {}", ferr.as_str());
@@ -1504,6 +1551,7 @@ OPTIONS:
         co.target,
         co.arch,
         cf::close(feats),
+        co.simd_width,
         co.bootstrap_tags,
         co.lint,
         pflags.as_str(),

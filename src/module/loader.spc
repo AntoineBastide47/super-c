@@ -139,6 +139,11 @@ pub struct Package {
     /// The resolved CPU features of the build (`--target-feature`, `target-features`): the baseline of
     /// `arch` unless the driver sets them.
     pub features: cf::CpuFeatureSet,
+    /// The vector width in bits the planner prefers where AVX-512 is enabled: 256 (the default) or 512.
+    pub simd_width: u32,
+    /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
+    /// some function of the program may plan with beyond `features`.
+    pub fn_union: cf::CpuFeatureSet,
     /// The backend table: every `@simd_impl` entry by key, then by feature count, the largest first
     /// (built once every module is typed; `emit::simd_plan` reads it).
     pub simd_table: Vector<cf::SimdEntry>,
@@ -1163,6 +1168,17 @@ pub const PAR_MIN_USER_BYTES: usize = 262144; // 256 KiB
 // LSP and library users keep the serial default (overlaid loads always stay serial).
 static mut G_LOAD_JOBS: u32 = 1;
 
+// The instruction set and features of every package `Package::new` makes; arch -1: the host's. The
+// lint driver sets them from `--arch` and `--target-feature` before its loads.
+static mut G_ARCH: i32 = -1;
+static mut G_FEATURES: cf::CpuFeatureSet = cf::CpuFeatureSet { w: [0, 0] };
+
+/// Set the instruction set and features of the packages loaded from now on.
+pub fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
+    unsafe G_ARCH = arch;
+    unsafe G_FEATURES = features;
+}
+
 /// Set the worker count for parallel module loading (1 = serial) before the first load.
 pub fn set_load_jobs(j: u32) {
     unsafe G_LOAD_JOBS = j;
@@ -1642,6 +1658,40 @@ fn pub_child(map: &Vector<TypeId>, t: TypeId, i: usize) TypeId {
 }
 
 extend Package {
+    /// The CPU features function `f` of module `m` states (`@target_feature`, `@simd_impl`); empty for
+    /// another.
+    pub fn fn_features(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
+        let a = &self.modules[m as usize].ast;
+        let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
+        for k in ks {
+            if a.attr_of(f, k) != null {
+                let v = a.attr_value(f, k);
+                if v.ok {
+                    return cf::CpuFeatureSet { w: v.w };
+                }
+            }
+        }
+        return cf::CpuFeatureSet { w: [0, 0] };
+    }
+
+    /// Whether type `t` of `a` is a function value's type that `FnPtr` admits: a function pointer, or a
+    /// named function's type; never a closure's.
+    pub fn fn_value_type(self: &Self, a: &Ast, t: TypeId) bool {
+        let y = a.type_at(t);
+        return y.kind == TypeKind::TYPE_FUNCTION && (y.fn_sig() || unsafe (*self.module_ast_const(y.module)).at_const(
+            y.as_data.decl,
+        ).kind == NodeKind::NODE_FUNCTION);
+    }
+
+    /// The effective features of function `f` of module `m` (NODE_NONE: none): the build's and those
+    /// it states, closed under `implies`. On wasm32 features are per build: the build's alone.
+    pub fn fn_set(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
+        if f == NODE_NONE || self.arch == 2 {
+            return self.features;
+        }
+        return cf::close(cf::join(self.features, self.fn_features(m, f)));
+    }
+
     /// The analysis worker count for this loaded package: `jobs` when the user source is large enough
     /// for the parallel frontiers to pay for themselves, else 1 (see PAR_MIN_USER_BYTES).
     pub fn analysis_jobs(self: &Self, jobs: u32) u32 {
@@ -2428,8 +2478,16 @@ extend Package {
     /// An empty package for the host architecture; `load_module` fills it.
     pub fn new() Package {
         return Package {
-            arch: unsafe shim::sc_host_arch(),
-            features: cf::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch()),
+            arch: if unsafe G_ARCH < 0 {
+                unsafe shim::sc_host_arch();
+            } else {
+                unsafe G_ARCH;
+            },
+            features: if unsafe G_ARCH < 0 {
+                cf::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch());
+            } else {
+                unsafe G_FEATURES;
+            },
             build_module: -1,
             tt: Box::<TypePool>::new(TypePool {}),
             ok: true,
@@ -5494,7 +5552,7 @@ extend Package {
         // and a module names a vector (`Ast.names_vectors`; std's own simd.spc aside): its
         // `@simd_impl` entries are what the lowering planner calls. A program without vectors
         // loads none, so it pays nothing for it.
-        let backends: [str<'static>; 3] = ["x86", "aarch64", "wasm"];
+        let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
         let mut vec_use = user_vectors;
         for i in 0..self.modules.len() {
             let md = &self.modules[i];

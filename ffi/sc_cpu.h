@@ -18,5 +18,11 @@ void sc_cpu_detected_words(uint64_t out[2]);
 /* The features the build's flags enable (the C compiler's `__ARM_FEATURE_*`, `__wasm_simd128__`, ...
    macros), two words. */
 void sc_cpu_static_words(uint64_t out[2]);
+/* The x86 features (one word) of CPUID registers `r` (leaf 1 ECX; leaf 7.0 EBX, ECX, EDX; leaf 7.1
+   EDX; leaf 80000001h ECX; leaf 24h EBX), XCR0 `xcr0`, and `os_zmm`, the OS's own report of the
+   AVX-512 state (macOS). A pure function, on every host. */
+uint64_t sc_cpu_x86_decide(const uint32_t r[7], uint64_t xcr0, int os_zmm);
+/* How many times the OS query ran in this process (`sc_cpu_detected_words` included). */
+int sc_cpu_query_count(void);
 
 #endif

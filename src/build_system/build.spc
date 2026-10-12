@@ -1201,6 +1201,12 @@ extend CcStream {
             self.cc_tail.push_str(lf);
             push_arg(&mut self.lto_ld, lf);
         }
+        // The link takes it too: under LTO it generates the code.
+        let mut uvm = String::new();
+        if push_uvm(&mut self.probes, &mut uvm) {
+            self.cc_tail.push_string(&uvm);
+            self.ldbase.push_string(&uvm);
+        }
         self.prefix_args = clone_args(&self.cc_args);
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
@@ -1848,6 +1854,7 @@ fn stamp_opt_line(
     target: i32,
     arch: i32,
     feats: cf::CpuFeatureSet,
+    width: u32,
     bootstrap: bool,
     lint: bool,
     ccount: u64,
@@ -1857,7 +1864,7 @@ fn stamp_opt_line(
     out.push_u64(target as u64);
     out.push_str("\t");
     out.push_u64(arch as u64 & 0xFF);
-    out.format_into("\t{}.{}\t", feats.w[0], feats.w[1]);
+    out.format_into("\t{}.{}.{}\t", feats.w[0], feats.w[1], width);
     out.push_u64(bootstrap as u64);
     out.push_str("\t");
     out.push_u64(lint as u64);
@@ -1901,7 +1908,7 @@ fn stamp_write(
     }
     let mut out = String::from_str("sc-emit-stamp v3\n");
     stamp_exe_line(&mut out, cid);
-    stamp_opt_line(&mut out, target, arch, p.features, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
+    stamp_opt_line(&mut out, target, arch, p.features, p.simd_width, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
         // flags shape the emitted tree.
@@ -1947,6 +1954,7 @@ fn stamp_fresh(
     target: i32,
     arch: i32,
     feats: cf::CpuFeatureSet,
+    width: u32,
     bootstrap: bool,
     lint: bool,
     gen: str,
@@ -2002,7 +2010,7 @@ fn stamp_fresh(
             // Every field but the unit count must match this build's options.
             ccount = stamp_u64(line, 6);
             let mut want = String::new();
-            stamp_opt_line(&mut want, target, arch, feats, bootstrap, lint, ccount, root_dir);
+            stamp_opt_line(&mut want, target, arch, feats, width, bootstrap, lint, ccount, root_dir);
             if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
@@ -2085,6 +2093,13 @@ pub struct BuildCtx<'a> {
     pub transpiler: str<'a>,
     /// `--target-feature`: the comma list applied after the manifest's `target-features`.
     pub target_features: str<'a>,
+    /// `--simd-width`: 256 or 512; 0 = the manifest's `simd-width`.
+    pub simd_width: u32,
+}
+
+/// The vector width the build's planner prefers on AVX-512: `--simd-width`, else `simd-width`, else 256.
+pub fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
+    return pick(cx.simd_width != 0, cx.simd_width, pick(m.simd_width != 0, m.simd_width, 256));
 }
 
 /// Check the `target-features` lists of `m` (the build's and every profile's: a feature of another
@@ -2093,7 +2108,7 @@ pub struct BuildCtx<'a> {
 pub fn check_features(m: &mf::Manifest, cli: str) bool {
     let mut s = cf::baseline(m.target, m.arch);
     let mut err = String::new();
-    let mut ok = true;
+    let mut ok = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
     for i in 0..m.target_features.len() {
         ok = ok && cf::apply(m.target_features.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
     }
@@ -2134,11 +2149,12 @@ pub fn mem_checker(fl: str) bool {
 }
 
 /// The CPU features of a build of `m` under profile `prof_name`: the instruction set's baseline, then
-/// the profile's `target-features` (else the build's), then the command line's list `cli`, closed
+/// the build's `target-cpu` level, then the profile's `target-features` (else the build's), then the command line's list `cli`, closed
 /// under `implies`. The lists passed `check_features`.
 pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
     let mut s = cf::baseline(m.target, m.arch);
     let mut err = String::new();
+    let _ = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
     let pi = m.profile_index(prof_name);
     let tf = if pi >= 0 && m.profiles.at(pi as usize).has_features {
         &m.profiles.at(pi as usize).target_features;
@@ -2176,6 +2192,7 @@ fn emit_closure(
     let mut p = loader::package_new(root_dir, alt, cx.std_dir);
     p.arch = m.arch;
     p.features = features_for(m, prof_name, cx.target_features);
+    p.simd_width = simd_width(m, cx);
     let pi = m.profile_index(prof_name);
     if pi >= 0 {
         let mut fl = String::new();
@@ -2280,6 +2297,9 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     args.push(format("--arch={}", par::axis_names(true)[m.arch as usize]));
     if cx.target_features.len() != 0 {
         args.push(format("--target-feature={}", cx.target_features));
+    }
+    if simd_width(m, cx) == 512 {
+        push_arg(&mut args, "--simd-width=512");
     }
     if cx.bootstrap_tags {
         push_arg(&mut args, "--bootstrap-tags");
@@ -2391,6 +2411,7 @@ pub fn transpile_step(
         cx.target,
         m.arch,
         features_for(m, prof_name, cx.target_features),
+        simd_width(m, cx),
         cx.bootstrap_tags,
         cx.lint,
         gen.as_str(),
@@ -2450,10 +2471,18 @@ fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32,
 }
 
 /// `features_pass` for a build without a manifest: C compiler `cc` (words) with compile flags `flags`,
-/// the probe record in `pdir`.
-pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32, all: cf::CpuFeatureSet) bool {
+/// the probe record in `pdir`. Appends to `more` the flags the build adds (`push_uvm`).
+pub fn features_accepted(
+    pdir: str,
+    cc: str,
+    flags: str,
+    target: i32,
+    arch: i32,
+    all: cf::CpuFeatureSet,
+    more: &mut String,
+) bool {
     let feats = cf::beyond_baseline(all, target);
-    let need = feature_probes(feats);
+    let need = feature_probes(feats) | uvm_need(target, arch);
     if need == 0 {
         return true;
     }
@@ -2471,8 +2500,27 @@ pub fn features_accepted(pdir: str, cc: str, flags: str, target: i32, arch: i32,
     let ver = cc_version_argv(&mut va, pdir);
     probes.settle(&ver);
     let ok = features_pass(&mut probes, feats, target, cc);
+    let _ = push_uvm(&mut probes, more);
     probes.save();
     return ok;
+}
+
+// The unaligned-vector-move probe's bit where it applies (Windows x86_64), else 0: elsewhere a build
+// needs no probe record for it.
+fn uvm_need(target: i32, arch: i32) u64 {
+    return pick(target == 0 && arch == 0, 1u64 << pr::UVM as u64, 0);
+}
+
+// Append the unaligned-vector-move flag to `out` when its probe accepted it (the result joins the
+// command fingerprint); whether it did.
+fn push_uvm(probes: &mut pr::Probes, out: &mut String) bool {
+    if probes.res.at(pr::UVM).as_str() != "accepted" {
+        return false;
+    }
+    probes.mark_used(pr::UVM);
+    out.push_byte(b' ');
+    out.push_str(pr::table()[pr::UVM].flags);
+    return true;
 }
 
 fn feature_probes(s: cf::CpuFeatureSet) u64 {
@@ -2592,7 +2640,7 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(cf::beyond_baseline(feats, cx.target)),
+        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};

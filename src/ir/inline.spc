@@ -31,10 +31,11 @@ import module::loader as loader;
 import ir::layout as lay;
 import ir::core as ir;
 import ir::lower as irl;
+import ir::cpu_features as cf;
 import stdlib;
 
 // Rejection reasons (SC_INLINE_STATS report order).
-pub const IJ_NOT_FN: u8 = 0; // extern, bodiless, attributed, or not a plain function
+pub const IJ_NOT_FN: u8 = 0; // extern, bodiless, attributed, needing features the caller lacks, or not a plain function
 pub const IJ_RECURSIVE: u8 = 1;
 pub const IJ_SHAPE: u8 = 2; // asm/closure/reflect/assert/coercion/wide-literal body content
 pub const IJ_TOO_BIG: u8 = 3;
@@ -754,11 +755,12 @@ extend InlineStore {
                 return shape; // the assert message renders from the callee module's source
             }
             // Inner calls splice into a FOREIGN TU: only a public non-extern CONCRETE
-            // function (no fn/extend generics, no call targs) or a header-declared extern
-            // function is guaranteed a global symbol and a shared prototype there -- a generic
+            // function (no fn/extend generics, no call targs), a header-declared extern function
+            // or a runtime atomic (a verified intrinsic call, `static inline` in every TU's runtime
+            // header) is guaranteed a global symbol and a shared prototype there -- a generic
             // inner call would need the emitter's demand machinery to re-derive substitutions it
             // no longer has context for.
-            if tk.kind == ir::TM_CALL && (tk.callee.node == NODE_NONE || tk.targs_len != 0 || !is_concrete_pub_fn(
+            if tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && (tk.callee.node == NODE_NONE || tk.targs_len != 0 || !is_concrete_pub_fn(
                 pkg,
                 tk.callee,
             ) && !is_header_extern_fn(pkg, tk.callee)) {
@@ -899,6 +901,16 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         if depth >= MAX_DEPTH {
             st.reasons[IJ_DEPTH as usize] = st.reasons[IJ_DEPTH as usize] + 1;
+            continue;
+        }
+        // A callee that needs features its caller lacks runs only after the caller's run-time check:
+        // its body never splices into the caller (whose C has no `target` attribute for them).
+        let ca = unsafe &*(*pkg).module_ast_const(t.callee.module);
+        if ca.at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION && ca.at_const(t.callee.node).as_data.function.needs_features() && !cf::contains(
+            unsafe (*pkg).fn_set(lw.body.owner.module, lw.body.owner.node),
+            unsafe (*pkg).fn_features(t.callee.module, t.callee.node),
+        ) {
+            st.reasons[IJ_NOT_FN as usize] = st.reasons[IJ_NOT_FN as usize] + 1;
             continue;
         }
         let slot = cx.callee_slot(t.callee);
@@ -1081,11 +1093,13 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             let ca = unsafe &*(&*pkg).module_ast_const(cm);
             let mut mode: u8 = 255;
             if pt != TYPE_NONE && sty != TYPE_NONE {
-                // &mut T into a &T parameter, *mut T into *const T: the same C pointer value, no
-                // adjustment needed
+                // &mut T into a &T parameter, *mut T into *const T, a reference into a pointer
+                // parameter, a function into a function-pointer parameter (the checker matched the
+                // signatures): the same C value, no adjustment needed
                 let py0 = *ca.type_at(pt);
                 let sy0 = *ca.type_at(sty);
-                if py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) && py0.as_data.elem == sy0.as_data.elem {
+                let ptr_like = py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) || py0.kind == TypeKind::TYPE_POINTER && sy0.kind == TypeKind::TYPE_REFERENCE;
+                if ptr_like && py0.as_data.elem == sy0.as_data.elem || py0.kind == TypeKind::TYPE_FUNCTION && py0.fn_sig() && sy0.kind == TypeKind::TYPE_FUNCTION && !sy0.fn_sig() {
                     mode = 0;
                 }
             }

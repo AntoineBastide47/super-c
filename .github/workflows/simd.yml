@@ -62,6 +62,14 @@ jobs:
           else
             "./super-c${BINEXT:-}" test --quiet --filter=simd_baseline ${cstd:+"$cstd"}
             sh bench/simd_baseline/record.sh ${cstd:+"$cstd"}
+            # x86_64: the portable kernels at AVX2 and, where the runner has it, AVX-512, each against
+            # the hand-written kernels of its level (the arithmetic ones within 10%).
+            if [ "${{ matrix.target }}" != macos ]; then
+              sh bench/simd_baseline/record.sh --target-cpu=x86-64-v3 ${cstd:+"$cstd"}
+              if grep -qw avx512bw /proc/cpuinfo 2>/dev/null; then
+                sh bench/simd_baseline/record.sh --target-cpu=x86-64-v4 ${cstd:+"$cstd"}
+              fi
+            fi
           fi
 
       - uses: actions/upload-artifact@v7

@@ -10,13 +10,22 @@ is in super-c-language `references/simd.md` (Target features and backends).
 of a `CpuFeatureSet { w: [u64; 2] }` and the discriminant of `std::cpu::Feature`), `IMPLIED` (each
 row's closure, a constant), `apply` (a `+a,-b` list for one instruction set, with the error text),
 `close`, `baseline(target, arch)` (a row's `base` names the platforms whose every build has it:
-the macOS and iOS aarch64 baselines are wider), `beyond_baseline`, `push_c_flags(set, target)`
-(the aarch64 rows make one `-march`/`-mcpu` flag at the lowest architecture their `level` allows;
-the `aarch64-features` probe checks it under the build's flags, for the features beyond the
-baseline only). `IMPLIED` is closed by bounded passes: an implication may name a later row.
+the macOS and iOS aarch64 baselines, and the macOS, iOS and Android x86_64 ones, are wider),
+`beyond_baseline`, `level` (an x86-64 psABI level name, `X_LEVELS`; `apply` takes one as a list
+item), `push_c_flags(set, target)` (the aarch64 rows make one `-march`/`-mcpu` flag at the lowest
+architecture their `level` allows; the x86_64 rows `-march=x86-64-vN` for the highest level the
+set holds above the baseline, then each further row's `-m` flag; the `aarch64-features` and
+`x86-features` probes check them under the build's flags, for the features beyond the baseline
+only) and `push_target_attr(set, build, target)` (a function's C `target` attribute: the x86 flag
+names, or `SC_TGT_A64(clang, gcc)` with clang's `+ext` list and GCC's `arch=armv8.N-a+ext`, which
+the runtime header chooses). `IMPLIED` is closed by bounded passes: an implication may name a later row.
 `Manifest.target` carries the platform. `Package.features` holds the build's closed set (the host
 baseline by default); `bsys::features_for` computes it from build.toml and `--target-feature`,
-`main.spc` for a bare build. `Package.mem_check` is true under `-fsanitize=` with `address`,
+`main.spc` for a bare build and the `lint` command (`loader::set_load_target`, read by
+`Package::new`). `Package.simd_width` (256 or 512) is the planner's preferred width on AVX-512.
+A function's effective set is `Package::fn_set(m, f)`: the build's and its `@target_feature`'s
+(`fn_features`), closed (on wasm32 the build's alone); `Package.fn_union` joins every function's
+set, so the entries any function may call render. `Package.mem_check` is true under `-fsanitize=` with `address`,
 `memory` or `thread` (`bsys::mem_checker`; the transpile form sets the engine's toolchain, so
 both routes agree). Both, and every backend entry's key, features and name, mix into the TU
 cache header hash (`driver::tuc`), so a changed set or table never replays a cached unit.
@@ -35,15 +44,24 @@ function's and its extend's `@arch` gates (`check_feature_gate`), before the bui
 removes a gated item; `TypePool.simd_op` and `TypePool.cpu_feature` name the two std enums.
 
 The type checker records each call or value use of a function that needs features
-(`Ast.feature_calls`) and each caller of a `@c.lane_access` function (`Ast.lane_callers`);
-`check_feature_calls` (`driver/emit.spc`, package-wide) reports a use whose build and caller both
-lack the features. The interpreter traps on a call of such a function ("`f` has no compile-time
+(`Ast.feature_calls`: span, callee, caller, the enclosing `unsafe` marker, `in_unsafe`) and each
+caller of a `@c.lane_access` function (`Ast.lane_callers`); an `unsafe` marker whose only reason is
+such a use goes to `Ast.unsafe_lints` instead of the checker's own lint. `check_feature_calls`
+(`driver/emit.spc`, package-wide, after the type check) classifies each use (`feature_use`: 0 the
+caller's effective set holds the callee's, 1 it needs `unsafe`, 2 an error even there: wasm32, an
+extern binding, an `@c.always_inline` callee), reports the uses not covered, the `@c.export`
+functions with features and the outside-called ones (`main`, tests, benches) the build cannot
+call, and sets `fn_union`; `lint_feature_unsafe` reports a deferred marker no use of class 1 or 2
+needs (a build's lints and `lint`), with the `(cpu::Feature, f)` tuple rows of feature functions
+(`Ast.feature_rows`, a `detect::dispatch` table) whose feature does not imply the function's. `tc_feature_bound_args` rejects a feature function as the
+value of a closure bound. The Core IR inliner never splices a callee whose features its caller's
+set lacks (`inline.spc`, reason `IJ_NOT_FN`). The interpreter traps on a call of such a function ("`f` has no compile-time
 value"). `ir::facts::call_access` reads the memory annotations (`MA_READ`, `MA_WRITE`, `MA_LANES`);
 `term_effect` gives an annotated read `EF_NONE` and a write `EF_PTR` through its argument.
 
 ## Backend table
 
-`loader::load_prelude` loads `std/simd/backend/<x86|aarch64|wasm>.spc` as module
+`loader::load_prelude` loads `std/simd/backend/<x86_64|aarch64|wasm>.spc` as module
 `std::simd::backend::<name>` (`Module.backend`, std for `tc_in_std` whatever the std path's
 spelling) when the file exists, the build has a feature and a loaded module names a vector
 (`Ast.names_vectors`, set by the lexer's `vector_name`: `Simd` or `Mask` before `<` or `::`,
@@ -55,20 +73,26 @@ against the operation's shape and computes its key: `op | T << 16 | R << 24 | N 
 the scalar operators, `OP_SIMD + code`, then the lane-mask forms `OP_CMP_LANES` to
 `OP_SHR_SCALAR`; `T` the vector operand's lane builtin, `R` the result's lane or scalar builtin or
 the index lanes' for a run-time index, `N` the lanes). `build_simd_table` collects the entries of
-the build's instruction set into `Package.simd_table`, sorted by `simd_plan::entry_cmp` (key, then
-feature count, the largest first, then declaration), reports two entries with one key and feature
-count, and marks an entry `lanes` when it calls a `@c.lane_access` binding. `ir::op_variant` names
+the build's instruction set into `Package.simd_table` with each entry's feature set closed, sorted
+by `simd_plan::entry_cmp` (key, then feature count, the largest first, then declaration),
+reports two entries with one key and feature set, and marks an entry `lanes` when it calls a
+`@c.lane_access` binding. `ir::op_variant` names
 each operation's `simd::Op` variant.
 
 ## Planner
 
-`simd_plan::plan(table, features, checked, op, t, r, n)` is a pure function:
+`simd_plan::plan(table, fs, checked, op, t, r, n, width)` is a pure function of the table, the
+effective set `fs` of the function that holds the statement (`CEmit.fs`, set per function and
+closure) and the preferred width (`max_bits`: 256 bits on AVX-512 unless the width is 512):
 
-- `PF_NATIVE`: an entry for `n` lanes whose features the build holds (the most specific first).
+- `PF_NATIVE`: an entry for `n` lanes, at most `max_bits` wide, whose features `fs` holds (the
+  largest set first).
 - `PF_SPLIT`: the widest entry for `n / 2^k` lanes, `chunks` calls in lane order. Only a lane-wise
   operation splits, or a reduction whose combining operation (`combine_op`: the tree float sums
   and products, wrapping integer sums and products, `min`, `max`, `and`, `or`, `xor`) has an
   entry at the chunk width.
+- `PF_NATIVE` again: an entry for `n` lanes past the preferred width, when no split exists (a
+  512-bit `compress`).
 - `PF_SCALAR`: the lane loop.
 
 `Plan.combine` is IR_NONE but for a split reduction. `checked` (a memory checker) skips
@@ -107,6 +131,14 @@ free element, and restores the elements after the last written one, read first
   writes a value the test reads the same (1 or 0, the bits or 0);
 - else `LanesToMask` per chunk, the bits shifted into place.
 
+Where the set has the mask-bit forms (AVX-512), a comparison calls `CmpEq` .. `CmpGe` and a
+`choose` calls `Choose` instead of the lane-mask forms. A gather or scatter with a `Gather` or
+`Scatter` entry calls it after the index check (the inactive lanes keep the fallback); a
+`compress_store` with `Compress` and `StoreMasked` entries compresses into a register and stores
+its first `count` lanes (`ventry_whole`: these cannot split, so they take entries past the
+preferred width when none within it exists). A function's C definition and each entry's carry the C target attribute
+of their features beyond the build's (`cemit_fn_attrs`, `push_target_attr`).
+
 A comparison in lane-mask temporaries (`ml_lanes`), and the copy its `choose` reads, declare no
 variable. A split reads and writes 16-byte chunks in place (`v.c[k]`); only a raw form whose
 pointer may address an address-taken vector (`vec_addr_taken`) copies its vectors first. A
@@ -114,7 +146,7 @@ split reduction is one expression over the chunks; a narrowing passes each pair 
 compound literal of the wider vector's `c`; pointers, masks, scalars, names and literals are
 spelled at each use, an operand expression bound once.
 
-Without entries (`simd_on` false: wasm without `simd128`, x86_64, `SC_SIMD_SCALAR=1`) every
+Without entries (`simd_on` false: wasm without `simd128`, `SC_SIMD_SCALAR=1`) every
 vector statement is a lane loop, and `vec_fusion` merges each slice load or non-trapping
 lane-wise operation that only a later lane loop of its block reads, when no statement between
 writes memory, an address-taken local or the definition's operands: the reader's loop computes
@@ -142,7 +174,7 @@ folds, which assume no signaling NaN (`x + -0.0`, `x * 1.0` and `fminnm(x, x)` f
 so NaN handling uses an operation they keep (`fmax(x, x)` quiets) or comparisons and selects; and a signed wrapping operation uses the unsigned
 intrinsic (GCC spells `vaddq_s8` as C arithmetic, undefined on overflow).
 Entry calls spell `__sc_si_<symbol>(..)`. `cemit_simd_entries` renders every entry the
-build's features allow (a TU-cache replay or a macro expansion may call any of them), splices
+features of `fn_union` allow (a TU-cache replay or a macro expansion may call any of them), splices
 the file's helpers into each entry whatever `SC_INLINE` says (a call left is a build error),
 renders a constant an entry addresses (a shuffle table) with the core module's definitions
 (`emit_owner`) and declares it in each entry header that names it, then renders each one with a
@@ -162,8 +194,17 @@ in registers.
 - `tests/simd_wasm_test.spc`: byte-identical C without vectors, instruction checks, the wasm32
   module against a scalar model.
 - `tests/simd_entry_test.spc` (`tests/gen/simd_entry.spc`): every entry against the lane loop,
-  in the wasm lane and on an aarch64 host; an entry another of its key and other features
-  shadows in this build is called in a build of the other set.
+  in the wasm lane and on an aarch64 or x86_64 host, each entry the run's features
+  (`SC_SIMD_FEATURES`) reach and no run with fewer features reaches (the baseline run, and at 512
+  bits the 256-bit run); an entry another of its key and other features shadows in this
+  build is called in a build of the other set.
+- `tests/simd_x86_test.spc`: per-function planning, the memory annotations of
+  `ffi/immintrin.spc`, and on an x86_64 host byte-identical C without vectors, instruction checks
+  per level (no `ymm`/`zmm` in a baseline function) and `std::simd::x86` against scalar models.
+- `tests/multiversion_test.spc`: the `@target_feature` use rules and lint, closure bounds,
+  `@c.export`, the target attributes and the inliner, function-address casts, `detect::dispatch`
+  (order, fallback by `SC_CPU_OFF`, one detection, the race and LTO builds) and the x86 detection
+  decision on fixed registers.
 - `tests/simd_aarch64_test.spc`: byte-identical C without vectors across the optional features,
   instruction checks, the halves order of a float tree sum, `std::simd::aarch64` against scalar
   models, the memory annotations of `ffi/arm_neon.spc`, and `std::cpu::detect`.

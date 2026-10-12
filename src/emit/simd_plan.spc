@@ -23,8 +23,9 @@ pub struct Plan {
     pub chunks: u64,
 }
 
-/// The backend table's order (`Package::simd_table`): by key, then by feature count, the largest first,
-/// then by declaration.
+/// The backend table's order (`Package::simd_table`): by key, then by feature count (an entry's set is
+/// closed under `implies`: an `Sse41` entry outranks an `Sse2` one), the largest first, then by the set
+/// (two entries of one set are adjacent), then by declaration.
 pub fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
     if x.key != y.key {
         return pick(x.key < y.key, -1, 1);
@@ -34,11 +35,23 @@ pub fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
     if cx != cy {
         return pick(cx > cy, -1, 1);
     }
+    if x.fs.w[0] != y.fs.w[0] || x.fs.w[1] != y.fs.w[1] {
+        return pick(x.fs.w[1] < y.fs.w[1] || x.fs.w[1] == y.fs.w[1] && x.fs.w[0] < y.fs.w[0], -1, 1);
+    }
     return pick((x.module as u64 << 32 | x.node as u64) < (y.module as u64 << 32 | y.node as u64), -1, 1);
 }
 
+/// The widest vector in bits the planner uses under features `fs` and the build's preferred width
+/// `width` (`--simd-width`): 256 where AVX-512 is enabled (older cores lower their clock for 512-bit
+/// instructions) unless the build prefers 512. The choice never changes a result.
+pub const fn max_bits(fs: cf::CpuFeatureSet, width: u32) u32 {
+    return pick(width >= 512 || !cf::has(fs, cf::F_AVX512F), 512u32, 256u32);
+}
+
 /// The table index of the entry for `op` over `n` lanes of `t` with result lane or scalar type `r`
-/// whose features `fs` holds, the one with the most features; -1 when none. Under a memory checker
+/// whose features `fs` holds, the one with the most features, among those at most `bits` wide
+/// (`max_bits`) when they need AVX-512 (only those use 512-bit registers; a gather or scatter widens
+/// its indexes to 64 bits); -1 when none. Under a memory checker
 /// (`checked`) an entry that touches memory in active lanes only (`SimdEntry.lanes`) is never one:
 /// the checked lane loop reports an inactive lane's access, a binding could not.
 pub fn find(
@@ -49,7 +62,12 @@ pub fn find(
     t: BuiltinType,
     r: BuiltinType,
     n: u64,
+    bits: u32,
 ) i64 {
+    // The vectors' width: of the operand, and of the result of a lane-wise operation (a conversion's).
+    let rb = pick(lane_wise(op) && bt_lane_bits(r) > bt_lane_bits(t), bt_lane_bits(r), bt_lane_bits(t));
+    let gs = op == ir::OP_SIMD + ir::SIMD_GATHER as u32 || op == ir::OP_SIMD + ir::SIMD_SCATTER as u32;
+    let w = pick(gs, (n * 64).min(512), n * rb as u64);
     let key = op as u64 | t as u64 << 16 | r as u64 << 24 | n << 32;
     let mut lo: usize = 0;
     let mut hi = tab.len();
@@ -62,7 +80,8 @@ pub fn find(
         }
     }
     while lo < tab.len() && tab.at(lo).key == key {
-        if cf::contains(fs, tab.at(lo).fs) && !(checked && tab.at(lo).lanes) {
+        let e = tab.at(lo);
+        if cf::contains(fs, e.fs) && !(checked && e.lanes) && (w <= bits as u64 || !cf::has(e.fs, cf::F_AVX512F)) {
             return lo as i64;
         }
         lo += 1;
@@ -71,9 +90,10 @@ pub fn find(
 }
 
 /// How operation `op` (`ir::OP_*`) over `lanes` lanes of `t`, with result lane or scalar type `r`, lowers
-/// under features `fs` (`checked`: under a memory checker): the entry for all the lanes, else the
-/// widest chunk an entry exists for when the chunks combine (lane-wise operations, and the
-/// reductions `combine_op` names), else the lane loop.
+/// under features `fs` (`checked`: under a memory checker) and preferred width `width` (`max_bits`):
+/// the entry for all the lanes, else the widest chunk an entry exists for when the chunks combine
+/// (lane-wise operations, and the reductions `combine_op` names), else an entry for all the lanes
+/// past the preferred width, else the lane loop.
 pub fn plan(
     tab: &Vector<cf::SimdEntry>,
     fs: cf::CpuFeatureSet,
@@ -82,25 +102,24 @@ pub fn plan(
     t: BuiltinType,
     r: BuiltinType,
     lanes: u64,
+    width: u32,
 ) Plan {
     let mut p = Plan { form: PF_SCALAR, entry: 0, combine: ir::IR_NONE, chunk_lanes: lanes, chunks: 1 };
-    let e = find(tab, fs, checked, op, t, r, lanes);
+    let bits = max_bits(fs, width);
+    let e = find(tab, fs, checked, op, t, r, lanes, bits);
     if e >= 0 {
         p.form = PF_NATIVE;
         p.entry = e as u32;
         return p;
     }
     let cop = combine_op(op);
-    if !lane_wise(op) && cop == ir::OP_COUNT {
-        return p;
-    }
-    let mut c = lanes / 2;
+    let mut c = pick(lane_wise(op) || cop != ir::OP_COUNT, lanes / 2, 0);
     while c >= 1 {
-        let ce = find(tab, fs, checked, op, t, r, c);
+        let ce = find(tab, fs, checked, op, t, r, c, bits);
         let ke = if cop == ir::OP_COUNT {
             0i64;
         } else {
-            find(tab, fs, checked, cop, t, t, c);
+            find(tab, fs, checked, cop, t, t, c, bits);
         };
         if ce >= 0 && ke >= 0 {
             p.form = PF_SPLIT;
@@ -111,6 +130,16 @@ pub fn plan(
             return p;
         }
         c /= 2;
+    }
+    // No split: an entry wider than the preferred width beats the lane loop (a 512-bit `compress`).
+    let w = if bits < 512 {
+        find(tab, fs, checked, op, t, r, lanes, 512);
+    } else {
+        -1;
+    };
+    if w >= 0 {
+        p.form = PF_NATIVE;
+        p.entry = w as u32;
     }
     return p;
 }

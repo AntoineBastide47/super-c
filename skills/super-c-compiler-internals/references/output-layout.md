@@ -110,7 +110,11 @@ the header of the type it collides with.
   `no_edges` set: they record no use edge and no type need for the module's unit.
 - The headers of `extern "C" "<header>"` blocks are global (`__sc_fwd.h`): every TU can
   call a header-declared extern function, so the Core IR inliner splices a callee that
-  calls one (the `std/bits.h` bit counts behind `u64::trailing_zeros`) into any TU.
+  calls one (the `std/bits.h` bit counts behind `u64::trailing_zeros`) into any TU; the
+  runtime atomics (`ffi/atomic.spc`, verified intrinsic calls) are `static inline` in every
+  TU's `super_rt.h`, so a callee that calls one splices too (`detect::dispatch`'s acquire
+  load). A splice accepts an argument whose C value is the parameter's: a reference into a
+  pointer parameter, a function into a function-pointer parameter.
 - Results C cannot return as they are (several results, one fixed array) return in a
   carrier struct shared by every function and function value with that result list
   (`Mangler::ret_pack`: `__sc_ret<n>__<types>`, `__sc_reta__<array>`), defined in its own
@@ -126,7 +130,8 @@ the header of the type it collides with.
   bytes whose alignment is its size holds `T l __attribute__((vector_size(S)))`, so its lanes have
   no address: a lane place or a constant's pointer to a lane spells `((T *)&v)[i]`, byte moves
   `(char *)&v + off`; a wider one of 16-byte chunks also names them, `union { l; c[k]; }`, so a
-  split operation reads and writes `v.c[k]`; `Mangler::vec_def`), defined once per mangler as a pack (`Mangler::vec_pack`, `pack_reqs`) in its own
+  split operation reads and writes `v.c[k]`; `Mangler::vec_def`, which records the chunk's need
+  wherever the vector's is recorded, since its definition names the chunk), defined once per mangler as a pack (`Mangler::vec_pack`, `pack_reqs`) in its own
   definition header, which also carries the lane-check helper `__sc_lane` under an include
   guard, and asserts the layout model; a mask is its storage integer (`uint8_t` to `uint64_t`).
   In mangled names a vector is `__sc_v<N>_<lane>` and a mask `__sc_mask<N>`: the runtime's

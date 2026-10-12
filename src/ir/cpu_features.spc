@@ -26,13 +26,15 @@ pub struct CpuFeature {
     pub level: u8,
 }
 
-pub const FEATURE_COUNT: usize = 16;
+pub const FEATURE_COUNT: usize = 49;
 pub const F_SIMD128: usize = 0;
 pub const F_RELAXED_SIMD: usize = 1;
+pub const F_SSE2: usize = 2;
 pub const F_NEON: usize = 3;
 pub const F_DOTPROD: usize = 5;
 pub const F_SVE: usize = 14;
 pub const F_SVE2: usize = 15;
+pub const F_AVX512F: usize = 31;
 
 const NONE: CpuFeatureSet = CpuFeatureSet { w: [0, 0] };
 // `base` masks: every platform; macOS, whose oldest aarch64 machine is the M1 (Apple clang's default
@@ -51,6 +53,20 @@ const L_NEED81: u8 = 2;
 const L_NEED82: u8 = 4;
 const V81: CpuFeatureSet = CpuFeatureSet { w: [8 | 1 << 12 | 1 << 13, 0] };
 const V82: CpuFeatureSet = CpuFeatureSet { w: [8 | 1 << 6, 0] };
+// The x86-64 psABI levels beyond the baseline (`x86-64`, SSE2): `x86-64-v2` adds rows 16 to 22,
+// `x86-64-v3` rows 23 to 30, `x86-64-v4` rows 31 to 35 (AVX-512 F, BW, CD, DQ, VL).
+const X2: u64 = 0x7F << 16;
+const X3: u64 = X2 | 0xFF << 23;
+const X4: u64 = X3 | 0x1F << 31;
+const X_LEVELS: [u64; 4] = [0, X2, X3, X4];
+// The x86 platform baselines: macOS and the iOS simulator (`core2`: Apple clang's default `penryn` adds
+// SSE4.1, but GCC on Darwin and clang for deployment targets before 10.12 stop at `core2`), and Android
+// (its ABI: SSE4.2 and POPCNT).
+const XMI: u8 = 50;
+const XA: u8 = 32;
+const fn x(m: u64) CpuFeatureSet {
+    return CpuFeatureSet { w: [m, 0] };
+}
 
 /// Append-only, in step with `std::cpu::Feature`.
 pub const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
@@ -197,6 +213,337 @@ pub const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
         base: 0,
         level: L_NEED82,
     },
+    CpuFeature {
+        name: "sse3",
+        variant: "Sse3",
+        arch: 0,
+        implies: x(1 << 2),
+        c_flag: "-msse3",
+        probe: "x86-features",
+        base: XMI,
+        level: 0,
+    },
+    CpuFeature {
+        name: "ssse3",
+        variant: "Ssse3",
+        arch: 0,
+        implies: x(1 << 16),
+        c_flag: "-mssse3",
+        probe: "x86-features",
+        base: XMI,
+        level: 0,
+    },
+    CpuFeature {
+        name: "sse4.1",
+        variant: "Sse41",
+        arch: 0,
+        implies: x(1 << 17),
+        c_flag: "-msse4.1",
+        probe: "x86-features",
+        base: XA,
+        level: 0,
+    },
+    CpuFeature {
+        name: "sse4.2",
+        variant: "Sse42",
+        arch: 0,
+        implies: x(1 << 18 | 1 << 20), // GCC's `-msse4.2` enables `popcnt` too
+        c_flag: "-msse4.2",
+        probe: "x86-features",
+        base: XA,
+        level: 0,
+    },
+    CpuFeature {
+        name: "popcnt",
+        variant: "Popcnt",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mpopcnt",
+        probe: "x86-features",
+        base: XA,
+        level: 0,
+    },
+    CpuFeature {
+        name: "cx16",
+        variant: "Cx16",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mcx16",
+        probe: "x86-features",
+        base: XMI,
+        level: 0,
+    },
+    CpuFeature {
+        name: "lahf-sahf",
+        variant: "LahfSahf",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-msahf",
+        probe: "x86-features",
+        base: APPLE,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx",
+        variant: "Avx",
+        arch: 0,
+        implies: x(1 << 19),
+        c_flag: "-mavx",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx2",
+        variant: "Avx2",
+        arch: 0,
+        implies: x(1 << 23),
+        c_flag: "-mavx2",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "fma",
+        variant: "Fma",
+        arch: 0,
+        implies: x(1 << 23),
+        c_flag: "-mfma",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "bmi1",
+        variant: "Bmi1",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mbmi",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "bmi2",
+        variant: "Bmi2",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mbmi2",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "f16c",
+        variant: "F16c",
+        arch: 0,
+        implies: x(1 << 23),
+        c_flag: "-mf16c",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "lzcnt",
+        variant: "Lzcnt",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mlzcnt",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "movbe",
+        variant: "Movbe",
+        arch: 0,
+        implies: NONE,
+        c_flag: "-mmovbe",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512f",
+        variant: "Avx512f",
+        arch: 0,
+        implies: x(1 << 24 | 1 << 25 | 1 << 28),
+        c_flag: "-mavx512f",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512bw",
+        variant: "Avx512bw",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512bw",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512cd",
+        variant: "Avx512cd",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512cd",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512dq",
+        variant: "Avx512dq",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512dq",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512vl",
+        variant: "Avx512vl",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512vl",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512vbmi",
+        variant: "Avx512vbmi",
+        arch: 0,
+        implies: x(1u64 << 32),
+        c_flag: "-mavx512vbmi",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512vbmi2",
+        variant: "Avx512vbmi2",
+        arch: 0,
+        implies: x(1u64 << 32),
+        c_flag: "-mavx512vbmi2",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512bitalg",
+        variant: "Avx512bitalg",
+        arch: 0,
+        implies: x(1u64 << 32),
+        c_flag: "-mavx512bitalg",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512vpopcntdq",
+        variant: "Avx512vpopcntdq",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512vpopcntdq",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512vnni",
+        variant: "Avx512vnni",
+        arch: 0,
+        implies: x(1u64 << 31),
+        c_flag: "-mavx512vnni",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx512fp16",
+        variant: "Avx512fp16",
+        arch: 0,
+        implies: x(1u64 << 32),
+        c_flag: "-mavx512fp16",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "gfni",
+        variant: "Gfni",
+        arch: 0,
+        implies: x(1 << 2),
+        c_flag: "-mgfni",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "vaes",
+        variant: "Vaes",
+        arch: 0,
+        implies: x(1u64 << 24 | 1u64 << 45),
+        c_flag: "-mvaes",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "vpclmulqdq",
+        variant: "Vpclmulqdq",
+        arch: 0,
+        implies: x(1u64 << 23 | 1u64 << 46),
+        c_flag: "-mvpclmulqdq",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "aes",
+        variant: "Aesni",
+        arch: 0,
+        implies: x(1 << 2),
+        c_flag: "-maes",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "pclmulqdq",
+        variant: "Pclmulqdq",
+        arch: 0,
+        implies: x(1 << 2),
+        c_flag: "-mpclmul",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    // AVX10 has no 256-bit-only form: `avx10.1` is `x86-64-v4` with the AVX-512 extensions above.
+    CpuFeature {
+        name: "avx10.1",
+        variant: "Avx101",
+        arch: 0,
+        implies: x(X4 | 0x3Fu64 << 36),
+        c_flag: "-mavx10.1",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
+    CpuFeature {
+        name: "avx10.2",
+        variant: "Avx102",
+        arch: 0,
+        implies: x(1u64 << 47),
+        c_flag: "-mavx10.2",
+        probe: "x86-features",
+        base: 0,
+        level: 0,
+    },
 ];
 
 // Each row's implied set closed under `implies`, the row itself included: each pass joins the sets of
@@ -291,15 +638,46 @@ pub const fn baseline(target: i32, arch: i32) CpuFeatureSet {
     return s;
 }
 
-/// The row named `name`, or -1.
-pub const fn find(name: str) i32 {
+/// The row named `name`, of instruction set `arch` when one is (`aes` names one on x86_64 and one on
+/// aarch64), or -1.
+pub const fn find(name: str, arch: i32) i32 {
     let t: []CpuFeature = CPU_FEATURES;
+    let mut r: i32 = -1;
     for i in 0..FEATURE_COUNT {
-        if t[i].name == name {
-            return i as i32;
+        if t[i].name == name && (r < 0 || t[i].arch == arch) {
+            r = i as i32;
         }
     }
-    return -1;
+    return r;
+}
+
+/// Add the features of x86-64 level `name` (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`; empty:
+/// none) to `s` (`--target-cpu`, the `target-cpu` key, a level in a feature list). Another instruction
+/// set skips a level, unless `strict` (the command line); another name is an error. On an error the
+/// diagnostic goes to `err` and the result is false.
+pub fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
+    let ns: []str<'static> = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"];
+    let xl: []u64 = X_LEVELS;
+    for i in 0..4 {
+        if ns[i] == name {
+            if arch == 0 {
+                *s = join(*s, x(xl[i]));
+            } else if strict {
+                err.format_into(
+                    "target CPU '{}' is an x86_64 level; the build is for {}",
+                    name,
+                    unsafe ARCH_NAMES[arch as usize],
+                );
+                return false;
+            }
+            return true;
+        }
+    }
+    if name.len() == 0 {
+        return true;
+    }
+    err.format_into("unknown target CPU '{}'; the x86_64 levels are: x86-64, x86-64-v2, x86-64-v3, x86-64-v4", name);
+    return false;
 }
 
 const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
@@ -331,7 +709,8 @@ fn names_of(arch: i32) String {
     return out;
 }
 
-/// Apply the comma list `spec` to `s` in order: `+name` or `name` enables, `-name` disables, for
+/// Apply the comma list `spec` to `s` in order: `+name` or `name` enables, `-name` disables, a level
+/// name (`x86-64-v3`) enables the level's features, for
 /// platform `target` and instruction set `arch` (loader arch codes, -1 unknown). An unknown name, the
 /// disabling of a baseline feature, or (when `strict`) a feature of another instruction set puts the
 /// diagnostic in `err` and returns false; a lenient list skips another instruction set's features.
@@ -353,9 +732,16 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
         if item.len() == 0 {
             continue;
         }
+        if item.starts_with("x86-64") {
+            // A level: its features.
+            if !level(item, arch, strict, s, err) {
+                return false;
+            }
+            continue;
+        }
         let off = item.byte_at(0) == b'-';
         let name = item.slice(ast::pick(off || item.byte_at(0) == b'+', 1usize, 0), item.len());
-        let k = find(name);
+        let k = find(name, arch);
         if k >= 0 && t[k as usize].arch != arch && !strict {
             continue;
         }
@@ -392,6 +778,8 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
 }
 
 /// The C flags of the features of `s` for platform `target`, in table order, each after a space. The
+/// x86_64 features beyond the platform's baseline make `-march=x86-64-vN` for the largest level they
+/// hold, then `-m<feature>` for each other one. The
 /// aarch64 features beyond the platform's baseline make one flag: on macOS `-mcpu=apple-m1` (a plain
 /// `-march` lowers the tuning) and each extra extension; elsewhere `-march=` the lowest architecture
 /// every feature's `level` allows (`armv8.2-a`, `armv8.1-a` or `armv8-a`), then each enabled extension
@@ -399,10 +787,21 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
 pub fn push_c_flags(s: CpuFeatureSet, target: i32, out: &mut String) {
     let t: []CpuFeature = CPU_FEATURES;
     let b = baseline(target, 1);
+    // x86_64: `-march=` the largest psABI level the features beyond the baseline reach, then the
+    // flag of each other feature beyond it.
+    let xb = baseline(target, 0).w[0];
+    let xl: []u64 = X_LEVELS;
+    let mut lv: usize = 3;
+    while lv > 0 && ((s.w[0] & xl[lv]) != xl[lv] || (xl[lv] & ~xb) == 0) {
+        lv -= 1;
+    }
+    if lv > 0 {
+        out.format_into(" -march=x86-64-v{}", lv + 1);
+    }
     let mut extra = false;
     let mut need: u8 = 0;
     for i in 0..FEATURE_COUNT {
-        if !has(s, i) || t[i].c_flag.len() == 0 {
+        if !has(s, i) || t[i].c_flag.len() == 0 || t[i].arch == 0 && has(x(xb | xl[lv]), i) {
             continue;
         }
         if t[i].arch != 1 {
@@ -437,10 +836,53 @@ pub fn push_c_flags(s: CpuFeatureSet, target: i32, out: &mut String) {
     }
 }
 
+/// The C `target` attribute argument of a function whose effective features are `s` (closed) in a
+/// build of features `build` for platform `target`, for each of `s`'s features the build lacks;
+/// nothing when it lacks none. x86_64: `target("sse4.2,avx,avx2")`, the flags' names. aarch64:
+/// clang adds `+dotprod`; GCC names the architecture level of the build flag for `s` too
+/// (binutils assembles an extension only at its level; `SC_TGT_A64` of the runtime header chooses).
+pub fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target: i32, out: &mut String) {
+    let t: []CpuFeature = CPU_FEATURES;
+    let mut a64 = false;
+    let mut names = String::new();
+    for i in 0..FEATURE_COUNT {
+        if !has(s, i) || has(build, i) || t[i].c_flag.len() == 0 {
+            continue;
+        }
+        a64 = t[i].arch == 1;
+        if !a64 && names.len() != 0 {
+            names.push_byte(b',');
+        }
+        names.push_str(t[i].c_flag.slice(ast::pick(a64, 0usize, 2usize), t[i].c_flag.len()));
+    }
+    if names.len() == 0 {
+        return;
+    }
+    if !a64 {
+        out.format_into("target(\"{}\")", names.as_str());
+        return;
+    }
+    let mut g = String::new();
+    push_c_flags(CpuFeatureSet { w: [s.w[0] & arch_mask(1), s.w[1]] }, target, &mut g);
+    out.format_into("target(SC_TGT_A64(\"{}\", \"{}\"))", names.as_str(), g.as_str().slice(3, g.len()));
+}
+
+// The rows of instruction set `arch`, as a mask of the first word.
+const fn arch_mask(arch: i32) u64 {
+    let t: []CpuFeature = CPU_FEATURES;
+    let mut m: u64 = 0;
+    for i in 0..FEATURE_COUNT {
+        if t[i].arch == arch {
+            m |= 1u64 << i as u64;
+        }
+    }
+    return m;
+}
+
 /// One row of a package's backend table: a `@simd_impl` function `module`/`node` and its key, `op |
 /// T << 16 | R << 24 | N << 32` (`ir::OP_*`, the vector operand's lane builtin `T` and lanes `N`,
 /// the result's lane or scalar builtin `R`, the index lanes' for a run-time index), with the
-/// feature set it needs.
+/// feature set it needs, closed under `implies`.
 pub struct SimdEntry {
     pub key: u64,
     pub fs: CpuFeatureSet,

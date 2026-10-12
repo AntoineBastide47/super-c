@@ -355,7 +355,12 @@ one type (`fn(i32)` and `fn(i32) void` too, in `Option`, `Vector` and array elem
 and substitution reaches its parameters and result, so a generic struct's `fn(T) T` field is
 `fn(i32) i32` in `W<i32>` and inference takes `W`'s arguments from it. A plain function, a
 non-capturing closure and a turbofished generic function (`let f = id::<i32>;`) are values of
-it; naming an `unsafe fn`, or an extern function without `@unsafe(safe)`, as one needs `unsafe`. `dyn fn(..)` may name generic parameters (`struct D<T> { pub f: Box<dyn fn(T) T> }`) and
+it; naming an `unsafe fn`, or an extern function without `@unsafe(safe)`, as one needs `unsafe`.
+A function or function-pointer value casts to `usize` (its address), and `usize` back to a
+function-pointer type inside `unsafe` (`unsafe (u as fn(i32) i32)`: the address must be one of a
+function of that signature). The prelude marker `FnPtr` admits exactly the function-pointer types
+(never a closure), and a `F: FnPtr` value casts the same way; a generic cast whose instance is no
+such type fails at that instance ("invalid cast from 'usize' to 'S'"). `dyn fn(..)` may name generic parameters (`struct D<T> { pub f: Box<dyn fn(T) T> }`) and
 substitutes the same way.
 
 Capture rules:

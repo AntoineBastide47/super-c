@@ -353,12 +353,13 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `parse_ast_for_fmt(src)` | Parse with trivia for formatter tests |
 | `compile_c(src)` | Compile to C through the production backend; the returned text is the shared headers, the snippet's own TU (part heads, buffer and tail) and the instance TU, without the prelude's TUs, so a needle cannot match a prelude function body |
 | `compile_c_user(src)` | `compile_c` with the snippet's own TU only |
+| `compile_c_arch(src, arch)` | `compile_c` for instruction set `arch` (0 x86_64, 1 aarch64) with its baseline, on any host |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
 | `expect_run(label, src, arg, msg)` | Build `src` (dev profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
-| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`) |
+| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
 
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
 filtering for the host and loads the vector backend for a snippet that names a vector, like a
@@ -398,9 +399,10 @@ compiler under wasmtime; the C compile and the program stay native.
 - `asm_check(src, opts, function, contains, absent)` builds, reads
   `build/<profile>/compile_commands.json`, finds the unit that defines `function`, reruns its
   command with `-S` (without `-c`, `-MMD` and `-flto*`, which would print IR), and matches
-  substrings of instruction mnemonics only (`asm_mnemonics`: the first word of each body line,
+  substrings of instruction mnemonics (`asm_mnemonics`: the first word of each body line,
   without labels, directives and comments; Mach-O `_name:` labels too), so `x0` or `rax` never
-  match. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
+  match; an entry that starts with `%` matches the whole instruction (`asm_instructions`), its
+  register operands included. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
   `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
   which the wasm lane sets (`asm_wasm32` in `tests/differential_test.spc` returns early without it).
   Its two halves serve many functions from one build: `asm_text(b, opts, function, out)` compiles
@@ -432,8 +434,18 @@ one. An entry whose key another entry holds with other features is called in one
 sets only (`dot` with and without `dotprod`): the model accepts it uncalled when its sibling is
 called.
 
+On an x86_64 host the entry model runs over `std/simd/backend/x86_64.spc` and requires the
+entries the run's features reach (the baseline, then `SC_SIMD_FEATURES`, which may name a level:
+`x86-64-v2`); `SC_SIMD_WIDTH=512` passes `--simd-width=512` to every differential build, and
+without it an AVX-512 entry wider than 256 bits is not required. A run checks only the entries no
+run with fewer features checks: with `SC_SIMD_FEATURES` it skips those the baseline reaches, and
+at 512 bits those the 256-bit run reaches. The release workflow's `levels` jobs (Linux, Windows,
+one runner per level, beside the test shards) run `--filter=simd_` at `x86-64-v2` and
+`x86-64-v3`, and on a Linux runner with AVX-512 at `x86-64-v4` with both widths. A machine without AVX-512 checks those
+entries in the assembly only.
+
 - `tests/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
-  entry of `std/simd/backend/wasm.spc` (in the lane) or `aarch64.spc` (on an aarch64 host), through four vector model cases of each operation that
+  entry of `std/simd/backend/wasm.spc` (in the lane), `aarch64.spc` or `x86_64.spc` (on such a host), through four vector model cases of each operation that
   reaches it at its lane count and at the most lanes (a `less_than` entry also through `count` and a
   `choose` of narrower lanes), and a choice, compress, expand or masked access over at most four
   lanes under every mask, built planned and with `SC_SIMD_SCALAR=1`; each case's value or
