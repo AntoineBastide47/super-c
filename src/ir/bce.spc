@@ -215,12 +215,8 @@ extend Bce {
     /// Emission-lifetime state (one per DropCtx): the env switches read once, every per-body
     /// table kept for capacity. `run` resets what a body needs, and sets the package.
     pub fn new() Bce {
-        let dis = stdlib::getenv("SC_BCE_DISABLE");
-        let mut d = "";
-        if dis != null {
-            d = str::from_cstr(dis);
-        }
-        let e = stdlib::getenv("SC_BCE");
+        let dis = stdlib::get_env("SC_BCE_DISABLE").unwrap_or(String::new());
+        let d = dis.as_str();
         return Bce {
             fx: fx::Facts::new(d.contains("sig")),
             lenof: Vector::<LenBind>::new(),
@@ -242,7 +238,7 @@ extend Bce {
             in_set: Vector::<bool>::new(),
             total_facts: 0,
             limited: false,
-            off: e != null && str::from_cstr(e) == "0",
+            off: stdlib::env_is("SC_BCE", "0"),
             no_fold: d.contains("fold"),
             no_sig: d.contains("sig"),
             no_int: d.contains("int"),

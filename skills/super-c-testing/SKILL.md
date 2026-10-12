@@ -238,7 +238,7 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
 In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
 `wasm-compile`: an artifact) and runs the two test shards in parallel on it; in the release
-workflow (macOS, Linux and Windows in one matrix) the macOS and Linux correctness gates run beside
+workflow (macOS, Linux and Windows in one matrix) the three correctness gates run beside
 the shards and the release binary is built after all of them pass. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
@@ -441,15 +441,17 @@ without it an AVX-512 entry wider than 256 bits is not required. A run checks on
 run with fewer features checks: with `SC_SIMD_FEATURES` it skips those the baseline reaches, and
 at 512 bits those the 256-bit run reaches. The release workflow's `levels` jobs (Linux, Windows,
 one runner per level, beside the test shards) run `--filter=simd_` at `x86-64-v2` and
-`x86-64-v3`, and on a Linux runner with AVX-512 at `x86-64-v4` with both widths. A machine without AVX-512 checks those
-entries in the assembly only.
+`x86-64-v3` only: a hosted runner's CPU is not selectable, so no CI job runs `x86-64-v4`. A machine
+without AVX-512 checks those entries in the assembly only.
 
 - `tests/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
   entry of `std/simd/backend/wasm.spc` (in the lane), `aarch64.spc` or `x86_64.spc` (on such a host), through four vector model cases of each operation that
   reaches it at its lane count and at the most lanes (a `less_than` entry also through `count` and a
   `choose` of narrower lanes), and a choice, compress, expand or masked access over at most four
   lanes under every mask, built planned and with `SC_SIMD_SCALAR=1`; each case's value or
-  trap must be equal, and the C of the first build must call every entry. Loads, stores and the `any`/`all`
+  trap must be equal, and the C of the first build must call every entry, except a lane-mask form
+  (`Cmp*Lanes`, `ChooseLanes`, `LanesToMask`, `MaskToLanes`, `AnyLanes`, `AllLanes`) whose lanes the
+  C handles through a called mask-register entry (AVX-512). Loads, stores and the `any`/`all`
   forms go through one extra program. Elsewhere the tests return at once.
 - `tests/simd_wasm_test.spc`: the C of a program without vectors is byte-identical with and without
   the features; `expect_asm` checks that kernels use their SIMD128 instructions (`f32x4.add`,

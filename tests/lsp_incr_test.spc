@@ -62,7 +62,7 @@ fn ws_new() Ws {
     proj.mkfile("b.spc", B0);
     proj.mkfile("c.spc", C0);
     proj.mkfile("d.spc", D0);
-    let dir = String::from_cstr(proj.rootp());
+    let dir = String::from_str(proj.dir());
     let mut root = String::from_str(dir.as_str());
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
@@ -82,7 +82,7 @@ fn ws_of(a: str, b: str, c: str, d: str) Ws {
     proj.mkfile("b.spc", b);
     proj.mkfile("c.spc", c);
     proj.mkfile("d.spc", d);
-    let dir = String::from_cstr(proj.rootp());
+    let dir = String::from_str(proj.dir());
     let mut root = String::from_str(dir.as_str());
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
@@ -981,7 +981,7 @@ fn release_engine_demand_parses_back_and_reruns() {
     proj.mkfile("a.spc", E_A);
     proj.mkfile("c.spc", E_C);
     proj.mkfile("d.spc", E_D);
-    let dir = String::from_cstr(proj.rootp());
+    let dir = String::from_str(proj.dir());
     let mut root = String::from_str(dir.as_str());
     root.push_str("/a.spc");
     let ws = Ws { proj: proj, root: root, dir: dir };

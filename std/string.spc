@@ -303,8 +303,13 @@ extend<A: Allocator> String<A> {
 
     // --- append --------------------------------------------------------------------------------.
 
-    /// Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
-    pub fn push_bytes(self: &mut String<A>, src: *const u8, n: usize) {
+    /// Append the bytes of `src`.
+    pub fn push_bytes(self: &mut String<A>, src: Slice<u8>) {
+        self.push_raw(src.ptr, src.len);
+    }
+
+    // Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
+    fn push_raw(self: &mut String<A>, src: *const u8, n: usize) {
         if n == 0 {
             return;
         }
@@ -346,12 +351,12 @@ extend<A: Allocator> String<A> {
     /// Append the bytes of a `str` (e.g. a string literal).
     @c.always_inline
     pub fn push_str(self: &mut String<A>, text: str) {
-        self.push_bytes(text.ptr(), text.len());
+        self.push_raw(text.ptr(), text.len());
     }
 
     /// Append another String's bytes.
     pub fn push_string(self: &mut String<A>, other: &String<A>) {
-        self.push_bytes(other.as_ptr(), other.len());
+        self.push_raw(other.as_ptr(), other.len());
     }
 
     /// Append the base-10 digits of an unsigned integer. Recurses on the high digits so they print first.
@@ -624,7 +629,7 @@ extend<A: Allocator> String<A> {
 
     /// The bytes as a borrowed `str` view: valid until the next mutation and, for a small string, until a move.
     pub fn as_str(self: &String<A>) str {
-        return str::from_raw(self.as_ptr(), self.len());
+        return unsafe str::from_raw(self.as_ptr(), self.len());
     }
 
     /// Borrowed iterators over the bytes: delegate to the `str` view: valid until the next mutation, and
@@ -934,7 +939,7 @@ extend<A: Allocator> String<A> {
         let mut run: usize = 0; // start of the pending unmatched run
         while i <= last {
             if unsafe memcmp(unsafe (p + i), from.ptr(), from.len()) == 0 {
-                out.push_bytes(unsafe (p + run), i - run);
+                out.push_raw(unsafe (p + run), i - run);
                 out.push_str(to);
                 i = i + from.len();
                 run = i;
@@ -943,7 +948,7 @@ extend<A: Allocator> String<A> {
             }
         }
         // Trailing run.
-        out.push_bytes(unsafe (p + run), n - run);
+        out.push_raw(unsafe (p + run), n - run);
         return out;
     }
 
@@ -1027,11 +1032,12 @@ extend<A: Allocator + Default> String<A> {
     }
 
     /// A new string copied from a NUL-terminated C string (the inverse of `cstr`), for FFI return values
-    /// such as `getenv`/`strerror`. Copies up to the first NUL.
-    pub fn from_cstr(s: *const char) String<A> {
-        let n = unsafe strlen(s);
+    /// such as `getenv`/`strerror`. Copies up to the first NUL. Unsafe: the caller promises a
+    /// NUL-terminated string at `s`.
+    pub unsafe fn from_cstr(s: *const char) String<A> {
+        let n = strlen(s);
         let mut out = String::<A>::with_capacity(n);
-        out.push_bytes(s as *const u8, n);
+        out.push_raw(s as *const u8, n);
         return out;
     }
 
@@ -1158,7 +1164,7 @@ extend<A: Allocator> String<A> as Writer {
     /// Append the bytes, returning the number written (always the slice length: the buffer grows on demand).
     pub fn write(self: &mut String<A>, bytes: []u8) usize {
         let n = bytes.len();
-        self.push_bytes(bytes.as_ptr(), n);
+        self.push_bytes(bytes);
         return n;
     }
 }

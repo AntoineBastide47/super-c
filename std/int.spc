@@ -796,10 +796,10 @@ extend<const BITS: usize> UInt<BITS> {
 
     /// The low and high halves of the full product: `hi` receives the top `BITS`, the low ones are
     /// returned. Nothing is lost, and no wider type has to exist for it.
-    pub fn widening_mul(self: &UInt<BITS>, other: &UInt<BITS>, hi: *mut UInt<BITS>) UInt<BITS> {
+    pub fn widening_mul(self: &UInt<BITS>, other: &UInt<BITS>, hi: &mut UInt<BITS>) UInt<BITS> {
         let mut h = IntBits::<BITS>::zero();
         let lo = self.bits.mul_full(&other.bits, &mut h);
-        unsafe *hi = UInt::<BITS>::from_bits(h);
+        *hi = UInt::<BITS>::from_bits(h);
         return UInt::<BITS>::from_bits(lo);
     }
 
@@ -1110,11 +1110,11 @@ extend<const BITS: usize> UInt<BITS> {
 
     /// Quotient and remainder in one pass: the division routine runs once, which `div` and `rem`
     /// separately would not.
-    pub fn divmod(self: &UInt<BITS>, other: &UInt<BITS>, rem: *mut UInt<BITS>) UInt<BITS> {
+    pub fn divmod(self: &UInt<BITS>, other: &UInt<BITS>, rem: &mut UInt<BITS>) UInt<BITS> {
         let mut q = IntBits::<BITS>::zero();
         let mut r = IntBits::<BITS>::zero();
         self.bits.divmod_unsigned(&other.bits, &mut q, &mut r);
-        unsafe *rem = UInt::<BITS> { bits: r };
+        *rem = UInt::<BITS> { bits: r };
         return UInt::<BITS> { bits: q };
     }
 
@@ -1973,7 +1973,7 @@ extend<const BITS: usize> Int<BITS> {
 
     /// Truncating division, with the remainder taking the DIVIDEND's sign: C's rule, and the built-in
     /// signed types'. Panics on a zero divisor, and on MIN / -1, whose quotient is out of range.
-    pub fn divmod(self: &Int<BITS>, other: &Int<BITS>, rem: *mut Int<BITS>) Int<BITS> {
+    pub fn divmod(self: &Int<BITS>, other: &Int<BITS>, rem: &mut Int<BITS>) Int<BITS> {
         if other.is_zero() {
             unsafe sc_int_div_zero("attempt to divide by zero".ptr());
         }
@@ -2002,7 +2002,7 @@ extend<const BITS: usize> Int<BITS> {
         if neg_a {
             r = r.wrapping_neg();
         }
-        unsafe *rem = r;
+        *rem = r;
         return q;
     }
 

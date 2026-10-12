@@ -33,18 +33,17 @@ pub fn object_cache_dir() String {
 /// The build cache root: $SC_CACHE_DIR, else <home>/.super-c/cache; empty when no home resolves.
 /// Objects live under `o/<namespace>`, the linker's ThinLTO caches under `lto/<namespace>`.
 pub fn cache_root() String {
-    let dir = stdlib::getenv("SC_CACHE_DIR");
-    if dir != null && unsafe *dir != 0 as char {
-        return String::from_cstr(dir);
+    let dir = stdlib::get_env("SC_CACHE_DIR").unwrap_or(String::new());
+    if dir.len() != 0 {
+        return dir;
     }
-    let mut home = stdlib::getenv("HOME");
-    if home == null || unsafe *home == 0 as char {
-        home = stdlib::getenv("USERPROFILE");
+    let mut out = stdlib::get_env("HOME").unwrap_or(String::new());
+    if out.len() == 0 {
+        out = stdlib::get_env("USERPROFILE").unwrap_or(String::new());
     }
-    if home == null || unsafe *home == 0 as char {
-        return String::new();
+    if out.len() == 0 {
+        return out;
     }
-    let mut out = String::from_cstr(home);
     out.push_str("/.super-c/cache");
     return out;
 }

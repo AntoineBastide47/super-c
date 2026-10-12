@@ -215,7 +215,7 @@ fn manifest_and_command_line_features() {
         "build.toml",
         "bin = \"app\"\nroot = \"main.spc\"\n[profile.web]\ntarget-features = [\"sse2\", \"bogus\"]\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let b = cli::superc_env_in(root, "SC_NONE", "", "build --target=wasm");
     assert(!b.ok() && b.out_has("unknown target feature 'bogus' for wasm32"), "the manifest's names are checked");
 }
@@ -292,7 +292,7 @@ fn target_feature_calls_need_the_build_features() {
     assert(r.out_has("`inner` needs `+relaxed-simd`"), "a pointer to it too");
     assert(!r.out_has("main.spc:10:"), "a function that needs the feature calls it");
     // The value use and the direct call, not the call through the value.
-    let o = str::from_cstr(r.out);
+    let o = unsafe str::from_cstr(r.out);
     let mut errs: usize = 0;
     let mut at: isize = o.find("needs `+relaxed-simd`");
     while at >= 0 {
@@ -470,7 +470,7 @@ fn feature_sets_rebuild_and_probe() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let runs: [str; 4] = [
         "build --target=wasm",
         "build --target=wasm",
@@ -487,7 +487,7 @@ fn feature_sets_rebuild_and_probe() {
     let mut sh = String::new();
     sh.format_into(
         "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = -msimd128 ] && exit 1\ndone\nexec \"{}/bin/clang\" \"$@\"\n",
-        str::from_cstr(sdk),
+        unsafe str::from_cstr(sdk),
     );
     p.mkfile("cc.sh", sh.as_str());
     let mut cmd = String::new();
@@ -580,7 +580,7 @@ fn simd_impl_operations_results_and_lanes() {
         );
         let r = h::compile_std(s.as_str(), -1, h::STAGE_TYPECHECK);
         if !r.msg_has(c[3]) {
-            eprintln("{}: {}", c[3], str::from_cstr(&r.first[0]));
+            eprintln("{}: {}", c[3], str::from_cbuf(r.first));
         }
         assert(!r.ok() && r.msg_has(c[3]), c[3]);
     }

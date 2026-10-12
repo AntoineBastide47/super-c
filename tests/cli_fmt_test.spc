@@ -18,7 +18,7 @@ fn read(root: str, rel: str) String {
 fn fmt_check_reports_unformatted() {
     let p = cli::proj_new();
     p.mkfile("a.spc", UGLY);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("fmt --check \"");
     args.push_str(root);
     args.push_str("/a.spc\"");
@@ -34,7 +34,7 @@ fn fmt_check_reports_unformatted() {
 fn fmt_rewrites_in_place() {
     let p = cli::proj_new();
     p.mkfile("a.spc", UGLY);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/a.spc\"");
@@ -53,7 +53,7 @@ fn fmt_recurses_a_directory() {
     let p = cli::proj_new();
     p.mkfile("src/a.spc", UGLY);
     p.mkfile("src/sub/b.spc", UGLY);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/src\"");
@@ -66,7 +66,7 @@ fn fmt_recurses_a_directory() {
 fn fmt_stdin_to_stdout() {
     let p = cli::proj_new();
     p.mkfile("in.spc", UGLY);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut inp = String::from_str(root);
     inp.push_str("/in.spc");
     let mut outp = String::from_str(root);
@@ -83,7 +83,7 @@ fn fmt_stdin_to_stdout() {
 @test
 fn fmt_missing_file_errors() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/nope.spc\"");
@@ -97,7 +97,7 @@ fn fmt_unparseable_file_is_not_rewritten() {
     let p = cli::proj_new();
     let BAD: str = "fn main( { return }\n";
     p.mkfile("bad.spc", BAD);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/bad.spc\"");
@@ -116,7 +116,7 @@ fn fmt_rewrites_through_a_symlink() {
     }
     let p = cli::proj_new();
     p.mkfile("real/a.spc", UGLY);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ln = String::new();
     ln.format_into("ln -s \"{}/real/a.spc\" \"{}/link.spc\"", root, root);
     assert_eq(cli::run_quiet(ln.cstr()), 0);

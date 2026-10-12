@@ -27,7 +27,7 @@ fn expect_panics(label: str, src: str, msg: str) {
     assert(r.built, label);
     let ok = r.exit != 0 && cli::contains_str(r.out, msg);
     if !ok {
-        eprintln("{}: exit {}: {}", label, r.exit, str::from_cstr(r.out));
+        eprintln("{}: exit {}: {}", label, r.exit, unsafe str::from_cstr(r.out));
     }
     assert(ok, label);
 }
@@ -283,7 +283,11 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut r = res::Resolver::new(unsafe &mut *((&mut m.ast) as *mut Ast), str::from_raw(src as *const u8, len), pkg);
+    let mut r = res::Resolver::new(
+        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe str::from_raw(src as *const u8, len),
+        pkg,
+    );
     r.resolve();
     let had = r.has_errors();
     if had {
@@ -297,7 +301,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     let had = t.has_errors();
     if had {
@@ -612,7 +616,7 @@ fn interval_widening_terminates_on_nested_loops() {
 fn vec_check(label: str, src: str, present: bool, trap: str) {
     let b = h::diff_build(src, []);
     assert(b.built, label);
-    let mut path = String::from_str(str::from_cstr(b.proj.rootp()));
+    let mut path = String::from_str(b.proj.dir());
     path.push_str("/build/dev/gen/main.c");
     let c = cli::read_text(path.as_str());
     assert(c.len() != 0, label);
@@ -661,9 +665,9 @@ fn vector_access_group_checks() {
     );
     // A slice built by a struct literal: its length is the value of its `len` operand, so the loop
     // over that value's aligned part is proven; a later write to the field keeps the check.
-    let VIEW: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let s = Slice::<i32> { ptr: p, len: n };\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    let VIEW: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let s = unsafe Slice::<i32> { ptr: p, len: n };\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
     vec_check("a view literal's length is its len operand", VIEW, false, "");
-    let VIEW_SET: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let mut s = Slice::<i32> { ptr: p, len: n };\n    s.len = n - 3;\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    let VIEW_SET: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let mut s = unsafe Slice::<i32> { ptr: p, len: n };\n    unsafe s.len = n - 3;\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
     vec_check(
         "a write to the view's len keeps the check: the second load traps",
         VIEW_SET,

@@ -141,7 +141,7 @@ pub fn canon_path(path: str) String {
     let mut pb = String::from_str(path);
     let mut rb = dutil::PathBuf {};
     if unsafe shim::sc_realpath(pb.cstr(), &mut rb[0]) != null {
-        return String::from_cstr(&rb[0]);
+        return String::from_str(str::from_cbuf(rb.as_slice()));
     }
     return pb;
 }
@@ -178,7 +178,7 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let aptr = (&mut m.ast) as *mut Ast;
-    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     r.resolve();
     let had = r.has_errors();
@@ -193,7 +193,7 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
     let had = t.has_errors();

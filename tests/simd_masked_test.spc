@@ -16,7 +16,7 @@ fn guard_prelude() str<'static> {
 }
 fn guarded(n: usize) SliceMut<'static, i32> {
     let base = unsafe sbrk(65536) as *mut u8;
-    return SliceMut::<i32> { ptr: unsafe (base + 65536 - n * 4) as *mut i32, len: n };
+    return unsafe SliceMut::<i32> { ptr: (base + 65536 - n * 4) as *mut i32, len: n };
 }
 )";
     }
@@ -35,7 +35,7 @@ fn guarded(n: usize) SliceMut<'static, i32> {
     if base == null || unsafe VirtualProtect(base + 65536, 65536, PAGE_NOACCESS, (&mut old) as *mut u64 as *mut void) == 0 {
         return guarded(0);
     }
-    return SliceMut::<i32> { ptr: unsafe (base + 65536 - n * 4) as *mut i32, len: n };
+    return unsafe SliceMut::<i32> { ptr: (base + 65536 - n * 4) as *mut i32, len: n };
 }
 )";
     }
@@ -52,7 +52,7 @@ fn guarded(n: usize) SliceMut<'static, i32> {
     if base == null || unsafe mprotect(base + pg, pg, PROT_NONE) != 0 {
         return guarded(0);
     }
-    return SliceMut::<i32> { ptr: unsafe (base + pg - n * 4) as *mut i32, len: n };
+    return unsafe SliceMut::<i32> { ptr: (base + pg - n * 4) as *mut i32, len: n };
 }
 )";
 }
@@ -119,7 +119,7 @@ fn unchanged(_sig: i32) {
 }
 fn main(args: Vector<str>) i32 {
     let mode = args.at(1).parse_u64().unwrap();
-    let s = SliceMut::<i32> { ptr: &mut unsafe A[0], len: 6 };
+    let s = unsafe SliceMut::<i32> { ptr: &mut A[0], len: 6 };
     let v = simd::iota::<i32, 4>() + Simd::<i32, 4>::splat(10);
     if mode == 2 {
         // Every lane at index 3: the last active lane's value lands.
@@ -148,7 +148,7 @@ fn pick3(ok: bool) i32 {
     assert(b.built, b.diag.as_str());
     let lane = h::simd_lane();
     if lane {
-        let mut mc = String::from_str(str::from_cstr(b.proj.rootp()));
+        let mut mc = String::from_str(b.proj.dir());
         mc.push_str("/build/dev/raw/main.c");
         let c = cli::read_text(mc.as_str());
         // The store's own range check is the statement just before it: the last check before the store
@@ -309,7 +309,7 @@ fn disjoint_masked_stores_do_not_race() {
             M"(import std::simd;
 static mut A: [i32; 8] = [0; 8];
 fn half(hi: bool) {
-    let s = SliceMut::<i32> { ptr: &mut unsafe A[0], len: 8 };
+    let s = unsafe SliceMut::<i32> { ptr: &mut A[0], len: 8 };
     let m = Mask::<8>::from_bits_truncate(if hi {
         0xF0u64;
     } else {
@@ -339,7 +339,7 @@ fn main() i32 {
 import std::parallel::thread as thread;
 static mut A: [i32; 8] = [0; 8];
 fn half(hi: bool) {
-    let s = SliceMut::<i32> { ptr: &mut unsafe A[0], len: 8 };
+    let s = unsafe SliceMut::<i32> { ptr: &mut A[0], len: 8 };
     let m = Mask::<8>::from_bits_truncate(if hi {
         0xF0u64;
     } else {

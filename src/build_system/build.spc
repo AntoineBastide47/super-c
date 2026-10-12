@@ -440,7 +440,7 @@ fn file_eq(a: str, b: &String) bool {
         if n == 0 {
             break;
         }
-        if off + n > want.len() || str::from_raw(&buf[0], n) != want.slice(off, off + n) {
+        if off + n > want.len() || unsafe str::from_raw(&buf[0], n) != want.slice(off, off + n) {
             same = false;
             break;
         }
@@ -753,9 +753,10 @@ fn which_path(cmd: str, out: &mut String) i64 {
         }
     }
     if !has_dir {
-        let pe = stdlib::getenv("PATH");
-        if pe != null {
-            let path = str::from_cstr(pe);
+        let pe = stdlib::get_env("PATH");
+        if pe.is_some() {
+            let pv = pe.unwrap();
+            let path = pv.as_str();
             let sep = if win {
                 b';';
             } else {
@@ -1221,9 +1222,9 @@ extend CcStream {
         // depend on the tree it was compiled in.
         if self.shared.len() != 0 {
             self.cwds.push(self.ccdb_dir.clone());
-            let pwd = stdlib::getenv("PWD");
-            if pwd != null && real_path(str::from_cstr(pwd)).as_str() == self.ccdb_dir.as_str() && str::from_cstr(pwd) != self.ccdb_dir.as_str() {
-                self.cwds.push(String::from_cstr(pwd));
+            let pwd = stdlib::get_env("PWD").unwrap_or(String::new());
+            if pwd.len() != 0 && real_path(pwd.as_str()).as_str() == self.ccdb_dir.as_str() && pwd.as_str() != self.ccdb_dir.as_str() {
+                self.cwds.push(pwd);
             }
             if self.ccdb_dir.len() > 2 && self.ccdb_dir.as_str()[1] == b':' {
                 let mut bs = self.ccdb_dir.clone();
@@ -1832,7 +1833,7 @@ fn stamp_dir_hash(dir: str) u64 {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if !nm.ends_with(".spc") {
             continue;
         }
@@ -1882,10 +1883,11 @@ fn stamp_opt_line(
 }
 
 fn stamp_push_env(out: &mut String, name: str) {
-    let v = stdlib::getenv(name);
+    let v = stdlib::get_env(name);
     out.push_str(";");
-    if v != null {
-        out.push_str(str::from_cstr(v));
+    if v.is_some() {
+        let vs = v.unwrap();
+        out.push_string(&vs);
     }
 }
 
@@ -2290,7 +2292,7 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
         eprintln("build: cannot resolve the working directory for the transpiler");
         return 1;
     }
-    args.push(format("--manifest-dir={}", str::from_cstr(&cwdb[0])));
+    args.push(format("--manifest-dir={}", str::from_cbuf(cwdb.as_slice())));
     args.push(format("--out-dir={}", m.out_dir.as_str()));
     args.push(format("--profile={}", prof_name));
     args.push(format("--target={}", par::axis_names(false)[cx.target as usize]));
@@ -2645,7 +2647,7 @@ fn cc_stream(
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};
     let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
-        String::from_cstr(&cwdb[0]);
+        String::from_str(str::from_cbuf(cwdb.as_slice()));
     } else {
         String::from_str(".");
     };
@@ -2714,10 +2716,42 @@ fn engine_build(
     link_kind: i32,
     topts: *const TestOpts,
 ) i32 {
+    let pdir = loader::join2(m.out_dir.as_str(), sub);
+    let lk = tree_lock(pdir.as_str());
+    if lk < 0 {
+        return 1;
+    }
     bst::begin();
     let rc = engine_build_i(m, prof_name, root, root_dir, alt, sub, bin, cx, link_kind, topts);
     bst::finish(rc);
+    unsafe shim::sc_tree_unlock(lk);
     return rc;
+}
+
+/// The longest a build waits for another build of its tree, in milliseconds.
+const TREE_LOCK_WAIT_MS: i64 = 30 * 60 * 1000;
+
+/// Take the lock of build tree `dir` (the file `<dir>/.lock`): one process builds a tree at a time. A
+/// second build would rewrite the units the first one compiles, so the first could compile a torn unit
+/// and install that object in the object cache under the key of the text it hashed. Waits for a build in
+/// progress at most TREE_LOCK_WAIT_MS. The handle for `sc_tree_unlock`, or -1 after a reported error.
+pub fn tree_lock(dir: str) i64 {
+    mkdir_p(dir);
+    let mut p = loader::join2(dir, ".lock");
+    let mut h = unsafe shim::sc_tree_lock(p.cstr(), 0);
+    if h == -1 {
+        eprintln("build: waiting for another build of '{}'", dir);
+        h = unsafe shim::sc_tree_lock(p.cstr(), TREE_LOCK_WAIT_MS);
+        if h == -1 {
+            eprintln("build: another build held '{}' for {} minutes", dir, TREE_LOCK_WAIT_MS / 60000);
+            return -1;
+        }
+    }
+    if h < 0 {
+        eprintln("build: cannot lock '{}'", p.as_str());
+        return -1;
+    }
+    return h;
 }
 
 fn engine_build_i(
@@ -2758,9 +2792,9 @@ fn engine_build_i(
         g.jobs = jobs;
     }
     let mut lto_req = prof.lto;
-    let lenv = stdlib::getenv("SC_LTO");
-    if lenv != null {
-        lto_req = mf::lto_parse(str::from_cstr(lenv));
+    let lenv = stdlib::get_env("SC_LTO");
+    if lenv.is_some() {
+        lto_req = mf::lto_parse(lenv.unwrap().as_str());
         if lto_req < 0 {
             eprintln("build: SC_LTO must be none, full, auto or thin");
             return 1;
@@ -3610,7 +3644,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     // A filter is part of the generated root: it imports only the files with a matching test, so the
     // others are not built. Finding them takes a parse of the whole suite.
     let filter = if unsafe (*topts).filter != null {
-        str::from_cstr(unsafe (*topts).filter);
+        unsafe str::from_cstr((*topts).filter);
     } else {
         "";
     };
@@ -3648,9 +3682,9 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     // resolves through PATH when the bin name is bare), unless SC_TEST_SUPERC names a different
     // compiler under test (the wasm lane's wasmtime wrapper), which then takes its place.
     let mut binb = String::new();
-    let ov = stdlib::getenv("SC_TEST_SUPERC");
-    if ov != null && unsafe *ov != 0 as char {
-        binb.push_str(str::from_cstr(ov));
+    let ov = stdlib::get_env("SC_TEST_SUPERC").unwrap_or(String::new());
+    if ov.len() != 0 {
+        binb.push_string(&ov);
     } else {
         if binp.as_str().find_byte(b'/') < 0 {
             binb.push_str("./");

@@ -323,7 +323,7 @@ extend Lowerer {
             f: facts::TypedFacts::of(a),
             pkg: pkg,
             module: module,
-            src: str::from_raw(sp.ptr(), sp.len()),
+            src: sp,
             body: ir::CoreBody::new(DefId { module: module, node: owner }, module),
             err: "",
             err_node: NODE_NONE,
@@ -404,7 +404,7 @@ extend Lowerer {
         self.f = facts::TypedFacts::of(p.module_ast_const(module));
         self.module = module;
         let sp = p.modules.at(module as usize).source.as_str();
-        self.src = str::from_raw(sp.ptr(), sp.len());
+        self.src = sp;
         self.env.truncate(0);
     }
 
@@ -3820,8 +3820,10 @@ extend Lowerer {
 
     fn lower_unary(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.unary;
-        if d.op == tt::TokenType::Move {
-            // `move` over a value that is not a place (a closure literal, a call) is that value.
+        if d.op == tt::TokenType::Move || d.op == tt::TokenType::Unsafe {
+            // `move` or `unsafe` over a value that is not a place (a literal, a closure, a call) is
+            // that value: no temporary hides it from the analyses that read it. `lower_expr` noted
+            // the `unsafe` span.
             return self.lower_expr(d.operand);
         }
         let ty = self.nty(id);

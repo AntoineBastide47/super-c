@@ -34,11 +34,11 @@ fn ext_c_wrap(
     err: &mut bool,
 ) {
     for k in 0..seen.len() {
-        if seen[k].as_str() == str::from_cstr(rsl) {
+        if seen[k].as_str() == unsafe str::from_cstr(rsl) {
             return;
         }
     }
-    seen.push(String::from_cstr(rsl));
+    seen.push(unsafe String::from_cstr(rsl));
     let mut basep = (unsafe cstring::strrchr(rsl, '/')) as *const char;
     if basep != null {
         basep = unsafe (basep + 1);
@@ -64,7 +64,7 @@ fn ext_c_wrap(
     let idx = *nsrc;
     *nsrc = idx + 1;
     unsafe stdio::snprintf(&mut nm[0], 128, "__ext%u_%s".ptr() as *const char, idx, &stem[0]);
-    let mut path = build_out_path(root, str::from_cstr(&nm[0]), ".c");
+    let mut path = build_out_path(root, str::from_cbuf(nm.as_slice()), ".c");
     let f = open_out(path.as_str());
     if f == null {
         unsafe stdio::perror(path.cstr());
@@ -141,7 +141,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
                 if unsafe *v != '-' as char {
                     flag.push_str("-l");
                 }
-                flag.push_str(str::from_raw(v as *const u8, vl as usize));
+                flag.push_str(unsafe str::from_raw(v as *const u8, vl as usize));
                 let mut dup = false;
                 for k in 0..ld.len() {
                     if ld[k].as_str() == flag.as_str() {
@@ -170,7 +170,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
                     continue;
                 }
             }
-            p.ext_inputs.push(String::from_cstr(&rsl[0]));
+            p.ext_inputs.push(String::from_str(str::from_cbuf(rsl.as_slice())));
             ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
@@ -214,7 +214,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
             }
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
-                p.ext_inputs.push(String::from_cstr(&cabs[0]));
+                p.ext_inputs.push(String::from_str(str::from_cbuf(cabs.as_slice())));
                 ext_c_wrap(root, keep, &mut seen, &mut nsrc, &cabs[0], err);
             }
         }

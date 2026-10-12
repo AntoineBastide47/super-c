@@ -563,6 +563,71 @@ long long sc_ticks_ms(void) {
 #endif
 }
 
+int64_t sc_tree_lock(const char *path, int64_t wait_ms) {
+#if defined(__wasi__)
+  /* No file locks: a WASI compiler runs as the transpiler of an engine that holds the lock. */
+  (void)path;
+  (void)wait_ms;
+  return 0;
+#else
+  long long until = sc_ticks_ms() + wait_ms;
+#  if defined(_WIN32)
+  HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE)
+    return -2;
+  for (;;) {
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    if (LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov))
+      return (int64_t)(intptr_t)h;
+    if (GetLastError() != ERROR_LOCK_VIOLATION) {
+      CloseHandle(h);
+      return -2;
+    }
+    if (sc_ticks_ms() >= until) {
+      CloseHandle(h);
+      return -1;
+    }
+    Sleep(100);
+  }
+#  else
+  int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd < 0)
+    return -2;
+  for (;;) {
+    /* A POSIX record lock on the whole file: held by this process until it closes `fd` or ends. */
+    struct flock fl;
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLK, &fl) == 0)
+      return fd;
+    if (errno != EACCES && errno != EAGAIN && errno != EINTR) {
+      close(fd);
+      return -2;
+    }
+    if (sc_ticks_ms() >= until) {
+      close(fd);
+      return -1;
+    }
+    struct timespec ts = {0, 100000000};
+    nanosleep(&ts, NULL);
+  }
+#  endif
+#endif
+}
+
+void sc_tree_unlock(int64_t h) {
+#if defined(_WIN32)
+  CloseHandle((HANDLE)(intptr_t)h);
+#elif !defined(__wasi__)
+  close((int)h);
+#else
+  (void)h;
+#endif
+}
+
 long long sc_peak_rss(void) {
 #if defined(_WIN32)
   PROCESS_MEMORY_COUNTERS pmc;

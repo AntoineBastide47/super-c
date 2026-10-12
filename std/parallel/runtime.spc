@@ -2462,7 +2462,7 @@ pub fn ensure_started() *mut Scheduler {
 }
 
 /// The per-`F` trampoline: move the closure out of its heap box, free the box, and run it. `pub` for linkage.
-pub fn job_entry<F: fn move()>(env: *mut void) {
+pub unsafe fn job_entry<F: fn move()>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
         pp[0];
@@ -2474,7 +2474,7 @@ pub fn job_entry<F: fn move()>(env: *mut void) {
 
 /// The trampoline for a closure stored inline in the task record: move it out and run it; the storage is
 /// the record's and needs no release. `pub` for linkage.
-pub fn job_entry_inline<F: fn move()>(env: *mut void) {
+pub unsafe fn job_entry_inline<F: fn move()>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
         pp[0];
@@ -2484,7 +2484,7 @@ pub fn job_entry_inline<F: fn move()>(env: *mut void) {
 
 /// Spawn a coroutine running `entry(env)` on a fresh guard-paged stack. Non-generic so it (and the runtime
 /// internals it touches) live in this TU; `pub` for linkage from the caller-monomorphized `submit`.
-pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
+pub unsafe fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     spawn_coroutine_env(entry, env, null, 0);
 }
 
@@ -2492,7 +2492,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
 /// `ENV_INLINE`, 8-aligned) are copied into the block's own storage and `entry` receives their address, so
 /// a reused block allocates nothing. The caller has given the bytes up (`submit` forgets its closure).
 /// `pub` for linkage.
-pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src: *const void, inline_len: usize) {
+pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src: *const void, inline_len: usize) {
     let s = ensure_started();
     // A recycled block brings its stack and context with it; only a cold spawn pays for an mmap. Its park
     // generation comes with it too, and deliberately does not restart: a token left over from the block's
@@ -2602,7 +2602,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
 /// primitive: it cannot park, so it would hold its worker, which is why `current()` reports null inside
 /// one. The record is the caller's, so the runtime touches nothing of it after `entry` returns. `pub` for
 /// linkage.
-pub fn job_init(r: *mut Runnable, entry: fn(*mut void) void, env: *mut void) {
+pub unsafe fn job_init(r: *mut Runnable, entry: fn(*mut void) void, env: *mut void) {
     unsafe r[0] = Runnable { next: null, entry: entry, env: env, id: 0, kind: RK_JOB, pad: 0 };
 }
 
@@ -2610,7 +2610,7 @@ pub fn job_init(r: *mut Runnable, entry: fn(*mut void) void, env: *mut void) {
 /// id allocation for the batch; from a worker the jobs go onto its own deque (no lock, and the caller's
 /// worker is the first to run them), from anywhere else onto the shared queue under one lock. `pub` for
 /// linkage.
-pub fn submit_jobs(first: *mut Runnable, stride: usize, n: usize) {
+pub unsafe fn submit_jobs(first: *mut Runnable, stride: usize, n: usize) {
     if n == 0 {
         return;
     }
@@ -2674,14 +2674,14 @@ pub fn submit<F: fn move() + Send + 'static>(f: F) {
         // The closure moves into the task record: its bytes are copied there and given up here (the
         // trampoline owns them from now on), so a reused block costs no allocation.
         let src = (&f) as *const F;
-        spawn_coroutine_env(job_entry_inline::<F>, null, src, sizeof(F));
+        unsafe spawn_coroutine_env(job_entry_inline::<F>, null, src, sizeof(F));
         forget(f);
         return;
     }
     let mut g = Global {};
     let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
     unsafe slot[0] = f;
-    spawn_coroutine(job_entry::<F>, slot);
+    unsafe spawn_coroutine(job_entry::<F>, slot);
 }
 
 /// The coroutine currently running on this worker, or null on a non-worker (e.g. the main) thread: and
@@ -2717,7 +2717,7 @@ pub fn in_job() bool {
 /// is what makes a wakeup specific to one park. A node left behind by an expired timed wait keeps an old
 /// token and is therefore inert, which is why a waiter may re-park (to re-take the lock) before it has
 /// managed to unlink itself.
-pub fn park_begin(co: *mut Coroutine) u32 {
+pub unsafe fn park_begin(co: *mut Coroutine) u32 {
     let p = &mut unsafe (*co).park_state;
     let t = (unsafe atomic::load_u32(p, 0) >> WR_BITS) + 1 << WR_BITS; // next generation, reason clear; wraps at width
     unsafe atomic::store_u32(p, t, 4); // SeqCst: a cancel claim reads this without holding the wait-queue lock
@@ -2739,7 +2739,7 @@ pub fn park_begin(co: *mut Coroutine) u32 {
 /// `cancellable` opts the park into the cancellation wake. A cancel claim is possible only when it is set
 /// AND the task's cancel mask is clear AND cleanup has not already started; the wait that sets it promises
 /// that a `WR_CANCEL`/`WR_SHUTDOWN` return leaves no registration behind.
-pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
+pub unsafe fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
     let co = current();
     if tracing() {
         trace(
@@ -2776,12 +2776,12 @@ pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *m
 }
 
 /// `park_timed` with no deadline: park until woken, and return the winning wake reason.
-pub fn park_current(token: u32, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
+pub unsafe fn park_current(token: u32, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
     return park_timed(token, 0, commit, arg, cancellable);
 }
 
 /// The current park is fully over: registrations removed, wait metadata cleared. Diagnostics only.
-pub fn park_done(co: *mut Coroutine) {
+pub unsafe fn park_done(co: *mut Coroutine) {
     let t = unsafe atomic::load_u32(&mut unsafe (*co).park_state, 0) & ~WR_MASK;
     unsafe atomic::store_u32(&mut unsafe (*co).park_phase, t | PH_NOT_PARKING, 0);
 }
@@ -2791,13 +2791,13 @@ pub fn park_done(co: *mut Coroutine) {
 /// `false` means the wakeup was not consumed (the token is stale, or another waker got there first) and
 /// should go to the next waiter. Safe to call while holding the primitive's wait-queue lock (it takes only
 /// the scheduler's lock, always in that order).
-pub fn wake(co: *mut Coroutine, token: u32) bool {
+pub unsafe fn wake(co: *mut Coroutine, token: u32) bool {
     return wake_as(co, token, WR_NOTIFY);
 }
 
 /// `wake`, claiming with an explicit `WR_*` reason (the reactor claims `WR_IO`, blocking completion claims
 /// `WR_BLOCKING`). The parked task reads the reason back from `park_timed`.
-pub fn wake_as(co: *mut Coroutine, token: u32, reason: u32) bool {
+pub unsafe fn wake_as(co: *mut Coroutine, token: u32, reason: u32) bool {
     if !claim(co, token, reason) {
         return false;
     }
@@ -2812,14 +2812,14 @@ pub fn wake_as(co: *mut Coroutine, token: u32, reason: u32) bool {
 /// it, without making the task runnable. A waker that resumes many tasks at once claims each, links the
 /// winners through `run.next`, and hands the chain to `run_claimed` in one scheduler operation. A claimed
 /// task cannot run, be woken again or complete until that chain is submitted.
-pub fn claim_wake(co: *mut Coroutine, token: u32, reason: u32) bool {
+pub unsafe fn claim_wake(co: *mut Coroutine, token: u32, reason: u32) bool {
     return claim(co, token, reason);
 }
 
 /// Make a chain of `claim_wake` winners (`head` to `tail` through `run.next`, `n` long) runnable under one
 /// injection lock, then wake one worker; the rest wake as the spinner finds the queue still full. From a
 /// worker thread a single task takes that worker's own deque instead.
-pub fn run_claimed(head: *mut Coroutine, tail: *mut Coroutine, n: i32) {
+pub unsafe fn run_claimed(head: *mut Coroutine, tail: *mut Coroutine, n: i32) {
     let s = unsafe G_SCHED;
     let mut co = head;
     let mut left = n;
@@ -2841,7 +2841,7 @@ pub fn run_claimed(head: *mut Coroutine, tail: *mut Coroutine, n: i32) {
 /// Drop `co`'s pending timer, if its wait was timed and it was woken before the deadline. Call after every
 /// `park_until` with a deadline, before the coroutine can park again: a stale timer entry would otherwise
 /// resume a running coroutine.
-pub fn cancel_timer(co: *mut Coroutine) {
+pub unsafe fn cancel_timer(co: *mut Coroutine) {
     let s = unsafe G_SCHED;
     if s == null {
         return;
@@ -3151,11 +3151,11 @@ pub fn sleep_ns(ns: i64) {
         return;
     }
     wait_note(WK_SLEEP, 0);
-    let token = park_begin(co); // on no wait queue: the timer and a cancel are the only wakers
-    let _ = park_timed(token, deadline_after(ns as u64), commit_nop, null, true);
-    cancel_timer(co);
+    let token = unsafe park_begin(co); // on no wait queue: the timer and a cancel are the only wakers
+    let _ = unsafe park_timed(token, deadline_after(ns as u64), commit_nop, null, true);
+    unsafe cancel_timer(co);
     wait_clear();
-    park_done(co);
+    unsafe park_done(co);
     let _ = cancel_after_wait(true);
 }
 
@@ -3355,11 +3355,11 @@ fn resolve_seed() u64 {
     if unsafe G_SEED != 0 {
         return unsafe G_SEED;
     }
-    let p = stdlib::getenv("SC_SCHED_SEED");
-    if p == null {
+    let p = stdlib::get_env("SC_SCHED_SEED");
+    if p.is_none() {
         return 0;
     }
-    return switch str::from_cstr(p).parse_u64() {
+    return switch p.unwrap().as_str().parse_u64() {
         Some(v) => v,
         None => 0u64,
     };
@@ -3426,7 +3426,7 @@ pub fn yield_now() {
     if co == null {
         return;
     }
-    let t = park_begin(co); // retire the current token: nothing may wake a coroutine the worker requeues
+    let t = unsafe park_begin(co); // retire the current token: nothing may wake a coroutine the worker requeues
     unsafe (*co).commit_requeue = 1;
     unsafe sc_runtime::sc_rt_ctx_switch((*co).ctx, (*co).sched_ctx);
     unsafe atomic::store_u32(&mut unsafe (*co).park_phase, t | PH_NOT_PARKING, 0); // a yield is not a park

@@ -27,7 +27,7 @@ pub interface Sync {}
 /// Marker: a `Copy` value is duplicated by a plain bitwise copy, so a use of it never moves it. Conformance
 /// is STRUCTURAL and automatic: scalars, `str`, raw pointers, shared references, `fn` pointers, and arrays,
 /// slices, tuples and non-`Free` aggregates whose members are all `Copy`. An owning value (`Free`, an
-/// owning closure, `Box<dyn I>`) and a `&mut T` are never `Copy`. Inside a generic body a type parameter
+/// owning closure, `Box<dyn I>`), a `&mut T` and a `[]mut T` are never `Copy`. Inside a generic body a type parameter
 /// is `Copy` only when its bounds say so (`T: Copy`, or a bound whose superinterfaces include `Copy`);
 /// otherwise its values move and drop like any owning value. An explicit `extend T as Copy {}` is accepted
 /// only where the structural rule already holds.

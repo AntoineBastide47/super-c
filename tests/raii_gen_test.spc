@@ -404,7 +404,7 @@ extend Gen {
             PROG_CAP,
             "  if acc == i32::MAX { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr() as *const char,
         );
-        let src = str::from_raw(self.prog as *const u8, self.at as usize);
+        let src = unsafe str::from_raw(self.prog as *const u8, self.at as usize);
         let r = h::compile_and_run(src);
         assert(r.built, "raii-gen: batch failed to build");
         assert_eq(r.exit, 0);

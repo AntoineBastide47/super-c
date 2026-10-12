@@ -95,6 +95,12 @@ pub struct CEmit {
     /// vector statements go through the planner (`simd_plan`). `simd_trace` (SC_SIMD_TRACE=1) reports
     /// each operation without a native entry.
     pub simd_on: bool,
+    /// The bodies this emitter writes keep the struct ABI for `[]mut T` parameters (`split_abi`):
+    /// vector-backend entries, whose callers spell their signatures.
+    pub no_split: bool,
+    /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
+    /// when spelled twice.
+    fwd_spelled: u64,
     simd_trace: bool,
     /// The effective features of the function being emitted (`Package::fn_set`): the planner's.
     pub fs: cf::CpuFeatureSet,
@@ -367,11 +373,12 @@ extend CEmit {
         mg.tn_on = true;
         let pk = unsafe &*pkg;
         mg.vec_regs = simd_enabled(pk);
-        let st = stdlib::getenv("SC_SIMD_TRACE");
         return CEmit {
             pkg: pkg,
             simd_on: simd_enabled(pk),
-            simd_trace: st != null && str::from_cstr(st) == "1",
+            no_split: false,
+            fwd_spelled: 0,
+            simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
             fs: pk.features,
             out: String::new(),
             err: "",
@@ -1468,15 +1475,15 @@ extend CEmit {
     }
 
     // Close the `<name>_ret` typedef in `aux` (owned by module `m`) and open the signature
-    // `<name>_ret <name>(`.
-    fn close_ret_typedef(self: &mut Self, m: ModuleId, name: str) {
+    // `<name>_ret <fname>(`.
+    fn close_ret_typedef(self: &mut Self, m: ModuleId, name: str, fname: str) {
         self.aux.push_str(" ");
         self.aux.push_str(name);
         self.aux.push_str("_ret;\n");
         self.aux_mark(0, m);
         self.out.push_str(name);
         self.out.push_str("_ret ");
-        self.out.push_str(name);
+        self.out.push_str(fname);
         self.out.push_str("(");
     }
 
@@ -1493,17 +1500,28 @@ extend CEmit {
         let mut hmark: usize = 0;
         let mut hdecl: usize = 0;
         let mut hty = TYPE_NONE;
+        // A `[]mut T` parameter passes as a `restrict` pointer and a length to `<name>__r`; `<name>`
+        // keeps the struct ABI for every caller that does not split (see `split_abi`).
+        let split = self.split_abi(b);
+        let mut fname = String::from_str(name);
+        if split {
+            fname.push_str("__r");
+        }
+        let mut ret_void = false;
+        let hstart = self.out.len();
         if self.fn_attrs.len() != 0 {
             self.out.push_string(&self.fn_attrs);
         }
+        let hhead = self.out.len();
         if b.returns > 1 {
             // multi-return: `typedef struct { <t> _0; ... } <name>_ret;` + struct-returning sig.
             // Zero-sized results take no member (their semantic `_N` names survive on the stored
             // ones); a pack with NO stored member returns C void.
             let rmat = self.stored_returns(b);
             if rmat == 0 {
+                ret_void = true;
                 self.out.push_str("void ");
-                self.out.push_str(name);
+                self.out.push_str(fname.as_str());
                 self.out.push_str("(");
             } else {
                 // `<name>_ret` names the result pack every function and function pointer with
@@ -1522,7 +1540,7 @@ extend CEmit {
                 self.aux.push_string(&pk);
                 self.hdr_dep(b.module, pk.as_str());
                 self.sput(pk);
-                self.close_ret_typedef(b.module, name);
+                self.close_ret_typedef(b.module, name, fname.as_str());
                 self.mret.truncate(0);
                 self.mret.push_str(name);
                 self.mret.push_str("_ret");
@@ -1549,7 +1567,7 @@ extend CEmit {
                 self.aux.push_string(&pk);
                 self.hdr_dep(b.module, pk.as_str());
                 self.sput(pk);
-                self.close_ret_typedef(b.module, name);
+                self.close_ret_typedef(b.module, name, fname.as_str());
                 self.mret.truncate(0);
                 self.mret.push_str(name);
                 self.mret.push_str("_ret");
@@ -1561,13 +1579,14 @@ extend CEmit {
                     // Zero-sized results have no C carrier.
                     rty = TYPE_NONE;
                 }
+                ret_void = rty == TYPE_NONE;
                 hmark = self.out.len();
                 let mut out = replace(&mut self.out, String::new());
                 ok0 = self.ty_c(b.module, rty, "", &mut out);
                 self.out = out;
                 self.out.push_str(" ");
                 hdecl = self.out.len();
-                self.out.push_str(name);
+                self.out.push_str(fname.as_str());
                 self.out.push_str("(");
                 hty = rty;
             }
@@ -1576,6 +1595,7 @@ extend CEmit {
             return false;
         }
         let mut arrcp = Vector::<u32>::new();
+        let mut views = Vector::<u32>::new();
         let mut np9: u32 = 0;
         for i in 0..b.args {
             let l = (b.returns + i) as usize;
@@ -1587,6 +1607,16 @@ extend CEmit {
                 self.out.push_str(", ");
             }
             np9 += 1;
+            if split && self.is_view_mut(b, b.locals.at(l).ty) {
+                views.push(l as u32);
+                let mut out = replace(&mut self.out, String::new());
+                let ok = self.split_view_param(b, b.locals.at(l).ty, l as u32, &mut out);
+                self.out = out;
+                if !ok {
+                    return false;
+                }
+                continue;
+            }
             let mut nm = self.sget();
             // A `&mut T` is exclusive for the whole call: `restrict` lets C keep its referent's
             // fields in registers across stores through other pointers.
@@ -1630,7 +1660,29 @@ extend CEmit {
                 return false;
             }
         }
+        if split && !self.split_entry(b, name, fname.as_str(), ret_void, hstart, hhead) {
+            return false;
+        }
         self.out.push_str(" {\n");
+        for k in 0..views.len() {
+            // The body reads the view through its usual local.
+            let l = views[k];
+            let mut nm3 = self.sget();
+            self.lspell(l, &mut nm3);
+            self.out.push_str("  ");
+            let mut out = replace(&mut self.out, String::new());
+            let ok = self.ty_c(b.module, b.locals.at(l as usize).ty, nm3.as_str(), &mut out);
+            self.out = out;
+            self.sput(nm3);
+            if !ok {
+                return false;
+            }
+            self.out.push_str(" = { .ptr = __sc_sp");
+            self.out.push_u64(l);
+            self.out.push_str(", .len = __sc_sn");
+            self.out.push_u64(l);
+            self.out.push_str(" };\n");
+        }
         for k in 0..arrcp.len() {
             let l = arrcp[k];
             let mut nm2 = String::new();
@@ -1650,6 +1702,220 @@ extend CEmit {
             self.out.push_str("));\n");
         }
         return self.emit_body_core(b);
+    }
+
+    // Whether `(b.module, t)` resolves to the prelude `[]mut T` view (`SliceMut<T>`).
+    fn is_view_mut(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+        return self.p().modules.at(it.module as usize).prelude && self.agg_name(it.module, it.decl) == "SliceMut";
+    }
+
+    // Does body `b` take a `[]mut T` by value? Its definition `<name>__r` then receives each one as a
+    // `restrict` element pointer and a length: the view is exclusive for the call, as a `&mut T` is,
+    // and C may keep its elements in registers across stores through other pointers. Not for an
+    // extern or variadic definition, a vector-backend entry or a macro template, whose C signatures
+    // other code spells.
+    fn split_abi(self: &mut Self, b: &ir::CoreBody) bool {
+        if self.no_split || self.mg.macro_on {
+            return false;
+        }
+        let fnn = unsafe (*self.p().module_ast_const(b.owner.module)).at_const(b.owner.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.is_extern() || fnn.as_data.function.is_variadic() {
+            return false;
+        }
+        for i in 0..b.args {
+            let ty = b.locals.at((b.returns + i) as usize).ty;
+            if !self.erased(b, ty) && self.is_view_mut(b, ty) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Does a direct call of `callee` reach a definition `split_abi` splits once it passes a view? A
+    // function with a body, not extern, variadic, `@blocking` (its wrapper keeps the struct ABI) or a
+    // vector-backend entry. Otherwise the call keeps the struct ABI, which every definition provides.
+    fn split_callee(self: &mut Self, callee: DefId) bool {
+        if self.mg.macro_on || callee.node == NODE_NONE || self.blocking_callee(callee) {
+            return false;
+        }
+        let mut c = callee;
+        if self.mg.in_interface(callee.module, callee.node) != NODE_NONE && self.mg.last_method_def.node != NODE_NONE {
+            c = self.mg.last_method_def;
+        }
+        let ca = self.p().module_ast_const(c.module);
+        let fnn = unsafe (*ca).at_const(c.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.is_extern() || fnn.as_data.function.is_variadic() || fnn.as_data.function.body == NODE_NONE {
+            return false;
+        }
+        return unsafe (*ca).attr_of(c.node, AttrKind::ATTR_SIMD_IMPL) == null;
+    }
+
+    // Does argument `i` (operand `opid`) of a direct call of `callee0` pass a `[]mut T` by value, the
+    // parameter `split_abi` splits? Mirrors `emit_call_arg`: a reference or pointer parameter takes
+    // the argument's address instead.
+    fn split_arg(self: &mut Self, b: &ir::CoreBody, callee0: DefId, i: u32, opid: ir::OperandId) bool {
+        if !self.is_view_mut(b, b.operands.at(opid as usize).ty) {
+            return false;
+        }
+        let mut callee = callee0;
+        if self.mg.in_interface(callee0.module, callee0.node) != NODE_NONE && self.mg.last_method_def.node != NODE_NONE {
+            callee = self.mg.last_method_def;
+        }
+        let fa = self.p().module_ast_const(callee.module);
+        let ps = unsafe (*fa).at_const(callee.node).as_data.function.params;
+        if i >= ps.len {
+            return false;
+        }
+        let pn = unsafe (*fa).at_const(unsafe (*fa).list(ps)[i as usize]);
+        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+            return false;
+        }
+        let pty = unsafe (*fa).type_of(pn.as_data.parameter.ty);
+        if pty == TYPE_NONE {
+            return false;
+        }
+        let mut pk = unsafe (*fa).type_at(pty).kind;
+        if pk == TypeKind::TYPE_GENERIC {
+            let mut xm = callee.module;
+            let mut xt = pty;
+            if self.mg.resolve(callee.module, pty, &mut xm, &mut xt) {
+                pk = unsafe (*self.p().module_ast_const(xm)).type_at(xt).kind;
+            }
+        }
+        return pk != TypeKind::TYPE_REFERENCE && pk != TypeKind::TYPE_POINTER;
+    }
+
+    // Spell `[]mut T` parameter local `l` of type `(b.module, t)` as the two C parameters it passes
+    // in: `<T> *restrict __sc_sp<l>, size_t __sc_sn<l>` (the `ptr` field's type under the instance).
+    fn split_view_param(self: &mut Self, b: &ir::CoreBody, t: TypeId, l: u32, o: &mut String) bool {
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+        let da = self.p().module_ast_const(it.module);
+        let dn = *unsafe (*da).at_const(it.decl);
+        let f0 = unsafe (*da).list(dn.as_data.aggregate.members)[0];
+        let fty = unsafe (*da).type_of(unsafe (*da).at_const(f0).as_data.field.ty);
+        let nb = self.mg.push_generics(it.module, dn.as_data.aggregate.generics, rm, &it);
+        let mut d = self.sget();
+        d.push_str("restrict __sc_sp");
+        d.push_u64(l);
+        let ok = self.mg.ctype(it.module, fty, d.as_str(), o);
+        self.sput(d);
+        self.mg.pop_subs(nb);
+        o.push_str(", size_t __sc_sn");
+        o.push_u64(l);
+        return ok;
+    }
+
+    // Ahead of the split definition whose finished declarator is `out[hhead..]` (its attributes start
+    // at `hstart`), write the prototype of `fname` and the struct-ABI entry `name`, which every other
+    // caller reaches (function values, vtables, `@c.export`, unsplit calls): `<decl of name>(<the
+    // struct parameters>) { return fname(a.ptr, a.len, ..); }`, both on the chunk's first line, which
+    // `proto_of` turns into the chunk's prototype line. The entry takes no attributes: a prototype
+    // must not carry them.
+    fn split_entry(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        name: str,
+        fname: str,
+        ret_void: bool,
+        hstart: usize,
+        hhead: usize,
+    ) bool {
+        let mut hdr = self.sget();
+        hdr.push_str(self.out.as_str().slice(hhead, self.out.len()));
+        let mut pre = self.sget();
+        pre.push_string(&hdr);
+        // One line: the driver pairs a chunk with its first line's prototypes.
+        pre.push_str("; ");
+        // The declarator `fname(..)` in the header: its parameter list closes at the matching paren.
+        let mut fk = String::from_str(fname);
+        fk.push_str("(");
+        let mut i0 = 0 as usize;
+        while i0 + fk.len() <= hdr.len() && hdr.as_str().slice(i0, i0 + fk.len()) != fk.as_str() {
+            i0 += 1;
+        }
+        if i0 + fk.len() > hdr.len() {
+            self.sput(hdr);
+            self.sput(pre);
+            return self.fail("split-entry");
+        }
+        let mut i1 = i0 + fk.len();
+        let mut depth: u32 = 1;
+        while i1 < hdr.len() && depth != 0 {
+            let c = hdr.as_str().byte_at(i1);
+            if c == 40 {
+                depth += 1;
+            } else if c == 41 {
+                depth -= 1;
+            }
+            i1 += 1;
+        }
+        pre.push_str(hdr.as_str().slice(0, i0));
+        pre.push_str(name);
+        pre.push_str("(");
+        let mut args = self.sget();
+        let mut np: u32 = 0;
+        for i in 0..b.args {
+            let l = (b.returns + i) as usize;
+            let ty = b.locals.at(l).ty;
+            if self.erased(b, ty) {
+                continue;
+            }
+            if np != 0 {
+                pre.push_str(", ");
+                args.push_str(", ");
+            }
+            let mut an = self.sget();
+            an.push_str("__sc_a");
+            an.push_u64(np);
+            np += 1;
+            if !self.ty_c(b.module, ty, an.as_str(), &mut pre) {
+                self.sput(an);
+                self.sput(args);
+                self.sput(hdr);
+                self.sput(pre);
+                return false;
+            }
+            args.push_string(&an);
+            if self.is_view_mut(b, ty) {
+                args.push_str(".ptr, ");
+                args.push_string(&an);
+                args.push_str(".len");
+            }
+            self.sput(an);
+        }
+        if np == 0 {
+            pre.push_str("void");
+        }
+        pre.push_str(")");
+        pre.push_str(hdr.as_str().slice(i1, hdr.len()));
+        pre.push_str(" {\n  ");
+        if !ret_void {
+            pre.push_str("return ");
+        }
+        pre.push_str(fname);
+        pre.push_str("(");
+        pre.push_string(&args);
+        pre.push_str(");\n}\n");
+        self.out.insert_str(hstart, pre.as_str());
+        self.sput(args);
+        self.sput(hdr);
+        self.sput(pre);
+        return true;
     }
 
     // A name that would collide with the `_N` temp spelling: `_` followed by only digits.
@@ -9072,6 +9338,7 @@ extend CEmit {
     fn emit_place_base(self: &mut Self, b: &ir::CoreBody, base: u32, dst: &mut String) bool {
         let d0 = dst.len();
         if *self.sx_call_fwd.at(base as usize) {
+            self.fwd_spelled += 1;
             dst.push_str("(");
             self.call_str_spell(base, dst);
             dst.push_str(")");
@@ -9350,6 +9617,7 @@ extend CEmit {
                 return self.emit_rvalue(b, *self.sx_inline.at(pl.base as usize), dst);
             }
             if pl.proj_len == 0 && *self.sx_call_fwd.at(pl.base as usize) {
+                self.fwd_spelled += 1;
                 self.call_str_spell(pl.base, dst);
                 return true;
             }
@@ -13412,9 +13680,7 @@ extend CEmit {
                 self.sput(ev);
                 return okm;
             }
-            if t == tt::TokenType::Unsafe {
-                // The `unsafe` prefix carries no C.
-            } else if t == tt::TokenType::Bang {
+            if t == tt::TokenType::Bang {
                 dst.push_str("!");
             } else if t == tt::TokenType::Tilde {
                 dst.push_str("~");
@@ -15432,6 +15698,11 @@ extend CEmit {
                 // value dispatches through its vtable's `call` slot.
                 let mut env_first = false;
                 let mut dyn_val = false;
+                // A direct call of a split definition: the end of the callee's symbol, and the bounds
+                // of each `[]mut T` argument's spelling in `sink` (see `split_abi`).
+                let mut split = false;
+                let mut sym_end: usize = 0;
+                let mut views = Vector::<usize>::new();
                 if ok && t.callee.node == NODE_NONE {
                     let cop = *b.operands.at(t.a as usize);
                     let mut cmV = b.module;
@@ -15468,6 +15739,8 @@ extend CEmit {
                     sink.push_str("(uint32_t)"); // the comparison wrote the count
                 } else if ok {
                     ok = self.term_callee_sym(b, t, true, sink);
+                    sym_end = sink.len();
+                    split = ok && self.split_callee(t.callee);
                 }
                 if ok {
                     sink.push_str("(");
@@ -15502,7 +15775,20 @@ extend CEmit {
                             sink.push_str(", ");
                         }
                         na9 += 1;
+                        let view = split && self.split_arg(b, t.callee, i, opid2);
+                        let a0 = sink.len();
+                        let f0 = self.fwd_spelled;
                         ok = self.emit_call_arg(b, t.callee, i, opid2, sink);
+                        if view {
+                            // A forwarded call spelled twice would run twice: call the struct entry.
+                            split = self.fwd_spelled == f0;
+                            views.push(a0);
+                            views.push(sink.len());
+                        }
+                    }
+                    if ok && split && views.len() != 0 {
+                        split_views(sink, &views);
+                        sink.insert_str(sym_end, "__r");
                     }
                 }
             }
@@ -15540,6 +15826,42 @@ extend CEmit {
             return ok;
         }
         return self.fail("terminator");
+    }
+}
+
+// Rewrite each `[]mut T` argument spelled at `views[2k]..views[2k + 1]` of `s` as the element pointer
+// and the length a split definition takes: `x` becomes `x.ptr, x.len`, and a spelling that is not
+// a plain name or member path is parenthesized. Last first, so earlier bounds stay valid.
+fn split_views(s: &mut String, views: &Vector<usize>) {
+    let mut k = views.len();
+    while k != 0 {
+        k -= 2;
+        let a0 = views[k];
+        let a1 = views[k + 1];
+        let mut plain = true;
+        for j in a0..a1 {
+            let c = s.as_str().byte_at(j);
+            if !(c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c == 95 || c == 46) {
+                plain = false;
+            }
+        }
+        let mut t = String::new();
+        if !plain {
+            t.push_str(")");
+        }
+        t.push_str(".ptr, ");
+        if !plain {
+            t.push_str("(");
+        }
+        t.push_str(s.as_str().slice(a0, a1));
+        if !plain {
+            t.push_str(")");
+        }
+        t.push_str(".len");
+        s.insert_str(a1, t.as_str());
+        if !plain {
+            s.insert_str(a0, "(");
+        }
     }
 }
 
@@ -16306,8 +16628,7 @@ extend CmpSide {
 /// Whether the planner may call a backend entry: the table has one the build's features hold, and
 /// SC_SIMD_SCALAR (a test switch) is not 1.
 pub fn simd_enabled(pk: &loader::Package) bool {
-    let sw = stdlib::getenv("SC_SIMD_SCALAR");
-    if sw != null && str::from_cstr(sw) == "1" {
+    if stdlib::env_is("SC_SIMD_SCALAR", "1") {
         return false;
     }
     for i in 0..pk.simd_table.len() {

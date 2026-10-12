@@ -119,7 +119,7 @@ fn lsp_lifecycle_and_cancellation() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::new();
@@ -173,7 +173,7 @@ fn lsp_completion_attributes() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "@\nfn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -207,7 +207,7 @@ fn lsp_completion_attribute_args() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "@platform(mac)\nfn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -232,7 +232,7 @@ fn lsp_completion_derive_args() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "@derive(Clo)\nstruct P {\n    pub x: i32,\n}\n\nfn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -266,7 +266,7 @@ fn lsp_completion_derive_visibility() {
         "src/hidden.spc",
         "pub interface HiddenIface {\n    fn probe2(self: &Self) i32;\n}\n\npub fn unused() {}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -295,7 +295,7 @@ fn lsp_attribute_expression_names() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", ALIGN_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -346,7 +346,7 @@ fn lsp_completion_lexical_scope() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/lib.spc\"\n");
     p.mkfile("src/lib.spc", SCOPE_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -380,7 +380,7 @@ fn lsp_completion_member_privacy() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", PRIV_MAIN);
     p.mkfile("src/util.spc", UTIL_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -406,7 +406,7 @@ fn lsp_completion_labels() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", LABEL_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -427,7 +427,7 @@ fn lsp_completion_import_paths() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "import \nfn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -452,7 +452,7 @@ fn lsp_rename_conflicts_and_prepare() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", RENAME_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -494,7 +494,7 @@ fn lsp_rename_interface_relations() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", IFACE_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -529,7 +529,7 @@ fn lsp_navigation_features() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", NAV_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -718,7 +718,7 @@ fn lsp_incremental_sync() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn main() i32 {\n    let s = \"\xF0\x9D\x9B\xBC\"; let t = 1;\n    return t;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "");
@@ -768,7 +768,7 @@ fn lsp_incremental_matches_full_sync() {
         let p = cli::proj_new();
         p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
         p.mkfile("src/main.spc", src);
-        let root = str::from_cstr(p.rootp());
+        let root = p.dir();
         let mut ses = String::new();
         push_init_caps(&mut ses, root, "{}", "");
         push_open(&mut ses, root, "src/main.spc", src);
@@ -803,7 +803,7 @@ fn lsp_pull_diagnostics() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn main() i32 {\n    return q;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"diagnostic\":{}}}";
 
     let mut ses = String::new();
@@ -855,7 +855,7 @@ fn lsp_delta_semantic_tokens() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":{\"delta\":true}}}}}";
     let ins = "fn extra() i32 {\\n    return 1;\\n}\\n";
 
@@ -939,7 +939,7 @@ fn lsp_code_actions_eager_and_fixall() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn main() i32 {\n    let unused_one = 1;\n    let unused_two = 2;\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[]}}}}}";
 
     let mut ses = String::new();
@@ -979,7 +979,7 @@ fn lsp_code_action_resolve_and_stale() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn main() i32 {\n    let unused = 1;\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[]}},\"resolveSupport\":{\"properties\":[\"edit\"]}}}}";
 
     let mut ses = String::new();
@@ -1035,7 +1035,7 @@ fn lsp_semantic_code_actions() {
     // other: an unresolved call whose target lives in an unimported workspace module.
     let other = "pub fn go() i32 {\n    return helper();\n}\n";
     p.mkfile("src/other.spc", other);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[]}}}}}";
 
     let mut ses = String::new();
@@ -1076,7 +1076,7 @@ fn lsp_call_and_type_hierarchy() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "interface I {\n    fn m(self: &Self) i32;\n}\n\nstruct S {\n    pub x: i32,\n}\n\nextend S as I {\n    fn m(self: &Self) i32 {\n        return self.x;\n    }\n}\n\nfn leaf() i32 {\n    return 1;\n}\n\nfn caller() i32 {\n    return leaf() + leaf();\n}\n\nfn main() i32 {\n    return caller();\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     // Byte offsets of the declaration names (the hierarchy item's `data.off`).
     let sfind = String::from_str(src);
@@ -1169,7 +1169,7 @@ fn lsp_edit_burst_folds_and_tags_versions() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{}");
     push_open(&mut ses, root, "src/main.spc", BURST_ERR1);
@@ -1206,7 +1206,7 @@ fn lsp_hover_doc_with_cr_line_ends() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", CR_DOC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", CR_DOC);
@@ -1230,7 +1230,7 @@ fn lsp_references_reach_released_bodies() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/util.spc", REF_UTIL);
     p.mkfile("src/main.spc", REF_MAIN);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{}");
     let mut b = String::from_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
@@ -1256,7 +1256,7 @@ fn lsp_limits_and_eviction() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "fn foo() i32 {\n    return 1;\n}\n\nfn main() i32 {\n    return foo() + foo() + foo();\n}\n";
     p.mkfile("src/main.spc", src);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     // MaxResults=1 bounds the reference batch; budgetMb=1 forces eviction of unpinned packages
     // after every round: later requests must still answer (the root rebuilds on demand).
@@ -1296,7 +1296,7 @@ fn lsp_malformed_notifications_are_dropped() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init(&mut ses, root);
     let mut b = String::new();
@@ -1325,7 +1325,7 @@ fn lsp_workspace_symbols_cap_after_filter() {
     p.mkfile("src/main.spc", MAIN_OK);
     // Swept into the workspace batch, whose package loads the prelude (full of `len` methods) first.
     p.mkfile("extra/probe.spc", "pub fn my_len_probe() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{\"maxResults\":1}");
     push_initialized(&mut ses);
@@ -1348,7 +1348,7 @@ fn lsp_token_state_dropped_on_close() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let caps = "{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":{\"delta\":true}}}}}";
     let mut ses = String::new();
     push_init_caps(&mut ses, root, caps, "");
@@ -1389,7 +1389,7 @@ fn lsp_evicted_batch_keeps_diagnostics() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
     p.mkfile("extra/stray.spc", STRAY_ERR);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{\"budgetMb\":1}");
     push_initialized(&mut ses);
@@ -1417,7 +1417,7 @@ fn lsp_sweep_skips_directory_links() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
     p.mkfile("extra/stray.spc", STRAY_ERR);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut target = root.to_string();
     target.push_str("/extra");
     // Two links back up: following them would branch at every level.
@@ -1479,7 +1479,7 @@ fn lsp_build_constants_follow_the_target() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", doc.as_str());
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{}");
     push_open(&mut ses, root, "src/main.spc", doc.as_str());
@@ -1507,7 +1507,7 @@ fn lsp_build_constants() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", BC_DOC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{}");
     push_open(&mut ses, root, "src/main.spc", BC_DOC);
@@ -1548,7 +1548,7 @@ fn lsp_reflection_hover() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", REFLECT_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     push_init(&mut ses, root);
@@ -1600,7 +1600,7 @@ fn lsp_generic_headers() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", GENERIC_SRC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", GENERIC_SRC);
@@ -1619,7 +1619,7 @@ fn lsp_generic_headers() {
     let q = cli::proj_new();
     q.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     q.mkfile("src/main.spc", GENERIC_BROKEN);
-    let qroot = str::from_cstr(q.rootp());
+    let qroot = q.dir();
     let mut qs = String::new();
     push_init(&mut qs, qroot);
     push_open(&mut qs, qroot, "src/main.spc", GENERIC_BROKEN);

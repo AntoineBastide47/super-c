@@ -253,12 +253,13 @@ pub fn finish(rc: i32) {
     }
     unsafe (*g).rc = rc;
     mark(B_LINK);
-    let sink = stdlib::getenv("SC_BUILD_STATS");
-    if sink != null {
+    let sink = stdlib::get_env("SC_BUILD_STATS");
+    if sink.is_some() {
         let mut out = String::with_capacity(2048);
         json(unsafe &*g, &mut out);
         out.push_byte(b'\n');
-        let path = str::from_cstr(sink);
+        let sv = sink.unwrap();
+        let path = sv.as_str();
         if path == "-" {
             unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), stdio::stderr());
         } else {

@@ -1018,7 +1018,7 @@ extend DirCache {
                     if e == null {
                         break;
                     }
-                    names.push(String::from_cstr(unsafe shim::sc_dirent_name(e)));
+                    names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
                 }
                 let _ = unsafe shim::sc_closedir(d);
             }
@@ -1327,7 +1327,7 @@ pub fn real_path_of(path: str) String {
     if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) == null {
         return String::new();
     }
-    return String::from_cstr(&rb.b[0]);
+    return String::from_str(str::from_cbuf(rb.b));
 }
 
 /// An empty package with its import roots, for a driver that sets the build settings (`arch`,
@@ -3889,7 +3889,7 @@ extend Package {
             unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), pl);
             unsafe pb.b[pl] = 0 as char;
             if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) != null {
-                key = str::from_cstr(&rb.b[0]);
+                key = str::from_cbuf(rb.b);
             }
         }
         for i in 0..self.overlay_files.len() {
@@ -4976,7 +4976,7 @@ extend Package {
         let sp = ast.at_const(name_node).as_data.name.text;
         let len = sp.end - sp.start;
         let np = (unsafe (srcp + sp.start as usize)) as *const u8;
-        let sym = idx.syms.intern(str::from_raw(np, len as usize));
+        let sym = idx.syms.intern(unsafe str::from_raw(np, len as usize));
         let it = idx.items.len() as ItemId;
         idx.items.push(
             ItemMeta {
@@ -5016,7 +5016,7 @@ extend Package {
         // Srcp is raw (Copy) so no borrow of self lingers across the &mut self index_decl calls below;
         // `ast` comes from a raw ptr (not a tracked self-borrow), so reading it across them is fine.
         let srcp = self.modules[m].source.as_str().ptr() as *const char;
-        let src = str::from_raw(srcp as *const u8, self.modules[m].source.len());
+        let src = unsafe str::from_raw(srcp as *const u8, self.modules[m].source.len());
         let ast = unsafe &*self.module_ast_const(mid);
         let items = ast.at_const(ast.root).as_data.program.items;
         let ids = ast.list(items);
@@ -5507,12 +5507,12 @@ extend Package {
                 continue;
             }
             if dt < 0 {
-                let mut probe = join2(std_dir, str::from_cstr(nm));
+                let mut probe = join2(std_dir, unsafe str::from_cstr(nm));
                 if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
                     continue;
                 }
             }
-            names.push(String::from_cstr(nm));
+            names.push(unsafe String::from_cstr(nm));
         }
         let _ = unsafe shim::sc_closedir(dir);
         // Sort by name (small: the std/ file list), byte-lexicographic with a length tiebreak (equivalent to

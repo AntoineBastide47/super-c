@@ -11,7 +11,7 @@ const E: str = "SC_NO_EMIT_CACHE";
 @test
 fn new_scaffolds_and_runs() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // `new myapp` creates myapp/ with build.toml + src/main.spc.
     let n = cli::superc_env_in(root, E, "1", "new myapp");
     assert(n.ok(), "new succeeds");
@@ -26,7 +26,7 @@ fn new_scaffolds_and_runs() {
 @test
 fn new_rejects_an_existing_directory() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "new dup").ok(), "first new succeeds");
     // A second `new` with the same name refuses rather than overwrite.
     let r = cli::superc_env_in(root, E, "1", "new dup");
@@ -37,7 +37,7 @@ fn new_rejects_an_existing_directory() {
 @test
 fn init_scaffolds_in_place() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "init");
     assert(r.ok(), "init scaffolds the current directory");
     // The scaffolded project runs from its own root.
@@ -51,7 +51,7 @@ fn run_reports_the_program_exit_code() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 7;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // `run` returns the program's own exit code.
     let r = cli::superc_env_in(root, E, "1", "run");
     assert_eq(r.exit, 7);
@@ -71,7 +71,7 @@ fn command_runs_a_manifest_command() {
         "bin = \"app\"\nroot = \"src/main.spc\"\n[command.greet]\nrun = [\"echo manifest-command-ran\"]\n",
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "command greet");
     assert(r.ok(), "the command runs");
     assert(r.out_has("manifest-command-ran"), "the command's shell line executed");
@@ -87,7 +87,7 @@ fn clean_removes_build_outputs() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
     let mut bdir = String::from_str(root);
     bdir.push_str("/build");
@@ -113,7 +113,7 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("src/build/dev/raw/super_rt.h", "stale\n");
     p.mkfile("src/build/release/raw/main.c", "stale\n");
     p.mkfile("src/build/release/raw/super_rt.h", "stale\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
     assert(cli::superc_env_in(root, E, "1", "clean").ok(), "clean succeeds");
     let mut keep = String::from_str(root);
@@ -136,7 +136,7 @@ fn rm_rf_does_not_follow_symlinks() {
     let p = cli::proj_new();
     p.mkfile("outside/keep.txt", "mine\n");
     p.mkfile("tree/file.txt", "x\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ln = String::new();
     ln.format_into("ln -s \"{}/outside\" \"{}/tree/link\"", root, root);
     assert_eq(cli::run_quiet(ln.cstr()), 0);
@@ -153,7 +153,7 @@ fn rm_rf_does_not_follow_symlinks() {
 @test
 fn new_names_the_project_after_the_last_path_component() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "new apps/demo").ok(), "new succeeds");
     let mut man = String::from_str(root);
     man.push_str("/apps/demo/build.toml");
@@ -167,7 +167,7 @@ fn vendor_rejects_a_path_as_name() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("dep/lib.spc", "pub fn one() i32 {\n    return 1;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "vendor dep .. --force");
     assert_eq(r.exit, 1);
     assert(r.out_has("is not a directory name"), "the name is refused");
@@ -186,7 +186,7 @@ fn command_env_keeps_quotes() {
         "bin = \"app\"\nroot = \"src/main.spc\"\n[command.show]\nenv = { V = \"it's\" }\nrun = [\"echo [$V]\"]\n",
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "command show");
     assert(r.ok(), "the command runs");
     assert(r.out_has("[it's]"), "the value arrives unchanged");
@@ -203,7 +203,7 @@ fn emit_stamp_sees_a_new_shadowing_module() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
     p.mkfile("src/lib/lib.spc", "pub fn v() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert_eq(cli::superc_env_in(root, "SC_STAMP_TEST", "1", "run").exit, 3);
     // `src/lib.spc` is probed before `src/lib/lib.spc`, so it now names the module.
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 5;\n}\n");
@@ -221,12 +221,12 @@ fn emit_stamp_keys_on_the_compiler_content() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // tc/super-c: a copy of the compiler under test, with std/ and ffi/ beside it; tc/ref keeps its mtime.
     let mut here = Array::<char, 4096> {};
     let mut dot = String::from_str(".");
     assert(unsafe shim::sc_realpath(dot.cstr(), &mut here[0]) != null, "the working directory resolves");
-    let cwd = str::from_cstr(&here[0]);
+    let cwd = str::from_cbuf(here.as_slice());
     p.mkfile("tc/.keep", "");
     let mut exe = String::new();
     exe.format_into("{}/tc/super-c", root);
@@ -275,12 +275,12 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let ext = format("build --out-dir=ext \"--transpiler={}\" -o app", cli::superc_path());
     let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
     assert(first.ok(), "the build through the transpiler succeeds");
     assert(first.out_has("phase load"), "the first build transpiles");
-    let app = format("{}/app{}", root, str::from_cstr(cli::binext()));
+    let app = format("{}/app{}", root, unsafe str::from_cstr(cli::binext()));
     assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
     let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
     assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
@@ -315,7 +315,7 @@ fn escaped_space_dependency_keeps_the_object_fresh() {
         "src/main.spc",
         "extern \"C\" \"my dir/native.h\" {\n    fn native_one() i32;\n}\n\nfn main() i32 {\n    return unsafe native_one();\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // Without the object cache, so every stale unit really compiles and is counted.
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "first build");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TIMINGS=1", "build");
@@ -339,7 +339,7 @@ fn manifest_profile_is_a_build_constant() {
         "src/main.spc",
         "fn main() i32 {\n    if PROFILE == \"fast\" {\n        return 0;\n    }\n    return 1;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "run --profile=fast");
     assert(r.ok(), "the fast profile takes the fast branch");
     let mut raw = String::from_str(root);

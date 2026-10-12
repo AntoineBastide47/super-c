@@ -11,7 +11,7 @@ fn build_with(key: str, finding: str) cli::CliResult {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", PROG);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, key, "1", "build");
     assert(r.ok(), key);
     if r.out_has(finding) {

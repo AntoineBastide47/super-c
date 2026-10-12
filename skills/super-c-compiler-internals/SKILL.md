@@ -325,7 +325,15 @@ than defining a new context. Two layers:
      place reached through a raw-pointer deref (`behind_raw`). A call-entry claim or a
      two-phase activation conflicts with loans live at the claim's successor point, so
      an argument's borrow carried into the call conflicts and a copied-out value does
-     not. Only a type with an explicit `Free` (itself or a member) reads its stored
+     not. The claims of one call share its entry point, so no loan orders them:
+     `Gen::arg_clashes` compares the call's arguments pairwise (`arg_share`: 2 for a
+     `&mut` or `[]mut` handed over or a `&mut` autoref, 1 for another borrow-carrying copy
+     or a shared autoref, 0 for a raw-pointer erasure) and records a `BodyFacts.clashes`
+     row for two overlapping places (`places_conflict`) when one of them is 2;
+     `bc_ir_body` reports it. A `&mut` or `[]mut T` (`mut_view_place`) copied whole into a
+     local of its own kind moves (`plain_copy`); one stored into a field, a literal member or a
+     copied closure capture issues a `LK_MUT` loan on it with `deref` set (`reborrow_store`),
+     held by the destination's origin, which a fn-value call passes on to its result. Only a type with an explicit `Free` (itself or a member) reads its stored
      borrows at destruction (`Owner::observes`); `Access.def` marks true stores for
      origin liveness.
    - The signature walks (`lt_tokens`, `behind_walk`, `names_static`) read a `Self` of the
@@ -618,6 +626,16 @@ A fold chain of inlined temporaries keeps every link past `INLINE_CHAIN_MAX` (64
 declared temporary, so long expressions stay under that depth. A body that still passes it
 is refused and reported as a located error (`CEmit.refused`, merged from the shards by
 `report_refusals`).
+
+A by-value `[]mut T` parameter splits the definition (`split_abi`, `emit_fn_inner`): the body is
+`<sym>__r`, which takes the view as `<T> *restrict __sc_sp<l>, size_t __sc_sn<l>` and rebuilds the
+local, and `split_entry` writes ahead of it the prototype of `<sym>__r` and the struct-ABI entry
+`<sym>` on the chunk's first line, so `proto_of` yields both prototypes on one line (the driver
+pairs prototype line k with chunk k). A direct call (`split_callee`, `split_arg`) spells
+`<sym>__r` and `x.ptr, x.len` for each view argument (`split_views`), unless the callee is
+extern, variadic, `@blocking` or a vector-backend entry, or a view argument spells a forwarded call
+(`fwd_spelled`), which would then run twice; such a call reaches `<sym>`. Vector-backend entries
+(`CEmit.no_split`) and `@emit_macro` templates keep the struct ABI.
 
 A body renders straight into the TU buffer: `emit_body_core_cf` takes `self.out` out of
 the emitter and threads it as `o: &mut String` through every statement, control-flow

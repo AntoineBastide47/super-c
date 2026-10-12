@@ -381,6 +381,11 @@ size_t sc_rt_parked(void) { return 0; } /* WaitOnAddress keeps no records of its
    comfortably more than a typical task's high-water mark (~16 KiB measured), so the growth path below is
    reached only by genuinely deep ones. */
 #define SC_STK_INIT (32u * 1024u)
+/* The bottom of a coroutine stack the overflow report runs in (TEB GuaranteedStackBytes, what
+   SetThreadStackGuarantee sets for a thread): the kernel raises STATUS_STACK_OVERFLOW while this much is
+   left. Without it the exception record alone, with its AVX-512 register state, fills the last page, and the
+   process dies before the report. Taken from the usable size, as a thread's guarantee is. */
+#define SC_STK_GUARANTEE (16u * 1024u)
 
 /* The TEB fields the stack machinery lives in. Read through gs because DeallocationStack (0x1478) is past
    the end of the NT_TIB the headers declare. */
@@ -492,7 +497,8 @@ static void sc_rt_report_overflow(void) {
     sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
   }
   sc_rt_say("\n");
-  ExitProcess(134);
+  /* Not ExitProcess: its DLL detach and CRT teardown would run on the exhausted stack. As POSIX `_exit`. */
+  TerminateProcess(GetCurrentProcess(), 134);
 }
 
 /* Grow the running coroutine stack into its reservation, or report that there is nothing left to grow into.
@@ -524,11 +530,16 @@ static LONG CALLBACK sc_rt_stack_veh(EXCEPTION_POINTERS *ep) {
   const uintptr_t dealloc = sc_teb_read(SC_TEB_DEALLOC);
   if (addr >= limit || addr < dealloc) return EXCEPTION_CONTINUE_SEARCH; /* not this stack's growth region */
 
-  /* One page above the reservation stays permanently uncommitted: that is the hard floor. */
-  const uintptr_t floor = dealloc + pg;
+  /* One page above the reservation stays permanently uncommitted, and the guarantee above it is the
+     report's: growth stops there. */
+  const uintptr_t floor = dealloc + pg + SC_STK_GUARANTEE;
   uintptr_t want = addr & ~(uintptr_t)(pg - 1);
   if (want > pg) want -= pg; /* a page of headroom, so the next frame does not fault immediately */
-  if (want < floor) sc_rt_report_overflow();
+  if (want < floor) {
+    /* Room for the report, as the kernel gives it on its own path; it reports whether or not this commits. */
+    VirtualAlloc((void *)(dealloc + pg), (size_t)(limit - (dealloc + pg)), MEM_COMMIT, PAGE_READWRITE);
+    sc_rt_report_overflow();
+  }
   if (!VirtualAlloc((void *)want, (size_t)(limit - want), MEM_COMMIT, PAGE_READWRITE))
     return EXCEPTION_CONTINUE_SEARCH;
   if (want - pg >= floor) VirtualAlloc((void *)(want - pg), pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD);
@@ -638,14 +649,15 @@ void sc_rt_cond_signal(void *c) { WakeConditionVariable((CONDITION_VARIABLE *)c)
    register state lives on the stack it belongs to. SwitchToFiber does the same job through the OS, at a few
    hundred nanoseconds and a fiber-owned stack we cannot guard ourselves.
    Win64 saves more than SysV: eight GPRs, xmm6-xmm15 (callee-saved here, unlike SysV where no xmm is), and
-   three TEB fields. The TEB is the part that is easy to miss and impossible to skip -- __chkstk probes and
+   four TEB fields. The TEB is the part that is easy to miss and impossible to skip -- __chkstk probes and
    the SEH unwinder both read the running thread's stack bounds from it, so a coroutine that leaves them
-   pointing at the WORKER's stack faults the moment a function with a big frame runs on it. */
+   pointing at the WORKER's stack faults the moment a function with a big frame runs on it, and the kernel
+   reads the stack guarantee from it when the stack overflows. */
 #define SC_ASM_FN(n) ".globl " n "\n.p2align 4\n" n ":\n"
 
-/* 160 bytes of xmm + 64 of GPRs + 24 of TEB + 16 of padding. Sized so that sp stays 16-aligned through the
-   frame (movaps demands it) and so the trampoline starts with a 16-aligned sp; the return address the
-   trailing `ret` consumes sits just above, at +264. */
+/* 160 bytes of xmm + 64 of GPRs + 24 of TEB + 16 of MXCSR, x87 control word and the 4-byte TEB stack
+   guarantee. Sized so that sp stays 16-aligned through the frame (movaps demands it) and so the trampoline
+   starts with a 16-aligned sp; the return address the trailing `ret` consumes sits just above, at +264. */
 #define SC_CTX_FRAME 264
 /* clang-format off */
 __asm__(
@@ -693,10 +705,14 @@ __asm__(
   "  movq %rax, 240(%rsp)\n"
   "  stmxcsr 248(%rsp)\n" /* MXCSR + x87 control word, in what was the alignment padding */
   "  fnstcw  252(%rsp)\n"
+  "  movl %gs:0x1748, %eax\n" /* GuaranteedStackBytes */
+  "  movl %eax, 256(%rsp)\n"
   "  movq %rsp, (%rcx)\n"
   "  movq %rdx, %rsp\n"
   "  ldmxcsr 248(%rsp)\n"
   "  fldcw   252(%rsp)\n"
+  "  movl 256(%rsp), %eax\n"
+  "  movl %eax, %gs:0x1748\n"
   "  movq 224(%rsp), %rax\n"
   "  movq %rax, %gs:0x08\n"
   "  movq 232(%rsp), %rax\n"
@@ -775,6 +791,7 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
   f[28] = (void *)top;          /* StackBase: the high end this coroutine runs on */
   f[29] = sc_stk_initial_limit((char *)base, size, si.dwPageSize); /* StackLimit: lowest COMMITTED byte */
   f[30] = (void *)(base - si.dwPageSize); /* DeallocationStack: the reservation, guard page included */
+  f[32] = (void *)(uintptr_t)SC_STK_GUARANTEE; /* GuaranteedStackBytes, read as its low 4 bytes */
   f[33] = (void *)sc_ctx_entry; /* the return address the trailing `ret` jumps to */
   /* The ONLY reader of this frame is the assembly above, which the compiler cannot see. Under LTO it has
      the whole program and concludes nothing reads these stores, so it deletes them -- the coroutine then

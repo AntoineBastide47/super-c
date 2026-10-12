@@ -26,6 +26,10 @@ esac
 step() { printf '\ngate: %s\n' "$1"; }
 fail() { printf 'gate: FAILED: %s\n' "$1" >&2; exit 1; }
 ncpu=$(getconf _NPROCESSORS_ONLN)
+# Windows (mingw-w64): binaries carry `.exe`, and the C standard is SC_CSTD (mingw hides POSIX prototypes
+# under -std=c11); every build passes it, as the CI build and test steps do.
+x=${BINEXT:-}
+cstd=${SC_CSTD:+--cstd=$SC_CSTD}
 
 # Sorted set comparison of a contract list against a shell glob (the glob only detects unlisted files).
 same_set() {
@@ -60,7 +64,7 @@ tree="$tmp/tree"
 mkdir -p "$tree"
 cp -R src std ffi build.toml "$tree/"
 rm -rf "$tree/src/build"
-cp "$CONTRACT_BIN" "$tree/super-c"
+cp "$CONTRACT_BIN$x" "$tree/super-c$x"
 
 # Byte comparison of two emitted trees, minus the accepted nondeterminism.
 same_tree() {
@@ -70,21 +74,21 @@ same_tree() {
 }
 
 step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)"
-( cd "$tree" && SC_LEAK_CHECK=fatal ./super-c build >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal "./super-c$x" build ${cstd:+"$cstd"} >/dev/null )
 cp -R "$tree/build/dev/raw" "$tmp/gen1-raw"
-cp "$tree/build/dev/super-c" "$tree/gen1-super-c"
+cp "$tree/build/dev/super-c$x" "$tree/gen1-super-c$x"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 ./gen1-super-c build >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build ${cstd:+"$cstd"} >/dev/null )
 same_tree "$tmp/gen1-raw" "$tree/build/dev/raw" || fail "gen1 and gen2 emitted different C (above)"
 # Generation two is compiled and run: every build below is its own.
-cp "$tree/build/dev/super-c" "$tree/gen2-super-c"
+cp "$tree/build/dev/super-c$x" "$tree/gen2-super-c$x"
 echo "gate: byte-identical"
 
 # One build of the tree by gen2: $1 workers, $2 the SC_TASK_DELAY seed (empty = none), $3 the record
 # name under $tmp (<name>-raw, <name>-types, <name>-err).
 gen2_build() {
     rm -rf "$tree/build"
-    ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} ./gen2-super-c build --jobs="$1" >/dev/null 2>"$tmp/$3-err" ) || { cat "$tmp/$3-err" >&2; fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"; }
+    ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} "./gen2-super-c$x" build --jobs="$1" ${cstd:+"$cstd"} >/dev/null 2>"$tmp/$3-err" ) || { cat "$tmp/$3-err" >&2; fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"; }
     cp -R "$tree/build/dev/raw" "$tmp/$3-raw"
 }
 # The identity of two records: the emitted tree, the type table, the item index digest, the
@@ -108,11 +112,12 @@ for seed in $CONTRACT_DELAY_SEEDS; do
     echo "gate: seed $seed byte-identical"
 done
 
-step "strict C warnings ($CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS) and readability"
+strict_cstd=${SC_CSTD:-$CONTRACT_CSTD}
+step "strict C warnings ($strict_cstd $CONTRACT_STRICT_CFLAGS) and readability"
 raw="$tree/build/dev/raw"
 units=0
 for c in $(find "$raw" -name '*.c' | sort); do
-    cc $CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS -fsyntax-only "$c" || fail "strict warnings: $c"
+    ${CC:-cc} $strict_cstd $CONTRACT_STRICT_CFLAGS -fsyntax-only "$c" || fail "strict warnings: $c"
     units=$((units + 1))
 done
 if grep -rln "$CONTRACT_READABLE_FORBIDDEN" "$raw" >/dev/null; then
@@ -134,7 +139,7 @@ fi
 
 step "profiles ($CONTRACT_PROFILES)"
 for p in $CONTRACT_PROFILES; do
-    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen2-super-c build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c" >/dev/null ) || fail "profile $p"
+    ( cd "$tree" && SC_LEAK_CHECK=fatal "./gen2-super-c$x" build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c$x" ${cstd:+"$cstd"} >/dev/null ) || fail "profile $p"
     echo "gate: profile $p builds"
 done
 

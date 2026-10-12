@@ -73,7 +73,7 @@ pub struct ThreadPayload<F, T> {
 /// The C-ABI thread entry point: reconstruct the payload, release its block, run the body into the cell,
 /// publish the result, drop the producer's reference. Monomorphized per (F, T); its address is handed to
 /// `sc_rt_thread_create`. `pub` for linkage.
-pub fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
+pub unsafe fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
     let pp = arg as *mut ThreadPayload<F, T>;
     let c = unsafe (*pp).cell;
     {
@@ -102,7 +102,7 @@ pub struct JoinHandle<T> {
 extend<T> JoinHandle<T> {
     /// `pub` for external linkage: `spawn` is monomorphized in the CALLER's module, so its call to this
     /// constructor must reach a non-static symbol. Not part of the intended surface: use `spawn`.
-    pub fn from_parts(handle: *mut void, cell: *mut Cell<T>) JoinHandle<T> {
+    pub unsafe fn from_parts(handle: *mut void, cell: *mut Cell<T>) JoinHandle<T> {
         return JoinHandle::<T> { handle: handle, cell: cell };
     }
     /// Whether the thread has finished: its value is published and it holds no reference to the result,
@@ -179,5 +179,5 @@ pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
         panic("thread::spawn: the OS cannot create a thread");
     }
-    return JoinHandle::<T>::from_parts(h, c);
+    return unsafe JoinHandle::<T>::from_parts(h, c);
 }

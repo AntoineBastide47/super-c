@@ -95,7 +95,13 @@ fn run_file(
         }
         let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
         p.cir = &mut cirv;
-        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
+        // One process builds a tree at a time, as in a manifest build.
+        default_gen_root(&mut p);
+        let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
+        if lk >= 0 {
+            rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
+            unsafe shim::sc_tree_unlock(lk);
+        }
     }
     return rc;
 }
@@ -168,7 +174,7 @@ fn exe_std_dir(argv0: *const char) String {
     };
     let mut base = String::new();
     if slash != null {
-        base.push_str(str::from_raw(path as *const u8, slash as usize - path as usize));
+        base.push_str(unsafe str::from_raw(path as *const u8, slash as usize - path as usize));
     } else {
         base.push_str(".");
     }
@@ -177,7 +183,7 @@ fn exe_std_dir(argv0: *const char) String {
     let mut cut = base.len();
     for _up in 0..3 {
         let mut probe = String::with_capacity(cut + 4);
-        probe.push_str(str::from_raw(base.as_str().ptr(), cut));
+        probe.push_str(unsafe str::from_raw(base.as_str().ptr(), cut));
         probe.push_str("/std");
         if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
             return probe;
@@ -205,7 +211,7 @@ fn read_stdin() String {
     loop {
         let n = unsafe stdio::fread(buf.as_ptr() as *mut u8, 1, cap, sin);
         if n > 0 {
-            s.push_bytes(buf.as_ptr(), n);
+            s.push_bytes(buf[0..n]);
         }
         if n < cap {
             break;
@@ -606,7 +612,7 @@ fn write_source(path: str, body: str) bool {
     let mut p = String::from_str(path);
     let mut abs = PathBuf {};
     if unsafe shim::sc_realpath(p.cstr(), &mut abs[0]) != null {
-        return write_file_atomic(str::from_cstr(&abs[0]), body);
+        return write_file_atomic(str::from_cbuf(abs.as_slice()), body);
     }
     return write_file_atomic(path, body);
 }
@@ -798,7 +804,7 @@ fn canon_cwd() String {
     let mut dot = String::from_str(".");
     let mut buf = PathBuf {};
     if unsafe shim::sc_realpath(dot.cstr(), &mut buf[0]) != null {
-        return String::from_cstr(&buf[0]);
+        return String::from_str(str::from_cbuf(buf.as_slice()));
     }
     return dot;
 }

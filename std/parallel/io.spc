@@ -261,7 +261,7 @@ fn batch_flush(r: *mut Reactor, b: &mut Batch) {
     if io_stats_on() {
         stat_add(&mut unsafe (*r).st.batches, 1);
     }
-    runtime::run_claimed(b.head, b.tail, b.n);
+    unsafe runtime::run_claimed(b.head, b.tail, b.n);
     b.head = null;
     b.tail = null;
     b.n = 0;
@@ -362,7 +362,7 @@ fn fire_list(r: *mut Reactor, head: *mut *mut IoWait, reason: u32, b: &mut Batch
         let next = unsafe (*n).lnext;
         unsafe (*n).state = NS_FIRED;
         // The last touch of `n`: on a won claim the frame may end as soon as the batch is flushed.
-        if runtime::claim_wake(unsafe (*n).co, unsafe (*n).token, reason) {
+        if unsafe runtime::claim_wake((*n).co, (*n).token, reason) {
             batch_add(b, unsafe (*n).co);
             if reason == runtime::WR_IO && io_stats_on() {
                 stat_add(&mut unsafe (*r).st.wakes, 1);
@@ -375,7 +375,7 @@ fn fire_list(r: *mut Reactor, head: *mut *mut IoWait, reason: u32, b: &mut Batch
 // Settle one node outside any list: wake it with `reason`; a lost claim leaves it to the disarm.
 fn settle_node(n: *mut IoWait, reason: u32, b: &mut Batch) {
     unsafe (*n).state = NS_FIRED;
-    if runtime::claim_wake(unsafe (*n).co, unsafe (*n).token, reason) {
+    if unsafe runtime::claim_wake((*n).co, (*n).token, reason) {
         batch_add(b, unsafe (*n).co);
     }
 }
@@ -384,7 +384,7 @@ fn settle_node(n: *mut IoWait, reason: u32, b: &mut Batch) {
 fn ack(n: *mut IoWait, b: &mut Batch) {
     unsafe (*n).state = NS_FIRED;
     // The acknowledgement park is untimed and non-cancellable: this claim is its only waker.
-    if !runtime::claim_wake(unsafe (*n).co, unsafe (*n).ack, runtime::WR_IO) {
+    if !unsafe runtime::claim_wake((*n).co, (*n).ack, runtime::WR_IO) {
         panic("reactor: the acknowledgement park has exactly one waker");
     }
     batch_add(b, unsafe (*n).co);
@@ -1057,21 +1057,21 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         dnext: 0,
         lnext: null,
     };
-    let token = runtime::park_begin(co);
+    let token = unsafe runtime::park_begin(co);
     n.token = token;
-    let reason = runtime::park_timed(token, deadline, commit_arm, &mut n, true);
+    let reason = unsafe runtime::park_timed(token, deadline, commit_arm, &mut n, true);
     if deadline != 0 {
-        runtime::cancel_timer(co);
+        unsafe runtime::cancel_timer(co);
     }
     let ready = reason == runtime::WR_IO;
     if !ready {
         // The deadline, a cancellation or shutdown won the park: the reactor may still hold the node,
         // armed or not yet processed. Park again until it has let go; that park has exactly one waker.
-        n.ack = runtime::park_begin(co);
-        let _ = runtime::park_timed(n.ack, 0, commit_disarm, &mut n, false);
+        n.ack = unsafe runtime::park_begin(co);
+        let _ = unsafe runtime::park_timed(n.ack, 0, commit_disarm, &mut n, false);
     }
     runtime::wait_clear();
-    runtime::park_done(co);
+    unsafe runtime::park_done(co);
     if runtime::cancel_after_wait(true) {
         return false;
     }

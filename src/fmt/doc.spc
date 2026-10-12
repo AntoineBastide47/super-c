@@ -199,7 +199,7 @@ extend<'a> DocPool<'a> {
             DOC_NIL => {},
             DOC_TEXT_SPAN => {
                 let len = (n.b - n.a) as usize;
-                unsafe (*r.out).push_bytes(unsafe (self.src + n.a as usize), len);
+                unsafe (*r.out).push_str(str::from_raw(self.src + n.a as usize, len));
                 r.col = r.col + len as i32;
             },
             DOC_TEXT_STR => {

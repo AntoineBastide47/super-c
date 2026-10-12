@@ -476,7 +476,7 @@ extend RunResult as Free {
 
 // Read a whole file into a fresh NUL-terminated buffer (caller frees); null if it cannot be opened.
 fn slurp(path: *const char) *mut char {
-    let f = stdio::fopen(str::from_cstr(path), "rb");
+    let f = stdio::fopen(unsafe str::from_cstr(path), "rb");
     if f == null {
         return null;
     }
@@ -502,7 +502,7 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     unsafe R_SEQ = unsafe R_SEQ + 1;
     let mut dir = format(
         "{}/scr_{}_{}_{}",
-        str::from_cstr(unsafe shim::sc_tmpdir()),
+        unsafe str::from_cstr(shim::sc_tmpdir()),
         unsafe shim::sc_getpid(),
         unsafe R_SEQ,
         (unsafe shim::sc_ticks_ms()) as u64,
@@ -522,11 +522,11 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf);
     }
     unsafe stdio::fclose(wf);
-    let bin = format("{}/prog{}", d, str::from_cstr(cli::binext()));
+    let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
     let mut cmd = format(
         "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
         cli::superc_path(),
-        str::from_cstr(cli::cstd_flag()),
+        unsafe str::from_cstr(cli::cstd_flag()),
         d,
         bin.as_str(),
     );
@@ -584,7 +584,7 @@ pub fn expect_resolve_ok(label: str, src: str) {
 pub fn expect_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_TYPECHECK);
     if !c.msg_has(needle) {
-        eprintln("{}: the first error is: {}", label, str::from_cstr(&c.first[0]));
+        eprintln("{}: the first error is: {}", label, str::from_cbuf(c.first));
     }
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
@@ -593,7 +593,7 @@ pub fn expect_err_msg(label: str, src: str, needle: str) {
 pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_RESOLVE);
     if !c.msg_has(needle) {
-        eprintln("{}: the first error is: {}", label, str::from_cstr(&c.first[0]));
+        eprintln("{}: the first error is: {}", label, str::from_cbuf(c.first));
     }
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
@@ -623,7 +623,7 @@ static mut SIMD_LANE: i32 = -1;
 pub fn simd_lane() bool {
     if unsafe SIMD_LANE < 0 {
         let e = stdlib::getenv("SC_SIMD_LANE");
-        unsafe SIMD_LANE = (e != null && str::from_cstr(e) == "wasm") as i32;
+        unsafe SIMD_LANE = (e != null && unsafe str::from_cstr(e) == "wasm") as i32;
     }
     return unsafe SIMD_LANE == 1;
 }
@@ -658,7 +658,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
         },
     );
     p.mkfile("main.spc", src);
-    let mut root = String::from_str(str::from_cstr(p.rootp()));
+    let mut root = String::from_str(p.dir());
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
     let mut env = cli::fixture_cache_env(root.as_str());
@@ -670,12 +670,12 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     // `+dotprod,+i8mm,+rdm`, or an x86-64 level).
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     if more != null && unsafe *more != 0 as char {
-        cmd.format_into(" --target-feature={}", str::from_cstr(more));
+        cmd.format_into(" --target-feature={}", unsafe str::from_cstr(more));
     }
     // `SC_SIMD_WIDTH`: the preferred width on AVX-512 (`--simd-width`), 512 for the 512-bit entries.
     let width = stdlib::getenv("SC_SIMD_WIDTH");
     if width != null && unsafe *width != 0 as char {
-        cmd.format_into(" --simd-width={}", str::from_cstr(width));
+        cmd.format_into(" --simd-width={}", unsafe str::from_cstr(width));
     }
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -689,7 +689,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     if cli::on_wasm() {
         cmd.format_into(" \"--transpiler={}\"", exe);
     }
-    cmd.format_into(" -o prog{}", str::from_cstr(cli::binext()));
+    cmd.format_into(" -o prog{}", unsafe str::from_cstr(cli::binext()));
     let mut outp = String::new();
     outp.format_into("{}/.build", root.as_str());
     // The engine reads build.toml from its working directory.
@@ -746,13 +746,13 @@ pub fn expect_run(label: str, src: str, arg: str, msg: str) {
 
 /// Run the program `b` built with `args` (a command-line fragment) and capture its output.
 pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
-    let root = str::from_cstr(b.proj.rootp());
+    let root = b.proj.dir();
     let mut cmd = String::new();
     if b.wasm {
         // Relaxed SIMD runs deterministically: a result never depends on the host.
         cmd.format_into("wasmtime run -W relaxed-simd-deterministic=y --dir=\"{}\" \"{}/prog\" {}", root, root, args);
     } else {
-        cmd.format_into("\"{}/prog{}\" {}", root, str::from_cstr(cli::binext()), args);
+        cmd.format_into("\"{}/prog{}\" {}", root, unsafe str::from_cstr(cli::binext()), args);
     }
     let mut outp = String::new();
     outp.format_into("{}/.out", root);
@@ -1173,7 +1173,7 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
             prof = o.slice(10, o.len());
         }
     }
-    let root = str::from_cstr(b.proj.rootp());
+    let root = b.proj.dir();
     let mut dbp = String::new();
     dbp.format_into("{}/build/{}/compile_commands.json", root, prof);
     let text = cli::read_text(dbp.as_str());
@@ -1314,7 +1314,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let aptr = (&mut m.ast) as *mut Ast;
-    let mut rr = res::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
+    let mut rr = res::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     rr.resolve();
     if i == cap {
         let c = rr.errors.errors.len();
@@ -1332,7 +1332,7 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     if i == cap {
         let c = t.errors.errors.len();
@@ -1352,7 +1352,7 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     let mut ow = bfx::Owner::new(pkg);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = keep;

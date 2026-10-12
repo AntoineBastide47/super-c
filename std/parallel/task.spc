@@ -203,7 +203,7 @@ const fn child_inline<F>() bool {
 /// a copy the trampoline now owns, and the record is abandoned, or freed when boxed), bind the group token,
 /// run the body. The finish runs from a `defer`, so a body that ends through cancellation cleanup still
 /// reports. `pub` for linkage.
-pub fn child_entry<F: fn move() + Send + 'static>(env: *mut void) {
+pub unsafe fn child_entry<F: fn move() + Send + 'static>(env: *mut void) {
     let pp = env as *mut ChildEnv<F>;
     let refs = unsafe (*pp).refs;
     let f = unsafe (*pp).f;
@@ -409,14 +409,14 @@ extend TaskGroup {
         if child_inline::<F>() {
             // The bytes move into the task record, which owns them from here on: a reused block costs no
             // allocation.
-            runtime::spawn_coroutine_env(child_entry::<F>, null, (&c) as *const ChildEnv<F>, sizeof(ChildEnv<F>));
+            unsafe runtime::spawn_coroutine_env(child_entry::<F>, null, (&c) as *const ChildEnv<F>, sizeof(ChildEnv<F>));
             forget(c);
             return;
         }
         let mut g = Global {};
         let env = (unsafe g.alloc(sizeof(ChildEnv<F>), alignof(ChildEnv<F>))) as *mut ChildEnv<F>;
         unsafe env[0] = c;
-        runtime::spawn_coroutine(child_entry::<F>, env);
+        unsafe runtime::spawn_coroutine(child_entry::<F>, env);
     }
     /// Request cooperative cancellation of every child, with the user reason.
     pub fn cancel(self: &TaskGroup) {

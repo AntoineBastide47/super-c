@@ -20,7 +20,7 @@ fn emitted(src: str, flags: str) String {
     p.mkfile("main.spc", src);
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut t = cli::read_text(format("{}/build/dev/raw/__sc_manifest", root).as_str());
     t.push_str(cli::read_text(format("{}/build/dev/raw/main.c", root).as_str()).as_str());
     return t;
@@ -117,7 +117,7 @@ extend Kernels {
             eprintln("{}", b.diag.as_str());
         }
         assert(b.built, "the kernels build");
-        let c = cli::read_text(format("{}/build/release/raw/main.c", str::from_cstr(b.proj.rootp())).as_str());
+        let c = cli::read_text(format("{}/build/release/raw/main.c", b.proj.dir()).as_str());
         let mut code = String::new();
         let e = h::asm_text(&b, ops, "main__k0", &mut code);
         assert(e.len() == 0, e.as_str());
@@ -279,7 +279,7 @@ fn operations_lower_to_their_instructions() {
     let dot = "fn k(a: i8x16, b: i8x16) i32 {\n    return simd::dot::<i32>(a, b);\n}\n";
     let dargs = "k(i8x16::splat(n as i8), i8x16::splat(1))";
     let more = stdlib::getenv("SC_SIMD_FEATURES");
-    if PLATFORM == Platform::MacOS || more != null && str::from_cstr(more).contains("dotprod") {
+    if PLATFORM == Platform::MacOS || more != null && unsafe str::from_cstr(more).contains("dotprod") {
         ks.add("a dot product", dot, dargs, ["sdot", "addv"], ["=bl"]);
     } else {
         ks.add("a dot product", dot, dargs, ["smull", "addv"], ["=bl", "sdot"]);
@@ -473,7 +473,7 @@ fn pick(c: bool, a: i32, b: i32) i32 {
 // Build `main.spc` of project `p` with `flags` and run it: its exit code (-1: no build), and its output
 // on stderr when it fails.
 fn build_run(p: &cli::Proj, flags: str) i32 {
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let b = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags).as_str());
     if !b.ok() {
         b.show();

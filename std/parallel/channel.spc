@@ -221,7 +221,7 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
 }
 
 /// Another handle to the block: one relaxed increment, as for an `Arc`. `pub` for linkage.
-pub fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
+pub unsafe fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
     let _ = unsafe atomic::add_usize(&mut (*p).strong, 1, atomics::MemoryOrder::Relaxed as i32);
     return p;
 }
@@ -229,7 +229,7 @@ pub fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
 /// Drop one handle; the one that observes the count fall to zero frees the state (buffered payloads and a
 /// heap ring included) and the block. AcqRel, as for an `Arc`: the decrement chain orders every handle's
 /// last touch before the free. `pub` for linkage.
-pub fn release<T>(p: *mut ChannelInner<T>) {
+pub unsafe fn release<T>(p: *mut ChannelInner<T>) {
     let prev = unsafe atomic::sub_usize(&mut (*p).strong, 1, atomics::MemoryOrder::AcqRel as i32);
     if prev != 1 {
         return;
@@ -268,7 +268,7 @@ extend<T> Channel<T> {
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.senders = s.senders + 1;
-        return Sender::<T> { inner: retain(self.inner) };
+        return Sender::<T> { inner: unsafe retain(self.inner) };
     }
     /// A new receiving handle.
     pub fn receiver(self: &Channel<T>) Receiver<T> {
@@ -276,13 +276,13 @@ extend<T> Channel<T> {
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.receivers = s.receivers + 1;
-        return Receiver::<T> { inner: retain(self.inner) };
+        return Receiver::<T> { inner: unsafe retain(self.inner) };
     }
 }
 
 extend<T> Channel<T> as Free {
     pub fn free(self: &mut Channel<T>) {
-        release(self.inner);
+        unsafe release(self.inner);
     }
 }
 
@@ -297,7 +297,7 @@ extend<T> Sender<T> {
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.senders = s.senders + 1;
-        return Sender::<T> { inner: retain(self.inner) };
+        return Sender::<T> { inner: unsafe retain(self.inner) };
     }
     /// Wait until there is room, then send `value`. Returns `Rejected(value)` if the channel is closed or has
     /// no receivers left (the value is handed back so the caller keeps ownership).
@@ -444,7 +444,7 @@ extend<T> Sender<T> as Free {
                 inner.not_empty.notify_all();
             }
         }
-        release(self.inner);
+        unsafe release(self.inner);
     }
 }
 
@@ -459,7 +459,7 @@ extend<T> Receiver<T> {
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.receivers = s.receivers + 1;
-        return Receiver::<T> { inner: retain(self.inner) };
+        return Receiver::<T> { inner: unsafe retain(self.inner) };
     }
     /// Wait for an item and take it, or return `None` once the channel is closed (or has no senders left)
     /// and the buffer is drained.
@@ -589,7 +589,7 @@ extend<T> Receiver<T> as Free {
                 inner.not_full.notify_all();
             }
         }
-        release(self.inner);
+        unsafe release(self.inner);
     }
 }
 

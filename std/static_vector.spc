@@ -502,7 +502,7 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
         if r.start > hi || hi > self.len {
             panic("StaticVector<T, N>[a..b]: range out of bounds");
         }
-        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start };
+        return unsafe Slice::<T> { ptr: self.as_ptr() + r.start, len: hi - r.start };
     }
 }
 
@@ -529,7 +529,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         if r.start > hi || hi > self.len {
             panic("StaticVector<T, N>[a..b]: range out of bounds");
         }
-        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start };
+        return unsafe SliceMut::<T> { ptr: p + r.start, len: hi - r.start };
     }
 }
 

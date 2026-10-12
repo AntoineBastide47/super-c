@@ -1902,7 +1902,11 @@ extend<'a> TypeChecker<'a> {
         let tb = self.type_buf(ty);
         self.errors.emit_span(
             name,
-            format("no field '{}' on '{}'", diag::span_str(self.source, name.start, name.end), str::from_cstr(&tb[0])),
+            format(
+                "no field '{}' on '{}'",
+                diag::span_str(self.source, name.start, name.end),
+                str::from_cbuf(tb.as_slice()),
+            ),
         );
     }
 
@@ -1918,7 +1922,10 @@ extend<'a> TypeChecker<'a> {
             self.errors.emit_span(sp, format("a mask is not a `bool`; use `.any()` or `.all()`"));
             return false;
         }
-        self.errors.emit_span(sp, format("{} condition must be 'bool', found '{}'", what, str::from_cstr(&ty[0])));
+        self.errors.emit_span(
+            sp,
+            format("{} condition must be 'bool', found '{}'", what, str::from_cbuf(ty.as_slice())),
+        );
         return false;
     }
 
@@ -2624,7 +2631,7 @@ extend<'a> TypeChecker<'a> {
     fn err_lit_range(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_buf(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("integer literal is out of range for '{}'", str::from_cstr(&tn[0])));
+        self.errors.emit_span(sp, format("integer literal is out of range for '{}'", str::from_cbuf(tn.as_slice())));
     }
 
     // A negation `node` of unsigned type `ty`: no unsigned value has one.
@@ -2632,7 +2639,7 @@ extend<'a> TypeChecker<'a> {
     fn err_neg_unsigned(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_buf(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("cannot apply unary operator '-' to type '{}'", str::from_cstr(&tn[0])));
+        self.errors.emit_span(sp, format("cannot apply unary operator '-' to type '{}'", str::from_cbuf(tn.as_slice())));
     }
 
     // An unpinned literal operand, or literal-only arithmetic of kind `k` (`2 * 3`), takes the other
@@ -3129,7 +3136,7 @@ extend<'a> TypeChecker<'a> {
             "float constant expression";
         };
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(sp, format("{} is out of range for '{}'", what, str::from_cstr(&tn[0])));
+        self.errors.emit_span(sp, format("{} is out of range for '{}'", what, str::from_cbuf(tn.as_slice())));
         return t;
     }
 
@@ -3189,7 +3196,11 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
         self.errors.emit_span(
             sp,
-            format("mismatched types: expected '{}', found '{}'", str::from_cstr(&e[0]), str::from_cstr(&f[0])),
+            format(
+                "mismatched types: expected '{}', found '{}'",
+                str::from_cbuf(e.as_slice()),
+                str::from_cbuf(f.as_slice()),
+            ),
         );
     }
 
@@ -3792,11 +3803,11 @@ extend<'a> TypeChecker<'a> {
 }
 
 // The plural suffix for a count of `n`: "" for one, "s" otherwise.
-const fn plural(n: u64) *const char {
+const fn plural(n: u64) str<'static> {
     if n == 1 {
-        return "".ptr() as *const char;
+        return "";
     }
-    return "s".ptr() as *const char;
+    return "s";
 }
 
 const fn src_at(p: str, off: u32) *const char {
@@ -3902,7 +3913,7 @@ fn render_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty:
         if i != 0 {
             out.push_str(", ");
         }
-        out.push_str(str::from_cstr(&pb[0]));
+        out.push_str(str::from_cbuf(pb.as_slice()));
     }
     out.push_str(")");
     let nr = unsafe (*a).sig_len(ty, true);
@@ -3916,7 +3927,7 @@ fn render_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty:
         } else {
             out.push_str(" ");
         }
-        out.push_str(str::from_cstr(&rb[0]));
+        out.push_str(str::from_cbuf(rb.as_slice()));
     }
     if nr > 1 {
         out.push_str(")");
@@ -5332,8 +5343,8 @@ extend<'a> TypeChecker<'a> {
                 sp,
                 format(
                     "mismatched types: generic parameter was constrained to both '{}' and '{}'",
-                    str::from_cstr(&first[0]),
-                    str::from_cstr(&later[0]),
+                    str::from_cbuf(first.as_slice()),
+                    str::from_cbuf(later.as_slice()),
                 ),
             );
         }
@@ -5519,6 +5530,10 @@ extend<'a> TypeChecker<'a> {
             return it.args[0];
         }
         return TYPE_NONE;
+    }
+    // Is `(m, d)` the prelude `Slice` or `SliceMut` declaration?
+    const fn tc_is_view_decl(self: &Self, m: ModuleId, d: NodeId) bool {
+        return d != NODE_NONE && (m == self.ph_slice.mid && d == self.ph_slice.node || m == self.ph_slicemut.mid && d == self.ph_slicemut.node);
     }
     // 0 not a slice, 1 Slice<E>, 2 SliceMut<E>; sets *elem.
     const fn slice_kind(self: &Self, tid: TypeId, elem: *mut TypeId) i32 {
@@ -5930,7 +5945,11 @@ extend<'a> TypeChecker<'a> {
         let ty = self.type_buf(t);
         self.errors.emit_span(
             sp,
-            format("expected a constant for const parameter '{}', found type '{}'", pname, str::from_cstr(&ty[0])),
+            format(
+                "expected a constant for const parameter '{}', found type '{}'",
+                pname,
+                str::from_cbuf(ty.as_slice()),
+            ),
         );
         return TYPE_ERROR;
     }
@@ -6919,7 +6938,7 @@ extend<'a> TypeChecker<'a> {
         let msg = vec_err(
             y.kind == TypeKind::TYPE_MASK,
             pick(e.kind == TypeKind::TYPE_BUILTIN, e.as_data.builtin, BuiltinType::BT_COUNT),
-            str::from_cstr(&tb[0]),
+            str::from_cbuf(tb.as_slice()),
             unsafe (*self.cur_ast()).lanes(&y),
         );
         if msg.len() != 0 {
@@ -6961,14 +6980,14 @@ extend<'a> TypeChecker<'a> {
             let msg = if y.kind == TypeKind::TYPE_SIMD {
                 format(
                     "`{}` has no stable C ABI; pass `[{}; {}]` and convert with `from_array`/`to_array`",
-                    str::from_cstr(&vb[0]),
-                    str::from_cstr(&eb[0]),
+                    str::from_cbuf(vb.as_slice()),
+                    str::from_cbuf(eb.as_slice()),
                     unsafe (*a).lanes(&y),
                 );
             } else {
                 format(
                     "`{}` has no stable C ABI; pass `u64` and convert with `from_bits`/`to_bits`",
-                    str::from_cstr(&vb[0]),
+                    str::from_cbuf(vb.as_slice()),
                 );
             };
             self.errors.emit_span(unsafe (*a).at_const(n).span, msg);
@@ -7053,7 +7072,7 @@ extend<'a> TypeChecker<'a> {
         if e.kind == TypeKind::TYPE_BUILTIN {
             // The result's lane count is the list's length.
             let tb = self.type_buf(vy.as_data.arr.elem);
-            let msg = vec_err(false, e.as_data.builtin, str::from_cstr(&tb[0]), lst.len() as u64);
+            let msg = vec_err(false, e.as_data.builtin, str::from_cbuf(tb.as_slice()), lst.len() as u64);
             if msg.len() != 0 {
                 self.errors.emit_span(sp, msg);
                 return;
@@ -7166,7 +7185,7 @@ extend<'a> TypeChecker<'a> {
             let hint = pick(v.kind == TypeKind::TYPE_SIMD, "`from_array` or `to_array`", "`from_bits` or `to_bits`");
             self.errors.emit_span(
                 sp,
-                format("only `std` casts `{}` to or from its storage; use {}", str::from_cstr(&vb[0]), hint),
+                format("only `std` casts `{}` to or from its storage; use {}", str::from_cbuf(vb.as_slice()), hint),
             );
             return;
         }
@@ -7174,7 +7193,7 @@ extend<'a> TypeChecker<'a> {
         let db = self.type_buf(dst);
         self.errors.emit_span(
             sp,
-            format("invalid cast from '{}' to '{}'", str::from_cstr(&sb[0]), str::from_cstr(&db[0])),
+            format("invalid cast from '{}' to '{}'", str::from_cbuf(sb.as_slice()), str::from_cbuf(db.as_slice())),
         );
     }
     // The type generic alias `d` names at type path `id` of module `m`: the alias body with each
@@ -7425,7 +7444,7 @@ extend<'a> TypeChecker<'a> {
                 nm.as_str(),
                 bound,
                 want,
-                str::from_cstr(plural(want)),
+                plural(want),
                 n,
                 pick(n == 1, "was", "were"),
             ),
@@ -9150,7 +9169,7 @@ extend<'a> TypeChecker<'a> {
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
                     diag::span_str(self.source, name.start, name.end),
-                    str::from_cstr(&tb[0]),
+                    str::from_cbuf(tb.as_slice()),
                     diag::span_str(self.mod_src(cm[first].module), isp.start, isp.end),
                 ),
             );
@@ -9321,7 +9340,7 @@ extend<'a> TypeChecker<'a> {
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
                     nm,
-                    str::from_cstr(&tb[0]),
+                    str::from_cbuf(tb.as_slice()),
                     diag::span_str(self.mod_src(iface.module), isp.start, isp.end),
                 ),
             );
@@ -10569,7 +10588,7 @@ extend<'a> TypeChecker<'a> {
                     format(
                         "ambiguous associated type '{}': several bounds of '{}' declare it",
                         name,
-                        str::from_cstr(&pb[0]),
+                        str::from_cbuf(pb.as_slice()),
                     ),
                 );
                 self.note_decl_site("the bounds are declared here", DefId { module: pmod, node: pdecl });
@@ -10979,8 +10998,8 @@ extend<'a> TypeChecker<'a> {
                         format(
                             "field {} of '{}' is '{}', which does not satisfy the bound",
                             idx,
-                            str::from_cstr(&on[0]),
-                            str::from_cstr(&fn2[0]),
+                            str::from_cbuf(on.as_slice()),
+                            str::from_cbuf(fn2.as_slice()),
                         ),
                     );
                 } else {
@@ -10989,8 +11008,8 @@ extend<'a> TypeChecker<'a> {
                         format(
                             "field '{}' of '{}' is '{}', which does not satisfy the bound",
                             diag::span_str(self.mod_src(om), fsp3.start, fsp3.end),
-                            str::from_cstr(&on[0]),
-                            str::from_cstr(&fn2[0]),
+                            str::from_cbuf(on.as_slice()),
+                            str::from_cbuf(fn2.as_slice()),
                         ),
                     );
                 }
@@ -11148,7 +11167,7 @@ extend<'a> TypeChecker<'a> {
                         sp2,
                         format(
                             "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
-                            str::from_cstr(&on2[0]),
+                            str::from_cbuf(on2.as_slice()),
                         ),
                     );
                     let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
@@ -11220,7 +11239,7 @@ extend<'a> TypeChecker<'a> {
             sp2,
             format(
                 "a field of '{}' does not satisfy a bound required by the interface's default method '{}'",
-                str::from_cstr(&on2[0]),
+                str::from_cbuf(on2.as_slice()),
                 diag::span_str(self.mod_src(imod), rn.start, rn.end),
             ),
         );
@@ -11655,7 +11674,7 @@ extend<'a> TypeChecker<'a> {
     }
     // Structural `Copy`: may a value of `ty` be duplicated bitwise, leaving both copies usable? Scalars,
     // `str`, raw pointers, shared references and `&dyn`, `fn` pointers and closures that own nothing,
-    // and arrays of Copy are; `&mut T`, owned `Box<dyn I>` and every owning value are not. A type
+    // and arrays of Copy are; `&mut T`, `[]mut T`, owned `Box<dyn I>` and every owning value are not. A type
     // parameter is Copy exactly when it does not own (`tc_param_owns`: its bounds reach `Copy`, or a
     // plain `fn` bound). An aggregate is Copy when it is not `Free` and every member is Copy under the
     // instance's arguments.
@@ -11704,7 +11723,8 @@ extend<'a> TypeChecker<'a> {
         self.sat_close(key, &f, r);
         return r;
     }
-    // `tc_copy_marker` of an aggregate: not `Free`, and every member Copy.
+    // `tc_copy_marker` of an aggregate: not `Free`, not the exclusive `[]mut T` view (a `&mut [T]`),
+    // and every member Copy.
     fn tc_copy_aggregate(self: &mut Self, ty: TypeId, depth: i32) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
@@ -11712,6 +11732,9 @@ extend<'a> TypeChecker<'a> {
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(ty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) || self.tc_type_is_free(ty) {
+            return false;
+        }
+        if om == self.ph_slicemut.mid && od == self.ph_slicemut.node {
             return false;
         }
         let dn = *unsafe (*self.mod_ast(om)).at_const(od);
@@ -12471,7 +12494,7 @@ extend<'a> TypeChecker<'a> {
             at,
             format(
                 "cannot call '{}::{}': unsatisfied interface bounds",
-                str::from_cstr(&ty[0]),
+                str::from_cbuf(ty.as_slice()),
                 diag::span_str(self.mod_src(md.module), mn.start, mn.end),
             ),
         );
@@ -12674,9 +12697,9 @@ extend<'a> TypeChecker<'a> {
             sp,
             format(
                 "cannot erase '{}' to '{}': '{}' conforms to this interface only with other arguments",
-                str::from_cstr(&sn[0]),
-                str::from_cstr(&dn[0]),
-                str::from_cstr(&sn[0]),
+                str::from_cbuf(sn.as_slice()),
+                str::from_cbuf(dn.as_slice()),
+                str::from_cbuf(sn.as_slice()),
             ),
         );
         let oa = self.mod_ast(other.module);
@@ -12836,12 +12859,12 @@ extend<'a> TypeChecker<'a> {
                     src_at(isrc, mn.start),
                 );
                 // The vtable calls the matching conformance's own method: mark that one used.
-                let cm = self.tc_ext_method(conf, str::from_cstr(&nmb[0]));
+                let cm = self.tc_ext_method(conf, str::from_cbuf(nmb.as_slice()));
                 if cm.node != NODE_NONE {
                     self.tc_mark_method_used(cm);
                     continue;
                 }
-                if self.find_method_cstr(tmod, tdecl, str::from_cstr(&nmb[0])).node != NODE_NONE {
+                if self.find_method_cstr(tmod, tdecl, str::from_cbuf(nmb.as_slice())).node != NODE_NONE {
                     continue;
                 }
                 let mut emod: ModuleId = 0;
@@ -12861,8 +12884,8 @@ extend<'a> TypeChecker<'a> {
                     sp,
                     format(
                         "cannot erase '{}' to 'dyn': method '{}' has no emittable implementation",
-                        str::from_cstr(&tn[0]),
-                        str::from_cstr(&nmb[0]),
+                        str::from_cbuf(tn.as_slice()),
+                        str::from_cbuf(nmb.as_slice()),
                     ),
                 );
                 self.errors.note(format("implement the method in an 'extend .. as ..' block or give it a default body"));
@@ -12963,8 +12986,8 @@ extend<'a> TypeChecker<'a> {
             sp,
             format(
                 "unnecessary cast: '{}' converts to '{}' implicitly here",
-                str::from_cstr(&f[0]),
-                str::from_cstr(&d[0]),
+                str::from_cbuf(f.as_slice()),
+                str::from_cbuf(d.as_slice()),
             ),
         );
         self.tc_cast_drop_fix(nid);
@@ -13104,7 +13127,7 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         self.errors.emit_span(
             sp,
-            format("invalid cast from '{}' to '{}'", str::from_cstr(&s[0]), str::from_cstr(&d[0])),
+            format("invalid cast from '{}' to '{}'", str::from_cbuf(s.as_slice()), str::from_cbuf(d.as_slice())),
         );
         return true;
     }
@@ -13640,7 +13663,10 @@ extend<'a> TypeChecker<'a> {
                 }
                 let tn = self.type_buf(expected);
                 let sp = unsafe (*self.cur_ast()).at_const(node).span;
-                self.errors.emit_span(sp, format("float literal is out of range for '{}'", str::from_cstr(&tn[0])));
+                self.errors.emit_span(
+                    sp,
+                    format("float literal is out of range for '{}'", str::from_cbuf(tn.as_slice())),
+                );
                 return true;
             }
             // Record the CONTEXT's type on the literal, exactly as the integer branch does. The emitted C
@@ -14803,7 +14829,7 @@ extend<'a> TypeChecker<'a> {
                         at,
                         format(
                             "'{}' is {}, which the default '{}' does not support",
-                            str::from_cstr(&tn[0]),
+                            str::from_cbuf(tn.as_slice()),
                             kind,
                             reflect_m,
                         ),
@@ -14911,7 +14937,7 @@ extend<'a> TypeChecker<'a> {
         } else {
             "a member is not 'Copy'";
         };
-        self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", str::from_cstr(&ty[0]), why));
+        self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", str::from_cbuf(ty.as_slice()), why));
     }
     // `Send` and `Sync` are the two conformances the compiler cannot verify. Every other interface is checked
     // against its requirements; these two are DERIVED structurally, and writing one by hand overrides that
@@ -15727,7 +15753,12 @@ extend TypeChecker {
         ).kind == TypeKind::TYPE_POINTER) {
             owant = self.type_at(expected).as_data.elem;
         }
+        let outer_write = self.icx.write_node;
+        if op == TokenType::Ampersand && qual == TypeQualifier::TYPE_QUAL_MUT {
+            self.icx.write_node = unsafe (*a).peel(operand, false);
+        }
         let opnd = self.check_expr_w(operand, owant);
+        self.icx.write_node = outer_write;
         if op == TokenType::Unsafe {
             self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
             // An `unsafe` take of a Free field through a reference is CONSUMED by the borrow
@@ -15779,7 +15810,7 @@ extend TypeChecker {
                         sp,
                         format(
                             "cannot apply unary operator '-' to type '{}' (its lanes have no sign)",
-                            str::from_cstr(&ty[0]),
+                            str::from_cbuf(ty.as_slice()),
                         ),
                     );
                 }
@@ -15931,8 +15962,8 @@ extend TypeChecker {
                         sp,
                         format(
                             "'?' error type '{}' does not match the function's error type '{}'",
-                            str::from_cstr(&a1[0]),
-                            str::from_cstr(&a2[0]),
+                            str::from_cbuf(a1.as_slice()),
+                            str::from_cbuf(a2.as_slice()),
                         ),
                     );
                 }
@@ -15963,11 +15994,11 @@ extend TypeChecker {
             ok = self.is_int(l) && self.is_int(r);
         }
         if !ok {
-            let mut w = "numeric".ptr() as *const char;
+            let mut w = "numeric";
             if require_int {
-                w = "integer".ptr() as *const char;
+                w = "integer";
             }
-            self.errors.emit_span(sp, format("operator requires {} operands", str::from_cstr(w)));
+            self.errors.emit_span(sp, format("operator requires {} operands", w));
             if self.type_at(self.strip(r)).kind == TypeKind::TYPE_SIMD {
                 self.errors.note(format("the left operand is the vector type or its lane type"));
             }
@@ -16062,7 +16093,7 @@ extend TypeChecker {
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
-                        str::from_cstr(&ty[0]),
+                        str::from_cbuf(ty.as_slice()),
                         m,
                     ),
                 );
@@ -16110,7 +16141,7 @@ extend TypeChecker {
                 let ty = self.type_buf(ls);
                 self.errors.emit_span(
                     sp,
-                    format("'{}' has no '{}' method for this operator", str::from_cstr(&ty[0]), m),
+                    format("'{}' has no '{}' method for this operator", str::from_cbuf(ty.as_slice()), m),
                 );
                 *out = TYPE_NONE;
             } else {
@@ -16540,7 +16571,7 @@ extend TypeChecker {
                     sp,
                     format(
                         "type parameter '{}' has no 'bit_not' method for this operator (add a bound that provides it)",
-                        str::from_cstr(&ty[0]),
+                        str::from_cbuf(ty.as_slice()),
                     ),
                 );
                 *out = TYPE_NONE;
@@ -16572,7 +16603,7 @@ extend TypeChecker {
                 let ty = self.type_buf(os);
                 self.errors.emit_span(
                     sp,
-                    format("type '{}' has no 'bit_not' method for this operator", str::from_cstr(&ty[0])),
+                    format("type '{}' has no 'bit_not' method for this operator", str::from_cbuf(ty.as_slice())),
                 );
                 *out = TYPE_NONE;
                 return true;
@@ -16718,7 +16749,10 @@ extend TypeChecker {
                 let ty = self.type_buf(rs);
                 self.errors.emit_span(
                     sp,
-                    format("cannot compare '{}' with 'null' (it is a value, not a pointer)", str::from_cstr(&ty[0])),
+                    format(
+                        "cannot compare '{}' with 'null' (it is a value, not a pointer)",
+                        str::from_cbuf(ty.as_slice()),
+                    ),
                 );
                 return Ast::builtin(BuiltinType::BT_BOOL);
             }
@@ -16766,7 +16800,7 @@ extend TypeChecker {
                 sp,
                 format(
                     "`{}` does not implement `{}`; compare {}",
-                    str::from_cstr(&ty[0]),
+                    str::from_cbuf(ty.as_slice()),
                     pick(ord, "Ord", "Eq"),
                     pick(lsk == TypeKind::TYPE_SIMD, "lanes", "elements"),
                 ),
@@ -16788,7 +16822,10 @@ extend TypeChecker {
                     let ty = self.type_buf(ls);
                     self.errors.emit_span(
                         sp,
-                        format("cannot compare '{}' with 'null' (it is a value, not a pointer)", str::from_cstr(&ty[0])),
+                        format(
+                            "cannot compare '{}' with 'null' (it is a value, not a pointer)",
+                            str::from_cbuf(ty.as_slice()),
+                        ),
                     );
                     return Ast::builtin(BuiltinType::BT_BOOL);
                 }
@@ -16803,17 +16840,17 @@ extend TypeChecker {
                     native_enum = true;
                 } else if md.node == NODE_NONE {
                     let ty = self.type_buf(ls);
-                    let mut iface = "Eq".ptr() as *const char;
+                    let mut iface = "Eq";
                     if ord {
-                        iface = "Ord".ptr() as *const char;
+                        iface = "Ord";
                     }
                     self.errors.emit_span(
                         sp,
                         format(
                             "'{}' has no '{}' method for this operator (implement {})",
-                            str::from_cstr(&ty[0]),
+                            str::from_cbuf(ty.as_slice()),
                             mm,
-                            str::from_cstr(iface),
+                            iface,
                         ),
                     );
                     self.errors.note(format("operator overloads are resolved through interface-style methods"));
@@ -16837,17 +16874,13 @@ extend TypeChecker {
                 mm = "cmp";
             }
             if !self.tc_param_bound_provides(gy.module, gy.as_data.decl, mm) {
-                let mut iface = "Eq".ptr() as *const char;
+                let mut iface = "Eq";
                 if ord {
-                    iface = "Ord".ptr() as *const char;
+                    iface = "Ord";
                 }
                 self.errors.emit_span(
                     sp,
-                    format(
-                        "type parameter has no '{}' method for this operator (add a `{}` bound)",
-                        mm,
-                        str::from_cstr(iface),
-                    ),
+                    format("type parameter has no '{}' method for this operator (add a `{}` bound)", mm, iface),
                 );
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
@@ -16906,10 +16939,7 @@ extend TypeChecker {
         let inst = self.aggregate_of(enum_ty, &mut amod, &mut adecl, &mut gp, &mut ga, &mut gn);
         if args.len != payload.len {
             let s2 = plural(payload.len);
-            self.errors.emit_span(
-                sp,
-                format("variant expects {} argument{}, found {}", payload.len, str::from_cstr(s2), args.len),
-            );
+            self.errors.emit_span(sp, format("variant expects {} argument{}, found {}", payload.len, s2, args.len));
         } else {
             for k in 0..args.len {
                 let pid = unsafe (*va).list(payload)[k as usize];
@@ -17993,12 +18023,12 @@ extend TypeChecker {
             }
             return Ast::builtin(BuiltinType::BT_VOID);
         }
-        let mut nm = "assert_eq".ptr() as *const char;
+        let mut nm = "assert_eq";
         if kind == 3 {
-            nm = "assert_ne".ptr() as *const char;
+            nm = "assert_ne";
         }
         if args.len != 2 {
-            self.errors.emit_span(sp, format("'{}' takes exactly two arguments", str::from_cstr(nm)));
+            self.errors.emit_span(sp, format("'{}' takes exactly two arguments", nm));
             for i in 0..args.len {
                 self.check_expr(unsafe (*a).list(args)[i as usize]);
             }
@@ -18038,7 +18068,7 @@ extend TypeChecker {
             let ty = self.type_buf(lt);
             self.errors.emit_span(
                 sp,
-                format("'{}' cannot compare values of type '{}'", str::from_cstr(nm), str::from_cstr(&ty[0])),
+                format("'{}' cannot compare values of type '{}'", nm, str::from_cbuf(ty.as_slice())),
             );
             self.errors.note(format("implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead"));
         }
@@ -18455,7 +18485,7 @@ extend TypeChecker {
                 format(
                     "cannot infer '{}': '{}' conforms to '{}' with several arguments",
                     diag::span_str(self.mod_src(fmod), nsp.start, nsp.end),
-                    str::from_cstr(&tb[0]),
+                    str::from_cbuf(tb.as_slice()),
                     diag::span_str(self.mod_src(iface.module), isp.start, isp.end),
                 ),
             );
@@ -18930,7 +18960,7 @@ extend TypeChecker {
                         let s2 = plural(members.len);
                         self.errors.emit_span(
                             sp,
-                            format("tuple struct takes {} element{}, got {}", members.len, str::from_cstr(s2), args.len),
+                            format("tuple struct takes {} element{}, got {}", members.len, s2, args.len),
                         );
                         return TYPE_NONE;
                     }
@@ -19058,7 +19088,7 @@ extend TypeChecker {
         if args.len != np {
             let sp = unsafe (*a).at_const(id).span;
             let s2 = plural(np);
-            self.errors.emit_span(sp, format("expected {} argument{}, found {}", np, str::from_cstr(s2), args.len));
+            self.errors.emit_span(sp, format("expected {} argument{}, found {}", np, s2, args.len));
         } else {
             let none = Defs8 {};
             let nonet = Tys8 {};
@@ -19812,15 +19842,9 @@ extend TypeChecker {
         if bad {
             let s2 = plural(expected);
             if variadic {
-                self.errors.emit_span(
-                    sp,
-                    format("expected at least {} argument{}, found {}", expected, str::from_cstr(s2), args.len),
-                );
+                self.errors.emit_span(sp, format("expected at least {} argument{}, found {}", expected, s2, args.len));
             } else {
-                self.errors.emit_span(
-                    sp,
-                    format("expected {} argument{}, found {}", expected, str::from_cstr(s2), args.len),
-                );
+                self.errors.emit_span(sp, format("expected {} argument{}, found {}", expected, s2, args.len));
             }
         } else {
             for i in 0..expected {
@@ -20020,7 +20044,7 @@ extend TypeChecker {
                 self.bind_miss = format(
                     "its '{}' is '{}'",
                     self.mod_src(fmod).slice(nt.start as usize, nt.end as usize),
-                    str::from_cstr(&hb[0]),
+                    str::from_cbuf(hb.as_slice()),
                 );
                 return false;
             }
@@ -20106,7 +20130,7 @@ extend TypeChecker {
                         sp,
                         format(
                             "type '{}' does not satisfy bound '{}'",
-                            str::from_cstr(&tn[0]),
+                            str::from_cbuf(tn.as_slice()),
                             diag::span_str(self.mod_src(fmod), bsp.start, bsp.end),
                         ),
                     );
@@ -20145,7 +20169,7 @@ extend TypeChecker {
                         sp,
                         format(
                             "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
-                            str::from_cstr(&on2[0]),
+                            str::from_cbuf(on2.as_slice()),
                         ),
                     );
                     let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
@@ -20186,7 +20210,7 @@ extend TypeChecker {
                     let tn = self.type_buf(wt);
                     self.errors.emit_span(
                         sp,
-                        format("type '{}' does not satisfy a where-clause bound", str::from_cstr(&tn[0])),
+                        format("type '{}' does not satisfy a where-clause bound", str::from_cbuf(tn.as_slice())),
                     );
                 }
             }
@@ -20254,7 +20278,10 @@ extend TypeChecker {
                     continue;
                 }
                 let tn = self.type_buf(arg);
-                self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", str::from_cstr(&tn[0]), bs));
+                self.errors.emit_span(
+                    sp,
+                    format("type '{}' does not satisfy bound '{}'", str::from_cbuf(tn.as_slice()), bs),
+                );
                 self.tc_note_blanket_conf(bi);
             }
         }
@@ -20330,7 +20357,12 @@ extend TypeChecker {
         let tn = self.type_buf(ty);
         self.errors.emit_span(
             at,
-            format("type '{}' does not satisfy {}: {}", str::from_cstr(&tn[0]), what.as_str(), self.bind_miss.as_str()),
+            format(
+                "type '{}' does not satisfy {}: {}",
+                str::from_cbuf(tn.as_slice()),
+                what.as_str(),
+                self.bind_miss.as_str(),
+            ),
         );
         self.bind_miss.clear();
     }
@@ -20341,9 +20373,9 @@ extend TypeChecker {
             at,
             format(
                 "type '{}' does not satisfy {}: '{}' conforms to this interface only with other arguments",
-                str::from_cstr(&tn[0]),
+                str::from_cbuf(tn.as_slice()),
                 what.as_str(),
-                str::from_cstr(&tn[0]),
+                str::from_cbuf(tn.as_slice()),
             ),
         );
         let site = diag::render_site(
@@ -20666,7 +20698,7 @@ extend TypeChecker {
                     (name.end - name.start) as i32,
                     src_at(self.source, name.start),
                 );
-                fhit = self.find_member_cstr(bmod, bdecl, str::from_cstr(&fld[0]));
+                fhit = self.find_member_cstr(bmod, bdecl, str::from_cbuf(fld.as_slice()));
             }
             let mut dconf = TYPE_NONE;
             if fhit == NODE_NONE && prefer_method {
@@ -20692,7 +20724,7 @@ extend TypeChecker {
             }
             if fhit != NODE_NONE && self.type_at(base).is_vec() {
                 let tb = self.type_buf(base);
-                self.errors.emit_span(name, format("`{}` has no fields", str::from_cstr(&tb[0])));
+                self.errors.emit_span(name, format("`{}` has no fields", str::from_cbuf(tb.as_slice())));
                 return TYPE_NONE;
             }
             if fhit != NODE_NONE {
@@ -20710,6 +20742,11 @@ extend TypeChecker {
                     let owner_is_union = unsafe (*self.mod_ast(bmod)).at_const(bdecl).as_data.aggregate.is_union;
                     if fty_is_ref && owner_is_union && self.tc_needs_unsafe() {
                         self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a reference-typed field of a union");
+                    }
+                    // A slice view's `ptr` and `len` say which memory it may reach: writing one is the
+                    // unchecked step of building a view from raw parts.
+                    if id == self.icx.write_node && self.tc_is_view_decl(bmod, bdecl) && self.tc_needs_unsafe() {
+                        self.err_unsafe(unsafe (*a).at_const(id).span, "writing a field of a slice view");
                     }
                 }
                 return fty;
@@ -20897,7 +20934,7 @@ extend TypeChecker {
                                 name,
                                 format(
                                     "cannot call a '&mut self' method through '{}': it has 'deref' but no 'deref_mut'",
-                                    str::from_cstr(&tn[0]),
+                                    str::from_cbuf(tn.as_slice()),
                                 ),
                             );
                             return TYPE_NONE;
@@ -20938,7 +20975,7 @@ extend TypeChecker {
             format(
                 "no field or method '{}' on '{}'",
                 diag::span_str(self.source, name.start, name.end),
-                str::from_cstr(&ty[0]),
+                str::from_cbuf(ty.as_slice()),
             ),
         );
         let mut bm: ModuleId = 0;
@@ -21010,7 +21047,7 @@ extend TypeChecker {
                 "'{}' takes {} generic argument{} but {} {} supplied",
                 diag::span_str(self.mod_src(fd.module), fnm.start, fnm.end),
                 f.generics.len,
-                str::from_cstr(s2),
+                s2,
                 nt,
                 pick(nt == 1, "was", "were"),
             ),
@@ -21407,7 +21444,7 @@ extend TypeChecker {
                     mname,
                     format(
                         "cannot use '{}::{}': unsatisfied interface bounds",
-                        str::from_cstr(&ty[0]),
+                        str::from_cbuf(ty.as_slice()),
                         diag::span_str(self.source, mname.start, mname.end),
                     ),
                 );
@@ -21421,17 +21458,13 @@ extend TypeChecker {
             self.frame_ext(ac.module, ext, &ga[0], gn, &mut ps[0], &mut ts[0], &mut k);
             return self.subst_type(self.decl_type_in(ac.module, ac.node), &ps[0], &ts[0], k);
         }
-        let mut kindw = "associated method or constant".ptr() as *const char;
+        let mut kindw = "associated method or constant";
         if bd_kind == NodeKind::NODE_ENUM {
-            kindw = "variant, method, or constant".ptr() as *const char;
+            kindw = "variant, method, or constant";
         }
         self.errors.emit_span(
             mname,
-            format(
-                "no {} '{}' on this type",
-                str::from_cstr(kindw),
-                diag::span_str(self.source, mname.start, mname.end),
-            ),
+            format("no {} '{}' on this type", kindw, diag::span_str(self.source, mname.start, mname.end)),
         );
         return TYPE_NONE;
     }
@@ -21485,6 +21518,11 @@ extend TypeChecker {
         let mut gn: i32 = 0;
         if !self.aggregate_of(sty, &mut smod, &mut decl, &mut gp, &mut ga, &mut gn) {
             decl = NODE_NONE;
+        }
+        // A view literal claims that `len` elements at `ptr` are valid and, for `[]mut T`, reachable
+        // through no other path: an unchecked promise, as Rust's `from_raw_parts` is.
+        if self.tc_is_view_decl(smod, decl) && self.tc_needs_unsafe() {
+            self.err_unsafe(unsafe (*a).at_const(id).span, "building a slice view from raw parts");
         }
         let mut variant = NODE_NONE;
         if unsafe (*a).at_const(stn).kind == NodeKind::NODE_TYPE_PATH {
@@ -21822,10 +21860,7 @@ extend TypeChecker {
                             return;
                         }
                         let s2 = plural(nmiss);
-                        self.errors.emit_span(
-                            sp2,
-                            format("switch is not exhaustive: missing {} variant{}", nmiss, str::from_cstr(s2)),
-                        );
+                        self.errors.emit_span(sp2, format("switch is not exhaustive: missing {} variant{}", nmiss, s2));
                         self.errors.note(format("match every variant or add a '_' arm"));
                         return;
                     }
@@ -21908,7 +21943,10 @@ extend TypeChecker {
     fn check_assignment(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let bd = unsafe (*a).at_const(id).as_data.binary;
+        let outer_write = self.icx.write_node;
+        self.icx.write_node = unsafe (*a).peel(bd.left, false);
         let l = self.check_expr(bd.left);
+        self.icx.write_node = outer_write;
         self.tc_note_capture_mut(bd.left);
         let ls = self.strip(l);
         let m = bd.op.op_method();
@@ -21927,7 +21965,7 @@ extend TypeChecker {
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
-                        str::from_cstr(&ty[0]),
+                        str::from_cbuf(ty.as_slice()),
                         m,
                     ),
                 );
@@ -21939,11 +21977,11 @@ extend TypeChecker {
                     sp,
                     format(
                         "mismatched types: the operator's result '{}' is not '{}'",
-                        str::from_cstr(&rb[0]),
-                        str::from_cstr(&tb[0]),
+                        str::from_cbuf(rb.as_slice()),
+                        str::from_cbuf(tb.as_slice()),
                     ),
                 );
-                self.errors.note(format("bind the result in the bound: 'Output = {}'", str::from_cstr(&tb[0])));
+                self.errors.note(format("bind the result in the bound: 'Output = {}'", str::from_cbuf(tb.as_slice())));
             }
             return l;
         }
@@ -22167,7 +22205,7 @@ extend TypeChecker {
                         let ty = self.type_buf(self.strip(obj));
                         self.errors.emit_span(
                             sp,
-                            format("'{}' has no 'index_range' method for '[..]'", str::from_cstr(&ty[0])),
+                            format("'{}' has no 'index_range' method for '[..]'", str::from_cbuf(ty.as_slice())),
                         );
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                         self.err_method_extend_bounds(sp, self.strip(obj), md);
@@ -22182,7 +22220,7 @@ extend TypeChecker {
                                 sp,
                                 format(
                                     "an open-ended range index needs a 'len' method on '{}' to supply the end",
-                                    str::from_cstr(&ty[0]),
+                                    str::from_cbuf(ty.as_slice()),
                                 ),
                             );
                         }
@@ -22316,7 +22354,10 @@ extend TypeChecker {
                     let md = self.find_method_cstr(om, od, "index");
                     if md.node == NODE_NONE {
                         let ty = self.type_buf(self.strip(obj));
-                        self.errors.emit_span(sp, format("'{}' has no 'index' method for '[]'", str::from_cstr(&ty[0])));
+                        self.errors.emit_span(
+                            sp,
+                            format("'{}' has no 'index' method for '[]'", str::from_cbuf(ty.as_slice())),
+                        );
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                         self.err_method_extend_bounds(sp, self.strip(obj), md);
                         result = TYPE_NONE;
@@ -22341,7 +22382,7 @@ extend TypeChecker {
                         sp,
                         format(
                             "type parameter '{}' has no 'index' method for '[]' (add a bound that provides it)",
-                            str::from_cstr(&ty[0]),
+                            str::from_cbuf(ty.as_slice()),
                         ),
                     );
                     result = TYPE_NONE;
@@ -22699,7 +22740,11 @@ extend TypeChecker {
                         let sp = unsafe (*a).at_const(id).span;
                         self.errors.emit_span(
                             sp,
-                            format("invalid cast from '{}' to '{}'", str::from_cstr(&s[0]), str::from_cstr(&d[0])),
+                            format(
+                                "invalid cast from '{}' to '{}'",
+                                str::from_cbuf(s.as_slice()),
+                                str::from_cbuf(d.as_slice()),
+                            ),
                         );
                     }
                 }
@@ -22732,7 +22777,10 @@ extend TypeChecker {
                     if !(ay.kind == TypeKind::TYPE_BUILTIN && ay.as_data.builtin == BuiltinType::BT_VALIST) {
                         let sp = unsafe (*a).at_const(vo.ap).span;
                         let ty = self.type_buf(apt);
-                        self.errors.emit_span(sp, format("expected a 'va_list', found '{}'", str::from_cstr(&ty[0])));
+                        self.errors.emit_span(
+                            sp,
+                            format("expected a 'va_list', found '{}'", str::from_cbuf(ty.as_slice())),
+                        );
                     }
                 }
                 if vo.op == VA_ARG {
@@ -23698,7 +23746,7 @@ extend TypeChecker {
                     vsp,
                     format(
                         "an array repeat needs a value that can be copied; '{}' is not 'Copy'",
-                        str::from_cstr(&tb[0]),
+                        str::from_cbuf(tb.as_slice()),
                     ),
                 );
             }
@@ -23975,13 +24023,7 @@ extend TypeChecker {
             let s2 = plural(nret);
             self.errors.emit_span(
                 sp,
-                format(
-                    "expected {} binding{}, the call returns {} value{}",
-                    names.len,
-                    str::from_cstr(s1),
-                    nret,
-                    str::from_cstr(s2),
-                ),
+                format("expected {} binding{}, the call returns {} value{}", names.len, s1, nret, s2),
             );
         }
         for i in 0..names.len {
@@ -24016,10 +24058,7 @@ extend TypeChecker {
         if values.len != expected {
             let sp = unsafe (*a).at_const(id).span;
             let s2 = plural(expected);
-            self.errors.emit_span(
-                sp,
-                format("expected {} return value{}, found {}", expected, str::from_cstr(s2), values.len),
-            );
+            self.errors.emit_span(sp, format("expected {} return value{}, found {}", expected, s2, values.len));
             return;
         }
         if returns_void {
@@ -24288,7 +24327,7 @@ extend TypeChecker {
                     sp,
                     format(
                         "expected a nonempty list of 'cpu::Feature' values, e.g. '[cpu::Feature::Simd128]', found '{}'",
-                        str::from_cstr(&tb[0]),
+                        str::from_cbuf(tb.as_slice()),
                     ),
                 );
                 return false;
@@ -24515,7 +24554,7 @@ extend TypeChecker {
         let tb = self.type_buf(t);
         self.errors.emit_span(
             unsafe (*self.cur_ast()).at_const(id).span,
-            format("`{}` is a register type; store it through `Simd<T, N>`", str::from_cstr(&tb[0])),
+            format("`{}` is a register type; store it through `Simd<T, N>`", str::from_cbuf(tb.as_slice())),
         );
     }
 
@@ -25360,11 +25399,11 @@ extend TypeChecker {
                             format("no enclosing loop is labeled {}", diag::span_str(self.source, lb.start, lb.end)),
                         );
                     } else {
-                        let mut w = "continue".ptr() as *const char;
+                        let mut w = "continue";
                         if nk == NodeKind::NODE_BREAK {
-                            w = "break".ptr() as *const char;
+                            w = "break";
                         }
-                        self.errors.emit_span(sp, format("'{}' outside of a loop", str::from_cstr(w)));
+                        self.errors.emit_span(sp, format("'{}' outside of a loop", w));
                     }
                     let fv = unsafe (*a).at_const(id).as_data.flow.value;
                     if fv != NODE_NONE {
@@ -25564,7 +25603,7 @@ extend TypeChecker {
                         format(
                             "pattern '{}(..)' expects an enum, but the value has type '{}'",
                             diag::span_str(self.source, vname.start, vname.end),
-                            str::from_cstr(&ty[0]),
+                            str::from_cbuf(ty.as_slice()),
                         ),
                     );
                 } else {
@@ -25578,7 +25617,7 @@ extend TypeChecker {
                             format(
                                 "no variant '{}' on '{}'",
                                 diag::span_str(self.source, vname.start, vname.end),
-                                str::from_cstr(&ty[0]),
+                                str::from_cbuf(ty.as_slice()),
                             ),
                         );
                     }
@@ -25751,7 +25790,7 @@ extend TypeChecker {
                 format(
                     "a tuple pattern with {} elements cannot match a value of type '{}'",
                     children.len,
-                    str::from_cstr(&ty[0]),
+                    str::from_cbuf(ty.as_slice()),
                 ),
             );
         }
@@ -26223,7 +26262,7 @@ extend TypeChecker {
                 let tn = self.type_buf(bad);
                 self.errors.emit_span(
                     sp,
-                    format("a constant cannot use the stateful allocator '{}'", str::from_cstr(&tn[0])),
+                    format("a constant cannot use the stateful allocator '{}'", str::from_cbuf(tn.as_slice())),
                 );
                 self.errors.note(
                     format(

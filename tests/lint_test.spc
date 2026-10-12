@@ -10,7 +10,7 @@ fn redundant_coalescing_cast_lint_and_fix() {
         "main.spc",
         "fn take(p: *mut i32) i32 {\n    return unsafe *p;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    return take((&mut x) as *mut i32) - 1;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -40,7 +40,7 @@ fn redundant_cast_lint_covers_all_implicits() {
         "main.spc",
         "fn share(r: &i32) i32 {\n    return *r;\n}\n\nfn sink(v: i64) i64 {\n    return v;\n}\n\nfn psink(p: *mut i32) i32 {\n    return 0;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    let mr: &mut i32 = &mut x;\n    let a = share(mr as &i32);\n    let n: u8 = 3;\n    let b = sink(n as i64);\n    let c = sink(300 as i64);\n    let f = psink(null as *mut i32);\n    let keep = (&mut x) as *mut i32;\n    return (a as i64 + b + c) as i32 + f + (keep as usize) as i32 * 0;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -64,7 +64,7 @@ fn const_suggestion_lint() {
         "main.spc",
         "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) - 21;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint --const \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -119,7 +119,7 @@ fn union_free_lint() {
         "main.spc",
         "struct Derived {\n    pub s: String,\n}\n\nunion Bad {\n    pub s: String,\n    pub n: u64,\n}\n\nunion Good {\n    pub s: String,\n    pub n: u64,\n}\n\nextend Good as Free {\n    pub fn free(self: &mut Good) {\n        unsafe self.s.free();\n    }\n}\n\nfn main() i32 {\n    let d = Derived { s: String::from_str(\"x\") };\n    let b = Bad { n: 3u64 };\n    let g = Good { s: String::from_str(\"y\") };\n    let k = d.s.len() + unsafe b.n as usize + unsafe g.s.len();\n    return (k - 5) as i32;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
@@ -141,7 +141,7 @@ fn union_free_lint_nested_instance() {
         "main.spc",
         "struct W<T> {\n    pub x: T,\n}\n\nunion Deep {\n    pub a: W<W<String>>,\n    pub n: u64,\n}\n\nunion Flat {\n    pub a: W<String>,\n    pub n: u64,\n}\n\nfn main() i32 {\n    let d = Deep { n: 1u64 };\n    let f = Flat { n: 1u64 };\n    return (unsafe d.n + unsafe f.n) as i32 - 2;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
@@ -161,7 +161,7 @@ fn local_analysis_lints() {
         "main.spc",
         "enum E {\n    A(i32),\n    B,\n}\n\nfn muts(a: i32) i32 {\n    let mut kept = a;\n    kept = kept + 1;\n    let mut extra = a;\n    return kept + extra;\n}\n\nfn stores(a: i32) i32 {\n    let mut v = a;\n    v = 7;\n    return v;\n}\n\nfn labeled(n: i32) i32 {\n    let mut s = 0;\n    'outer: for i in 0..n {\n        s = s + i;\n    }\n    'used: for i in 0..n {\n        if i == 1 {\n            break 'used;\n        }\n        s = s + i;\n    }\n    return s;\n}\n\nfn unreach(a: i32) i32 {\n    let mut s = a;\n    if a > 0 {\n        return s;\n        s = 0;\n    }\n    return -s;\n}\n\nfn arms(e: E) i32 {\n    return switch e {\n        _ => {\n            0;\n        },\n        B => {\n            1;\n        },\n    };\n}\n\nfn derefs(a: i32) i32 {\n    let r = &a;\n    let b = *&a;\n    let c = &*r;\n    return b + *c;\n}\n\nfn main() i32 {\n    let e = E::A(2);\n    return muts(1) + stores(2) + labeled(3) + unreach(4) + arms(e) + derefs(5) - 27;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -212,7 +212,7 @@ fn lint_reports_cross_module_duplicate_conformance() {
     );
     // Run from the project root, which has no `src/`, so `import lib` resolves beside main.spc. The path
     // is absolute: a wasm guest has no working directory.
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -231,7 +231,7 @@ fn non_ascii_char_ranges_are_disjoint() {
         "fn cls(c: char) i32 {\n    return switch c {\n        'à'..='ÿ' => 1,\n        'À'..='Ö' => 2,\n        _ => 3,\n    };\n}\n\nfn main() i32 {\n    return cls('a') - 3;\n}\n",
     );
     let mut args = String::from_str("lint \"");
-    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str(p.dir());
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
     assert(!r.out_has("unreachable arm"));
@@ -247,7 +247,7 @@ fn driver_lints() {
         "main.spc",
         "import stdio;\nimport string as cstring;\n\nstruct S {\n    pub used_field: i32,\n    ghost: i32,\n}\n\nenum T {\n    Used(i32),\n    Ghost(i32),\n}\n\nextend S {\n    pub fn new(v: i32) S {\n        return S { used_field: v, ghost: v + 1 };\n    }\n}\n\nfn pure_add(a: i32, b: i32) i32 {\n    return a + b;\n}\n\nfn len_of(s: str) i32 {\n    return (unsafe cstring::strlen(s.ptr() as *const char)) as i32;\n}\n\nfn main() i32 {\n    let s = S::new(1);\n    let t = T::Used(3);\n    let x = switch t {\n        Used(v) => {\n            v;\n        },\n        _ => {\n            0;\n        },\n    };\n    pure_add(1, 2);\n    let y = pure_add(s.used_field, x);\n    return y + len_of(\"ab\") - 6;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -289,7 +289,7 @@ fn always_panics_lint() {
     assert(c.exit != 0, "a provable panic fails the build");
     assert(c.out_has("error: this statement always panics at runtime"));
     assert(c.out_has("call stack: at -> panic"));
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -335,7 +335,7 @@ fn always_panics_lint() {
 @test
 fn constant_traps_at_the_operation() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     p.mkfile(
         "body.spc",
         "fn main() i32 {\n    let x: i32 = 5;\n    let a = x / (1 - 1);\n    let b = x << 40;\n    let c: i8 = -(-128i8);\n    let d: i32 = 2147483647 + 1;\n    return a + b + c as i32 + d;\n}\n",
@@ -424,7 +424,7 @@ fn type_path_call_marks_a_private_associated_function_used() {
         "solo.spc",
         "struct S {\n    pub v: i32,\n}\n\nextend S {\n    fn helper(v: i32) i32 {\n        return v + 1;\n    }\n\n    pub fn run(self: &S) i32 {\n        return S::helper(self.v);\n    }\n}\n\nfn main() i32 {\n    let s = S { v: 1 };\n    return s.run() - 2;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
     assert(r.ok(), "a private associated function called through a type path is used");
 }
@@ -442,7 +442,7 @@ fn leading_turbofish_call_marks_a_generic_function_used() {
         "fn main() i32 {\n    return (g::<i32>(1)) - 1;\n}\n",
         "fn k() i32 {\n    return g::<i32>(1);\n}\n\nfn main() i32 {\n    return k() - 1;\n}\n",
     ];
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     for m in mains {
         let mut src = String::from_str(g);
         src.push_str(m);
@@ -468,7 +468,7 @@ fn standalone_file_lint_and_fix() {
         "solo.spc",
         "fn take(q: *mut i32) i32 {\n    return unsafe *q;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    return take((&mut x) as *mut i32) - 1;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
     // The redundant coalescing cast is reported through the per-path route.
     assert(r.out_has("unnecessary cast"), "the standalone lint reports the redundant cast");
@@ -499,7 +499,7 @@ fn const_suggestion_scans_a_switch() {
         "solo.spc",
         "fn classify(n: i32) i32 {\n    return switch n {\n        0 => 10,\n        1..=5 => 20,\n        _ => 0,\n    };\n}\nfn dbl(n: i32) i32 {\n    return n * 2;\n}\nfn main() i32 { return classify(1) + dbl(0) - 20; }\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --const solo.spc");
     assert(r.out_shows("function 'dbl' can be declared 'const fn'"), "the sweep ran");
     assert(r.out_shows("function 'classify' can be declared 'const fn'"), "the scan sees through the switch");
@@ -539,7 +539,7 @@ fn main() i32 {
 }
 )",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -603,7 +603,7 @@ fn main() i32 {
 }
 )",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -621,7 +621,7 @@ fn tuple_let_element_mut_lint() {
         "main.spc",
         "fn f() (i32, i32) {\n    return 1, 2;\n}\n\nfn main() i32 {\n    let (mut a, mut b) = f();\n    a += 1;\n    return a + b - 4;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
@@ -638,12 +638,12 @@ fn tuple_let_element_mut_lint() {
 fn format_argument_warnings_report_once() {
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    let g = [1, 2];\n    print(\"{}\\n\", unsafe g[1]);\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
-    let out = str::from_cstr(r.out);
+    let out = unsafe str::from_cstr(r.out);
     let needle = "unnecessary 'unsafe'";
     let first = out.find(needle);
     assert(first >= 0, "the warning is reported");
@@ -723,7 +723,7 @@ fn main() i32 {
 fn build_constant_removed_code_suppresses_only_its_names() {
     let p = cli::proj_new();
     p.mkfile("main.spc", BC_LINT_REST);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     for t in 0..3 {
         let mut args = String::new();
         args.format_into(
@@ -753,7 +753,7 @@ fn build_constant_removed_code_suppresses_only_its_names() {
 fn build_constant_conditions_lint_quietly() {
     let p = cli::proj_new();
     p.mkfile("main.spc", BC_LINT);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     for t in 0..3 {
         let mut args = String::new();
         args.format_into(
@@ -783,7 +783,7 @@ fn lint_explicit_prelude_import_is_the_prelude_module() {
         "import std::vector;\n\nfn main() i32 {\n    let v = vector::Vector::<i32>::new();\n    let w: Vector<i32> = v;\n    return w.len() as i32;\n}\n",
     );
     let mut args = String::from_str("lint \"");
-    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str(p.dir());
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
     assert(!r.out_has("mismatched types"));
@@ -800,7 +800,7 @@ fn arch_gated_uses_keep_imports() {
         "import string as cstring;\n\n@arch(wasm32)\nfn len_of(s: str) usize {\n    return unsafe cstring::strlen(s.ptr() as *const char);\n}\n\n@arch(x86_64 | aarch64)\nfn len_of(s: str) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    return len_of(\"ab\") as i32 - 2;\n}\n",
     );
     let mut args = String::from_str("lint \"");
-    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str(p.dir());
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
     assert(!r.out_has("unused import"), "the gated item uses it");
@@ -835,7 +835,7 @@ fn conformances_use_their_interfaces() {
         "interface Lane {}\nextend f32 as Lane {}\ninterface Twice { fn twice(self: &Self) i64; }\nextend<T: Lane> T as Twice { fn twice(self: &Self) i64 { return 2; } }\ninterface Never { fn n(self: &Self) i32; }\nstruct Lonely { pub x: i32 }\nextend Lonely { fn get(self: &Lonely) i32 { return self.x; } }\nfn main() i32 {\n    return (0.5f32.twice() != 2) as i32;\n}\n",
     );
     let mut args = String::new();
-    args.format_into("lint \"{}/main.spc\"", str::from_cstr(p.rootp()));
+    args.format_into("lint \"{}/main.spc\"", p.dir());
     let r = p.run_raw(args.as_str());
     assert(!r.out_has("unused interface 'Lane'") && !r.out_has("unused interface 'Twice'"), "conformed interfaces");
     assert(r.out_has("unused interface 'Never'") && r.out_has("unused struct 'Lonely'"), "unused items");

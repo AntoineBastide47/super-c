@@ -497,7 +497,7 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
 }
 
 fn temp_path(tag: str) String {
-    let mut p = String::from_str(str::from_cstr(unsafe shim::sc_tmpdir()));
+    let mut p = String::from_str(unsafe str::from_cstr(shim::sc_tmpdir()));
     p.format_into("/super-c-bindgen-{}-{}", unsafe shim::sc_getpid(), tag);
     return p;
 }
@@ -1118,7 +1118,7 @@ fn run_one(
     let mut abs = PathBuf {};
     if unsafe shim::sc_realpath(hdr.cstr(), &mut abs[0]) != null {
         hdr.clear();
-        hdr.push_str(str::from_cstr(&abs[0]));
+        hdr.push_str(str::from_cbuf(abs.as_slice()));
     }
     let mut spelling = String::from_str(spelling_in);
     if spelling.len() == 0 {
@@ -1299,7 +1299,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
         if unsafe nm[0] == '.' as char {
             continue;
         }
-        names.push(String::from_cstr(nm));
+        names.push(unsafe String::from_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dh);
     names.sort();
@@ -1339,9 +1339,9 @@ pub fn run(
 ) i32 {
     let mut cc = String::from_str(cc_in);
     if cc.len() == 0 {
-        let e = stdlib::getenv("CC");
-        if e != null && unsafe *e != 0 as char {
-            cc.push_str(str::from_cstr(e));
+        let e = stdlib::get_env("CC").unwrap_or(String::new());
+        if e.len() != 0 {
+            cc.push_string(&e);
         } else {
             cc.push_str("cc");
         }

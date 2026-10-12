@@ -23,5 +23,5 @@ pub fn set_errno(code: i32) {
 
 /// The error message for `code` (e.g. a negative return value's magnitude) as an owned string.
 pub fn error_string(code: i32) String {
-    return String::from_cstr(unsafe strerror(code));
+    return unsafe String::from_cstr(strerror(code));
 }

@@ -212,7 +212,7 @@ fn main() i32 {
 }
 )",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let b = cli::superc_env_in(root, "SC_UNUSED", "1", "build main.spc -o app --profile=race");
     assert(b.ok());
     let mut app = String::new();

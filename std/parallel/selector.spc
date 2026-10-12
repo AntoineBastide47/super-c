@@ -118,7 +118,7 @@ extend Selector {
     /// channels beyond this interface.
     pub fn arm<S: sync::Selectable>(self: &mut Selector, s: &S) usize {
         // Recorded once and reused for the life of the arm, which is what `Selectable` requires of them.
-        return self.push(s, iface_ready::<S>, unsafe s.select_lock(), unsafe s.select_queue());
+        return unsafe self.push(s, iface_ready::<S>, s.select_lock(), s.select_queue());
     }
     /// Wait for `rx` to have a value (or to be closed and drained, which `try_recv` reports as `None`).
     /// Returns the arm index a `Ready` result will carry.
@@ -241,7 +241,7 @@ extend Selector {
             runtime::wait_note(runtime::WK_SELECT, self as usize);
             // AFTER lock_all: a contended `raw_mutex_lock` parks, and that park would take a token of its
             // own, leaving ours stale and unwakeable.
-            token = runtime::park_begin(co);
+            token = unsafe runtime::park_begin(co);
         }
         self.woken = -1;
         let claim = &mut self.woken;
@@ -262,14 +262,14 @@ extend Selector {
         }
         let mut reason = runtime::WR_NONE;
         if co != null {
-            reason = runtime::park_timed(token, deadline, commit_unlock_all, self, true);
+            reason = unsafe runtime::park_timed(token, deadline, commit_unlock_all, self, true);
             if deadline != 0 {
-                runtime::cancel_timer(co); // drop the timer if a notify got here first
+                unsafe runtime::cancel_timer(co); // drop the timer if a notify got here first
             }
         } else {
             self.unlock_all();
             runtime::replay_release(); // about to block: in replay mode the pool runs while we do not
-            reason = sync::os_wait(&mut word, deadline);
+            reason = unsafe sync::os_wait(&mut word, deadline);
         }
         // Our nodes outlive the wake: a notify pops only the one it used, and a deadline or a cancel pops
         // none. Every losing arm is unregistered in the stable lock order before anything else happens.
@@ -287,7 +287,7 @@ extend Selector {
             return reason;
         }
         runtime::wait_clear();
-        runtime::park_done(co);
+        unsafe runtime::park_done(co);
         // A notify this wait consumed is spent on the arm it names, never dropped: other waiters on that
         // channel may be parked behind it. A request that landed after it is taken at the next cancellation
         // point.
@@ -329,7 +329,7 @@ extend Selector {
     }
     /// Record one type-erased arm. `pub` for linkage: `arm_recv`/`arm_send` are generic, so they are
     /// monomorphized in the caller's module and call this from there. Not user-facing.
-    pub fn push(
+    pub unsafe fn push(
         self: &mut Selector,
         obj: *const void,
         ready: fn(*const void) bool,

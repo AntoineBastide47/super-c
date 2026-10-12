@@ -27,7 +27,7 @@ fn whole_project_fmt_check_flags_an_unformatted_file() {
         return;
     }
     let p = project(false);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "fmt --check");
     assert_eq(r.exit, 1);
     assert(r.out_has("a.spc"), "the unformatted file in the sweep is named");
@@ -41,7 +41,7 @@ fn whole_project_lint_is_clean() {
         return;
     }
     let p = project(true);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
     assert(r.ok() && !r.out_has("warning"), "a clean project lints without warnings");
     // The sweep reaches a file nothing imports.
@@ -61,7 +61,7 @@ fn lint_recurses_a_directory() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import extra::util;\n\nfn main() i32 {\n    return extra::util::u();\n}\n");
     p.mkfile("src/extra/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // Run from the project root so imports resolve against it; `lint src` recurses the directory and
     // reaches the nested file's warning.
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint src");

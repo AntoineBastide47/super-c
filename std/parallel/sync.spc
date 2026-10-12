@@ -430,10 +430,10 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 stat_add(&mut unsafe G_SYNC.lock_parks);
             }
             runtime::wait_note(runtime::WK_MUTEX, m as usize);
-            let token = runtime::park_begin(co);
+            let token = unsafe runtime::park_begin(co);
             let mut n = LotNode { co: co, token: token, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
-            let reason = runtime::park_current(token, commit_lot_unlock, &mut unsafe (*b).lock, cancellable);
+            let reason = unsafe runtime::park_current(token, commit_lot_unlock, &mut (*b).lock, cancellable);
             if reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN {
                 // Cancelled without the lock. Unlink our node (an unlock racing us may have popped it
                 // already: then the pop consumed it and `lot_remove` finds nothing), clear the wait
@@ -446,7 +446,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 lot_remove(b, &mut n);
                 unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
                 runtime::wait_clear();
-                runtime::park_done(co);
+                unsafe runtime::park_done(co);
                 return false;
             }
             // Woken by an unlock: this park CONSUMED that release, so it must be spent on an acquisition
@@ -454,7 +454,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
             // cancelled here left the waiters behind us parked for good. The pending request is taken at
             // the next cancellation point: this loop's next park, or the caller's.
             runtime::wait_clear();
-            runtime::park_done(co);
+            unsafe runtime::park_done(co);
         } else {
             if sync_stats_on() {
                 stat_add(&mut unsafe G_SYNC.lock_blocks);
@@ -561,7 +561,7 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
         // that claimed this park first resumes the waiter, which takes the bucket lock to unlink its node
         // before it can return, complete, and have its task block freed. Released before the wake, that
         // lock let the block be freed while the wake's claim still read it.
-        let woke = runtime::wake(wco, unsafe (*n).token);
+        let woke = unsafe runtime::wake(wco, (*n).token);
         unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
         if woke {
             return;
@@ -1031,7 +1031,7 @@ fn wake_waiter(wp: *mut Waiter) bool {
     let co = unsafe (*wp).co;
     let mut won = false;
     if co != null {
-        won = runtime::wake(co, unsafe (*wp).token);
+        won = unsafe runtime::wake(co, (*wp).token);
     } else {
         let word = unsafe (*wp).os;
         won = unsafe atomic::cas_i32(word, 0, 1, false, 2, 0);
@@ -1054,7 +1054,7 @@ fn wake_waiter(wp: *mut Waiter) bool {
 /// the node is registered and the paired mutex released. Reports `WR_NOTIFY`, or `WR_TIMEOUT` when this call
 /// claimed the word (2) first: a notify that pops the node afterwards finds it claimed and passes its wake
 /// on. `pub` for `select`; not user-facing.
-pub fn os_wait(word: *mut i32, deadline: u64) u32 {
+pub unsafe fn os_wait(word: *mut i32, deadline: u64) u32 {
     while unsafe atomic::load_i32(word, 1) == 0 {
         let mut rel = -1i64;
         if deadline != 0 {

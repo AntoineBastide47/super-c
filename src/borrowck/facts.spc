@@ -112,6 +112,14 @@ pub struct KillAt {
     pub point: u32,
 }
 
+/// Two arguments of the call at `span` that reach overlapping borrowed storage, at least one of
+/// them mutably: `first` and `second` are their `share` levels (1 shared, 2 mutable), in order.
+pub struct ArgClash {
+    pub span: tok::Span,
+    pub first: u8,
+    pub second: u8,
+}
+
 /// One init/move fact, packed to 16 bytes: replays stream millions of these, so `kind` rides in
 /// `pk`'s top byte over the 24-bit path id (move-path creation checks the id fits).
 pub struct Event {
@@ -158,6 +166,7 @@ pub struct BodyFacts {
     pub subsets: Vector<SubsetAt>,
     pub accesses: Vector<Access>,
     pub kills: Vector<KillAt>,
+    pub clashes: Vector<ArgClash>,
     pub events: Vector<Event>,
     pub ev_start: Vector<u32>, // per block: first event (+ one sentinel entry at the end)
     // The state-CHANGING events only (assign/dead/move), same order and block ranges: the move/init
@@ -348,6 +357,7 @@ extend BodyFacts {
             subsets: Vector::<SubsetAt>::new(),
             accesses: Vector::<Access>::new(),
             kills: Vector::<KillAt>::new(),
+            clashes: Vector::<ArgClash>::new(),
             events: Vector::<Event>::new(),
             ev_start: Vector::<u32>::new(),
             mev: Vector::<Event>::new(),
@@ -367,7 +377,7 @@ extend BodyFacts {
 
     /// Heap bytes kept across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.loans.capacity() * sizeof(Loan) + (self.origin_loans.capacity() + self.loan_next.capacity()) * sizeof(u32) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + self.moved_whole.capacity() * sizeof(bool) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64)) as u64;
+        return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.loans.capacity() * sizeof(Loan) + (self.origin_loans.capacity() + self.loan_next.capacity()) * sizeof(u32) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.clashes.capacity() * sizeof(ArgClash) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + self.moved_whole.capacity() * sizeof(bool) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64)) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
@@ -389,6 +399,7 @@ extend BodyFacts {
         self.subsets.truncate(0);
         self.accesses.truncate(0);
         self.kills.truncate(0);
+        self.clashes.truncate(0);
         self.events.truncate(0);
         self.ev_start.truncate(0);
         self.mev.truncate(0);
@@ -960,15 +971,12 @@ extend Gen {
                 return;
             }
         }
-        // A plain copy of a `&mut` place consumes the binding (exclusivity); passing one to a call
-        // reborrows instead, so only RV_USE operands take this branch.
-        if self.plain_copy && path != mp::MP_NONE && pl.ty != TYPE_NONE {
-            let y = *self.owner().ast_of(self.body().module).type_at(pl.ty);
-            if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                self.push_ev(EV_MOVE, path, point, sp);
-                self.access(op.data, BF_NONE, ACC_MOVE, point, sp);
-                return;
-            }
+        // A plain copy of a `&mut` or `[]mut T` place consumes the binding (exclusivity); passing
+        // one to a call reborrows instead, so only stored operands take this branch.
+        if self.plain_copy && path != mp::MP_NONE && (self.mut_ref_place(op.data) || self.mut_view_place(op.data)) {
+            self.push_ev(EV_MOVE, path, point, sp);
+            self.access(op.data, BF_NONE, ACC_MOVE, point, sp);
+            return;
         }
         let mut upath = path;
         if upath == mp::MP_NONE {
@@ -1720,6 +1728,69 @@ extend Gen {
         return (self.callee_flag(callee) & 2) != 0;
     }
 
+    // A `&mut` or `[]mut T` place `p` stored into a field of, or a member of a literal for, place `dst`
+    // (origin `dor`) reborrows its referent for as long as `dst` holds it, as Rust reborrows at a
+    // coercion site: a use of `p` conflicts until then, and overwriting `p` only ends the loan.
+    fn reborrow_store(self: &mut Self, p: ir::PlaceId, dor: u32, dst: ir::PlaceId, exit: u32, sp: tok::Span) {
+        if self.loans && dor != BF_NONE && !self.behind_raw(p) && (self.mut_ref_place(p) || self.mut_view_place(p)) {
+            self.push_loan(true, false, true, self.store_edge(dst) == SD_REF, p, LK_MUT, dor, exit, sp);
+        }
+    }
+
+    // How argument `i` of call `t`, a copy or move of place `p` passed to a parameter of kind `k`,
+    // shares borrowed storage with the callee: 2 mutably (a `&mut` or `[]mut` it hands over, or a
+    // `&mut` autoref), 1 shared (any other borrow-carrying value, or a shared autoref), 0 not at all
+    // (a value without borrows, or a reference erased to a raw pointer).
+    fn arg_share(self: &mut Self, t: &ir::Terminator, k: u8, p: ir::PlaceId) u8 {
+        let ty = self.place_of(p).ty;
+        if ty == TYPE_NONE {
+            return 0;
+        }
+        let m = self.body().module;
+        let yk = self.owner().ast_of(m).type_at(ty).kind;
+        if k == 3 {
+            return 0;
+        }
+        if k != 0 && yk != TypeKind::TYPE_REFERENCE && yk != TypeKind::TYPE_POINTER {
+            return k;
+        }
+        if self.mut_ref_place(p) && (k != 1 || t.callee.node == NODE_NONE) || self.mut_view_place(p) {
+            return 2;
+        }
+        if self.owner().carries(m, ty) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Record a clash when two arguments of call `t` reach overlapping borrowed storage and one of them
+    // shares it mutably. Each argument only reads its place at the call's entry, so no loan orders the
+    // pair, yet the callee would hold two live paths to storage one of them writes.
+    fn arg_clashes(self: &mut Self, t: &ir::Terminator, kinds: &Vector<u8>) {
+        for j in 1..t.args_len {
+            let oj = *self.body().operands.at(self.body().oper_pool[(t.args_start + j) as usize] as usize);
+            if oj.kind != ir::OP_COPY && oj.kind != ir::OP_MOVE {
+                continue;
+            }
+            let sj = self.arg_share(t, kinds[j as usize], oj.data);
+            if sj == 0 {
+                continue;
+            }
+            for i in 0..j {
+                let oi = *self.body().operands.at(self.body().oper_pool[(t.args_start + i) as usize] as usize);
+                if oi.kind != ir::OP_COPY && oi.kind != ir::OP_MOVE {
+                    continue;
+                }
+                let si = self.arg_share(t, kinds[i as usize], oi.data);
+                if si == 0 || si == 1 && sj == 1 || !places_conflict(self.body(), oi.data, oj.data) {
+                    continue;
+                }
+                self.f.clashes.push(ArgClash { span: t.span, first: si, second: sj });
+                return;
+            }
+        }
+    }
+
     // An argument the callee receives by reference while the operand names a non-reference place:
     // the checker's autoref, implicit in Core IR. It reads or claims the place for the call and,
     // when the call produces a borrow-carrying result, opens a loan owned by that result's origin.
@@ -2010,6 +2081,9 @@ extend Gen {
                             }
                         }
                     }
+                }
+                if self.loans {
+                    self.arg_clashes(&t, &kinds);
                 }
                 // A parameter naming `'static` keeps what its argument borrows for the whole
                 // program: the argument's origin flows into `'static` (origin 0), so a borrow of
@@ -2492,6 +2566,8 @@ extend Gen {
                     self.in_caps = false;
                     let aor = self.origin_of_place(op.data);
                     self.subset_d(aor, dor, entry, sd_then(self.place_edge(op.data), self.store_edge(s.place)));
+                    // A copied `&mut` or `[]mut T` capture is a unique reborrow held by the closure.
+                    self.reborrow_store(op.data, dor, s.place, exit, s.span);
                 }
             }
             self.write_place(s.place, exit, s.span);
@@ -2500,14 +2576,15 @@ extend Gen {
         // Value-carrying rvalues: read operands, flow borrow-carrying operand origins into the
         // destination, then write.
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_CAST || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_DYN || rv.kind == ir::RV_REPEAT {
-            // The `&mut`-copy-consumes rule is a REBIND rule: it applies only when the copy lands
-            // whole in a reference-typed local (`let r2 = r1`), never on stores into fields or
-            // coercions into the raw-pointer world.
+            // The `&mut`-copy-consumes rule is a REBIND rule: a `&mut` or `[]mut T` copied whole into a
+            // local of its own kind (`let r2 = r1`) moves; a store into a field reborrows below, and a
+            // coercion into the raw-pointer world does neither.
+            let mut field_store = false;
             if rv.kind == ir::RV_USE {
                 let dpl = self.place_of(s.place);
-                if dpl.proj_len == 0 && dpl.ty != TYPE_NONE {
-                    self.plain_copy = self.owner().ast_of(self.body().module).type_at(dpl.ty).kind == TypeKind::TYPE_REFERENCE;
-                }
+                let own_kind = self.mut_ref_place(s.place) || self.mut_view_place(s.place);
+                self.plain_copy = own_kind && dpl.proj_len == 0;
+                field_store = own_kind && dpl.proj_len != 0;
             }
             self.op_read(rv.a, entry, s.span);
             self.plain_copy = false;
@@ -2515,6 +2592,9 @@ extend Gen {
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
                 let aor = self.origin_of_place(op.data);
                 self.subset_d(aor, dor, entry, sd_then(self.place_edge(op.data), self.store_edge(s.place)));
+                if field_store {
+                    self.reborrow_store(op.data, dor, s.place, exit, s.span);
+                }
                 // Reading a VIEW value out of a non-carrying container (`v[0..2]` copies a slice)
                 // pins the container exactly like the call-result hook.
                 let opl = self.place_of(op.data);
@@ -2573,6 +2653,7 @@ extend Gen {
                     if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
                         let aor = self.origin_of_place(op.data);
                         self.subset_d(aor, dor, entry, sd_then(self.place_edge(op.data), self.store_edge(s.place)));
+                        self.reborrow_store(op.data, dor, s.place, exit, s.span);
                     }
                 }
             }
@@ -2814,7 +2895,7 @@ extend Owner {
 
     const fn src_of(self: &Self, m: ModuleId) str<'static> {
         let s = self.p().modules.at(m as usize).source.as_str();
-        return str::from_raw(s.ptr(), s.len());
+        return s;
     }
 
     const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {

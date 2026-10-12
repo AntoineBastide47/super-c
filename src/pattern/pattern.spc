@@ -228,7 +228,7 @@ extend PatCx {
         return PatCx {
             pkg: pkg,
             f: facts::TypedFacts::of(ast),
-            src: str::from_raw(src.ptr(), src.len()),
+            src: src,
             pats: Vector::<NPat>::new(),
             subs: Vector::<u32>::new(),
             cols: Vector::<u32>::new(),

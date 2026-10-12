@@ -636,15 +636,15 @@ pub fn json_identity(js: &mut String) {
     js.push_str(",\"flags\":");
     json_str(js, unsafe G_FLAGS);
     js.push_str(",\"os\":");
-    json_str(js, str::from_cstr(unsafe sys::sc_bs_os()));
+    json_str(js, unsafe str::from_cstr(sys::sc_bs_os()));
     js.push_str(",\"arch\":");
-    json_str(js, str::from_cstr(unsafe sys::sc_bs_arch()));
+    json_str(js, unsafe str::from_cstr(sys::sc_bs_arch()));
     let mut cpu = Array::<char, 256>::new();
     if unsafe sys::sc_bs_cpu_model(&mut cpu[0], 256) != 0 {
         cpu[0] = 0 as char;
     }
     js.push_str(",\"cpu\":");
-    json_str(js, str::from_cstr(&cpu[0]));
+    json_str(js, str::from_cbuf(cpu.as_slice()));
     js.push_str(",\"ncpu\":");
     js.push_u64(platform::ncpu() as u64);
     js.push_str(",\"workers\":");
@@ -668,7 +668,7 @@ pub fn log_line(line: str) {
     if outp == null {
         return;
     }
-    let path = str::from_cstr(outp);
+    let path = unsafe str::from_cstr(outp);
     let f = stdio::fopen(path, "ab");
     if f == null {
         let mut what = String::from_str("cannot append to SC_BENCH_LOG=");

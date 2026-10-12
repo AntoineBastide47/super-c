@@ -106,18 +106,6 @@ pub const fn copy(dst: []mut u8, src: []u8) usize {
     return n;
 }
 
-/// Copy `min(dst.len, src.len)` bytes, overlap-safe, and return the count.
-pub fn move_bytes(dst: []mut u8, src: []u8) usize {
-    let mut n = dst.len();
-    if src.len() < n {
-        n = src.len();
-    }
-    if n > 0 {
-        unsafe memmove(dst.as_mut_ptr(), src.as_ptr(), n);
-    }
-    return n;
-}
-
 /// Set every byte of `dst` to `value`.
 pub const fn fill(dst: []mut u8, value: u8) {
     if dst.len() > 0 {

@@ -1706,7 +1706,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
         unsafe stdio::snprintf(&mut jb[0], 64, "--jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
-        run.push(String::from_cstr(&jb[0]));
+        run.push(String::from_str(str::from_cbuf(jb.as_slice())));
     }
     if unsafe (*topts).no_fork {
         run.push(String::from_str("--no-fork"));
@@ -1716,7 +1716,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     }
     if unsafe (*topts).filter != null {
         let mut fs = String::from_str("--filter=");
-        fs.push_str(str::from_cstr(unsafe (*topts).filter));
+        fs.push_str(unsafe str::from_cstr((*topts).filter));
         run.push(fs);
     }
     let mut tb = Buf64 {};
@@ -1726,18 +1726,18 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
         unsafe (*topts).timeout;
     };
     unsafe stdio::snprintf(&mut tb[0], 64, "--timeout=%d".ptr() as *const char, tsec);
-    run.push(String::from_cstr(&tb[0]));
+    run.push(String::from_str(str::from_cbuf(tb.as_slice())));
     let dur = unsafe (*topts).durations;
     if dur != null {
         // The shards balance by the recorded durations when the file exists; a recording run writes it.
         if unsafe shim::sc_mtime(dur) != 0 {
             let mut w = String::from_str("--weights=");
-            w.push_str(str::from_cstr(dur));
+            w.push_str(unsafe str::from_cstr(dur));
             run.push(w);
         }
         if unsafe (*topts).record {
             let mut r = String::from_str("--record=");
-            r.push_str(str::from_cstr(dur));
+            r.push_str(unsafe str::from_cstr(dur));
             run.push(r);
         }
     }
@@ -1750,7 +1750,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
             unsafe (*topts).shard,
             unsafe (*topts).shards,
         );
-        run.push(String::from_cstr(&sb[0]));
+        run.push(String::from_str(str::from_cbuf(sb.as_slice())));
     }
     unsafe shim::sc_jobserver_release_claim();
     let rrc = exec_args(&mut run, null);

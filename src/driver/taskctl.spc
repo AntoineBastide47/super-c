@@ -84,11 +84,11 @@ pub fn parse_size(s: str) Option<u64> {
 /// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; unset or
 /// empty = off (0). Any other spelling, or a value past u64, is a fatal configuration error.
 pub fn budget_from_env() u64 {
-    let e = stdlib::getenv("SC_BUILD_MEM_BUDGET");
-    if e == null || unsafe *e == 0 as char {
+    let e = stdlib::get_env("SC_BUILD_MEM_BUDGET").unwrap_or(String::new());
+    if e.len() == 0 {
         return 0;
     }
-    let v = parse_size(str::from_cstr(e));
+    let v = parse_size(e.as_str());
     if v.is_none() {
         eprintln("error: SC_BUILD_MEM_BUDGET must be a whole byte count with an optional K, M or G suffix");
         unsafe stdlib::exit(1);

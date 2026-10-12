@@ -177,7 +177,7 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
                 let isa = if t == 1 {
                     level();
                 } else {
-                    str::from_cstr(table.name);
+                    unsafe str::from_cstr(table.name);
                 };
                 println("simd\t{}\t{}\t{}\t{}", names()[k], isa, bytes, ns);
                 if t == 1 {
@@ -392,12 +392,12 @@ fn mix(h: u64, v: u64) u64 {
 
 // A view of `n` elements at `p`, which stay alive and unwritten while the view is used.
 fn view<'a, T>(p: *const T, n: usize) []'a T {
-    return Slice::<T> { ptr: p, len: n };
+    return unsafe Slice::<T> { ptr: p, len: n };
 }
 
 // A view of `n` elements at `p`, which nothing else reads or writes while the view is used.
 fn view_mut<'a, T>(p: *mut T, n: usize) []'a mut T {
-    return SliceMut::<T> { ptr: p, len: n };
+    return unsafe SliceMut::<T> { ptr: p, len: n };
 }
 
 // The scalar kernels: plain loops over slices behind the C signatures of `Kernels`.
@@ -946,7 +946,7 @@ extend Input {
                     return format(
                         "{} on {} at {} bytes, mode {}",
                         names()[k],
-                        str::from_cstr(tables[t].name),
+                        unsafe str::from_cstr(tables[t].name),
                         self.bytes_p.len(),
                         self.mode,
                     );

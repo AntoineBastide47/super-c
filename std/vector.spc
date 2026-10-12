@@ -629,7 +629,7 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
         if r.start > hi || hi > self.len {
             panic("Vector<T, A>[a..b]: range out of bounds");
         }
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
+        return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
 }
 
@@ -655,7 +655,7 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
         if r.start > hi || hi > self.len {
             panic("Vector<T, A>[a..b]: range out of bounds");
         }
-        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
+        return unsafe SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
 }
 

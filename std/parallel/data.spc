@@ -110,7 +110,7 @@ pub struct ChunkJob {
 /// The next index range for this chunk, `[lo, hi)`; `false` once it has no more work. Static hands over the
 /// chunk's own range once; Dynamic claims `grain` indices at a time from the shared cursor, so a chunk that
 /// draws cheap indices comes back for more; Guided claims a share of what remains, shrinking to `grain`.
-pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
+pub unsafe fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
     let b = unsafe (*ce).batch;
     if unsafe (*b).mode == 0 {
         if unsafe (*ce).lo >= unsafe (*ce).hi {
@@ -163,7 +163,7 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
 }
 
 /// Report this chunk finished; the last one out wakes the caller.
-pub fn finish(ce: *mut ChunkEnv) {
+pub unsafe fn finish(ce: *mut ChunkEnv) {
     let l = unsafe (*(*ce).batch).latch;
     if l == null {
         // Ran inline: the caller is this thread.
@@ -212,7 +212,7 @@ pub fn chunk_count(total: usize) usize {
 /// Split `[0, total)` into chunks, run `entry` on each (inline when there is only one), and return once every
 /// chunk has finished. `shared` is the call's typed payload, handed to `entry` through the batch. `pub` for
 /// linkage: every entry point below is monomorphized in the caller's module and calls this.
-pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: *mut void) {
+pub unsafe fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: *mut void) {
     let nchunks = chunk_count(total);
     if nchunks == 0 {
         return;
@@ -306,7 +306,7 @@ pub struct RangeShared<F> {
 }
 
 /// The `range` chunk trampoline. `pub` for linkage.
-pub fn range_chunk<F: fn(usize) + Send + Sync>(e: *mut void) {
+pub unsafe fn range_chunk<F: fn(usize) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut RangeShared<F>;
     let b = unsafe (*sh).body; // shallow copy: a `fn(..)` body owns nothing, so copies cost and free nothing
@@ -338,7 +338,7 @@ pub fn range_with<F: fn(usize) + Send + Sync>(r: Range<usize>, opts: Options, bo
         return;
     }
     let mut sh = RangeShared::<F> { body: body, start: r.start };
-    dispatch(end - r.start, opts, range_chunk::<F>, &mut sh);
+    unsafe dispatch(end - r.start, opts, range_chunk::<F>, &mut sh);
 }
 
 // Per-element, read-only.
@@ -352,7 +352,7 @@ pub struct EachShared<T, F> {
 }
 
 /// The `each` chunk trampoline. `pub` for linkage.
-pub fn each_chunk<T, F: fn(&T) + Send + Sync>(e: *mut void) {
+pub unsafe fn each_chunk<T, F: fn(&T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut EachShared<T, F>;
     let b = unsafe (*sh).body;
@@ -384,7 +384,7 @@ pub fn each_with<T, F: fn(&T) + Send + Sync>(items: []T, opts: Options, body: F)
         return;
     }
     let mut sh = EachShared::<T, F> { body: body, items: items.as_ptr(), len: n };
-    dispatch(n, opts, each_chunk::<T, F>, &mut sh);
+    unsafe dispatch(n, opts, each_chunk::<T, F>, &mut sh);
 }
 
 // Per-element, mutable: disjoint by construction.
@@ -398,7 +398,7 @@ pub struct EachMutShared<T, F> {
 }
 
 /// The `each_mut` chunk trampoline. `pub` for linkage.
-pub fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
+pub unsafe fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut EachMutShared<T, F>;
     let b = unsafe (*sh).body;
@@ -431,7 +431,7 @@ pub fn each_mut_with<T, F: fn(&mut T) + Send + Sync>(items: []mut T, opts: Optio
         return;
     }
     let mut sh = EachMutShared::<T, F> { body: body, items: items.ptr, len: n };
-    dispatch(n, opts, each_mut_chunk::<T, F>, &mut sh);
+    unsafe dispatch(n, opts, each_mut_chunk::<T, F>, &mut sh);
 }
 
 // Per-chunk, mutable: the body sees a whole `[]mut T` slice.
@@ -446,7 +446,7 @@ pub struct ChunksShared<T, F> {
 }
 
 /// The `chunks_mut` trampoline: the dispatched unit is a chunk index, not an element. `pub` for linkage.
-pub fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
+pub unsafe fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut ChunksShared<T, F>;
     let b = unsafe (*sh).body;
@@ -464,7 +464,7 @@ pub fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
                 n = total - at;
             }
             // Disjoint by construction: chunk `k` owns exactly `[k*size, k*size + n)`.
-            b(SliceMut::<T> { ptr: unsafe (items + at), len: n });
+            b(unsafe SliceMut::<T> { ptr: items + at, len: n });
         }
     }
     finish(ce);
@@ -489,7 +489,7 @@ pub fn chunks_mut_with<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: us
     }
     let nchunks = (n + step - 1) / step;
     let mut sh = ChunksShared::<T, F> { body: body, items: items.ptr, total: n, size: step };
-    dispatch(nchunks, opts, chunks_mut_chunk::<T, F>, &mut sh);
+    unsafe dispatch(nchunks, opts, chunks_mut_chunk::<T, F>, &mut sh);
 }
 
 // Parallel reduction.
@@ -504,7 +504,7 @@ pub struct ReduceShared<T, A, MK, FOLD> {
 }
 
 /// The `reduce` chunk trampoline: fold this chunk's elements into its own accumulator. `pub` for linkage.
-pub fn reduce_chunk<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sync>(e: *mut void) {
+pub unsafe fn reduce_chunk<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut ReduceShared<T, A, MK, FOLD>;
     let mk = unsafe (*sh).make;
@@ -556,7 +556,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
     let mut g = Global {};
     let out = (unsafe g.alloc(nslots * sizeof(A), alignof(A))) as *mut A;
     let mut sh = ReduceShared::<T, A, MK, FOLD> { make: make, fold: fold, items: items.as_ptr(), out: out };
-    dispatch(n, opts, reduce_chunk::<T, A, MK, FOLD>, &mut sh);
+    unsafe dispatch(n, opts, reduce_chunk::<T, A, MK, FOLD>, &mut sh);
     // Every chunk wrote its slot (a chunk that drew no work wrote the identity), so all `nslots` are live.
     let mut acc = unsafe {
         out[0];
@@ -587,7 +587,7 @@ pub struct Sections {
 }
 
 /// Runs one section: take the closure out of its box, release the box, call it. `pub` for linkage.
-pub fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
+pub unsafe fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
         pp[0];
@@ -604,7 +604,7 @@ extend Sections {
         let mut g = Global {};
         let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
         unsafe slot[0] = f;
-        self.entries.push(SectionJob { entry: section_entry::<F>, env: slot });
+        self.entries.push(SectionJob { entry: unsafe section_entry::<F>, env: slot });
     }
     /// How many sections are registered.
     pub fn len(self: &Sections) usize {
@@ -619,7 +619,7 @@ pub struct SectionsShared {
 }
 
 /// The `sections` chunk trampoline: non-generic, since the sections are already type-erased.
-pub fn sections_chunk(e: *mut void) {
+pub unsafe fn sections_chunk(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe (*(*ce).batch).shared) as *mut SectionsShared;
     let jobs = unsafe (*sh).jobs;
@@ -650,7 +650,7 @@ pub fn sections<F: fn(&mut Sections)>(build: F) {
     if n > 0 {
         let view = s.entries[0..n];
         let mut sh = SectionsShared { jobs: view.ptr };
-        dispatch(n, Options { schedule: Schedule::Dynamic, grain_size: 1 }, sections_chunk, &mut sh);
+        unsafe dispatch(n, Options { schedule: Schedule::Dynamic, grain_size: 1 }, sections_chunk, &mut sh);
     }
     // `s` (and its entry vector) is auto-freed at scope exit; each section's closure box was released by the
     // trampoline that ran it.

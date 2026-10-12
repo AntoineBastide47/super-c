@@ -79,11 +79,16 @@ extend<T, const N: usize> Array<T, N> {
         return &unsafe self.data[0];
     }
 
-    /// Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Caller guarantees
-    /// `n <= N * sizeof(T)` and that the bytes form valid `T`s; overwritten elements are NOT
-    /// freed (raw overwrite, unlike `set`).
-    pub fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
-        unsafe memcpy(&mut self.data[0], src, n);
+    /// A shared view of every element.
+    pub const fn as_slice(self: &Array<T, N>) []T {
+        return unsafe Slice::<T> { ptr: self.as_ptr(), len: N };
+    }
+
+    /// Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Unsafe: the caller
+    /// promises `n` readable bytes at `src`, `n <= N * sizeof(T)`, and that the bytes form valid `T`s;
+    /// overwritten elements are NOT freed (raw overwrite, unlike `set`).
+    pub unsafe fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
+        memcpy(&mut self.data[0], src, n);
     }
 
     /// Exchange the elements at `i` and `j`: panics when either is out of range.
@@ -399,7 +404,7 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
         if r.start > hi || hi > N {
             panic("Array<T, N>[a..b]: range out of bounds");
         }
-        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start };
+        return unsafe Slice::<T> { ptr: self.as_ptr() + r.start, len: hi - r.start };
     }
 }
 
@@ -426,7 +431,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         if r.start > hi || hi > N {
             panic("Array<T, N>[a..b]: range out of bounds");
         }
-        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start };
+        return unsafe SliceMut::<T> { ptr: p + r.start, len: hi - r.start };
     }
 }
 

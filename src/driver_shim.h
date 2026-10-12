@@ -20,6 +20,11 @@ int sc_exe_path(char *buf, unsigned size);           /* absolute path of the run
 void sc_set_argv0(const char *argv0);        /* record argv[0]: sc_exe_path answers it under WASI */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
 int sc_process_alive(int64_t pid); /* 1 while `pid` exists (kill 0 / OpenProcess); 0 once it is gone */
+/* Exclusive lock on file `path` (created when missing), waiting at most `wait_ms`: the handle that holds it,
+   -1 when another process still holds it, -2 on an error. The OS releases it when the process ends; no child
+   inherits it. */
+int64_t sc_tree_lock(const char *path, int64_t wait_ms);
+void sc_tree_unlock(int64_t h);                      /* release a `sc_tree_lock` handle */
 /* Bytes of `f`'s descriptor into `buf` (at most `n`), past the stdio buffer: what one read returns (a pipe
    hands over what has arrived), 0 at end of stream, -1 on error. */
 int64_t sc_file_read(void *f, void *buf, size_t n);

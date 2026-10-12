@@ -35,9 +35,7 @@ fn uses_beyond_the_callers_features_need_unsafe() {
         "",
     );
     assert(ok.ok(), "inside the features, and inside `unsafe`");
-    let lint = p.run_raw(
-        format("lint --arch=x86_64 --target=linux \"{}/main.spc\"", str::from_cstr(p.rootp())).as_str(),
-    );
+    let lint = p.run_raw(format("lint --arch=x86_64 --target=linux \"{}/main.spc\"", p.dir()).as_str());
     assert(!lint.out_has("unnecessary 'unsafe'"), "each `unsafe` is needed");
     p.mkfile(
         "main.spc",
@@ -46,7 +44,7 @@ fn uses_beyond_the_callers_features_need_unsafe() {
             V3,
         ).as_str(),
     );
-    let l2 = p.run_raw(format("lint --arch=x86_64 --target=linux \"{}/main.spc\"", str::from_cstr(p.rootp())).as_str());
+    let l2 = p.run_raw(format("lint --arch=x86_64 --target=linux \"{}/main.spc\"", p.dir()).as_str());
     assert(l2.out_has("unnecessary 'unsafe': nothing inside requires it"), "the function's own features");
     // A build whose features hold the function's needs no `unsafe`.
     let b = x86(&p, "fn main() i32 {\n    return wide(0) - 1;\n}\n", "--target-cpu=x86-64-v3");
@@ -106,11 +104,11 @@ fn feature_functions_keep_their_calls() {
         ).as_str(),
     );
     // The C alone: a C compiler for another instruction set rejects the x86 target attribute.
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let _ = p.run_raw(
         format("build \"{}/main.spc\" -o \"{}/app\" --profile=release --arch=x86_64 --target=linux", root, root).as_str(),
     );
-    let c = cli::read_text(format("{}/build/release/raw/main.c", str::from_cstr(p.rootp())).as_str());
+    let c = cli::read_text(format("{}/build/release/raw/main.c", p.dir()).as_str());
     assert(
         c.contains(
             "__attribute__((target(\"sse3,ssse3,sse4.1,sse4.2,popcnt,cx16,sahf,avx,avx2,fma,bmi,bmi2,f16c,lzcnt,movbe\"))) int32_t wide(",
@@ -128,7 +126,7 @@ fn feature_functions_keep_their_calls() {
         "import std::cpu;\n@arch(aarch64)\n@target_feature([cpu::Feature::I8mm])\nfn mm(a: i32) i32 {\n    return a;\n}\nfn main() i32 {\n    return unsafe mm(0);\n}\n",
     );
     assert(p.compile_flags("--arch=aarch64 --target=linux", "main.spc").ok(), "aarch64");
-    let a = cli::read_text(format("{}/build/dev/raw/main.c", str::from_cstr(p.rootp())).as_str());
+    let a = cli::read_text(format("{}/build/dev/raw/main.c", p.dir()).as_str());
     assert(
         a.contains("SC_TGT_A64(\"+rdm+i8mm+crc+lse\", \"arch=armv8.2-a+i8mm\")))) int32_t mm("),
         "the aarch64 target",
@@ -197,7 +195,7 @@ fn dispatch_rows_cover_their_functions() {
         r.out_has("the row's feature `avx2` does not imply `+cx16,+lahf-sahf,+fma,+bmi1,+bmi2,+f16c,+lzcnt,+movbe`"),
         "the level's row",
     );
-    let o = str::from_cstr(r.out);
+    let o = unsafe str::from_cstr(r.out);
     let first = o.find("does not imply");
     assert(
         first >= 0 && o.slice(first as usize + 1, o.len()).find("does not imply") < 0,
@@ -298,7 +296,7 @@ fn main() i32 {
 fn dispatch_run(flags: str, env: str) String {
     let p = cli::proj_new();
     p.mkfile("main.spc", DISPATCH);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let b = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags).as_str());
     if !b.ok() {
         b.show();

@@ -9,6 +9,8 @@ import driver_shim as shim;
 import stdlib;
 import std::cpu;
 import std::cpu::detect as detect;
+import ir::cpu_features as cf;
+import tests::gen::simd_entry as se;
 
 fn x86_host() bool {
     return unsafe shim::sc_host_arch() == 0 && !h::simd_lane();
@@ -58,7 +60,7 @@ fn each_function_plans_with_its_own_features() {
         0,
     );
     assert(c.ok(), "the program builds");
-    let code = str::from_cstr(c.code);
+    let code = unsafe str::from_cstr(c.code);
     let w = fn_body(code, "wide");
     let b = fn_body(code, "base");
     assert(w.contains("__sc_si_x86_64__add_f32x8(") && !w.contains("add_f32x4("), "the AVX entry");
@@ -125,7 +127,7 @@ fn emitted(src: str, flags: str) String {
     p.mkfile("main.spc", src);
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut t = cli::read_text(format("{}/build/dev/raw/__sc_manifest", root).as_str());
     t.push_str(cli::read_text(format("{}/build/dev/raw/main.c", root).as_str()).as_str());
     return t;
@@ -154,7 +156,8 @@ const fn pick<T>(c: bool, a: T, b: T) T {
 }
 
 // Kernel `k` of `src` (one `@c.noinline` function per kernel, `fn k` renamed) lowers to assembly holding
-// each mnemonic of `want` and none of `avoid`; `flags` are the build's.
+// each mnemonic of `want` and none of `avoid`; `flags` are the build's. A kernel that takes a `[]mut T`
+// has its body in `main__k__r` (the split view ABI); `main__k` only forwards to it.
 fn kernel_asm(label: str, src: str, flags: []str, want: []str, avoid: []str) {
     let d = h::asm_check(
         format(
@@ -162,7 +165,7 @@ fn kernel_asm(label: str, src: str, flags: []str, want: []str, avoid: []str) {
             src,
         ).as_str(),
         flags,
-        "main__k",
+        pick(src.contains("[]mut "), "main__k__r", "main__k"),
         want,
         avoid,
     );
@@ -217,13 +220,13 @@ fn operations_lower_to_their_instructions() {
         ["vfmadd"],
         [],
     );
-    kernel_asm(
-        "u8x32 compare to a mask",
-        format("{}fn k(a: u8x32, b: u8x32) u64 {{\n    return a.equal(b).to_bits();\n}}\n", v3).as_str(),
-        ops,
-        ["vpcmpeqb", "vpmovmskb"],
-        [],
-    );
+    // Under run features with AVX-512BW (an `x86-64-v4` run) the comparison gives a mask register.
+    let src = format("{}fn k(a: u8x32, b: u8x32) u64 {{\n    return a.equal(b).to_bits();\n}}\n", v3);
+    if cf::has(se::run_features(true), cf::find_variant("Avx512bw") as usize) {
+        kernel_asm("u8x32 compare to a mask", src.as_str(), ops, ["vpcmpeqb", "%k", "kmov"], ["vpmovmskb"]);
+    } else {
+        kernel_asm("u8x32 compare to a mask", src.as_str(), ops, ["vpcmpeqb", "vpmovmskb"], []);
+    }
     kernel_asm(
         "gather",
         format(

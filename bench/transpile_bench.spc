@@ -182,7 +182,7 @@ const fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
 // engine's own record is appended to `js` and summarized; a failing compiler, C compiler or linker fails
 // the benchmark and the scratch tree stays for inspection.
 fn real_build(js: &mut String) bool {
-    let mut dir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    let mut dir = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
     dir.push_str("/sc_bench_build");
     let _ = unsafe dshim::sc_rm_rf(dir.cstr());
     let m0 = mf::load("build.toml", false);
@@ -328,7 +328,7 @@ fn run_report(b: &mut bench::Bencher) bool {
         return false;
     }
     let mut m = m0.unwrap();
-    let mut dir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    let mut dir = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
     dir.push_str("/sc_bench_transpile");
     m.out_dir = dir.clone();
     let mut pdir = loader::join2(dir.as_str(), BUILD_PROFILE);
@@ -533,7 +533,7 @@ fn run_report(b: &mut bench::Bencher) bool {
     js.push_str("{\"v\":2,\"build_id\":");
     bench::json_str(&mut js, bid.as_str());
     js.push_str(",\"cpu\":");
-    bench::json_str(&mut js, str::from_cstr(&cpu[0]));
+    bench::json_str(&mut js, str::from_cbuf(cpu.as_slice()));
     js.push_str(",\"rounds\":");
     js.push_u64(rounds as u64);
     js.push_str(",\"jobs\":1,\"corpus\":{\"modules\":");
@@ -584,7 +584,7 @@ fn run_report(b: &mut bench::Bencher) bool {
     js.push_str("}\n");
     let outp = stdlib::getenv("SC_BENCH_OUT");
     if outp != null {
-        let path = str::from_cstr(outp);
+        let path = unsafe str::from_cstr(outp);
         let f = stdio::fopen(path, "wb");
         if f == null {
             eprintln("bench: cannot write '{}'", path);

@@ -174,7 +174,7 @@ fn ws_new(a: str, b: str, c: str) Ws {
     proj.mkfile("a.spc", a);
     proj.mkfile("b.spc", b);
     proj.mkfile("c.spc", c);
-    let dir = String::from_cstr(proj.rootp());
+    let dir = String::from_str(proj.dir());
     let mut root = String::from_str(dir.as_str());
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
@@ -323,7 +323,7 @@ fn driver_order(ws: &Ws) loader::Package {
         let len = m.source.len();
         let mut r = res::Resolver::new(
             unsafe &mut *((&mut m.ast) as *mut Ast),
-            str::from_raw(src as *const u8, len),
+            unsafe str::from_raw(src as *const u8, len),
             pkg,
         );
         r.resolve();
@@ -334,7 +334,7 @@ fn driver_order(ws: &Ws) loader::Package {
         let m = &mut p.modules[i];
         let src = m.source.as_str().ptr() as *const char;
         let len = m.source.len();
-        let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
         t.check();
         assert(!t.has_errors(), "the workspace type-checks");
     }

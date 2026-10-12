@@ -234,7 +234,7 @@ ffi/
 
 The loader resolves `import X;` by searching: project root → `std/` → `ffi/X.spc`.
 FFI modules include safe wrappers alongside raw bindings (e.g., `stdio` has an RAII
-`File` type, `stdlib` has `get_env() Option<String>`).
+`File` type, `stdlib` has `get_env(name) Option<String>`, an owned copy, and `env_is(name, value)`).
 
 The raw bindings carry the `@unsafe` claims their C contract supports (rules below):
 
@@ -265,10 +265,18 @@ through `*const u8`, so a `const` model (`strlen`) sees what the C call sees.
 |-----------|---------|-------|
 | Pass to C `%s` | `%.*s` with `.len()`, `.ptr()` | `%s` with `.ptr()` (buffer overread) |
 | Pass to C API expecting `const char*` | `String::cstr()` (writes trailing NUL) | `.ptr()` (no NUL) |
-| Build from C string | `str::from_cstr(p)` | Direct cast |
+| Build from C string | `unsafe str::from_cstr(p)` (C owns `p`), `str::from_cbuf(buf)` (a buffer the program owns) | Direct cast |
 
 `.cstr()` exists only on `String` and takes `&mut self`: a `str` view has no `cstr`;
 materialize it first with `.to_string()`.
+
+A std function that turns a raw pointer into a view, or reads through one, is `unsafe fn`: its caller
+promises what the function cannot check (`str::from_raw`, `str::from_cstr`, `String::from_cstr`,
+`Array::copy_from`, and the `std::parallel` runtime's entry points). A program-owned buffer goes
+through a checked view instead: `str::from_cbuf(buf)` stops at the first NUL or at the buffer's end
+(`Array::as_slice()` views an `Array`), `String::push_bytes` takes `[]u8`, and the integer
+out-parameters (`widening_mul`, `divmod`) take `&mut`. An environment value read through
+`stdlib::get_env` is a copy, so a later `setenv` cannot change it under the reader.
 
 ```superc
 // Correct: print a str
@@ -294,6 +302,12 @@ extern "C" "legacy.h" {
 Exported functions get external linkage (non-`static` in the generated C). `@c.import`
 goes on the `fn` declaration **inside** the extern block; placed before the block it
 parses but does not rename the call sites.
+
+An exported function keeps its declared C ABI: a `[]mut T` parameter stays the struct
+`SliceMut__T` (`{ T *ptr; size_t len; }`) by value, as `[]T` stays `Slice__T`. Internally the
+function's body is `<sym>__r`, which takes the view as `T *restrict` and a length; `<sym>` is a
+one-call entry into it. C code that calls `<sym>` must pass a view no other argument or global
+reaches while the call runs, as for a `&mut` parameter.
 
 ## Pointers to Arrays
 

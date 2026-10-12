@@ -15,7 +15,7 @@ fn inline_splices_a_void_callee() {
         "src/main.spc",
         "fn bump(p: &mut i32) {\n    *p = *p + 1;\n}\nfn main() i32 {\n    let mut x = 1;\n    bump(&mut x);\n    return x - 2;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_INLINE_STATS", "1", "build");
     assert(r.ok(), "the build succeeds");
     assert(r.out_has("inline considered 1 inlined 1 "), "the void call is inlined");
@@ -29,7 +29,7 @@ fn stats_switches_report_in_one_build() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", PROG);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_BCE_STATS=1 SC_INLINE_STATS=1 SC_CEMIT_STATS=1", "build");
     assert(r.ok(), "the build succeeds");
     assert(r.out_has("bce total"), "the bounds-check stats line is printed");
@@ -52,7 +52,7 @@ fn build_mem_records_allocation_counters() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", PROG);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // The child environment is a space-separated NAME=VALUE list, so the value carries the second switch.
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_BUILD_MEM=1", "build");
     assert(r.ok(), "the build succeeds");

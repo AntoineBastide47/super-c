@@ -17,7 +17,7 @@ fn emitted(src: str, flags: str) String {
     p.mkfile("main.spc", src);
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut m = String::new();
     m.format_into("{}/build/dev/raw/__sc_manifest", root);
     let mut c = String::new();

@@ -14,7 +14,7 @@ fn manifest_test_runs_the_tests_directory() {
     p.mkfile("src/util.spc", "pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n");
     p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::add(2, 3) - 5;\n}\n");
     p.mkfile("tests/t.spc", "import util;\n\n@test\nfn adds() {\n    assert_eq(util::add(2, 3), 5);\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // `super-c test` builds the tests/ tree against the src closure and runs it.
     let r = cli::superc_env_in(root, E, "1", "test --quiet");
     assert(r.ok(), "the manifest test run succeeds");
@@ -34,7 +34,7 @@ fn manifest_test_shards_by_duration() {
         "tests/durations.tsv",
         "# weights\n10.00\ttests::t::a\n1.00\ttests::t::b\n1.00\ttests::t::c\n8.00\ttests::t::d\n3.00\ttests::t::gone\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let s1 = cli::superc_env_in(root, E, "1", "test --test-shard=1/2");
     assert(s1.ok(), "shard 1 runs");
     assert(s1.out_has("running 1 test (shard 1/2)") && s1.out_has("test tests::t::a ... ok"), "the longest alone");
@@ -69,7 +69,7 @@ fn library_build(stat: bool, shared: bool) {
     };
     p.mkfile("build.toml", format("[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [{}]\n", types).as_str());
     p.mkfile("src/lib.spc", LIB);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.ok(), types);
     let host = unsafe shim::sc_host_platform();
@@ -84,7 +84,7 @@ fn library_build(stat: bool, shared: bool) {
         assert(r.out_has(format("built {}", rel.as_str()).as_str()) == want, leaf.as_str());
         assert(cli::read_text(format("{}/{}", root, rel.as_str()).as_str()).len() != 0 == want, "the artifact exists");
     }
-    let out = str::from_cstr(r.out);
+    let out = unsafe str::from_cstr(r.out);
     let at = out.find("unused function 'helper'");
     assert(at >= 0, "the private dead function is reported");
     assert(out.slice(at as usize + 1, out.len()).find("unused function 'helper'") < 0, "once");
@@ -120,7 +120,7 @@ fn failed_c_compile_reports_status_and_keeps_the_log() {
         "src/main.spc",
         "extern \"C\" \"bad.h\" {\n    fn bad_value() i32;\n}\nfn main() i32 {\n    return unsafe bad_value();\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.exit != 0, "the build fails");
     assert(
@@ -144,7 +144,7 @@ fn same_second_edit_recompiles() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let first = cli::superc_env_in(root, E, "1", "run");
     assert_eq(first.exit, 3);
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
@@ -163,7 +163,7 @@ fn shard_parts(dir: str) i32 {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         n += (nm == "main.c" || nm.starts_with("main__p") && nm.ends_with(".c")) as i32;
     }
     unsafe shim::sc_closedir(dh);
@@ -192,7 +192,7 @@ fn shard_counts_follow_emitted_size() {
     }
     src.push_str("fn main() i32 {\n    return f0(1) + f1499(2) - f0(1) - f1499(2);\n}\n");
     p.mkfile("src/main.spc", src.as_str());
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.ok(), "the build succeeds");
     let mut gen = String::from_str(root);

@@ -32,7 +32,7 @@ pub fn compiler_id() u64 {
     if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
         return 0;
     }
-    return file_id(str::from_cstr(&exe[0]));
+    return file_id(str::from_cbuf(exe.as_slice()));
 }
 
 /// A content hash of the file at `path`; 0 when it cannot be read or is empty. Four independent lanes
@@ -282,7 +282,7 @@ pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if nm.starts_with(".") && (!hidden || nm == "." || nm == "..") {
             continue;
         }
@@ -299,7 +299,7 @@ pub fn mkdir_p(path: str) {
         return;
     }
     let mut buf = Array::<char, 4096>::new();
-    buf.copy_from(path.ptr(), n);
+    unsafe buf.copy_from(path.ptr(), n);
     buf[n] = 0 as char;
     let base = (&buf[0]) as *const char; // read-only C string view; the buffer is edited in place below
     for i in 1..n {
@@ -330,7 +330,7 @@ pub fn open_out(path: str) *mut stdio::FILE {
     if slash == n {
         return null;
     }
-    mkdir_p(str::from_raw(p, slash));
+    mkdir_p(unsafe str::from_raw(p, slash));
     return stdio::fopen(path, "wb");
 }
 
@@ -379,7 +379,7 @@ fn prune_dir(dir: *const char, keep: &Set<str>) {
         if !(l >= 2 && unsafe name[l - 2] == '.' as char && (unsafe name[l - 1] == 'c' as char || unsafe name[l - 1] == 'h' as char)) {
             continue;
         }
-        let ps = str::from_cstr(path);
+        let ps = unsafe str::from_cstr(path);
         if !keep.contains(&ps) {
             let _ = unsafe shim::sc_unlink(path);
         }
@@ -445,9 +445,9 @@ pub fn resolve_cc(cc: str, sdk: i32) String {
         sdk_cc(sdk, &mut out);
     }
     if out.len() == 0 {
-        let env = stdlib::getenv("CC");
-        if env != null && unsafe *env != 0 as char {
-            out.push_str(str::from_cstr(env));
+        let env = stdlib::get_env("CC").unwrap_or(String::new());
+        if env.len() != 0 {
+            out.push_string(&env);
         } else {
             out.push_str("cc");
         }
@@ -466,14 +466,14 @@ pub fn sdk_cc(sdk: i32, out: &mut String) {
     }
     if sdk == 2 {
         // Android: the NDK's prebuilt clang. $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates it.
-        let mut ndk = stdlib::getenv("ANDROID_NDK_HOME");
-        if ndk == null || unsafe *ndk == 0 as char {
-            ndk = stdlib::getenv("ANDROID_NDK_ROOT");
+        let mut ndk = stdlib::get_env("ANDROID_NDK_HOME").unwrap_or(String::new());
+        if ndk.len() == 0 {
+            ndk = stdlib::get_env("ANDROID_NDK_ROOT").unwrap_or(String::new());
         }
-        if ndk == null || unsafe *ndk == 0 as char {
+        if ndk.len() == 0 {
             return;
         }
-        out.push_str(str::from_cstr(ndk));
+        out.push_string(&ndk);
         out.push_str("/toolchains/llvm/prebuilt/");
         out.push_str(ndk_host_tag());
         out.push_str("/bin/clang");
@@ -482,9 +482,9 @@ pub fn sdk_cc(sdk: i32, out: &mut String) {
     if sdk == 3 {
         // WebAssembly: the wasi-sdk's clang when present (it brings wasi-libc), else a plain clang,
         // which can only build freestanding code.
-        let w = stdlib::getenv("WASI_SDK_PATH");
-        if w != null && unsafe *w != 0 as char {
-            out.push_str(str::from_cstr(w));
+        let w = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
+        if w.len() != 0 {
+            out.push_string(&w);
             out.push_str("/bin/clang");
             return;
         }
@@ -539,19 +539,19 @@ fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
         // A wasi sysroot supplies the libc the emitted C needs. $WASI_SDK_PATH names a full wasi-sdk
         // (its sysroot sits under share/wasi-sysroot); $WASI_SYSROOT names a bare one. With neither,
         // only freestanding code can build; there is no libc to include.
-        let sdkp = stdlib::getenv("WASI_SDK_PATH");
-        if sdkp != null && unsafe *sdkp != 0 as char {
+        let sdkp = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
+        if sdkp.len() != 0 {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
             cmd.push_str(" -target wasm32-wasip1 --sysroot=");
-            cmd.push_str(str::from_cstr(sdkp));
+            cmd.push_string(&sdkp);
             cmd.push_str("/share/wasi-sysroot");
             return;
         }
-        let sr = stdlib::getenv("WASI_SYSROOT");
-        if sr != null && unsafe *sr != 0 as char {
+        let sr = stdlib::get_env("WASI_SYSROOT").unwrap_or(String::new());
+        if sr.len() != 0 {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
             cmd.push_str(" -target wasm32-wasip1 --sysroot=");
-            cmd.push_str(str::from_cstr(sr));
+            cmd.push_string(&sr);
             return;
         }
         cmd.push_str(" -target wasm32 -nostdlib");

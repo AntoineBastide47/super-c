@@ -71,7 +71,7 @@ pub fn read_text(path: str) String {
     if buf == null {
         return String::new();
     }
-    let text = String::from_cstr(buf);
+    let text = unsafe String::from_cstr(buf);
     unsafe stdlib::free(buf);
     return text;
 }
@@ -107,9 +107,9 @@ fn superc() *const char {
     }
     let sc = stdlib::getenv("SUPERC");
     let mut want = if sc == null || unsafe *sc == 0 as char {
-        format("./super-c{}", str::from_cstr(binext()));
+        format("./super-c{}", unsafe str::from_cstr(binext()));
     } else {
-        String::from_cstr(sc);
+        unsafe String::from_cstr(sc);
     };
     let slot = ((&mut unsafe SUPERC_RESOLVED) as *mut PathMax) as *mut char;
     if unsafe shim::sc_realpath(want.cstr(), slot) == null {
@@ -122,7 +122,7 @@ fn superc() *const char {
 
 /// Absolute path from $SUPERC, or ./super-c when unset.
 pub fn superc_path() str<'static> {
-    return str::from_cstr(superc());
+    return unsafe str::from_cstr(superc());
 }
 
 /// C compiler from $CC, or gcc on Windows and cc elsewhere.
@@ -188,7 +188,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 
 // Read a whole file into a fresh NUL-terminated buffer (caller frees); null if it cannot be opened.
 fn slurp(path: *const char) *mut char {
-    let f = stdio::fopen(str::from_cstr(path), "rb");
+    let f = stdio::fopen(unsafe str::from_cstr(path), "rb");
     if f == null {
         return null;
     }
@@ -280,10 +280,15 @@ extend Proj {
         return &self.root[0];
     }
 
+    /// The project root.
+    pub const fn dir(self: &Proj) str {
+        return str::from_cbuf(self.root.as_slice());
+    }
+
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
     /// Write `content` to `rel` under the root, creating directories.
     pub fn mkfile(self: &Proj, rel: str, content: str) {
-        let path = format("{}/{}", str::from_cstr(self.rootp()), rel);
+        let path = format("{}/{}", self.dir(), rel);
         // Everything up to the last separator is the directory to create.
         let mut cut: usize = 0;
         for i in 0..path.len() {
@@ -319,7 +324,7 @@ extend Proj {
         if content == null {
             return false;
         }
-        self.mkfile(rel, str::from_cstr(content));
+        self.mkfile(rel, unsafe str::from_cstr(content));
         unsafe stdlib::free(content);
         return true;
     }
@@ -333,7 +338,7 @@ extend Proj {
     /// `compile_flags` with `env` ("NAME=VALUE" pairs, space separated) applied to the compiler and
     /// everything it runs, so a check never depends on the suite's own environment.
     pub fn compile_flags_env(self: &Proj, flags: str, mainrel: str, env: str) CliResult {
-        let root = str::from_cstr(self.rootp());
+        let root = self.dir();
         let mut base = format("\"{}\" {} \"{}/{}\"", superc_path(), flags, root, mainrel);
         let mut op = format("{}/.out", root);
         let envb = cache_env(root, env);
@@ -348,7 +353,7 @@ extend Proj {
     // Run `$SUPERC <args>` verbatim (for flag-only invocations like usage checks); no path is appended.
     /// Run the compiler with `args` verbatim from the project root, capturing output.
     pub fn run_raw(self: &Proj, args: str) CliResult {
-        let root = str::from_cstr(self.rootp());
+        let root = self.dir();
         let mut base = format("\"{}\" {}", superc_path(), args);
         let mut op = format("{}/.out", root);
         let envb = cache_env(root, "");
@@ -369,7 +374,7 @@ extend Proj {
             if e == null {
                 break;
             }
-            let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+            let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
             if nm == "." || nm == ".." {
                 continue;
             }
@@ -388,7 +393,7 @@ extend Proj {
     // The `@c.link` flags the emit wrote to build/dev/raw/__ldflags, space separated (empty when there are
     // none): the `cat` a shell command would run.
     fn append_ldflags(self: &Proj, out: &mut String) {
-        let flags = read_text(format("{}/build/dev/raw/__ldflags", str::from_cstr(self.rootp())).as_str());
+        let flags = read_text(format("{}/build/dev/raw/__ldflags", self.dir()).as_str());
         if flags.len() == 0 {
             return;
         }
@@ -409,11 +414,11 @@ extend Proj {
     // <root>/bin. `strict` adds -Wall -Wextra -Werror; without it this is the plain build (the analog of
     // cli_test's `cc -std=c11`, where a tree containing @test functions compiles as an ordinary program).
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
-        let root = str::from_cstr(self.rootp());
+        let root = self.dir();
         let mut base = format(
             "{} {} -funsigned-char -ffp-contract=off{}",
-            str::from_cstr(cc_name()),
-            str::from_cstr(cstd()),
+            unsafe str::from_cstr(cc_name()),
+            unsafe str::from_cstr(cstd()),
             if strict {
                 " -Wall -Wextra -Werror";
             } else {
@@ -423,7 +428,7 @@ extend Proj {
         self.append_c_files(format("{}/build/dev/raw", root).as_str(), &mut base);
         base.format_into(" {}", extra);
         self.append_ldflags(&mut base);
-        base.format_into(" -o \"{}/bin{}\"", root, str::from_cstr(binext()));
+        base.format_into(" -o \"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
         let mut op = format("{}/.ccout", root);
         return exec(base.cstr(), op.cstr());
     }
@@ -442,8 +447,8 @@ extend Proj {
     // capturing its exit code and output.
     /// Run the linked binary with `env` applied, capturing output.
     pub fn run_bin_env(self: &Proj, env: str) CliResult {
-        let root = str::from_cstr(self.rootp());
-        let mut base = format("\"{}/bin{}\"", root, str::from_cstr(binext()));
+        let root = self.dir();
+        let mut base = format("\"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
         let mut op = format("{}/.runout", root);
         return exec_env(base.cstr(), op.cstr(), env);
     }
@@ -456,7 +461,7 @@ extend Proj {
 
     // The path of generated file `rel` under <root>/build/dev/raw.
     fn raw_path(self: &Proj, rel: str) String {
-        return format("{}/build/dev/raw/{}", str::from_cstr(self.rootp()), rel);
+        return format("{}/build/dev/raw/{}", self.dir(), rel);
     }
 
     // True if the generated <root>/build/rel contains `needle` (the `grep -q` analog).
@@ -488,7 +493,7 @@ extend Proj {
             return -1;
         }
         let mut n: i32 = -1;
-        let text = str::from_cstr(buf);
+        let text = unsafe str::from_cstr(buf);
         let mut head = String::from_str(" ");
         head.push_str(name);
         head.push_str("(");
@@ -528,7 +533,7 @@ extend Proj {
     // asserts that generated wrapper TUs are pruned.
     /// Number of entries under build/dev/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
-        let mut raw = format("{}/build/dev/raw", str::from_cstr(self.rootp()));
+        let mut raw = format("{}/build/dev/raw", self.dir());
         let d = unsafe shim::sc_opendir(raw.cstr());
         if d == null {
             return 0;
@@ -593,7 +598,7 @@ extend EnvGuard {
         let prev = stdlib::getenv(name);
         let mut g = EnvGuard { name: String::from_str(name), had: prev != null, old: String::new() };
         if prev != null {
-            g.old = String::from_cstr(prev);
+            g.old = unsafe String::from_cstr(prev);
         }
         let mut v = String::from_str(value);
         assert(unsafe shim::sc_setenv(g.name.cstr(), v.cstr()) == 0, "the variable is set");
@@ -635,7 +640,7 @@ pub fn cache_env(root: str, env: str) String {
 pub fn fixture_cache_env(root: str) String {
     let fx = stdlib::getenv("SC_TEST_CACHE_DIR");
     if fx != null && unsafe *fx != 0 as char {
-        return format("SC_CACHE_DIR=\"{}\"", str::from_cstr(fx));
+        return format("SC_CACHE_DIR=\"{}\"", unsafe str::from_cstr(fx));
     }
     return cache_env(root, "");
 }
@@ -678,7 +683,7 @@ pub fn dir_count_suffix(dir: str, suffix: str) i32 {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if nm.ends_with(suffix) {
             n = n + 1;
         }
@@ -701,7 +706,7 @@ pub fn dir_corrupt_suffix(dir: str, suffix: str) i32 {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if nm.ends_with(suffix) {
             names.push(String::from_str(nm));
         }

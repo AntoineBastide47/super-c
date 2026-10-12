@@ -74,7 +74,7 @@ extend Reader {
             }
             e = self.pos + d;
         }
-        let l = str::from_raw(unsafe (self.buf.as_ptr() + self.pos), e - self.pos);
+        let l = unsafe str::from_raw(self.buf.as_ptr() + self.pos, e - self.pos);
         self.pos = e + 1;
         return Option::<str>::Some(l);
     }
@@ -87,7 +87,7 @@ extend Reader {
         if have > n {
             have = n;
         }
-        body.push_bytes(unsafe (self.buf.as_ptr() + self.pos), have);
+        body.push_bytes(self.buf[self.pos..self.pos + have]);
         self.pos += have;
         // Each read adds at least one byte, so the loop runs at most n - have times.
         while body.len() < n {

@@ -53,7 +53,8 @@ across generations and worker counts at once. `check.sh` (the commit hook) ends 
 `sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the input lists, the
 fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
 a warm object cache). The targets, profiles and benchmark steps (about 130 s) run in the
-release workflow (`sh ci/gate.sh --no-check`, macOS and Linux).
+release workflow (`sh ci/gate.sh --no-check`, macOS, Linux and Windows; on Windows the strict
+warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX prototypes under `-std=c11`).
 
 The wasm leg of the release workflow checks the fixpoint for the wasm compiler with
 the CLI only: in one project copy, the native engine builds gen2 with gen1 (the `super-c.wasm`

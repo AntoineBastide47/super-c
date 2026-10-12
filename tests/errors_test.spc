@@ -98,7 +98,7 @@ fn long_line_windowing() {
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
     e.emit(180, 3, format("{}", "m"));
-    e.finalize(str::from_raw((&buf.b[0]) as *const u8, 201), "");
+    e.finalize(unsafe str::from_raw((&buf.b[0]) as *const u8, 201), "");
     let b = e.rendered_errors.at(0).clone();
     assert(contains(&b, "--> 1:181"), "column past the window");
     assert(contains(&b, "^"), "a caret");
@@ -107,7 +107,7 @@ fn long_line_windowing() {
     for k in 0..150 {
         unsafe needle.b[k] = 'x' as char;
     }
-    assert(!contains(&b, str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
+    assert(!contains(&b, unsafe str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
 }
 
 @test

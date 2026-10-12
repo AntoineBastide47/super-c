@@ -798,6 +798,14 @@ stamp and object cache making an unchanged suite a link check; `super-c bench` u
 (the `out-dir` key or `--out-dir`, default `build`) and never spells `build/`. The bare
 `super-c <root.spc>` tree under `<root dir>/build/<profile>/raw` is the one exception.
 
+One process builds a profile directory at a time: a build holds the lock file `.lock` in it
+(`bsys::tree_lock`: a POSIX record lock, `LockFileEx` on Windows, none under WASI) from the emit to
+the link, and the bare `super-c <root.spc>` holds its `build/<profile>` the same way. A second build of
+the directory prints "build: waiting for another build of '<dir>'" and waits at most 30 minutes. Without
+the lock it would rewrite the units the first one compiles: a torn unit compiles, and its object enters
+the object cache under the key of the text the first build hashed. The OS releases the lock when the
+process ends, also by a crash; a transpiler child (`--emit-sub`) runs under its engine's lock.
+
 Parallel analysis (the resolve frontier, the type check, borrow check and always-panics
 item jobs, the emission frontier) is used only when the package holds at least 256 KiB of
 non-prelude source (`Package::analysis_jobs`,

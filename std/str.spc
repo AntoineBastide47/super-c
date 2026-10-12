@@ -23,18 +23,30 @@ pub struct str<'a> {
 extend str {
     /// Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
     /// bridging from a raw C buffer: the fields are private, so this is the only way to make a `str`.
-    pub const fn from_raw<'a>(ptr: *const u8, len: usize) str<'a> {
+    /// Unsafe: the caller promises `len` readable bytes at `ptr` for `'a`, which nothing writes meanwhile.
+    pub unsafe const fn from_raw<'a>(ptr: *const u8, len: usize) str<'a> {
         return str { ptr: ptr, len: len };
     }
 
     /// View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
-    /// the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
-    pub const fn from_cstr<'a>(s: *const char) str<'a> {
+    /// the returned view borrows `s`. The bridge for callers holding a raw `*const char`. Unsafe: the
+    /// caller promises a NUL-terminated string at `s` for `'a`, which nothing writes meanwhile.
+    pub unsafe const fn from_cstr<'a>(s: *const char) str<'a> {
         let mut n: usize = 0;
-        while unsafe s[n] != 0 as char {
+        while s[n] != 0 as char {
             n += 1;
         }
         return str::from_raw(s as *const u8, n);
+    }
+
+    /// View the text of a C string buffer: the bytes of `buf` up to its first NUL, or all of them when
+    /// it holds none. The safe form of `from_cstr` for a buffer the program owns.
+    pub const fn from_cbuf<'a>(buf: Slice<'a, char>) str<'a> {
+        let mut n: usize = 0;
+        while n < buf.len && unsafe buf.ptr[n] != 0 as char {
+            n += 1;
+        }
+        return unsafe str::from_raw(buf.ptr as *const u8, n);
     }
 
     // --- length & raw access -------------------------------------------------------------------.
@@ -211,7 +223,7 @@ extend str {
     /// Allocate an owning String holding a copy of this view's bytes.
     pub fn to_string(self: &str) String {
         let mut out = String::with_capacity(self.len);
-        out.push_bytes(self.ptr, self.len);
+        out.push_str(*self);
         return out;
     }
 }

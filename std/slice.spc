@@ -1,8 +1,9 @@
 // Slice<T> / SliceMut<T>: borrowed (ptr, len) views over a contiguous run of `T`. Non-owning; they
 // never allocate or resize; the backing storage outlives them. `Slice<T>` is read-only; `SliceMut<T>`
-// permits in-place writes. These are the prelude types `[]T` and `[]mut T` lower to (the `[]` sugar and
-// array->slice coercion are wired separately); the two public fields make them plain fat pointers, so
-// `s.ptr` / `s.len` are usable directly, with the methods mirroring the `str` / `Vector` surface.
+// permits in-place writes and is exclusive like Rust's `&mut [T]` (not `Copy`). These are the prelude
+// types `[]T` and `[]mut T` lower to (the `[]` sugar and array->slice coercion are wired separately);
+// the two public fields make them plain fat pointers, so `s.ptr` / `s.len` read directly, with the
+// methods mirroring the `str` / `Vector` surface. Building a view or writing a field needs `unsafe`.
 
 /// A borrowed, read-only view over `len` consecutive `T` at `ptr`.
 pub struct Slice<'a, T> {
@@ -186,7 +187,7 @@ extend<T> Slice<T> as Index<T, []T> {
         if r.start > hi || hi > self.len {
             panic("Slice[a..b]: range out of bounds");
         }
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
+        return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
 }
 
@@ -209,7 +210,7 @@ extend<T> SliceMut<T> as Index<T, []T> {
         if r.start > hi || hi > self.len {
             panic("Slice[a..b]: range out of bounds");
         }
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
+        return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
 }
 
@@ -232,6 +233,6 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
         if r.start > hi || hi > self.len {
             panic("SliceMut[a..b]: range out of bounds");
         }
-        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
+        return unsafe SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
 }

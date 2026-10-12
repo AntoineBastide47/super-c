@@ -335,7 +335,7 @@ fn align_constant_expression_matches_literal() {
     );
     assert(lit.ok() && ex.ok(), "both forms compile");
     assert(lit.code_has("__attribute__((aligned(64)))"), "the literal form aligns");
-    assert(str::from_cstr(lit.code) == str::from_cstr(ex.code), "the expression form emits the same C");
+    assert(unsafe str::from_cstr(lit.code) == unsafe str::from_cstr(ex.code), "the expression form emits the same C");
 }
 
 @test

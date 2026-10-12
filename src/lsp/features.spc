@@ -679,7 +679,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             tc::render_type_into(p, a, src, t, &mut buf[0], 512);
         }
         out.push_str("```super-c\n");
-        out.push_str(str::from_cstr(&buf[0]));
+        out.push_str(str::from_cbuf(buf.as_slice()));
         out.push_str("\n```");
     }
     if d.node == NODE_NONE {
@@ -2260,7 +2260,7 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         }
         let mut buf = HovBuf {};
         tc::render_type_into(p, a, p.modules.at(mi).source.as_str(), t, &mut buf[0], 512);
-        let rendered = str::from_cstr(&buf[0]);
+        let rendered = str::from_cbuf(buf.as_slice());
         if rendered.len() == 0 || rendered.len() > 60 {
             continue;
         }

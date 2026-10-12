@@ -92,7 +92,7 @@ fn write_message_emits_the_frame() {
     // The exact wire bytes: the header, its CRLF CRLF terminator, then the body.
     let mut raw = Array::<char, 64> {};
     let n = unsafe stdio::fread(&mut raw[0], 1, 63, f);
-    let wire = str::from_raw((&raw[0]) as *const u8, n);
+    let wire = unsafe str::from_raw((&raw[0]) as *const u8, n);
     assert(wire == "Content-Length: 7\r\n\r\n{\"k\":1}", "the frame's bytes");
     unsafe stdio::rewind(f);
     let mut rd = transport::Reader::new(f);

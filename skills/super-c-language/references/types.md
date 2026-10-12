@@ -118,8 +118,13 @@ Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` and
 lower to `const T*` in C; `&mut T` and `*mut T` lower to `T*`, and a `&mut T` parameter to `T *restrict`: the
 C compiler assumes nothing else reaches the referent during the call. Unsafe code that
 reaches a live `&mut` referent through another path (a raw pointer, a second reference)
-while the call runs is undefined behavior. `&T` parameters stay plain `const T*`, because
-writing through a const-cast `&Self` is allowed. `&&T` and `&&x` are two references (`& &T`,
+while the call runs is undefined behavior. A by-value `[]mut T` parameter is exclusive the same
+way: function `f` is defined as `f__r`, which takes it as `T *restrict` and a `size_t` length,
+and every direct call passes `s.ptr, s.len`. `f` itself keeps the struct ABI (`SliceMut__T`) and
+calls `f__r`: function values, vtables, `@c.export` and a call whose view argument is a call
+result reach `f`. `&T` and `[]T` parameters take no `restrict`: unsafe code may write their
+referent through a const-cast `&Self` or another raw pointer (the compiler writes `Ast` through
+`module_ast_const(m) as *mut Ast`), and a measured `restrict` on them gained nothing. `&&T` and `&&x` are two references (`& &T`,
 `&(&x)`). Indexing a reference to an array (`r[i]` for `r: &[T; N]`) indexes the array, with
 the array's rules; it assigns only through `&mut`.
 

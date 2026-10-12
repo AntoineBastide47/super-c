@@ -1198,7 +1198,11 @@ extend InstGraph {
         let src = unsafe (&*self.pkg).modules.at(a.module as usize).source.as_str();
         tc::render_type_into(self.pkg, a, src, s, &mut sb[0], 128);
         tc::render_type_into(self.pkg, a, src, d, &mut db[0], 128);
-        self.fault_msg = format("invalid cast from '{}' to '{}'", str::from_cstr(&sb[0]), str::from_cstr(&db[0]));
+        self.fault_msg = format(
+            "invalid cast from '{}' to '{}'",
+            str::from_cbuf(sb.as_slice()),
+            str::from_cbuf(db.as_slice()),
+        );
         self.take_fault(a.module, st.span);
     }
 

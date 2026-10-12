@@ -237,13 +237,24 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
   ("slicing an array of unknown length"). A field of a concrete instance has the instance's
   length (`Buf<i32, 4>.d` is `[i32; 4]`)
 - Every call to an `extern "C"` function
+- A `Slice`/`SliceMut` literal (`unsafe SliceMut::<T> { ptr: p, len: n }`, Rust's
+  `from_raw_parts`), and a write or `&mut` of a view's `ptr` or `len` field ("writing a field of a
+  slice view")
 - Naming an `unsafe fn`, or an `extern "C"` function without `@unsafe(safe)`, as a value
   outside a call: a `fn` pointer is called without `unsafe`
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
 A `&mut` reference is exclusive also for unsafe code: reaching its referent through any
 other path while it is live is undefined behavior (its C parameter is `restrict`, see
-`types.md`).
+`types.md`). A `[]mut T` view is exclusive the same way (Rust's `&mut [T]`). A `&mut` or a
+`[]mut T` copied into a local of its own kind moves (`let t = s;`); passed to a call it is
+reborrowed for the call; stored into a field, a struct, tuple or variant literal, or a closure, it
+is reborrowed for as long as that holder lives, so the source is unusable until then
+(`let w = S { a: r }; h(r, w.a)` is "cannot use this value while it is mutably borrowed"). Two
+arguments of one call cannot reach the same storage when one of them hands it over mutably (a `&mut`, a `[]mut T`, or a `&mut` autoref): `h(r, r)`, `h2(r, r)` with
+`h2(a: &mut i32, b: &i32)`, `f(s, s)` for one `[]mut` view and `(*r).m(r)` are "cannot borrow this
+value as mutable while it is already borrowed as ..." errors. A reference erased to a raw pointer
+in the same call (`h4(r, r as *mut i32)`) is not checked.
 
 There is no auto-dereference through a raw pointer (the Rust rule): for `p: *mut T`,
 `p.f` and `p.m()` are errors; write `unsafe (*p).f` and `unsafe (*p).m()`. A method whose
@@ -299,7 +310,8 @@ fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out throu
 ## Closures
 
 Capture flavors:
-- **Read**: copy at creation (default)
+- **Read**: copy at creation (default). A copied `&mut` or `[]mut T` is a unique reborrow the
+  closure holds while it lives: the outer binding is unusable until the closure's last use
 - **Mutated** (`FnMut`): a non-owning capture the body assigns, borrows `&mut` or calls a
   `&mut self` method on: implicit `&mut` capture, writes land on the outer variable. The
   capture is an exclusive borrow: until the closure's last use, the outer binding cannot be
@@ -389,7 +401,10 @@ let a: [i32; 4] = [10, 20, 30, 40];
 
 `[]T` / `[]mut T` lower to prelude `Slice<T>` / `SliceMut<T>`; `[]'a T` / `[]'a mut T` name
 the lifetime (`Slice<'a, T>` / `SliceMut<'a, T>`), which binds right after `[]` and before
-`mut`, as after `&`. The compiler's own sources (`src/`, `std/`, `ffi/`) spell the named form
+`mut`, as after `&`. `[]mut T` follows Rust's `&mut [T]`: it is not `Copy`, it moves, reborrows
+and conflicts as a `&mut` does (see Unsafe), and building a view from raw parts or writing its
+`ptr` or `len` needs `unsafe`. A by-value `[]mut T` parameter reaches C as a `restrict` element
+pointer and a length (`types.md`). The compiler's own sources (`src/`, `std/`, `ffi/`) spell the named form
 `Slice<'a, T>` until a release parses the sugar. Arrays coerce to slices; the view borrows the
 array like `&a` (`&mut a` for `[]mut`) and never moves it: the array must outlive the view and
 cannot be written, moved or viewed mutably while the view is live. A `[]mut T` coerces to `[]T` (a

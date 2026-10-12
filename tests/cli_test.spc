@@ -23,7 +23,7 @@ struct Cmd {
 @test
 fn duplicate_items_across_modules() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     p.mkfile(
         "lib.spc",
         "pub struct P {\n    pub a: i32,\n}\n\nextend P {\n    pub fn get(self: &P) i32 {\n        return self.a;\n    }\n}\n",
@@ -355,6 +355,81 @@ fn mut_refs_restrict_and_question_success_is_likely() {
     assert(p.compile("main.spc").ok());
     assert(p.gen_has("main.c", "int32_t *restrict n, const int32_t *by"), "only the &mut parameter is restrict");
     assert(p.gen_has("main.c", "__builtin_expect("), "the success test of `?` is likely");
+    assert(p.cc_build("-pedantic-errors ").ok());
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
+// A `[]mut T` parameter is exclusive for the call like a `&mut`: `f__r` receives it as a `restrict`
+// element pointer and a length, every direct call splits the view, and `f` keeps the struct ABI for
+// function values and `@c.export`. Recursion, methods, generics and a call result argument agree.
+const SPLIT_VIEWS: str = M"(fn axpy(y: []mut f64, x: []f64, a: f64) {
+    for i in 0..y.len() {
+        y.set(i, *y.at(i) + a * *x.at(i));
+    }
+}
+fn fill<T: Copy>(d: []mut T, v: T) {
+    for i in 0..d.len() {
+        d.set(i, v);
+    }
+}
+struct Acc { pub n: i64 }
+extend Acc {
+    fn take(self: &mut Acc, d: []mut i64) {
+        for i in 0..d.len() {
+            self.n += *d.at(i);
+            d.set(i, 0);
+        }
+    }
+}
+fn rec(d: []mut i32, k: usize) i32 {
+    if k == 0 {
+        return *d.at(0);
+    }
+    d.set(0, *d.at(0) + 1);
+    return rec(d, k - 1);
+}
+fn pick(x: []mut i32) []mut i32 {
+    return x;
+}
+@c.export("sc_scale")
+fn scale(d: []mut f32, s: f32) {
+    for i in 0..d.len() {
+        d.set(i, *d.at(i) * s);
+    }
+}
+fn main(args: Vector<str>) i32 {
+    let mut y: [f64; 8] = [1.0; 8];
+    let x: [f64; 8] = [2.0; 8];
+    axpy(y, x, args.len() as f64);
+    let mut a: [i64; 4] = [0; 4];
+    fill(a, 3i64);
+    let mut acc = Acc { n: 0 };
+    acc.take(a);
+    let mut r: [i32; 2] = [0; 2];
+    let v = rec(pick(r), 5);
+    let fp = rec;
+    let w = fp(r, 2);
+    let mut f: [f32; 3] = [1.0; 3];
+    scale(f, 2.0);
+    return (y[7] as i64 + acc.n + v as i64 + w as i64 + f[0] as i64 + a[0]) as i32 - 29;
+}
+)";
+
+@test
+fn mut_views_split_into_restrict_pointers() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", SPLIT_VIEWS);
+    assert(p.compile("main.spc").ok());
+    assert(p.gen_has("main.c", "void axpy__r(double *restrict __sc_sp"), "the definition splits the view");
+    assert(
+        p.gen_has("main.c", "void axpy(SliceMut__f64 __sc_a0, Slice__f64 __sc_a1, double __sc_a2) {"),
+        "the entry keeps the struct ABI",
+    );
+    assert(
+        p.gen_has("main.c", "void sc_scale(SliceMut__f32 __sc_a0, float __sc_a1) {"),
+        "an export keeps the struct ABI",
+    );
+    assert(p.gen_has("main.c", "return rec__r(d.ptr, d.len, "), "a direct call passes the pointer and the length");
     assert(p.cc_build("-pedantic-errors ").ok());
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
@@ -2135,7 +2210,7 @@ fn test_timeout_dumps_child_processes() {
         return;
     }
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     p.mkfile(
         "sleeper.spc",
         "import std::parallel::time as time;\nfn main() i32 {\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
@@ -2264,8 +2339,8 @@ fn main() i32 { return 0; }
     // The runner rejects an argument it does not know (a driver flag given to it directly) instead of
     // running the whole suite.
     let mut runner = String::new();
-    runner.format_into("{}/build/dev/raw/__tests{}", str::from_cstr(p.rootp()), str::from_cstr(cli::binext()));
-    let ua = cli::exe_env_in(runner.as_str(), str::from_cstr(p.rootp()), "SC_UNUSED", "1", "--test-jobs=2");
+    runner.format_into("{}/build/dev/raw/__tests{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let ua = cli::exe_env_in(runner.as_str(), p.dir(), "SC_UNUSED", "1", "--test-jobs=2");
     assert_eq(ua.exit, 2);
     assert(ua.out_has("unknown test runner argument '--test-jobs=2'"), "the runner names the argument");
     assert(!ua.out_has("running"), "the runner runs nothing");
@@ -2311,12 +2386,12 @@ fn main() i32 { return 0; }
 fn env_guards_restore_the_environment() {
     {
         let _a = cli::set_env("SC_GUARD_PROBE", "1");
-        assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "1", "set");
+        assert(stdlib::env_is("SC_GUARD_PROBE", "1"), "set");
         {
             let _b = cli::set_env("SC_GUARD_PROBE", "2");
-            assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "2", "set over");
+            assert(stdlib::env_is("SC_GUARD_PROBE", "2"), "set over");
         }
-        assert(str::from_cstr(stdlib::getenv("SC_GUARD_PROBE")) == "1", "the previous value is back");
+        assert(stdlib::env_is("SC_GUARD_PROBE", "1"), "the previous value is back");
     }
     assert(stdlib::getenv("SC_GUARD_PROBE") == null, "a variable that had no value goes");
 }
@@ -2326,7 +2401,7 @@ fn env_guards_restore_the_environment() {
 // nothing. A value in double quotes holds spaces.
 @test
 fn an_env_that_does_not_apply_whole_starts_nothing() {
-    let mut cmd = format("{} --version", str::from_cstr(cli::cc_name()));
+    let mut cmd = format("{} --version", unsafe str::from_cstr(cli::cc_name()));
     assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1=1 SC_P2=2 SC_P3=3 SC_P4=4 SC_P5=5 SC_P6=6 SC_P7=7"), 0);
     assert_eq(
         cli::run_with(cmd.cstr(), null, null, null, "SC_P1=1 SC_P2=2 SC_P3=3 SC_P4=4 SC_P5=5 SC_P6=6 SC_P7=7 SC_P8=8"),
@@ -3631,7 +3706,7 @@ fn main() i32 {
 }
 // Whether generated file `rel` of `p` holds `a` with `b` next after it, whitespace aside.
 fn gen_followed_by(p: &cli::Proj, rel: str, a: str, b: str) bool {
-    let text = cli::read_text(format("{}/build/dev/raw/{}", str::from_cstr(p.rootp()), rel).as_str());
+    let text = cli::read_text(format("{}/build/dev/raw/{}", p.dir(), rel).as_str());
     let t = text.as_str();
     let k = t.find(a);
     if k < 0 {
@@ -4706,8 +4781,8 @@ fn main() i32 {
         assert(a.ok());
         let b = p.run_bin_env(env);
         assert(b.ok());
-        let sa = str::from_cstr(a.out);
-        let sb = str::from_cstr(b.out);
+        let sa = unsafe str::from_cstr(a.out);
+        let sb = unsafe str::from_cstr(b.out);
         assert(sa.len() > 60, "the fixture logged an order");
         assert(sa == sb, "the same seed replays the same interleaving");
     }
@@ -6088,7 +6163,7 @@ fn main() i32 {
 }
 )",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "run");
     assert(r.ok(), "the -Werror build runs");
     assert(r.out_shows("2 7 4000000000 5 6 1"), "every constant reads back as its value");
@@ -6559,7 +6634,7 @@ fn qual_fails(body: str, want: str, at: str) {
     let r = p.compile("main.spc");
     assert(r.exit != 0 && r.out_shows(format("error: {}\n--> ", want).as_str()), body);
     assert(r.out_shows(format("main.spc:{}\n", at).as_str()), body);
-    let out = str::from_cstr(r.out);
+    let out = unsafe str::from_cstr(r.out);
     let first = out.find("error: ");
     assert(first >= 0 && out.slice(first as usize + 1, out.len()).find("error: ") < 0, body);
 }
@@ -7397,7 +7472,7 @@ fn bindgen_generates_callable_bindings() {
         "lib.c",
         "#include \"lib.h\"\n#include <stdlib.h>\n#include <string.h>\nstruct lib_ctx { int seed; };\nlib_ctx *lib_open(int seed) { lib_ctx *c = malloc(sizeof *c); if (c) c->seed = seed; return c; }\nsize_t lib_len(const lib_ctx *c, const char *s, unsigned long bump) { return strlen(s) + (size_t)c->seed + bump; }\nvoid lib_each(lib_ctx *c, lib_cb cb, void *user) { (void)c; cb(\"x\", user); }\nvoid lib_close(lib_ctx *c) { free(c); }\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     let gen = p.run_raw(args.as_str());
@@ -7449,7 +7524,7 @@ fn bindgen_generates_records_enums_and_consts() {
         "lib.c",
         "#include \"lib.h\"\n#include <string.h>\nint lib_sum(const struct lib_cfg *c) { return (int)c->len + c->origin.x + c->origin.y + (int)c->mode + c->tag[0]; }\nlib_pt lib_origin(const struct lib_cfg *c) { return c->origin; }\nint lib_mode_of(enum lib_mode m) { return (int)m; }\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args.as_str()).exit, 0);
@@ -7501,7 +7576,7 @@ fn bindgen_walks_paths_recursively() {
     p.mkfile("inc/net/http/http.h", "#ifndef H_H\n#define H_H\nint http_get(const char *url);\n#endif\n");
     p.mkfile("inc/README.md", "not a header\n");
     p.mkfile("other/z-lib.h", "#ifndef Z_H\n#define Z_H\nint z_run(void);\n#endif\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut args = String::new();
     args.format_into("bindgen \"{}/inc\" \"{}/other/z-lib.h\" -o \"{}/gen\"", root, root, root);
@@ -7561,7 +7636,7 @@ fn bindgen_overflow_fnptr_params_and_field_opaques() {
         "lib.h",
         "#ifndef LIB_H\n#define LIB_H\n#define LIB_ALL 0xFFFFFFFFFFFFFFFF\n#define LIB_TOP 0x8000000000000000\n#define LIB_WIDE 99999999999999999999\n#define LIB_MUL (4611686018427387904 * 4)\n#define LIB_SUB (-9223372036854775807 - 2)\n#define LIB_SHL (3 << 62)\n#define LIB_HALF 0x4000000000000000\nenum lib_e { LIB_E_MAX = 0x7FFFFFFFFFFFFFFF, LIB_E_NEXT };\ntypedef int (*lib_cb)(struct { int x; } s);\nint lib_use_cb(lib_cb cb);\nstruct lib_holder { struct lib_hidden *h; int n; };\nextern struct lib_other *lib_global;\nint lib_get(struct lib_holder *h);\n#endif\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args.as_str()).exit, 0);
@@ -7607,7 +7682,7 @@ fn bindgen_expressions_anonymous_types_and_globals() {
         "lib.c",
         "#include \"lib.h\"\nint lib_counter = 41;\nint lib_use(const lib_pt *p, lib_mode m) { return p->x + p->y + (int)m; }\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args.as_str()).exit, 0);
@@ -7658,7 +7733,7 @@ fn vendor_copies_and_imports_resolve() {
     let p = cli::proj_new();
     p.mkfile("dep/geo.spc", "pub fn area(w: i32, h: i32) i32 { return w * h; }\n");
     p.mkfile("dep/util/more.spc", "pub fn twice(x: i32) i32 { return x * 2; }\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("vendor \"{}/dep\" --dir=\"{}\"", root, root);
     let r = p.run_raw(args.as_str());
@@ -7699,7 +7774,7 @@ fn vendor_copies_and_imports_resolve() {
 fn vendor_clones_git_and_strips_the_repository() {
     let p = cli::proj_new();
     p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut g = String::new();
     g.format_into("git -C \"{}/srcrepo\" init -q", root);
     if cli::run_quiet(g.cstr()) != 0 {
@@ -7811,7 +7886,7 @@ fn vendor_strips_submodule_git_and_follows_the_ref() {
     let p = cli::proj_new();
     p.mkfile("subrepo/s.spc", "pub fn s() i32 { return 1; }\n");
     p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let gc = "-c user.email=v@e -c user.name=v -c commit.gpgsign=false -c protocol.file.allow=always";
     if git_ok(root, "subrepo", "init -q") != 0 {
         // No git on this machine: the clone path cannot be exercised.
@@ -7919,7 +7994,7 @@ fn bindgen_globals_and_cflag() {
         "lib.c",
         "#include \"lib.h\"\nint counter = 2;\nconst int limit = 40;\nint bump(int by) { counter += by; return counter; }\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args.as_str()).exit, 0);
@@ -7978,7 +8053,7 @@ fn bindgen_escapes_keyword_names() {
         "lib.c",
         "#include \"lib.h\"\nint select(int a, int b) { return a + b; }\nint pair_n(struct pair *p) { return p->n; }\nint launch = 5;\nconst int move = 6;\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args.as_str()).exit, 0);
@@ -8007,7 +8082,7 @@ fn global_object_cache_round_trip() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"cache\");\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut cache = String::new();
     cache.format_into("{}/ocache", root);
     let mut bdir = String::new();
@@ -8045,7 +8120,7 @@ fn dir_names(dir: str) Vector<String> {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if !nm.starts_with(".") {
             out.push(String::from_str(nm));
         }
@@ -8131,7 +8206,7 @@ fn cache_version(p: &cli::Proj, v: i32) {
 fn object_cache_keeps_four_generations() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut cache = String::new();
     cache.format_into("{}/ocache", root);
     let mut env = String::new();
@@ -8179,7 +8254,7 @@ fn rewritten_header_restales_units() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     cache_version(&p, 0);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the first version builds");
     let mut objd = String::new();
     objd.format_into("{}/build/dev/obj", root);
@@ -8215,7 +8290,7 @@ fn object_cache_sweep() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     cache_version(&p, 0);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut cache = String::new();
     cache.format_into("{}/ocache", root);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first build");
@@ -8285,7 +8360,7 @@ fn object_cache_sweep() {
 @test
 fn object_cache_keeps_trees_apart() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     for t in 0..2 {
         let d = if t == 0 {
             "a";
@@ -8335,7 +8410,7 @@ fn object_cache_keeps_trees_apart() {
 @test
 fn object_cache_shares_identical_units_across_trees() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     for d in ["a", "b"] {
         let mut f = String::new();
         f.format_into("{}/build.toml", d);
@@ -8390,7 +8465,7 @@ fn cache_restored_object_relinks() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut cache = String::new();
     cache.format_into("{}/ocache", root);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first version builds");
@@ -8431,7 +8506,7 @@ pub fn wasm_loop(b: &mut bench::Bencher) {
 }
 )",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev");
     assert(all.ok());
     assert(all.out_shows("micro::add_loop"), "unfiltered run reports the first benchmark");
@@ -8461,7 +8536,7 @@ fn test_filter_builds_only_matching_files() {
         "struct S {}\nextend S {\n    @test_init\n    fn init() S {\n        return S {};\n    }\n    @test\n    fn beta(self: &mut S) {}\n    @test\n    fn delta() {}\n}\n",
     );
     p.mkfile("tests/c.spc", "@test\nfn gamma() { let x: i32 = \"no\"; }\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet");
     assert(!all.ok(), "the unfiltered suite builds the file that does not compile");
     let a = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=a::alpha_");
@@ -8734,13 +8809,13 @@ fn build_paths_with_spaces() {
     mainf.format_into("{}/src/main.spc", sub);
     p.mkfile(toml.as_str(), "bin = \"my app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(mainf.as_str(), "fn main() i32 {\n    println(\"weird ok\");\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut dir = String::new();
     dir.format_into("{}/{}", root, sub);
     let r = cli::superc_env_in(dir.as_str(), "SC_NO_CACHE", "1", "build");
     assert(r.ok(), "a project under a directory with spaces builds without shell escaping errors");
     let mut bin = String::new();
-    bin.format_into("{}/my app{}", dir.as_str(), str::from_cstr(cli::binext()));
+    bin.format_into("{}/my app{}", dir.as_str(), unsafe str::from_cstr(cli::binext()));
     assert(p13_mtime(bin.as_str()) != 0, "the space-named binary linked");
     let mut run = String::new();
     run.format_into("\"{}\"", bin.as_str());
@@ -8766,14 +8841,14 @@ fn build_staleness_gates() {
         "src/util.spc",
         "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut genc = String::new();
     genc.format_into("{}/build/dev/gen/main.c", root);
     let mut objo = String::new();
     objo.format_into("{}/build/dev/obj/main.o", root);
     let mut bin = String::new();
-    bin.format_into("{}/app{}", root, str::from_cstr(cli::binext()));
+    bin.format_into("{}/app{}", root, unsafe str::from_cstr(cli::binext()));
     let g1 = p13_mtime(genc.as_str());
     let o1 = p13_mtime(objo.as_str());
     let b1 = p13_mtime(bin.as_str());
@@ -8824,7 +8899,7 @@ fn build_type_edit_stays_local() {
         "src/other.spc",
         "pub struct T {\n    pub b: i64,\n}\n\n@c.noinline\npub fn f(x: i32) i32 {\n    let t = T { b: x as i64 };\n    return t.b as i32;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut fwd = String::new();
     fwd.format_into("{}/build/dev/gen/__sc_fwd.h", root);
@@ -8874,7 +8949,7 @@ fn build_new_type_recompiles_no_user() {
     let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
     p.mkfile("src/util.spc", util0);
     p.mkfile("src/other.spc", "import util;\n\n@c.noinline\npub fn f(s: util::S) i32 {\n    return s.a * 2;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut paths = Vector::<String>::new();
     for rel in "gen/main.c obj/main.o gen/other.c obj/other.o gen/util.c obj/util.o gen/util.h".split(" ") {
@@ -8927,7 +9002,7 @@ fn build_field_edit_recompiles_users() {
         "src/third.spc",
         "import util;\n\n@c.noinline\npub fn g(s: &util::S) i32 {\n    let q = s as *const util::S;\n    return (q == null) as i32;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut same = Vector::<String>::new();
     for rel in "obj/other.o obj/third.o".split(" ") {
@@ -8991,7 +9066,7 @@ fn build_array_elements_include_definitions() {
         "src/main.spc",
         "import tk;\nimport tk as *;\nimport user;\nimport get;\nfn one(p: &[tk::Tk; 2]) i32 { return p[1].y; }\nfn main() i32 {\n    let a = [Tk { x: 1, y: 2 }, Tk { x: 3, y: 4 }];\n    let h = user::Holder { p: &a, n: 6 };\n    let c = user::Cb { f: one, n: 1 };\n    let s = Sh::Pt { x: 1, y: 2 };\n    let g = tk::G::<u8>::Pt { x: 3, y: 4 };\n    let q: G<u16> = tk::G::Pt { x: 5, y: 6 };\n    let mut t = get::get(&h) + get::cbn(&c) + user::by_val([a]) + user::by_ref(&&a);\n    t += switch s { Pt { x, y } => x + y, No => 0 };\n    t += switch g { Pt { x, y } => x + y, No => 0 };\n    t += switch q { Pt { x, y } => x + y, No => 0 };\n    return t - 32;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").ok(), "every header compiles and the program runs");
 }
 
@@ -9009,7 +9084,7 @@ fn build_symbol_segment_includes_no_type() {
     let util0 = "pub struct K {\n    pub a: i64,\n}\n";
     p.mkfile("src/util.spc", util0);
     p.mkfile("src/gen.spc", "@c.noinline\npub fn size<T>() i32 {\n    return sizeof(T) as i32;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut genc = String::new();
     genc.format_into("{}/build/dev/gen/main.c", root);
@@ -9040,7 +9115,7 @@ fn build_lto_modes() {
         "bin = \"app\"\nroot = \"src/main.spc\"\n[profile.rel]\ncflags = [\"-O1\"]\nlto = \"thin\"\n",
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut env = format("1 SC_BUILD_STATS=- SC_CACHE_DIR={}/cache", root);
     let r1 = cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel");
     assert(r1.ok(), "thin build");
@@ -9107,7 +9182,7 @@ fn build_lto_probe_fallback() {
         return; // a shebang wrapper needs a POSIX host
     }
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     p.mkfile(
         "cc.sh",
         "#!/bin/sh\nfor a in \"$@\"; do\n    [ \"$a\" = \"-flto=thin\" ] && exit 1\ndone\nexec cc \"$@\"\n",
@@ -9136,7 +9211,7 @@ fn build_lto_probe_fallback() {
         "the probe record stores the reason",
     );
     let mut cmdp = String::new();
-    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
+    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, unsafe str::from_cstr(cli::binext()));
     let l = loader::read_file(cmdp.as_str()).unwrap();
     assert(l.as_str().find("-flto=auto") >= 0, "the link keeps the automatic mode");
     let mut probe = String::new();
@@ -9153,10 +9228,10 @@ fn build_print_probes() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r1 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
     assert(r1.ok(), "print the probe table");
-    let o1 = String::from_cstr(r1.out);
+    let o1 = unsafe String::from_cstr(r1.out);
     let s = o1.as_str();
     assert(lto_line(s, 0).starts_with("compiler: "), "the table names the compiler first");
     let tl = lto_line(s, 1);
@@ -9189,10 +9264,10 @@ fn build_print_probes() {
     let mut rp = recp.clone();
     assert(unsafe shim::sc_unlink(rp.cstr()) == 0, "the run wrote the record");
     let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
-    assert(r2.ok() && str::from_cstr(r2.out) == s, "a fresh record gives the same table");
+    assert(r2.ok() && unsafe str::from_cstr(r2.out) == s, "a fresh record gives the same table");
     let m1 = p13_mtime(recp.as_str());
     let r3 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --print-probes");
-    assert(r3.ok() && str::from_cstr(r3.out) == s, "the record gives the same table");
+    assert(r3.ok() && unsafe str::from_cstr(r3.out) == s, "the record gives the same table");
     assert(p13_mtime(recp.as_str()) == m1, "a second run probes nothing");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "build after the table");
     assert(p13_mtime(recp.as_str()) == m1, "a build probes nothing either");
@@ -9249,10 +9324,10 @@ fn build_stats_report_relowering_census() {
         "src/main.spc",
         "struct Z {}\n\nfn main() i32 {\n    let mut a = Vector::<u8>::new();\n    a.push(1u8);\n    let mut b = Vector::<Z>::new();\n    b.push(Z {});\n    return a.len() as i32 + b.len() as i32 - 2;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
     assert(r.ok(), "the build succeeds");
-    let out = str::from_cstr(r.out);
+    let out = unsafe str::from_cstr(r.out);
     let head = "\"relower\":{\"reflect\":0,\"zst\":";
     let k = out.find(head);
     assert(k >= 0, "the record carries the counts and no reflection re-lowering");
@@ -9267,13 +9342,13 @@ fn build_link_failure_keeps_artifact() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r0 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
     assert(r0.ok(), "initial build");
     let mut bin = String::new();
-    bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
+    bin.format_into("{}/build/dev/app{}", root, unsafe str::from_cstr(cli::binext()));
     let mut cmdp = String::new();
-    cmdp.format_into("{}/build/__link-build_dev_app{}.cmd", root, str::from_cstr(cli::binext()));
+    cmdp.format_into("{}/build/__link-build_dev_app{}.cmd", root, unsafe str::from_cstr(cli::binext()));
     let b1 = p13_mtime(bin.as_str());
     let l1 = switch loader::read_file(cmdp.as_str()) {
         Some(v) => v,
@@ -9311,7 +9386,7 @@ fn build_relinks_after_failed_link_in_same_second() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
@@ -9336,10 +9411,10 @@ fn build_publication_failure_keeps_artifact() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 3);
     let mut bin = String::new();
-    bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
+    bin.format_into("{}/build/dev/app{}", root, unsafe str::from_cstr(cli::binext()));
     let b1 = p13_mtime(bin.as_str());
     // A directory where the generated file goes refuses the write for every user (root ignores a
     // read-only mode).
@@ -9361,7 +9436,7 @@ fn build_compile_commands_json() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "build");
     let mut dbp = String::new();
     dbp.format_into("{}/build/dev/compile_commands.json", root);
@@ -9477,7 +9552,7 @@ fn type_table_is_deterministic() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/shapes.spc", TT_SHAPES);
     p.mkfile("src/main.spc", TT_MAIN);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let t1 = tt_build(root, "1", "SC_TYPE_VALIDATE=1", "--jobs=1");
     let t3 = tt_build(root, "3", "SC_TYPE_VALIDATE=1 SC_TYPE_COLLIDE=1", "--jobs=4");
     assert(t1.equals(&t3), "a colliding hash publishes the same table");
@@ -9517,13 +9592,13 @@ fn item_jobs_publish_diagnostics_in_declaration_order() {
         "src/lib.spc",
         "pub fn one() i32 {\n    let s: str = 1;\n    return 1;\n}\n\nstatic_assert(1 + 1 == 3, \"arithmetic\");\n\npub fn two() i32 {\n    let b: bool = \"no\";\n    return 2;\n}\n\npub fn three() i32 {\n    return \"three\";\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r1 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1");
     assert(!r1.ok(), "the build fails");
-    let t1 = String::from_str(str::from_cstr(r1.out));
+    let t1 = String::from_str(unsafe str::from_cstr(r1.out));
     let r4 = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TASK_DELAY=1", "build --jobs=4");
     assert(!r4.ok(), "the build fails");
-    let t4 = String::from_str(str::from_cstr(r4.out));
+    let t4 = String::from_str(unsafe str::from_cstr(r4.out));
     assert(t1.equals(&t4), "one worker and four delayed workers print the same diagnostics");
     let a = t1.as_str().find("expected 'str', found 'i32'");
     let b = t1.as_str().find("static assertion failed");
@@ -9550,7 +9625,7 @@ fn item_jobs_fold_across_an_import_cycle() {
         "src/b.spc",
         "import a;\n\npub const fn size() usize {\n    return 8;\n}\n\npub fn back() usize {\n    return a::N;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let r4 = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TASK_DELAY=1", "build --jobs=4 --out-dir=o4 -o o4/app");
     assert(r4.ok(), "the fold across the cycle succeeds under four delayed workers");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1 -o bin");
@@ -9593,7 +9668,7 @@ fn worker_count_keeps_instance_shard_includes() {
         "src/main.spc",
         "import early;\nimport stats;\n\nfn main() i32 {\n    let s = stats::make();\n    return s.t[1] as i32 + early::sum() as i32 - 7;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     jobs_build(root, "1", "1");
     jobs_build(root, "4", "4");
     let files = ["stats__inst.c", "stats.c", "early.c", "main.c", "__sc_manifest"];
@@ -9634,7 +9709,7 @@ fn rm_rf_does_not_follow_a_directory_link() {
     let p = cli::proj_new();
     p.mkfile("target/keep.txt", "kept\n");
     p.mkfile("tree/other.txt", "gone\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut target = root.to_string();
     target.push_str("/target");
     let mut link = root.to_string();
@@ -9673,7 +9748,7 @@ fn operator_chain_at_the_parser_limit_compiles() {
     assert(cc.ok());
     assert_eq(p.run_bin(), 6);
     let mut args = String::from_str("fmt --check \"");
-    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str(p.dir());
     args.push_str("/main.spc\"");
     let fr = p.run_raw(args.as_str());
     assert(fr.ok());
@@ -9851,7 +9926,7 @@ fn build_constant_profile_selects_the_branch() {
     }
     assert(p.cc_build("").ok());
     assert_eq(p.run_bin(), 11);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
     assert(p.run_raw(args.as_str()).ok());
@@ -10016,7 +10091,7 @@ fn runtime_arithmetic_follows_the_profile() {
     if cli::on_wasm() {
         return;
     }
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let checked: []str = [
         "",
         "add",
@@ -10118,7 +10193,7 @@ fn release_float_has_no_contraction() {
         "main.spc",
         "fn main(argv: Vector<str>) i32 {\n    let one = argv.len() as f64;\n    let a = 1.0 + one / 1073741824.0;\n    let c = 1.0 + one / 536870912.0;\n    if a * a - c == 0.0 {\n        return 0;\n    }\n    return 1;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
     assert(p.run_raw(args.as_str()).ok());
@@ -10238,7 +10313,7 @@ fn library_int_overflow_follows_the_profile() {
     if cli::on_wasm() {
         return;
     }
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // Cases 11 to 16 follow 1 to 6 in the tables.
     let checked: []str = [
         "",
@@ -10361,7 +10436,7 @@ fn literal_arithmetic_is_computed_in_its_type() {
     p.mkfile("main.spc", LIT_RULES);
     assert(p.compile("main.spc").ok());
     if !cli::on_wasm() {
-        let root = str::from_cstr(p.rootp());
+        let root = p.dir();
         let mut args = String::new();
         args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
         assert(p.run_raw(args.as_str()).ok());
@@ -10437,7 +10512,7 @@ fn main() i32 {
         "wasm.spc",
         "static_assert(usize::MAX == 4294967295 && isize::MIN == -2147483648 && isize::MAX == 2147483647);\n\nfn main() i32 {\n    return 0;\n}\n",
     );
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut wargs = String::new();
     wargs.format_into("\"{}/wasm.spc\" --target=wasm", root);
     assert(p.run_raw(wargs.as_str()).ok());
@@ -10752,16 +10827,16 @@ fn build_constant_mistakes_are_errors() {
 fn script_build(dir: str, cache: str, jobs: i32) bool {
     let args = format(
         "build {} --jobs={} main.spc -o prog{}",
-        str::from_cstr(cli::cstd_flag()),
+        unsafe str::from_cstr(cli::cstd_flag()),
         jobs,
-        str::from_cstr(cli::binext()),
+        unsafe str::from_cstr(cli::binext()),
     );
     return cli::superc_env_in(dir, "SC_CACHE_DIR", cache, args.as_str()).ok();
 }
 
 // Run `<dir>/prog`; its exit code.
 fn script_run(dir: str) i32 {
-    let mut cmd = format("\"{}/prog{}\"", dir, str::from_cstr(cli::binext()));
+    let mut cmd = format("\"{}/prog{}\"", dir, unsafe str::from_cstr(cli::binext()));
     return cli::run_quiet(cmd.cstr());
 }
 
@@ -10775,7 +10850,7 @@ fn script_builds_share_cached_objects() {
     let p = cli::proj_new();
     p.mkfile("a/main.spc", "fn main() i32 {\n    println(\"{}\", 3);\n    return 3;\n}\n");
     p.mkfile("b/main.spc", "fn main() i32 {\n    println(\"{}\", 4);\n    return 4;\n}\n");
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let cache = format("{}/ocache", root);
     let ns = format("{}/o/script", cache.as_str());
     let ta = format("{}/a", root);
@@ -10805,7 +10880,7 @@ fn script_build_same_file_names() {
     p.mkfile("a/main.spc", main);
     p.mkfile("b/lib/string.spc", lib);
     p.mkfile("b/main.spc", main);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let cache = format("{}/ocache", root);
     let ns = format("{}/o/script", cache.as_str());
     let ta = format("{}/a", root);
@@ -10842,4 +10917,47 @@ fn cwd_free_rejects_relative_paths() {
     let mut rel = Vector::<String>::new();
     rel.push(String::from_str("./tools/cc"));
     assert(!ocache::cwd_free(&rel, &fl), "a relative compiler path");
+}
+
+import std::parallel::time as ptime;
+
+// One process builds a tree at a time: a build whose tree another process holds says it waits,
+// waits, and finishes once the holder releases the tree. Two builds of one tree would otherwise
+// rewrite the units each other compiles and cache objects under the wrong keys.
+@test
+fn a_build_waits_for_the_holder_of_its_tree() {
+    if cli::on_wasm() {
+        return; // WASI has no file locks
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    assert(p.compile("main.spc").ok());
+    let root = p.dir();
+    let mut lock = format("{}/build/dev/.lock", root);
+    let h = unsafe shim::sc_tree_lock(lock.cstr(), 0);
+    assert(h >= 0, "the test takes the tree's lock");
+    let mut log = format("{}/second.log", root);
+    let mut sc = String::from_str(cli::superc_path());
+    let mut mainp = String::from_str("main.spc");
+    let mut ptrs = Vector::<usize>::new();
+    ptrs.push(sc.cstr() as usize);
+    ptrs.push(mainp.cstr() as usize);
+    ptrs.push(0);
+    let pid = unsafe shim::sc_spawn_argv_in(ptrs.as_ptr() as *const *const char, log.cstr(), p.rootp());
+    assert(pid > 0, "the second build starts");
+    let mut told = false;
+    for _ in 0..600 {
+        if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
+            told = true;
+            break;
+        }
+        ptime::sleep(ptime::Duration::from_millis(50));
+    }
+    let mut code: i32 = 0;
+    let pids: [i64; 1] = [pid];
+    let still = unsafe shim::sc_try_wait(&pids[0], 1, &mut code) < 0;
+    unsafe shim::sc_tree_unlock(h);
+    assert(told, "the second build says it waits for the tree");
+    assert(still, "the second build waits while the tree is held");
+    assert(unsafe shim::sc_waitpid(pid, &mut code) == 0 && code == 0, "the second build finishes once the tree is free");
 }

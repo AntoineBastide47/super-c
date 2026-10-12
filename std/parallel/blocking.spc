@@ -498,7 +498,7 @@ fn admit_next(p: *mut Pool) {
         if unsafe (*p).admit_head == null {
             unsafe (*p).admit_tail = null;
         }
-        if runtime::wake(unsafe (*a).co, unsafe (*a).token) {
+        if unsafe runtime::wake((*a).co, (*a).token) {
             break;
         }
         a = unsafe (*p).admit_head;
@@ -721,7 +721,7 @@ fn admit(co: *mut runtime::Coroutine, cancellable: bool, cancelled: &mut bool) *
             return p;
         }
         unsafe (*p).admit_waits = unsafe (*p).admit_waits + 1;
-        let token = runtime::park_begin(co);
+        let token = unsafe runtime::park_begin(co);
         let mut a = Admit { co: co, token: token, next: null };
         let ap = &mut a;
         if unsafe (*p).admit_tail == null {
@@ -730,7 +730,7 @@ fn admit(co: *mut runtime::Coroutine, cancellable: bool, cancelled: &mut bool) *
             unsafe (*(*p).admit_tail).next = ap;
         }
         unsafe (*p).admit_tail = ap;
-        let reason = runtime::park_timed(token, 0, commit_unlock, &mut unsafe (*p).spin, cancellable);
+        let reason = unsafe runtime::park_timed(token, 0, commit_unlock, &mut (*p).spin, cancellable);
         lock(p);
         admit_unlink(p, ap);
         if reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN {
@@ -800,7 +800,7 @@ fn settle(j: *mut Job) {
     let co = unsafe (*j).co;
     if co != null {
         let token = unsafe (*j).token;
-        if runtime::claim_wake(co, token, runtime::WR_BLOCKING) {
+        if unsafe runtime::claim_wake(co, token, runtime::WR_BLOCKING) {
             wake_push(co);
         }
         return;
@@ -849,7 +849,7 @@ fn wake_flush(hp: *mut usize) {
         cur = nx;
         n = n + 1;
     }
-    runtime::run_claimed(head, tail, n);
+    unsafe runtime::run_claimed(head, tail, n);
 }
 
 // --- call: frame-resident records ---------------------------------------------------------------------.
@@ -873,7 +873,7 @@ union Frame<R> {
 
 /// The per-`(F, T)` trampoline of `call`: run the closure on the pool thread, store its value, wake the
 /// caller. `pub` for linkage.
-pub fn run_call<F: fn move() T + Send, T>(j: *mut Job) {
+pub unsafe fn run_call<F: fn move() T + Send, T>(j: *mut Job) {
     let rp = j as *mut Call<F, T>;
     let f = unsafe (*rp).body;
     unsafe (*rp).value = f();
@@ -894,7 +894,7 @@ fn call_ext<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     }
     let mut fr = Frame::<Call<F, T>> { none: 0 };
     let rp = ((&mut fr) as *mut Frame<Call<F, T>>) as *mut Call<F, T>;
-    unsafe (*rp).job = Job { next: null, run: run_call::<F, T>, co: null, token: 0, done: 0, t: null };
+    unsafe (*rp).job = Job { next: null, run: unsafe run_call::<F, T>, co: null, token: 0, done: 0, t: null };
     unsafe (*rp).body = f;
     if submit_ext(p, rp as *mut Job) {
         wait_ext(rp as *mut Job);
@@ -928,17 +928,17 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     }
     let mut fr = Frame::<Call<F, T>> { none: 0 };
     let rp = ((&mut fr) as *mut Frame<Call<F, T>>) as *mut Call<F, T>;
-    let token = runtime::park_begin(co);
-    unsafe (*rp).job = Job { next: null, run: run_call::<F, T>, co: co, token: token, done: 0, t: null };
+    let token = unsafe runtime::park_begin(co);
+    unsafe (*rp).job = Job { next: null, run: unsafe run_call::<F, T>, co: co, token: token, done: 0, t: null };
     unsafe (*rp).body = f;
-    let reason = runtime::park_timed(token, 0, commit_submit, rp, false);
+    let reason = unsafe runtime::park_timed(token, 0, commit_submit, rp, false);
     if reason != runtime::WR_BLOCKING {
         panic("a non-cancellable blocking park has exactly one waker");
     }
     let v = unsafe {
         (*rp).value;
     };
-    runtime::park_done(co);
+    unsafe runtime::park_done(co);
     runtime::wait_clear();
     return v;
 }
@@ -952,7 +952,7 @@ struct Raw {
 }
 
 /// Runs one `run_blocking` job on a pool thread. `pub` for linkage.
-pub fn run_raw(j: *mut Job) {
+pub unsafe fn run_raw(j: *mut Job) {
     let rp = j as *mut Raw;
     let run = unsafe (*rp).run;
     let env = unsafe (*rp).env;
@@ -965,7 +965,7 @@ pub fn run_raw(j: *mut Job) {
 /// function's generated wrapper hands its work to: hence the pinned C symbol, which is the name codegen
 /// emits. Masked: foreign code whose result lands through `env` can never be abandoned.
 @c.export("__sc_blocking_run")
-pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
+pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
     if on_pool_thread() {
         run(env);
         return;
@@ -1111,7 +1111,7 @@ fn crec_drop<F, T>(rp: *mut CCall<F, T>) {
 /// The per-`(F, T)` trampoline of `call_c`: run the closure, publish the value into the record, and settle
 /// the ownership race. If the task abandoned the call, the value is destroyed HERE: the pool thread never
 /// touches the coroutine after an abandonment. `pub` for linkage.
-pub fn run_ccall<F: fn move() T + Send, T>(j: *mut Job) {
+pub unsafe fn run_ccall<F: fn move() T + Send, T>(j: *mut Job) {
     let rp = j as *mut CCall<F, T>;
     let f = unsafe (*rp).body;
     unsafe (*rp).value = f();
@@ -1148,13 +1148,13 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
     }
     let bytes = sizeof(CCall<F, T>);
     let rp = cache_alloc(p, bytes) as *mut CCall<F, T>;
-    let token = runtime::park_begin(co);
-    unsafe (*rp).job = Job { next: null, run: run_ccall::<F, T>, co: co, token: token, done: 0, t: null };
+    let token = unsafe runtime::park_begin(co);
+    unsafe (*rp).job = Job { next: null, run: unsafe run_ccall::<F, T>, co: co, token: token, done: 0, t: null };
     unsafe (*rp).refs = 2;
     unsafe (*rp).state = BS_PENDING;
     unsafe (*rp).bytes = bytes;
     unsafe (*rp).body = f;
-    let _ = runtime::park_timed(token, 0, commit_submit, rp, true);
+    let _ = unsafe runtime::park_timed(token, 0, commit_submit, rp, true);
     if runtime::cancel_after_wait(true) {
         if !unsafe atomic::cas_i32(&mut unsafe (*rp).state, BS_PENDING, BS_ABANDONED, false, 4, 0) {
             // Completed first: the value is this side's to destroy.
@@ -1162,7 +1162,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
             vp.free();
         }
         crec_drop::<F, T>(rp);
-        runtime::park_done(co);
+        unsafe runtime::park_done(co);
         runtime::wait_clear();
         return Option::<T>::None;
     }
@@ -1170,7 +1170,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
         (*rp).value;
     };
     crec_drop::<F, T>(rp);
-    runtime::park_done(co);
+    unsafe runtime::park_done(co);
     runtime::wait_clear();
     return Option::<T>::Some(v);
 }
@@ -1261,7 +1261,7 @@ pub fn try_shutdown(grace_ns: u64) ShutdownReport {
         unsafe (*p).admit_tail = null;
         while a != null {
             let nx = unsafe (*a).next;
-            let _ = runtime::wake(unsafe (*a).co, unsafe (*a).token);
+            let _ = unsafe runtime::wake((*a).co, (*a).token);
             a = nx;
         }
         if unsafe (*p).ext_waiters != 0 {

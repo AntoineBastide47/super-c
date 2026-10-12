@@ -171,7 +171,7 @@ fn spawn_failure(fail: str) {
         ).as_str(),
     );
     assert(r.built, fail);
-    let out = str::from_cstr(r.out);
+    let out = unsafe str::from_cstr(r.out);
     let rel = out.find("released");
     let pan = out.find("panic: thread::spawn: the OS cannot create a thread");
     if r.exit == 0 || rel < 0 || pan < rel {

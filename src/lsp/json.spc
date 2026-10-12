@@ -527,7 +527,7 @@ extend JSONParser {
                 stop = hit as usize - base;
             }
             if stop > p {
-                out.push_bytes((base + p) as *const u8, stop - p);
+                out.push_str(unsafe str::from_raw((base + p) as *const u8, stop - p));
             }
             p = stop;
             if p >= to {

@@ -833,7 +833,7 @@ fn scalar_instance_drops_nothing() {
     // The scalar instance's body is a bare return, whitespace aside.
     let c = h::compile_c(src);
     assert(c.ok());
-    let t = str::from_cstr(c.code);
+    let t = unsafe str::from_cstr(c.code);
     let k = t.find("drop_it__i64(int64_t x) {");
     assert(k >= 0, "the scalar instance is emitted");
     let rest = t.slice(k as usize + 25, t.len());
@@ -3693,7 +3693,7 @@ fn atomic_memory_orders_are_checked() {
     }
     let p = cli::proj_new();
     p.mkfile("main.spc", ATOMIC_ORDERS);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut args = String::new();
     args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
     assert(p.run_raw(args.as_str()).ok());
@@ -3813,6 +3813,34 @@ fn a_generic_method_value_is_its_instance() {
     h::expect_exit(
         "generic method values",
         "struct W<T> {\n    pub v: T,\n}\n\nextend<T: Copy> W<T> {\n    pub fn make(v: T) Self {\n        return W::<T> { v: v };\n    }\n\n    pub fn get(self: &Self) T {\n        return self.v;\n    }\n\n    pub fn pair(self: Self, o: Self) (T, T) {\n        return self.v, o.v;\n    }\n}\n\nfn main() i32 {\n    let mk = W::<i64>::make;\n    let g = W::<i64>::get;\n    let sq = Simd::<f32, 4>::sqrt;\n    let ad = Simd::<i8, 4>::abs_diff;\n    let w = mk(5);\n    let (x, y) = w.pair(mk(2));\n    let r = sq(Simd::<f32, 4>::splat(16.0));\n    let d = ad(Simd::<i8, 4>::splat(-100), Simd::<i8, 4>::splat(100));\n    return (g(&w) + x + y) as i32 + r[0] as i32 + d[0] as i32 - 216;\n}\n",
+        0,
+    );
+}
+
+// The checked views over program-owned bytes: `str::from_cbuf` stops at the first NUL or at the
+// buffer's end, `String::push_bytes` appends a `[]u8`, and the integer out-parameters take `&mut`.
+@test
+fn checked_byte_views() {
+    run_exit(
+        "from_cbuf, push_bytes and &mut out-parameters",
+        M"(fn main() i32 {
+    let a: [char; 6] = ['a', 'b', 0 as char, 'c', 'd', 'e'];
+    let b: [char; 3] = ['x', 'y', 'z'];
+    let s = str::from_cbuf(a);
+    let t = str::from_cbuf(b);
+    let mut out = String::new();
+    let bytes: [u8; 2] = [104, 105];
+    out.push_bytes(bytes);
+    let x = u128::from_u64(7);
+    let two = u128::from_u64(2);
+    let mut r = u128::zero();
+    let q = x.divmod(&two, &mut r);
+    if s != "ab" || t != "xyz" || out.as_str() != "hi" || q.to_u64() != 3 || r.to_u64() != 1 {
+        unsafe exit(1);
+    }
+    return 0;
+}
+)",
         0,
     );
 }

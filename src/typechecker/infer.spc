@@ -128,6 +128,9 @@ pub struct InferenceContext {
     /// overloads even without arguments.
     pub callee_node: NodeId,
     pub addr_ctx: bool,
+    /// The place an assignment or a `&mut` writes (past `unsafe` and `move`): its member check
+    /// knows the field is written.
+    pub write_node: NodeId,
     pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
     pub coerce_depth: i32,
@@ -153,6 +156,7 @@ extend InferenceContext {
             args_pre: 0,
             callee_node: NODE_NONE,
             addr_ctx: false,
+            write_node: NODE_NONE,
             proj_obj_ok: false,
             coerce_depth: 0,
             sv: Solver::new(),

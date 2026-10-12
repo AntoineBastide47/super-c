@@ -52,7 +52,7 @@ fn dir_setup() bool {
     if v == null {
         return false;
     }
-    let d = str::from_cstr(v);
+    let d = unsafe str::from_cstr(v);
     if d.len() == 0 || d.len() >= 1024 {
         return false;
     }
@@ -103,7 +103,7 @@ fn env_is(name: str, want: str) bool {
     if v == null {
         return false;
     }
-    return str::from_cstr(v) == want;
+    return unsafe str::from_cstr(v) == want;
 }
 
 fn main() i32 {

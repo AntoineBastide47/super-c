@@ -27,6 +27,12 @@ extern "C" "driver_shim.h" {
     pub fn sc_getpid() i32;
     /// 1 while process `pid` is alive, 0 once it is gone (parent-death detection for the LSP).
     pub fn sc_process_alive(pid: i64) i32;
+    /// Exclusive lock on file `path` (created when missing), waiting at most `wait_ms`: the handle that
+    /// holds it, -1 when another process still holds it, -2 on an error. The OS releases it when the
+    /// process ends; no child inherits it.
+    pub fn sc_tree_lock(path: *const char, wait_ms: i64) i64;
+    /// Release a `sc_tree_lock` handle.
+    pub fn sc_tree_unlock(h: i64) void;
     /// Bytes of stream `f`'s descriptor into `buf` (at most `n`), past the stdio buffer: what one read
     /// returns (a pipe hands over what has arrived), 0 at end of stream, -1 on error.
     pub fn sc_file_read(f: *mut void, buf: *mut void, n: usize) i64;

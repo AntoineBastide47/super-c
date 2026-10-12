@@ -262,8 +262,9 @@ pub fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCase> {
             };
             let mut rng = gen::Rng::new(k as u64 * 7919 + j as u64 + 1);
             let most = vec::max_lanes(t);
-            for ln in [n, most] {
-                if ln == most && n == most && cs.len() != 0 && cs.at(cs.len() - 1).n == most {
+            for i in 0usize..2 {
+                let ln = pick(i == 0, n, most);
+                if i == 1 && n == most {
                     continue; // the entry's count is the most: one set of cases
                 }
                 let mut got: u64 = 0;
@@ -445,7 +446,7 @@ fn c_text(dir: str) String {
         if e == null {
             break;
         }
-        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
         if nm.ends_with(".c") || nm.ends_with(".h") {
             let mut p = String::from_str(dir);
             p.format_into("/{}", nm);
@@ -458,7 +459,7 @@ fn c_text(dir: str) String {
 
 // The emitted C of build `b` (profile `prof`): every file of its tree and of the type headers.
 fn emitted_c(b: &h::DiffBuild, prof: str) String {
-    let root = str::from_cstr(b.proj.rootp());
+    let root = b.proj.dir();
     let mut d = String::new();
     d.format_into("{}/build/{}/raw", root, prof);
     let mut s = c_text(d.as_str());
@@ -484,6 +485,35 @@ fn shadowed(es: &Vector<Entry>, k: usize, seen: &String) bool {
     return false;
 }
 
+// Whether entry `e` is a lane-mask form (`CmpEqLanes` .. `CmpGeLanes`, `ChooseLanes`, `LanesToMask`,
+// `MaskToLanes`, `AnyLanes`, `AllLanes`) of lanes the C works on through an entry that gives or takes
+// the mask itself (AVX-512's mask registers): the build composes lane masks only without one, so a run
+// without it calls `e`.
+fn mask_form_instead(es: &Vector<Entry>, e: &Entry, seen: &String) bool {
+    let op = e.op.as_str();
+    let cmp = op.starts_with("Cmp") && op.ends_with("Lanes");
+    for j in 0..es.len() {
+        let o = es.at(j);
+        let oo = o.op.as_str();
+        let mask_cmp = oo.starts_with("Cmp") && !oo.ends_with("Lanes");
+        // the lanes of the comparison, whatever their type: the width and the count
+        let same_width = mask_cmp && e.t != 255 && o.n == e.n && vec::lane_bytes(o.t) == vec::lane_bytes(e.t);
+        let hit = if cmp {
+            oo == op.slice(0, op.len() - 5) && o.t == e.t && o.n == e.n;
+        } else if op == "ChooseLanes" {
+            oo == "Choose" && o.u == e.u && o.m == e.m;
+        } else if op == "MaskToLanes" {
+            oo == "Choose" && o.m == e.m && vec::lane_bytes(o.u) == vec::lane_bytes(e.u);
+        } else {
+            (op == "LanesToMask" || op == "AnyLanes" || op == "AllLanes") && same_width;
+        };
+        if hit && calls(seen, o) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The features of the differential builds: the host's baseline and, when `with_more`,
 /// `SC_SIMD_FEATURES`, closed. An entry beyond them is not required to be called (another run of the
 /// lane checks it).
@@ -494,7 +524,7 @@ pub fn run_features(with_more: bool) cf::CpuFeatureSet {
     let mut err = String::new();
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     if with_more && more != null {
-        assert(cf::apply(str::from_cstr(more), t, a, true, &mut s, &mut err), err.as_str());
+        assert(cf::apply(unsafe str::from_cstr(more), t, a, true, &mut s, &mut err), err.as_str());
     }
     if h::simd_lane() {
         s = cf::with(s, cf::F_SIMD128);
@@ -504,8 +534,7 @@ pub fn run_features(with_more: bool) cf::CpuFeatureSet {
 
 // Whether the run prefers 512-bit vectors on AVX-512 (`SC_SIMD_WIDTH=512`).
 fn wide() bool {
-    let w = stdlib::getenv("SC_SIMD_WIDTH");
-    return w != null && str::from_cstr(w) == "512";
+    return stdlib::env_is("SC_SIMD_WIDTH", "512");
 }
 
 /// Whether the differential builds of features `run` must call entry `e`: the features hold its own,
@@ -517,7 +546,11 @@ fn required(e: &Entry, run: cf::CpuFeatureSet, wide: bool) bool {
     if wide || !cf::has(e.fs, cf::F_AVX512F) {
         return true;
     }
-    let mut bytes = e.n * vec::lane_bytes(e.t);
+    // An entry without a vector parameter (a load) has no operand lanes: its result's count.
+    let mut bytes: u64 = 0;
+    if e.t != 255 {
+        bytes = e.n * vec::lane_bytes(e.t);
+    }
     if e.op.as_str() == "Gather" || e.op.as_str() == "Scatter" {
         bytes = (e.n * 8).min(64);
     } else if e.u != 255 && e.m * vec::lane_bytes(e.u) > bytes {
@@ -600,7 +633,7 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
         }
     }
     for k in ks {
-        if !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) {
+        if !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) && !mask_form_instead(&es, es.at(k), &seen) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }
     }
@@ -617,7 +650,11 @@ pub fn check_memory(text: str) String {
     let es = entries(text);
     let run = run_features(true);
     for k in 0..es.len() {
-        if model_ops(es.at(k)).len() == 0 && required(es.at(k), run, wide()) && !calls(&c, es.at(k)) {
+        if model_ops(es.at(k)).len() == 0 && required(es.at(k), run, wide()) && !calls(&c, es.at(k)) && !mask_form_instead(
+            &es,
+            es.at(k),
+            &c,
+        ) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }
     }

@@ -428,11 +428,7 @@ extend InlineCtx {
     }
 
     pub fn new(store: *const InlineStore) InlineCtx {
-        let e = stdlib::getenv("SC_INLINE");
-        let mut off = false;
-        if e != null && str::from_cstr(e) == "0" {
-            off = true;
-        }
+        let off = stdlib::env_is("SC_INLINE", "0");
         return InlineCtx {
             off: off,
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,

@@ -90,12 +90,19 @@ extern "C" {
 
 /// The value of environment variable `name`, or `None` if unset (a fresh owned copy: the C buffer is not
 /// retained).
-pub fn get_env(name: &mut String) Option<String> {
-    let p = unsafe c_getenv(name.cstr());
+pub fn get_env(name: str) Option<String> {
+    let mut n = String::from_str(name);
+    let p = unsafe c_getenv(n.cstr());
     if p == null {
         return Option::<String>::None;
     }
-    return Option::<String>::Some(String::from_cstr(p));
+    return Option::<String>::Some(unsafe String::from_cstr(p));
+}
+
+/// Whether environment variable `name` is set to exactly `value`.
+pub fn env_is(name: str, value: str) bool {
+    let v = get_env(name);
+    return v.is_some() && v.unwrap().as_str() == value;
 }
 
 /// The raw value of environment variable `name` (`null` if unset). Borrows libc's buffer: copy it if you

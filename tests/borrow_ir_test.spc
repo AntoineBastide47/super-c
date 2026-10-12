@@ -21,7 +21,11 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut r = res::Resolver::new(unsafe &mut *((&mut m.ast) as *mut Ast), str::from_raw(src as *const u8, len), pkg);
+    let mut r = res::Resolver::new(
+        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe str::from_raw(src as *const u8, len),
+        pkg,
+    );
     r.resolve();
     let had = r.has_errors();
     if had {
@@ -36,7 +40,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     let had = t.has_errors();
     if had {

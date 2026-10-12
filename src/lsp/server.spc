@@ -861,7 +861,7 @@ extend Server {
             if unsafe nm[0] == '.' as char {
                 continue;
             }
-            names.push(String::from_cstr(nm));
+            names.push(unsafe String::from_cstr(nm));
         }
         unsafe shim::sc_closedir(dh);
         for i in 0..names.len() {

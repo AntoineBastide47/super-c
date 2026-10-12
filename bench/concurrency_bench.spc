@@ -120,7 +120,7 @@ static mut G_DIR: str<'static> = "";
 
 @platform(macos | linux)
 fn dir_setup(name: str) bool {
-    let mut d = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    let mut d = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
     d.push_str("/sc-bench-");
     d.push_str(name);
     d.push_byte(b'-');

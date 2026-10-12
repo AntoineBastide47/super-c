@@ -118,7 +118,7 @@ fn lsp_diagnostics_lifecycle() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_ERR);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -179,7 +179,7 @@ fn lsp_diagnostics_lifecycle() {
 @test
 fn lsp_unknown_method_and_bad_json() {
     let p = cli::proj_new();
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     let mut b = String::from_str(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
@@ -221,7 +221,7 @@ fn lsp_positional_features() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/util.spc", UTIL_SRC);
     p.mkfile("src/main.spc", MAIN_PT);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -340,7 +340,7 @@ fn lsp_completion_formatting_tokens() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/util.spc", UTIL_SRC);
     p.mkfile("src/main.spc", MAIN_PT);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -421,7 +421,7 @@ fn lsp_code_actions() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_UNUSED);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -487,7 +487,7 @@ fn lsp_completion_survives_pattern_nodes() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_SWITCH);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -592,7 +592,7 @@ fn lsp_rename_workspace_relative() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_VEC);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     let mut ses = String::new();
     rename_session(root, root, &mut ses);
     let out = run_lsp_session(root, &ses);
@@ -603,9 +603,9 @@ fn lsp_rename_workspace_relative() {
     let mut rb = Array::<char, 4096>::new();
     let mut dot = String::from_str(".");
     assert(unsafe shim::sc_realpath(dot.cstr(), &mut rb[0]) != null);
-    let repo = str::from_cstr(&rb[0]);
+    let repo = str::from_cbuf(rb.as_slice());
     let p2 = cli::proj_new(); // scratch dir for the session/out files only
-    let root2 = str::from_cstr(p2.rootp());
+    let root2 = p2.dir();
     let mut ses2 = String::new();
     rename_session(repo, repo, &mut ses2);
     let mut sp = String::from_str(root2);
@@ -675,7 +675,7 @@ fn lsp_build_toml() {
     let p = cli::proj_new();
     p.mkfile("build.toml", BAD);
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
 
     let mut ses = String::new();
     let mut b = String::from_str(
@@ -755,12 +755,12 @@ fn lsp_workspace_lifecycle() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_OK);
-    let root = str::from_cstr(p.rootp());
+    let root = p.dir();
     // A second project, reachable only through the workspace folder the session adds.
     let q = cli::proj_new();
     q.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     q.mkfile("src/main.spc", "fn main() i32 {\n    let x: i32 = true;\n    return x;\n}\n");
-    let qroot = str::from_cstr(q.rootp());
+    let qroot = q.dir();
 
     let mut ses = String::new();
     let mut b = String::new();

@@ -138,7 +138,7 @@ fn parity_mixed_cases() {
 @test
 fn parity_reports_missing_runtime_check() {
     let mut cstd = String::from_str("--cstd=");
-    cstd.push_str(str::from_cstr(cli::cstd()));
+    cstd.push_str(unsafe str::from_cstr(cli::cstd()));
     cstd.push_str(" -DSC_ARITH_WRAP");
     let d = h::const_runtime_parity(
         "",

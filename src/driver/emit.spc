@@ -271,7 +271,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let aptr = (&mut m.ast) as *mut Ast;
-    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     r.resolve();
     let had = r.has_errors();
@@ -306,11 +306,11 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
         let m = &mut p.modules[i];
         let src = m.source.as_str().ptr() as *const char;
         let len = m.source.len();
-        let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
         t.check_cross_module_dup_conformances(dup_idx);
         t.check_cross_module_dup_items();
         if t.has_errors() {
-            t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
             t.log_errors();
             p.ok = false;
         }
@@ -332,13 +332,13 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
             let m = &mut p.modules[i];
             let src = m.source.as_str().ptr() as *const char;
             let len = m.source.len();
-            let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+            let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
             if t.discharge_foreign_obligations(starts.as_ptr()) {
                 grew = true;
             }
             t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr());
             if t.has_errors() {
-                t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+                t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
                 t.log_errors();
                 p.ok = false;
             }
@@ -377,7 +377,7 @@ fn rs_run_one(t: RsTask) {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let aptr = (&mut m.ast) as *mut Ast;
-    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = t.lint && !p.modules[i].prelude;
     r.resolve();
     out.ok = !r.has_errors();
@@ -532,7 +532,7 @@ fn tc_item(st: &TcStage, it: loader::ItemId, meta: loader::ItemMeta) {
         let mm = &mut p.modules[m];
         let src = mm.source.as_str().ptr() as *const char;
         let len = mm.source.len();
-        let mut t = tc::TypeChecker::new(&mut mm.ast, str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
         t.lint = unsafe st.lint[m];
         t.check_open();
         chk.push(Box::new(t));
@@ -914,11 +914,11 @@ fn dup_run_one(t: DupTask) {
     let m = &mut p.modules[t.i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut tck = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     tck.check_cross_module_dup_conformances(unsafe &*t.idx);
     tck.check_cross_module_dup_items();
     if tck.has_errors() {
-        tck.errors.finalize(str::from_raw(src as *const u8, len), unsafe (&*t.p).modules[t.i].file.as_str());
+        tck.errors.finalize(unsafe str::from_raw(src as *const u8, len), unsafe (&*t.p).modules[t.i].file.as_str());
         let o = unsafe &mut *t.out;
         *o = replace(&mut tck.errors, diag::Errors::new());
     }
@@ -5305,11 +5305,11 @@ pub fn cemit_package(
     if unsafe TS_ON {
         ty_stats_report(p);
     }
-    let dumpp = stdlib::getenv("SC_TYPE_TABLE");
-    if dumpp != null {
+    let dumpp = stdlib::get_env("SC_TYPE_TABLE");
+    if dumpp.is_some() {
         let mut txt = String::new();
         p.type_table_dump(&mut txt);
-        let path = String::from_cstr(dumpp);
+        let path = dumpp.unwrap();
         let f = stdio::fopen(path.as_str(), "wb");
         if f != null {
             unsafe stdio::fwrite(txt.as_ptr(), 1, txt.len(), f);
@@ -5841,7 +5841,7 @@ fn push_c_float(out: &mut String, v: f64) {
     }
     let mut buf = Buf64 {};
     let n = (unsafe stdio::snprintf(&mut buf[0], 64, "%.17g".ptr() as *const char, v)) as usize;
-    out.push_bytes((&buf[0]) as *const u8, n);
+    out.push_str(str::from_cbuf(buf.as_slice()));
     for i in 0..n {
         let c = buf[i] as u8;
         if c == b'.' || c == b'e' {
@@ -6198,6 +6198,8 @@ fn cemit_simd_entries(
     let mut sc = cbe::CEmit::new(p);
     // An entry's own vector operations keep their lane loops: no entry calls another.
     sc.simd_on = false;
+    // The planner spells an entry's call with the struct ABI.
+    sc.no_split = true;
     // A constant an entry addresses queues its definition (merged into `cem` below).
     sc.collect_demand = true;
     sc.mg.agg_on = true;
@@ -6388,7 +6390,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 let ra = unsafe shim::sc_realpath(rel.cstr(), &mut absb[0]);
                 if ra != null {
                     line.push_str("#include \"");
-                    line.push_str(str::from_cstr(&absb[0]));
+                    line.push_str(str::from_cbuf(absb.as_slice()));
                     line.push_str("\"\n");
                     done = true;
                 }
@@ -8656,7 +8658,7 @@ fn bc_job(ctx: *mut void, j: u32) {
     let mm = &mut p.modules[m];
     let src = mm.source.as_str().ptr() as *const char;
     let len = mm.source.len();
-    let mut tck = tc::TypeChecker::new(&mut mm.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut tck = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     let mut slot = bc_slot_take(unsafe &*st.slots, st.p);
     // The serial path lowers straight into the package keep; a parallel job keeps its own and
     // publishes it under the evaluator's lock (its lookups read the index).
@@ -8842,7 +8844,7 @@ fn bc_stats_print(st: &bfi::BcStats, ctx: &bfi::BorrowCtx) {
 // A deferred static_assert that failed once the whole package was typed: render it against the owning module.
 fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
     if msg != null {
-        flush_err(ctx, m, cond, format("static assertion cannot be evaluated: {}", str::from_cstr(msg)));
+        flush_err(ctx, m, cond, format("static assertion cannot be evaluated: {}", unsafe str::from_cstr(msg)));
     } else {
         flush_err(ctx, m, cond, format("static assertion failed"));
     }
@@ -8850,7 +8852,7 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
 
 // A deferred call-bearing const initializer that still cannot be evaluated once the package is typed.
 fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
-    flush_err(ctx, m, decl, format("constant cannot be evaluated at compile time: {}", str::from_cstr(msg)));
+    flush_err(ctx, m, decl, format("constant cannot be evaluated at compile time: {}", unsafe str::from_cstr(msg)));
 }
 
 // Log error `msg` at node `id` of module `m` of the package `ctx` points to, and fail the package.
@@ -10266,6 +10268,18 @@ fn stage_ms(on: bool, t0: &mut i64, label: str) {
     }
 }
 
+/// Manifest builds point `p.gen_root` into their out-dir; a bare invocation defaults it next to the
+/// sources, one tree per profile (PROFILE makes the emitted C depend on it).
+pub fn default_gen_root(p: &mut loader::Package) {
+    if p.gen_root.len() == 0 {
+        let mut g = String::from_str(p.root_dir.as_str());
+        g.push_str("/build/");
+        g.push_str(p.profile_name());
+        g.push_str("/raw");
+        p.gen_root = g;
+    }
+}
+
 pub fn run_package(
     p: &mut loader::Package,
     topts: *const TestOpts,
@@ -10430,15 +10444,7 @@ pub fn run_package(
         }
     }
 
-    // Manifest builds point gen_root into their out-dir; bare invocations default next to the
-    // sources, one tree per profile (PROFILE makes the emitted C depend on it).
-    if p.gen_root.len() == 0 {
-        let mut g = String::from_str(p.root_dir.as_str());
-        g.push_str("/build/");
-        g.push_str(p.profile_name());
-        g.push_str("/raw");
-        p.gen_root = g;
-    }
+    default_gen_root(p);
     // A tree that did not exist before this build holds no orphan to prune afterwards.
     let mut gr9 = String::from_str(p.gen_root.as_str());
     let fresh_tree = unsafe shim::sc_stat_isdir(gr9.cstr()) != 1;

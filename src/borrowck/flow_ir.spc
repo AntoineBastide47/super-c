@@ -783,10 +783,10 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
 
 // The validation build's structural checks over one body's analysis products: every move path
 // has a valid parent, the init rows are sized by the path count, every loan issues at a borrow
-// operation (a reference, a carrying projected copy or view, a closure capture, or a call's
-// implicit autoref), every conflict names a loan and a place of the body, and each fixpoint queue
-// stayed within its monotone bound (every push after the seeds follows a row change, and a row
-// changes at most once per lattice bit).
+// operation (a reference, a carrying projected copy or view, a closure capture, a `&mut` or
+// `[]mut T` reborrowed into a literal or a field, or a call's implicit autoref), every conflict
+// names a loan and a place of the body, and each fixpoint queue stayed within its monotone bound
+// (every push after the seeds follows a row change, and a row changes at most once per lattice bit).
 fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_need: bool) {
     let nl = body.locals.len();
     for p in 0..ctx.forest.paths.len() {
@@ -825,7 +825,7 @@ fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_nee
             assert(st.kind == ir::ST_ASSIGN, "a statement loan is issued by a store");
             let rk = body.rvalues.at(st.rvalue as usize).kind;
             assert(
-                rk == ir::RV_REF || rk == ir::RV_USE || rk == ir::RV_SLICE || rk == ir::RV_CLOSURE,
+                rk == ir::RV_REF || rk == ir::RV_USE || rk == ir::RV_SLICE || rk == ir::RV_CLOSURE || rk == ir::RV_AGGREGATE,
                 "a loan issues at a borrow operation",
             );
         }
@@ -1402,6 +1402,30 @@ extend tc::TypeChecker {
                 self.bc_ir_conflict(body, &ctx.facts, &er, seen, out);
             } else if er.kind == bln::BE_ESCAPE {
                 self.bc_ir_escape(body, &ctx.facts, &ctx.solver, &er, seen, out);
+            }
+        }
+        // Two arguments of one call that share borrowed storage, one mutably (read only when this
+        // body's facts were built).
+        if ctx.built {
+            for c in 0..ctx.facts.clashes.len() {
+                let cl = *ctx.facts.clashes.at(c);
+                let k1 = if cl.second == 2 {
+                    "mutable";
+                } else {
+                    "immutable";
+                };
+                let k2 = if cl.first == 2 {
+                    "mutable";
+                } else {
+                    "immutable";
+                };
+                self.bc_ir_push(
+                    out,
+                    seen,
+                    CAT_C_ISSUE,
+                    cl.span,
+                    format("cannot borrow this value as {} while it is already borrowed as {}", k1, k2),
+                );
             }
         }
         // Skipped stages leave the previous body's facts behind.

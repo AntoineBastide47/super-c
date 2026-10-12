@@ -319,7 +319,7 @@ extend Resolver {
                 out.push_str("::");
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
-            out.push_str(str::from_raw(unsafe (self.source.ptr() + s.start as usize), (s.end - s.start) as usize));
+            out.push_str(unsafe str::from_raw(self.source.ptr() + s.start as usize, (s.end - s.start) as usize));
             i = i + 1;
         }
         return out;
@@ -416,7 +416,7 @@ extend Resolver {
             }
         }
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
-        let m = pkg.find(str::from_raw(buf.as_str().ptr(), buf.len()));
+        let m = pkg.find(buf.as_str());
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize], head: parts.len - 1 };
         }
@@ -430,7 +430,7 @@ extend Resolver {
                 }
             }
             let b2 = self.join_segs(ids, parts.len - 2);
-            let m2 = pkg.find(str::from_raw(b2.as_str().ptr(), b2.len()));
+            let m2 = pkg.find(b2.as_str());
             if m2 >= 0 {
                 return ModQual { mid: m2, type_node: at, head: parts.len - 2 };
             }
@@ -449,7 +449,7 @@ extend Resolver {
         let nl = (name.end - name.start) as usize;
         let ng = self.glob_mids.len();
         for i in 0..ng {
-            let hit = pkg.glob_lookup(self.glob_mids[i], str::from_raw(nm as *const u8, nl), want_type);
+            let hit = pkg.glob_lookup(self.glob_mids[i], unsafe str::from_raw(nm as *const u8, nl), want_type);
             if hit.node != NODE_NONE {
                 return hit;
             }
@@ -462,7 +462,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
         let nl = (name.end - name.start) as usize;
-        let decl = pkg.lookup(mid, str::from_raw(nm as *const u8, nl), want_type);
+        let decl = pkg.lookup(mid, unsafe str::from_raw(nm as *const u8, nl), want_type);
         if decl != NODE_NONE {
             self.ast.set_resolution_def(refn, DefId { module: mid, node: decl });
         } else {
@@ -568,7 +568,7 @@ extend Resolver {
                 }
             }
             if !aliased {
-                found = pkg.find(str::from_raw(prefix, plen));
+                found = pkg.find(unsafe str::from_raw(prefix, plen));
             }
             if found >= 0 {
                 let mid = found as ModuleId;
@@ -577,9 +577,9 @@ extend Resolver {
                     let dn = self.name_span(unsafe seg[m as usize]);
                     let dnm = (unsafe (self.source.ptr() + dn.start as usize)) as *const char;
                     let dl = (dn.end - dn.start) as usize;
-                    let mut decl = pkg.lookup(mid, str::from_raw(dnm as *const u8, dl), false);
+                    let mut decl = pkg.lookup(mid, unsafe str::from_raw(dnm as *const u8, dl), false);
                     if decl == NODE_NONE {
-                        decl = pkg.lookup(mid, str::from_raw(dnm as *const u8, dl), true);
+                        decl = pkg.lookup(mid, unsafe str::from_raw(dnm as *const u8, dl), true);
                     }
                     if decl != NODE_NONE {
                         self.ast.set_resolution_def(id, DefId { module: mid, node: decl });
@@ -589,7 +589,7 @@ extend Resolver {
                             format(
                                 "no public item '{}' in module '{}'",
                                 diag::span_str(self.source, dn.start, dn.end),
-                                str::from_raw(prefix, plen),
+                                unsafe str::from_raw(prefix, plen),
                             ),
                         );
                         self.errors.note(format("the module was found, but this item is missing or not public"));
@@ -653,7 +653,7 @@ extend Resolver {
             let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
             let nl = (name.end - name.start) as usize;
             let want_type = ns == Namespace::NS_TYPE;
-            let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), want_type);
+            let mut hit = pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), want_type);
             if hit.node == NODE_NONE {
                 hit = self.glob_lookup(name, want_type);
             }
@@ -698,7 +698,7 @@ extend Resolver {
             let pkg = unsafe &*self.package;
             let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
             let nl = (name.end - name.start) as usize;
-            let s = str::from_raw(nm as *const u8, nl);
+            let s = unsafe str::from_raw(nm as *const u8, nl);
             if pkg.prelude_lookup(s, want_type).node != NODE_NONE {
                 return true;
             }
@@ -1631,7 +1631,7 @@ extend Resolver {
                     let pkg = unsafe &*self.package;
                     let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
                     let nl = (name.end - name.start) as usize;
-                    let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), true);
+                    let mut hit = pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), true);
                     if hit.node == NODE_NONE {
                         hit = self.glob_lookup(name, true);
                     }

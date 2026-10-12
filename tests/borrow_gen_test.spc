@@ -40,7 +40,7 @@ fn check_case(label: str, src: str, expect_ok: bool) {
     // (`check_rejected_by_type_check` covers the rules the type checker owns).
     if !c.ok() && !expect_ok {
         if c.stage != h::STAGE_BORROWCK {
-            eprintln("{}: stage {}: {}", label, c.stage, str::from_cstr(&c.first[0]));
+            eprintln("{}: stage {}: {}", label, c.stage, str::from_cbuf(c.first));
         }
         assert(c.stage == h::STAGE_BORROWCK, label);
     }
@@ -50,7 +50,7 @@ fn check_case(label: str, src: str, expect_ok: bool) {
 // itself, before the borrow check, with a first message holding `needle`.
 fn check_rejected_by_type_check(label: str, src: str, needle: str) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
-    let first = str::from_cstr(&c.first[0]);
+    let first = str::from_cbuf(c.first);
     if c.ok() || c.stage != h::STAGE_TYPECHECK || !first.contains(needle) {
         eprintln("{}: stage {}: {}", label, c.stage, first);
     }

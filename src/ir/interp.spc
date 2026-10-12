@@ -937,7 +937,7 @@ fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
         unsafe buf[n] = unsafe digits[nd];
         n += 1;
     }
-    return str::from_raw(buf, n);
+    return unsafe str::from_raw(buf, n);
 }
 
 extend Interp {
@@ -1073,8 +1073,9 @@ extend Interp {
         if k == self.trap_texts.len() {
             self.trap_texts.push(text);
         }
+        // A pooled text is never removed and its bytes never move: the view outlives the trap.
         let t = self.trap_texts[k].as_str();
-        self.it_trap(kind, str::from_raw(t.ptr(), t.len()));
+        self.it_trap(kind, unsafe str::from_raw(t.ptr(), t.len()));
     }
 
     const fn bail(self: &mut Self) IVal {
@@ -3178,7 +3179,9 @@ extend Interp {
             // `panic(msg)` traps with its message, as the run time prints it.
             let mut text = Vector::<u8>::new();
             if nargs == 2 && self.ptr_bytes(*args.at(0), *args.at(1), &mut text) {
-                self.it_trap_text(IT_TRAP_PANIC, String::from_str(str::from_raw(text.as_ptr(), text.len())));
+                let mut msg = String::new();
+                msg.push_bytes(text[0..text.len()]);
+                self.it_trap_text(IT_TRAP_PANIC, msg);
             } else {
                 self.it_trap(IT_TRAP_PANIC, "panic reached at compile time");
             }
@@ -6812,9 +6815,6 @@ extend Interp {
 
     const fn unary(self: &mut Self, v: IVal, tok2: u8, m: ModuleId, target: TypeId) IVal {
         let t = tok2 as TokenType;
-        if t == TokenType::Unsafe || t == TokenType::Move {
-            return v; // wrappers: the operand IS the value
-        }
         if v.kind == IV_BOOL && t == TokenType::Bang {
             return iv_bool(m, target, v.i == 0);
         }

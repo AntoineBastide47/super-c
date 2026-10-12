@@ -90,9 +90,9 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     // Emission-mode switches change the C a body renders to: a record written under one mode
     // must never replay under another.
     for i in 0..inl::EMIT_MODE_ENV_N {
-        let e = stdlib::getenv(inl::emit_mode_env(i));
-        if e != null {
-            h = fnv_cont(h, str::from_cstr(e));
+        let e = stdlib::get_env(inl::emit_mode_env(i));
+        if e.is_some() {
+            h = fnv_cont(h, e.unwrap().as_str());
             h = fnv_mix(h, 101 + i as u64);
         }
     }

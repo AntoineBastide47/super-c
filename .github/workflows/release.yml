@@ -262,6 +262,8 @@ jobs:
             target: macos
           - os: ubuntu-latest
             target: linux
+          - os: windows-latest
+            target: windows
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -286,7 +288,7 @@ jobs:
       # built-in profile but dev.
       - name: Run the correctness gate
         run: |
-          chmod +x ./super-c
+          chmod +x "./super-c${BINEXT:-}"
           sh ci/gate.sh --no-check
 
   # The release binary, built by the compiler the suite and the gate passed with.

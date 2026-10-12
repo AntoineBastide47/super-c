@@ -864,7 +864,7 @@ fn qualified_const_arguments() {
 fn expect_one_err(label: str, src: str, needle: str) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
     if c.errors != 1 || !c.msg_has(needle) {
-        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cstr(&c.first[0]));
+        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cbuf(c.first));
     }
     assert(c.errors == 1 && c.msg_has(needle), label);
 }
@@ -2746,6 +2746,219 @@ fn index_conformance_borrows_container() {
         "v[0] read by value does not pin the Vector",
         "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    v.push(1);\n    let x = v[0];\n    v.push(2);\n    return (x + v[1]) as i32 - 3;\n}\n",
     );
+}
+
+// Two arguments of one call cannot reach the same storage when one of them is mutable: a `&mut`
+// parameter is C `restrict`, so the alias would be undefined behavior in the emitted C.
+@test
+fn one_call_arguments_do_not_alias_mutably() {
+    let pre = "fn h(a: &mut i32, b: &mut i32) i32 { *a = 1; *b = 2; return *a; }\nfn h2(a: &mut i32, b: &i32) i32 { *a = 1; return *b; }\nfn f(a: []mut i32, b: []mut i32) { a.set(0, 1); b.set(0, 2); }\nfn g<T>(a: T, b: T) {}\nstruct S<'a> { pub a: &'a mut i32, pub b: &'a mut i32 }\nstruct B { pub x: i32 }\nextend B { fn m(self: &B, o: &mut B) i32 { o.x = 1; return self.x; } }\n";
+    let mut cases = Vector::<(str, str, str)>::new();
+    cases.push(
+        (
+            "one &mut passed twice",
+            "let r = &mut v; return h(r, r);",
+            "as mutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "&mut and & of one reference",
+            "let r = &mut v; return h2(r, r);",
+            "as immutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "one &mut field passed twice",
+            "let s = S { a: &mut v, b: &mut w }; return h(s.a, s.a);",
+            "as mutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "one []mut view passed twice",
+            "let s: []mut i32 = x; f(s, s); return 0;",
+            "as mutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "one &mut passed twice to a generic",
+            "let r = &mut v; g(r, r); return 0;",
+            "as mutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "one &mut passed twice to a fn value",
+            "let fp = h; let r = &mut v; return fp(r, r);",
+            "as mutable while it is already borrowed as mutable"
+        ),
+    );
+    cases.push(
+        (
+            "a &mut and the receiver it reaches",
+            "let r = &mut b; return (*r).m(r);",
+            "as mutable while it is already borrowed as immutable"
+        ),
+    );
+    for i in 0..cases.len() {
+        let c = cases[i];
+        let mut src = String::from_str(pre);
+        src.push_str(
+            "fn main() i32 {\n    let mut v: i32 = 0;\n    let mut w: i32 = 0;\n    let mut x: [i32; 4] = [0; 4];\n    let mut b = B { x: 0 };\n    ",
+        );
+        src.push_str(c.1);
+        src.push_str("\n}\n");
+        h::expect_err_msg(c.0, src.as_str(), c.2);
+    }
+    let mut oks = Vector::<(str, str)>::new();
+    oks.push(("two &mut fields", "let s = S { a: &mut v, b: &mut w }; return h(s.a, s.b) - 1;"));
+    oks.push(("&mut and a raw pointer of it", "let r = &mut v; return h2(r, &w) + unsafe *(r as *mut i32) - 1;"));
+    oks.push(("one & passed twice", "let r = &v; return h2(&mut w, r) + *r;"));
+    oks.push(("one &mut in two calls", "let r = &mut v; let _ = h(r, &mut w); return h(r, &mut w) - 1;"));
+    for i in 0..oks.len() {
+        let c = oks[i];
+        let mut src = String::from_str(pre);
+        src.push_str(
+            "fn main() i32 {\n    let mut v: i32 = 0;\n    let mut w: i32 = 0;\n    let mut x: [i32; 4] = [0; 4];\n    let mut b = B { x: 0 };\n    ",
+        );
+        src.push_str(c.1);
+        src.push_str("\n}\n");
+        h::expect_ok(c.0, src.as_str());
+    }
+}
+
+// `[]mut T` is exclusive like Rust's `&mut [T]`: a plain copy moves it, a call argument reborrows it,
+// and a `&mut` or `[]mut T` stored into a field, a literal or a closure reborrows its referent for as
+// long as the holder lives. It is not `Copy`, and building or rewriting a view from raw parts needs
+// `unsafe`.
+@test
+fn mut_views_and_refs_stay_exclusive() {
+    let pre = "fn h(a: &mut i32, b: &mut i32) i32 { *a = 1; *b = 2; return *a; }\nfn f(a: []mut i32, b: []mut i32) { a.set(0, 1); b.set(0, 2); }\nfn g(a: []mut i32) { a.set(0, 7); }\nfn hc<F: fn()>(a: &mut i32, c: F) i32 { *a = 1; c(); return *a; }\nfn cp<T: Copy>(t: T) T { return t; }\nstruct S<'a> { pub a: &'a mut i32 }\nstruct V<'a> { pub s: []'a mut i32 }\n";
+    let head = "fn main() i32 {\n    let mut v: i32 = 0;\n    let mut x: [i32; 4] = [0; 4];\n    ";
+    let mut errs = Vector::<(str, str, str)>::new();
+    errs.push(
+        ("a copied []mut view moves", "let s: []mut i32 = x; let t = s; f(s, t); return 0;", "use of moved value"),
+    );
+    errs.push(
+        (
+            "a &mut in a struct literal stays borrowed",
+            "let r = &mut v; let w = S { a: r }; return h(r, w.a);",
+            "cannot use this value while it is mutably borrowed"
+        ),
+    );
+    errs.push(
+        (
+            "a &mut in a tuple stays borrowed",
+            "let r = &mut v; let t = (r, 1); return h(r, t.0);",
+            "cannot use this value while it is mutably borrowed"
+        ),
+    );
+    errs.push(
+        (
+            "a []mut view in a field stays borrowed",
+            "let s: []mut i32 = x; let w = V { s: s }; f(s, w.s); return 0;",
+            "cannot use this value while it is mutably borrowed"
+        ),
+    );
+    errs.push(
+        (
+            "a closure capturing a &mut holds it",
+            "let r = &mut v; return hc(r, || { *r = 5; });",
+            "cannot use this value while it is mutably borrowed"
+        ),
+    );
+    errs.push(
+        (
+            "a closure returning a captured []mut holds it",
+            "let s: []mut i32 = x; let c = || s; let t = c(); f(s, t); return 0;",
+            "cannot use this value while it is mutably borrowed"
+        ),
+    );
+    errs.push(
+        ("a []mut view is not Copy", "let s: []mut i32 = x; g(cp(s)); return 0;", "does not satisfy bound 'Copy'"),
+    );
+    errs.push(
+        (
+            "a view literal needs unsafe",
+            "let p = &mut x as *mut i32; g(SliceMut::<i32> { ptr: p, len: 4 }); return 0;",
+            "building a slice view from raw parts requires an 'unsafe' block"
+        ),
+    );
+    errs.push(
+        (
+            "a view's len write needs unsafe",
+            "let mut s: []mut i32 = x; s.len = 9; return 0;",
+            "writing a field of a slice view requires an 'unsafe' block"
+        ),
+    );
+    errs.push(
+        (
+            "a view's &mut len needs unsafe",
+            "let mut s: []mut i32 = x; let l = &mut s.len; *l = 9; return 0;",
+            "writing a field of a slice view requires an 'unsafe' block"
+        ),
+    );
+    for i in 0..errs.len() {
+        let c = errs[i];
+        let mut src = String::from_str(pre);
+        src.push_str(head);
+        src.push_str(c.1);
+        src.push_str("\n}\n");
+        h::expect_err_msg(c.0, src.as_str(), c.2);
+    }
+    let mut oks = Vector::<(str, str)>::new();
+    oks.push(("a []mut view passed twice in turn", "let s: []mut i32 = x; g(s); g(s); return x[0] - 7;"));
+    oks.push(
+        (
+            "a &mut usable once its holder is dead",
+            "let r = &mut v; { let w = S { a: r }; *w.a = 3; } *r = 4; return *r - 4;"
+        ),
+    );
+    oks.push(
+        (
+            "a []mut view usable once the closure is dead",
+            "let s: []mut i32 = x; let c = || { s.set(1, 3); }; c(); s.set(2, 1); return x[1] + x[2] - 4;"
+        ),
+    );
+    oks.push(
+        (
+            "an unsafe view literal",
+            "let p = &mut x as *mut i32; g(unsafe SliceMut::<i32> { ptr: p, len: 4 }); return x[0] - 7;"
+        ),
+    );
+    oks.push(("an unsafe len write", "let mut s: []mut i32 = x; unsafe s.len = 2; return s.len as i32 - 2;"));
+    oks.push(("a view's len is Copy", "let s: []mut i32 = x; return cp(s.len) as i32 - 4;"));
+    for i in 0..oks.len() {
+        let c = oks[i];
+        let mut src = String::from_str(pre);
+        src.push_str(head);
+        src.push_str(c.1);
+        src.push_str("\n}\n");
+        h::expect_ok(c.0, src.as_str());
+    }
+}
+
+// A std function that turns a raw pointer into a view or reads through one is `unsafe fn`: the caller
+// promises what it cannot check.
+@test
+fn raw_pointer_constructors_need_unsafe() {
+    let head = "fn main() i32 {\n    let a: [u8; 2] = [104, 105];\n    let p = &a as *const u8;\n    ";
+    let mut errs = Vector::<(str, str)>::new();
+    errs.push(("str::from_raw", "let s = str::from_raw(p, 2);\n    return s.len() as i32;"));
+    errs.push(("str::from_cstr", "let s = str::from_cstr(p as *const char);\n    return s.len() as i32;"));
+    errs.push(("String::from_cstr", "let s = String::from_cstr(p as *const char);\n    return s.len() as i32;"));
+    for i in 0..errs.len() {
+        let mut src = String::from_str(head);
+        src.push_str(errs[i].1);
+        src.push_str("\n}\n");
+        h::expect_err_msg(errs[i].0, src.as_str(), "calling an unsafe function requires an 'unsafe' block");
+    }
+    let mut ok = String::from_str(head);
+    ok.push_str("let s = unsafe str::from_raw(p, 2);\n    return s.len() as i32 - 2;\n}\n");
+    h::expect_ok("an unsafe str::from_raw", ok.as_str());
 }
 
 // Two-phase borrows: a method call's `&mut self` receiver does not conflict with a shared borrow
@@ -5857,7 +6070,7 @@ fn expect_dup(label: str, src: str, at: str, first: str) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
     let note = format("= note: the first definition is here\n--> <harness>:{}", first);
     if c.errors != 1 || !c.msg_has(at) || !c.msg_has(note.as_str()) {
-        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cstr(&c.first[0]));
+        eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cbuf(c.first));
     }
     assert(c.errors == 1 && c.msg_has(at) && c.msg_has(note.as_str()), label);
 }

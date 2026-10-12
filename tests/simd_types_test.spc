@@ -202,7 +202,7 @@ fn main() i32 {
         h::STAGE_TYPECHECK,
     );
     if !c.ok() {
-        eprintln("{}", str::from_cstr(&c.first[0]));
+        eprintln("{}", str::from_cbuf(c.first));
     }
     assert(c.ok(), "alias identity");
 }

@@ -43,7 +43,7 @@ fn gen_vector_seeds() {
 fn gen_finds_planted_defect() {
     let mut m = scalar::scalar_model(4, 2);
     let mut plant = String::from_str("--cstd=");
-    plant.push_str(str::from_cstr(cli::cstd()));
+    plant.push_str(unsafe str::from_cstr(cli::cstd()));
     plant.push_str(" -DSC_ARITH_WRAP");
     m.opts.push(plant);
     let r = gen::run_seed(&mut m, 14); // seed 14 draws an overflowing case (6 reduction checks)
@@ -78,7 +78,7 @@ fn env_u64(name: str, dflt: u64) u64 {
     if v == null || unsafe *v == 0 as char {
         return dflt;
     }
-    let p = str::from_cstr(v).parse_u64();
+    let p = unsafe str::from_cstr(v).parse_u64();
     assert(p.is_some(), "a generator variable is not a number");
     return p.unwrap();
 }
@@ -97,7 +97,7 @@ fn gen_random_run() {
     let model = if only == null {
         "";
     } else {
-        str::from_cstr(only);
+        unsafe str::from_cstr(only);
     };
     eprintln("gen: {} runs from seed {}", runs, base);
     let mut failures: u64 = 0;
