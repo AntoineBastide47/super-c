@@ -84,7 +84,8 @@ job starts when its last dependency completes, every prelude component before an
 and checks its top-level items under the module's lease (one checker per module, so a
 module's side tables have one writer at a time). The serial path runs the same jobs in
 their stable order. Type inference with expected-type propagation, interface obligations,
-dispatch. Records the typed facts (per-node types, resolutions, `call_info`, `op_method`, bound calls,
+dispatch. Records the typed facts (per-node types, resolutions, `call_info`, `op_method` (the arithmetic
+operators' methods, and a comparison's `eq` or `cmp` on a struct or enum with one), bound calls,
 coercion/deref chains, captures, integer pattern values) that `ast::facts` exposes read-only to
 everything downstream; a declaration's slot is written by the item that owns it, every other reader
 lowers privately. What a check may read as checked follows the static visibility rule
@@ -183,8 +184,14 @@ saturating float-to-integer cast; a float `%` emits `fmod`/`fmodf`. The checker 
 negation, so no unsigned `__sc_neg_*` exists. std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` (std's `int128.h`, not the
 generated runtime, so a released compiler building this std has it) on overflow: it
 traps, or returns under `-DSC_ARITH_WRAP` and the operator keeps the wrapped value; the IR
-interpreter intercepts it as the built-in "arithmetic overflow" trap, and `sc_has_i128` (std's
-`int128.h` probe) as 0, so 128-bit values evaluate through the limb code at compile time. The
+interpreter intercepts it as the built-in "arithmetic overflow" trap, and `sc_has_i128` and
+`sc_has_f128` (the probes of std's `int128.h` and `float128.h`) as 0, so 128-bit integers and the 64x64
+products and 2-by-1 divisions of the wide integers evaluate through the limb code at compile time,
+and so do the `Float<E, F>` formats. The interpreter reads a union through the member last written,
+or through another scalar member of its width (`f64_bits`: the bits retyped, `Interp::repun`); any
+other member is no compile-time value, so a `String` past its inline bytes (23 on a 64-bit target),
+whose union shares its length byte with the heap capacity, does not fold. Objects are reclaimed per
+constant, so a long computation (a wide float's text) can meet the memory budget. The
 interpreter also models std's `bits.h` helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
 wrapping `sc_w*64` and `sc_mulo_*64`). An integer loop step renders as `for (..; i++)` (or `i--`)
 only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (`i > e` for `--`)

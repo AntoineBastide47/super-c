@@ -269,6 +269,91 @@ fn project_paths() Vector<String> {
     return out;
 }
 
+// `lint` of `paths` from the working directory: build.toml's target settings, then the command line's.
+fn lint_project(
+    paths: &Vector<String>,
+    co: &CommonOpts,
+    bo: &BuildOpts,
+    cpu_set: cf::CpuFeatureSet,
+    std_dir: str,
+    fix: bool,
+    sc: bool,
+) i32 {
+    // The instruction set's gates and the features' rules apply as in a build: build.toml's, when
+    // there is one, then the command line's.
+    let mut lf = cpu_set;
+    let mut lerr = String::new();
+    let lm = bman::load("build.toml", false);
+    if !lm.is_none() {
+        let mut man = lm.unwrap();
+        man.arch = co.arch;
+        man.target = co.target;
+        if co.target_cpu.len() != 0 {
+            man.target_cpu = co.target_cpu.clone();
+        }
+        if !bsys::check_features(&man, co.target_features.as_str()) {
+            return 1;
+        }
+        lf = bsys::features_for(&man, bo.profile, co.target_features.as_str());
+    } else if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut lf, &mut lerr) {
+        eprintln("error: {}", lerr.as_str());
+        return 1;
+    }
+    loader::set_load_target(co.arch, cf::close(lf));
+    let mut rc = 0;
+    if lint_alt().len() != 0 {
+        // Manifest layout: every path resolves against the project root, so ALL listed paths share
+        // one closure: collect them into a single package and run the pipeline once.
+        let mut files = Vector::<String>::new();
+        let mut nested = Vector::<String>::new();
+        for k in 0..paths.len() {
+            let pa = paths.at(k).as_str();
+            if is_dir(pa) {
+                if spc_collect_in(pa, "lint", &mut files, &mut nested) != 0 {
+                    rc = 1;
+                }
+            } else {
+                files.push(String::from_str(pa));
+            }
+        }
+        // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings.
+        let mut lpub = false;
+        let mo = bman::load("build.toml", false);
+        if !mo.is_none() {
+            let man = mo.unwrap();
+            lpub = man.lib_name.len() == 0;
+        }
+        if files.len() != 0 && lint_batch(&files, ".", std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc, lpub) != 0 {
+            rc = 1;
+        }
+        // A nested project (its own build.toml) lints as from its own directory: its manifest, its
+        // imports.
+        let home = canon_cwd();
+        for k in 0..nested.len() {
+            let mut nd = nested.at(k).clone();
+            if unsafe shim::sc_chdir(nd.cstr()) != 0 {
+                eprintln("lint: cannot enter '{}'", nd.as_str());
+                rc = 1;
+                continue;
+            }
+            let np = project_paths();
+            if lint_project(&np, co, bo, cpu_set, std_dir, fix, sc) != 0 {
+                eprintln("lint: the findings above are in the project '{}'", nd.as_str());
+                rc = 1;
+            }
+            let mut hc = home.clone();
+            assert(unsafe shim::sc_chdir(hc.cstr()) == 0, "lint: cannot return to the working directory");
+        }
+    } else {
+        for k in 0..paths.len() {
+            if run_lint(paths.at(k).as_str(), std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc) != 0 {
+                rc = 1;
+            }
+        }
+    }
+    return rc;
+}
+
 // Format every .spc under `dir` (spc_collect order). Returns 1 if a directory could not be read, a
 // file failed, or (--check) a file needs formatting, else 0.
 fn fmt_dir(dir: str, write: bool, check: bool) i32 {
@@ -464,6 +549,12 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
 // Collect every .spc under `dir` recursively, in dir_entries order (dot-entries skipped). Returns 1
 // when a directory cannot be read (reported as a `cmd` error), else 0.
 fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
+    return spc_collect_in(dir, cmd, files, null);
+}
+
+// `spc_collect`; with `nested`, a subdirectory holding its own build.toml is another project: its path
+// goes to `nested` and its files are not collected (its imports resolve against itself).
+fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut Vector<String>) i32 {
     let eo = dir_entries(dir);
     if eo.is_none() {
         eprintln("{}: cannot read directory '{}'", cmd, dir);
@@ -476,7 +567,11 @@ fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
         p.push_byte(b'/');
         p.push_string(names.at(i));
         if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
-            if spc_collect(p.as_str(), cmd, files) != 0 {
+            let mut man = p.clone();
+            man.push_str("/build.toml");
+            if nested != null && unsafe shim::sc_stat_isdir(man.cstr()) == 0 {
+                unsafe (*nested).push(p);
+            } else if spc_collect_in(p.as_str(), cmd, files, nested) != 0 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
@@ -849,6 +944,8 @@ fn main(argv: Vector<str>) i32 {
     }
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
+    let mut proj_dir = ""; // `build <dir>`, `release <dir>`: the project of that directory
+    let mut out_abs = String::new(); // a relative -o of `build <dir>`, from the caller's directory
     let mut bg_link = ""; // bindgen: --link=NAME, the library the bindings need on the link line
     let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
     let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
@@ -962,6 +1059,10 @@ fn main(argv: Vector<str>) i32 {
             // table belongs to a manifest profile and builds nothing.
             if transpiler.len() != 0 && file.len() != 0 || print_probes && (file.len() != 0 || out_bin.len() != 0) {
                 co.bad = true;
+            }
+            if file.len() != 0 && is_dir(file) {
+                proj_dir = file;
+                file = "";
             }
             if file.len() != 0 && out_bin.len() == 0 {
                 out_bin = "a.out";
@@ -1170,6 +1271,21 @@ fn main(argv: Vector<str>) i32 {
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0) {
         co.bad = true;
     }
+    // `build <dir>` and `release <dir>`: the project of that directory, as from inside it; a relative -o
+    // still names a path from here.
+    if proj_dir.len() != 0 {
+        if out_bin.len() != 0 && !out_bin.starts_with("/") {
+            out_abs = canon_cwd();
+            out_abs.push_byte(b'/');
+            out_abs.push_str(out_bin);
+            out_bin = out_abs.as_str();
+        }
+        let mut d = String::from_str(proj_dir);
+        if unsafe shim::sc_chdir(d.cstr()) != 0 {
+            eprintln("error: cannot enter '{}'", proj_dir);
+            return 1;
+        }
+    }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml.
     let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
     // Cargo-style manifest discovery: a manifest command run from a subdirectory walks up to the
@@ -1322,78 +1438,7 @@ OPTIONS:
         return 1;
     }
     if mode == Mode::MODE_LINT {
-        // The instruction set's gates and the features' rules apply as in a build: build.toml's, when
-        // there is one, then the command line's.
-        let mut lf = cpu_set;
-        let mut lerr = String::new();
-        let lm = bman::load("build.toml", false);
-        if !lm.is_none() {
-            let mut man = lm.unwrap();
-            man.arch = co.arch;
-            man.target = co.target;
-            if co.target_cpu.len() != 0 {
-                man.target_cpu = co.target_cpu.clone();
-            }
-            if !bsys::check_features(&man, co.target_features.as_str()) {
-                return 1;
-            }
-            lf = bsys::features_for(&man, bo.profile, co.target_features.as_str());
-        } else if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut lf, &mut lerr) {
-            eprintln("error: {}", lerr.as_str());
-            return 1;
-        }
-        loader::set_load_target(co.arch, cf::close(lf));
-        let mut rc = 0;
-        if lint_alt().len() != 0 {
-            // Manifest layout: every path resolves against the project root, so ALL listed paths share
-            // one closure: collect them into a single package and run the pipeline once.
-            let mut files = Vector::<String>::new();
-            for k in 0..paths.len() {
-                let pa = paths.at(k).as_str();
-                if is_dir(pa) {
-                    if spc_collect(pa, "lint", &mut files) != 0 {
-                        rc = 1;
-                    }
-                } else {
-                    files.push(String::from_str(pa));
-                }
-            }
-            // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings.
-            let mut lpub = false;
-            let mo = bman::load("build.toml", false);
-            if !mo.is_none() {
-                let man = mo.unwrap();
-                lpub = man.lib_name.len() == 0;
-            }
-            if files.len() != 0 && lint_batch(
-                &files,
-                ".",
-                std_dir.as_str(),
-                co.ce_steps,
-                co.ce_mem,
-                co.target,
-                lint_fix,
-                lint_sc,
-                lpub,
-            ) != 0 {
-                rc = 1;
-            }
-        } else {
-            for k in 0..paths.len() {
-                if run_lint(
-                    paths.at(k).as_str(),
-                    std_dir.as_str(),
-                    co.ce_steps,
-                    co.ce_mem,
-                    co.target,
-                    lint_fix,
-                    lint_sc,
-                ) != 0 {
-                    rc = 1;
-                }
-            }
-        }
-        return rc;
+        return lint_project(&paths, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
     }
     if emit_sub.len() != 0 {
         // The transpile form works from the project directory, as the engine that runs it does.
@@ -1528,8 +1573,11 @@ OPTIONS:
                 rc = bsys::manifest_run_bin(&man, bo.profile, out_bin, bo.bin_sel, &cx);
             } else if print_probes {
                 rc = bsys::manifest_print_probes(&man, bo.profile, &cx);
+            } else if out_bin.len() != 0 && bo.lib_sel {
+                eprintln("error: -o names one binary; --lib builds the library targets");
+                rc = 1;
             } else if out_bin.len() != 0 {
-                rc = bsys::manifest_build(&man, bo.profile, out_bin, &cx);
+                rc = bsys::manifest_build(&man, bo.profile, out_bin, bo.bin_sel, &cx);
             } else {
                 rc = bsys::manifest_build_all(&man, bo.profile, bo.bin_sel, bo.lib_sel, &cx);
             }

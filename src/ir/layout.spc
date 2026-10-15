@@ -329,6 +329,12 @@ extend Svc {
             }
             return Layout { ok: false };
         }
+        if y.kind == TypeKind::TYPE_FUNCTION && self.has_ast(y.module) {
+            let cf = self.a(y.module).closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).ncaps != 0 {
+                return self.env_layout(y.module, cf, depth);
+            }
+        }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION {
             let w = self.tgt().ptr;
             return Layout { ok: true, size: w, align: w };
@@ -425,6 +431,34 @@ extend Svc {
             return self.aggregate_layout(it.module, it.decl, &frame, depth + 1);
         }
         return Layout { ok: false };
+    }
+
+    // A closure with captures is its env struct, by value (`Mangler::env_field`): a field per capture
+    // of nonzero size, a pointer for one the body mutates or borrows; one byte when every capture is
+    // zero-sized.
+    fn env_layout(self: &mut Self, m: ModuleId, cf: *const ClosureFact, depth: i32) Layout {
+        let w = self.tgt().ptr;
+        let caps = self.a(m).caps_of(cf);
+        let mut size: u64 = 0;
+        let mut align: u64 = 1;
+        for k in 0..unsafe (&*cf).ncaps {
+            let mut fl = self.layout_of(m, unsafe caps[k as usize].ty, null, depth + 1);
+            if !fl.ok {
+                return fl;
+            }
+            if fl.size == 0 {
+                continue;
+            }
+            if ((unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps) >> k as u64 & 1u64) != 0 {
+                fl = Layout { ok: true, size: w, align: w };
+            }
+            size = round_up(size, fl.align) + fl.size;
+            align = align.max(fl.align);
+        }
+        if size == 0 {
+            return Layout { ok: true, size: 1, align: 1 };
+        }
+        return Layout { ok: true, size: round_up(size, align), align: align };
     }
 
     // Accumulate the member typed by annotation `tn` into `acc`; false = unfoldable.

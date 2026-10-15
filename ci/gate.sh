@@ -13,14 +13,16 @@
 #   5. every built-in profile other than dev (which every build above produced) builds the compiler.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
 # `sh ci/gate.sh --no-check` skips step 1 (CI, after its own build and test steps); `--core` also skips
-# step 5: check.sh runs it last, over the compiler its bootstrap step installed.
+# step 5: check.sh runs it last, over the compiler its bootstrap step installed. `--profiles` runs steps 0
+# and 5 alone, with the installed compiler building each profile: CI runs it in a job of its own beside
+# `--core`, whose fixpoint proves the two generations emit the same C.
 set -eu
 cd "$(dirname "$0")/.."
 . ci/contract.sh
 mode=${1:-}
 case "$mode" in
-"" | --no-check | --core) ;;
-*) printf 'usage: sh ci/gate.sh [--no-check | --core]\n' >&2; exit 2 ;;
+"" | --no-check | --core | --profiles) ;;
+*) printf 'usage: sh ci/gate.sh [--no-check | --core | --profiles]\n' >&2; exit 2 ;;
 esac
 
 step() { printf '\ngate: %s\n' "$1"; }
@@ -65,6 +67,21 @@ mkdir -p "$tree"
 cp -R src std ffi build.toml "$tree/"
 rm -rf "$tree/src/build"
 cp "$CONTRACT_BIN$x" "$tree/super-c$x"
+
+# Step 5: every built-in profile but dev builds the compiler, each with builder $1 (in the tree).
+profiles() {
+    step "profiles ($CONTRACT_PROFILES)"
+    for p in $CONTRACT_PROFILES; do
+        ( cd "$tree" && SC_LEAK_CHECK=fatal "./$1" build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c$x" ${cstd:+"$cstd"} >/dev/null ) || fail "profile $p"
+        echo "gate: profile $p builds"
+    done
+}
+
+if [ "$mode" = --profiles ]; then
+    profiles "super-c$x"
+    printf '\ngate: OK (contract v%s, profiles)\n' "$CONTRACT_VERSION"
+    exit 0
+fi
 
 # Byte comparison of two emitted trees, minus the accepted nondeterminism.
 same_tree() {
@@ -137,10 +154,6 @@ if [ "$mode" = --core ]; then
     exit 0
 fi
 
-step "profiles ($CONTRACT_PROFILES)"
-for p in $CONTRACT_PROFILES; do
-    ( cd "$tree" && SC_LEAK_CHECK=fatal "./gen2-super-c$x" build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c$x" ${cstd:+"$cstd"} >/dev/null ) || fail "profile $p"
-    echo "gate: profile $p builds"
-done
+profiles "gen2-super-c$x"
 
 printf '\ngate: OK (contract v%s)\n' "$CONTRACT_VERSION"

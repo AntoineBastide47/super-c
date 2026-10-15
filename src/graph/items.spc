@@ -540,8 +540,14 @@ pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
         if self_t[(e >> 32) as usize] == t as u32 {
             continue;
         }
+        // A prelude item never reaches a method of an extend outside the prelude (it cannot name one,
+        // and such an extend adds only new names), and every prelude component completes before any
+        // other starts (the type check's gate): no edge.
+        let pre = p.modules.at(p.idx.items.at((e >> 32) as usize).module as usize).prelude;
         for k in xoff[t] as usize..xoff[t + 1] as usize {
-            all.push(e & 0xFFFFFFFF00000000u64 | xtgt[k] as u64);
+            if !pre || p.modules.at(p.idx.items.at(xtgt[k] as usize).module as usize).prelude {
+                all.push(e & 0xFFFFFFFF00000000u64 | xtgt[k] as u64);
+            }
         }
     }
     for i in 0..n {

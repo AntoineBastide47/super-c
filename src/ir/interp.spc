@@ -652,6 +652,14 @@ pub struct Interp {
     pub slot_cap: u64, // slot capacity the object store holds, live and retained
     pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
     pub failed: bool,
+    // `read_place`/`write_place` admit a scalar union member other than the active one (`pun_ok`);
+    // `resolve_place` then reports the member asked for (`pun_slot`, -1 for none) and resolves to the
+    // active one.
+    pub pun_ok: bool,
+    pub pun_slot: i64,
+    // The object a place's last projection dereferences through its handle (`*self` of an aggregate):
+    // `write_place` replaces that object's contents, which every alias of it names. 0 for none.
+    pub deref_obj: u32,
     pub trap: str<'static>,
     pub trap_kind: u8,
     pub trap_steps: u32,
@@ -774,6 +782,9 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         slot_cap: 0,
         zcell: 0,
         failed: false,
+        pun_ok: false,
+        pun_slot: -1,
+        deref_obj: 0,
         trap: "",
         trap_kind: IT_TRAP_NONE,
         trap_steps: 0,
@@ -1383,6 +1394,27 @@ extend Interp {
             }
             return self.ground_i(rm, rt, dm, out, depth + 1);
         }
+        if y.kind == TypeKind::TYPE_CONST_EXPR {
+            // A const-generic expression argument (`UInt<{1 + E + F}>`): its form over the frame's
+            // bindings, folded to the value.
+            let l = *a.const_lin_at(y.as_data.inst);
+            let mut sum = l.k;
+            let mut v = i128::zero();
+            for i in 0..l.n {
+                if !self.cparam_val(unsafe l.p[i as usize], 0, NODE_NONE, 0, null, null, &mut v) || !lin_acc(
+                    &mut sum,
+                    unsafe l.c[i as usize],
+                    v,
+                ) {
+                    return false;
+                }
+            }
+            if !l.finish(sum, lay::target_for(self.p().arch).ptr == 4, &mut v) {
+                return false;
+            }
+            *out = unsafe (*da).const_value(cval_bits(v), l.to);
+            return true;
+        }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
             let mut e = TYPE_NONE;
             if !self.ground_i(m, y.as_data.elem, dm, &mut e, depth + 1) {
@@ -1391,6 +1423,22 @@ extend Interp {
             let mut nt = y;
             nt.as_data.elem = e;
             *out = unsafe (*da).intern_type(nt);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            // `[T; N]`: the element and the length type both through the frame.
+            let mut e = TYPE_NONE;
+            let mut lt = TYPE_NONE;
+            if !self.ground_i(m, y.as_data.arr.elem, dm, &mut e, depth + 1) || !self.ground_i(
+                m,
+                y.as_data.arr.len,
+                dm,
+                &mut lt,
+                depth + 1,
+            ) {
+                return false;
+            }
+            *out = unsafe (*da).intern_array(TypeKind::TYPE_ARRAY, e, lt);
             return true;
         }
         if y.kind == TypeKind::TYPE_INSTANCE || y.is_vec() || y.kind == TypeKind::TYPE_ASSOC || y.kind == TypeKind::TYPE_DYN && a.instance(
@@ -1897,6 +1945,12 @@ extend Interp {
                 let mut gt = TYPE_NONE;
                 if !self.rty(m, unsafe it.args[i as usize], &mut gm, &mut gt) {
                     return false;
+                }
+                // An argument built from the frame's parameters (`UInt<{1 + E + F}>`) grounds through
+                // them; one that does not ground stays symbolic.
+                let mut g = TYPE_NONE;
+                if !(unsafe &*self.p().module_ast_const(gm)).type_concrete(gt) && self.ground_i(gm, gt, gm, &mut g, 0) {
+                    gt = g;
                 }
                 unsafe am[i as usize] = gm;
                 unsafe at[i as usize] = gt;
@@ -2586,8 +2640,18 @@ extend Interp {
             if !self.rty(b.module, b.targ_pool[(start + i) as usize], &mut am2, &mut at2) {
                 return false;
             }
-            let ta = unsafe &*self.p().module_ast_const(am2);
-            if !ta.type_concrete(at2) || self.ty_no_const(am2, at2, 0) {
+            // A type the caller builds from its own parameters (`UInt::<{F + 8}>`) grounds through
+            // the caller's frame, which is still the active one here.
+            if !(unsafe &*self.p().module_ast_const(am2)).type_concrete(at2) && !self.ground_i(
+                am2,
+                at2,
+                am2,
+                &mut at2,
+                0,
+            ) {
+                return false;
+            }
+            if self.ty_no_const(am2, at2, 0) {
                 return false;
             }
             if !self.subst_add(binds, fm, unsafe ids[i as usize], am2, at2) {
@@ -2902,11 +2966,13 @@ extend Interp {
                 if xgens.len != 0 {
                     // the receiver's instance binds the extend parameters; a receiver-less
                     // associated call binds them from the leading type arguments, or (like the
-                    // emitter's symbol resolution) from the DESTINATION type
+                    // emitter's symbol resolution) from the DESTINATION type. A first argument is
+                    // the receiver only for a `self` parameter: `H::<13>::conv(&v)` with `v: H<11>`
+                    // is H<13>'s.
                     let mut bound = false;
                     if t.recv != TYPE_NONE {
                         bound = self.bind_extend_from(&mut binds, b.module, t.recv, fm, ext);
-                    } else if t.args_len != 0 {
+                    } else if t.args_len != 0 && self.takes_self(fm, fnode) {
                         let rty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
                         bound = self.bind_extend_from(&mut binds, b.module, rty, fm, ext);
                     }
@@ -2915,7 +2981,9 @@ extend Interp {
                         bound = dty != TYPE_NONE && self.bind_extend_from(&mut binds, b.module, dty, fm, ext);
                     }
                     if !bound {
-                        if t.targs_len < xgens.len {
+                        // The leading type arguments are the extend's only ahead of the function's own.
+                        let own = (unsafe &*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.generics.len;
+                        if t.targs_len < xgens.len + own {
                             return self.fail();
                         }
                         if !self.bind_targs(&mut binds, b, t.targs_start, fm, xa.list(xgens), xgens.len) {
@@ -3193,8 +3261,9 @@ extend Interp {
         } else if self.span_is(fm, nm, "sc_int_div_zero") {
             self.it_trap(IT_TRAP_UB_DIV_ZERO, "division by zero");
             return false;
-        } else if self.span_is(fm, nm, "sc_has_i128") {
-            // std/int128.h: the limb code gives the native path's results, so compile time runs it.
+        } else if self.span_is(fm, nm, "sc_has_i128") || self.span_is(fm, nm, "sc_has_f128") {
+            // std/int128.h, std/float128.h: the limb code gives the native path's results, so compile
+            // time runs it.
             out = iv_int(b.module, rt, 0);
         } else if self.wrap_name(fm, nm) {
             // std/bits.h wrapping arithmetic: C's unsigned operators modulo 2^64.
@@ -4471,7 +4540,11 @@ extend Interp {
             }
             if pj.kind == ir::PJ_DEREF {
                 if cur.kind == IV_OBJ {
-                    continue; // an aggregate handle IS its referent (object ids alias like refs)
+                    // an aggregate handle IS its referent (object ids alias like refs)
+                    if i + 1 == pl.proj_len {
+                        self.deref_obj = cur.i as u32;
+                    }
+                    continue;
                 }
                 // the UB ladder, WITHOUT requiring the target initialized (a store through the
                 // pointer addresses uninitialized storage legitimately)
@@ -4610,9 +4683,16 @@ extend Interp {
                 return false;
             }
             // a union read through a member other than the one written is refused; the write
-            // path re-marks the active member after resolution
+            // path re-marks the active member after resolution. A plain read or write of a scalar
+            // member while another scalar is active (`f64_bits`) resolves to the active one, the
+            // member asked for in `pun_slot`, and the caller retypes the bits.
             if is_union && unsafe (*op).uactive >= 0 && unsafe (*op).uactive != base_slot as i32 {
-                return self.fail();
+                let av = unsafe (*op).slots[(unsafe (*op).uactive) as usize];
+                if !self.pun_ok || i + 1 != pl.proj_len || av.kind != IV_INT && av.kind != IV_FLOAT {
+                    return self.fail();
+                }
+                self.pun_slot = base_slot;
+                base_slot = unsafe (*op).uactive;
             }
             *obj = id;
             *slot = base_slot as u32;
@@ -4648,22 +4728,74 @@ extend Interp {
     fn read_place(self: &mut Self, b: &ir::CoreBody, env: u32, pid: ir::PlaceId) IVal {
         let mut obj: u32 = 0;
         let mut slot: u32 = 0;
-        if !self.resolve_place(b, env, pid, &mut obj, &mut slot) {
+        self.pun_ok = true;
+        self.pun_slot = -1;
+        let ok = self.resolve_place(b, env, pid, &mut obj, &mut slot);
+        self.pun_ok = false;
+        if !ok {
             return none();
         }
-        return unsafe (*self.obj_ptr(obj)).slots[slot as usize];
+        let v = unsafe (*self.obj_ptr(obj)).slots[slot as usize];
+        if self.pun_slot < 0 {
+            return v;
+        }
+        return self.repun(v, b.module, b.places.at(pid as usize).ty);
+    }
+
+    // Scalar `v` of the active union member read as `(m, t)`, another member of its width: its bits
+    // retyped (an f64 as a u64, a u32 as an f32). A width that differs is no compile-time value.
+    fn repun(self: &mut Self, v: IVal, m: ModuleId, t: TypeId) IVal {
+        let mut sb = BuiltinType::BT_COUNT;
+        let mut db = BuiltinType::BT_COUNT;
+        if !self.bt_of(v.tm, v.ty, &mut sb) || !self.bt_of(m, t, &mut db) {
+            return self.bail();
+        }
+        let pw = self.pw();
+        // `bt_bits` measures the integers; an f32 is 32 bits, an f64 64.
+        let ws = pick(sb == BuiltinType::BT_F32, 32, bt_bits(sb, pw));
+        let wd = pick(db == BuiltinType::BT_F32, 32, bt_bits(db, pw));
+        if ws != wd {
+            return self.bail();
+        }
+        return Interp::bits_lane(Interp::lane_bits(v, sb, pw), db, m, t, pw);
     }
 
     fn write_place(self: &mut Self, b: &ir::CoreBody, env: u32, pid: ir::PlaceId, v0: IVal) {
         let v = self.maybe_slice_wrap(b.module, b.places.at(pid as usize).ty, v0);
         let mut obj: u32 = 0;
         let mut slot: u32 = 0;
-        if !self.resolve_place(b, env, pid, &mut obj, &mut slot) {
+        self.pun_ok = true;
+        self.pun_slot = -1;
+        self.deref_obj = 0;
+        let ok = self.resolve_place(b, env, pid, &mut obj, &mut slot);
+        self.pun_ok = false;
+        let target = self.deref_obj;
+        self.deref_obj = 0;
+        if !ok {
             return;
+        }
+        if self.pun_slot >= 0 {
+            // A write through another scalar member makes that member the active one.
+            slot = self.pun_slot as u32;
         }
         let cv = self.obj_clone(v, 0);
         if v.kind != IV_NONE && cv.kind == IV_NONE {
             self.failed = true;
+            return;
+        }
+        if target != 0 && cv.kind == IV_OBJ && cv.i as u32 != target {
+            // `*r = v` through an aggregate handle: the referent takes v's contents in place, so
+            // the caller's binding the handle aliases sees them.
+            let dst = self.obj_ptr(target);
+            let src = self.obj_ptr(cv.i as u32);
+            if dst == null || src == null || unsafe (*dst).slots.len() != unsafe (*src).slots.len() {
+                self.failed = true;
+                return;
+            }
+            for k in 0..unsafe (*src).slots.len() {
+                unsafe (*dst).slots.set(k, unsafe (*src).slots[k]);
+            }
+            unsafe (*dst).uactive = unsafe (*src).uactive;
             return;
         }
         let op = self.obj_ptr(obj);
@@ -4679,6 +4811,17 @@ extend Interp {
             unsafe (*op).uactive = slot as i32;
         }
         unsafe (*op).slots.set(slot as usize, cv);
+    }
+
+    // Whether function `fnode` of module `fm` declares a `self` first parameter.
+    fn takes_self(self: &Self, fm: ModuleId, fnode: NodeId) bool {
+        let fa = unsafe &*self.p().module_ast_const(fm);
+        let ps = fa.at_const(fnode).as_data.function.params;
+        if ps.len == 0 {
+            return false;
+        }
+        let p0 = fa.at_const(unsafe fa.list(ps)[0]).as_data.parameter.name;
+        return self.span_is(fm, fa.at_const(p0).as_data.name.text, "self");
     }
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
@@ -4788,6 +4931,16 @@ extend Interp {
             if v.kind == IV_OBJ && (rv.b == TokenType::Minus as u32 || rv.b == TokenType::Tilde as u32) {
                 return self.vec_rvalue(b, &rv, v, none(), none());
             }
+            let mut rm: ModuleId = 0;
+            let mut rt = TYPE_NONE;
+            if v.kind == IV_INT && self.rty(b.module, rv.target, &mut rm, &mut rt) {
+                // A mask's `!`: its N lane bits flipped, the bits above them kept 0.
+                let ty = *(unsafe &*self.p().module_ast_const(rm)).type_at(rt);
+                if ty.kind == TypeKind::TYPE_MASK {
+                    let n = self.arr_count(rm, &ty, 0, NODE_NONE, 0, null, null) as u64;
+                    return iv_int(b.module, rv.target, (~(v.i as u64) & ~0u64 >> 64 - n) as i64);
+                }
+            }
             return self.unary(v, rv.b as u8, b.module, rv.target);
         }
         if rv.kind == ir::RV_SIMD {
@@ -4817,8 +4970,11 @@ extend Interp {
                 if cv.kind != IV_OBJ {
                     return self.bail();
                 }
-                self.vec_tag(cv.i as u32, b.module, rv.target);
-                return IVal { kind: cv.kind, tm: b.module, ty: rv.target, i: cv.i, f: 0.0 };
+                // The type grounded in the frame (`Simd<u64, 2>::to_array` gives a `[u64; 2]`, not the
+                // template's `[T; N]`): a constant spells its C type from it.
+                let tt = self.vty(b, rv.target);
+                self.vec_tag(cv.i as u32, b.module, tt);
+                return IVal { kind: cv.kind, tm: b.module, ty: tt, i: cv.i, f: 0.0 };
             }
             if rv.b == ir::CAST_MASK_BITS {
                 // The mask's storage integer either way: `u64`, or the lane bits truncated to it.

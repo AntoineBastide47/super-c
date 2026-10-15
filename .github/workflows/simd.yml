@@ -77,3 +77,8 @@ jobs:
           name: simd-baseline-${{ matrix.target }}
           path: bench/simd_baseline/*.tsv
           if-no-files-found: error
+
+      - uses: ./.github/actions/ccache-save
+        with:
+          cache: ccache-${{ matrix.target }}-build
+          sha: ${{ github.sha }}

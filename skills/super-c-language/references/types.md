@@ -65,8 +65,10 @@ unary `-` and parentheses) is computed in one type, at compile time and at run t
   `-9223372036854775808` are the `i64` minimum, `-2147483648` the `i32` one; a negated suffixed
   literal reaches its type's minimum too (`-128i8`, `-9223372036854775808i64`). Library integers (`Int<N>`, `UInt<N>`) are never
   selected; a declared one converts the builtin result.
-- A float expression is `f32`, or `f64` when a step passes the f32 range (`1e39`, `1e30 * 1e10`); past
-  the f64 range, or past a declared or suffixed type's, it is an error ("float literal is out of
+- A float expression is `f32`, or `f64` when a step passes the f32 range (`1e39`, `1e30 * 1e10`), at
+  either end: a nonzero value that rounds to 0 in f32 is past it too (`1e-50`, `0x1p-1030`,
+  `1e-30 * 1e-30`); past the f64 range, or past a declared or suffixed type's (`let x: f32 = 1e-50;`,
+  `1e-50f32`), it is an error ("float literal is out of
   range for 'f32'", "float constant expression is out of range for 'f32'", "float literal does not
   fit in its suffixed type").
 - An integer literal never becomes a float and a float literal never an integer (Rust's rule):

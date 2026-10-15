@@ -34,6 +34,7 @@ pub const F_NEON: usize = 3;
 pub const F_DOTPROD: usize = 5;
 pub const F_SVE: usize = 14;
 pub const F_SVE2: usize = 15;
+pub const F_AVX: usize = 23;
 pub const F_AVX512F: usize = 31;
 
 const NONE: CpuFeatureSet = CpuFeatureSet { w: [0, 0] };

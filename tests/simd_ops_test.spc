@@ -131,6 +131,48 @@ fn comparison_reads_match() {
     sweep([124, 125]);
 }
 
+// Masks read by several `choose`s, combined by every mask operator and copied; `big & lt` and `both`
+// are also read as bits.
+const LANE_MASKS: str = M"(import std::simd;
+@c.noinline
+fn mix(a: f32x8, b: f32x8) f32x8 {
+    let lt = a.less_than(b);
+    let big = a.greater_than(f32x8::splat(10.0));
+    let both = lt & !big;
+    let either = lt | big;
+    let odd = both ^ either;
+    let same = lt;
+    let mut r = simd::choose(both, a, b) + simd::choose(either, b, a) + simd::choose(odd, a * 2.0, b) + simd::choose(
+        same,
+        a,
+        f32x8::splat(1.0),
+    );
+    if (big & lt).any() {
+        r = r * 2.0;
+    }
+    if both.count() == 3 {
+        r = r + 1.0;
+    }
+    return r;
+}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as f32;
+    let a = f32x8::from_array([k, 12.0, -3.0, 5.0, 20.0, 0.5, 7.0, 11.0]);
+    let b = f32x8::from_array([2.0, 15.0, -4.0, 9.0, 1.0, 0.25, 8.0, 30.0]);
+    let r = mix(a, b) + mix(b, a);
+    for i in 0..8 {
+        println("{}", r[i]);
+    }
+    return 0;
+}
+)";
+
+@test
+fn masks_read_several_times_stay_lane_masks() {
+    h::expect_c_absent("no mask converts to lanes", LANE_MASKS, "mask_to_lanes");
+    h::expect_same_output("lane masks and the lane loop", LANE_MASKS, ["SC_SIMD_SCALAR=1"], []);
+}
+
 @test
 fn operator_misuse_is_diagnosed() {
     let main = "\nfn main() i32 {\n    return 0;\n}\n";

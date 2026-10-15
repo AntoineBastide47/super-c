@@ -117,8 +117,11 @@ with `SwizzleOrZero` and a byte-index table emitted at the site, stores whole ch
 free element, and restores the elements after the last written one, read first
 (`compress_store_planned`; the slice is borrowed alone). A comparison is `CmpXxLanes` then:
 
-- lane-mask temporaries `__sc_ml<local>_<chunk>` when its one read is a `choose` in the same block
-  (`lane_only`, through one whole copy: `ml_alias`); the `choose` reads them with `ChooseLanes`.
+- lane-mask temporaries `__sc_ml<local>_<chunk>` when its one read is a `choose` later in the same
+  block or in a block a chain of calls and gotos alone reaches, each step's successor (past empty
+  gotos) with one predecessor among the blocks reachable from the entry (`straight`, over the body's
+  `CFlow`: an inlined body leaves dead blocks), through one whole copy (`lane_only`, `ml_alias`); the `choose` reads them with
+  `ChooseLanes`.
   A `choose` of narrower lanes takes them narrowed by the truncating `Cast` entries, a pair of
   chunks into one per step (`narrow_plan`, `emit_narrow`);
 - the lane count when its one read, through whole copies and a cast to `u64`, is `count`'s
@@ -131,6 +134,16 @@ free element, and restores the elements after the last written one, read first
   writes a value the test reads the same (1 or 0, the bits or 0);
 - else `LanesToMask` per chunk, the bits shifted into place.
 
+A mask local defined once, by such a comparison, by a mask operator over such locals or by a whole
+copy of one, whose definition dominates every read, lives in lane-mask temporaries too when at
+least one read takes lanes: a `choose` of its chunking, or such an operator or copy (`lf_scan`,
+`ml_lf`, a fixpoint bounded at 64 rounds). Its temps declare up front with the locals; an operator
+calls the lane type's `And`, `Or`, `Xor` or `Not` entry over its operands' temps (`emit_lf_op`); a
+copy reads its root's temps; a local also read otherwise keeps its bits, `LanesToMask` per chunk
+after its definition (`lf_bits`). `Mask<N>`'s `&`, `|`, `^` and `!` are the `simd.and` ..
+`simd.not` intrinsics, an RV_BINARY or RV_UNARY over masks: over bits, C's operator on the storage
+integer, `!` masked to the N lanes.
+
 Where the set has the mask-bit forms (AVX-512), a comparison calls `CmpEq` .. `CmpGe` and a
 `choose` calls `Choose` instead of the lane-mask forms. A gather or scatter with a `Gather` or
 `Scatter` entry calls it after the index check (the inactive lanes keep the fallback); a
@@ -140,11 +153,14 @@ preferred width when none within it exists). A function's C definition and each 
 of their features beyond the build's (`cemit_fn_attrs`, `push_target_attr`).
 
 A comparison in lane-mask temporaries (`ml_lanes`), and the copy its `choose` reads, declare no
-variable. A split reads and writes 16-byte chunks in place (`v.c[k]`); only a raw form whose
-pointer may address an address-taken vector (`vec_addr_taken`) copies its vectors first. A
-split reduction is one expression over the chunks; a narrowing passes each pair of chunks as a
-compound literal of the wider vector's `c`; pointers, masks, scalars, names and literals are
-spelled at each use, an operand expression bound once.
+variable. A split reads and writes 16-byte chunks in place (`v.c[k]`) where the vector names them
+(`Mangler::vec_chunked`: wider than the build's widest register, `vec_reg_bytes`); only a raw form
+whose pointer may address an address-taken vector (`vec_addr_taken`) copies its vectors first, and
+a vector held in one C vector (`vec_def`) is copied out to chunks and back. A split reduction is
+one expression over the chunks in place, else over copied chunks; a narrowing passes each pair of
+chunks as a compound literal of the wider vector's `c`, or of `__builtin_shufflevector` of their
+lanes for a C vector; pointers, masks, scalars, names and literals are spelled at each use, an
+operand expression bound once.
 
 Without entries (`simd_on` false: wasm without `simd128`, `SC_SIMD_SCALAR=1`) every
 vector statement is a lane loop, and `vec_fusion` merges each slice load or non-trapping

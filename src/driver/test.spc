@@ -833,29 +833,48 @@ static double sc_known[SC_NTESTS > 0 ? SC_NTESTS : 1];
 static int sc_index_cmp(const void *a, const void *b) {
   return strcmp(SC_TESTS[*(const int *)a].name, SC_TESTS[*(const int *)b].name);
 }
-/* Fill sc_known from `path` (-1 for a test the file does not name); 0 when the file cannot be read. */
-static int sc_read_durations(const char *path) {
-  for (int i = 0; i < SC_NTESTS; i++) sc_known[i] = -1;
-  FILE *f = path ? fopen(path, "rb") : NULL;
-  if (!f) return 0;
+/* The index of the test named `name`, or -1 when this binary does not have it. */
+static int sc_find_test(const char *name) {
   static int by_name[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  for (int i = 0; i < SC_NTESTS; i++) by_name[i] = i;
-  qsort(by_name, (size_t)SC_NTESTS, sizeof by_name[0], sc_index_cmp);
-  char line[1024];
-  while (fgets(line, sizeof line, f)) {
+  static int sorted = 0;
+  if (!sorted) {
+    for (int i = 0; i < SC_NTESTS; i++) by_name[i] = i;
+    qsort(by_name, (size_t)SC_NTESTS, sizeof by_name[0], sc_index_cmp);
+    sorted = 1;
+  }
+  int lo = 0, hi = SC_NTESTS - 1;
+  while (lo <= hi) {
+    const int mid = (lo + hi) / 2;
+    const int c = strcmp(SC_TESTS[by_name[mid]].name, name);
+    if (c == 0) return by_name[mid];
+    if (c < 0) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+/* One `<seconds>\t<name>` line of `f` split in place: the name, or NULL at the end of the file. */
+static char *sc_duration_line(FILE *f, char *line, int size, double *secs) {
+  while (fgets(line, size, f)) {
     if (line[0] == '#') continue;
     char *tab = strchr(line, '\t');
     if (!tab) continue;
     *tab = 0;
     char *name = tab + 1;
     name[strcspn(name, "\r\n")] = 0;
-    int lo = 0, hi = SC_NTESTS - 1;
-    while (lo <= hi) {
-      const int mid = (lo + hi) / 2;
-      const int c = strcmp(SC_TESTS[by_name[mid]].name, name);
-      if (c == 0) { sc_known[by_name[mid]] = atof(line); break; }
-      if (c < 0) lo = mid + 1; else hi = mid - 1;
-    }
+    *secs = atof(line);
+    return name;
+  }
+  return NULL;
+}
+/* Fill sc_known from `path` (-1 for a test the file does not name); 0 when the file cannot be read. */
+static int sc_read_durations(const char *path) {
+  for (int i = 0; i < SC_NTESTS; i++) sc_known[i] = -1;
+  FILE *f = path ? fopen(path, "rb") : NULL;
+  if (!f) return 0;
+  char line[1024];
+  double secs;
+  for (char *name; (name = sc_duration_line(f, line, sizeof line, &secs));) {
+    const int i = sc_find_test(name);
+    if (i >= 0) sc_known[i] = secs;
   }
   fclose(f);
   return 1;
@@ -913,23 +932,54 @@ static int sc_select(const char *filter, int shard, int shards, const char *weig
   return nsel;
 }
 /* Merge this run's durations into `path`: a test that ran gets its new time, one that did not keeps its
-   old one, and a name the suite no longer has is dropped. Written whole through a temp file, sorted by
-   name so the file diffs line by line. */
-static void sc_write_durations(const char *path) {
+   old one, and a name the suite no longer has is dropped. A filtered run's binary has only the files
+   with a match, so there a name the binary does not have keeps its line. Written whole through a temp
+   file, sorted by name so the file diffs line by line. */
+typedef struct {
+  char *name;
+  double secs;
+} sc_dline;
+static int sc_dline_cmp(const void *a, const void *b) {
+  return strcmp(((const sc_dline *)a)->name, ((const sc_dline *)b)->name);
+}
+static void sc_write_durations(const char *path, const char *filter) {
   sc_read_durations(path);
-  static int by_name[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  for (int i = 0; i < SC_NTESTS; i++) by_name[i] = i;
-  qsort(by_name, (size_t)SC_NTESTS, sizeof by_name[0], sc_index_cmp);
+  size_t n = 0, cap = (size_t)SC_NTESTS + 1;
+  sc_dline *d = malloc(cap * sizeof *d);
+  if (!d) { perror("malloc"); exit(101); }
+  for (int i = 0; i < SC_NTESTS; i++) {
+    const double s = sc_dur[i] >= 0 ? sc_dur[i] : sc_known[i];
+    if (s >= 0) d[n++] = (sc_dline){(char *)SC_TESTS[i].name, s};
+  }
+  FILE *in = filter ? fopen(path, "rb") : NULL;
+  if (in) {
+    char line[1024];
+    double secs;
+    for (char *name; (name = sc_duration_line(in, line, sizeof line, &secs));) {
+      if (sc_find_test(name) >= 0) continue;
+      if (n == cap) {
+        cap *= 2;
+        d = realloc(d, cap * sizeof *d);
+        if (!d) { perror("realloc"); exit(101); }
+      }
+      d[n].name = strdup(name);
+      if (!d[n].name) { perror("strdup"); exit(101); }
+      d[n++].secs = secs;
+    }
+    fclose(in);
+  }
+  qsort(d, n, sizeof *d, sc_dline_cmp);
   char tmp[4096];
   snprintf(tmp, sizeof tmp, "%s.tmp", path);
   FILE *f = fopen(tmp, "wb");
-  if (!f) { perror(tmp); return; }
-  fprintf(f, "# super-c test --test-record-durations: seconds per test, read to balance --test-shard\n");
-  for (int k = 0; k < SC_NTESTS; k++) {
-    const int i = by_name[k];
-    const double s = sc_dur[i] >= 0 ? sc_dur[i] : sc_known[i];
-    if (s >= 0) fprintf(f, "%.2f\t%s\n", s, SC_TESTS[i].name);
+  if (f) {
+    fprintf(f, "# super-c test --test-record-durations: seconds per test, read to balance --test-shard\n");
+    for (size_t k = 0; k < n; k++) fprintf(f, "%.2f\t%s\n", d[k].secs, d[k].name);
   }
+  for (size_t k = 0; k < n; k++)
+    if (sc_find_test(d[k].name) < 0) free(d[k].name);
+  free(d);
+  if (!f) { perror(tmp); return; }
   if (fclose(f) != 0) { perror(tmp); remove(tmp); return; }
   remove(path); /* rename over an existing file fails on Windows */
   if (rename(tmp, path) != 0) perror(path);
@@ -1217,7 +1267,7 @@ int main(int argc, char **argv) {
   if (genv) sc_genv_free(genv);
   if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
   sc_report_slowest();
-  if (record) sc_write_durations(record);
+  if (record) sc_write_durations(record, filter);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else
@@ -1462,7 +1512,7 @@ int main(int argc, char **argv) {
   if (genv) sc_genv_free(genv);
   if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
   sc_report_slowest();
-  if (record) sc_write_durations(record);
+  if (record) sc_write_durations(record, filter);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else

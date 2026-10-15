@@ -449,6 +449,9 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 - A constant whose type embeds a stateful allocator is "a constant cannot use the stateful
   allocator '...'". A `static mut` cannot hold an owning type (raw pointers and references are
   allowed).
+- A union reads at compile time through the member last written, or through another scalar member
+  of its width (`f64_bits`); any other member read does not fold. So a `String` folds only up to its
+  inline bytes (23 on a 64-bit target).
 - Allocation is valid at compile time. A `@no_const` type (see Attributes) is not: a `const fn`
   whose signature names one, or that fails on every path (it constructs one), is an error at
   its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
@@ -599,7 +602,7 @@ source text, values, and file:line on failure.
 | `@c.reads(p, bytes)` / `@c.writes(p, bytes)` / `@c.lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
-| `@no_const` | Struct, union or enum whose values never exist at compile time |
+| `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
 | `@intrinsic("simd.<name>")` | `std` only: a function without a body whose call is the operation the name gives (references/simd.md) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 

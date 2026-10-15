@@ -1,6 +1,7 @@
 // Vector operations at compile time: a constant's trap names the lowest failing lane as the run time
 // does, a static_assert folds vector code, a signaling NaN lane keeps its bits through the bit-preserving
-// operations, and a float lane converted to i64 saturates past 2^63 (a scalar constant too).
+// operations, a float lane converted to i64 saturates past 2^63 (a scalar constant too), a constant
+// array of lanes has the instance's array type, and a narrow mask's operators keep its lanes.
 import tests::harness as h;
 
 @test
@@ -29,6 +30,28 @@ fn main() i32 {
 }
 )";
     h::expect_exit("vector static_asserts", src, 0);
+}
+
+// The mask operators of 2- and 4-lane masks keep the bits above their lanes 0, at compile time and at
+// run time.
+@test
+fn narrow_mask_operators_keep_their_lanes() {
+    let src = M"(const fn mask_ops(x: u64) u64 {
+    let a = Mask::<4>::from_bits_truncate(x);
+    let b = Mask::<4>::from_bits_truncate(x >> 4);
+    let c = Mask::<2>::from_bits_truncate(x);
+    return (!a).to_bits() | (a & b).to_bits() << 4 | (a | b).to_bits() << 8 | (a ^ b).to_bits() << 12 | (!c).to_bits() << 16;
+}
+static_assert(mask_ops(0x5C) == 0x39D43, "mask operators");
+@c.noinline
+fn opr(x: u64) u64 {
+    return x;
+}
+fn main() i32 {
+    return (mask_ops(opr(0x5C)) != 0x39D43) as i32;
+}
+)";
+    h::expect_exit("mask operators at compile time and at run time", src, 0);
 }
 
 @test
@@ -68,5 +91,16 @@ const fn wide(x: f64) i64 {
         "the values",
         "const A: u32 = 0x7fa00001;\nconst fn f() u32 {\n    let v = Simd::<f32, 2>::from_bits(Simd::<u32, 2>::splat(A));\n    return (-v).to_bits()[0];\n}\nconst X: i64 = 1e19 as i64;\nstatic_assert(f() == 0xffa00001, \"the sign flips, the payload stays\");\nstatic_assert(X == 9223372036854775807, \"saturated\");\nfn main() i32 {\n    return 0;\n}\n",
         0,
+    );
+}
+
+// A constant computed as a vector's lanes (`to_array` in a generic body) has the array type of the
+// instance, `[u64; 2]`, not the template's `[T; N]`.
+@test
+fn a_constant_from_vector_lanes_has_the_instance_array_type() {
+    h::expect_exit(
+        "the lanes",
+        "const fn lanes() [u64; 2] {\n    return Simd::<u64, 2>::splat(6).to_array();\n}\nconst C: [u64; 2] = lanes();\nconst D: [u64; 2] = Simd::<u64, 2>::splat(1).to_array();\nfn main() i32 {\n    return (C[0] + C[1] + D[1]) as i32;\n}\n",
+        13,
     );
 }

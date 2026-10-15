@@ -266,7 +266,7 @@ extend TuEmit {
                     let csp = unsafe (*ca).caps_of(cf)[k as usize].name;
                     let mut cnm = String::new();
                     self.mg.ident(y.module, csp, &mut cnm);
-                    if !self.mg.ctype(y.module, cty, cnm.as_str(), &mut body) {
+                    if !self.mg.env_field(y.module, cty, cnm.as_str(), unsafe &*cf, k, &mut body) {
                         ok = false;
                         break;
                     }

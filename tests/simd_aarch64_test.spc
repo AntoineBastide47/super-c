@@ -766,3 +766,37 @@ fn pick_u8(c: bool, v: u8) u8 {
     return 0;
 }
 )";
+
+// A comparison bound through a chain of copies (the inlined `is_nan`'s result, then the caller's
+// temporary) still gives its `choose` the lane masks it wrote, not a never-written mask local.
+@test
+fn a_choose_through_copies_reads_lane_masks() {
+    let src = "@c.noinline\nfn canon(a: [u64; 2]) Simd<u64, 2> {\n    let x = Simd::<f64, 2>::from_bits(Simd::<u64, 2>::from_array(a));\n    let v = x.min_num(x);\n    return v.is_nan().choose(Simd::<u64, 2>::splat(1), v.to_bits());\n}\nfn main() i32 {\n    let c = canon([0xfff8000000000001, 0x3ff0000000000000]);\n    return (c[0] == 1 && c[1] == 0x3ff0000000000000) as i32;\n}\n";
+    let c = h::compile_c_arch(src, 1);
+    assert(c.ok(), "the program builds");
+    if aarch64_host() {
+        h::expect_exit("choose through copies", src, 1);
+    }
+    let b = fn_body(unsafe str::from_cstr(c.code), "main__canon");
+    assert(b.contains("__sc_ml") && !b.contains("mask_to_lanes"), "the choose reads the comparison's lane masks");
+}
+
+// A comparison whose `choose` follows after calls (`big()`, `splat(..)`: each ends its block, and an
+// inlined body leaves dead blocks beside the path) keeps its lane masks: the C neither packs them
+// into mask bits nor unpacks them again.
+@test
+fn a_choose_after_calls_reads_lane_masks() {
+    // The comparison's masks live across the call of `big`, in a later block.
+    let src = "@c.noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
+    let c = h::compile_c_arch(src, 1);
+    assert(c.ok(), "the program builds");
+    if aarch64_host() {
+        h::expect_exit("choose after calls", src, 1);
+    }
+    let b = fn_body(unsafe str::from_cstr(c.code), "main__pick");
+    assert(b.len() != 0, "pick is emitted");
+    assert(
+        !b.contains("lanes_to_mask") && !b.contains("mask_to_lanes"),
+        "no mask bits between the comparison and its choose",
+    );
+}

@@ -23,7 +23,8 @@ fn manifest_test_runs_the_tests_directory() {
 
 // The shards of `super-c test` balance by tests/durations.tsv: the longest test first, each to the shard
 // with the least recorded time (a: 10 s alone; d, b, c: 8 + 1 + 1 s). --test-record-durations merges the
-// run's times into the file: every test of the suite listed, a name the suite no longer has dropped.
+// run's times into the file: every test of the suite listed, a name the suite no longer has dropped. A
+// filtered run builds only the files with a match, so it keeps the lines of the other files.
 @test
 fn manifest_test_shards_by_duration() {
     let p = cli::proj_new();
@@ -42,13 +43,31 @@ fn manifest_test_shards_by_duration() {
     assert(s2.ok(), "shard 2 runs");
     assert(s2.out_has("running 3 tests (shard 2/2)"), "the other three");
     assert(!s2.out_has("tests::t::a ..."), "no test in both shards");
-    let r = cli::superc_env_in(root, E, "1", "test --quiet --test-record-durations");
-    assert(r.ok(), "a recording run succeeds");
+    p.mkfile("tests/u.spc", "@test\nfn e() {}\n");
+    p.mkfile(
+        "tests/durations.tsv",
+        "# weights\n10.00\ttests::t::a\n1.00\ttests::t::b\n1.00\ttests::t::c\n8.00\ttests::t::d\n3.00\ttests::t::gone\n2.00\ttests::u::e\n",
+    );
     let mut fp = String::from_str(root);
     fp.push_str("/tests/durations.tsv");
+    let rf = cli::superc_env_in(root, E, "1", "test --quiet --test-record-durations --filter=t::a");
+    assert(rf.ok(), "a filtered recording run succeeds");
+    let ff = cli::read_text(fp.as_str());
+    assert(ff.as_str().contains("\n2.00\ttests::u::e\n"), "a filtered run keeps the line of a file it did not build");
+    assert(
+        ff.as_str().contains("\n1.00\ttests::t::b\n") && !ff.as_str().contains("\n10.00\ttests::t::a\n"),
+        "only the run test changes",
+    );
+    let r = cli::superc_env_in(root, E, "1", "test --quiet --test-record-durations");
+    assert(r.ok(), "a recording run succeeds");
     let f = cli::read_text(fp.as_str());
     assert(f.as_str().starts_with("# super-c test --test-record-durations"), "the header names the writer");
-    assert(f.as_str().contains("\ttests::t::a\n") && f.as_str().contains("\ttests::t::d\n"), "every test is listed");
+    assert(
+        f.as_str().contains("\ttests::t::a\n") && f.as_str().contains("\ttests::t::d\n") && f.as_str().contains(
+            "\ttests::u::e\n",
+        ),
+        "every test is listed",
+    );
     assert(!f.as_str().contains("tests::t::gone"), "a name the suite lost is dropped");
 }
 
@@ -172,8 +191,9 @@ fn shard_parts(dir: str) i32 {
 
 // The compiler decides a module's shard count from its emitted size (about one shard per 256 KiB
 // of C), keeps the count across rebuilds, and lets a `[shards]` entry in build.toml override it: the
-// emitted tree shows it as the module's part files.
-@test
+// emitted tree shows it as the module's part files. Three builds of a large program: about 90 s in a
+// full Windows CI shard, so it takes the long timeout.
+@test(timeout = 300)
 fn shard_counts_follow_emitted_size() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");

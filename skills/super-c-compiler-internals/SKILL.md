@@ -476,11 +476,35 @@ instances share it as they share the lowering. The inliner's callees come from t
 package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
 at the start of `cemit_package` (the size gate reads `CoreBody.inline_size_ok`, recorded
 before the rewrite), and the accepted ones are copied compact; no task lowers a callee
-from syntax. A callee generic over a const parameter splices with each read of the parameter
-(and each `{N / 2}` form in its types) replaced by the bound value; a generic callee with a
-per-instantiation `static_assert` splices too, and the caller's `CoreBody.demands` keeps the
-call, whose symbol the emitter still demands so the assert runs. A multi-return call's member
-reads of its result temp (and of the temps copied from it) become reads of the return slots. The record of the migration, the analysis boundary and the validation
+from syntax. The store also vets every conformance's method (a call through its interface
+reaches it). A callee generic over a const parameter splices with each read of the parameter
+(and each `{N / 2}` form in its types) replaced by the bound value, or by a read of the caller's
+own parameter when the binding is that parameter; a switch on such a parameter then reads a
+constant and `CFlow` lays out its one arm, and a callee past the size gate with such a switch is
+sized per call by the arms its bindings take (`live_size`). A callee with a vector parameter or
+result takes four times the size limits, and a caller that holds a vector four times the splice
+budget (`VEC_SCALE`). The splice translates every type, type
+argument, receiver and interface, so an inner call to a generic, private or interface function
+spells and demands in the caller's unit; an associated function of a generic extend whose call
+names its receiver by no type stays out (`env_receiver`), and a module's constants and statics
+splice as the caller's own static references. A callee that needs either (an inner call another
+than a concrete public or header-declared extern function, or a static reference) inlines only
+into a caller that holds a vector (`CalleeInfo.vec_only`, `inl::holds_vector`): the compiler's own
+emitted C keeps its size, and vector kernels inline their helpers. A generic callee with a per-instantiation
+`static_assert` splices too, and the caller's `CoreBody.demands` keeps the call, whose symbol the
+emitter still demands so the assert runs. A multi-return call's member reads of its result temp
+(and of the temps copied from it) become reads of the return slots.
+
+A generic instance whose body holds a vector and calls an interface method through a type parameter
+has a bound variant (`driver::emit::bound_variant`, in the serial and the parallel drain alike): when, under the
+instance's bindings, the receiver's conformance by target defines the method and the store keeps it
+(`CEmit::bound_target`; not a generic interface, a keyed or blanket conformance, or a default
+body), the shared lowering is copied, grounded for the instance (`inl::ground_body`: every type
+substituted, each const-parameter read a constant, its switches folded), the call made direct, and
+the inliner run again for up to `inl::MAX_DEPTH` rounds while it inlines (`bind_calls`). The variant
+serves that demand only. A concrete body that holds a vector runs the same rounds after its own
+inlining (`cemit_seed_module`): a generic callee spliced into it brings interface calls the splice
+already translated to concrete receivers. The record of the migration, the analysis boundary and the validation
 checks is [ownership-analysis.md](references/ownership-analysis.md).
 
 ## CTFE (Compile-Time Function Evaluation)

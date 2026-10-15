@@ -118,6 +118,12 @@ pub struct CEmit {
     ml_cnt: Vector<u32>,
     ml_def: Vector<u32>,
     ml_use: Vector<u32>,
+    /// Per local: its lane-mask form beyond `lane_only` (`lf_scan`), empty without one.
+    ml_lf: Vector<LfMask>,
+    /// The program names a vector or mask type (`Package::names_vectors`): `lf_scan` has work.
+    vec_prog: bool,
+    /// The control flow of the body being emitted (`emit_body_core_o`), for `lane_only`.
+    ml_cf: *const cfl::CFlow,
     pub blk_defs: String,
     pub blk_seen: Set<u64>,
     /// Block-wrapper prototypes, one per `sh_blk_k` row (ends in `sh_blk_e2`).
@@ -372,10 +378,11 @@ extend CEmit {
         // The emitted text's type uses decide each unit's definition headers.
         mg.tn_on = true;
         let pk = unsafe &*pkg;
-        mg.vec_regs = simd_enabled(pk);
+        let simd_on = mg.vec_regs;
         return CEmit {
             pkg: pkg,
-            simd_on: simd_enabled(pk),
+            simd_on: simd_on,
+            vec_prog: pk.names_vectors(),
             no_split: false,
             fwd_spelled: 0,
             simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
@@ -2138,6 +2145,7 @@ extend CEmit {
         self.ml_cnt.clear();
         self.ml_def.clear();
         self.ml_use.clear();
+        self.ml_lf.clear();
         self.wx_on = false;
         self.sx_coal.clear();
         self.sx_nm_pool.clear();
@@ -4195,10 +4203,12 @@ extend CEmit {
 
     fn emit_body_core_o(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
         assert(self.sx_nest == 0);
+        self.ml_cf = cf;
         let dm = self.pr.start();
         self.compute_loop_inline(b, cf);
         self.compute_fusion(b, cf);
         self.compute_call_fwd(b, cf);
+        self.lf_scan(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
         // The instances of inlined calls whose per-instantiation static_asserts still run: their
         // symbols demand them, as the calls did.
@@ -4217,6 +4227,17 @@ extend CEmit {
         }
         // Every non-argument local declares up front, explicitly typed; unit locals carry no C.
         for l in 0..b.locals.len() {
+            if self.ml_lf.len() != 0 && self.ml_lf[l].state != LF_NONE && self.ml_alias[l] == ir::IR_NONE {
+                // A lane-mask local's temps (`lf_scan`), whatever its own value's spelling.
+                let f = self.ml_lf[l];
+                for k in 0..f.pl.chunks {
+                    o.push_str("  ");
+                    if !self.entry_ty(f.pl.entry, VP_RET, format("__sc_ml{}_{}", l, k).as_str(), o) {
+                        return false;
+                    }
+                    o.push_str(";\n");
+                }
+            }
             let st = b.locals.at(l).storage;
             if st == ir::LS_ARG {
                 continue;
@@ -4233,16 +4254,23 @@ extend CEmit {
                 // Single-use pure temp: inlined at its read, no declaration.
                 continue;
             }
-            let ml = if self.simd_on && b.locals.at(l).ty != TYPE_NONE && self.rty_y(b, b.locals.at(l).ty).kind == TypeKind::TYPE_MASK {
-                self.lane_only(b, l as u32);
-                pick(self.ml_alias[l] != ir::IR_NONE, self.ml_alias[l], l as u32);
+            if self.ml_lf.len() != 0 && self.ml_lf[l].state != LF_NONE {
+                // A lane-mask local (`lf_scan`): a value only when it keeps its bits.
+                if self.ml_lf[l].state == LF_LANES {
+                    continue;
+                }
             } else {
-                ir::IR_NONE;
-            };
-            let mut to = BuiltinType::BT_VOID;
-            if ml != ir::IR_NONE && self.ml_lanes(b, ml, &mut to) {
-                // A comparison in lane-mask temporaries, or the copy its `choose` reads: no value.
-                continue;
+                let ml = if self.simd_on && b.locals.at(l).ty != TYPE_NONE && self.rty_y(b, b.locals.at(l).ty).kind == TypeKind::TYPE_MASK {
+                    self.lane_only(b, l as u32);
+                    self.ml_root(l as u32);
+                } else {
+                    ir::IR_NONE;
+                };
+                let mut to = BuiltinType::BT_VOID;
+                if ml != ir::IR_NONE && self.ml_lanes(b, ml, &mut to) {
+                    // A comparison in lane-mask temporaries, or the copy its `choose` reads: no value.
+                    continue;
+                }
             }
             if *self.sx_fuse.at(l) {
                 // Declares at its initializing write instead of up front.
@@ -5806,17 +5834,8 @@ extend CEmit {
                 }
                 cmat9 += 1;
                 let cs = (*self.cap_off.at(k as usize)) as usize;
-                let mut cname = String::new();
-                let by_ptr = ((cf.mut_caps | cf.ref_caps) >> k as u64 & 1u64) != 0;
-                if (cf.ref_caps >> k as u64 & 1u64) != 0 {
-                    // Only owning aggregates (and arrays of them) are borrowed: a leading `const`
-                    // qualifies the pointee, which may be a non-`mut` (C `const`) binding.
-                    env_out.push_str("const ");
-                }
-                cname.push_str(mbe::if_s(by_ptr, "(*", ""));
-                cname.push_str(self.cap_pool.as_str().slice(cs, cs + (*self.cap_len.at(k as usize)) as usize));
-                cname.push_str(mbe::if_s(by_ptr, ")", ""));
-                if !self.mg.ctype(b.module, b.locals.at(l).ty, cname.as_str(), env_out) {
+                let cname = self.cap_pool.as_str().slice(cs, cs + (*self.cap_len.at(k as usize)) as usize);
+                if !self.mg.env_field(b.module, b.locals.at(l).ty, cname, cf, k, env_out) {
                     return self.fail("closure-cap-ty");
                 }
                 env_out.push_str("; ");
@@ -6295,12 +6314,21 @@ extend CEmit {
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_ASM as u32 {
                 return self.emit_asm_stmt(o, b, &rv0);
             }
+            let sb = b.places.at(s.place as usize).base as usize;
+            let lf = if self.ml_lf.len() != 0 && b.places.at(s.place as usize).proj_len == 0 {
+                self.ml_lf[sb].state;
+            } else {
+                LF_NONE;
+            };
+            if lf != LF_NONE && (rv0.kind == ir::RV_BINARY || rv0.kind == ir::RV_UNARY) {
+                return self.emit_lf_op(o, b, s, &rv0);
+            }
             if self.vec_rv(b, &rv0) {
                 return self.emit_vec_store(o, b, s, &rv0);
             }
-            if rv0.kind == ir::RV_USE && self.ml_chunks.len() != 0 && b.places.at(s.place as usize).proj_len == 0 && self.ml_alias[b.places.at(
-                s.place as usize,
-            ).base as usize] != ir::IR_NONE && self.ml_src(b.places.at(s.place as usize).base) != ir::IR_NONE {
+            if rv0.kind == ir::RV_USE && lf != LF_BITS && self.ml_chunks.len() != 0 && b.places.at(s.place as usize).proj_len == 0 && self.ml_alias[sb] != ir::IR_NONE && self.ml_src(
+                sb as u32,
+            ) != ir::IR_NONE {
                 // The copy of a comparison's result its `choose` reads as the comparison's lane temps.
                 return true;
             }
@@ -7865,7 +7893,8 @@ extend CEmit {
             psp[0].format_into("__sc_ml{}", self.ml_src(b.places.at(b.operands.at(ops[0] as usize).data as usize).base));
         }
         if planned && !traps {
-            return self.emit_planned(o, &vp, &psp, na, pd.as_str());
+            let pok = self.emit_planned(o, &vp, &psp, na, pd.as_str());
+            return pok && (!vp.top || self.lf_bits(o, b, place));
         }
         if planned && rv.kind == ir::RV_BINARY && self.vec_checks_planned(o, &vp, &psp, rv, n, bt, pd.as_str()) {
             return true;
@@ -8101,7 +8130,8 @@ extend CEmit {
     }
 
     // `d = <entry>(args)` for plan `vp`: one call over all the lanes, or one per chunk in lane order.
-    // A vector of 16-byte chunks is read and written in place (`v.c[k]`, `Mangler::vec_def`); another,
+    // A vector that names its 16-byte chunks is read and written in place (`v.c[k]`,
+    // `Mangler::vec_chunked`); another,
     // or any operand of a raw form, is copied out before the first call and the result back after the
     // last (the entry's own parameter and result types spell the chunks: no type is made). `sp`
     // spells the arguments (`vp.kinds`); `vp.wres`, when set, applies to each call's result and
@@ -8115,17 +8145,15 @@ extend CEmit {
             pl.entry;
         };
         let mut ok = true;
-        // In place: a vector operand or result whose chunk is 16 bytes, outside a raw form.
+        // In place: a vector operand or result that names its 16-byte chunks, outside a raw form.
+        let chunked = split && !vp.raw && self.mg.vec_chunked(pl.chunks * 16, 16);
         let mut inp: [bool; 3] = [false; 3];
         for i in 0..na {
-            unsafe inp[i as usize] = split && !vp.raw && unsafe vp.kinds[i as usize] == VK_VEC && self.entry_bytes(
-                pl.entry,
-                i,
-            ) == 16;
+            unsafe inp[i as usize] = chunked && unsafe vp.kinds[i as usize] == VK_VEC && self.entry_bytes(pl.entry, i) == 16;
         }
-        let rin = split && !vp.raw && vp.res == VR_VEC && vp.nsteps == 0 && self.entry_bytes(re, VP_RET) == 16;
-        if vp.res == VR_LANES {
-            // The comparison's lane masks outlive this statement: its `choose` follows in the block;
+        let rin = chunked && vp.res == VR_VEC && vp.nsteps == 0 && self.entry_bytes(re, VP_RET) == 16;
+        if vp.res == VR_LANES && !vp.top {
+            // The comparison's lane masks outlive this statement: its `choose` follows (`straight`);
             // narrowed, they are the last cast's chunks.
             let ne = pick(vp.nsteps > 0, unsafe vp.narrow[(vp.nsteps - pick(vp.nsteps > 0, 1u32, 0u32)) as usize], re);
             for k in 0..pl.chunks >> vp.npairs.count_ones() as u64 {
@@ -8263,22 +8291,37 @@ extend CEmit {
     }
 
     // The narrowing steps (`narrow_plan`) of the comparison calls `calls` into the temps `<d>_<k>`, one
-    // expression each: a pair of chunks is the cast's wider operand, a compound literal of its chunks.
+    // expression each: a pair of chunks is the cast's wider operand, a compound literal of its chunks
+    // (`c`), or of their lanes when it is one C vector (`Mangler::vec_chunked`).
     fn emit_narrow(self: &mut Self, o: &mut String, vp: &VPlan, d: str, calls: &mut Vector<String>) bool {
         let mut ok = true;
         for s in 0..vp.nsteps {
             let e = (unsafe vp.narrow[s as usize]) as u32;
             let pair = (vp.npairs >> s & 1) != 0;
+            let chunked = self.mg.vec_chunked(self.entry_bytes(e, 0), 16);
+            let lanes = self.p().simd_table.at(e as usize).key >> 32;
             let mut next = Vector::<String>::new();
             for j in 0..pick(pair, calls.len() / 2, calls.len()) {
                 let mut x = String::new();
                 self.entry_name(e, &mut x);
                 x.push_byte(b'(');
-                if pair {
+                if pair && chunked {
                     // The two chunks as the cast's wider operand.
                     x.push_byte(b'(');
                     ok = ok && self.entry_ty(e, 0, "", &mut x);
                     x.format_into("){{ .c = {{ {}, {} }} }}", calls.at(2 * j).as_str(), calls.at(2 * j + 1).as_str());
+                } else if pair {
+                    x.push_byte(b'(');
+                    ok = ok && self.entry_ty(e, 0, "", &mut x);
+                    x.format_into(
+                        "){{ .l = __builtin_shufflevector(({}).l, ({}).l",
+                        calls.at(2 * j).as_str(),
+                        calls.at(2 * j + 1).as_str(),
+                    );
+                    for i in 0..lanes {
+                        x.format_into(", {}", i);
+                    }
+                    x.push_str(") }");
                 } else {
                     x.push_string(calls.at(j));
                 }
@@ -8371,6 +8414,7 @@ extend CEmit {
                 }
                 self.ml_chunks.set(l as usize, ch as u32);
                 vp.res = VR_LANES;
+                vp.top = self.ml_lf.len() != 0 && self.ml_lf[l as usize].state != LF_NONE;
                 return true;
             }
             // The one read is `count`: the chunks' lane masks summed, then reduced (`count_kind`).
@@ -8399,10 +8443,8 @@ extend CEmit {
             return vp.wres >= 0;
         } else if c == ir::SIMD_CHOOSE {
             vp.pl = self.vplan(ir::OP_CHOOSE_LANES, bt, bt, n);
-            let m = *b.operands.at(ops[0] as usize);
-            if m.kind != ir::OP_CONST && b.places.at(m.data as usize).proj_len == 0 && self.ml_src(
-                b.places.at(m.data as usize).base,
-            ) != ir::IR_NONE {
+            let mb = lf_local(b, ops[0]);
+            if mb != ir::IR_NONE && self.ml_src(mb) != ir::IR_NONE && self.lf_choose(b, rv, mb) {
                 vp.kinds[0] = VK_LANES;
                 return true;
             }
@@ -8530,7 +8572,7 @@ extend CEmit {
             call.format_into("{}, {})", sp[0].as_str(), sp[1].as_str());
         } else if pl.form == sp::PF_NATIVE {
             call.format_into("{})", sp[0].as_str());
-        } else if self.entry_bytes(pl.entry, 0) == 16 {
+        } else if self.entry_bytes(pl.entry, 0) == 16 && self.mg.vec_chunked(pl.chunks * 16, 16) {
             // The chunks in place, the upper half of them onto the lower half until one is left: one
             // expression.
             let mut cn = String::new();
@@ -8579,9 +8621,21 @@ extend CEmit {
         if self.ml_chunks.len() == 0 {
             return ir::IR_NONE;
         }
-        let a = self.ml_alias[l as usize];
-        let x = pick(a != ir::IR_NONE, a, l);
+        let x = self.ml_root(l);
         return pick(self.ml_chunks[x as usize] != 0, x, ir::IR_NONE);
+    }
+
+    // The comparison result a chain of whole copies ends at from local `l` (`ml_alias`), or `l` itself.
+    fn ml_root(self: &Self, l: u32) u32 {
+        let mut x = l;
+        for _ in 0..self.ml_alias.len() {
+            let a = self.ml_alias[x as usize];
+            if a == ir::IR_NONE {
+                return x;
+            }
+            x = a;
+        }
+        return x;
     }
 
     // The statement of the one `choose` that reads mask local `l` as its mask, after the comparison
@@ -8670,25 +8724,49 @@ extend CEmit {
                     }
                 }
             }
+            let cf = unsafe &*self.ml_cf;
             for i in 0..nl {
                 let ci = self.ml_ch[i];
                 let di = self.ml_def[i];
-                if ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 || di > ci || sb[di as usize] != sb[ci as usize] {
+                if ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 || !straight(
+                    b,
+                    cf,
+                    sb[di as usize],
+                    sb[ci as usize],
+                    di,
+                    ci,
+                ) {
                     self.ml_ch.set(i, ir::IR_NONE);
                 }
             }
-            // A local whose one read is a whole copy into such a local: the copy's `choose` reads it.
-            for i in 0..nl {
-                let ci = cp[i];
-                let di = self.ml_def[i];
-                if self.ml_ch[i] != ir::IR_NONE || ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 {
-                    continue;
+            // A local whose one read is a whole copy into such a local: the copy's `choose` reads it. A
+            // chain of copies (an inlined function's result, then its binding) grows one copy a round,
+            // each alias naming the next local back (`ml_root`).
+            for _ in 0..nl {
+                let mut grew = false;
+                for i in 0..nl {
+                    let ci = cp[i];
+                    let di = self.ml_def[i];
+                    if self.ml_ch[i] != ir::IR_NONE || ci == ir::IR_NONE || self.ml_cnt[i] != 1 || di >= ir::IR_NONE - 1 {
+                        continue;
+                    }
+                    let t = b.places.at(b.statements.at(ci as usize).place as usize).base as usize;
+                    let ch = self.ml_ch[t];
+                    if ch != ir::IR_NONE && self.ml_def[t] == ci && straight(
+                        b,
+                        cf,
+                        sb[di as usize],
+                        sb[ci as usize],
+                        di,
+                        ci,
+                    ) {
+                        self.ml_ch.set(i, ch);
+                        self.ml_alias.set(t, i as u32);
+                        grew = true;
+                    }
                 }
-                let t = b.places.at(b.statements.at(ci as usize).place as usize).base as usize;
-                let ch = self.ml_ch[t];
-                if ch != ir::IR_NONE && self.ml_def[t] == ci && di < ci && sb[di as usize] == sb[ch as usize] {
-                    self.ml_ch.set(i, ch);
-                    self.ml_alias.set(t, i as u32);
+                if !grew {
+                    break;
                 }
             }
             self.uput(cp);
@@ -8697,12 +8775,418 @@ extend CEmit {
         return self.ml_ch[l as usize];
     }
 
+    // Whether local `l` is a mask.
+    fn lf_mask(self: &Self, b: &ir::CoreBody, l: u32) bool {
+        let t = b.locals.at(l as usize).ty;
+        return t != TYPE_NONE && self.rty_y(b, t).kind == TypeKind::TYPE_MASK;
+    }
+
+    // Whether `rv` is a mask operator: `&`, `|`, `^` or `!` with a mask result.
+    fn lf_op(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        let t = (pick(rv.kind == ir::RV_UNARY, rv.b, rv.c) as u8) as tt::TokenType;
+        let op = rv.kind == ir::RV_BINARY && (t == tt::TokenType::Ampersand || t == tt::TokenType::Pipe || t == tt::TokenType::Caret) || rv.kind == ir::RV_UNARY && t == tt::TokenType::Tilde;
+        return op && rv.target != TYPE_NONE && self.rty_y(b, rv.target).kind == TypeKind::TYPE_MASK;
+    }
+
+    // The lane-mask form of mask local `l` by its one definition (`lf_scan`): a comparison with a
+    // lane-mask plan and no mask-register entry, a mask operator whose operands have one form and
+    // whose entry splits as they do, or a whole copy; LF_NONE without one (or before its operands
+    // have theirs).
+    fn lf_def(self: &mut Self, b: &ir::CoreBody, l: u32) LfMask {
+        let none = lf_none();
+        let mut f = none;
+        let rv = *b.rvalues.at(b.statements.at(self.ml_def[l as usize] as usize).rvalue as usize);
+        if rv.kind == ir::RV_SIMD && rv.c >= ir::SIMD_CMP_EQ && rv.c <= ir::SIMD_CMP_GE {
+            let mut bt = BuiltinType::BT_VOID;
+            let _ = self.vec_ty(b, b.operands.at(b.oper_pool[rv.a as usize] as usize).ty, &mut f.n, &mut bt);
+            f.u = lane_mask_bt(bt);
+            if self.vplan_quiet(ir::OP_SIMD + rv.c as u32, bt, BuiltinType::BT_BOOL, f.n).form != sp::PF_SCALAR {
+                return none;
+            }
+            f.pl = self.vplan_quiet(ir::OP_CMP_LANES + (rv.c - ir::SIMD_CMP_EQ) as u32, bt, f.u, f.n);
+            let bits = self.ventry(ir::OP_LANES_TO_MASK, f.u, BuiltinType::BT_BOOL, f.pl.chunk_lanes);
+            f.state = pick(f.pl.form != sp::PF_SCALAR && bits >= 0, LF_LANES, LF_NONE);
+            return f;
+        }
+        if rv.kind != ir::RV_USE && !self.lf_op(b, &rv) {
+            return none;
+        }
+        for i in 0..pick(rv.kind == ir::RV_BINARY, 2u32, 1u32) {
+            let x = lf_local(b, pick(i == 0, rv.a, rv.b));
+            if x == ir::IR_NONE || self.ml_lf[x as usize].state == LF_NONE {
+                return none;
+            }
+            let g = self.ml_lf[x as usize];
+            if i == 0 {
+                f = g;
+            } else if g.u != f.u || g.n != f.n || g.pl.form != f.pl.form || g.pl.chunk_lanes != f.pl.chunk_lanes {
+                return none;
+            }
+        }
+        f.state = LF_LANES;
+        if rv.kind != ir::RV_USE {
+            let p = self.vplan_quiet(
+                pick(rv.kind == ir::RV_UNARY, ir::OP_NOT, tok_op(rv.c as tt::TokenType)),
+                f.u,
+                f.u,
+                f.n,
+            );
+            if p.form != f.pl.form || p.chunk_lanes != f.pl.chunk_lanes {
+                return none;
+            }
+        }
+        return f;
+    }
+
+    // Whether `choose` `rv` takes the lane masks of form `f` chunk for chunk.
+    fn lf_takes(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue, f: &LfMask) bool {
+        let mut cn: i64 = 0;
+        let mut cbt = BuiltinType::BT_VOID;
+        let _ = self.vec_ty(b, b.operands.at(b.oper_pool[(rv.a + 1) as usize] as usize).ty, &mut cn, &mut cbt);
+        let cp = self.vplan_quiet(ir::OP_CHOOSE_LANES, cbt, cbt, cn);
+        return lane_mask_bt(cbt) == f.u && cn == f.n && cp.form == f.pl.form && cp.chunk_lanes == f.pl.chunk_lanes;
+    }
+
+    // Whether `choose` `rv` reads mask local `x`'s lane masks: `x` (or the root of its copies) is not
+    // a `lf_scan` local, or one whose form the `choose` takes.
+    fn lf_choose(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue, x: u32) bool {
+        let r = self.ml_root(x);
+        if self.ml_lf.len() == 0 || self.ml_lf[r as usize].state == LF_NONE {
+            return true;
+        }
+        let f = self.ml_lf[r as usize];
+        return self.lf_takes(b, rv, &f);
+    }
+
+    // Read `x` (an operand of statement `k` of block `bi`, or of its terminator at `k` = its statement
+    // count) for `lf_scan`: counted in `seen`, and `bad` for its local unless the local's one
+    // definition (`dblk`, `dk`) dominates it.
+    fn lf_read(
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        bi: u32,
+        k: u32,
+        seen: &mut Vector<u32>,
+        bad: &mut Vector<u32>,
+        dblk: &Vector<u32>,
+        dk: &Vector<u32>,
+    ) {
+        if x == ir::IR_NONE {
+            return;
+        }
+        let o = *b.operands.at(x as usize);
+        if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
+            return;
+        }
+        let l = b.places.at(o.data as usize).base as usize;
+        seen.set(l, seen[l] + 1);
+        let d = dblk[l];
+        if !(d == bi && dk[l] < k && cf.dominates(bi, bi) || d != bi && cf.dominates(d, bi)) {
+            bad.set(l, 1);
+        }
+    }
+
+    // The mask locals held as lane masks beyond `lane_only`'s one `choose` (`ml_lf`): defined once by
+    // a lane-mask comparison, a mask operator over such locals or a whole copy of one, every read
+    // reachable and dominated by that definition, and at least one read a `choose`, operator or copy
+    // that takes the lanes. Their temps declare up front, so a read need not be the next one in the
+    // text; a local read otherwise too keeps its bits, from its lanes after its definition (LF_BITS).
+    fn lf_scan(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
+        self.ml_lf.clear();
+        if !self.simd_on || !self.vec_prog {
+            return;
+        }
+        let nl = b.locals.len();
+        let mut masks = false;
+        for l in b.returns as usize..nl {
+            masks = masks || self.lf_mask(b, l as u32);
+        }
+        if !masks {
+            return;
+        }
+        let _ = self.lane_only(b, 0);
+        for _ in 0..nl {
+            self.ml_lf.push(lf_none());
+        }
+        // Per local: its operand reads (`cnt`), those met below (`seen`; a read only `cnt` counts
+        // disqualifies it), its definition's block and index (`dblk`, `dk`), and `bad`: a read the
+        // definition does not dominate or behind a projection, a reference, a call's destination.
+        let mut cnt = self.uget();
+        let mut seen = self.uget();
+        let mut bad = self.uget();
+        let mut dblk = self.uget();
+        let mut dk = self.uget();
+        let mut lane = self.uget();
+        cnt.resize_default(nl);
+        seen.resize_default(nl);
+        bad.resize_default(nl);
+        dblk.resize_default(nl);
+        dk.resize_default(nl);
+        lane.resize_default(nl);
+        for i in 0..b.operands.len() {
+            let x = *b.operands.at(i);
+            if x.kind == ir::OP_COPY || x.kind == ir::OP_MOVE {
+                let p = *b.places.at(x.data as usize);
+                cnt.set(p.base as usize, cnt[p.base as usize] + 1);
+                if p.proj_len != 0 {
+                    bad.set(p.base as usize, 1);
+                }
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let bb = *b.blocks.at(bi);
+            for k in 0..bb.stmt_len {
+                let s = *b.statements.at((bb.stmt_start + k) as usize);
+                if s.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let p = *b.places.at(s.place as usize);
+                dblk.set(p.base as usize, bi as u32);
+                dk.set(p.base as usize, k);
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if p.proj_len != 0 {
+                    bad.set(p.base as usize, 1);
+                }
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                    bad.set(b.places.at(rv.a as usize).base as usize, 1);
+                }
+            }
+            let t = bb.term;
+            for j in 0..pick(t.kind == ir::TM_CALL, t.dests_len, 0u32) {
+                bad.set(b.places.at(b.dest_pool[(t.dests_start + j) as usize] as usize).base as usize, 1);
+            }
+            if t.kind == ir::TM_DROP {
+                bad.set(b.places.at(t.a as usize).base as usize, 1);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let bb = *b.blocks.at(bi);
+            let bu = bi as u32;
+            for k in 0..bb.stmt_len {
+                let s = *b.statements.at((bb.stmt_start + k) as usize);
+                if s.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                let r = rv.kind;
+                if r == ir::RV_USE || r == ir::RV_UNARY || r == ir::RV_CAST || r == ir::RV_DYN || r == ir::RV_BINARY || r == ir::RV_REPEAT {
+                    CEmit::lf_read(b, cf, rv.a, bu, k, &mut seen, &mut bad, &dblk, &dk);
+                }
+                if r == ir::RV_BINARY || r == ir::RV_REPEAT || r == ir::RV_SLICE {
+                    CEmit::lf_read(b, cf, rv.b, bu, k, &mut seen, &mut bad, &dblk, &dk);
+                }
+                if r == ir::RV_SLICE {
+                    CEmit::lf_read(b, cf, rv.item.node, bu, k, &mut seen, &mut bad, &dblk, &dk);
+                }
+                let pool = r == ir::RV_AGGREGATE || r == ir::RV_CLOSURE || r == ir::RV_SIMD || r == ir::RV_INTRINSIC && rv.c as u32 != ir::IN_SIZEOF as u32 && rv.c as u32 != ir::IN_ALIGNOF as u32;
+                for j in 0..pick(pool, rv.b, 0u32) {
+                    CEmit::lf_read(b, cf, b.oper_pool[(rv.a + j) as usize], bu, k, &mut seen, &mut bad, &dblk, &dk);
+                }
+            }
+            let t = bb.term;
+            let k = bb.stmt_len;
+            if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT || t.kind == ir::TM_CALL && t.callee.node == NODE_NONE {
+                CEmit::lf_read(b, cf, t.a, bu, k, &mut seen, &mut bad, &dblk, &dk);
+            }
+            for j in 0..pick(t.kind == ir::TM_CALL || t.kind == ir::TM_ASSERT, t.args_len, 0u32) {
+                CEmit::lf_read(b, cf, b.oper_pool[(t.args_start + j) as usize], bu, k, &mut seen, &mut bad, &dblk, &dk);
+            }
+        }
+        // The candidates by definition: a round settles one more link of an operator or copy chain.
+        let ret = b.returns as usize;
+        for _ in 0..64 {
+            let mut grew = false;
+            for l in ret..nl {
+                let d = self.ml_def[l];
+                if self.ml_lf[l].state != LF_NONE || bad[l] != 0 || seen[l] != cnt[l] || d >= ir::IR_NONE - 1 || !self.lf_mask(
+                    b,
+                    l as u32,
+                ) {
+                    continue;
+                }
+                // A comparison one `choose` reads is `lane_only`'s.
+                if self.ml_ch[l] != ir::IR_NONE && b.rvalues.at(b.statements.at(d as usize).rvalue as usize).kind == ir::RV_SIMD {
+                    continue;
+                }
+                let f = self.lf_def(b, l as u32);
+                if f.state != LF_NONE {
+                    self.ml_lf.set(l, f);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        // Then keep those a `choose`, operator or copy reads as lanes, and whose operands stay lanes:
+        // a round drops at least one local, at most 64 rounds, else none stays.
+        let mut settled = false;
+        for _ in 0..64 {
+            for l in 0..nl {
+                lane.set(l, 0);
+            }
+            for i in 0..b.statements.len() {
+                let s = *b.statements.at(i);
+                if s.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_CHOOSE {
+                    let x = lf_local(b, b.oper_pool[rv.a as usize]);
+                    if x != ir::IR_NONE && self.ml_lf[x as usize].state != LF_NONE {
+                        let f = self.ml_lf[x as usize];
+                        if self.lf_takes(b, &rv, &f) {
+                            lane.set(x as usize, lane[x as usize] + 1);
+                        }
+                    }
+                    continue;
+                }
+                let p = *b.places.at(s.place as usize);
+                if p.proj_len != 0 || self.ml_lf[p.base as usize].state == LF_NONE || self.ml_def[p.base as usize] != i as u32 {
+                    continue;
+                }
+                // An operator's or copy's operands (a comparison's are vectors).
+                for j in 0..pick(rv.kind == ir::RV_SIMD, 0u32, pick(rv.kind == ir::RV_BINARY, 2u32, 1u32)) {
+                    let x = lf_local(b, pick(j == 0, rv.a, rv.b));
+                    if x != ir::IR_NONE {
+                        lane.set(x as usize, lane[x as usize] + 1);
+                    }
+                }
+            }
+            let mut cut = false;
+            for l in 0..nl {
+                if self.ml_lf[l].state == LF_NONE {
+                    continue;
+                }
+                let rv = *b.rvalues.at(b.statements.at(self.ml_def[l] as usize).rvalue as usize);
+                let mut drop = lane[l] == 0;
+                for j in 0..pick(rv.kind == ir::RV_SIMD, 0u32, pick(rv.kind == ir::RV_BINARY, 2u32, 1u32)) {
+                    let x = lf_local(b, pick(j == 0, rv.a, rv.b));
+                    drop = drop || x == ir::IR_NONE || self.ml_lf[x as usize].state == LF_NONE;
+                }
+                if drop {
+                    self.ml_lf.set(l, lf_none());
+                    cut = true;
+                }
+            }
+            if !cut {
+                settled = true;
+                break;
+            }
+        }
+        for l in 0..nl {
+            if !settled {
+                self.ml_lf.set(l, lf_none());
+            } else if self.ml_lf[l].state != LF_NONE && seen[l] > lane[l] {
+                self.lf_keep_bits(l);
+            }
+        }
+        // A local sharing such a local's C variable (`sx_coal`) reads its bits; so does a copy keeping
+        // bits (it emits as a copy), up its chain of copies.
+        for l in 0..nl {
+            let c = (*self.sx_coal.at(l)) as usize;
+            if c != l && self.ml_lf[l].state == LF_NONE && self.ml_lf[c].state == LF_LANES {
+                self.lf_keep_bits(c);
+            }
+        }
+        for l in 0..nl {
+            if self.ml_lf[l].state != LF_BITS {
+                continue;
+            }
+            let mut x = l as u32;
+            for _ in 0..nl {
+                let rv = *b.rvalues.at(b.statements.at(self.ml_def[x as usize] as usize).rvalue as usize);
+                if rv.kind != ir::RV_USE {
+                    break;
+                }
+                x = lf_local(b, rv.a);
+                if self.ml_lf[x as usize].state == LF_BITS {
+                    break;
+                }
+                self.lf_keep_bits(x as usize);
+            }
+        }
+        for l in 0..nl {
+            if self.ml_lf[l].state == LF_NONE {
+                continue;
+            }
+            let rv = *b.rvalues.at(b.statements.at(self.ml_def[l] as usize).rvalue as usize);
+            if rv.kind == ir::RV_USE {
+                self.ml_alias.set(l, lf_local(b, rv.a));
+            } else {
+                self.ml_chunks.set(l, self.ml_lf[l].pl.chunks as u32);
+            }
+            // Its definition writes lanes: a value it keeps declares up front.
+            self.sx_inline.set(l, ir::IR_NONE);
+            self.sx_fuse.set(l, false);
+        }
+        self.uput(cnt);
+        self.uput(seen);
+        self.uput(bad);
+        self.uput(dblk);
+        self.uput(dk);
+        self.uput(lane);
+    }
+
+    // Lane-mask local `l` keeps its bits too (LF_BITS).
+    fn lf_keep_bits(self: &mut Self, l: usize) {
+        let f = self.ml_lf[l];
+        self.ml_lf.set(l, LfMask { state: LF_BITS, u: f.u, n: f.n, pl: f.pl });
+    }
+
+    // Mask operator `rv` into lane-mask local `s.place` (`ml_lf`): its entry over its operands' lane
+    // masks, then its bits when it keeps them.
+    fn emit_lf_op(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let l = b.places.at(s.place as usize).base;
+        let f = self.ml_lf[l as usize];
+        let un = rv.kind == ir::RV_UNARY;
+        let mut vp = vplan_none();
+        vp.pl = self.vplan(pick(un, ir::OP_NOT, tok_op(rv.c as tt::TokenType)), f.u, f.u, f.n);
+        vp.kinds = [VK_LANES, VK_LANES, VK_SCALAR];
+        vp.res = VR_LANES;
+        vp.top = true;
+        let mut psp: [String; 3] = [String::new(), String::new(), String::new()];
+        let na = pick(un, 1u32, 2u32);
+        for i in 0..na {
+            unsafe psp[i as usize].format_into("__sc_ml{}", self.ml_root(lf_local(b, pick(i == 0, rv.a, rv.b))));
+        }
+        let ok = self.emit_planned(o, &vp, &psp, na, format("__sc_ml{}", l).as_str());
+        return ok && self.lf_bits(o, b, s.place);
+    }
+
+    // The bits of lane-mask local `p` (whole) after its definition, when it keeps them (LF_BITS):
+    // each chunk's lane bits shifted into place.
+    fn lf_bits(self: &mut Self, o: &mut String, b: &ir::CoreBody, p: ir::PlaceId) bool {
+        let l = b.places.at(p as usize).base;
+        if self.ml_lf.len() == 0 || b.places.at(p as usize).proj_len != 0 || self.ml_lf[l as usize].state != LF_BITS {
+            return true;
+        }
+        let f = self.ml_lf[l as usize];
+        let e = self.ventry(ir::OP_LANES_TO_MASK, f.u, BuiltinType::BT_BOOL, f.pl.chunk_lanes);
+        let mut d = self.sget();
+        let ok = self.emit_place(b, p, &mut d);
+        o.format_into("  {} = ", d.as_str());
+        for k in 0..f.pl.chunks {
+            o.push_str(pick(k == 0, "(uint64_t)", " | (uint64_t)"));
+            self.entry_name(e as u32, o);
+            o.format_into("(__sc_ml{}_{}) << {}", l, k, k * f.pl.chunk_lanes);
+        }
+        o.push_str(";\n");
+        self.sput(d);
+        return ok;
+    }
+
     // Whether comparison result `l` lives in lane-mask temporaries (`__sc_ml<l>_<k>`): its one read
     // is a `choose` (`lane_only`) whose plan takes them chunk for chunk. Its variable then holds
     // nothing, so it is not declared, nor the copy the `choose` reads it through.
     fn ml_lanes(self: &mut Self, b: &ir::CoreBody, l: u32, to: &mut BuiltinType) bool {
         if !self.simd_on {
             return false;
+        }
+        if self.ml_lf.len() != 0 && self.ml_lf[l as usize].state != LF_NONE {
+            *to = self.ml_lf[l as usize].u;
+            return true;
         }
         let ci = self.lane_only(b, l);
         let d = pick(ci == ir::IR_NONE, ir::IR_NONE, self.ml_def[l as usize]);
@@ -10756,7 +11240,7 @@ extend CEmit {
             if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE || itn.as_data.extend_def.interface_type == NODE_NONE {
                 continue;
             }
-            let tg = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
+            let tg = self.mg.ext_target(dm, iid);
             if tg.module != dm || tg.node != dd {
                 continue;
             }
@@ -10804,6 +11288,65 @@ extend CEmit {
     // them under its own interface arguments.
     // `want` (pool `wm`, null when unknown) is the interface instance the call goes through: it
     // solves a keyed conformance's parameters its target does not name.
+    /// The method call `t` of `b`, of an interface method through a type parameter, dispatches to
+    /// under the active env when the receiver's conformance by target defines it, its receiver
+    /// grounded into `b`'s pool in `recv`; node NONE for any other call, a generic interface's, a
+    /// keyed or blanket conformance's, or a default body. The bound variant of an instance calls
+    /// it directly (`ir::inline::run` splices it).
+    pub fn bound_target(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, recv: &mut TypeId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || t.iface != TYPE_NONE {
+            return none;
+        }
+        let inode = self.mg.in_interface(t.callee.module, t.callee.node);
+        if inode == NODE_NONE {
+            return none;
+        }
+        let mut rt = t.recv;
+        if rt == TYPE_NONE && t.args_len > 0 && self.self_param0(t.callee) {
+            rt = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+        }
+        let mut g = TYPE_NONE;
+        if rt == TYPE_NONE || !self.mg.ground(b.module, rt, b.module, &mut g) {
+            return none;
+        }
+        let ba = self.p().module_ast_const(b.module);
+        for _ in 0..4 {
+            let y = *unsafe (*ba).type_at(g);
+            if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            g = y.as_data.elem;
+        }
+        let mut em: ModuleId = 0;
+        let ext = self.mg.conform_ext(b.module, g, DefId { module: t.callee.module, node: inode }, &mut em);
+        let ea = self.p().module_ast_const(em);
+        if ext == NODE_NONE || ext_keyed(unsafe &*ea, ext) {
+            return none;
+        }
+        let ca = self.p().module_ast_const(t.callee.module);
+        let mn = unsafe (*ca).at_const(unsafe (*ca).at_const(t.callee.node).as_data.function.name).as_data.name.text;
+        let mname = self.p().modules.at(t.callee.module as usize).source.as_str().slice(
+            mn.start as usize,
+            mn.end as usize,
+        );
+        let esrc = self.p().modules.at(em as usize).source.as_str();
+        let its = unsafe (*ea).at_const(ext).as_data.extend_def.items;
+        for j in 0..its.len {
+            let iid = unsafe (*ea).list(its)[j as usize];
+            let inn = unsafe (*ea).at_const(iid);
+            if inn.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let isp = unsafe (*ea).at_const(inn.as_data.function.name).as_data.name.text;
+            if esrc.slice(isp.start as usize, isp.end as usize) == mname {
+                *recv = g;
+                return DefId { module: em, node: iid };
+            }
+        }
+        return none;
+    }
+
     fn iface_target_sym(
         self: &mut Self,
         rm6: ModuleId,
@@ -13548,6 +14091,26 @@ extend CEmit {
             }
             return self.emit_operand(b, rv.a, dst);
         }
+        if (rv.kind == ir::RV_BINARY || rv.kind == ir::RV_UNARY) && self.rty_y(b, rv.target).kind == TypeKind::TYPE_MASK {
+            // A mask operator over the lane bits; `!` keeps the bits above the N lanes 0.
+            let mut n: i64 = 0;
+            let mut bt = BuiltinType::BT_VOID;
+            let _ = self.vec_ty(b, rv.target, &mut n, &mut bt);
+            dst.push_str("(");
+            let mut ok = self.ty_c(b.module, rv.target, "", dst);
+            if rv.kind == ir::RV_UNARY {
+                dst.push_str(")(~(uint64_t)");
+                ok = ok && self.emit_operand(b, rv.a, dst);
+                dst.format_into(" & {}u)", ~0u64 >> (64 - n) as u64);
+                return ok;
+            }
+            dst.push_str(")((uint64_t)");
+            ok = ok && self.emit_operand(b, rv.a, dst);
+            dst.format_into(" {} (uint64_t)", CEmit::c_binop(rv.c as tt::TokenType));
+            ok = ok && self.emit_operand(b, rv.b, dst);
+            dst.push_str(")");
+            return ok;
+        }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
             // A reference to a zero-sized value binds to the aligned sentinel, EXCEPT `&*p`,
             // which stays the pointer itself (cheaper, and keeps whatever provenance p carried). A
@@ -14305,6 +14868,13 @@ extend CEmit {
             if sv.len() != 0 {
                 dst.push_str(" + ");
                 dst.push_string(&sv);
+                // Pointer arithmetic needs the element's definition, not its forward declaration.
+                if ty9.kind == TypeKind::TYPE_INSTANCE {
+                    self.mg.need_ty(
+                        b.module,
+                        unsafe (*self.p().module_ast_const(b.module)).instance(ty9.as_data.inst).args[0],
+                    );
+                }
             }
             if wr {
                 dst.push_str(")");
@@ -16280,20 +16850,20 @@ const fn vec_op_tpl(unary: bool, op: u8, bt: BuiltinType) str<'static> {
     return switch t {
         Plus => mbe::if_s(
             sg,
-            "$T __sc_s = ($T)(($P)$a + ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ __sc_s) & ($b ^ __sc_s)) < 0) << __sc_i;",
-            "$T __sc_s = ($T)($a + $b); $d = __sc_s; __sc_f0 |= (uint64_t)(__sc_s < $a) << __sc_i;",
+            "{ $T __sc_s = ($T)(($P)$a + ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ __sc_s) & ($b ^ __sc_s)) < 0) << __sc_i; }",
+            "{ $T __sc_s = ($T)($a + $b); $d = __sc_s; __sc_f0 |= (uint64_t)(__sc_s < $a) << __sc_i; }",
         ),
         Minus => mbe::if_s(
             sg,
-            "$T __sc_s = ($T)(($P)$a - ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ $b) & ($a ^ __sc_s)) < 0) << __sc_i;",
+            "{ $T __sc_s = ($T)(($P)$a - ($P)$b); $d = __sc_s; __sc_f0 |= (uint64_t)((($a ^ $b) & ($a ^ __sc_s)) < 0) << __sc_i; }",
             "$d = ($T)($a - $b); __sc_f0 |= (uint64_t)($a < $b) << __sc_i;",
         ),
         Star => if wide {
-            "$T __sc_w; __sc_f0 |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_w) << __sc_i; $d = __sc_w;";
+            "{ $T __sc_w; __sc_f0 |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_w) << __sc_i; $d = __sc_w; }";
         } else if sg {
-            "int64_t __sc_s = (int64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s < $X || __sc_s > $Y) << __sc_i;";
+            "{ int64_t __sc_s = (int64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s < $X || __sc_s > $Y) << __sc_i; }";
         } else {
-            "uint64_t __sc_s = (uint64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s > $Y) << __sc_i;";
+            "{ uint64_t __sc_s = (uint64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s > $Y) << __sc_i; }";
         },
         Slash => mbe::if_s(
             sg,
@@ -16426,9 +16996,9 @@ const fn vec_simd_tpl(c: u8, bt: BuiltinType, rbt: BuiltinType) str<'static> {
     return switch c {
         ir::SIMD_IOTA => "$d = ($T)__sc_i;",
         ir::SIMD_CHOOSE => "$d = (($a >> __sc_i) & 1) ? $b : $c;",
-        ir::SIMD_WRAP_ADD => "$T __sc_w; (void)__builtin_add_overflow($a, $b, &__sc_w); $d = __sc_w;",
-        ir::SIMD_WRAP_SUB => "$T __sc_w; (void)__builtin_sub_overflow($a, $b, &__sc_w); $d = __sc_w;",
-        ir::SIMD_WRAP_MUL => "$T __sc_w; (void)__builtin_mul_overflow($a, $b, &__sc_w); $d = __sc_w;",
+        ir::SIMD_WRAP_ADD => "{ $T __sc_w; (void)__builtin_add_overflow($a, $b, &__sc_w); $d = __sc_w; }",
+        ir::SIMD_WRAP_SUB => "{ $T __sc_w; (void)__builtin_sub_overflow($a, $b, &__sc_w); $d = __sc_w; }",
+        ir::SIMD_WRAP_MUL => "{ $T __sc_w; (void)__builtin_mul_overflow($a, $b, &__sc_w); $d = __sc_w; }",
         ir::SIMD_WRAP_NEG => "$d = ($T)(0u - ($P)$a);",
         ir::SIMD_WRAP_SHL => "$d = ($T)(($P)$a << ($b & ($W - 1)));",
         ir::SIMD_WRAP_SHR => "$d = ($T)($a >> ($b & ($W - 1)));",
@@ -16437,12 +17007,12 @@ const fn vec_simd_tpl(c: u8, bt: BuiltinType, rbt: BuiltinType) str<'static> {
         ir::SIMD_OVF_MUL => "{ $T __sc_r; __sc_m |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_r) << __sc_i; }",
         ir::SIMD_SAT_ADD => mbe::if_s(
             sg,
-            "$T __sc_s = ($T)(($P)$a + ($P)$b); $d = (($a ^ __sc_s) & ($b ^ __sc_s)) < 0 ? ($b < 0 ? $X : $Y) : __sc_s;",
-            "$T __sc_s = ($T)($a + $b); $d = __sc_s < $a ? $Y : __sc_s;",
+            "{ $T __sc_s = ($T)(($P)$a + ($P)$b); $d = (($a ^ __sc_s) & ($b ^ __sc_s)) < 0 ? ($b < 0 ? $X : $Y) : __sc_s; }",
+            "{ $T __sc_s = ($T)($a + $b); $d = __sc_s < $a ? $Y : __sc_s; }",
         ),
         ir::SIMD_SAT_SUB => mbe::if_s(
             sg,
-            "$T __sc_s = ($T)(($P)$a - ($P)$b); $d = (($a ^ $b) & ($a ^ __sc_s)) < 0 ? ($b < 0 ? $Y : $X) : __sc_s;",
+            "{ $T __sc_s = ($T)(($P)$a - ($P)$b); $d = (($a ^ $b) & ($a ^ __sc_s)) < 0 ? ($b < 0 ? $Y : $X) : __sc_s; }",
             "$d = $a < $b ? 0 : ($T)($a - $b);",
         ),
         ir::SIMD_MIN => "$d = $a < $b ? $a : $b;",
@@ -16625,20 +17195,6 @@ extend CmpSide {
 // A planned vector statement (`CEmit::emit_planned`): the plan, what each argument is (a vector, a
 // mask, a scalar, or lane-mask temps), what the result is, and the table indexes of the entries
 // applied to each call's result and to its argument 0 (-1: none).
-/// Whether the planner may call a backend entry: the table has one the build's features hold, and
-/// SC_SIMD_SCALAR (a test switch) is not 1.
-pub fn simd_enabled(pk: &loader::Package) bool {
-    if stdlib::env_is("SC_SIMD_SCALAR", "1") {
-        return false;
-    }
-    for i in 0..pk.simd_table.len() {
-        if cf::contains(cf::join(pk.features, pk.fn_union), pk.simd_table.at(i).fs) {
-            return true;
-        }
-    }
-    return false;
-}
-
 struct VPlan {
     pub pl: sp::Plan,
     pub kinds: [u8; 3],
@@ -16660,7 +17216,27 @@ struct VPlan {
     /// a vector operand or the result whose address the body takes (`vec_addr_taken`): every operand
     /// is copied before any chunk is written.
     pub raw: bool,
+    /// VR_LANES: the temps declare up front (`lf_scan`), not before the call.
+    pub top: bool,
 }
+
+// One local's lane-mask form beyond `lane_only` (`CEmit::lf_scan`).
+struct LfMask {
+    pub state: u8, // LF_NONE, LF_LANES or LF_BITS
+    pub u: BuiltinType, // the lane masks' unsigned lane type
+    pub n: i64,
+    // The defining comparison's lane-mask plan: its chunks, and the entry whose result spells a temp.
+    pub pl: sp::Plan,
+}
+
+// No lane-mask form.
+const fn lf_none() LfMask {
+    return LfMask { state: LF_NONE, u: BuiltinType::BT_VOID, n: 0, pl: sp::Plan { form: sp::PF_SCALAR } };
+}
+
+const LF_NONE: u8 = 0;
+const LF_LANES: u8 = 1; // lane-mask temps `__sc_ml<l>_<k>` (an alias's: its root's)
+const LF_BITS: u8 = 2; // and its bits, from the lanes after its definition
 
 const VK_VEC: u8 = 0;
 const VK_MASK: u8 = 1;
@@ -16697,6 +17273,7 @@ const fn vplan_none() VPlan {
         nsteps: 0,
         npairs: 0,
         raw: false,
+        top: false,
     };
 }
 
@@ -16715,6 +17292,38 @@ const fn tok_op(t: tt::TokenType) u32 {
         RightShift => ir::OP_SHR,
         _ => ir::OP_COUNT,
     };
+}
+
+// Whether statement `di` of block `bd` runs before statement `ui` of block `bu` on every path to `bu`,
+// with nothing in between but calls and gotos: the same block in order, or a chain of blocks from `bd`
+// each ending in a call or goto whose successor (past empty gotos) has one reachable predecessor
+// (`cf`; an inlined body leaves dead blocks whose edges are no real paths). A lane-mask temporary
+// written at `di` then holds its value at `ui` (the calls are `inf()`, `splat(..)`, ..).
+fn straight(b: &ir::CoreBody, cf: &cfl::CFlow, bd: u32, bu: u32, di: u32, ui: u32) bool {
+    if bd == bu {
+        return di < ui;
+    }
+    let mut k = bd;
+    for _ in 0..b.blocks.len() {
+        let t = &b.blocks.at(k as usize).term;
+        if t.kind != ir::TM_CALL && t.kind != ir::TM_GOTO || t.t0 == ir::IR_NONE || cf.preds[cf.thread[t.t0 as usize] as usize] != 1 {
+            return false;
+        }
+        k = cf.thread[t.t0 as usize];
+        if k == bu {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The whole local operand `x` names, or IR_NONE (a constant, a projection).
+fn lf_local(b: &ir::CoreBody, x: u32) u32 {
+    let o = *b.operands.at(x as usize);
+    if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE || b.places.at(o.data as usize).proj_len != 0 {
+        return ir::IR_NONE;
+    }
+    return b.places.at(o.data as usize).base;
 }
 
 // The lane type of a lane mask of lanes `bt`: the unsigned integer of its width.

@@ -1138,6 +1138,15 @@ fn inject_chain(s: *mut Scheduler, head: *mut Runnable, tail: *mut Runnable, n: 
     push_chain(s, head, tail, n);
     qunlock(s);
     signal_work(s);
+    // One wake per further task, up to the parked workers: a woken worker is not the spinner, so it
+    // passes no wake on, and one wake would leave it to drain the whole chain.
+    for _ in 1..n {
+        let idx = claim_idle(s);
+        if idx < 0 {
+            break;
+        }
+        wake_parked(s, idx as usize);
+    }
 }
 
 // Append a whole chain (linked through `next`, `n` long, `tail` last). Caller holds `qlock`.
@@ -2817,8 +2826,8 @@ pub unsafe fn claim_wake(co: *mut Coroutine, token: u32, reason: u32) bool {
 }
 
 /// Make a chain of `claim_wake` winners (`head` to `tail` through `run.next`, `n` long) runnable under one
-/// injection lock, then wake one worker; the rest wake as the spinner finds the queue still full. From a
-/// worker thread a single task takes that worker's own deque instead.
+/// injection lock, then wake a worker per task (`inject_chain`). From a worker thread a single task takes
+/// that worker's own deque instead.
 pub unsafe fn run_claimed(head: *mut Coroutine, tail: *mut Coroutine, n: i32) {
     let s = unsafe G_SCHED;
     let mut co = head;

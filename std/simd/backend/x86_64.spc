@@ -4252,7 +4252,7 @@ fn cmp_ge_lanes_f32x4(a: f32x4, b: f32x4) u32x4 {
 @arch(x86_64)
 @simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Sse41])
 fn choose_lanes_f32x4(m: u32x4, a: f32x4, b: f32x4) f32x4 {
-    return xfv::<f32, 4>(_mm_castsi128_ps(_mm_blendv_epi8(_mm_castps_si128(xf(b)), _mm_castps_si128(xf(a)), xi(m))));
+    return xfv::<f32, 4>(_mm_blendv_ps(xf(b), xf(a), _mm_castsi128_ps(xi(m))));
 }
 
 @arch(x86_64)
@@ -4355,7 +4355,7 @@ fn cmp_ge_lanes_f64x2(a: f64x2, b: f64x2) u64x2 {
 @arch(x86_64)
 @simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Sse41])
 fn choose_lanes_f64x2(m: u64x2, a: f64x2, b: f64x2) f64x2 {
-    return xdv::<f64, 2>(_mm_castsi128_pd(_mm_blendv_epi8(_mm_castpd_si128(xd(b)), _mm_castpd_si128(xd(a)), xi(m))));
+    return xdv::<f64, 2>(_mm_blendv_pd(xd(b), xd(a), _mm_castsi128_pd(xi(m))));
 }
 
 @arch(x86_64)
@@ -5463,7 +5463,7 @@ fn cmp_ge_lanes_f32x8(a: f32x8, b: f32x8) u32x8 {
 @arch(x86_64)
 @simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Avx2])
 fn choose_lanes_f32x8(m: u32x8, a: f32x8, b: f32x8) f32x8 {
-    return yiv::<f32, 8>(_mm256_blendv_epi8(yi(b), yi(a), yi(m)));
+    return yfv::<f32, 8>(_mm256_blendv_ps(yf(b), yf(a), _mm256_castsi256_ps(yi(m))));
 }
 
 @arch(x86_64)
@@ -5559,7 +5559,7 @@ fn cmp_ge_lanes_f64x4(a: f64x4, b: f64x4) u64x4 {
 @arch(x86_64)
 @simd_impl(simd::Op::ChooseLanes, [cpu::Feature::Avx2])
 fn choose_lanes_f64x4(m: u64x4, a: f64x4, b: f64x4) f64x4 {
-    return yiv::<f64, 4>(_mm256_blendv_epi8(yi(b), yi(a), yi(m)));
+    return ydv::<f64, 4>(_mm256_blendv_pd(yd(b), yd(a), _mm256_castsi256_pd(yi(m))));
 }
 
 @arch(x86_64)

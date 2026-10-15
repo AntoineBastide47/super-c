@@ -228,6 +228,10 @@ extend str {
     }
 }
 
+// A view of bytes nothing writes while it lives (`from_raw`'s contract): another thread may read them.
+unsafe extend str as Send {}
+unsafe extend str as Sync {}
+
 // Standard-interface conformances. `eq`/`cmp` take `other: &str` (the `&Self` convention), so `str` works
 // behind `T: Eq`/`T: Ord` bounds and the `==`/`<` operators dispatch to it.
 extend str as Eq {

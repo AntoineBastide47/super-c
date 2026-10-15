@@ -5949,6 +5949,158 @@ fn main() i32 {
     assert(run.ok());
 }
 
+// A closure stored in an aggregate (`chunks_mut` keeps its body in `ChunksShared`) has its env defined by
+// the declaration pass; a capture the body borrows (a Vector it indexes) is a pointer there too, as in
+// the body, so the env, its initializer and the body agree.
+@test
+fn data_parallel_borrowed_capture_in_stored_closure() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::data as parallel;
+
+struct Slot {
+    pub i: usize,
+    pub v: i32,
+}
+
+fn main() i32 {
+    let mut src = Vector::<i32>::new();
+    src.push(5);
+    src.push(7);
+    let mut out = Vector::<Slot>::new();
+    out.push(Slot { i: 0, v: 0 });
+    out.push(Slot { i: 1, v: 0 });
+    parallel::chunks_mut(out.index_range_mut(0..2), 1, fn(slot: []mut Slot) {
+        slot[0].v = src[slot[0].i] + src.len() as i32;
+    });
+    return out[0].v + out[1].v;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 16);
+}
+
+// A closure stored in a generic struct is its env by value: captures of 16 bytes (a struct, a vector
+// whose C type is a vector register) size and align it as C does.
+@test
+fn data_parallel_closure_with_wide_captures() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::data as parallel;
+
+struct P {
+    pub a: i64,
+    pub b: i64,
+}
+
+fn main() i32 {
+    let k = P { a: 3, b: 4 };
+    let v = f32x4::from_array([1.0, 2.0, 3.0, 4.0]);
+    let mut out = Vector::<i64>::new();
+    out.push(0);
+    out.push(0);
+    parallel::chunks_mut(out.index_range_mut(0..2), 1, fn(s: []mut i64) {
+        s[0] = k.a + k.b + v.get(2) as i64;
+    });
+    return (out[0] + out[1]) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 20);
+}
+
+// Two chunks (grain 1) that each wait (bounded, spinning: a job cannot park) until both run: a batch
+// submitted from off the pool wakes a parked worker per job, so the second chunk starts while the first
+// waits. Each round first lets the workers park (the window the missed wake needed). Then the same
+// through `sections`, whose two sections are two chunks (one per claim), not one inline run.
+@test
+fn data_parallel_wakes_a_second_worker() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
+import std::parallel::atomics as atom;
+import std::parallel::platform as platform;
+import std::parallel::time as time;
+
+// Count in, then wait up to five seconds for `want` arrivals; whether they came.
+fn meet(c: &atom::Atomic<i64>, want: i64) bool {
+    let _ = c.fetch_add(1, atom::MemoryOrder::AcqRel);
+    let deadline = platform::now_ns() + 5000000000;
+    while c.load(atom::MemoryOrder::Acquire) < want {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn main() i32 {
+    if rt::worker_count() < 2 {
+        rt::shutdown();
+        return 0;
+    }
+    for round in 0..4 {
+        time::sleep(time::Duration::from_millis(20));
+        let arrived = atom::Atomic::<i64>::new(0);
+        let ap = &arrived;
+        let mut met = Vector::<bool>::new();
+        met.push(false);
+        met.push(false);
+        // grain 1: two chunks (the default floor of 16 units would make it one inline run).
+        let one = parallel::Options { schedule: parallel::Schedule::Dynamic, grain_size: 1 };
+        parallel::chunks_mut_with(met.index_range_mut(0..2), 1, one, fn(m: []mut bool) {
+            m[0] = meet(ap, 2);
+        });
+        if !met[0] || !met[1] {
+            rt::shutdown();
+            return 1 + round;
+        }
+    }
+    time::sleep(time::Duration::from_millis(20));
+    let both = atom::Atomic::<i64>::new(0);
+    let bp = &both;
+    let ok = atom::Atomic::<i64>::new(0);
+    let op = &ok;
+    parallel::sections(fn(s: &mut parallel::Sections) {
+        s.add(fn() {
+            if meet(bp, 2) {
+                let _ = op.fetch_add(1, atom::MemoryOrder::Relaxed);
+            }
+        });
+        s.add(fn() {
+            if meet(bp, 2) {
+                let _ = op.fetch_add(1, atom::MemoryOrder::Relaxed);
+            }
+        });
+    });
+    rt::shutdown();
+    return if ok.load(atom::MemoryOrder::SeqCst) == 2 {
+        0;
+    } else {
+        9;
+    };
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
+}
+
 // A parallel body is copied to every worker and run from several at once, so it may not mutate a capture. The
 // plain `fn(..)` bound makes the body borrow what it captures; a mutated capture is a `&mut` borrow, and a
 // closure holding one is not `Sync`, so the classic data race (`|i| values.set(i, ..)`, a `&mut` capture
@@ -8584,7 +8736,8 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(!p.gen_has("main.c", "= cf()"), "the const initializer folded to its value");
-    assert(p.gen_has("main.c", "sugar_fmt_new"), "runtime sites thread the desugar shims");
+    // The empty-string shim inlines; the value shims stay calls.
+    assert(p.gen_has("main.c", "sugar_fmt_hex_i"), "runtime sites thread the desugar shims");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");

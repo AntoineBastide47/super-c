@@ -1,0 +1,8 @@
+bin = "simd-math-gen"
+root = "gen.spc"
+
+[bin.simd-math-check]
+root = "check.spc"
+
+[bin.simd-math-bench]
+root = "bench.spc"

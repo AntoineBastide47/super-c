@@ -52,6 +52,8 @@ trace of the dev build, run it under `lldb -b -o run -k "bt 30" -k quit -- <cmd>
 ```sh
 super-c build                # build from build.toml (dev profile, incremental)
 super-c build -o out         # override output binary name
+super-c build app -o out-app # build the project of directory app (its build.toml); -o stays the caller's path
+super-c build --bin=tool -o t # link the [bin.tool] target at t (an unknown name is an error; --lib with -o is one too)
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
 super-c clean                # remove the out-dir and every <root dir>/build/<profile>/raw (--cache also removes the global build cache); never a user directory
@@ -204,7 +206,9 @@ super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another tar
 ```
 
 `lint` applies build.toml's `target-cpu` and `target-features` when the file exists, then the
-command line's, as a build does.
+command line's, as a build does. In a project with `src/`, a subdirectory with its own
+`build.toml` is a nested project: `lint` checks it as `lint` run in that subdirectory does
+(its manifest, its imports; `lint_project` in `src/main.spc`).
 
 Lints: unused imports/members/labels, unnecessary `mut`/`unsafe`/cast, unreachable
 statements/arms/branches (after a `return`, an `if` whose two branches both leave, a
@@ -227,9 +231,10 @@ unused-`pub` lint runs only where no external caller can exist: `super-c lint` o
 with `src/` whose `build.toml` declares no `[lib]`, and a script build with no `build.toml`
 in the working directory (`src/main.spc`); it never applies to std or ffi
 modules (`lint_pub_applies` in `src/driver/emit.spc`). A `[lib]` build lints its closure
-once: in the static pass when `type` holds `static`, else in the shared pass. `--const` never suggests prelude
-functions: a const prelude function turns a failed fold into an error in every downstream
-program (`cs_check_fn` in `src/driver/emit.spc`).
+once: in the static pass when `type` holds `static`, else in the shared pass. `--const` never suggests a
+`@no_const` function: a `const fn` whose call always panics turns the call into an error in every
+program that makes it, so a function such as std's `panic` takes the tag (`cs_check_fn` in
+`src/driver/emit.spc`). It lints std modules only when a listed file names one.
 
 ### Language server
 
@@ -326,7 +331,9 @@ opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": -O<level> on every com
 cflags = ["-DNDEBUG"]        # after the manifest-level cflags and the -O flag
 ldflags = ["-static"]        # after the manifest-level ldflags and the -O flag
 link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, after ldflags
-strip = true
+strip = true                 # the host `strip` after the link; a build for another platform's object format
+                             # (Linux or Windows from another host, the Android and wasm SDKs) strips at
+                             # link time (`-Wl,--strip-all`) instead
 lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
 overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
 target-features = ["+simd128"] # replaces the build-level list for this profile
@@ -521,7 +528,8 @@ never version text.
 | `unaligned-vector-move` | Windows x86_64 | `-Wa,-muse-unaligned-vector-move` accepted (GNU as 2.38+; clang rejects it) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
-its first line holds the schema, a hash of the compiler path and mtime, the target, the
+its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
+command (`--cc="clang -arch x86_64"`: its arguments select a target too), the target, the
 instruction set and the compile and link flags, then the compiler version line; each
 other line is `<id>\t<result>` (the `thin-lto` line adds the linker path and mtime). A
 record of another key holds nothing; one of another compiler version loses its results
@@ -670,7 +678,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
 | `--cstd=STD` | Replace the manifest's base C flags string, passed verbatim (e.g. `gnu11`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
-| `--bin=NAME` | Build/run only that `[bin.NAME]` target |
+| `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above) |
 | `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above) |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |

@@ -148,7 +148,7 @@ Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:
 
 | Type | Send | Sync |
 |------|------|------|
-| Scalars, `str` | yes | yes |
+| Scalars, `str`, function pointers (`fn(..)`) | yes | yes |
 | Raw pointers (`*const T`, `*mut T`) | no | no |
 | `&T` | if `T: Sync` | if `T: Sync` |
 | Closures | if all captures are `Send` | if all captures are `Sync` |

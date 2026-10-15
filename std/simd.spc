@@ -369,17 +369,22 @@ extend<T: SimdFloat, const N: usize> Simd<T, N> {
     @intrinsic("simd.fma")
     pub fn fma(self: Self, b: Self, c: Self) Self;
 
-    /// The lanes holding a NaN.
-    @intrinsic("simd.is_nan")
-    pub fn is_nan(self: Self) Mask<N>;
+    /// The lanes holding a NaN. A comparison every backend has (and a `choose` reads as lane masks).
+    pub fn is_nan(self: Self) Mask<N> {
+        return self.not_equal(self);
+    }
 
-    /// The lanes holding an infinity.
-    @intrinsic("simd.is_infinite")
-    pub fn is_infinite(self: Self) Mask<N>;
+    /// The lanes holding an infinity: x - x is NaN for an infinity or a NaN, x == x is false for a NaN.
+    pub fn is_infinite(self: Self) Mask<N> {
+        let d = self - self;
+        return d.not_equal(d) & self.equal(self);
+    }
 
-    /// The lanes holding neither an infinity nor a NaN.
-    @intrinsic("simd.is_finite")
-    pub fn is_finite(self: Self) Mask<N>;
+    /// The lanes holding neither an infinity nor a NaN: x - x is 0 for those alone.
+    pub fn is_finite(self: Self) Mask<N> {
+        let d = self - self;
+        return d.equal(d);
+    }
 
     /// The lanes holding a normal number (not zero, subnormal, infinite or NaN).
     @intrinsic("simd.is_normal")
@@ -1329,30 +1334,30 @@ extend<const N: usize> Mask<N> as Eq {
 
 extend<const N: usize> Mask<N> as BitAnd {
     type Output = Mask<N>;
-    pub fn bit_and(self: &Self, other: &Self) Mask<N> {
-        return ((*self) as u64 & (*other) as u64) as Self;
-    }
+    /// Lane-wise `&`.
+    @intrinsic("simd.and")
+    pub fn bit_and(self: &Self, other: &Self) Mask<N>;
 }
 
 extend<const N: usize> Mask<N> as BitOr {
     type Output = Mask<N>;
-    pub fn bit_or(self: &Self, other: &Self) Mask<N> {
-        return ((*self) as u64 | (*other) as u64) as Self;
-    }
+    /// Lane-wise `|`.
+    @intrinsic("simd.or")
+    pub fn bit_or(self: &Self, other: &Self) Mask<N>;
 }
 
 extend<const N: usize> Mask<N> as BitXor {
     type Output = Mask<N>;
-    pub fn bit_xor(self: &Self, other: &Self) Mask<N> {
-        return ((*self) as u64 ^ (*other) as u64) as Self;
-    }
+    /// Lane-wise `^`.
+    @intrinsic("simd.xor")
+    pub fn bit_xor(self: &Self, other: &Self) Mask<N>;
 }
 
 extend<const N: usize> Mask<N> as BitNot {
     type Output = Mask<N>;
-    pub fn bit_not(self: &Self) Mask<N> {
-        return (~((*self) as u64) & ~0u64 >> (64 - N) as u64) as Self;
-    }
+    /// Lane-wise `!`.
+    @intrinsic("simd.not")
+    pub fn bit_not(self: &Self) Mask<N>;
 }
 
 /// The portable vector operations, for `@simd_impl` (std only): one variant per operator, cast and

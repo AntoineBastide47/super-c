@@ -927,7 +927,11 @@ fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, firs
         let rt = String::from_str(exprs[k]).replace("opq::", "opr::").replace("opq(", "opr(");
         s.format_into("@c.noinline\nfn parity_r{}() {} {{\n    return {};\n}}\n", k, tys[k], rt.as_str());
     }
-    s.push_str("fn main(args: Vector<str>) i32 {\n    let k = args.at(1).parse_i64().unwrap();\n");
+    // Argument -1 runs every case in order, each after a line `= k`.
+    s.format_into(
+        "fn main(args: Vector<str>) i32 {{\n    let a = args.at(1).parse_i64().unwrap();\n    let mut k = if a < 0 {{\n        0;\n    }} else {{\n        a;\n    }};\n    let end = if a < 0 {{\n        {};\n    }} else {{\n        a + 1;\n    }};\n    while k < end {{\n    if a < 0 {{\n        println(\"= {{}}\", k);\n    }}\n",
+        exprs.len(),
+    );
     for k in 0..exprs.len() {
         s.format_into("    if k == {} {{\n", k);
         let t = tys[k];
@@ -945,7 +949,7 @@ fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, firs
         }
         s.push_str("    }\n");
     }
-    s.push_str("    return 0;\n}\n");
+    s.push_str("    k += 1;\n    }\n    return 0;\n}\n");
     return s;
 }
 
@@ -1030,10 +1034,20 @@ pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts: []str) S
             return r;
         }
     }
+    // One run computes every case, each after a line `= k`; a case after a trap or a crash, or every
+    // case when the sanitizer reports, runs alone, so its trap or report is its own.
+    let all = diff_run(&b, "-1");
+    let clean = !sanitizer_report(all.err.as_str());
+    let segs = parity_segments(all.out.as_str());
     for k in 0..n {
-        let mut arg = String::new();
-        arg.push_u64(k as u64);
-        let run = diff_run(&b, arg.as_str());
+        let done = clean && k < segs.len() && (k + 1 < segs.len() || all.exit == 0);
+        let run = if done {
+            DiffRun { exit: 0, out: segs.at(k).clone(), err: String::new() };
+        } else {
+            let mut arg = String::new();
+            arg.push_u64(k as u64);
+            diff_run(&b, arg.as_str());
+        };
         let trap = trap_text(run.err.as_str());
         let mut want = String::new();
         if omit[k] {
@@ -1064,6 +1078,21 @@ pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts: []str) S
         }
     }
     return r;
+}
+
+// The output of a run of every case (`-1`) per case: the lines after each `= k`.
+fn parity_segments(out: str) Vector<String> {
+    let mut segs = Vector::<String>::new();
+    for line in out.lines() {
+        if line.starts_with("= ") {
+            segs.push(String::new());
+        } else if segs.len() != 0 {
+            let last = segs.len() - 1;
+            segs.index_mut(last).push_str(line);
+            segs.index_mut(last).push_byte(b'\n');
+        }
+    }
+    return segs;
 }
 
 /// The program `const_runtime_parity` builds first, with every constant.

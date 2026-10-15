@@ -146,6 +146,39 @@ fn a_program_without_vectors_emits_the_same_c() {
     assert(emitted(vsrc, x86).contains("__sc_si_x86_64__add_f32x4"), "a vector operation calls its entry");
 }
 
+// The C definition of vector struct `name` a build with `flags` emits for `src`.
+fn vector_def(src: str, flags: str, name: str) String {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", src);
+    let r = p.compile_flags(flags, "main.spc");
+    assert(r.ok(), flags);
+    return cli::read_text(format("{}/build/dev/raw/__sc_t/{}.h", p.dir(), name).as_str());
+}
+
+// A build whose own features hold AVX (AVX-512F) keeps a 32-byte (64-byte) vector in one C vector,
+// which the C ABI passes in one register, at the layout's alignment of 16; a narrower build names the
+// 16-byte chunks.
+@test
+fn a_wide_vector_is_one_c_vector_where_the_build_has_its_register() {
+    let src = "fn main(args: Vector<str>) i32 {\n    let v = f32x8::splat(args.len() as f32);\n    let w = f32x16::splat(2.0);\n    return (v + v).get(0) as i32 + (w + w).get(0) as i32 - 6;\n}\n";
+    let base = vector_def(src, "--arch=x86_64 --target=linux", "__sc_v8_f32");
+    assert(base.contains("__sc_v4_f32 c[2];") && !base.contains("vector_size(32)"), "the baseline names the chunks");
+    let v3 = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v3", "__sc_v8_f32");
+    assert(
+        v3.contains("typedef float __sc_g8_f32 __attribute__((vector_size(32), aligned(16)));") && v3.contains(
+            "__sc_g8_f32 l;",
+        ) && !v3.contains(" c["),
+        "AVX: one 32-byte vector",
+    );
+    let v3w = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v3", "__sc_v16_f32");
+    assert(v3w.contains("__sc_v4_f32 c[4];"), "AVX: a 64-byte vector keeps its chunks");
+    let v4 = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v4", "__sc_v16_f32");
+    assert(
+        v4.contains("__attribute__((vector_size(64), aligned(16)))") && !v4.contains(" c["),
+        "AVX-512F: one 64-byte vector",
+    );
+}
+
 const RELEASE: [str; 1] = ["--profile=release"];
 
 const fn pick<T>(c: bool, a: T, b: T) T {
@@ -406,8 +439,9 @@ fn preferred_widths_agree() {
     );
 }
 
-// Every operation of `std::simd::x86` compiles under its features (one function holds them all).
-@test
+// Every operation of `std::simd::x86` compiles under its features (one function holds them all). The
+// whole module's units compile: about 90 s in a full CI shard, so it takes the long timeout.
+@test(timeout = 300)
 fn x86_operations_compile() {
     if !x86_host() {
         return;

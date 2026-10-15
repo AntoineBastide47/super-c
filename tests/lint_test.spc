@@ -55,14 +55,14 @@ fn redundant_cast_lint_covers_all_implicits() {
 
 // `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
 // time: through branches, matches and statically-resolved method calls, and stays silent on
-// loops, extern calls, recursion, and declared `const fn`s. Off by default (no warning without the
-// flag).
+// loops, extern calls, recursion, `@no_const` functions and declared `const fn`s. Off by
+// default (no warning without the flag).
 @test
 fn const_suggestion_lint() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) - 21;\n}\n",
+        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\n@no_const\nfn tagged(a: i32) i32 {\n    return a + 1;\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) + tagged(0) - 22;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint --const \"");
@@ -78,6 +78,7 @@ fn const_suggestion_lint() {
     assert(!r.out_has("'looping'"));
     assert(!r.out_has("'prints'"));
     assert(!r.out_has("'rec'"));
+    assert(!r.out_has("'tagged'"), "a '@no_const' function is never suggested");
     assert(!r.out_has("'main'"));
 
     // Off by default: the same file lints clean.

@@ -54,7 +54,9 @@ pub enum Schedule {
 /// Tuning for the `*_with` forms.
 pub struct Options {
     pub schedule: Schedule,
-    pub grain_size: usize, // Dynamic: indices per claim. Guided: the floor. 0 picks a default from the size
+    // Dynamic: indices per claim. Guided: the floor. Every schedule: one chunk at most per this many
+    // units. 0 picks a default from the size.
+    pub grain_size: usize,
 }
 
 extend Options {
@@ -184,10 +186,12 @@ pub unsafe fn finish(ce: *mut ChunkEnv) {
     }
 }
 
-/// How many chunks a call over `total` units will use: one is "run it inline on this thread". `reduce`
-/// needs this up front to size its per-chunk accumulators, so the answer must be exactly what `dispatch`
-/// goes on to do.
-pub fn chunk_count(total: usize) usize {
+/// How many chunks a call over `total` units under `opts` will use: one is "run it inline on this
+/// thread". `reduce` needs this up front to size its per-chunk accumulators, so the answer must be
+/// exactly what `dispatch` goes on to do. At most one chunk per `MIN_UNITS_PER_CHUNK` units, or per
+/// `grain_size` units when it is not 0, so a few heavy units (a section each, `sections`) still spread
+/// over the workers.
+pub fn chunk_count(total: usize, opts: Options) usize {
     if total == 0 {
         return 0;
     }
@@ -195,8 +199,13 @@ pub fn chunk_count(total: usize) usize {
     if runtime::in_job() {
         return 1;
     }
+    let per = if opts.grain_size == 0 {
+        MIN_UNITS_PER_CHUNK;
+    } else {
+        opts.grain_size;
+    };
     let mut n = runtime::worker_count() * CHUNKS_PER_WORKER;
-    let by_units = (total + MIN_UNITS_PER_CHUNK - 1) / MIN_UNITS_PER_CHUNK;
+    let by_units = (total + per - 1) / per;
     if n > by_units {
         n = by_units;
     }
@@ -213,7 +222,7 @@ pub fn chunk_count(total: usize) usize {
 /// chunk has finished. `shared` is the call's typed payload, handed to `entry` through the batch. `pub` for
 /// linkage: every entry point below is monomorphized in the caller's module and calls this.
 pub unsafe fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: *mut void) {
-    let nchunks = chunk_count(total);
+    let nchunks = chunk_count(total, opts);
     if nchunks == 0 {
         return;
     }
@@ -548,7 +557,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
     combine: COMB,
 ) A {
     let n = items.len();
-    let nslots = chunk_count(n);
+    let nslots = chunk_count(n, opts);
     if nslots == 0 {
         // Nothing to fold.
         return make();

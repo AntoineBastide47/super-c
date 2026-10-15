@@ -7,6 +7,8 @@ import ir::layout as lay;
 import lexer::token as tok;
 import module::loader as loader;
 import ir::interp as iri;
+import ir::cpu_features as cf;
+import stdlib;
 
 // The C spelling of a builtin in declarations (usize is size_t, NOT uintptr_t; c32/c64 are the
 // _Complex pair). "void" doubles as the fallback.
@@ -408,6 +410,10 @@ pub struct Mangler {
     /// vector (`vec_pack`), so the C ABI passes it in one register. Without, the C has no vector
     /// extension.
     pub vec_regs: bool,
+    /// The widest vector the build's own features hold in one register: 16 bytes, 32 with AVX, 64 with
+    /// AVX-512F (`vec_def`). Every function of the build has those features, so caller and callee
+    /// agree on the C ABI of a vector that wide.
+    pub vec_reg_bytes: u64,
     tn_seen: Vector<u64>, // direct-mapped filter over (row, key): most spellings repeat a recent one
     tn_pre: Vector<u64>, // direct-mapped filter over (row, concrete pool type, kind): skips the name hash
     tn_memo: Map<u64, u64>, // (module, decl) or concrete (module, type) -> C name FNV
@@ -632,7 +638,8 @@ extend Mangler {
             tn_key: Vector::<u64>::new(),
             tn_row: Vector::<u32>::new(),
             tn_on: false,
-            vec_regs: false,
+            vec_regs: simd_enabled(unsafe &*pkg),
+            vec_reg_bytes: vec_reg_bytes(unsafe (*pkg).features),
             tn_seen: Vector::<u64>::new(),
             tn_pre: Vector::<u64>::new(),
             tn_memo: Map::<u64, u64>::new(),
@@ -2118,7 +2125,7 @@ extend Mangler {
                 if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE {
                     continue;
                 }
-                let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
+                let tg = self.ext_target(m, iid);
                 if tg.module != tmod || tg.node != tdecl {
                     continue;
                 }
@@ -2159,7 +2166,7 @@ extend Mangler {
         if ntxt == "from" || ntxt == "try_from" {
             return true;
         }
-        let tg = unsafe (*a).resolution_def(unsafe (*a).at_const(ext).as_data.extend_def.target_type);
+        let tg = self.ext_target(fm, ext);
         if tg.node == NODE_NONE || self.overload_count(fm, tg.module, tg.node, fm, name) < 2 {
             return true;
         }
@@ -2283,11 +2290,33 @@ extend Mangler {
         if ext == NODE_NONE {
             return DefId { module: m, node: NODE_NONE };
         }
+        return self.ext_target(m, ext);
+    }
+
+    /// The declaration extend `ext` of module `m` targets: an alias target (`extend f128 as I`) names
+    /// the type it stands for, as every receiver and call does; `node == NODE_NONE` when unresolved.
+    pub fn ext_target(self: &Self, m: ModuleId, ext: NodeId) DefId {
         let a = self.p().module_ast_const(m);
-        if unsafe (*a).at_const(ext).as_data.extend_def.target_type == NODE_NONE {
+        let tn = unsafe (*a).at_const(ext).as_data.extend_def.target_type;
+        if tn == NODE_NONE {
             return DefId { module: m, node: NODE_NONE };
         }
-        return unsafe (*a).resolution_def(unsafe (*a).at_const(ext).as_data.extend_def.target_type);
+        let d = unsafe (*a).resolution_def(tn);
+        if d.node == NODE_NONE || unsafe (*self.p().module_ast_const(d.module)).at_const(d.node).kind != NodeKind::NODE_TYPE_ALIAS {
+            return d;
+        }
+        let y = *unsafe (*a).type_at(unsafe (*a).type_of(tn));
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            return DefId { module: self.p().core_module, node: self.p().builtin_decl(y.as_data.builtin) };
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return DefId { module: y.module, node: y.as_data.decl };
+        }
+        let mut it = TyInstance {};
+        if unsafe (*a).targs_of(unsafe (*a).type_of(tn), &mut it) {
+            return DefId { module: it.module, node: it.decl };
+        }
+        return d;
     }
 
     /// The extend owning `fnode` (NODE_NONE when free-standing).
@@ -2303,12 +2332,8 @@ extend Mangler {
 
     /// Does the extend that owns `fnode` declare generic parameters (its methods emit per receiver
     /// instance, outside the frozen non-generic symbol families)?
-    pub fn in_generic_extend(self: &mut Self, m: ModuleId, fnode: NodeId) bool {
-        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
-        if ext == NODE_NONE {
-            return false;
-        }
-        return unsafe (*self.p().module_ast_const(m)).at_const(ext).as_data.extend_def.generics.len != 0;
+    pub fn in_generic_extend(self: &Self, m: ModuleId, fnode: NodeId) bool {
+        return unsafe (*self.p().module_ast_const(m)).extend_arity(fnode) > 0;
     }
 
     /// Whether the extend that owns `fnode` is keyed (`ext_keyed`): a call names all of the extend's
@@ -2482,7 +2507,8 @@ extend Mangler {
             return false;
         }
         let mut it = TyInstance {};
-        if unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
+        // A generic extend's method emits per receiver instance; a concrete extend's has its own symbol.
+        if self.in_generic_extend(md.module, md.node) && unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             if !self.inst_name(rm, &it, out) {
                 return false;
             }
@@ -2540,7 +2566,7 @@ extend Mangler {
             self.mark_used(md.module);
             return true;
         }
-        let tg = unsafe (*ea).resolution_def(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        let tg = self.ext_target(em, ext);
         return self.fn_sym(md.module, md.node, tg, out);
     }
 
@@ -2592,7 +2618,7 @@ extend Mangler {
                     if it2.kind != NodeKind::NODE_EXTEND || it2.as_data.extend_def.target_type == NODE_NONE {
                         continue;
                     }
-                    let tg2 = unsafe (*pa).resolution_def(it2.as_data.extend_def.target_type);
+                    let tg2 = self.ext_target(pm2 as ModuleId, iid2);
                     if tg2.node == NODE_NONE || self.p().builtin_of_decl(tg2.module, tg2.node) != bt {
                         continue;
                     }
@@ -2642,7 +2668,7 @@ extend Mangler {
                 if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
                     continue;
                 }
-                let tgi = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
+                let tgi = self.ext_target(em2, iid);
                 if tgi.module != dm || tgi.node != dd {
                     continue;
                 }
@@ -2798,7 +2824,7 @@ extend Mangler {
             if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
                 continue;
             }
-            let tg = unsafe (*da).resolution_def(itn.as_data.extend_def.target_type);
+            let tg = self.ext_target(dm, iid);
             if tg.module != dm || tg.node != dd {
                 continue;
             }
@@ -2920,6 +2946,21 @@ extend Mangler {
 
     /// The full C declarator `<type> <decl>` of pool type `(pm, t)`, including east-const on pointer-to-pointer and array/function spirals. False when
     /// `t` needs an unfrozen family (dyn value types, non-capturing fn pointers).
+    /// The closure-env field of capture `k`, named `name`, of type `t`: a capture the body mutates or
+    /// borrows (`caps`) is a pointer to the captured binding, `const` when borrowed. Only owning
+    /// aggregates (and arrays of them) are borrowed: the `const` qualifies the pointee, which may be
+    /// a non-`mut` (C `const`) binding.
+    pub fn env_field(self: &mut Self, pm: ModuleId, t: TypeId, name: str, caps: &ClosureFact, k: u32, out: &mut String) bool {
+        let by_ptr = ((caps.mut_caps | caps.ref_caps) >> k as u64 & 1u64) != 0;
+        if (caps.ref_caps >> k as u64 & 1u64) != 0 {
+            out.push_str("const ");
+        }
+        let mut nm = String::from_str(if_s(by_ptr, "(*", ""));
+        nm.push_str(name);
+        nm.push_str(if_s(by_ptr, ")", ""));
+        return self.ctype(pm, t, nm.as_str(), out);
+    }
+
     pub fn ctype(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
         self.type_depth += 1;
         let r = self.ctype_i(pm, t, decl, out);
@@ -3364,26 +3405,39 @@ extend Mangler {
     /// is its size holds `<lane> l __attribute__((vector_size(S)))` instead, so the C ABI passes it in
     /// one vector register, not lane by lane (an aggregate of floats is a homogeneous aggregate, of
     /// integers two words); its lanes have no address: code that takes one spells `((T *)&v)[i]`. A
-    /// wider one of 16-byte chunks also names them, `c[k]` in a union with `l`: a split operation
-    /// reads and writes its chunks in place.
+    /// wider one up to `vec_reg_bytes` holds a C vector too, of the type `__sc_g<N>_<lane>` that keeps
+    /// the alignment of 16 (a member cannot lower it), and the x86-64 C ABI passes it in one register;
+    /// another wider one of 16-byte chunks also names them, `c[k]` in a union with `l`: a split
+    /// operation reads and writes its chunks in place (`vec_chunked`).
     fn vec_def(self: &mut Self, pm: ModuleId, elem: TypeId, nm: str, n: u64, size: u64, align: u64) bool {
         let h = nm.hash();
         if !self.pack_seen.contains(&h) {
-            let reg = self.vec_regs && n >= 2 && size <= 16 && align == size;
+            let reg = self.vec_regs && n >= 2 && (size <= 16 && align == size || size <= self.vec_reg_bytes && align == 16);
             let k = size / 16;
-            let wide = self.vec_regs && size > 16 && size % 16 == 0 && align == 16 && n % k == 0 && n / k >= 2;
+            let wide = !reg && self.vec_chunked(size, align) && n % k == 0 && n / k >= 2;
             let mut el = String::new();
             let mut lane = String::from_str("l");
-            if !reg {
-                lane.format_into("[{}]", n);
-            }
-            if !self.ctype(pm, elem, lane.as_str(), &mut el) {
-                return false;
-            }
-            if reg {
-                el.format_into(" __attribute__((vector_size({})))", size);
+            let mut gv = String::new();
+            if size > 16 && reg {
+                // `__sc_v<N>_<lane>` -> `__sc_g<N>_<lane>`.
+                gv.format_into("__sc_g{}", nm.slice(6, nm.len()));
+                if !self.ctype(pm, elem, gv.as_str(), &mut el) {
+                    return false;
+                }
+                gv = format("typedef {} __attribute__((vector_size({}), aligned({})));\n", el.as_str(), size, align);
+                el = format("__sc_g{} l", nm.slice(6, nm.len()));
             } else {
-                el.insert_str(0, format("_Alignas({}) ", align).as_str());
+                if !reg {
+                    lane.format_into("[{}]", n);
+                }
+                if !self.ctype(pm, elem, lane.as_str(), &mut el) {
+                    return false;
+                }
+                if reg {
+                    el.format_into(" __attribute__((vector_size({})))", size);
+                } else {
+                    el.insert_str(0, format("_Alignas({}) ", align).as_str());
+                }
             }
             if wide {
                 // `__sc_v<N>_<lane>` -> `__sc_v<N/k>_<lane>`, its 16-byte chunk.
@@ -3397,7 +3451,8 @@ extend Mangler {
             // The lane check (`ir::CHECK_LANES`) names its index and lane count; every TU that
             // indexes a vector needs the vector complete, so its definition carries the helper.
             let body = format(
-                "typedef struct {} {};\nstruct {} {{\n  {};\n}};\n_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n{}",
+                "{}typedef struct {} {};\nstruct {} {{\n  {};\n}};\n_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n{}",
+                gv.as_str(),
                 nm,
                 nm,
                 nm,
@@ -3414,6 +3469,11 @@ extend Mangler {
         }
         self.pack_use(h);
         return true;
+    }
+
+    /// Whether a vector of `size` bytes aligned to `align` names its 16-byte chunks (`c[k]`, `vec_def`).
+    pub const fn vec_chunked(self: &Self, size: u64, align: u64) bool {
+        return self.vec_regs && size > self.vec_reg_bytes && size % 16 == 0 && align == 16;
     }
 
     // Journal pack `h` (`pack_reqs`) and record the current context's need of its definition.
@@ -3834,3 +3894,28 @@ static __attribute__((unused)) inline double __sc_qnan_double(double __x) {
 #endif
 #endif
 )";
+
+/// Whether the planner may call a backend entry: the table has one the build's features hold, and
+/// SC_SIMD_SCALAR (a test switch) is not 1.
+/// The widest vector in one register under build features `fs` (`Mangler.vec_reg_bytes`).
+const fn vec_reg_bytes(fs: cf::CpuFeatureSet) u64 {
+    return if cf::has(fs, cf::F_AVX512F) {
+        64;
+    } else if cf::has(fs, cf::F_AVX) {
+        32;
+    } else {
+        16;
+    };
+}
+
+pub fn simd_enabled(pk: &loader::Package) bool {
+    if stdlib::env_is("SC_SIMD_SCALAR", "1") {
+        return false;
+    }
+    for i in 0..pk.simd_table.len() {
+        if cf::contains(cf::join(pk.features, pk.fn_union), pk.simd_table.at(i).fs) {
+            return true;
+        }
+    }
+    return false;
+}

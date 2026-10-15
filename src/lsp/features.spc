@@ -337,7 +337,7 @@ const ATTR_DOCS: [AttrDoc; 34] = [
     AttrDoc {
         name: "no_const",
         sig: "@no_const",
-        doc: "A struct, union or enum whose values never exist at compile time.",
+        doc: "A struct, union or enum whose values never exist at compile time, or a function that is never `const fn`.",
     },
     AttrDoc {
         name: "derive",

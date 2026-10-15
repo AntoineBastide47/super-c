@@ -1117,9 +1117,19 @@ fn diagnostics_by_message() {
         "'@derive' may only be applied to a struct, union, or enum declaration",
     );
     h::expect_err_msg(
-        "no_const on fn",
-        "@no_const\nfn f() {}\nfn main() i32 { return 0; }\n",
-        "'@no_const' may only be applied to a struct, union, or enum declaration",
+        "no_const on a const",
+        "@no_const\nconst K: i32 = 1;\nfn main() i32 { return K - 1; }\n",
+        "'@no_const' may only be applied to a struct, union, enum, or function declaration",
+    );
+    h::expect_err_msg(
+        "no_const on a const fn",
+        "@no_const\nconst fn f() i32 { return 0; }\nfn main() i32 { return f(); }\n",
+        "a '@no_const' function cannot be a 'const fn'",
+    );
+    h::expect_err_msg(
+        "no_const on a const method",
+        "struct S {}\nextend S {\n    @no_const\n    pub const fn f(self: &Self) i32 { return 0; }\n}\nfn main() i32 { return S {}.f(); }\n",
+        "a '@no_const' function cannot be a 'const fn'",
     );
     h::expect_err_msg(
         "const fn in body",

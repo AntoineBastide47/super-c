@@ -40,8 +40,11 @@ i64x2 i64x4 i64x8 u64x2 u64x4 u64x8`, and `mask2` to `mask64`.
 
 In a build that plans backend entries, a vector of 2 to 16 bytes whose alignment is its size holds
 `T l __attribute__((vector_size(S)))` instead, with the same size and alignment: the C ABI passes it
-in one vector register, not lane by lane; a wider one of 16-byte chunks also names them in a union
-with `l`.
+in one vector register, not lane by lane. A wider one holds a C vector too where the build's own
+features hold a register that wide (32 bytes with AVX, 64 with AVX-512F: every function of the build
+has them, so caller and callee agree on the ABI), of the type
+`typedef T __sc_g<N>_<lane> __attribute__((vector_size(S), aligned(16)))`; another wider one of
+16-byte chunks also names them in a union with `l`.
 
 A vector or mask is `Copy`, `Send` and `Sync`. Neither has a C ABI: an `extern "C"` or
 `@c.export` signature that names one is an error; pass `[T; N]` (`from_array`/`to_array`) or
@@ -323,6 +326,57 @@ place ("use `get` or `set`"), and a mask is no condition ("use `.any()` or `.all
 `std`. The compile-time evaluator holds a vector as its array of lanes and a mask as an
 integer; a vector constant is static data. `type_info` reports `TypeTag::Simd` (element and
 length as for an array) and `TypeTag::Mask` (element `Bool`, length `N`).
+
+## Vector math
+
+Elementary functions over `Simd<T, N>` for `f32` and `f64` lanes (`T: Lane`, `std/simd/math/lane.spc`)
+and every lane count, in three accuracy classes. Each function is generic, branch-free in its lanes
+and written over portable operations only, so a result has the same bits on every target, lowering
+(the scalar one included) and at compile time, a NaN's sign and payload aside (the hardware's default
+NaN differs); a lane's result never depends on the other lanes.
+
+| Class | Module | Bound | Special values | Subnormals |
+|-------|--------|-------|----------------|------------|
+| `precise` | `std::simd::math` | 1.0 ULP | C Annex F | in and out |
+| `balanced` | `std::simd::math::balanced` | 3.5 ULP | C Annex F | in and out |
+| `fast` | `std::simd::math::fast` | relative 2^-11 (f32), 2^-22 (f64) | NaN in gives NaN out, infinities, signed zeros | a result below 2^emin may be 0 (any value of at most 2^emin); `log`, `log2`, `log10` take a subnormal argument as 0 |
+
+Functions (every class): `exp exp2 exp10 expm1 log log2 log10 log1p pow powi cbrt hypot sin cos tan
+sincos asin acos atan atan2 sinh cosh tanh asinh acosh atanh`; `erf` in `precise` only and `erfc` in
+`precise` and `balanced` (a balanced erf would cost what the precise one does: both spend their time
+in the same table). `powi(x, n)` takes `n: Simd<i32, N>`; `sincos(x)` returns `(sin x, cos x)`; `atan2(y, x)`
+is the angle of (x, y). Free functions everywhere (`simd::math::exp(v)`, `balanced::exp(v)`); methods
+(`v.exp()`) for `precise` only, so a class other than the default is visible at the call.
+
+Choice: use `precise` unless a measured kernel needs more speed; then `balanced`, then `fast`
+inside its documented ranges.
+
+`fast` ranges: `sin`, `cos`, `tan`, `sincos` for |x| up to 2^13 (f32) or 2^24 (f64), unspecified past
+it; `exp`, `exp2`, `exp10`, `expm1`, `sinh`, `cosh` give inf from the first x whose reduced result
+reaches 2^(emax + 1), at most an ULP of x below the true threshold; `hypot` overflows past 2^(emax/2)
+and flushes below 2^(emin/2) (no scaling); an `atan2` quotient below 2^emin rounds as a subnormal;
+`cos(0)` is within the bound of 1, not exactly 1.
+
+Speed, measured by `simd-math-bench` (ns per element at the native lane count; aarch64 Neon: 4 f32,
+2 f64 lanes; x86_64 AVX2 at `x86-64-v3`: 8 f32, 4 f64 lanes):
+
+- Apple M: `balanced` is 1.05 to 2.31 times as fast as `precise` (exp, log, sin, cos: 1.30 to 1.61)
+  and `fast` 1.08 to 2.92 times as fast as `balanced` (exp, log, sin, cos: 1.41 to 2.22), every class
+  gate met. `precise` is slower than the scalar C library loop (Apple libm) for: in f32 `asinh` 0.98,
+  `atanh` 0.91, `erf` 0.92, `pow` 0.58, `powi` 0.59, `tanh` 0.96; in f64 `cbrt` 0.85, `cosh` 0.78,
+  `expm1` 0.98, `log2` 0.95, `powi` 0.80, `sinh` 0.72, `tan` 0.96, `tanh` 1.00 (its double-word steps
+  cost more than that library's table-driven kernels); faster for the rest (up to 3.22 times).
+- x86_64 (GitHub runners: AMD EPYC 7763, Intel Xeon 8370C and 6973P): `precise` built by clang is at
+  most 1.04 times as slow as SLEEF's 1-ULP vector functions (f32 `tan`, `atanh`, `erf`) and up to 2.45
+  times as fast; built by gcc, up to 1.17 times as slow (f32 `log1p`; f64 `erf` 1.23). glibc's libmvec
+  (4 ULP) stays faster (up to 7 times) except for f64 `exp` and f32 `erfc`. The class gates depend on the
+  CPU: on the EPYC 7763, `balanced` f64 `log`, `asinh` and `acosh` (one table step shared with
+  `precise`) and, built by gcc, `fast` f32 `exp` and `exp2` miss them; on the Xeon 8370C every gate is
+  met.
+
+Each class module starts with its measured table (`tools/simd_math`, super-c-testing: the largest
+error per function and lane type) and states its reductions and approximations. The coefficients
+(`std/simd/math/coeffs_f32.spc`, `coeffs_f64.spc`) are generated; never edit them by hand.
 
 ## Target features and backends
 

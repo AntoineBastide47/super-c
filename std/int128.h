@@ -41,8 +41,26 @@ static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl
   *sc_ql = (uint64_t)sc_q; *sc_qh = (uint64_t)(sc_q >> 64);
   *sc_rl = (uint64_t)sc_r; *sc_rh = (uint64_t)(sc_r >> 64);
 }
+/* The full 64x64 product: the low half returned, the high half stored. */
+static inline uint64_t sc_mul64(uint64_t sc_a, uint64_t sc_b, uint64_t *sc_hi) {
+  unsigned __int128 sc_p = (unsigned __int128)sc_a * sc_b;
+  *sc_hi = (uint64_t)(sc_p >> 64);
+  return (uint64_t)sc_p;
+}
+/* (sc_u1 : sc_u0) / sc_v for sc_u1 < sc_v: the quotient fits one limb. */
+static inline uint64_t sc_div128by64(uint64_t sc_u1, uint64_t sc_u0, uint64_t sc_v, uint64_t *sc_r) {
+  unsigned __int128 sc_u = (unsigned __int128)sc_u1 << 64 | sc_u0;
+  *sc_r = (uint64_t)(sc_u % sc_v);
+  return (uint64_t)(sc_u / sc_v);
+}
 #else
 static inline int sc_has_i128(void) { return 0; }
+static inline uint64_t sc_mul64(uint64_t sc_a, uint64_t sc_b, uint64_t *sc_hi) {
+  (void)sc_a; (void)sc_b; (void)sc_hi; abort();
+}
+static inline uint64_t sc_div128by64(uint64_t sc_u1, uint64_t sc_u0, uint64_t sc_v, uint64_t *sc_r) {
+  (void)sc_u1; (void)sc_u0; (void)sc_v; (void)sc_r; abort();
+}
 static inline void sc_i128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_c) {
   (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_c; abort();
 }

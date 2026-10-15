@@ -246,3 +246,87 @@ fn main() i32 {
         "ambiguous call to 'conv': 'P' conforms to 'Conv' with several arguments that fit",
     );
 }
+
+// Extends of std types from a user module: a vector extend over every lane count (std's generic code
+// names `Simd`, which must not make the prelude wait for the user module), an associated function of
+// a concrete extend called through its type (`String::mk()`: the qualifier's `Global` is no argument
+// of it), and a conformance written through an alias (`f128`), called through a bound.
+@test
+fn user_extends_of_std_types() {
+    h::expect_exit(
+        "user extends of std types",
+        M"(import std::float as fl;
+interface Real {
+    fn of(x: f64) Self;
+}
+extend fl::f128 as Real {
+    pub fn of(x: f64) fl::f128 {
+        return fl::f128::from_f64(x);
+    }
+}
+extend<const N: usize> Simd<f32, N> {
+    pub fn twice(self: Self) Self {
+        return self + self;
+    }
+}
+extend String {
+    pub fn mk() String {
+        return String::from_str("ab");
+    }
+}
+fn g<R: Real>() R {
+    return R::of(1.5);
+}
+fn main() i32 {
+    let v: f32x4 = [1.0, 2.0, 3.0, 4.0];
+    let s = String::mk();
+    let q = g::<fl::f128>();
+    return (v.twice()[3] != 8.0 || s.len() != 2 || q.to_f64() != 1.5 || fl::f128::of(2.5).to_f64() != 2.5) as i32;
+}
+)",
+        0,
+    );
+}
+
+// Interface dispatch over lane types: a scalar times a vector in a generic body that does not import
+// std::simd (the prelude's extensions are in scope), a turbofished `T::f::<..>()` (the call names the
+// implementor), a conformance on a vector alias, and fn pointers and `str` as `Send + Sync`.
+@test
+fn lane_interfaces_and_aliases() {
+    h::expect_exit(
+        "lane interfaces and aliases",
+        M"(interface Lane2: SimdFloat {
+    fn times<const K: usize, const N: usize>(z: Simd<Self, N>) Simd<Self, N>;
+}
+extend f32 as Lane2 {
+    pub fn times<const K: usize, const N: usize>(z: Simd<f32, N>) Simd<f32, N> {
+        return z * (K as f32);
+    }
+}
+fn g<T: Lane2, const N: usize>(a: T, z: Simd<T, N>) Simd<T, N> {
+    return a * T::times::<3, N>(z);
+}
+interface First {
+    fn first(self: Self) f32;
+}
+extend f32x4 as First {
+    pub fn first(self: Self) f32 {
+        return self[0];
+    }
+}
+fn needs<X: Send + Sync>(_x: X) i32 {
+    return 1;
+}
+fn one() i32 {
+    return 1;
+}
+fn main() i32 {
+    let v: f32x4 = [1.0, 2.0, 3.0, 4.0];
+    let r = g(2.0, v);
+    let f: fn() i32 = one;
+    return (r[1] != 12.0 || v.first() != 1.0) as i32 + needs(f) + needs("abc") - 2;
+}
+)",
+        0,
+    );
+}

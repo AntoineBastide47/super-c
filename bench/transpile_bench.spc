@@ -211,7 +211,7 @@ fn real_build(js: &mut String) bool {
         lint: true,
         transpiler: "",
     };
-    let rc = bsys::manifest_build(&m, BUILD_PROFILE, bin.as_str(), &cx);
+    let rc = bsys::manifest_build(&m, BUILD_PROFILE, bin.as_str(), "", &cx);
     let gp = bst::last();
     if gp == null {
         eprintln("bench: the build produced no statistics record");

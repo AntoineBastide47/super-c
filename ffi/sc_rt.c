@@ -1390,8 +1390,21 @@ static void sc_rt_sigstk_key_init(void) {
   sc_rt_sigstk_keyed = pthread_key_create(&sc_rt_sigstk_key, sc_rt_sigstk_drop) == 0;
 }
 
+/* The handler is process-wide: installed once, and every worker waits for it (pthread_once) before it
+   runs a task, so no overflow can meet the default action while another worker is still installing. */
+static pthread_once_t sc_rt_overflow_once = PTHREAD_ONCE_INIT;
+
+static void sc_rt_overflow_install(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = sc_rt_overflow;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, 0);
+  sigaction(SIGBUS, &sa, 0); /* macOS reports a guard-page hit as SIGBUS, Linux as SIGSEGV */
+}
+
 void sc_rt_stack_guard_install(void) {
-  static int32_t once = 0;
   /* A signal stack of this thread's own: the handler runs when a stack is exhausted, so it cannot run on
      that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. Without the
      key there is no way to release it at thread exit, so the thread does without. */
@@ -1408,14 +1421,7 @@ void sc_rt_stack_guard_install(void) {
     else if (pthread_setspecific(sc_rt_sigstk_key, m) != 0)
       sc_rt_sigstk_drop(m);
   }
-  if (__sync_val_compare_and_swap(&once, 0, 1) != 0) return; /* the handler itself is process-wide */
-  struct sigaction sa;
-  memset(&sa, 0, sizeof sa);
-  sa.sa_sigaction = sc_rt_overflow;
-  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGSEGV, &sa, 0);
-  sigaction(SIGBUS, &sa, 0); /* macOS reports a guard-page hit as SIGBUS, Linux as SIGSEGV */
+  pthread_once(&sc_rt_overflow_once, sc_rt_overflow_install);
 }
 
 /* Threads and their locks. The handle is a heap `pthread_t` rather than a cast: `pthread_t` is opaque and

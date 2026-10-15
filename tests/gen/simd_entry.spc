@@ -587,8 +587,15 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
             sel.push(i);
         }
     }
-    let ks = sel.index_range(sel.len() * k / parts..sel.len() * (k + 1) / parts);
-    let cs = cases(&es, ks, per);
+    // Dealt in turn (entry i to part i mod parts), not in contiguous runs: the backend file groups
+    // related entries, so a run of costly ones would make one part far longer than the others.
+    let mut ks = Vector::<usize>::new();
+    for i in 0..sel.len() {
+        if i % parts == k {
+            ks.push(sel[i]);
+        }
+    }
+    let cs = cases(&es, ks.index_range(0..ks.len()), per);
     let mut seen = String::new();
     let mut i: usize = 0;
     while i < cs.len() {
@@ -632,7 +639,7 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
             r.push_str("a lane-loop build calls an entry\n");
         }
     }
-    for k in ks {
+    for k in ks.index_range(0..ks.len()) {
         if !calls(&seen, es.at(k)) && !shadowed(&es, k, &seen) && !mask_form_instead(&es, es.at(k), &seen) {
             r.format_into("no call of entry '{}' ({})\n", es.at(k).name.as_str(), es.at(k).op.as_str());
         }

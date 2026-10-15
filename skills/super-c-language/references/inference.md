@@ -33,7 +33,7 @@ Never inferred (the signature barrier):
 - An unsuffixed integer literal defaults to `i32`, or to the first of `i64` and `u64` that
   holds its value when `i32` does not (`let x = 3000000000;` is an `i64`).
 - An unsuffixed float literal defaults to `f32`, or to `f64` when its value is past the f32
-  range (`let f = 1e39;` is an `f64`). The `f32` default is a deliberate choice, parallel to
+  range (`let f = 1e39;` is an `f64`; so is `1e-50`, nonzero yet 0 in f32). The `f32` default is a deliberate choice, parallel to
   the `i32` integer default; do not change it to `f64`.
 - Literal-only arithmetic (unsuffixed literals under `+ - * / %`, `& | ^ << >>`, unary `-`
   and parentheses) is typed as one expression. An expected builtin type of its kind (from a
@@ -47,7 +47,10 @@ Never inferred (the signature barrier):
   prefix (`0xFF`) or a minus sign does not pin it.
 - A typed context adapts an unsuffixed literal before the default applies: typed
   operands win over defaults, and the default applies only after all other
-  information is exhausted.
+  information is exhausted. A value `if`, `switch` or block beside a typed numeric operand of a
+  binary operator (not a shift count) is such a context for its literal branches, on either side
+  (`x < if c { 0.5; } else { 2.0; }` and its mirror compare in `x`'s type). A nested array literal
+  is checked against its slot type, in the repeat form too (`[[0.0; 2]; 3]` for `[[f64; 2]; 3]`).
 - A literal under `&` or `&mut` (at any depth: `&1`, `&&1`) adapts to the expected
   pointee type: `map.get(&1)` with `Map<u64, V>` passes a `&u64`. A typed value under
   a reference never converts: `&x` with `x: u8` does not become `&u64`.

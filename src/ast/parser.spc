@@ -4534,6 +4534,9 @@ extend Parser {
                 }
             }
             let fnk = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
+            if attr.kind == AttrKind::ATTR_NO_CONST as u8 && fnk && self.ast.at_const(owner).as_data.function.is_const() {
+                self.errors.emit_span(self.node_span(owner), format("a '@no_const' function cannot be a 'const fn'"));
+            }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
                 pick(fnk, "", "may only be applied to a function");
             } else if attr.kind == AttrKind::ATTR_C_VALUE as u8 {
@@ -4724,10 +4727,10 @@ extend Parser {
             }
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
                 owner,
-            ).kind != NodeKind::NODE_ENUM) {
+            ).kind != NodeKind::NODE_ENUM && self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION) {
                 self.errors.emit_span(
                     sp,
-                    format("'@no_const' may only be applied to a struct, union, or enum declaration"),
+                    format("'@no_const' may only be applied to a struct, union, enum, or function declaration"),
                 );
             }
             if attr.kind == AttrKind::ATTR_EMIT_MACRO as u8 && !generic_aggregate {

@@ -54,7 +54,8 @@ fn sleeps_never_end_early() {
 
 // A wait notified before its deadline leaves no entry behind: the old deadline passing later must not
 // wake the task out of its next park. The task's second wait is a longer sleep; a stale wake would end it
-// early.
+// early. The margins hold on a loaded runner with a coarse clock (Windows sleeps in about 15.6 ms
+// steps): the notify comes well inside the 200 ms deadline, which then passes during the 300 ms sleep.
 @test
 fn early_notify_leaves_no_stale_entry() {
     rt::set_worker_count(2);
@@ -69,22 +70,22 @@ fn early_notify_leaves_no_stale_entry() {
     let e = early.clone();
     launch || {
         defer w.done();
-        for _k in 0..50 {
+        for _k in 0..10 {
             {
                 let g = m1.get().lock();
-                // Woken by the notify well before this 20 ms deadline.
-                let _ = cv1.get().wait_until(&g, time::deadline_in(time::Duration::from_millis(20)));
+                // Woken by the notify well before this 200 ms deadline.
+                let _ = cv1.get().wait_until(&g, time::deadline_in(time::Duration::from_millis(200)));
             }
             // The cancelled deadline passes during this sleep; it must not cut it short.
             let t0 = platform::now_ns();
-            rt::sleep_ns(30000000);
-            if platform::now_ns() - t0 < 30000000 {
+            rt::sleep_ns(300000000);
+            if platform::now_ns() - t0 < 300000000 {
                 let _ = e.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
             }
         }
     };
     // Each round notifies the waiter while it is parked on the condvar, then lets it reach its sleep.
-    for _k in 0..50 {
+    for _k in 0..10 {
         assert(ph::wait_waiting(rt::WK_CONDVAR, 1), "the waiter parks on the condvar");
         cv.get().notify_one();
         assert(ph::wait_waiting(rt::WK_SLEEP, 1), "the waiter reaches its sleep");

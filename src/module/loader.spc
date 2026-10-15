@@ -884,6 +884,11 @@ fn path_exists(path: str) bool {
 /// Read a whole file into a String padded with lexer::SOURCE_PAD trailing NULs past len (the lexer's
 /// read-ahead sentinel); None on any I/O error.
 pub fn read_file(path: str) Option<String> {
+    // A directory is no file: Linux opens one, and its size reads as the largest offset.
+    let mut pc = String::from_str(path);
+    if unsafe shim::sc_stat_isdir(pc.cstr()) == 1 {
+        return Option::<String>::None;
+    }
     let f = stdio::fopen(path, "rb");
     if f == null {
         return Option::<String>::None;
@@ -5478,6 +5483,17 @@ extend Package {
     // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
     // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
     // `user_vectors`: a module the caller loads after the prelude names a vector (`package_from_source_arch`).
+    /// Whether a loaded module names a vector (`Ast.names_vectors`; std's own simd.spc aside).
+    pub fn names_vectors(self: &Self) bool {
+        for i in 0..self.modules.len() {
+            let md = &self.modules[i];
+            if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc") {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
         if std_dir.len() == 0 {
             return;
@@ -5553,12 +5569,7 @@ extend Package {
         // `@simd_impl` entries are what the lowering planner calls. A program without vectors
         // loads none, so it pays nothing for it.
         let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
-        let mut vec_use = user_vectors;
-        for i in 0..self.modules.len() {
-            let md = &self.modules[i];
-            vec_use = vec_use || md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc");
-        }
-        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && vec_use {
+        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
             let bn = unsafe backends[self.arch as usize];
             let mut bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
             if unsafe shim::sc_mtime(bf.cstr()) != 0 {

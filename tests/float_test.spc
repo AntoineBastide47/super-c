@@ -159,6 +159,95 @@ fn wide_formats_compute_exactly() {
 // The FINITE_ONLY family, held to e4m3fn's published encodings: no infinities, one NaN encoding
 // (S.1111.111), and the top exponent otherwise ordinary, which puts max_finite at 448. Overflow and an
 // incoming infinity saturate; division by zero has no infinity to give and answers NaN.
+// One f128 operand: random bits; or a random sign and fraction with the exponent field 0 (zeros and
+// subnormals), all ones (infinities and NaN), tiny or huge (results that underflow or overflow), or near
+// `near` (cancelling sums, quotients near 1).
+fn f128_operand(r: &mut u64, near: u64) f128 {
+    *r = r.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *r;
+    z = (z ^ z >> 30).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ z >> 27).wrapping_mul(0x94D049BB133111EB);
+    z = z ^ z >> 31;
+    let lo = z.wrapping_mul(0x2545F4914F6CDD1D);
+    let mut b = UInt::<128>::zero();
+    b.set_limb(0, lo);
+    let pick = z % 8;
+    if pick == 0 {
+        b.set_limb(1, z);
+        return f128::from_raw(b);
+    }
+    let e = if pick == 1 {
+        0;
+    } else if pick == 2 {
+        32767;
+    } else if pick == 3 {
+        (z >> 8) % 160;
+    } else if pick == 4 {
+        32766 - (z >> 8) % 160;
+    } else {
+        (near + 32768 + (z >> 8) % 129 - 64) % 32768;
+    };
+    // A short fraction half the time: ties and exact results.
+    let frac = if (z >> 7 & 1) == 0 {
+        z >> 16 & 0xFFFFFFFFFFFF;
+    } else {
+        z >> 16 & 0xFF0000000000;
+    };
+    if (z >> 7 & 1) != 0 {
+        b.set_limb(0, 0);
+    }
+    b.set_limb(1, z >> 63 << 63 | e << 48 | frac);
+    return f128::from_raw(b);
+}
+
+// f128 add, subtract, multiply, divide and square root against the f256 result rounded to f128: exact, as
+// f256's 237-bit significand is at least 2 x 113 + 2 bits, so its double rounding is innocuous (Figueroa).
+// Where the C compiler has binary128 the f128 side of the first four is the native path (float128.h), else
+// the limb code; the square roots are the limb code's at both widths.
+@test
+fn f128_operations_round_as_f256_does() {
+    let mut r: u64 = 0x1234;
+    for i in 0..20000 {
+        let a = f128_operand(&mut r, 16383);
+        let b = f128_operand(&mut r, a.to_raw().limb(1) >> 48 & 0x7FFF);
+        let wa = f256::convert(&a);
+        let wb = f256::convert(&b);
+        let aa = a.abs();
+        let got = [a + b, a - b, a * b, a / b, aa.sqrt()];
+        let waa = wa.abs();
+        let ws = [wa + wb, wa - wb, wa * wb, wa / wb, waa.sqrt()];
+        for k in 0..5 {
+            let g = unsafe got[k];
+            let w = f128::convert(&unsafe ws[k]);
+            let same = g.is_nan() && w.is_nan() || g.to_raw() == w.to_raw();
+            if !same {
+                eprintln("case {} op {}: {} and {}", i, k, a.to_string().as_str(), b.to_string().as_str());
+            }
+            assert(same, "the f128 result is the f256 result rounded");
+        }
+    }
+}
+
+// The square root of an exact square is exact: k with a short significand (56 bits) squares exactly, so
+// sqrt(k^2) must be k, with no sticky bit. A root one too large (the integer root's last correction) shows
+// here where rounding would hide it.
+@test
+fn square_roots_of_squares_are_exact() {
+    let mut r: u64 = 0x5EED;
+    for _ in 0..20000 {
+        r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let sig = r >> 8 | 1u64 << 55;
+        let e = (r % 4000) as i64 - 2000;
+        let su = UInt::<64>::from_u64(sig);
+        let k = f128::from_uint(&su).scalbn(e - 55);
+        let k2 = k * k;
+        assert(k2.sqrt() == k, "an f128 square's root is exact");
+        let w = f256::convert(&k);
+        let w2 = w * w;
+        assert(w2.sqrt() == w, "an f256 square's root is exact");
+    }
+}
+
 @test
 fn finite_only_family_is_e4m3fn() {
     let one = f8e4m3fn::from_f64(1.0);
@@ -565,4 +654,156 @@ fn parse_f64_is_correctly_rounded() {
 fn from_str_zero_with_huge_exponent() {
     assert(f16::from_str("0e5000").unwrap().is_zero());
     assert(f16::from_str("-0e5000").unwrap().is_negative());
+}
+
+fn step(s: &mut u64) u64 {
+    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    return *s ^ *s >> 29;
+}
+
+// A random fraction field.
+fn rand_frac<const E: usize, const F: usize>(s: &mut u64) UInt<{1 + E + F}> {
+    let mut v = UInt::<{1 + E + F}>::zero();
+    for i in 0..UInt::<{1 + E + F}>::limbs() {
+        v.set_limb(i, step(s));
+    }
+    return v;
+}
+
+// The remainder at every exponent distance: random bit patterns, all classes and scales, against libm.
+@test
+fn fmod_matches_libm_at_every_scale() {
+    let mut s: u64 = 5;
+    for _ in 0..20000 {
+        let a = f64_from_bits(step(&mut s));
+        let b = f64_from_bits(step(&mut s));
+        let fa = Float::<11, 52>::from_f64(a);
+        let fb = Float::<11, 52>::from_f64(b);
+        assert(same64((fa % fb).to_f64(), math::fmod(a, b)));
+    }
+}
+
+// The wide remainders against the integer one: x = mx 2^(d + e), y = my 2^e, x % y = (mx 2^d mod my) 2^e,
+// in a 1024-bit integer for distances up to 700.
+fn check_wide_rem<const E: usize, const F: usize>(seed: u64, n: usize) {
+    let mut s = seed;
+    let bias = (1u64 << (E - 1) as u64) - 1;
+    let implicit = UInt::<1024>::one().shl(F);
+    for _ in 0..n {
+        let fx = rand_frac::<E, F>(&mut s);
+        let fy = rand_frac::<E, F>(&mut s);
+        let r = step(&mut s);
+        let d = (r >> 40) % 700;
+        let ey = bias - 20 + (r >> 20) % 40;
+        let neg = (r & 1) == 1;
+        let x = Float::<E, F, IEEE>::from_parts(neg, ey + d, &fx);
+        let y = Float::<E, F, IEEE>::from_parts((r & 2) == 2, ey, &fy);
+        let (_, _, px) = x.to_parts();
+        let (_, _, py) = y.to_parts();
+        let mx = UInt::<1024>::cast_unsigned(&px).bit_or(&implicit);
+        let my = UInt::<1024>::cast_unsigned(&py).bit_or(&implicit);
+        let rem = mx.shl(d as usize) % my;
+        let mut want = Float::<E, F, IEEE>::from_uint(&rem).scalbn(ey as i64 - bias as i64 - F as i64);
+        if neg {
+            want = want.neg();
+        }
+        assert(x % y == want, "the remainder is the integer remainder of the significands");
+    }
+}
+
+@test
+fn wide_fmod_matches_the_integer_remainder() {
+    check_wide_rem::<15, 112>(41, 3000);
+    check_wide_rem::<19, 236>(42, 2000);
+}
+
+// Decimal text against the hardware's correctly rounded parse: every finite double prints digits that
+// parse back to it, and random digit strings at every scale parse to what the hardware reads.
+@test
+fn decimal_text_matches_the_hardware_parse() {
+    let mut s: u64 = 99;
+    for _ in 0..3000 {
+        let a = f64_from_bits(step(&mut s));
+        if a != a || a - a != 0.0 {
+            continue;
+        }
+        let t = Float::<11, 52>::from_f64(a).to_string();
+        assert(same64(t.as_str().parse_f64().unwrap(), a));
+        assert(same64(Float::<11, 52>::from_str(t.as_str()).unwrap().to_f64(), a));
+    }
+    for _ in 0..3000 {
+        let r = step(&mut s);
+        let mut t = String::new();
+        if (r & 1) == 1 {
+            t.push_byte(b'-');
+        }
+        let nd = 1 + (r >> 8) as usize % 30;
+        let dot = (r >> 16) as usize % (nd + 1);
+        for i in 0..nd {
+            if i == dot && i != 0 {
+                t.push_byte(b'.');
+            }
+            t.push_byte(b'0' + (step(&mut s) % 10) as u8);
+        }
+        t.push_byte(b'e');
+        let e = ((r >> 24) % 660) as i64 - 340;
+        t.push_i64(e);
+        let want = t.as_str().parse_f64().unwrap();
+        assert(same64(Float::<11, 52>::from_str(t.as_str()).unwrap().to_f64(), want));
+    }
+}
+
+// The wide formats' text round-trips: the digit count is chosen for it.
+fn check_text_round_trip<const E: usize, const F: usize>(seed: u64, n: usize) {
+    let mut s = seed;
+    let span = 1u64 << (E - 1) as u64;
+    for _ in 0..n {
+        let f = rand_frac::<E, F>(&mut s);
+        let r = step(&mut s);
+        let x = Float::<E, F, IEEE>::from_parts((r & 1) == 1, 1 + (r >> 8) % (2 * span - 2), &f);
+        let t = x.to_string();
+        assert(Float::<E, F, IEEE>::from_str(t.as_str()).unwrap() == x, "the text parses back to the value");
+    }
+}
+
+@test
+fn wide_decimal_text_round_trips() {
+    check_text_round_trip::<15, 112>(51, 500);
+    check_text_round_trip::<19, 236>(52, 300);
+    check_text_round_trip::<23, 492>(53, 100);
+}
+
+// The root is correctly rounded: its value squared brackets x between the squares of the midpoints to
+// its neighbours, exact in a format twice as wide. Against the hardware too at the f64 format.
+fn check_sqrt<const E: usize, const F: usize>(seed: u64, n: usize) {
+    let mut s = seed;
+    let span = 1u64 << (E - 1) as u64;
+    for _ in 0..n {
+        let f = rand_frac::<E, F>(&mut s);
+        let r = step(&mut s);
+        let x = Float::<E, F, IEEE>::from_parts(false, 1 + r % (2 * span - 2), &f);
+        let q = x.sqrt();
+        let wq = Float::<{E + 1}, {2 * F + 8}, IEEE>::convert(&q);
+        let qd = q.next_down();
+        let qu = q.next_up();
+        let wd = Float::<{E + 1}, {2 * F + 8}, IEEE>::convert(&qd);
+        let wu = Float::<{E + 1}, {2 * F + 8}, IEEE>::convert(&qu);
+        let lo = (wd + wq).scalbn(-1);
+        let hi = (wq + wu).scalbn(-1);
+        let wx = Float::<{E + 1}, {2 * F + 8}, IEEE>::convert(&x);
+        let hh = hi * hi;
+        assert((lo * lo).ieee_lt(&wx) && wx.ieee_lt(&hh), "x lies between the squares of the midpoints");
+    }
+}
+
+@test
+fn square_roots_are_correctly_rounded() {
+    let mut s: u64 = 61;
+    for _ in 0..20000 {
+        let a = f64_from_bits(step(&mut s));
+        assert(same64(Float::<11, 52>::from_f64(a).sqrt().to_f64(), math::sqrt(a)));
+    }
+    check_sqrt::<15, 112>(62, 3000);
+    check_sqrt::<19, 236>(63, 2000);
+    check_sqrt::<23, 492>(64, 500);
 }

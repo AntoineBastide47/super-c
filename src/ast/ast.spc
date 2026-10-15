@@ -4548,6 +4548,15 @@ extend Ast {
         };
     }
 
+    /// The number of parameters of the extend that holds `fnode`; -1 when no extend holds it.
+    pub const fn extend_arity(self: &Self, fnode: NodeId) i32 {
+        let c = self.container_of(fnode);
+        if c == NODE_NONE || self.at_const(c).kind != NodeKind::NODE_EXTEND {
+            return -1;
+        }
+        return self.at_const(c).as_data.extend_def.generics.len as i32;
+    }
+
     /// Record `container` as the extend or interface of every node in `items`, or forget it
     /// (NODE_NONE) when the platform filter drops the container.
     pub fn set_members(self: &mut Self, container: NodeId, items: NodeList) {

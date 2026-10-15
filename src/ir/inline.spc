@@ -6,20 +6,33 @@
 // order preserved); every early return becomes a jump to one join block that moves the return
 // slots into the call's destinations.
 //
-// Candidate policy (conservative, tuned for the std index family): direct non-variadic calls to
-// known function bodies of at most MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks,
-// non-recursive through the active splice chain, without asm, closures, variadic intrinsics,
-// reflection, asserts, wide literals, static references, or `from` coercions, and without
-// attributes beyond the inline hints, the build gates and `@target_feature` (@c.noinline and
-// @c.noreturn therefore reject). Inner calls
-// must target CONCRETE public functions or header-declared extern functions, and fn-value
-// constants CONCRETE public functions -- anything else would need the
-// emitter's demand machinery (symbols, prototypes, per-instantiation static_asserts) from a
-// context the splice no longer has -- and a generic callee whose body defers a static_assert per
-// instantiation stays a call so its demand still fires the guard. Generic callees inline when
-// every generic parameter binds through the call (signature unification plus the recorded type
-// arguments) and every body type substitutes into a package type; const-generic types do not
-// substitute and reject the site. Never into a body holding IN_REFLECT binder placeholders.
+// Candidate policy: direct non-variadic calls to known function bodies of at most
+// MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks / MAX_CALLEE_LOCALS locals (VEC_SCALE
+// times more for a vector signature; a body past them with a switch on a const-generic parameter is
+// sized per call by the arms its bindings take), non-recursive through the active splice chain, at
+// most MAX_DEPTH splices deep and MAX_ADDED_STMTS statements per caller (VEC_SCALE times more in a
+// caller that holds a vector), without asm, closures, variadic intrinsics, reflection, asserts, wide
+// literals, statics of a generic scope, or `from` coercions, and without attributes beyond the
+// inline hints, the build gates and `@target_feature` (@c.noinline and @c.noreturn therefore
+// reject). The splice translates every type, type argument,
+// receiver and interface of the callee into the caller's types, so an inner call spells and demands
+// in the caller's unit as the caller's own call: a function with a body, an interface method, a
+// function value, a header-declared extern function or a runtime atomic; not another extern function
+// (its prototype is its module's) nor an associated function of a generic extend that names its
+// receiver by no type of the call (`env_receiver`: the instance env names it). A callee that reads a
+// module's constant or static, or whose inner call names another function than a concrete public
+// one or a header-declared extern one, inlines into a caller that holds a vector only
+// (`CalleeInfo.vec_only`, `holds_vector`): vector code gains the most, and elsewhere the C compiler's
+// own inlining serves without the larger C. A generic callee whose
+// body defers a static_assert per instantiation records the call in the caller's `demands`, so the
+// guard still fires. Generic callees inline when every generic parameter binds through the call
+// (signature unification plus the recorded type arguments) and every body type substitutes into a
+// package type; a const-generic parameter bound to a value reads as that constant, one bound to the
+// caller's own parameter reads as that parameter. A switch whose scrutinee is then a constant takes
+// its one edge (`CFlow` lays out no other), and a block no edge reaches inlines nothing. Never into a
+// body holding IN_REFLECT binder placeholders. The emitter's bound variants (`ground_body`) turn a
+// generic instance that holds a vector concrete, so a call through an interface the instance resolves
+// inlines too.
 //
 // Spliced constants keep their raw spans and mark the callee module in `item` (the emitter's
 // foreign-source convention for CK_STR, extended to CK_FLOAT and CK_INT); IR_NONE sentinels are
@@ -68,21 +81,53 @@ const MAX_CALLEE_STMTS: usize = 40;
 const MAX_CALLEE_BLOCKS: usize = 10;
 const MAX_CALLEE_LOCALS: usize = 32;
 
-/// The callee size gate over a body's current shape. The borrow pass records the answer for the
-/// pre-elaboration shape in `CoreBody.inline_size_ok` (the shape the limits were tuned for), and
-/// the vet reads that bit.
+/// A callee that passes or returns a vector takes limits this many times larger: its call spills
+/// every live vector register (no x86-64 vector register survives a call) and returns several
+/// vectors through memory.
+const VEC_SCALE: usize = 4;
+
+/// The callee size gate over a body's current shape (`VEC_SCALE` for a vector signature, package
+/// `pkg`). The borrow pass records the answer for the pre-elaboration shape in
+/// `CoreBody.inline_size_ok` (the shape the limits were tuned for), and the vet reads that bit.
 /// The blocks, statements and locals the counted-loop lowering added (`count_blocks`, `chunks`)
 /// do not count.
-pub const fn callee_size_ok(b: &ir::CoreBody) bool {
+pub fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
     let ns = b.statements.len() - 2 * b.chunks as usize;
     let nb = b.blocks.len() - b.count_blocks as usize;
     let nl = b.locals.len() - 2 * b.chunks as usize;
-    return ns <= MAX_CALLEE_STMTS && nb <= MAX_CALLEE_BLOCKS && nl <= MAX_CALLEE_LOCALS;
+    let k = size_scale(b, pkg);
+    return ns <= MAX_CALLEE_STMTS * k && nb <= MAX_CALLEE_BLOCKS * k && nl <= MAX_CALLEE_LOCALS * k;
 }
-/// Per caller body: total statements added by all splices (nested ones included).
+
+/// Whether a local of `b` (package `pkg`) is a vector: vector code, where the inliner reaches further
+/// (`CalleeInfo.vec_only`, the emitter's bound variants).
+pub fn holds_vector(b: &ir::CoreBody, pkg: *const loader::Package) bool {
+    let a = unsafe &*(&*pkg).module_ast_const(b.module);
+    for i in 0..b.locals.len() {
+        let t = b.locals.at(i).ty;
+        if t != TYPE_NONE && a.type_at(t).kind == TypeKind::TYPE_SIMD {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// `VEC_SCALE` when a parameter or result of `b` (package `pkg`) is a vector, else 1.
+fn size_scale(b: &ir::CoreBody, pkg: *const loader::Package) usize {
+    let a = unsafe &*(&*pkg).module_ast_const(b.module);
+    for i in 0..(b.returns + b.args) as usize {
+        let t = b.locals.at(i).ty;
+        if t != TYPE_NONE && a.type_at(t).kind == TypeKind::TYPE_SIMD {
+            return VEC_SCALE;
+        }
+    }
+    return 1;
+}
+/// Per caller body: total statements added by all splices (nested ones included); VEC_SCALE times more
+/// in a caller that holds a vector.
 const MAX_ADDED_STMTS: usize = 512;
-/// Nested splice depth (a spliced call inlining its own calls).
-const MAX_DEPTH: usize = 3;
+/// Nested splice depth (a spliced call inlining its own calls); the budget above bounds the growth.
+pub const MAX_DEPTH: usize = 6;
 
 // keep_ix value encoding: slot index, or REJ_BASE | reason for a cached rejection.
 const REJ_BASE: u64 = 0xFFFFFFFF00000000u64;
@@ -94,10 +139,12 @@ struct CalleeInfo {
     pub gp: Vector<NodeId>,
     pub fg: u32, // trailing entries of `gp` that are the function's own parameters
     pub demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
+    pub big: bool, // past the size gate, with a switch on a const-generic parameter: sized per call (`live_size`)
+    pub vec_only: bool, // inlines into a caller that holds a vector only (`vet_body`)
 }
 
 /// One generic-parameter binding: `(pm, pnode)` resolves to the caller's type `at`.
-struct GBind {
+pub struct GBind {
     pub pm: ModuleId,
     pub pnode: NodeId,
     pub at: TypeId,
@@ -154,6 +201,8 @@ pub struct InlineCtx {
     pub sc_wire: Vector<u8>,
     pub sc_probe: Vector<TypeId>,
     pub sc_shape: Vector<u64>,
+    pub sc_live: Vector<bool>,
+    pub sc_stack: Vector<u32>,
 }
 
 fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) {
@@ -367,13 +416,26 @@ const fn callee_key(d: DefId) u64 {
     return skey_mix(3, d.module as u64 << 32 | d.node as u64);
 }
 
-/// A public non-extern CONCRETE function with a body (no generics of its own, and any enclosing
-/// extend non-generic): the one item shape whose symbol and prototype every TU can spell.
-fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
+/// A function with a body, or an interface method a call dispatches per receiver: its call spells
+/// from the call's own types (the splice translates them) and demands what it names, in any TU.
+fn is_spelled_fn(pkg: *const loader::Package, d: DefId) bool {
     let p = unsafe &*pkg;
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return false;
     }
+    let a = unsafe &*p.module_ast_const(d.module);
+    let n = a.at_const(d.node);
+    if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern() {
+        return false;
+    }
+    let c = a.container_of(d.node);
+    return n.as_data.function.body != NODE_NONE || c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_INTERFACE;
+}
+
+/// A public non-extern CONCRETE function with a body (no generics of its own, and any enclosing
+/// extend non-generic): an inner call of it keeps a callee a candidate for any caller (`vet_body`).
+fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
+    let p = unsafe &*pkg;
     let a = unsafe &*p.module_ast_const(d.module);
     let n = a.at_const(d.node);
     if n.kind != NodeKind::NODE_FUNCTION {
@@ -384,10 +446,7 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
         return false;
     }
     let ext = extend_of(a, d.node);
-    if ext != NODE_NONE && a.at_const(ext).as_data.extend_def.generics.len != 0 {
-        return false;
-    }
-    return true;
+    return ext == NODE_NONE || a.at_const(ext).as_data.extend_def.generics.len == 0;
 }
 
 /// A non-variadic function of an `extern "C" "<header>"` block. Every TU includes that header
@@ -445,6 +504,8 @@ extend InlineCtx {
             sc_wire: Vector::<u8>::new(),
             sc_probe: Vector::<TypeId>::new(),
             sc_shape: Vector::<u64>::new(),
+            sc_live: Vector::<bool>::new(),
+            sc_stack: Vector::<u32>::new(),
         };
     }
 
@@ -491,10 +552,22 @@ extend InlineCtx {
         let mut body = ir::CoreBody::compact_from(&lw.body);
         body.elaborated = true; // nothing to elaborate: the kept body drops nothing
         self.rl.push(
-            CalleeInfo { body: body, gp: unsafe (*ki).gp.clone(), fg: unsafe (*ki).fg, demand: unsafe (*ki).demand },
+            CalleeInfo {
+                body: body,
+                gp: unsafe (*ki).gp.clone(),
+                fg: unsafe (*ki).fg,
+                demand: unsafe (*ki).demand,
+                big: unsafe (*ki).big,
+                vec_only: unsafe (*ki).vec_only,
+            },
         );
         self.rl_ix.insert(key, self.rl.len() as u64 - 1);
         return self.rl.at(self.rl.len() - 1);
+    }
+
+    /// Whether the shared store keeps callee `d` as a candidate.
+    pub fn kept(self: &Self, d: DefId) bool {
+        return self.callee_slot(d) < REJ_BASE;
     }
 
     /// The shared store's verdict for callee `d`: the kept slot, or REJ_BASE|reason (a body the
@@ -517,6 +590,289 @@ fn is_param(p: &loader::Package, d: DefId) bool {
     return d.node != NODE_NONE && (unsafe &*p.module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
 }
 
+// The operand switch scrutinee `o` of `b` copies: through locals of `l0..`, each written once among
+// statements `s0..` (blocks `bl0..` for call destinations) and never borrowed there, and through the
+// discriminant of a payload-less enum (its value): what a `switch` on a value lowers into. `o` itself
+// when it reads no such temp.
+fn scrutinee(p: &loader::Package, b: &ir::CoreBody, o0: u32, s0: usize, l0: u32, bl0: usize) u32 {
+    let mut o = o0;
+    // Each hop crosses one temp: a scrutinee lowers through two at most.
+    for _ in 0..4 {
+        let op = *b.operands.at(o as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return o;
+        }
+        let rv = temp_source(b, op.data, s0, l0, bl0);
+        if rv.kind == ir::RV_USE {
+            o = rv.a;
+            continue;
+        }
+        if rv.kind != ir::RV_DISCRIMINANT || b.places.at(rv.a as usize).proj_len != 0 {
+            return o;
+        }
+        let y = *(unsafe &*p.module_ast_const(b.module)).type_at(b.places.at(rv.a as usize).ty);
+        if y.kind != TypeKind::TYPE_ENUM || (unsafe &*p.module_ast_const(y.module)).enum_has_payload(y.as_data.decl) {
+            return o;
+        }
+        let src = temp_source(b, rv.a, s0, l0, bl0);
+        if src.kind != ir::RV_USE {
+            return o;
+        }
+        o = src.a;
+    }
+    return o;
+}
+
+// The one assignment's rvalue of the local place `pl` of `b` names (`scrutinee`: a temp or a binding,
+// not a parameter, result or item), else an rvalue of kind RV_CLOSURE (no such assignment).
+fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize) ir::Rvalue {
+    let none = ir::rv(ir::RV_CLOSURE, 0, 0, 0, TYPE_NONE);
+    let pl = *b.places.at(pl0 as usize);
+    let sk = b.locals.at(pl.base as usize).storage;
+    if pl.proj_len != 0 || pl.base < l0 || sk != ir::LS_TEMP && sk != ir::LS_USER && sk != ir::LS_INL {
+        return none;
+    }
+    let mut src = none;
+    let mut n: u32 = 0;
+    for i in s0..b.statements.len() {
+        let st = *b.statements.at(i);
+        if st.kind != ir::ST_ASSIGN || st.place == ir::IR_NONE {
+            continue;
+        }
+        let rv = *b.rvalues.at(st.rvalue as usize);
+        if (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR) && b.places.at(rv.a as usize).base == pl.base {
+            return none;
+        }
+        if b.places.at(st.place as usize).base == pl.base {
+            n += 1;
+            if b.places.at(st.place as usize).proj_len != 0 {
+                return none;
+            }
+            src = rv;
+        }
+    }
+    for i in bl0..b.blocks.len() {
+        let t = b.blocks.at(i).term;
+        for j in 0..pick(t.kind == ir::TM_CALL, t.dests_len, 0) {
+            let d = b.dest_pool[(t.dests_start + j) as usize];
+            if d != ir::IR_NONE && b.places.at(d as usize).base == pl.base {
+                return none;
+            }
+        }
+    }
+    return pick(n == 1, src, none);
+}
+
+// The integer value of operand `o` of `b` when it is a constant or a read of a const-generic
+// parameter `binds` bind (types of module `cm`).
+fn int_operand(p: &loader::Package, b: &ir::CoreBody, o: u32, cm: ModuleId, binds: &Vector<GBind>, v: &mut i64) bool {
+    let op = *b.operands.at(o as usize);
+    if op.kind == ir::OP_CONST {
+        let c = *b.constants.at(op.data as usize);
+        *v = c.val;
+        return c.kind == ir::CK_INT || c.kind == ir::CK_BOOL;
+    }
+    let pl = *b.places.at(op.data as usize);
+    let l = *b.locals.at(pl.base as usize);
+    return pl.proj_len == 0 && l.storage == ir::LS_STATIC_REF && is_param(p, l.item) && param_value(
+        p,
+        l.item,
+        cm,
+        binds,
+        v,
+    );
+}
+
+// The block switch `tm` of `b` goes to when its operand, or the scrutinee temp it reads
+// (`scrutinee`), has a known value (`int_operand`); IR_NONE otherwise. A value past the u32 case
+// encoding stays unknown.
+fn switch_goes(p: &loader::Package, b: &ir::CoreBody, tm: &ir::Terminator, cm: ModuleId, binds: &Vector<GBind>) u32 {
+    let mut v: i64 = 0;
+    let mut o = tm.a;
+    if b.operands.at(o as usize).kind != ir::OP_CONST && !b_param_read(p, b, o) {
+        o = scrutinee(p, b, o, 0, 0, 0);
+    }
+    if !int_operand(p, b, o, cm, binds, &mut v) || v < 0 || v > 0xFFFFFFFF {
+        return ir::IR_NONE;
+    }
+    for k in 0..tm.sw_len {
+        let pair = b.switch_pool[(tm.sw_start + k) as usize];
+        if pair >> 32 == v as u64 {
+            return (pair & 0xFFFFFFFFu64) as u32;
+        }
+    }
+    return tm.t0;
+}
+
+// Mark in `live` the blocks of `b` reachable from `from` that are not marked yet, a switch with a
+// constant operand taking its one edge (as `CFlow` lays the C out); the statements of the marked
+// blocks. `live` covers every block; `stack` is scratch.
+fn reach(b: &ir::CoreBody, from: u32, live: &mut Vector<bool>, stack: &mut Vector<u32>) usize {
+    let mut ns: usize = 0;
+    stack.clear();
+    stack.push(from);
+    // Each block is pushed once per in-edge at most, and marked once.
+    while stack.len() != 0 {
+        let x = stack.pop().unwrap();
+        if live[x as usize] {
+            continue;
+        }
+        live.set(x as usize, true);
+        let blk = *b.blocks.at(x as usize);
+        ns += blk.stmt_len as usize;
+        let t = blk.term;
+        if t.kind == ir::TM_SWITCH && b.operands.at(t.a as usize).kind == ir::OP_CONST {
+            let c = *b.constants.at(b.operands.at(t.a as usize).data as usize);
+            let mut to = t.t0;
+            for k in 0..t.sw_len {
+                let pair = b.switch_pool[(t.sw_start + k) as usize];
+                if (pair >> 32) as u32 == c.val as u32 {
+                    to = (pair & 0xFFFFFFFFu64) as u32;
+                    break;
+                }
+            }
+            stack.push(to);
+            continue;
+        }
+        if t.kind == ir::TM_SWITCH {
+            for k in 0..t.sw_len {
+                stack.push((b.switch_pool[(t.sw_start + k) as usize] & 0xFFFFFFFFu64) as u32);
+            }
+        }
+        if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE && t.t0 != ir::IR_NONE {
+            stack.push(t.t0);
+        }
+    }
+    return ns;
+}
+
+// The statements and blocks of callee `k` reachable from its entry when every switch on a const-generic
+// parameter `binds` bind (types of caller module `cm`) takes its one edge.
+fn live_size(p: &loader::Package, k: &ir::CoreBody, cm: ModuleId, binds: &Vector<GBind>, nb: &mut usize) usize {
+    let mut live = Vector::<bool>::new();
+    live.resize_default(k.blocks.len());
+    let mut stack = Vector::<u32>::new();
+    stack.push(k.entry);
+    let mut ns: usize = 0;
+    *nb = 0;
+    while stack.len() != 0 {
+        let x = stack.pop().unwrap();
+        if live[x as usize] {
+            continue;
+        }
+        live.set(x as usize, true);
+        *nb += 1;
+        let blk = *k.blocks.at(x as usize);
+        ns += blk.stmt_len as usize;
+        let t = blk.term;
+        if t.kind == ir::TM_SWITCH {
+            let to = switch_goes(p, k, &t, cm, binds);
+            if to != ir::IR_NONE {
+                stack.push(to);
+                continue;
+            }
+            for j in 0..t.sw_len {
+                stack.push((k.switch_pool[(t.sw_start + j) as usize] & 0xFFFFFFFFu64) as u32);
+            }
+        }
+        if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE && t.t0 != ir::IR_NONE {
+            stack.push(t.t0);
+        }
+    }
+    return ns;
+}
+
+// Whether `k` holds a switch on a const-generic parameter (`scrutinee`): its live size depends on the
+// call's bindings (`live_size`).
+fn param_switch(p: &loader::Package, k: &ir::CoreBody) bool {
+    // Most bodies read no const-generic parameter: one pass over the locals answers for them.
+    let mut reads = false;
+    for i in 0..k.locals.len() {
+        reads = reads || k.locals.at(i).storage == ir::LS_STATIC_REF && is_param(p, k.locals.at(i).item);
+    }
+    if !reads {
+        return false;
+    }
+    for i in 0..k.blocks.len() {
+        let t = k.blocks.at(i).term;
+        if t.kind != ir::TM_SWITCH {
+            continue;
+        }
+        if b_param_read(p, k, scrutinee(p, k, t.a, 0, 0, 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether operand `o` of `b` reads a const-generic parameter.
+fn b_param_read(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+    let op = *b.operands.at(o as usize);
+    if op.kind == ir::OP_CONST {
+        return false;
+    }
+    let pl = *b.places.at(op.data as usize);
+    let l = *b.locals.at(pl.base as usize);
+    return pl.proj_len == 0 && l.storage == ir::LS_STATIC_REF && is_param(p, l.item);
+}
+
+// Whether call `t` of `b` reaches a function of a generic extend without a `self` parameter whose
+// receiver instance no type of the call names: not the call's receiver type, not its one result's
+// type, not its type arguments (`Type::<Args>::f()`). The emitter then takes it from the active
+// bindings (`CEmit::callee_sym_i`).
+fn env_receiver(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    let d = t.callee;
+    let a = unsafe &*p.module_ast_const(d.module);
+    if a.extend_arity(d.node) <= 0 || a.at_const(d.node).kind != NodeKind::NODE_FUNCTION || t.recv != TYPE_NONE {
+        return false;
+    }
+    let ps = a.at_const(d.node).as_data.function.params;
+    if ps.len != 0 {
+        let nm = a.at_const(a.at_const(unsafe a.list(ps)[0]).as_data.parameter.name).as_data.name.text;
+        if p.modules.at(d.module as usize).source.as_str().slice(nm.start as usize, nm.end as usize) == "self" {
+            return false;
+        }
+    }
+    // The extend's target declaration.
+    let tn = a.at_const(a.container_of(d.node)).as_data.extend_def.target_type;
+    let mut tg = TyInstance {};
+    let mut tdecl = a.resolution_def(tn);
+    if a.targs_of(a.type_of(tn), &mut tg) {
+        tdecl = DefId { module: tg.module, node: tg.decl };
+    }
+    if t.dests_len == 1 {
+        let ba = unsafe &*p.module_ast_const(b.module);
+        let mut dt = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+        for _ in 0..4 {
+            let y = *ba.type_at(dt);
+            if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            dt = y.as_data.elem;
+        }
+        let mut it = TyInstance {};
+        if ba.targs_of(dt, &mut it) && it.module == tdecl.module && it.decl == tdecl.node {
+            return false;
+        }
+    }
+    if tdecl.node == NODE_NONE || t.targs_len == 0 {
+        return true;
+    }
+    let td = (unsafe &*p.module_ast_const(tdecl.module)).at_const(tdecl.node);
+    return !((td.kind == NodeKind::NODE_STRUCT || td.kind == NodeKind::NODE_ENUM) && td.as_data.aggregate.generics.len == t.targs_len);
+}
+
+// Is `d` a const or static outside any generic scope: a module's, or a non-generic extend's? Every TU
+// spells it as its symbol and declares it at the use (`CEmit`'s static stubs), as the caller's own.
+fn is_plain_item(p: &loader::Package, d: DefId) bool {
+    if d.node == NODE_NONE || Ast::in_body(d.node) {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(d.module);
+    let c = a.container_of(d.node);
+    return c == NODE_NONE || a.at_const(c).kind == NodeKind::NODE_EXTEND && a.at_const(c).as_data.extend_def.generics.len == 0;
+}
+
 // Is operand `o` of `b` a constant, or a read of a const-generic parameter (a constant once spliced)?
 fn const_or_param(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
     let op = *b.operands.at(o as usize);
@@ -528,6 +884,20 @@ fn const_or_param(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
         p,
         b.locals.at(pl.base as usize).item,
     );
+}
+
+// The caller's own const-generic parameter `d` binds to under `binds` (caller types of module `cm`),
+// node NONE when it binds to none: a symbolic count (`N`) the caller's instance env folds.
+fn param_param(p: &loader::Package, d: DefId, cm: ModuleId, binds: &Vector<GBind>) DefId {
+    for i in 0..binds.len() {
+        let g = binds.at(i);
+        if g.pm == d.module && g.pnode == d.node {
+            let y = *(unsafe &*p.module_ast_const(cm)).type_at(g.at);
+            let q = DefId { module: y.module, node: y.as_data.decl };
+            return pick(y.kind == TypeKind::TYPE_GENERIC && is_param(p, q), q, DefId { module: 0, node: NODE_NONE });
+        }
+    }
+    return DefId { module: 0, node: NODE_NONE };
 }
 
 // The value of const-generic parameter `d` under `binds` (caller types of module `cm`), or false.
@@ -680,12 +1050,23 @@ extend InlineStore {
             asserts.push(Vector::<u64>::new());
             has_asserts.push(0);
         }
+        let vec_prog = unsafe (&*pkg).names_vectors();
         for i in 0..keep.kept.len() {
             let b = &keep.kept.at(i).body;
             for k in 0..b.blocks.len() {
                 let t = &b.blocks.at(k).term;
                 if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
                     called.insert(callee_key(t.callee), 1);
+                }
+            }
+            // A conformance's method: a call through its interface reaches it once an instance that
+            // holds a vector names the receiver (the emitter's bound variants).
+            let d = b.owner;
+            if vec_prog && !Ast::in_body(d.node) && unsafe (&*pkg).modules.at(d.module as usize).has_ast {
+                let a = unsafe &*(&*pkg).module_ast_const(d.module);
+                let ext = extend_of(a, d.node);
+                if ext != NODE_NONE && a.at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
+                    called.insert(callee_key(d), 1);
                 }
             }
         }
@@ -703,7 +1084,7 @@ extend InlineStore {
             // The size gate first: it rejects most bodies at once, before the declaration checks
             // walk the module's attributes.
             let mut r: u64 = 0;
-            if !lw.body.inline_size_ok {
+            if !lw.body.inline_size_ok && !param_switch(unsafe &*pkg, &lw.body) {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
                 let dm = d.module as usize;
@@ -715,7 +1096,7 @@ extend InlineStore {
                 let mut demand = false;
                 r = vet_decl(pkg, d, asserts.at(dm), &mut ext, &mut demand);
                 if r == 0 {
-                    r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len(), demand);
+                    r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len(), demand, vec_prog);
                 }
             }
             self.keep_ix.insert(key, r);
@@ -732,11 +1113,17 @@ extend InlineStore {
         body: &ir::CoreBody,
         nclosures: usize,
         demand: bool,
+        vec_prog: bool,
     ) u64 {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
         let f = a.at_const(d.node).as_data.function;
         let shape = REJ_BASE | IJ_SHAPE as u64;
+        // A callee that reads a module's constant or static, or makes an inner call another function
+        // than a concrete public one or a header-declared extern one names, inlines into vector code
+        // only: there each call spills the live vector registers, and kernel helpers read their
+        // tables; elsewhere the C compiler's own inlining serves, without the larger C.
+        let mut vec_only = false;
         if body.has_reflect || body.has_zst_cond || nclosures != 0 {
             return shape;
         }
@@ -750,23 +1137,35 @@ extend InlineStore {
             if tk.kind == ir::TM_ASSERT {
                 return shape; // the assert message renders from the callee module's source
             }
-            // Inner calls splice into a FOREIGN TU: only a public non-extern CONCRETE
-            // function (no fn/extend generics, no call targs), a header-declared extern function
-            // or a runtime atomic (a verified intrinsic call, `static inline` in every TU's runtime
-            // header) is guaranteed a global symbol and a shared prototype there -- a generic
-            // inner call would need the emitter's demand machinery to re-derive substitutions it
-            // no longer has context for.
-            if tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && (tk.callee.node == NODE_NONE || tk.targs_len != 0 || !is_concrete_pub_fn(
+            // Inner calls splice into a FOREIGN TU: a function with a body or an interface method
+            // (`is_spelled_fn`; the splice translates its type arguments, receiver and interface
+            // into the caller's types, so the emitter spells and demands it there as the caller's
+            // own call), a call through a function value, a header-declared extern function or a
+            // runtime atomic (a verified intrinsic call, `static inline` in every TU's runtime
+            // header). Another extern function's prototype is its own module's.
+            vec_only = vec_only || tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && (tk.targs_len != 0 || tk.callee.node == NODE_NONE || !is_concrete_pub_fn(
                 pkg,
                 tk.callee,
-            ) && !is_header_extern_fn(pkg, tk.callee)) {
+            ) && !is_header_extern_fn(pkg, tk.callee));
+            if tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && tk.callee.node != NODE_NONE && !is_spelled_fn(
+                pkg,
+                tk.callee,
+            ) && !is_header_extern_fn(pkg, tk.callee) {
+                return shape;
+            }
+            // An associated function of a generic extend whose call names its receiver by no type
+            // names it by the instance's own bindings, which the caller's do not hold.
+            if tk.kind == ir::TM_CALL && tk.callee.node != NODE_NONE && env_receiver(p, body, tk) {
                 return shape;
             }
         }
         for i in 0..body.locals.len() {
             // A const-generic parameter's value becomes a constant at the splice.
-            if body.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(p, body.locals.at(i).item) {
-                return shape; // item symbol/linkage is the owner TU's business
+            if body.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(p, body.locals.at(i).item) && !is_plain_item(
+                p,
+                body.locals.at(i).item,
+            ) {
+                return shape;
             }
         }
         for i in 0..body.rvalues.len() {
@@ -790,9 +1189,20 @@ extend InlineStore {
             if c9.kind == ir::CK_WIDE {
                 return shape; // wide-literal records index the callee module's Ast
             }
-            if c9.kind == ir::CK_ITEM && (c9.targ_len() != 0 || !is_concrete_pub_fn(pkg, c9.item)) {
+            if c9.kind == ir::CK_ITEM && !is_spelled_fn(pkg, c9.item) {
                 return shape; // fn-value symbols follow the inner-call rule
             }
+            vec_only = vec_only || c9.kind == ir::CK_ITEM && (c9.targ_len() != 0 || !is_concrete_pub_fn(pkg, c9.item));
+        }
+        for i in 0..body.locals.len() {
+            vec_only = vec_only || body.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(
+                p,
+                body.locals.at(i).item,
+            );
+        }
+        // A program without vectors has no caller for it.
+        if vec_only && !vec_prog {
+            return shape;
         }
         let kb = ir::CoreBody::compact_from(body);
         let mut gp = Vector::<NodeId>::new();
@@ -807,7 +1217,9 @@ extend InlineStore {
             gp.push(unsafe a.list(fgl)[i as usize]);
         }
         let slot = self.kept.len() as u64;
-        self.kept.push(CalleeInfo { body: kb, gp: gp, fg: fgl.len, demand: demand });
+        self.kept.push(
+            CalleeInfo { body: kb, gp: gp, fg: fgl.len, demand: demand, big: !body.inline_size_ok, vec_only: vec_only },
+        );
         return slot;
     }
 }
@@ -867,11 +1279,19 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let mut probe = replace(&mut cx.sc_probe, Vector::<TypeId>::new());
     let mut shape = replace(&mut cx.sc_shape, Vector::<u64>::new());
     let mut alias = Vector::<u32>::new();
+    // A block a constant switch skips (a callee's arm another binding takes) inlines nothing.
+    let mut live = replace(&mut cx.sc_live, Vector::<bool>::new());
+    let mut stack = replace(&mut cx.sc_stack, Vector::<u32>::new());
+    live.clear();
+    live.resize_default(lw.body.blocks.len());
+    let _ = reach(&lw.body, lw.body.entry, &mut live, &mut stack);
+    let vec_caller = holds_vector(&lw.body, pkg);
+    let budget = MAX_ADDED_STMTS * pick(vec_caller, VEC_SCALE, 1usize);
     let mut bi: usize = 0;
     while bi < lw.body.blocks.len() {
         let t = lw.body.blocks.at(bi).term;
         bi += 1;
-        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
+        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || !live[bi - 1] {
             continue;
         }
         st.considered += 1;
@@ -931,7 +1351,11 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
             continue;
         }
-        if added + k0.statements.len() + k0.args as usize + k0.returns as usize > MAX_ADDED_STMTS {
+        if ki0.vec_only && !vec_caller {
+            st.reasons[IJ_SHAPE as usize] = st.reasons[IJ_SHAPE as usize] + 1;
+            continue;
+        }
+        if !ki0.big && added + k0.statements.len() + k0.args as usize + k0.returns as usize > budget {
             st.reasons[IJ_BUDGET as usize] = st.reasons[IJ_BUDGET as usize] + 1;
             continue;
         }
@@ -972,6 +1396,21 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         let ki = unsafe &*kp;
         let k = &ki.body;
+        // A callee past the size gate inlines when the arms its bindings take fit it.
+        let mut kstmts = k.statements.len();
+        if ki.big {
+            let mut nb: usize = 0;
+            kstmts = live_size(unsafe &*pkg, k, cm, &binds, &mut nb);
+            let sc = size_scale(k, pkg);
+            if kstmts > MAX_CALLEE_STMTS * sc || nb > MAX_CALLEE_BLOCKS * sc {
+                st.reasons[IJ_TOO_BIG as usize] = st.reasons[IJ_TOO_BIG as usize] + 1;
+                continue;
+            }
+            if added + kstmts + k.args as usize + k.returns as usize > budget {
+                st.reasons[IJ_BUDGET as usize] = st.reasons[IJ_BUDGET as usize] + 1;
+                continue;
+            }
+        }
         // ---- translate every callee type up front; any failure rejects the site ----------------
         // The translation depends only on (callee slot, caller module, binds): repeated call
         // shapes reuse the finished map instead of re-walking the callee type table.
@@ -1004,39 +1443,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             _ => {},
         };
         if cix < 0 {
-            probe.truncate(0);
-            for i in 0..k.locals.len() {
-                probe.push(k.locals.at(i).ty);
-            }
-            for i in 0..k.places.len() {
-                probe.push(k.places.at(i).ty);
-            }
-            for i in 0..k.projections.len() {
-                probe.push(k.projections.at(i).ty);
-            }
-            for i in 0..k.operands.len() {
-                probe.push(k.operands.at(i).ty);
-            }
-            for i in 0..k.constants.len() {
-                probe.push(k.constants.at(i).ty);
-            }
-            for i in 0..k.targ_pool.len() {
-                probe.push(k.targ_pool[i]);
-            }
-            for i in 0..k.blocks.len() {
-                probe.push(k.blocks.at(i).term.iface);
-                probe.push(k.blocks.at(i).term.recv);
-            }
-            for i in 0..k.rvalues.len() {
-                let rv = k.rvalues.at(i);
-                probe.push(rv.target);
-                if rv.kind == ir::RV_DYN {
-                    probe.push(rv.b);
-                }
-                if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
-                    probe.push(rv.b);
-                }
-            }
+            body_types(k, &mut probe);
             for i in 0..probe.len() {
                 let kt = probe[i];
                 let kk: u64 = kt;
@@ -1135,7 +1542,13 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         for i in 0..k.locals.len() {
             let mut v: i64 = 0;
             let it = k.locals.at(i).item;
-            if wok && k.locals.at(i).storage == ir::LS_STATIC_REF && !param_value(unsafe &*pkg, it, cm, &binds, &mut v) {
+            if wok && k.locals.at(i).storage == ir::LS_STATIC_REF && is_param(unsafe &*pkg, it) && !param_value(
+                unsafe &*pkg,
+                it,
+                cm,
+                &binds,
+                &mut v,
+            ) && param_param(unsafe &*pkg, it, cm, &binds).node == NODE_NONE {
                 wok = false;
             }
         }
@@ -1147,8 +1560,11 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         if !multi {
             alias.truncate(0);
         }
+        let prelude = lw.body.blocks.len() + k.blocks.len();
         splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins);
-        added += k.statements.len() + k.args as usize + k.returns as usize;
+        live.resize_default(lw.body.blocks.len());
+        let _ = reach(&lw.body, prelude as u32, &mut live, &mut stack);
+        added += kstmts + k.args as usize + k.returns as usize;
         st.inlined += 1;
     }
     cx.sc_blk_origin = blk_origin;
@@ -1158,6 +1574,129 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     cx.sc_wire = wire;
     cx.sc_probe = probe;
     cx.sc_shape = shape;
+    cx.sc_live = live;
+    cx.sc_stack = stack;
+}
+
+/// Every type `k` names, into `out`: the ones a splice or `ground_body` translates.
+fn body_types(k: &ir::CoreBody, out: &mut Vector<TypeId>) {
+    out.truncate(0);
+    for i in 0..k.locals.len() {
+        out.push(k.locals.at(i).ty);
+    }
+    for i in 0..k.places.len() {
+        out.push(k.places.at(i).ty);
+    }
+    for i in 0..k.projections.len() {
+        out.push(k.projections.at(i).ty);
+    }
+    for i in 0..k.operands.len() {
+        out.push(k.operands.at(i).ty);
+    }
+    for i in 0..k.constants.len() {
+        out.push(k.constants.at(i).ty);
+    }
+    for i in 0..k.targ_pool.len() {
+        out.push(k.targ_pool[i]);
+    }
+    for i in 0..k.blocks.len() {
+        out.push(k.blocks.at(i).term.iface);
+        out.push(k.blocks.at(i).term.recv);
+    }
+    for i in 0..k.rvalues.len() {
+        let rv = k.rvalues.at(i);
+        out.push(rv.target);
+        if takes_type(rv) {
+            out.push(rv.b);
+        }
+    }
+}
+
+// Whether `rv.b` is a type (`body_types`).
+const fn takes_type(rv: &ir::Rvalue) bool {
+    return rv.kind == ir::RV_DYN || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING);
+}
+
+/// Body `lw.body` with every generic parameter `binds` names substituted (`xty`): one instance's
+/// concrete body, so a call the instance resolves to a concrete method splices with matching types
+/// (`run`). False, the body unchanged, when a type does not substitute.
+pub fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
+    let pkg = lw.pkg;
+    let m = lw.body.module;
+    let mut tys = Vector::<TypeId>::new();
+    body_types(&lw.body, &mut tys);
+    let mut map = Map::<u64, u64>::new();
+    for i in 0..tys.len() {
+        let t = tys[i];
+        if t == TYPE_NONE || map.contains_key(&(t as u64)) {
+            continue;
+        }
+        let g = xty(pkg, m, t, m, binds, 0);
+        if g == TYPE_NONE {
+            return false;
+        }
+        map.insert(t, g);
+    }
+    let b = &mut lw.body;
+    for i in 0..b.locals.len() {
+        b.locals.index_mut(i).ty = mty(&map, b.locals.at(i).ty);
+    }
+    for i in 0..b.places.len() {
+        b.places.index_mut(i).ty = mty(&map, b.places.at(i).ty);
+    }
+    for i in 0..b.projections.len() {
+        b.projections.index_mut(i).ty = mty(&map, b.projections.at(i).ty);
+    }
+    for i in 0..b.operands.len() {
+        b.operands.index_mut(i).ty = mty(&map, b.operands.at(i).ty);
+    }
+    for i in 0..b.constants.len() {
+        b.constants.index_mut(i).ty = mty(&map, b.constants.at(i).ty);
+    }
+    for i in 0..b.targ_pool.len() {
+        b.targ_pool.set(i, mty(&map, b.targ_pool[i]));
+    }
+    for i in 0..b.blocks.len() {
+        let tm = &mut b.blocks.index_mut(i).term;
+        tm.iface = mty(&map, tm.iface);
+        tm.recv = mty(&map, tm.recv);
+    }
+    for i in 0..b.rvalues.len() {
+        let rv = b.rvalues.index_mut(i);
+        rv.target = mty(&map, rv.target);
+        if takes_type(rv) {
+            rv.b = mty(&map, rv.b);
+        }
+    }
+    // A const-generic parameter read is its value, and a switch on one takes its one edge, as in a
+    // splice.
+    for i in 0..b.operands.len() {
+        let mut v: i64 = 0;
+        if b.operands.at(i).kind != ir::OP_CONST && int_operand(unsafe &*pkg, b, i as u32, m, binds, &mut v) {
+            b.constants.push(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: b.operands.at(i).ty,
+                    val: v,
+                    raw: tok::Span::empty(),
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+            );
+            let o = b.operands.index_mut(i);
+            o.kind = ir::OP_CONST;
+            o.data = b.constants.len() as u32 - 1;
+        }
+    }
+    for i in 0..b.blocks.len() {
+        let tm = b.blocks.at(i).term;
+        if tm.kind == ir::TM_SWITCH && b.operands.at(tm.a as usize).kind != ir::OP_CONST {
+            let o = scrutinee(unsafe &*pkg, b, tm.a, 0, 0, 0);
+            if b.operands.at(o as usize).kind == ir::OP_CONST {
+                b.blocks.index_mut(i).term.a = o;
+            }
+        }
+    }
+    return true;
 }
 
 /// The C-authoritative type of a place: the base local's declared type for a bare place, else the
@@ -1230,7 +1769,13 @@ fn splice(
         // Declared callee locals (args and user bindings) become LS_INL: still declared for every
         // consumer that asks (`decl` must clear: it names a node in the CALLEE module's Ast).
         // Return slots become plain temps: the join moves them out.
-        if d.storage == ir::LS_RET || d.storage == ir::LS_STATIC_REF {
+        let mut v: i64 = 0;
+        if d.storage == ir::LS_STATIC_REF && !is_param(unsafe &*pkg9, d.item) {
+            // a const or static (`is_plain_item`): the caller spells it by its item
+        } else if d.storage == ir::LS_STATIC_REF && !param_value(unsafe &*pkg9, d.item, b.module, binds, &mut v) {
+            // a const-generic parameter bound to the caller's own (`param_param`): read as that one
+            d.item = param_param(unsafe &*pkg9, d.item, b.module, binds);
+        } else if d.storage == ir::LS_RET || d.storage == ir::LS_STATIC_REF {
             // a const-generic parameter's reads became its constant: the local stays unused
             d.storage = ir::LS_TEMP;
             d.item = DefId { module: 0, node: NODE_NONE };
@@ -1521,4 +2066,16 @@ fn splice(
         blk_origin.push(orec);
     }
     b.blocks[call_blk].term = ir::goto_term(prelude, sp);
+    // A switch on a const-generic parameter, through the temp a `switch` lowers it into, now reads a
+    // constant: the C layout takes its one edge (`CFlow`).
+    for i in b0..b0 + nkb {
+        let tm = b.blocks.at(i as usize).term;
+        if tm.kind != ir::TM_SWITCH || b.operands.at(tm.a as usize).kind == ir::OP_CONST {
+            continue;
+        }
+        let o = scrutinee(unsafe &*pkg9, b, tm.a, s0 as usize, l0, b0 as usize);
+        if b.operands.at(o as usize).kind == ir::OP_CONST {
+            b.blocks.index_mut(i as usize).term.a = o;
+        }
+    }
 }

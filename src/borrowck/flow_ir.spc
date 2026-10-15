@@ -849,7 +849,7 @@ fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_nee
 /// the elaborated body.
 pub fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::CoreBody, verify: bool) {
     let te = ctx.st.pr.start();
-    body.inline_size_ok = inl::callee_size_ok(body);
+    body.inline_size_ok = inl::callee_size_ok(body, ow.pkg);
     body.elaborated = true;
     let want = (ctx.ft & FT_OWNED) != 0 || ird::assign_may_schedule(ow, body);
     if !want && !ctx.validate {

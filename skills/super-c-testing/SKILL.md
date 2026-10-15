@@ -237,9 +237,13 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 `_IONBF` on both streams. Diagnose a Windows-only failure on the real `windows-latest`
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
 In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
-`wasm-compile`: an artifact) and runs the two test shards in parallel on it; in the release
-workflow (macOS, Linux and Windows in one matrix) the three correctness gates run beside
-the shards and the release binary is built after all of them pass. The toolchain and bootstrap steps live in `.github/actions/`. An
+`wasm-compile`: an artifact) and runs its test shards in parallel on it (three on Windows, the
+slowest runner, two elsewhere); in the release workflow (macOS, Linux and Windows in one matrix)
+the correctness gate (`ci/gate.sh --core`), its profile builds (`gate-profiles`,
+`ci/gate.sh --profiles`) and the x86-64 levels run beside the shards, and the release binary is
+built after all of them pass. Only a run on main saves caches: the toolchain action restores every
+cache, saves its installation caches on main, and each job's last step (`.github/actions/ccache-save`)
+saves its ccache on main, so a probe branch cannot evict main's entries. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
 
@@ -265,8 +269,10 @@ median recorded duration. Every shard computes the same assignment from the same
 and filter, so the shards are disjoint and cover the list. Without the file (and in the script form
 `super-c --test app.spc`) tests are dealt round-robin. `super-c test --test-record-durations` merges
 the run's times into the file: a test that ran gets its new time, one that did not (another shard)
-keeps its old one, and a name the suite no longer has is dropped. Refresh it with an unsharded run
-after adding or removing slow tests; a stale file only makes the split less even.
+keeps its old one, and a name the suite no longer has is dropped. A filtered run builds only the
+files with a match, so it keeps every line it has no test for (a removed test's line stays until an
+unfiltered run). Refresh it after adding or removing slow tests (`--filter` for the new ones); a stale
+file only makes the split less even.
 
 ## Leak Detection
 
@@ -383,7 +389,9 @@ compiler under wasmtime; the C compile and the program stay native.
   text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a sanitizer
   report on either side or a build failure is a difference.
 - `const_runtime_parity(decls, exprs, tys, opts)` puts every case in one program: `const
-  PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`. Write inputs as `opq::<T>(v)`: the
+  PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`; `prog -1` runs them all in order, each
+  after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash (or
+  every case when the sanitizer reports). Write inputs as `opq::<T>(v)`: the
   constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@c.noinline`
   identity that writes a static, so the compiler cannot fold it (a call of a plain or `const fn`
   identity with constant arguments is folded, and a certain trap becomes the compile error "this
@@ -420,7 +428,7 @@ has no UBSan runtime, and an unoptimized large function can pass the engine's li
 host instruction check returns early in the lane. The masked-memory tests run there too: the
 guard page is the end of linear memory (`sbrk`), the trap-before-write check reads the C order
 (WASI has no signal handler), and the disjoint stores run one half after the other (no
-threads). The release workflow's wasm job runs
+threads). The release workflow's `wasm-checks` job (beside the wasm test shards) runs
 `SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_`,
 then the same with `--filter=gen_vector_seeds`.
 
@@ -492,13 +500,74 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   `tests/simd_ops_test.spc` sweeps every operation, lane type, lane count and conversion target
   through the same functions, in programs of at most 256 cases.
 
+- `math.spc`: calls of the vector math classes (`std::simd::math`, `balanced`, `fast`) on lanes drawn
+  near special points (zeros, infinities, NaN, subnormal and normal extremes, exp's thresholds, the
+  `Konsts` thresholds, multiples of pi/2 of either sign and the double nearest one). Oracle 0 is `const_runtime_parity` per result lane; oracle 1 compares the
+  planned build with `SC_SIMD_SCALAR=1` and checks that each lane equals the same call on that lane's
+  input alone.
+
 `tests/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
 (`-DSC_ARITH_WRAP` through `--cstd` under `dev`: the runtime wraps, the constant traps), which the
 scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
-`SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops|vector] ./super-c test --quiet
+`SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops|vector|math] ./super-c test --quiet
 --filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four
 programs (scalar), two (loops) or one or two (vector: a rebuild without the trapping constants).
+
+## The vector math tools
+
+`tools/simd_math` is one project with three binaries (one root: imports cannot cross project
+roots): `simd-math-gen` (`gen.spc`), `simd-math-check` (`check.spc`) and `simd-math-bench`
+(`bench.spc`), over `real.spc` (double words, `f128`, `f256`), `ref.spc` (the reference functions)
+and `remez.spc` (minimax fits). Build each in release and run it from the repository root:
+
+```sh
+./super-c release tools/simd_math                          # simd-math-gen
+tools/simd_math/build/release/simd-math-gen                # rewrites std/simd/math/coeffs_*.spc
+./super-c release tools/simd_math --bin=simd-math-check
+tools/simd_math/build/release-bin-simd-math-check/simd-math-check --write   # the full check
+./super-c release tools/simd_math --bin=simd-math-bench
+tools/simd_math/build/release-bin-simd-math-bench/simd-math-bench [--only=NAME]
+```
+
+- The generator is deterministic (its fits run in parallel, each independent, on grids built once
+  for both lane types): rerun it after a change to a polynomial spec or a constant, then rerun the
+  full check. A fit that misses its target, or a Remez exchange that does not converge, stops it.
+- The full check: every f32 input of a one-argument function (2^32, minutes per class in parallel)
+  against the f64 C library; `--n` f64 inputs per function (default 10^9: about an hour for all; a
+  quarter random bits, a quarter within 2^40 ULP of 0, 1, the domain ends and every `Konsts`
+  threshold, the rest uniform per binade, or near multiples of pi/2 for the trigonometric functions)
+  against the double-word reference; pairs of two-argument functions shaped per function, and in f32
+  every pair of binades; a result within 0.01 ULP of the bound, or a subnormal one, again against
+  f128; a zero result must have the reference's sign. The special-value tables: a zero, infinite or
+  NaN argument gives the C library's result exactly, any other the class bound against f128. `--write`
+  replaces the measured table (each function's largest error and its input) at the top of each class
+  module; it needs every function and both lane types. `--only=NAME`, `--part=K/N` (the functions
+  whose index is K modulo N), `--f32`, `--f64`, `--n=N` and `--sample32=N` (random f32 inputs instead
+  of all) narrow a run; `--jobs=N` (both tools) sets the worker threads. Exit status 1: a result over its
+  bound or a wrong special value, printed per function and class.
+- The bench prints ns per element for each class and the scalar C library loop at the native lane
+  count (wide ranges log-uniform per binade), the ratios, and a `gate:` line per failed class gate
+  (precise not slower than the library; balanced 20% faster than precise and fast 20% faster than
+  balanced for exp, log, sin and cos, faster for the rest); exit status 1 when one fails.
+
+`tests/simd_math_test.spc` runs in the normal suite: the special values of every function, class
+and lane type at compile time against run time (`const_runtime_parity`, Annex F domain edges and
+pow's special pairs included; each function through a `@c.noinline` wrapper, so its kernel is in the
+C once), a hash of 10^5 results per function and kind (the planned build
+against `SC_SIMD_SCALAR=1`; for every function, two-argument ones, `powi` and `sincos` included, each
+lane of a call at the other lane count against the call on that lane's inputs alone; and a fixed
+combined hash per class and lane type every target must give, one test each (`ALL_PRECISE_32` ..
+`ALL_FAST_64`): after a kernel or coefficient change, set it to the `all` line the failing test
+prints). Its builds and the math model's (`tests/gen/math.spc`) run one compile job (`--jobs=1`): a
+test of the parallel suite takes one CPU, so its large programs do not starve the tests beside it;
+its tests take `@test(timeout = 300)`. `tests/vector_math_tools_test.spc` runs the generator against the committed coefficients
+and the reduced check (10^6 inputs per function: `--n=500000 --sample32=500000`, a third of the
+functions per test), each tool built with the release profile (their f128 arithmetic needs
+inlining across units) in a scratch copy. Their results do not depend on the lowering, so that
+file's path names no `simd_`: CI's per-level `--filter=simd_` jobs skip it. In the suite the tools
+run with `--jobs=1`: a test that starts a worker per CPU slows every test beside it past its
+timeout. These tests take `@test(timeout = 300)`.
 
 ## Test Design Rules
 

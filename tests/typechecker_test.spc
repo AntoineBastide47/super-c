@@ -1168,6 +1168,12 @@ fn bug_regressions() {
         "struct V { pub x: f32 }\nextend f32 as Mul<V> {\n    type Output = V;\n    pub fn mul(self: &f32, o: &V) V { return V { x: *self * o.x }; }\n}\nextend f64 as Mul<V> {\n    type Output = V;\n    pub fn mul(self: &f64, o: &V) V { return V { x: o.x }; }\n}\nfn main() i32 { let d = 2.0 * V { x: 1.0 }; return d.x as i32 - 2; }\n",
         "the literal's type is ambiguous",
     );
+    // Two conformances that fit the right operand equally: the ambiguity reports at the operator.
+    expect_one_err(
+        "an operator two conformances fit equally is ambiguous",
+        "struct P<A, B> { pub a: A, pub b: B }\nstruct S { pub x: i32 }\nextend<T> S as Mul<P<T, i32>> {\n    type Output = i32;\n    pub fn mul(self: &S, o: &P<T, i32>) i32 { return o.b; }\n}\nextend<T> S as Mul<P<i32, T>> {\n    type Output = i32;\n    pub fn mul(self: &S, o: &P<i32, T>) i32 { return o.a; }\n}\nfn main() i32 { let s = S { x: 1 }; return s * P::<i32, i32> { a: 1, b: 2 }; }\n",
+        "error: ambiguous call: two candidates for 'mul' fit equally well\n--> <harness>:11:44",
+    );
     // Implicit conversion is LOSSLESS only: a narrowing width is refused, and a cast with no
     // conversion path is invalid rather than broken C.
     h::expect_err_msg(
@@ -6726,5 +6732,55 @@ fn an_associated_call_infers_from_the_expected_result() {
     h::expect_ok(
         "W::<i8>::of([1, 2])",
         "struct W<T> { pub x: [T; 2] }\nextend<T: Copy> W<T> {\n    pub fn of(v: [T; 2]) Self { return W::<T> { x: v }; }\n}\nfn main() i32 { let w = W::<i8>::of([1, -2]); let v: [i8; 2] = w.x; return v[0] as i32; }\n",
+    );
+}
+
+// A comparison of aggregates lowers to its `eq` or `cmp` call, so compile time evaluates it like run
+// time; the soft-float formats, whose operations compare `UInt` values, fold with it.
+@test
+fn struct_comparisons_fold_at_compile_time() {
+    h::expect_exit(
+        "struct comparisons fold through eq and cmp",
+        "struct P {\n    pub x: i32,\n}\nextend P as Eq {\n    pub fn eq(self: &P, other: &P) bool {\n        return self.x == other.x;\n    }\n}\nextend P as Ord {\n    pub fn cmp(self: &P, other: &P) i32 {\n        return self.x - other.x;\n    }\n}\nfn order(a: i32, b: i32) i32 {\n    let p = P { x: a };\n    let r = P { x: b };\n    return (p < r) as i32 + (p <= r) as i32 * 2 + (p > r) as i32 * 4 + (p >= r) as i32 * 8 + (p == r) as i32 * 16 + (p != r) as i32 * 32;\n}\nstatic_assert(order(1, 2) == 35 && order(2, 2) == 26 && order(3, 2) == 44);\nstatic_assert(UInt::<256>::from_u64(3) < UInt::<256>::from_u64(5) && UInt::<256>::max() == UInt::<256>::max());\nstatic_assert(f128::from_f64(1.5) * f128::from_f64(2.0) == f128::from_f64(3.0));\nfn main() i32 {\n    return order(1, 2) - 35 + order(2, 2) - 26 + order(3, 2) - 44;\n}\n",
+        0,
+    );
+}
+
+// `Type::<Args>::f(..)` whose function has parameters of its own names its receiver by the qualifier
+// at compile time and in the emitted C, and a field typed by a const expression (`UInt<{1 + E + F}>`)
+// grounds through the frame.
+@test
+fn qualified_generic_calls_bind_the_qualifier() {
+    h::expect_exit(
+        "the qualifier binds the extend's parameters",
+        "struct G<const E: usize, const F: usize> {\n    pub bits: UInt<{1 + E + F}>,\n}\nextend<const E: usize, const F: usize> G<E, F> {\n    fn conv<const E2: usize, const F2: usize>(v: &G<E2, F2>) usize {\n        return UInt::<{1 + E + F}>::bits() * 1000 + E * 10 + E2 + v.bits.shr(1).to_u64() as usize;\n    }\n}\nfn widths() usize {\n    let v = G::<11, 52> { bits: UInt::<64>::from_u64(6) };\n    return G::<13, 148>::conv(&v);\n}\nstatic_assert(widths() == 162144);\nfn main() i32 {\n    return (widths() - 162144) as i32;\n}\n",
+        0,
+    );
+}
+
+// A scalar union member written and another of its width read is the bits (`f64_bits`) at compile
+// time; a member of another width is no compile-time value.
+@test
+fn scalar_union_members_reinterpret_at_compile_time() {
+    h::expect_exit(
+        "same-width scalar members reinterpret",
+        "static_assert(f64_bits(1.5) == 0x3FF8000000000000 && f64_from_bits(0x4008000000000000) == 3.0);\nstatic_assert(f32_bits(-2.0f32) == 0xC0000000 && f32_from_bits(0x40000000) == 2.0f32);\nfn main() i32 {\n    return (f64_bits(1.5) >> 48) as i32 - 0x3FF8;\n}\n",
+        0,
+    );
+    h::expect_build_err(
+        "a member of another width does not fold",
+        "union Mixed {\n    pub f: f64,\n    pub u: u32,\n}\nfn low() u32 {\n    let m = Mixed { f: 1.5 };\n    return m.u;\n}\nconst L: u32 = low();\nfn main() i32 {\n    return L as i32;\n}\n",
+        "does not fold",
+    );
+}
+
+// A whole value written through `&mut self` (`*self = ..`) replaces the referent at compile time as at
+// run time: the caller's binding sees it.
+@test
+fn whole_value_writes_through_self_fold() {
+    h::expect_exit(
+        "a write through *self reaches the caller",
+        "struct C {\n    pub v: u64,\n}\nextend C {\n    fn bump(self: &mut C, by: u64) {\n        *self = C { v: self.v + by };\n    }\n}\nextend<const W: usize> UInt<W> {\n    fn add_shift(self: &mut UInt<W>, low: &UInt<W>) {\n        *self = self.wrapping_add(low).shl(1);\n    }\n}\nfn whole(a: u64) u64 {\n    let mut c = C { v: a };\n    c.bump(10);\n    let mut x = UInt::<240>::one();\n    let y = UInt::<240>::from_u64(a);\n    x.add_shift(&y);\n    return c.v * 100 + x.limb(0);\n}\nstatic_assert(whole(5) == 1512);\nfn main() i32 {\n    return whole(5) as i32 - 1512;\n}\n",
+        0,
     );
 }

@@ -1238,12 +1238,12 @@ extend CcStream {
     }
 
     /// Settle the LTO mode. A ThinLTO request needs the toolchain's answer: the probe record's `thin-lto`
-    /// result (the verdict, then the linker's path and mtime; the record's key holds the compiler, the
-    /// target and the flags) gives it without a process while the linker is unchanged, else `lto_probe`
+    /// result (the verdict, then the linker's path and mtime; the record's key holds the compiler and
+    /// its command, the target and the flags) gives it without a process while the linker is unchanged, else `lto_probe`
     /// measures it. A rejected request keeps `-flto=auto`, the mode the profiles used before ThinLTO,
     /// and `lto_reason` names why. The verdict joins the build's used probe results. The linker cache
     /// directory is `<cache root>/lto/<hash of the key below and the linker line>`: one namespace per
-    /// compiler, linker, target, flag set and schema, pruned by the linker itself (`lto_cache_args`).
+    /// compiler command, linker, target, flag set and schema, pruned by the linker itself (`lto_cache_args`).
     fn lto_resolve(self: &mut Self) {
         self.lto = self.lto_req;
         if self.lto_req != mf::LTO_THIN {
@@ -1259,6 +1259,8 @@ extend CcStream {
         key.push_string(&ccpath);
         key.push_byte(b'\t');
         key.push_i64(ccmt);
+        key.push_byte(b'\t');
+        key.push_string(&self.cc_raw);
         key.push_byte(b'\t');
         key.push_i64(self.target);
         key.push_byte(b'\t');
@@ -2490,7 +2492,7 @@ pub fn features_accepted(
     }
     let mut ccpath = String::new();
     let ccmt = which_path(cc, &mut ccpath);
-    let key = format("{}\t{}\t{}\t{}\t{}\t{}\t", LTO_SCHEMA, ccpath.as_str(), ccmt, target, arch, flags);
+    let key = format("{}\t{}\t{}\t{}\t{}\t{}\t{}\t", LTO_SCHEMA, ccpath.as_str(), ccmt, cc, target, arch, flags);
     let mut pargv = Vector::<String>::new();
     split_args(&mut pargv, cc);
     split_args(&mut pargv, flags);
@@ -2599,8 +2601,7 @@ fn cc_stream(
     let mut ldbase = String::new();
     push_sdk_flags(&mut ldbase, m.target, m.sdk, m.arch, feats);
     push_sdk_libs(&mut ldbase, m.sdk);
-    // The Android and wasm linkers are lld, whose output the host `strip` cannot read: they strip at link.
-    if prof.strip && (m.sdk == 2 || m.sdk == 3) {
+    if prof.strip && strips_at_link(m) {
         ldbase.push_str(" -Wl,--strip-all");
     }
     push_all(&mut ldbase, &m.ldflags);
@@ -2619,14 +2620,16 @@ fn cc_stream(
     push_arg(&mut va, "--version");
     let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
     // The toolchain probes of `need` the record does not hold start beside it. The record's key: the
-    // schema, the compiler's path and mtime, the target and the flags; `settle` checks the version.
+    // schema, the compiler's path, mtime and command (its arguments select a target too), the target
+    // and the flags; `settle` checks the version.
     let mut ccpath = String::new();
     let ccmt = which_path(cc_raw.as_str(), &mut ccpath);
     let key = format(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         LTO_SCHEMA,
         ccpath.as_str(),
         ccmt,
+        cc_raw.as_str(),
         cx.target,
         m.arch,
         flags.as_str(),
@@ -3011,7 +3014,7 @@ fn engine_build_i(
                         eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
                     } else {
-                        if prof.strip && link_kind == 0 && m.sdk != 2 && m.sdk != 3 {
+                        if prof.strip && link_kind == 0 && !strips_at_link(m) {
                             let mut st = Vector::<String>::new();
                             push_arg(&mut st, "strip");
                             push_arg(&mut st, bin);
@@ -3114,14 +3117,35 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
     return 0;
 }
 
+// Whether a stripped build strips at link: the host `strip` cannot read the Android and wasm linkers'
+// (lld) output, nor a Linux or Windows binary cross-linked from another host.
+fn strips_at_link(m: &mf::Manifest) bool {
+    return m.sdk == 2 || m.sdk == 3 || m.target != unsafe shim::sc_host_platform() && (m.target == 0 || m.target == 2);
+}
+
 /// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile
-/// (see `resolve_profile`), linking `bin_override` when non-empty, else the manifest's `bin`.
-pub fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str, cx: &BuildCtx) i32 {
+/// (see `resolve_profile`), linking `bin_override` when non-empty, else the manifest's `bin`. With
+/// `bin_override`, `sel_bin` (`--bin=NAME`) names the target linked there: a [bin.NAME] or the root.
+pub fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     if bin_override.len() != 0 {
         // `-o` names an exact path: link straight there, no profile copy and nothing installed.
         let ob = exe_name(bin_override, cx.target);
-        return root_build(m, prof_name, ob.as_str(), cx);
+        if sel_bin.len() == 0 || sel_bin == m.bin.as_str() {
+            return root_build(m, prof_name, ob.as_str(), cx);
+        }
+        for i in 0..m.bins.len() {
+            let bt = m.bins.at(i);
+            if bt.name.as_str() == sel_bin {
+                let mut sub = String::from_str(prof_name);
+                sub.push_str("-bin-");
+                sub.push_string(&bt.name);
+                let dir = loader::dirname_of(m.root.as_str());
+                return engine_build(m, prof_name, bt.root.as_str(), dir, "", sub.as_str(), ob.as_str(), cx, 0, null);
+            }
+        }
+        eprintln("build: no target named '{}' (check `bin` and [bin.NAME] sections)", sel_bin);
+        return 1;
     }
     let mut path = String::new();
     let rc = build_into_profile(m, prof_name, cx, &mut path);
@@ -3219,7 +3243,7 @@ pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib:
     }
     if m.bin.len() != 0 && (!selected || sel_bin == m.bin.as_str()) {
         matched = true;
-        let rc = manifest_build(m, profile, "", cx);
+        let rc = manifest_build(m, profile, "", "", cx);
         if rc != 0 {
             return rc;
         }
@@ -4105,7 +4129,7 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
     }
     let c = m.commands.at(ci as usize);
     if c.needs_build {
-        let rc = manifest_build(m, profile, "", cx);
+        let rc = manifest_build(m, profile, "", "", cx);
         if rc != 0 {
             return rc;
         }

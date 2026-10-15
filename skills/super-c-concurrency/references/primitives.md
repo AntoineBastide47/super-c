@@ -194,5 +194,10 @@ is what a batch that delivered `n` items owes; `notify_one` is `notify_some(1)`.
 
 Each has a `*_with` variant (`range_with`, `each_with`, `each_mut_with`,
 `chunks_mut_with`, `reduce_with`) taking an `Options` for schedule and grain size.
+A call splits its units into at most four chunks per worker and at most one chunk per 16
+units (17 units: two chunks), or per `grain_size` units when it is not 0: a few heavy units
+(a fit) need `grain_size: 1` to spread over the workers, else a short range runs inline. `sections`
+claims one section per chunk. A batch submitted from off the pool wakes one parked worker
+per job, so it reaches every idle worker.
 All require `Send + Sync` on the closure. Slices come from range-indexing a Vector
 (`v[0..n]`, `v.index_range_mut(0..n)`).

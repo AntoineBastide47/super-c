@@ -4,6 +4,7 @@ import tests::gen::driver as gen;
 import tests::gen::scalar as scalar;
 import tests::gen::loops as loops;
 import tests::gen::vector as vector;
+import tests::gen::math as math;
 import tests::cli_harness as cli;
 import driver_shim as shim;
 import stdlib;
@@ -34,6 +35,25 @@ fn gen_loop_seeds() {
 fn gen_vector_seeds() {
     let mut m = vector::vector_model(8);
     expect_seeds(&mut m, [1, 2, 3]);
+}
+
+// One seed per test: each compiles every math kernel (on x86 unoptimized, with the sanitizer).
+@test(timeout = 300)
+fn gen_math_seed_1() {
+    let mut m = math::math_model(6);
+    expect_seeds(&mut m, [1]);
+}
+
+@test(timeout = 300)
+fn gen_math_seed_2() {
+    let mut m = math::math_model(6);
+    expect_seeds(&mut m, [2]);
+}
+
+@test(timeout = 300)
+fn gen_math_seed_3() {
+    let mut m = math::math_model(6);
+    expect_seeds(&mut m, [3]);
 }
 
 // The runtime's overflow checks compiled out (SC_ARITH_WRAP under the checking `dev` profile): the
@@ -104,6 +124,7 @@ fn gen_random_run() {
     let mut sm = scalar::scalar_model(6, 3);
     let mut lm = loops::loop_model(6);
     let mut vm = vector::vector_model(8);
+    let mut mm = math::math_model(6);
     for i in 0..runs {
         let seed = base + i;
         if model.len() == 0 || model == "scalar" {
@@ -122,6 +143,13 @@ fn gen_random_run() {
         }
         if model.len() == 0 || model == "vector" {
             let r = gen::run_seed(&mut vm, seed);
+            if r.len() != 0 {
+                eprintln("{}", r.as_str());
+                failures += 1;
+            }
+        }
+        if model.len() == 0 || model == "math" {
+            let r = gen::run_seed(&mut mm, seed);
             if r.len() != 0 {
                 eprintln("{}", r.as_str());
                 failures += 1;

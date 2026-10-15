@@ -305,6 +305,13 @@ fn expected_result_flow() {
         "fn nothing<T: Default>() T { return T::default(); }\nfn main() i32 { let x = nothing(); return 0; }\n",
         "cannot infer the generic argument",
     );
+    // The call whose argument stays open has the error type: the operator that uses it reports nothing
+    // more.
+    let c = h::compile(
+        "fn main() i32 { let x = i32x4::splat(1); return (x * Simd::splat(2)).get(0) - 2; }\n",
+        h::STAGE_TYPECHECK,
+    );
+    assert(c.errors == 1 && c.msg_has("cannot infer the generic argument 'N'"), "one error for an open argument");
     // Argument, expected-result, and bound evidence together infer one call's parameters
     // at once.
     h::expect_exit(
@@ -722,5 +729,171 @@ fn null_branches_take_the_pointer_type() {
         "null against a number",
         "fn main() i32 {\n    let q = if true {\n        null;\n    } else {\n        1;\n    };\n    return q;\n}\n",
         "mismatched types",
+    );
+}
+
+// A vector body generic over its lane count: an unsuffixed literal operand takes the lane type
+// (`Mul<T>`, never `Mul<Self>`), an operator in a turbofished call's receiver ignores that turbofish,
+// `Simd::splat(..)` takes its instance from the parameter it meets, and against a parameter over a
+// generic callee's own parameters it waits for the call's inference (`choose(m, x, Simd::splat(..))`).
+@test
+fn generic_lane_count_bodies() {
+    h::expect_exit(
+        "literal operands, expected instances and postponed arguments",
+        M"(fn take<const N: usize>(a: Simd<f32, N>, b: Simd<f32, N>) Simd<f32, N> {
+    return a + b;
+}
+fn f<const N: usize>(x: Simd<f32, N>) Simd<f32, N> {
+    let k = (x * 2.0 + 1.0).round_even();
+    let s = Simd::<f32, N>::from_bits(((k.cast::<i32>() + 127) << 23).bitcast::<u32, N>());
+    let y = take(x, Simd::splat(0.5));
+    let m = x.less_than(Simd::splat(1.5));
+    return choose(m, x.min_num(Simd::splat(0.5)) + y, s);
+}
+fn main() i32 {
+    let a: f32x4 = [1.0, 2.0, 0.25, 4.0];
+    let r = f(a);
+    let c: f32x4 = a.min_num(Simd::splat(0.5));
+    return (r[0] != 2.0 || r[1] != 32.0 || r[2] != 1.0 || c[0] != 0.5) as i32;
+}
+)",
+        0,
+    );
+}
+
+// A nested repeat literal is checked against the slot type: `[[0.5; 2]; 3]` for `[[f64; 2]; 3]` is
+// three rows of f64, not rows of the f32 default.
+@test
+fn nested_repeat_literal_takes_slot_type() {
+    h::expect_exit(
+        "nested repeat literal",
+        M"(const K: usize = 3;
+fn main() i32 {
+    let a: [[f64; 2]; 3] = [[0.5; 2]; 3];
+    let b: [[f64; 2]; K] = [[0x1p-1030; 2]; K];
+    return (a[2][1] * 4.0) as i32 + (b[1][0] > 0.0) as i32;
+}
+)",
+        3,
+    );
+}
+
+// A value `if` beside a typed operand: its literal branches take the operand's numeric type, as a bare
+// literal does, on either side. `0x1p-1030` is 0 in f32 and not in f64.
+@test
+fn if_operand_literals_take_other_operand_type() {
+    h::expect_exit(
+        "if operand literals",
+        M"(fn right(x: f64, t: i32) bool {
+    return x.abs() < if t == 0 {
+        0x1p-1030;
+    } else {
+        2.0;
+    };
+}
+fn left(x: f64, t: i32) bool {
+    return if t == 0 {
+        0x1p-1030;
+    } else {
+        2.0;
+    } > x.abs();
+}
+fn scaled(b: f64, c: i32) f64 {
+    return 0.25 * if c == 2 {
+        b;
+    } else {
+        1.0;
+    };
+}
+fn left_switch(x: f64, t: i32) bool {
+    return switch t {
+        0 => {
+            0x1p-1030;
+        },
+        _ => {
+            2.0;
+        },
+    } > x.abs();
+}
+fn main() i32 {
+    return right(1e-312, 0) as i32 + 2 * left(1e-312, 0) as i32 + 4 * (scaled(4.0, 2) == 1.0) as i32 + 8 * left_switch(
+        1e-312,
+        0,
+    ) as i32;
+}
+)",
+        15,
+    );
+}
+
+@test
+fn deep_generic_call_chain_takes_the_expected_type() {
+    // Each `id` call's result names T, fixed only by the innermost call's expected type.
+    h::expect_exit(
+        "deep generic chain",
+        M"(fn id<T>(x: T) T {
+    return x;
+}
+fn zero<T: Default>() T {
+    return T::default();
+}
+fn main() i32 {
+    let z: i64 = id(id(id(id(id(id(id(id(id(id(id(id(zero()))))))))))));
+    return z as i32 + 3;
+}
+)",
+        3,
+    );
+}
+
+@test
+fn interface_method_param_takes_the_bound_arguments() {
+    h::expect_exit(
+        "interface bound arguments",
+        M"(interface Foo<U> {
+    fn put(self: &Self, v: Vector<U>) usize;
+}
+struct S {}
+extend S as Foo<i32> {
+    fn put(self: &Self, v: Vector<i32>) usize {
+        return v.len() + 4;
+    }
+}
+fn g<T: Foo<i32>>(t: &T) usize {
+    return t.put(Vector::new());
+}
+fn main() i32 {
+    let s = S {};
+    return g(&s) as i32;
+}
+)",
+        4,
+    );
+}
+
+// A nonzero float literal that rounds to 0 in f32 is past the f32 range: unsuffixed it is an f64, and
+// as an f32 (by its suffix or its context) it is an error, as an overflowing one is.
+@test
+fn float_literal_below_f32_range() {
+    h::expect_exit(
+        "tiny literal default",
+        M"(fn main() i32 {
+    let a = 1e-50;
+    let b = 0x1p-1030;
+    let c = 0.5 * 1e-30 * 1e-30;
+    return (a > 0.0) as i32 + 2 * (b > 0.0) as i32 + 4 * (c > 0.0) as i32;
+}
+)",
+        7,
+    );
+    h::expect_err_msg(
+        "tiny literal in an f32",
+        "fn main() i32 {\n    let x: f32 = 1e-50;\n    return x as i32;\n}\n",
+        "out of range for 'f32'",
+    );
+    h::expect_err_msg(
+        "tiny suffixed f32",
+        "fn main() i32 {\n    let x = 1e-50f32;\n    return x as i32;\n}\n",
+        "does not fit in its suffixed type",
     );
 }

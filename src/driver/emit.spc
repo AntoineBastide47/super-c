@@ -2422,6 +2422,11 @@ fn cemit_seed_module(
             continue;
         }
         dow.apply_drops(&mut lw);
+        if !dow.inl.off && inl::holds_vector(&lw.body, p) {
+            // Vector code: a call a splice brought through an interface binds and inlines too.
+            let mut sites = Vector::<BoundSite>::new();
+            bind_calls(cem, dow, &mut lw, &mut sites);
+        }
         let mut sym = String::new();
         let sm9 = cem.pr.start();
         let tgt = cem.mg.method_target(m as ModuleId, nid);
@@ -2832,6 +2837,116 @@ fn relower(lw: &mut irl::Lowerer, node: NodeId, subs: &Vector<mbe::MSub>, dow: &
     return ok;
 }
 
+// The bound variant of instance body `base` under `subs`, a body that holds a vector (the inliner's
+// reach for vector code, `inl::holds_vector`): when a call of an interface method through a type
+// parameter dispatches, for this instance, to a conformance method the inliner keeps
+// (`CEmit::bound_target`), the body grounded for the instance (`inl::ground_body`) calls that method
+// directly and inlines it, for up to `inl::MAX_DEPTH` rounds of the calls the splices bring. None when
+// no call qualifies or the body does not ground.
+fn bound_variant(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer, subs: &Vector<mbe::MSub>) Option<
+    irl::Lowerer
+> {
+    if dow.inl.off || !inl::holds_vector(&base.body, base.pkg) {
+        return Option::<irl::Lowerer>::None;
+    }
+    cem.mg.clear_subs();
+    for i in 0..subs.len() {
+        cem.mg.push_msub(*subs.at(i));
+    }
+    let r = bound_variant_in(cem, dow, base, subs);
+    cem.mg.clear_subs();
+    return r;
+}
+
+fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer, subs: &Vector<mbe::MSub>) Option<
+    irl::Lowerer
+> {
+    let mut sites = Vector::<BoundSite>::new();
+    bound_calls(cem, dow, base.pkg, &base.body, &mut sites);
+    if sites.len() == 0 {
+        return Option::<irl::Lowerer>::None;
+    }
+    let m = base.body.module;
+    // Innermost first: the first binding of a parameter wins.
+    let mut binds = Vector::<inl::GBind>::new();
+    let mut i = subs.len();
+    while i > 0 {
+        i -= 1;
+        let sb = *subs.at(i);
+        let mut g = TYPE_NONE;
+        if cem.mg.ground(sb.am, sb.at, m, &mut g) {
+            binds.push(inl::GBind { pm: sb.pm, pnode: sb.pnode, at: g });
+        }
+    }
+    let mut out = irl::Lowerer::new(base.pkg, m, base.body.owner.node);
+    out.body = irc::CoreBody::compact_from(&base.body);
+    out.closures = base.closures.clone();
+    if !inl::ground_body(&mut out, &binds) {
+        return Option::<irl::Lowerer>::None;
+    }
+    bind_calls(cem, dow, &mut out, &mut sites);
+    return Option::<irl::Lowerer>::Some(out);
+}
+
+// The calls of concrete body `lw` that dispatch through an interface to a method the inliner keeps
+// (`bound_calls`, scratch `sites`) call it directly and inline, for up to `inl::MAX_DEPTH` rounds of
+// the calls the splices bring: a round inlines to `inl::MAX_DEPTH` levels, the next goes on from
+// where its depth stopped. Nothing changes when no call binds at first.
+fn bind_calls(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, sites: &mut Vector<BoundSite>) {
+    for r in 0..inl::MAX_DEPTH {
+        bound_calls(cem, dow, lw.pkg, &lw.body, sites);
+        if r == 0 && sites.len() == 0 {
+            return;
+        }
+        for k in 0..sites.len() {
+            let st = *sites.at(k);
+            let tm = &mut lw.body.blocks.index_mut(st.blk as usize).term;
+            tm.callee = st.md;
+            tm.iface = TYPE_NONE;
+            tm.recv = st.recv;
+            tm.targs_start += tm.targs_len - st.own;
+            tm.targs_len = st.own;
+        }
+        if dow.apply_drops(lw) == 0 {
+            return;
+        }
+    }
+}
+
+// A call `bound_calls` found: its block, the method it dispatches to, the receiver, and the method's
+// own type-argument count.
+struct BoundSite {
+    pub blk: u32,
+    pub md: DefId,
+    pub recv: TypeId,
+    pub own: u32,
+}
+
+// The calls of `b` whose interface method dispatches to a method the inliner keeps
+// (`bound_variant`), into `sites`: each becomes a direct call of that method, with the receiver
+// and the method's own type arguments (the call's trailing ones).
+fn bound_calls(
+    cem: &mut cbe::CEmit,
+    dow: &DropCtx,
+    pkg: *const loader::Package,
+    b: &irc::CoreBody,
+    sites: &mut Vector<BoundSite>,
+) {
+    sites.clear();
+    for i in 0..b.blocks.len() {
+        let t = b.blocks.at(i).term;
+        let mut rv = TYPE_NONE;
+        let md = cem.bound_target(b, &t, &mut rv);
+        if md.node == NODE_NONE || !dow.inl.kept(md) {
+            continue;
+        }
+        let own = (unsafe &*(&*pkg).module_ast_const(md.module)).at_const(md.node).as_data.function.generics.len;
+        if t.targs_len >= own {
+            sites.push(BoundSite { blk: i as u32, md: md, recv: rv, own: own });
+        }
+    }
+}
+
 // The re-lowering cache key of definition `d` under `subs`: one bit per type argument (ZST or not),
 // the only part of an instantiation a ZST-conditional body's lowering depends on.
 fn zst_key(mg: &mut mbe::Mangler, d: DefId, subs: &Vector<mbe::MSub>) u64 {
@@ -2910,8 +3025,10 @@ fn cemit_drain_demand(
     // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
     // its args; every material instantiation folds identically and shares one body.
     let mut li2 = li;
-    // The reflection re-lowering serves this demand only; its slot is dropped at the end.
+    // The reflection re-lowering serves this demand only; its slots, from `own_at` on, are dropped at
+    // the end.
     let mut own_slot = false;
+    let mut own_at: u64 = 0;
     if lws.at(li as usize).body.has_reflect || lws.at(li as usize).body.has_lists {
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
         let okr9 = relower(&mut lw2, d_def.node, &d_subs, dow, prb::P_RELOWER_REFLECT, prb::C_RELOWER_REFLECT);
@@ -2920,6 +3037,7 @@ fn cemit_drain_demand(
             lws.push(lw2);
             li2 = lws.len() as u64 - 1;
             own_slot = true;
+            own_at = li2;
         } else {
             if verbose {
                 eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
@@ -2953,6 +3071,18 @@ fn cemit_drain_demand(
         }
         li2 = zi;
     }
+    // The bound variant serves this demand only, as the reflection re-lowering does.
+    switch bound_variant(cem, dow, lws.at(li2 as usize), &d_subs) {
+        Some(bv) => {
+            if !own_slot {
+                own_slot = true;
+                own_at = lws.len() as u64;
+            }
+            lws.push(bv);
+            li2 = lws.len() as u64 - 1;
+        },
+        None => {},
+    };
     cem.mg.clear_subs();
     for i2 in 0..d_subs.len() {
         cem.mg.push_msub(*d_subs.at(i2));
@@ -3025,9 +3155,9 @@ fn cemit_drain_demand(
     cem.mg.clos_sfx.truncate(0);
     cem.mg.clos_ids.truncate(0);
     if own_slot {
-        lws.truncate(li2 as usize);
-        cfs.truncate(li2 as usize);
-        cf_ok.truncate(li2 as usize);
+        lws.truncate(own_at as usize);
+        cfs.truncate(own_at as usize);
+        cf_ok.truncate(own_at as usize);
     }
 }
 
@@ -3185,6 +3315,18 @@ fn cemit_drain_slice_one(
             o.dvars.push(var_lw);
         }
     }
+    // The bound variant serves this demand only: it stays out of the slice's variants.
+    let base = if var_on {
+        o.dvars.at(vix as usize);
+    } else {
+        lws.at(li2 as usize);
+    };
+    let mut bvs = Vector::<irl::Lowerer>::new();
+    switch bound_variant(&mut o.cem, dow2, base, d_subs) {
+        Some(x) => bvs.push(x),
+        None => {},
+    };
+    let bv_on = bvs.len() != 0;
     let sh = &mut o.cem;
     sh.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
     sh.mg.clear_subs();
@@ -3194,18 +3336,18 @@ fn cemit_drain_slice_one(
     sh.mg.clos_sfx.truncate(0);
     sh.mg.clos_sfx.push_str(d_sfx);
     sh.mg.clos_ids.truncate(0);
-    {
-        let cls = if var_on {
-            &o.dvars.at(vix as usize).closures;
-        } else {
-            &lws.at(li2 as usize).closures;
-        };
-        for c2 in 0..cls.len() {
-            sh.mg.clos_ids.push(cls[c2]);
-        }
+    let blw = if bv_on {
+        bvs.at(0);
+    } else if var_on {
+        o.dvars.at(vix as usize);
+    } else {
+        lws.at(li2 as usize);
+    };
+    for c2 in 0..blw.closures.len() {
+        sh.mg.clos_ids.push(blw.closures[c2]);
     }
-    if var_on {
-        cf_own.build_into(&o.dvars.at(vix as usize).body);
+    if bv_on || var_on {
+        cf_own.build_into(&blw.body);
         cfp = &cf_own;
     } else {
         cfp = cfs.at(li2 as usize);
@@ -3215,12 +3357,7 @@ fn cemit_drain_slice_one(
     sh.fn_attrs.truncate(0);
     cemit_fn_attrs(p, d_def.module, d_def.node, &mut sh.fn_attrs);
     sh.fs = p.fn_set(d_def.module, d_def.node);
-    let bodyp = if var_on {
-        &o.dvars.at(vix as usize).body;
-    } else {
-        &lws.at(li2 as usize).body;
-    };
-    let em_ok9 = sh.emit_fn(bodyp, d_sym);
+    let em_ok9 = sh.emit_fn(&blw.body, d_sym);
     sh.cf_ext = null;
     if !em_ok9 {
         o.douts.push(2);
@@ -3238,15 +3375,8 @@ fn cemit_drain_slice_one(
     proto_of(&sh.out, &mut o.acc.protos);
     o.acc.ch.add(65534, d_def.module, &sh.out);
     let mut clsq = Vector::<NodeId>::new();
-    {
-        let cls = if var_on {
-            &o.dvars.at(vix as usize).closures;
-        } else {
-            &lws.at(li2 as usize).closures;
-        };
-        for c2 in 0..cls.len() {
-            clsq.push(cls[c2]);
-        }
+    for c2 in 0..blw.closures.len() {
+        clsq.push(blw.closures[c2]);
     }
     let mut cqi: usize = 0;
     while cqi < clsq.len() {
@@ -6536,20 +6666,23 @@ extend DropCtx {
         };
     }
 
-    fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
-        self.apply_drops_of(lw, true);
+    // The calls inlined.
+    fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) u32 {
+        return self.apply_drops_of(lw, true);
     }
 
-    fn apply_drops_of(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
+    // The calls inlined.
+    fn apply_drops_of(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) u32 {
         let dm = self.pr.start();
         let i0 = self.pr.ns[prb::P_INLINE];
         let ia0 = self.pr.an[prb::P_INLINE];
         let ib0 = self.pr.ab[prb::P_INLINE];
-        self.apply_drops_i(lw, allow_inline);
+        let n = self.apply_drops_i(lw, allow_inline);
         self.pr.stop_less(prb::P_DROPS, dm, prb::P_INLINE, i0, ia0, ib0);
+        return n;
     }
 
-    fn apply_drops_i(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
+    fn apply_drops_i(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) u32 {
         // A body emission lowered itself (a per-instance re-lowering, a wrapper) elaborates its
         // drops here, BEFORE the inliner: every callee splices in elaborated, so the merged body
         // is never analyzed for ownership. A kept body arrives elaborated by the borrow pass.
@@ -6569,9 +6702,9 @@ extend DropCtx {
                 bfi::bc_validate_elaborated(&mut self.ow, &lw.body);
             }
         }
+        let mut ist = inl::InlineStats::new();
         if allow_inline && !self.inl.off {
             let im = self.pr.start();
-            let mut ist = inl::InlineStats::new();
             inl::run(lw, &mut self.inl, &mut ist);
             if self.inl.stats_on && ist.considered != 0 {
                 let mut iline = String::new();
@@ -6604,6 +6737,7 @@ extend DropCtx {
             eprint("{} owner {}:{}\n", line.as_str(), lw.body.module, lw.body.owner.node);
             line.free();
         }
+        return ist.inlined;
     }
 }
 
@@ -9590,13 +9724,15 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
 // --lint: functions the deep (all-paths) CTFE scan proves always evaluable, which pass the def-site
 // check as `const fn`. The fix (insert `const ` before the `fn` keyword, which lands AFTER any
 // `pub`/`unsafe`, the canonical order) applies only under `--fix`.
-// Conformance members are skipped (the interface fixes the signature), as are @test fns and `main`.
-// Prelude modules are ALWAYS excluded, even when linted in place: a panic the always-panics check
-// proves through a `const fn` frame is an error, so constifying a prelude helper can fail the build
-// of every downstream program, a blast radius the per-package `--fix` fixpoint cannot validate;
-// prelude const adoption must be a deliberate manual change.
+// Conformance members are skipped (the interface fixes the signature), as are @test fns, `main` and
+// `@no_const` fns: a panic the always-panics check proves through a `const fn` frame is an error, so a
+// function whose every call may panic (std's `panic`) takes the tag and is never suggested.
 fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, in_iface: bool) {
-    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || is_test_item(a, fnode) {
+    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || is_test_item(a, fnode) || attr_any(
+        a,
+        fnode,
+        attr_bit(AttrKind::ATTR_NO_CONST),
+    ) {
         return;
     }
     let f = unsafe (*a).at_const(fnode).as_data.function;
@@ -9627,7 +9763,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         return;
     }
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
+        if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = p.module_ast_const(m as ModuleId);

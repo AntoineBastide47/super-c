@@ -46,6 +46,148 @@ pub struct Float<const E: usize, const F: usize, const FAMILY: FloatFamily = IEE
     bits: UInt<{1 + E + F}>,
 }
 
+// The native binary128 fast path. Whether the C compiler building the emitted code has an IEEE
+// binary128 type is knowable only there: `sc_has_f128()` (float128.h, shipped next to this file) folds
+// to a constant, so a `native()` branch keeps exactly one side. Compile time runs the limb code (the
+// interpreter answers 0): correctly rounded both ways, the same bits.
+extern "C" "float128.h" {
+    fn sc_has_f128() i32;
+    fn sc_f128_add(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
+    fn sc_f128_mul(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
+    fn sc_f128_div(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
+}
+
+// Integer square roots, for `sqrt`.
+extend<const W: usize> UInt<W> {
+    // The floor of the square root of `self`, its remainder self - r^2 stored through `rem`: the Karatsuba square
+    // root (Brent and Zimmermann, Modern Computer Arithmetic, Algorithm 1.12) in binary digits. The root and
+    // remainder of a come from those of a >> 2t, t = (bits of a - 1) / 4, by one division of a number twice
+    // t bits wide by twice that root: a quotient of t bits, where a Newton step would divide a by its root.
+    // a >> 2t has at most half a's bits and 2 more, so every level below the last runs in a type half as
+    // wide (`isqrt_levels`), and the value whole in 128 bits when it fits.
+    fn isqrt_rem(self: &UInt<W>, rem: &mut UInt<W>) UInt<W> {
+        let bl = self.bit_length();
+        if bl <= 128 {
+            let a2 = UInt::<128>::cast_unsigned(self);
+            let mut r2 = UInt::<128>::zero();
+            let s2 = a2.isqrt_levels(&mut r2);
+            *rem = UInt::<W>::cast_unsigned(&r2);
+            return UInt::<W>::cast_unsigned(&s2);
+        }
+        let t = (bl - 1) / 4;
+        let high = self.shr(2 * t);
+        let top = UInt::<{(W + 5) / 2}>::cast_unsigned(&high);
+        let mut r1 = UInt::<{(W + 5) / 2}>::zero();
+        let s1 = top.isqrt_levels(&mut r1);
+        let mut x = UInt::<W>::cast_unsigned(&s1);
+        let mut rm = UInt::<W>::cast_unsigned(&r1);
+        x.sqrt_step(&mut rm, self, t);
+        *rem = rm;
+        return x;
+    }
+
+    // `isqrt_rem`'s levels in one width: ks[j] is the shift of level j + 1, the whole value being level 0,
+    // and each level halves the bits, so 64 levels cover any width. They end at 64 bits, whose root comes
+    // from the double's; the ones whose value fits 128 bits run in `UInt<128>`, the C compiler's native type
+    // where it has one.
+    fn isqrt_levels(self: &UInt<W>, rem: &mut UInt<W>) UInt<W> {
+        let mut ks: [usize; 64] = [0; 64];
+        let mut levels: usize = 0;
+        let bl0 = self.bit_length();
+        let mut bl = bl0;
+        let mut k: usize = 0;
+        for _ in 0..64 {
+            if bl <= 64 {
+                break;
+            }
+            let t = (bl - 1) / 4;
+            k = k + t;
+            bl = bl - 2 * t;
+            unsafe ks[levels] = k;
+            levels = levels + 1;
+        }
+        assert(bl <= 64, "isqrt_levels: the levels end below 64 bits");
+        // The double's square root is within one of the top level's root, and squares settle it.
+        let head = self.shr(2 * k).limb(0);
+        let mut s = (head as f64).sqrt() as u64;
+        if s > 0xFFFFFFFF {
+            s = 0xFFFFFFFF;
+        }
+        for _ in 0..4 {
+            if s * s <= head {
+                break;
+            }
+            s = s - 1;
+        }
+        for _ in 0..4 {
+            let n = s + 1;
+            if n > 0xFFFFFFFF || n * n > head {
+                break;
+            }
+            s = n;
+        }
+        assert(s * s <= head && (s == 0xFFFFFFFF || (s + 1) * (s + 1) > head), "isqrt_levels: the top level's root");
+        let mut x2 = UInt::<128>::from_u64(s);
+        let mut r2 = UInt::<128>::from_u64(head - s * s);
+        let mut j = levels;
+        while j > 0 {
+            let kn = if j == 1 {
+                0;
+            } else {
+                unsafe ks[j - 2];
+            };
+            if bl0 - 2 * kn > 128 {
+                break;
+            }
+            j = j - 1;
+            let b = self.shr(2 * kn);
+            let mut lo = UInt::<128>::from_u64(b.limb(0));
+            lo.set_limb(1, b.limb(1));
+            x2.sqrt_step(&mut r2, &lo, unsafe ks[j] - kn);
+        }
+        let mut x = UInt::<W>::cast_unsigned(&x2);
+        let mut rm = UInt::<W>::cast_unsigned(&r2);
+        while j > 0 {
+            j = j - 1;
+            let kn = if j == 0 {
+                0;
+            } else {
+                unsafe ks[j - 1];
+            };
+            let b = self.shr(2 * kn);
+            x.sqrt_step(&mut rm, &b, unsafe ks[j] - kn);
+        }
+        *rem = rm;
+        return x;
+    }
+
+    // One level of `isqrt_rem`: from root s (`self`) and remainder r of b >> 2t, those of b, whose bits
+    // below 2t are read from `low` (its higher bits are ignored). With b = a' 2^2t + a1 2^t + a0 and
+    // a' = s^2 + r: (q, u) = divmod(r 2^t + a1, 2s), and b - (s 2^t + q)^2 = u 2^t + a0 - q^2. Below zero,
+    // the root is one less: Theorem 1.6, for t below a quarter of b's bits, which keeps a' at least 2^2t.
+    fn sqrt_step(self: &mut UInt<W>, r: &mut UInt<W>, low: &UInt<W>, t: usize) {
+        let one = UInt::<W>::one();
+        let mask = one.shl(t).wrapping_sub(&one);
+        let a1 = low.shr(t).bit_and(&mask);
+        let a0 = low.bit_and(&mask);
+        let num = r.shl(t).bit_or(&a1);
+        let den = self.shl(1);
+        let mut u = UInt::<W>::zero();
+        let q = num.divmod(&den, &mut u);
+        let mut ns = self.shl(t).wrapping_add(&q);
+        let mut pos = u.shl(t).bit_or(&a0);
+        let qq = q.wrapping_mul(&q);
+        if pos < qq {
+            // r + 2s - 1 at the root found, s - 1: 2 (s - 1) + 1 at the root kept.
+            ns = ns.wrapping_sub(&one);
+            pos = pos.wrapping_add(&ns).wrapping_add(&ns).wrapping_add(&one);
+            assert(!(pos < qq), "isqrt_rem: one correction settles the root");
+        }
+        *self = ns;
+        *r = pos.wrapping_sub(&qq);
+    }
+}
+
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> {
     /// Format constants. `bias` fits an i64 because E is capped well below it: 2 <= E <= 30 keeps every
     /// exponent computation in comfortable i64 range at any F.
@@ -89,6 +231,38 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// A float from its encoding bits.
     pub fn from_raw(b: UInt<{1 + E + F}>) Float<E, F, FAMILY> {
         return Float::<E, F, FAMILY> { bits: b };
+    }
+
+    // Whether this format is IEEE binary128 and the C compiler has that type: add, multiply and divide
+    // then run natively.
+    fn native() bool {
+        return E == 15 && F == 112 && FAMILY == FloatFamily::FF_IEEE && unsafe sc_has_f128() != 0;
+    }
+
+    // Operation `op` (0 add, 1 multiply, 2 divide) on two binary128 values by the native type; a NaN
+    // result as `nan()`, the limb code's NaN.
+    fn native_op(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>, op: u32) Float<E, F, FAMILY> {
+        let al = self.bits.limb(0);
+        let ah = self.bits.limb(1);
+        let bl = other.bits.limb(0);
+        let bh = other.bits.limb(1);
+        let mut lo: u64 = 0;
+        let mut hi: u64 = 0;
+        if op == 0 {
+            unsafe sc_f128_add(al, ah, bl, bh, &mut lo, &mut hi);
+        } else if op == 1 {
+            unsafe sc_f128_mul(al, ah, bl, bh, &mut lo, &mut hi);
+        } else {
+            unsafe sc_f128_div(al, ah, bl, bh, &mut lo, &mut hi);
+        }
+        let mut b = UInt::<{1 + E + F}>::zero();
+        b.set_limb(0, lo);
+        b.set_limb(1, hi);
+        let r = Float::<E, F, FAMILY> { bits: b };
+        if r.is_nan() {
+            return Float::<E, F, FAMILY>::nan();
+        }
+        return r;
     }
 
     fn sign(self: &Float<E, F, FAMILY>) bool {
@@ -439,20 +613,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             i = i + 1;
         }
         a = a.shl(k);
-        // Digit-by-digit integer square root: r^2 <= a < (r+1)^2, remainder exactness for the sticky.
-        let mut num = a;
-        let mut res = UInt::<{2 * F + 16}>::zero();
-        let mut bit = UInt::<{2 * F + 16}>::one().shl((2 * F + 14) / 2 * 2);
-        while !bit.is_zero() {
-            let t = res.wrapping_add(&bit);
-            if !(num < t) {
-                num = num.wrapping_sub(&t);
-                res = res.shr(1).wrapping_add(&bit);
-            } else {
-                res = res.shr(1);
-            }
-            bit = bit.shr(2);
-        }
+        // The integer square root: r^2 <= a < (r+1)^2, the remainder's exactness for the sticky.
+        let mut num = UInt::<{2 * F + 16}>::zero();
+        let res = a.isqrt_rem(&mut num);
         // sig3 = r with a cleared sticky slot below, jammed by the remainder.
         let mut sig = UInt::<{F + 8}>::zero();
         i = 0;
@@ -662,15 +825,23 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             w = w * ten;
             d10 = d10 - 1;
         }
-        // Extract one digit past the printed count, for the final round.
+        // The printed digits and one past them, for the final round, at once: floor(w 10^p) as an integer.
+        // 10^p is exact (5^p fits the wide significand), so that is one rounding, where a digit at a time
+        // would round at every digit. It reaches 10^(p+1) only when w rounds up to ten: 1.0 at the next
+        // exponent, whose first p + 1 digits the same text holds.
         let p = Float::<E, F, FAMILY>::decimal_digits();
+        let mut whole = UInt::<{F + 96}>::zero();
+        let scaled = w * Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(p as u64);
+        scaled.to_uint(&mut whole);
+        let owned = whole.to_string();
+        let text = owned.as_str();
+        if text.len() > p + 1 {
+            d10 = d10 + 1;
+        }
         let mut digits = Vector::<u8>::new();
         let mut i: usize = 0;
         while i <= p {
-            let d = w.int_digit();
-            digits.push(d as u8);
-            let dv = Float::<{E + 2}, {F + 96}, IEEE>::from_f64(d as f64);
-            w = (w - dv) * ten;
+            digits.push(text.byte_at(i) - b'0');
             i = i + 1;
         }
         if digits[p] >= 5 {
@@ -734,8 +905,12 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
                 return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::overflow_result(negv));
             }
         }
-        let mut acc = Float::<{E + 2}, {F + 96}, IEEE>::zero();
-        let ten = Float::<{E + 2}, {F + 96}, IEEE>::from_f64(10.0);
+        // The tracked digits gather as an integer: up to 19 in a u64 (`chunk`, `scale` 10 to their count),
+        // folded into `digs` when full. At most maxd significant digits, about F + 41 bits, so it is exact,
+        // and so is its conversion to the wide format below.
+        let mut digs = UInt::<{F + 96}>::zero();
+        let mut chunk: u64 = 0;
+        let mut scale: u64 = 1;
         let maxd = Float::<E, F, FAMILY>::decimal_digits() + 10;
         let mut nsig: usize = 0;
         let mut exp_adj: i64 = 0;
@@ -756,9 +931,15 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             }
             any = true;
             if nsig < maxd {
-                let dv = Float::<{E + 2}, {F + 96}, IEEE>::from_f64((ch - b'0') as f64);
-                acc = acc * ten + dv;
-                if !acc.is_zero() {
+                chunk = chunk * 10 + (ch - b'0') as u64;
+                scale = scale * 10;
+                if scale == 10000000000000000000 {
+                    digs = Float::<E, F, FAMILY>::fold_digits(&digs, scale, chunk);
+                    chunk = 0;
+                    scale = 1;
+                }
+                // Leading zeros are not significant.
+                if nsig > 0 || ch != b'0' {
                     nsig = nsig + 1;
                 }
                 if seen_dot {
@@ -770,6 +951,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             }
             i = i + 1;
         }
+        digs = Float::<E, F, FAMILY>::fold_digits(&digs, scale, chunk);
         if !any {
             return Option::<Float<E, F, FAMILY>>::None;
         }
@@ -801,7 +983,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if i != n {
             return Option::<Float<E, F, FAMILY>>::None;
         }
-        if acc.is_zero() {
+        if digs.is_zero() {
             // Zero at any scale; scaling could meet an infinite power of ten, and 0 * inf is NaN.
             if negv {
                 return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::neg_zero());
@@ -814,17 +996,25 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         } else {
             total as u64;
         };
-        let scale = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
+        let p10 = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
+        let mut acc = Float::<{E + 2}, {F + 96}, IEEE>::from_uint(&digs);
         if total >= 0 {
-            acc = acc * scale;
+            acc = acc * p10;
         } else {
-            acc = acc / scale;
+            acc = acc / p10;
         }
         let mut r = Float::<E, F, FAMILY>::convert(&acc);
         if negv {
             r = r.neg();
         }
         return Option::<Float<E, F, FAMILY>>::Some(r);
+    }
+
+    // digs * scale + chunk: `from_str` folding a u64 of digits into the wide integer.
+    fn fold_digits(digs: &UInt<{F + 96}>, scale: u64, chunk: u64) UInt<{F + 96}> {
+        let m = UInt::<{F + 96}>::from_u64(scale);
+        let c = UInt::<{F + 96}>::from_u64(chunk);
+        return digs.wrapping_mul(&m).wrapping_add(&c);
     }
 
     // 10^k by binary exponentiation: log2(k) roundings of error, absorbed by the 96 guard bits.
@@ -842,19 +1032,6 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             }
         }
         return r;
-    }
-
-    // The leading integer digit of a value in [0, 10): read straight off the decoded significand.
-    fn int_digit(self: &Float<E, F, FAMILY>) u64 {
-        if self.is_zero() {
-            return 0;
-        }
-        let mut e: i64 = 0;
-        let s3 = self.decode_sig3(&mut e);
-        if e < 0 {
-            return 0;
-        }
-        return s3.shr(F + 3 - e as usize).to_u64();
     }
 
     // IEEE equality and ordering: NaN compares equal to nothing (itself included), the two zeros are
@@ -1477,6 +1654,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     type Output = Float<E, F, FAMILY>;
 
     pub fn add(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if Float::<E, F, FAMILY>::native() {
+            return self.native_op(other, 0);
+        }
         if self.is_nan() || other.is_nan() {
             return Float::<E, F, FAMILY>::nan();
         }
@@ -1562,6 +1742,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     type Output = Float<E, F, FAMILY>;
 
     pub fn mul(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if Float::<E, F, FAMILY>::native() {
+            return self.native_op(other, 1);
+        }
         let neg = self.sign() != other.sign();
         if self.is_nan() || other.is_nan() {
             return Float::<E, F, FAMILY>::nan();
@@ -1620,6 +1803,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     type Output = Float<E, F, FAMILY>;
 
     pub fn div(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if Float::<E, F, FAMILY>::native() {
+            return self.native_op(other, 2);
+        }
         let neg = self.sign() != other.sign();
         if self.is_nan() || other.is_nan() {
             return Float::<E, F, FAMILY>::nan();
@@ -1696,9 +1882,8 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     type Output = Float<E, F, FAMILY>;
 
     /// C's fmod: the remainder of truncating division, with the DIVIDEND's sign, and EXACT, because
-    /// the remainder of two representable values always is; the shift-subtract runs on the integer
-    /// significands, one exponent step per iteration. NaN for a NaN operand, x % 0, and inf % y;
-    /// x % inf is x.
+    /// the remainder of two representable values always is; it runs on the integer significands. NaN
+    /// for a NaN operand, x % 0, and inf % y; x % inf is x.
     pub fn rem(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() || other.is_nan() || self.is_infinite() || other.is_zero() {
             return Float::<E, F, FAMILY>::nan();
@@ -1714,15 +1899,35 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             // |x| < |y|: x is its own remainder.
             return *self;
         }
-        while ex > ey {
-            if ux.cmp(&uy) >= 0 {
-                ux = ux.wrapping_sub(&uy);
-            }
-            ux = ux.shl(1);
-            ex = ex - 1;
+        // ux * 2^d mod uy for d = ex - ey, with 2^d mod uy by square and multiply over d's bits: about E
+        // steps of one product and one division, where a step per unit of d would be up to 2^E.
+        let d = (ex - ey) as u64;
+        let mut x = UInt::<{2 * F + 16}>::zero();
+        let mut y = UInt::<{2 * F + 16}>::zero();
+        let mut i: usize = 0;
+        while i * 64 < F + 8 {
+            x.set_limb(i, ux.limb(i));
+            y.set_limb(i, uy.limb(i));
+            i = i + 1;
         }
-        if ux.cmp(&uy) >= 0 {
-            ux = ux.wrapping_sub(&uy);
+        // Both below 2^(F+1), so every product of two residues fits the width; uy is at least 2^F.
+        let mut p = UInt::<{2 * F + 16}>::one();
+        let mut bit = 64 - d.leading_zeros();
+        while bit > 0 {
+            bit = bit - 1;
+            p = p.wrapping_mul(&p) % y;
+            if (d >> bit as u64 & 1) == 1 {
+                p = p.shl(1);
+                if !(p < y) {
+                    p = p.wrapping_sub(&y);
+                }
+            }
+        }
+        let rx = x.wrapping_mul(&p) % y;
+        i = 0;
+        while i * 64 < F + 8 {
+            ux.set_limb(i, rx.limb(i));
+            i = i + 1;
         }
         if ux.is_zero() {
             if self.sign() {

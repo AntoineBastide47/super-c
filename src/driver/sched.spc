@@ -27,6 +27,19 @@ extend Jobs {
     /// serial order `order` (every job after its dependencies).
     pub fn from_edges(n: usize, edges: &Vector<u64>, order: Vector<u32>) Jobs {
         let mut j = Jobs::independent(n);
+        // Every edge must run forward in the serial order: a backward one is a cycle, which the
+        // parallel path would wait on forever.
+        let mut pos = Vector::<u32>::new();
+        pos.resize_default(n);
+        for k in 0..order.len() {
+            pos.set(order[k] as usize, k as u32);
+        }
+        for i in 0..edges.len() {
+            assert(
+                pos[(edges[i] >> 32) as usize] < pos[(edges[i] & 0xFFFFFFFFu64) as usize],
+                "job graph edge against the serial order",
+            );
+        }
         j.order = order;
         j.succ_off.clear();
         j.succ_off.resize_default(n + 1);

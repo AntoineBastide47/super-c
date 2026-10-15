@@ -3922,6 +3922,7 @@ extend Lowerer {
                     op,
                     NODE_NONE,
                     ty,
+                    false,
                 );
             },
             None => {},
@@ -4149,14 +4150,41 @@ extend Lowerer {
         }
         switch self.f.op_method(id) {
             Some(m) => {
-                return self.lower_op_call_from(
+                let eq = d.op == tt::TokenType::EqualEqual || d.op == tt::TokenType::BangEqual;
+                let ord = d.op == tt::TokenType::LessThan || d.op == tt::TokenType::LessThanEqual || d.op == tt::TokenType::GreaterThan || d.op == tt::TokenType::GreaterThanEqual;
+                if !eq && !ord {
+                    return self.lower_op_call_from(
+                        id,
+                        (m >> 32) as ModuleId,
+                        (m & 0xFFFFFFFFu64) as NodeId,
+                        lop,
+                        d.right,
+                        ty,
+                        false,
+                    );
+                }
+                // A comparison of aggregates: `eq` decides `==` and `!=`, `cmp`'s sign the ordering. It
+                // reads its operands and never consumes them: a temporary operand (`mk() == s`) is
+                // dropped by its scope.
+                self.own_operand(lop, d.left);
+                let it = Ast::builtin(BuiltinType::BT_I32);
+                let r = self.lower_op_call_from(
                     id,
                     (m >> 32) as ModuleId,
                     (m & 0xFFFFFFFFu64) as NodeId,
                     lop,
                     d.right,
-                    ty,
+                    pick(eq, ty, it),
+                    true,
                 );
+                if r == ir::IR_NONE || d.op == tt::TokenType::EqualEqual {
+                    return r;
+                }
+                if eq {
+                    return self.copy_op(self.rv_temp(ir::rv(ir::RV_UNARY, r, tt::TokenType::Bang as u32, 0, ty), sp));
+                }
+                let zero = self.kop(ir::CK_INT, it, 0, sp);
+                return self.copy_op(self.rv_temp(ir::rv(ir::RV_BINARY, r, zero, d.op as u8, ty), sp));
             },
             None => {},
         };
@@ -4182,6 +4210,7 @@ extend Lowerer {
         lop: ir::OperandId,
         rhs: NodeId,
         ty: TypeId,
+        reads: bool,
     ) ir::OperandId {
         let sp = self.f.node(id).span;
         let mut argv = self.avget();
@@ -4214,6 +4243,9 @@ extend Lowerer {
             let mut rop = self.lower_expr(rhs);
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
+            }
+            if reads {
+                self.own_operand(rop, rhs);
             }
             // A by-reference parameter (`other: &i32`) borrows the right operand, as `m.add(&n)` does:
             // the operand's place, or a temporary holding a constant (`m + 5`).
@@ -4643,8 +4675,12 @@ extend Lowerer {
             // not the call node
             tn = self.copy_targs(d.callee);
             // Only a path's qualifier carries them: a method call's receiver may be a turbofished
-            // call of its own (`x.m::<u8>().get()`), whose arguments are not this call's.
-            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path {
+            // call of its own (`x.m::<u8>().get()`), whose arguments are not this call's. A member of
+            // an extend without parameters (`extend String { fn mk() .. }`) binds none, so the
+            // qualifier's (`String<Global>`) are not its call's.
+            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path && (target.node == NODE_NONE || unsafe (*(&*self.pkg).module_ast_const(
+                target.module,
+            )).extend_arity(target.node) != 0) {
                 let ob9 = self.f.node(d.callee).as_data.member.object;
                 tn = self.copy_targs(ob9);
                 if tn == 0 {
@@ -4686,29 +4722,44 @@ extend Lowerer {
         // names its implementor by the parameter, whatever its result or first argument are; through a
         // type (`P::twice()`, an inherited default), by that type.
         let mut impl9 = TYPE_NONE;
+        // The member path that names the callee, under a turbofish (`T::f::<U>(..)`) too.
+        let mut pm9 = NODE_NONE;
         if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
             // `Type::<Args>::f::<U>()`: the qualifying instance names the receiver of a function
             // whose own arguments are the call's.
             let in9 = self.f.node(d.callee).as_data.specialization.expression;
             if self.f.node(in9).kind == NodeKind::NODE_MEMBER && self.f.node(in9).as_data.member.path {
+                pm9 = in9;
                 let q9 = self.nty(self.f.node(in9).as_data.member.object);
                 if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
                     impl9 = q9;
                 }
             }
+        } else if ck == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path {
+            pm9 = d.callee;
+            // `Type::<Args>::f(..)` whose function has parameters of its own: the call's bound args are
+            // the function's, so the qualifying instance names the receiver, as under a turbofish.
+            if target.node != NODE_NONE && self.decl_kind(target) == NodeKind::NODE_FUNCTION && unsafe (*(&*self.pkg).module_ast_const(
+                target.module,
+            )).at_const(target.node).as_data.function.generics.len != 0 {
+                let q9 = self.nty(self.f.node(d.callee).as_data.member.object);
+                if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
+                    impl9 = q9;
+                }
+            }
         }
-        if ck == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE && iface_of_member(
+        if impl9 == TYPE_NONE && pm9 != NODE_NONE && target.node != NODE_NONE && iface_of_member(
             unsafe &*(&*self.pkg).module_ast_const(target.module),
             target.node,
         ) != NODE_NONE {
-            let od9 = self.f.res(self.f.node(d.callee).as_data.member.object);
+            let od9 = self.f.res(self.f.node(pm9).as_data.member.object);
             if od9.node != NODE_NONE && (self.decl_kind(od9) == NodeKind::NODE_GENERIC_PARAM || self.decl_kind(od9) == NodeKind::NODE_INTERFACE) {
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
                 impl9 = sa.intern_type(
                     Ty { kind: TypeKind::TYPE_GENERIC, module: od9.module, as_data: TyAs { decl: od9.node } },
                 );
             } else {
-                impl9 = self.nty(self.f.node(d.callee).as_data.member.object);
+                impl9 = self.nty(self.f.node(pm9).as_data.member.object);
             }
         }
         let res = self.emit_call(target, callee_op, start, n, ts, tn, bc, impl9, ty, sp);
@@ -5114,7 +5165,9 @@ extend Lowerer {
         let c = k as u8;
         let kind = k >> 8;
         let shift = c == tt::TokenType::LeftShift as u8 || c == tt::TokenType::RightShift as u8;
-        for i in 0..pick(kind == ir::SI_BINARY, 2usize, 0usize) {
+        // A mask operator's operands are masks.
+        let vec = self.f.ty(ty).kind == TypeKind::TYPE_SIMD;
+        for i in 0..pick(kind == ir::SI_BINARY && vec, 2usize, 0usize) {
             // A lane scalar beside a vector operator (`v * s`, `s * v`): the vector of the scalar in
             // every lane. A shift keeps a scalar count.
             if self.f.ty(self.body.operands.at(ops[i] as usize).ty).kind != TypeKind::TYPE_SIMD && (i == 0 || !shift) {
@@ -5427,6 +5480,7 @@ extend Lowerer {
                     lop,
                     d.right,
                     lt,
+                    false,
                 );
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
@@ -6729,6 +6783,7 @@ extend Lowerer {
                     lop,
                     d.index,
                     rty,
+                    false,
                 );
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
