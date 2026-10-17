@@ -1,0 +1,81 @@
+# Probe: the SIMD baseline kernels (scalar, portable, neon, sve) on an Arm Linux runner with SVE. The
+# bench binary is cross-built on x86_64 (no aarch64 Linux release compiler exists), then run natively.
+name: SVE probe
+on:
+  push:
+    branches: [probe/sve-measure]
+permissions:
+  contents: read
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          cache: ccache-linux-build
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the compiler and cross-build the bench
+        run: |
+          set -eu
+          ./super-c-boot build --bootstrap-tags
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -n 1
+          ./super-c bench --no-run --filter=simd_baseline --target=linux --arch=aarch64 --cc=aarch64-linux-gnu-gcc
+          file build/bench-bin
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-bin
+          path: build/bench-bin
+          if-no-files-found: error
+
+  run:
+    needs: cross
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: bench-bin
+
+      - name: Machine
+        run: |
+          set -eu
+          lscpu
+          grep -m1 -i features /proc/cpuinfo
+          printf '#include <arm_sve.h>\n#include <stdio.h>\nint main(void) { printf("sve vector bits: %%d\\n", (int)svcntb() * 8); return 0; }\n' >vl.c
+          gcc -O2 -march=armv8.2-a+sve vl.c -o vl && ./vl
+
+      - name: Run the kernels three times
+        run: |
+          set -u
+          chmod +x bench-bin
+          for r in 1 2 3; do
+            ./bench-bin >out$r.txt 2>&1
+            echo "run $r: exit $?"
+            grep -E '^simd' out$r.txt
+          done
+          tail -n 20 out1.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sve-probe-${{ matrix.os }}
+          path: out*.txt
