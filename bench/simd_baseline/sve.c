@@ -18,6 +18,7 @@
 #pragma GCC target("+sve")
 #endif
 #include <arm_sve.h>
+#include <arm_neon.h>
 
 static void saxpy_f32(float a, const float *x, float *y, size_t n) {
     svbool_t all = svptrue_b32();
@@ -210,6 +211,117 @@ static void abs_diff_u8(const uint8_t *a, const uint8_t *b, uint8_t *out, size_t
     }
 }
 
+// Variants of the kernels SVE loses on N2, for the tuned table: eight vectors per step (count_eq_u8,
+// abs_diff_u8), two byte vectors per step (mix_width), and the 128-bit length fixed (tail_load_f32:
+// three whole vectors and one predicate per row, a constant trip count).
+static size_t count_eq_u8_x8(const uint8_t *x, size_t n, uint8_t v) {
+    svbool_t all = svptrue_b8();
+    size_t w = svcntb(), blocks = n / (8 * w), i = blocks * 8 * w, c = 0;
+    const uint8_t *p = x;
+    while (blocks > 0) {
+        size_t k = blocks < 255 ? blocks : 255; // blocks before a byte count can wrap
+        blocks -= k;
+        svuint8_t z = svdup_n_u8(0), a0 = z, a1 = z, a2 = z, a3 = z, a4 = z, a5 = z, a6 = z, a7 = z;
+        for (const uint8_t *e = p + k * 8 * w; p != e; p += 8 * w) {
+#define F(u) a##u = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_vnum_u8(all, p, u), v), a##u, 1);
+            SB_ACC8(F)
+#undef F
+        }
+#define F(u) +svaddv_u8(all, a##u)
+        c += 0 SB_ACC8(F);
+#undef F
+    }
+    for (; i < n; i += w) {
+        svbool_t pg = svwhilelt_b8_u64(i, n);
+        c += svcntp_b8(pg, svcmpeq_n_u8(pg, svld1_u8(pg, x + i), v));
+    }
+    return c;
+}
+
+static void mix_width_x2(const float *x, float t, const uint8_t *p, const uint8_t *q, uint8_t *out, size_t n) {
+    svbool_t all = svptrue_b32(), bytes = svptrue_b8();
+    size_t w = svcntw(), b = svcntb(), i = 0;
+    for (; i + 2 * b <= n; i += 2 * b) {
+#define F(u) svcmpgt_n_f32(all, svld1_vnum_f32(all, x + i, u), t)
+        svbool_t m0 = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
+        svbool_t m1 = svuzp1_b8(svuzp1_b16(F(4), F(5)), svuzp1_b16(F(6), F(7)));
+#undef F
+        svst1_vnum_u8(bytes, out + i, 0, svsel_u8(m0, svld1_vnum_u8(bytes, p + i, 0), svld1_vnum_u8(bytes, q + i, 0)));
+        svst1_vnum_u8(bytes, out + i, 1, svsel_u8(m1, svld1_vnum_u8(bytes, p + i, 1), svld1_vnum_u8(bytes, q + i, 1)));
+    }
+    for (; i < n; i += b) {
+#define F(u) svcmpgt_n_f32(svwhilelt_b32_u64(i + u * w, n), svld1_f32(svwhilelt_b32_u64(i + u * w, n), x + i + u * w), t)
+        svbool_t m = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
+#undef F
+        svbool_t pb = svwhilelt_b8_u64(i, n);
+        svst1_u8(pb, out + i, svsel_u8(m, svld1_u8(pb, p + i), svld1_u8(pb, q + i)));
+    }
+}
+
+static void tail_load_f32_vls(float a, const float *x, float *y, size_t rows) {
+    svbool_t all = svptrue_b32(), pt = svwhilelt_b32_u64(12, SB_ROW);
+    for (size_t r = 0; r < rows; r++, x += SB_ROW, y += SB_STRIDE) {
+        svst1_vnum_f32(all, y, 0, svmul_n_f32_x(all, svld1_vnum_f32(all, x, 0), a));
+        svst1_vnum_f32(all, y, 1, svmul_n_f32_x(all, svld1_vnum_f32(all, x, 1), a));
+        svst1_vnum_f32(all, y, 2, svmul_n_f32_x(all, svld1_vnum_f32(all, x, 2), a));
+        svst1_vnum_f32(pt, y, 3, svmul_n_f32_x(pt, svld1_vnum_f32(pt, x, 3), a));
+    }
+}
+
+static void abs_diff_u8_x8(const uint8_t *a, const uint8_t *b, uint8_t *out, size_t n) {
+    svbool_t all = svptrue_b8();
+    size_t w = svcntb(), i = 0;
+    for (; i + 8 * w <= n; i += 8 * w) {
+#define F(u) svst1_vnum_u8(all, out + i, u, svabd_u8_x(all, svld1_vnum_u8(all, a + i, u), svld1_vnum_u8(all, b + i, u)));
+        SB_ACC8(F)
+#undef F
+    }
+    for (; i < n; i += w) {
+        svbool_t pg = svwhilelt_b8_u64(i, n);
+        svst1_u8(pg, out + i, svabd_u8_x(pg, svld1_u8(pg, a + i), svld1_u8(pg, b + i)));
+    }
+}
+
+// Neon in an SVE function: the compares that the sve table makes write predicates, which N2 issues on
+// one vector pipe (an integer one also on a multicycle pipe), are Neon compares here, which issue on
+// both; the tail is one predicated SVE pass instead of a scalar loop.
+static size_t count_eq_u8_neon(const uint8_t *x, size_t n, uint8_t v) {
+    uint8x16_t vv = vdupq_n_u8(v);
+    size_t i = 0, c = 0;
+    while (i + 64 <= n) {
+        uint8x16_t acc[4]; // a count per byte lane, summed before it can wrap
+        for (int u = 0; u < 4; u++) acc[u] = vdupq_n_u8(0);
+        for (int b = 0; b < 255 && i + 64 <= n; b++, i += 64)
+            for (int u = 0; u < 4; u++) acc[u] = vsubq_u8(acc[u], vceqq_u8(vld1q_u8(x + i + 16 * u), vv));
+        for (int u = 0; u < 4; u++) c += vaddlvq_u8(acc[u]);
+    }
+    for (; i < n; i += svcntb()) {
+        svbool_t pg = svwhilelt_b8_u64(i, n);
+        c += svcntp_b8(pg, svcmpeq_n_u8(pg, svld1_u8(pg, x + i), v));
+    }
+    return c;
+}
+
+static void mix_width_neon(const float *x, float t, const uint8_t *p, const uint8_t *q, uint8_t *out, size_t n) {
+    float32x4_t vt = vdupq_n_f32(t);
+    size_t w = svcntw(), i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint32x4_t c[4];
+        for (int u = 0; u < 4; u++) c[u] = vcgtq_f32(vld1q_f32(x + i + 4 * u), vt);
+        uint16x8_t c01 = vuzp1q_u16(vreinterpretq_u16_u32(c[0]), vreinterpretq_u16_u32(c[1]));
+        uint16x8_t c23 = vuzp1q_u16(vreinterpretq_u16_u32(c[2]), vreinterpretq_u16_u32(c[3]));
+        uint8x16_t m = vuzp1q_u8(vreinterpretq_u8_u16(c01), vreinterpretq_u8_u16(c23));
+        vst1q_u8(out + i, vbslq_u8(m, vld1q_u8(p + i), vld1q_u8(q + i)));
+    }
+    for (; i < n; i += svcntb()) {
+#define F(u) svcmpgt_n_f32(svwhilelt_b32_u64(i + u * w, n), svld1_f32(svwhilelt_b32_u64(i + u * w, n), x + i + u * w), t)
+        svbool_t m = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
+#undef F
+        svbool_t pb = svwhilelt_b8_u64(i, n);
+        svst1_u8(pb, out + i, svsel_u8(m, svld1_u8(pb, p + i), svld1_u8(pb, q + i)));
+    }
+}
+
 static uint64_t words(void) { return svcntw(); }
 
 #ifdef __clang__
@@ -223,10 +335,24 @@ static const sb_kernels table = {
     min_max_f32,    filter_gt_f32, gather_sum_f32,  tail_load_f32, mix_width,   abs_diff_u8,
 };
 
-const void *sb_sve(void) {
-    // HWCAP_SVE, bit 22 of the kernel's arch/arm64/include/uapi/asm/hwcap.h.
-    return (getauxval(AT_HWCAP) & (1ul << 22)) != 0 && words() == 4 ? &table : NULL;
-}
+static const sb_kernels tuned = {
+    "sve-tuned",    saxpy_f32,     dot_f32_ordered, dot_f32_tree,      count_eq_u8_x8, sum_i32,
+    min_max_f32,    filter_gt_f32, gather_sum_f32,  tail_load_f32_vls, mix_width_x2,   abs_diff_u8_x8,
+};
+
+static const sb_kernels neon = {
+    "sve-neon",     saxpy_f32,     dot_f32_ordered, dot_f32_tree,  count_eq_u8_neon, sum_i32,
+    min_max_f32,    filter_gt_f32, gather_sum_f32,  tail_load_f32, mix_width_neon,   abs_diff_u8,
+};
+
+// HWCAP_SVE, bit 22 of the kernel's arch/arm64/include/uapi/asm/hwcap.h.
+static int usable(void) { return (getauxval(AT_HWCAP) & (1ul << 22)) != 0 && words() == 4; }
+
+const void *sb_sve(void) { return usable() ? &table : NULL; }
+const void *sb_sve_tuned(void) { return usable() ? &tuned : NULL; }
+const void *sb_sve_neon(void) { return usable() ? &neon : NULL; }
 #else
 const void *sb_sve(void) { return NULL; }
+const void *sb_sve_tuned(void) { return NULL; }
+const void *sb_sve_neon(void) { return NULL; }
 #endif

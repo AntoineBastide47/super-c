@@ -33,12 +33,23 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           aarch64-linux-gnu-gcc --version | head -n 1
           ./super-c bench --no-run --filter=simd_baseline --target=linux --arch=aarch64 --cc=aarch64-linux-gnu-gcc
-          file build/bench-bin
+          mv build/bench-bin bench-gcc
+          file bench-gcc
+          # The same bench built by Clang, against the cross toolchain's sysroot; optional.
+          clang --version | head -n 1
+          ld=""
+          if command -v ld.lld >/dev/null 2>&1; then ld=" -fuse-ld=lld"; fi
+          if ./super-c bench --no-run --filter=simd_baseline --target=linux --arch=aarch64 --cc="clang --target=aarch64-linux-gnu$ld"; then
+            mv build/bench-bin bench-clang
+            file bench-clang
+          else
+            echo "the Clang build failed"
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
           name: bench-bin
-          path: build/bench-bin
+          path: bench-*
           if-no-files-found: error
 
   run:
@@ -61,16 +72,19 @@ jobs:
           printf '#include <arm_sve.h>\n#include <stdio.h>\nint main(void) { printf("sve vector bits: %%d\\n", (int)svcntb() * 8); return 0; }\n' >vl.c
           gcc -O2 -march=armv8.2-a+sve vl.c -o vl && ./vl
 
-      - name: Run the kernels five times
+      - name: Run the kernels five times per compiler
         run: |
           set -u
-          chmod +x bench-bin
-          for r in 1 2 3 4 5; do
-            rc=0
-            ./bench-bin >out$r.txt 2>&1 || rc=$?
-            echo "run $r: exit $rc"
-            grep -E '^simd' out$r.txt || true
-            if [ "$rc" != 0 ]; then tail -n 40 out$r.txt; exit 1; fi
+          for cc in gcc clang; do
+            [ -f bench-$cc ] || { echo "no bench-$cc"; continue; }
+            chmod +x bench-$cc
+            for r in 1 2 3 4 5; do
+              rc=0
+              ./bench-$cc >out-$cc-$r.txt 2>&1 || rc=$?
+              echo "$cc run $r: exit $rc"
+              grep -E '^simd' out-$cc-$r.txt || true
+              if [ "$rc" != 0 ]; then tail -n 40 out-$cc-$r.txt; exit 1; fi
+            done
           done
 
       - uses: actions/upload-artifact@v7
