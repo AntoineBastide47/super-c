@@ -254,11 +254,11 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
 // is not the vector backend file, whose entries render apart (`cemit_simd_entries`).
 // The module whose files hold module `m`'s definitions: the core module for the backend file, which
 // emits no unit of its own.
-fn emit_owner(p: &loader::Package, m: ModuleId) ModuleId {
+const fn emit_owner(p: &loader::Package, m: ModuleId) ModuleId {
     return pick(p.modules[m as usize].backend, p.core_module, m);
 }
 
-fn module_emits(p: &loader::Package, live: *const bool, m: usize) bool {
+const fn module_emits(p: &loader::Package, live: *const bool, m: usize) bool {
     return p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !p.modules[m].backend;
 }
 

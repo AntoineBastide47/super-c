@@ -49,11 +49,11 @@ fn q(x: f64) Q {
     return Q::of(x);
 }
 
-fn wz(_r: &Ref<Q>, z: Q) Q {
+const fn wz(_r: &Ref<Q>, z: Q) Q {
     return z;
 }
 
-fn wz2(_r: &Ref<Q>, z: Q) Q {
+const fn wz2(_r: &Ref<Q>, z: Q) Q {
     return z * z;
 }
 
@@ -138,7 +138,7 @@ fn g_logk(_r: &Ref<Q>, z: Q) Q {
     );
 }
 
-fn wz3p(_r: &Ref<Q>, z: Q) Q {
+const fn wz3p(_r: &Ref<Q>, z: Q) Q {
     return z * z * z;
 }
 
@@ -777,7 +777,7 @@ fn above(x: Z, bits: i32) f64 {
 }
 
 // The neighbor of `v` in the lane type, up or down.
-fn step(v: f64, bits: i32, up: bool) f64 {
+const fn step(v: f64, bits: i32, up: bool) f64 {
     if bits == 24 {
         let b = fl::f32_bits(v as f32);
         let n = if v > 0.0 == up {
@@ -1186,7 +1186,7 @@ fn erfc_pieces(r: &Ref<Q>, bits: i32) usize {
 }
 
 // Piece i: [lo, hi) = 2^(i/8 - 1) [1 + (i%8)/8, 1 + (i%8 + 1)/8).
-fn piece(i: usize) (f64, f64) {
+const fn piece(i: usize) (f64, f64) {
     let e = fl::f64_from_bits((1022 + i / 8) as u64 << 52);
     return e * (1.0 + (i % 8) as f64 * 0.125), e * (1.0 + (i % 8 + 1) as f64 * 0.125);
 }

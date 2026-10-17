@@ -95,7 +95,7 @@ const POWI_N: [i32; 5] = [0, -1, 3, 2147483647, -2147483648];
 // The special-value cases of class module `m` ("mp", "mb", "mf") in one lane type: each function at
 // each special argument as `m::f(splat(x))[lane]`.
 // Whether class module `m` lacks function `f`: erf is precise only, erfc precise and balanced.
-fn absent(m: str, f: str) bool {
+const fn absent(m: str, f: str) bool {
     return m == "mf" && f.starts_with("erf") || m == "mb" && f == "erf";
 }
 

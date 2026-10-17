@@ -327,7 +327,7 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     }
 
     // Bit `i` (weight 2^-i, i >= 1) of 2/pi and the 31 bits after it, as one word.
-    fn bits32(self: &Ref<R>, i: i64) u32 {
+    const fn bits32(self: &Ref<R>, i: i64) u32 {
         let w = (i - 1) / 32;
         let o = (i - 1) % 32;
         let hi = (unsafe self.two_pi_words[w as usize]) as u64;
@@ -340,7 +340,7 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     }
 
     // Bit `i` (weight 2^i) of the 12-limb integer `p`; 0 outside it.
-    fn bits_at(p: &[u64; 12], i: i64) u64 {
+    const fn bits_at(p: &[u64; 12], i: i64) u64 {
         if i < 0 || i >= 384 {
             return 0;
         }

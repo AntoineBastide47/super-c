@@ -4381,7 +4381,7 @@ extend Lowerer {
     // The verified intrinsic kind of a call of `callee` with the `n` arguments at `start`: the callee
     // is the extern routine `ir::ci_of_name` names, the arity matches, and the first argument is a
     // pointer (a fence takes none). CI_NONE otherwise.
-    fn call_intr(self: &Self, callee: DefId, start: u32, n: u32) u8 {
+    const fn call_intr(self: &Self, callee: DefId, start: u32, n: u32) u8 {
         if callee.node == NODE_NONE {
             return ir::CI_NONE;
         }
@@ -6695,7 +6695,7 @@ extend Lowerer {
     }
 
     /// The cast kind of `src as dst`: a vector and its array, a mask and its bits, else numeric.
-    fn cast_kind(self: &Self, src: TypeId, dst: TypeId) u8 {
+    const fn cast_kind(self: &Self, src: TypeId, dst: TypeId) u8 {
         let sk = pick(src == TYPE_NONE, TypeKind::TYPE_ERROR, self.f.ty(src).kind);
         let dk = pick(dst == TYPE_NONE, TypeKind::TYPE_ERROR, self.f.ty(dst).kind);
         if sk == TypeKind::TYPE_SIMD || dk == TypeKind::TYPE_SIMD {

@@ -59,7 +59,7 @@ fn layout_source() String {
 }
 
 // The zero literal of a lane type: `0.0` for a float lane.
-fn zero_lit(float: bool) str<'static> {
+const fn zero_lit(float: bool) str<'static> {
     if float {
         return "0.0";
     }

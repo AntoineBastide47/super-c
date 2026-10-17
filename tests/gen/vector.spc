@@ -575,7 +575,7 @@ pub const XOPS: [XOp; 49] = [
 pub const OPS_N: u64 = 127;
 
 // The whole-function operation `op` (78 and up).
-fn xop_of(op: u8) XOp {
+const fn xop_of(op: u8) XOp {
     let x: []XOp = XOPS;
     return x[(op - 78) as usize];
 }
@@ -610,13 +610,13 @@ pub fn vector_model(cases_max: u64) VectorModel {
     return VectorModel { cases: Vector::<VCase>::new(), cases_max: cases_max };
 }
 
-fn lane_name(t: u8) str<'static> {
+const fn lane_name(t: u8) str<'static> {
     let names: []str<'static> = LANE_NAMES;
     return names[t as usize];
 }
 
 // The width index of lane type `t`: 0 for 8 bits to 3 for 64.
-fn wi(t: u8) u8 {
+const fn wi(t: u8) u8 {
     if t >= 8 {
         return t - 6;
     }
@@ -624,7 +624,7 @@ fn wi(t: u8) u8 {
 }
 
 /// The bytes of lane type `t`.
-pub fn lane_bytes(t: u8) u64 {
+pub const fn lane_bytes(t: u8) u64 {
     return 1u64 << wi(t) as u64;
 }
 
@@ -637,12 +637,12 @@ const fn is_signed(t: u8) bool {
 }
 
 // The unsigned integer type of `t`'s width: a float lane's storage.
-fn store_name(t: u8) str<'static> {
+const fn store_name(t: u8) str<'static> {
     return lane_name(4 + wi(t));
 }
 
 // The kind of lane type `t`: 0 signed, 1 unsigned, 2 float.
-fn lane_kind(t: u8) u8 {
+const fn lane_kind(t: u8) u8 {
     if is_float(t) {
         return 2;
     }
@@ -650,12 +650,12 @@ fn lane_kind(t: u8) u8 {
 }
 
 /// The most lanes of lane type `t`: 512 bits, at most 64 lanes.
-pub fn max_lanes(t: u8) u64 {
+pub const fn max_lanes(t: u8) u64 {
     return 64 / lane_bytes(t);
 }
 
 /// Whether lane type `t` belongs to class `cls`.
-pub fn in_class(t: u8, cls: u8) bool {
+pub const fn in_class(t: u8, cls: u8) bool {
     if cls == C_ALL {
         return true;
     }
@@ -669,7 +669,7 @@ pub fn in_class(t: u8, cls: u8) bool {
 }
 
 /// Whether target `u` (with `m` lanes) suits conversion kind `k` from `n` lanes of `t`.
-pub fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
+pub const fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
     if k == U_BITCAST {
         return m >= 2 && m <= 64 && lane_bytes(u) * m == lane_bytes(t) * n;
     }
@@ -692,13 +692,13 @@ pub fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
 }
 
 /// Whether operation `op` converts to a target type.
-pub fn converts(op: u8) bool {
+pub const fn converts(op: u8) bool {
     let ops: []VOp = VOPS;
     return op as u64 < 72 && ops[op as usize].tgt != U_NONE || op >= 78 && xop_of(op).tgt != U_NONE;
 }
 
 /// Whether operation `op` applies to `n` lanes of `t` (a rearrangement's result must be a vector).
-pub fn op_ok(op: u8, t: u8, n: u64) bool {
+pub const fn op_ok(op: u8, t: u8, n: u64) bool {
     if op as u64 < 72 {
         let ops: []VOp = VOPS;
         return in_class(t, ops[op as usize].cls);
@@ -1491,7 +1491,7 @@ pub fn case_call(cs: &VCase, fname: str, k: usize, wrap: str) String {
 }
 
 /// The name of case `cs`'s operation.
-pub fn op_name(cs: &VCase) str<'static> {
+pub const fn op_name(cs: &VCase) str<'static> {
     if cs.op >= 78 {
         return xop_of(cs.op).name;
     }

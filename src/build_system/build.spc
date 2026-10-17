@@ -2102,7 +2102,7 @@ pub struct BuildCtx<'a> {
 }
 
 /// The vector width the build's planner prefers on AVX-512: `--simd-width`, else `simd-width`, else 256.
-pub fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
+pub const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
     return pick(cx.simd_width != 0, cx.simd_width, pick(m.simd_width != 0, m.simd_width, 256));
 }
 
@@ -2511,7 +2511,7 @@ pub fn features_accepted(
 
 // The unaligned-vector-move probe's bit where it applies (Windows x86_64), else 0: elsewhere a build
 // needs no probe record for it.
-fn uvm_need(target: i32, arch: i32) u64 {
+const fn uvm_need(target: i32, arch: i32) u64 {
     return pick(target == 0 && arch == 0, 1u64 << pr::UVM as u64, 0);
 }
 

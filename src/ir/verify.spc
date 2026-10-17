@@ -110,13 +110,13 @@ const fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
 }
 
 // The width in bits of a vector type's lanes, 0 when symbolic.
-fn lane_bits(da: &Ast, y: &Ty) u64 {
+const fn lane_bits(da: &Ast, y: &Ty) u64 {
     let e = *da.type_at(y.as_data.arr.elem);
     return pick(e.kind == TypeKind::TYPE_BUILTIN, bt_lane_bits(e.as_data.builtin), 0u32);
 }
 
 // The lane class of a vector type's lanes: 1 signed integer, 2 unsigned integer, 3 float, 0 symbolic.
-fn lane_class(da: &Ast, y: &Ty) u8 {
+const fn lane_class(da: &Ast, y: &Ty) u8 {
     let e = *da.type_at(y.as_data.arr.elem);
     if e.kind != TypeKind::TYPE_BUILTIN {
         return 0;
@@ -245,7 +245,7 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
 }
 
 // Whether `t` is the mask of vector type `v`'s lanes.
-fn mask_of(da: &Ast, t: TypeId, v: &Ty) bool {
+const fn mask_of(da: &Ast, t: TypeId, v: &Ty) bool {
     return da.type_at(t).kind == TypeKind::TYPE_MASK && da.type_at(t).as_data.arr.len == v.as_data.arr.len;
 }
 

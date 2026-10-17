@@ -262,12 +262,12 @@ fn level() str<'static> {
 static mut D: detect::Dispatch = detect::Dispatch::new();
 
 @c.noinline
-fn plus1(x: u64) u64 {
+const fn plus1(x: u64) u64 {
     return x + 1;
 }
 
 @c.noinline
-fn plus2(x: u64) u64 {
+const fn plus2(x: u64) u64 {
     return x + 2;
 }
 
@@ -360,12 +360,12 @@ fn push_table(v: &mut Vector<&'static Kernels>, t: *const void) {
     }
 }
 
-fn names() []'static str<'static> {
+const fn names() []'static str<'static> {
     return NAMES;
 }
 
 // The next value of a xorshift64 sequence; `r` is never 0.
-fn next(r: &mut u64) u64 {
+const fn next(r: &mut u64) u64 {
     *r ^= *r << 13;
     *r ^= *r >> 7;
     *r ^= *r << 17;
@@ -373,12 +373,12 @@ fn next(r: &mut u64) u64 {
 }
 
 // A number in [-1, 1) on a 2^-23 grid.
-fn unit(r: &mut u64) f32 {
+const fn unit(r: &mut u64) f32 {
     return (next(r) >> 40) as f32 / 8388608.0 - 1.0;
 }
 
 // The bits of `v`, every NaN as one value: the NaN payload of an arithmetic result is not specified.
-fn bits(v: f32) u64 {
+const fn bits(v: f32) u64 {
     if v.is_nan() {
         return 0x7fc00000;
     }
@@ -386,17 +386,17 @@ fn bits(v: f32) u64 {
 }
 
 // One FNV-1a step over a 64-bit value.
-fn mix(h: u64, v: u64) u64 {
+const fn mix(h: u64, v: u64) u64 {
     return (h ^ v).wrapping_mul(0x100000001b3);
 }
 
 // A view of `n` elements at `p`, which stay alive and unwritten while the view is used.
-fn view<'a, T>(p: *const T, n: usize) []'a T {
+const fn view<'a, T>(p: *const T, n: usize) []'a T {
     return unsafe Slice::<T> { ptr: p, len: n };
 }
 
 // A view of `n` elements at `p`, which nothing else reads or writes while the view is used.
-fn view_mut<'a, T>(p: *mut T, n: usize) []'a mut T {
+const fn view_mut<'a, T>(p: *mut T, n: usize) []'a mut T {
     return unsafe SliceMut::<T> { ptr: p, len: n };
 }
 
@@ -891,7 +891,7 @@ extend Input {
     }
 
     // Elements one call of kernel `k` reads from its first input.
-    fn elements(self: &Input, k: usize) usize {
+    const fn elements(self: &Input, k: usize) usize {
         return switch k {
             3 | 10 => self.bytes_p.len(),
             8 => self.floats / ROW * ROW,

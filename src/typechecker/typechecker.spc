@@ -9513,7 +9513,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Whether function `md`'s first parameter is the receiver (`self`).
-    fn tc_takes_self(self: &Self, md: DefId) bool {
+    const fn tc_takes_self(self: &Self, md: DefId) bool {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
         if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.params.len == 0 {
@@ -9792,7 +9792,7 @@ extend<'a> TypeChecker<'a> {
 
     // Whether types `p` and `a` (neither a type parameter) have one head: one kind, and for instances
     // and `dyn` types one declaration; their arguments may still differ.
-    fn tc_heads_meet(self: &Self, p: TypeId, a: TypeId) bool {
+    const fn tc_heads_meet(self: &Self, p: TypeId, a: TypeId) bool {
         let py = *self.type_at(p);
         let ay = *self.type_at(a);
         if py.kind != ay.kind {
@@ -22750,7 +22750,7 @@ extend TypeChecker {
     }
 
     // The value branch `br` yields: the branch itself or its block's tail, or NODE_NONE.
-    fn tc_branch_tail(self: &Self, br: NodeId) NodeId {
+    const fn tc_branch_tail(self: &Self, br: NodeId) NodeId {
         let a = self.cur_ast();
         if unsafe (*a).at_const(br).kind != NodeKind::NODE_BLOCK {
             return br;
@@ -24930,7 +24930,7 @@ extend TypeChecker {
 
     // One type of a `@simd_impl` signature: a vector (`SG_VEC`, lanes `n` of `bt`), a mask (`n`
     // lanes), a scalar `bt`, a raw pointer to `bt` (`mutp`: `*mut`), or no type (`SG_UNIT`).
-    fn tc_sig_ty(self: &mut Self, t: TypeId) SigTy {
+    const fn tc_sig_ty(self: &mut Self, t: TypeId) SigTy {
         let y = *self.type_at(t);
         let mut g = SigTy { k: SG_OTHER, n: 0, bt: BuiltinType::BT_COUNT, mutp: false };
         if t == TYPE_NONE {

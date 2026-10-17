@@ -68,7 +68,7 @@ const K_TRIG: u8 = 1;
 
 // The f64 C library has no exp10 in C99: 10^x through pow is within an f64 ULP or two of it, far
 // below an f32 ULP.
-fn lib_exp10(x: f64) f64 {
+const fn lib_exp10(x: f64) f64 {
     return math::pow(10.0, x);
 }
 
@@ -177,7 +177,7 @@ struct F2 {
 
 // Whether the fast class's range holds pair (x, y): hypot's squares neither overflow nor flush
 // (the max of |x| and |y| within hyp_lo .. hyp_hi, `lane.spc`), every pair for the others.
-fn fast_pair(kind: u8, x: f64, y: f64, f64_lanes: bool) bool {
+const fn fast_pair(kind: u8, x: f64, y: f64, f64_lanes: bool) bool {
     if kind != S_HYPOT {
         return true;
     }
@@ -257,7 +257,7 @@ fn f2s() Vector<F2> {
 }
 
 // A binade-uniform positive value with exponent in [lo, hi] (the lane type's range applies later).
-fn binade(g: &mut Rng, lo: i32, hi: i32) f64 {
+const fn binade(g: &mut Rng, lo: i32, hi: i32) f64 {
     let e = lo + (g.next() % (hi - lo + 1) as u64) as i32;
     let m = 1.0 + g.unit();
     if e < -1022 {
@@ -938,7 +938,7 @@ fn f1s() Vector<F1> {
 }
 
 // The class bounds: ULP for precise and balanced; for fast the relative bound per lane type.
-fn bound(class: usize, f64_lanes: bool) f64 {
+const fn bound(class: usize, f64_lanes: bool) f64 {
     if class == 0 {
         return 1.0;
     }
@@ -1112,7 +1112,7 @@ struct Stat {
 }
 
 extend Stat {
-    fn new(chunk: usize) Stat {
+    const fn new(chunk: usize) Stat {
         return Stat {
             chunk: chunk,
             max: [0.0; CLASSES],
@@ -1123,7 +1123,7 @@ extend Stat {
         };
     }
 
-    fn add(self: &mut Stat, class: usize, e: f64, x: f64, y: f64, b: f64) {
+    const fn add(self: &mut Stat, class: usize, e: f64, x: f64, y: f64, b: f64) {
         if e > unsafe self.max[class] || unsafe self.max[class] == 0.0 && e > 0.0 {
             unsafe self.max[class] = e;
             unsafe self.arg[class] = x;
@@ -1216,7 +1216,7 @@ fn run32(f: &F1, sample: u64, rq: &Ref<Q>) Stat {
 
 // Whether error `e` is within 0.01 ULP (1% of a relative bound) of bound `b`: the f128 reference
 // decides it.
-fn near_bound(c: usize, e: f64, b: f64) bool {
+const fn near_bound(c: usize, e: f64, b: f64) bool {
     return (e - b).abs() <= 0.01 * if c == 2 {
         b;
     } else {
@@ -1230,7 +1230,7 @@ struct Rng {
 }
 
 extend Rng {
-    fn next(self: &mut Rng) u64 {
+    const fn next(self: &mut Rng) u64 {
         self.s = self.s.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = self.s;
         z = (z ^ z >> 30).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -1239,7 +1239,7 @@ extend Rng {
     }
 
     // A uniform double in [0, 1).
-    fn unit(self: &mut Rng) f64 {
+    const fn unit(self: &mut Rng) f64 {
         return (self.next() >> 11) as f64 * 0x1p-53;
     }
 }
@@ -1261,7 +1261,7 @@ fn binade_of(g: &mut Rng, hi: f64, pos: bool) f64 {
 
 // A neighbor of `p` at most `d` ULP away in magnitude (finite, the sign kept), negated half the time
 // when `neg`.
-fn neighbor(g: &mut Rng, p: f64, d: i64, neg: bool) f64 {
+const fn neighbor(g: &mut Rng, p: f64, d: i64, neg: bool) f64 {
     let b = (fl::f64_bits(p.abs()) as i64 + (g.next() % (2 * d as u64 + 1)) as i64 - d).max(0).min(0x7FEFFFFFFFFFFFFF);
     let v = fl::f64_from_bits(b as u64);
     return if neg && g.next() % 2 == 0 {
@@ -1536,13 +1536,13 @@ fn specials64() Vector<f64> {
 }
 
 // A zero, an infinity or NaN: an argument whose result Annex F (and the class contract) fixes.
-fn special_arg(x: f64) bool {
+const fn special_arg(x: f64) bool {
     return x == 0.0 || !x.is_finite();
 }
 
 // Whether class `c`'s result `y` for a special case is right against the C library's `r` (rounded to
 // the lane type): exactly (bits, any NaN as NaN), or for a fast zero within the bound with its sign.
-fn special_ok(c: usize, y: f64, r: f64, f64_lanes: bool) bool {
+const fn special_ok(c: usize, y: f64, r: f64, f64_lanes: bool) bool {
     if y.is_nan() || r.is_nan() {
         return y.is_nan() && r.is_nan();
     }

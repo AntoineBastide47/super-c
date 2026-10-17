@@ -1681,7 +1681,7 @@ extend Package {
 
     /// Whether type `t` of `a` is a function value's type that `FnPtr` admits: a function pointer, or a
     /// named function's type; never a closure's.
-    pub fn fn_value_type(self: &Self, a: &Ast, t: TypeId) bool {
+    pub const fn fn_value_type(self: &Self, a: &Ast, t: TypeId) bool {
         let y = a.type_at(t);
         return y.kind == TypeKind::TYPE_FUNCTION && (y.fn_sig() || unsafe (*self.module_ast_const(y.module)).at_const(
             y.as_data.decl,

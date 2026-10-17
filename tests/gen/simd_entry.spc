@@ -539,7 +539,7 @@ fn wide() bool {
 
 /// Whether the differential builds of features `run` must call entry `e`: the features hold its own,
 /// and an AVX-512 entry wider than the preferred width (512 bits when `wide`, else 256) splits.
-fn required(e: &Entry, run: cf::CpuFeatureSet, wide: bool) bool {
+const fn required(e: &Entry, run: cf::CpuFeatureSet, wide: bool) bool {
     if !cf::contains(run, e.fs) {
         return false;
     }

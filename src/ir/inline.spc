@@ -586,7 +586,7 @@ extend InlineCtx {
 }
 
 // Is `d` a generic parameter (an item local of a const-generic parameter names it)?
-fn is_param(p: &loader::Package, d: DefId) bool {
+const fn is_param(p: &loader::Package, d: DefId) bool {
     return d.node != NODE_NONE && (unsafe &*p.module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
 }
 
@@ -806,7 +806,7 @@ fn param_switch(p: &loader::Package, k: &ir::CoreBody) bool {
 }
 
 // Whether operand `o` of `b` reads a const-generic parameter.
-fn b_param_read(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+const fn b_param_read(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
     let op = *b.operands.at(o as usize);
     if op.kind == ir::OP_CONST {
         return false;
@@ -874,7 +874,7 @@ fn is_plain_item(p: &loader::Package, d: DefId) bool {
 }
 
 // Is operand `o` of `b` a constant, or a read of a const-generic parameter (a constant once spliced)?
-fn const_or_param(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+const fn const_or_param(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
     let op = *b.operands.at(o as usize);
     if op.kind == ir::OP_CONST {
         return true;

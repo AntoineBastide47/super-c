@@ -179,7 +179,7 @@ pub struct Bce {
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
 // (`switch t [1 -> x] otherwise y` and `switch t [0 -> y] otherwise x` both branch to x on true).
-fn bool_target(b: &ir::CoreBody, t: &ir::Terminator, v: bool) u32 {
+const fn bool_target(b: &ir::CoreBody, t: &ir::Terminator, v: bool) u32 {
     if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE {
         return ir::IR_NONE;
     }
@@ -740,7 +740,7 @@ extend Bce {
 
     /// The stride and phase of the value (local `l`, version `v`): the solved facts when the version
     /// is current, or an alignment binding. (1, 0) when nothing is known.
-    fn stride_of(self: &Self, l: u32, v: u32, st: &mut u64, ph: &mut u64) {
+    const fn stride_of(self: &Self, l: u32, v: u32, st: &mut u64, ph: &mut u64) {
         *st = 1;
         *ph = 0;
         let ab = *self.alof.at(l as usize);

@@ -1045,7 +1045,7 @@ extend Interp {
     }
 
     // A vector's lanes object (`vec_tag`) as static data: an array of its lanes inside its struct.
-    fn st_vec(self: &Self, g: &mut StaticObj, op: *mut IObj) {
+    const fn st_vec(self: &Self, g: &mut StaticObj, op: *mut IObj) {
         if unsafe (*op).heap != 0 || unsafe (*op).et == TYPE_NONE {
             return;
         }
@@ -4814,7 +4814,7 @@ extend Interp {
     }
 
     // Whether function `fnode` of module `fm` declares a `self` first parameter.
-    fn takes_self(self: &Self, fm: ModuleId, fnode: NodeId) bool {
+    const fn takes_self(self: &Self, fm: ModuleId, fnode: NodeId) bool {
         let fa = unsafe &*self.p().module_ast_const(fm);
         let ps = fa.at_const(fnode).as_data.function.params;
         if ps.len == 0 {
@@ -5697,7 +5697,7 @@ extend Interp {
     }
 
     // Lane `i` of vector value `v`, typed `(em, et)`; none when `v` holds no such lane.
-    fn vlane(self: &Self, v: IVal, i: u64, em: ModuleId, et: TypeId) IVal {
+    const fn vlane(self: &Self, v: IVal, i: u64, em: ModuleId, et: TypeId) IVal {
         let o = self.obj_ptr(v.i as u32);
         if v.kind != IV_OBJ || o == null || i >= (unsafe (*o).slots.len()) as u64 {
             return none();
@@ -7114,7 +7114,7 @@ extend Interp {
 
     // `u8` or `char`: the two unsigned byte types (C's `char` is unsigned here), which view each
     // other's storage with the same values.
-    fn is_ubyte(self: &Self, m: ModuleId, t: TypeId) bool {
+    const fn is_ubyte(self: &Self, m: ModuleId, t: TypeId) bool {
         let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
         return y.kind == TypeKind::TYPE_BUILTIN && (y.as_data.builtin == BuiltinType::BT_U8 || y.as_data.builtin == BuiltinType::BT_CHAR);
     }
@@ -7343,7 +7343,7 @@ extend Interp {
     }
 
     // Whether interface `iface` is the prelude's interface named `name`.
-    fn rt_iface_is(self: &Self, iface: DefId, name: str) bool {
+    const fn rt_iface_is(self: &Self, iface: DefId, name: str) bool {
         let ia = unsafe &*self.p().module_ast_const(iface.module);
         let n = ia.at_const(iface.node);
         return n.kind == NodeKind::NODE_INTERFACE && self.p().modules.at(iface.module as usize).prelude && self.span_is(
@@ -7533,7 +7533,7 @@ extend Interp {
     }
 
     // The declaration behind concrete struct, enum or instance type `(m, t)`.
-    fn rt_decl_of(self: &Self, m: ModuleId, t: TypeId, dm: &mut ModuleId, dn: &mut NodeId) bool {
+    const fn rt_decl_of(self: &Self, m: ModuleId, t: TypeId, dm: &mut ModuleId, dn: &mut NodeId) bool {
         let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *dm = y.module;

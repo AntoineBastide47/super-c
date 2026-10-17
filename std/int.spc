@@ -137,19 +137,19 @@ fn div2by1(u1: u64, u0: u64, v: u64, r: *mut u64) u64 {
     return q1 << 32 | q0;
 }
 
-fn use_i128() bool {
+const fn use_i128() bool {
     return unsafe sc_has_i128() != 0;
 }
 
 // The 8 bytes of `x` in reverse order: halves swapped, then quarters, then bytes.
-fn bswap64(x: u64) u64 {
+const fn bswap64(x: u64) u64 {
     let mut v = x << 32 | x >> 32;
     v = (v & 0x0000FFFF0000FFFF) << 16 | v >> 16 & 0x0000FFFF0000FFFF;
     return (v & 0x00FF00FF00FF00FF) << 8 | v >> 8 & 0x00FF00FF00FF00FF;
 }
 
 // The 64 bits of `x` in reverse order: bytes reversed, then nibbles, pairs and bits within each.
-fn rev64(x: u64) u64 {
+const fn rev64(x: u64) u64 {
     let mut v = bswap64(x);
     v = (v & 0x0F0F0F0F0F0F0F0F) << 4 | v >> 4 & 0x0F0F0F0F0F0F0F0F;
     v = (v & 0x3333333333333333) << 2 | v >> 2 & 0x3333333333333333;
@@ -190,7 +190,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return (1u64 << (BITS % 64) as u64) - 1;
     }
 
-    fn get(self: &IntBits<BITS>, i: usize) u64 {
+    const fn get(self: &IntBits<BITS>, i: usize) u64 {
         if i >= IntBits::<BITS>::nlimbs() {
             // Reading past the top limb yields the zero extension, which is what callers mean.
             return 0;
@@ -198,7 +198,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return unsafe self.limbs[i];
     }
 
-    fn set(self: &mut IntBits<BITS>, i: usize, v: u64) {
+    const fn set(self: &mut IntBits<BITS>, i: usize, v: u64) {
         let n = IntBits::<BITS>::nlimbs();
         if i + 1 == n {
             unsafe self.limbs[i] = v & IntBits::<BITS>::top_mask();
@@ -207,12 +207,12 @@ extend<const BITS: usize> IntBits<BITS> {
         }
     }
 
-    fn zero() IntBits<BITS> {
+    const fn zero() IntBits<BITS> {
         static_assert(BITS >= 1, "an integer width must be positive");
         return IntBits::<BITS> {};
     }
 
-    fn from_u64(v: u64) IntBits<BITS> {
+    const fn from_u64(v: u64) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         r.set(0, v);
         return r;
@@ -228,14 +228,14 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     // Bit `i` counted from the least significant, 0 past the top.
-    fn bit(self: &IntBits<BITS>, i: usize) u64 {
+    const fn bit(self: &IntBits<BITS>, i: usize) u64 {
         if i >= BITS {
             return 0;
         }
         return self.get(i / 64) >> (i % 64) as u64 & 1u64;
     }
 
-    fn set_bit(self: &mut IntBits<BITS>, i: usize, on: bool) {
+    const fn set_bit(self: &mut IntBits<BITS>, i: usize, on: bool) {
         if i >= BITS {
             return;
         }
@@ -885,21 +885,21 @@ extend<const BITS: usize> UInt<BITS> {
 
     // The only places `bits` is named from outside this type's own methods: a wrapper's field belongs
     // to that wrapper, so the signed view goes through these rather than reaching into the unsigned one.
-    fn from_bits(b: IntBits<BITS>) UInt<BITS> {
+    const fn from_bits(b: IntBits<BITS>) UInt<BITS> {
         return UInt::<BITS> { bits: b };
     }
 
-    fn raw(self: &UInt<BITS>) IntBits<BITS> {
+    const fn raw(self: &UInt<BITS>) IntBits<BITS> {
         return self.bits;
     }
 
     /// The value 0.
-    pub fn zero() UInt<BITS> {
+    pub const fn zero() UInt<BITS> {
         return UInt::<BITS> { bits: IntBits::<BITS>::zero() };
     }
 
     /// The value 1.
-    pub fn one() UInt<BITS> {
+    pub const fn one() UInt<BITS> {
         return UInt::<BITS> { bits: IntBits::<BITS>::from_u64(1) };
     }
 
@@ -909,27 +909,27 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// The smallest value (0 for unsigned).
-    pub fn min() UInt<BITS> {
+    pub const fn min() UInt<BITS> {
         return UInt::<BITS>::zero();
     }
 
     /// The value of `v`, truncated to BITS.
-    pub fn from_u64(v: u64) UInt<BITS> {
+    pub const fn from_u64(v: u64) UInt<BITS> {
         return UInt::<BITS> { bits: IntBits::<BITS>::from_u64(v) };
     }
 
     /// The low 64 bits, discarding the rest: the `as u64` of a wide value.
-    pub fn to_u64(self: &UInt<BITS>) u64 {
+    pub const fn to_u64(self: &UInt<BITS>) u64 {
         return self.bits.get(0);
     }
 
     /// Limb `i`, least significant first; 0 past the top.
-    pub fn limb(self: &UInt<BITS>, i: usize) u64 {
+    pub const fn limb(self: &UInt<BITS>, i: usize) u64 {
         return self.bits.get(i);
     }
 
     /// Overwrite limb `i`; bits past the width are masked off.
-    pub fn set_limb(self: &mut UInt<BITS>, i: usize, v: u64) {
+    pub const fn set_limb(self: &mut UInt<BITS>, i: usize, v: u64) {
         self.bits.set(i, v);
     }
 
@@ -939,7 +939,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// True when bit `i` (0 = least significant) is set; `i` must be below BITS.
-    pub fn bit(self: &UInt<BITS>, i: usize) bool {
+    pub const fn bit(self: &UInt<BITS>, i: usize) bool {
         return self.bits.bit(i) != 0;
     }
 
@@ -1792,23 +1792,23 @@ extend<const BITS: usize> Int<BITS> {
         return (BITS + 63) / 64;
     }
 
-    fn from_bits(b: IntBits<BITS>) Int<BITS> {
+    const fn from_bits(b: IntBits<BITS>) Int<BITS> {
         return Int::<BITS> { bits: b };
     }
 
     /// The value 0.
-    pub fn zero() Int<BITS> {
+    pub const fn zero() Int<BITS> {
         return Int::<BITS> { bits: IntBits::<BITS>::zero() };
     }
 
     /// The value 1.
-    pub fn one() Int<BITS> {
+    pub const fn one() Int<BITS> {
         return Int::<BITS> { bits: IntBits::<BITS>::from_u64(1) };
     }
 
     /// The most negative value: the sign bit alone. Its magnitude has no positive counterpart, which is
     /// what makes `MIN.abs()` and `MIN / -1` overflow.
-    pub fn min() Int<BITS> {
+    pub const fn min() Int<BITS> {
         let mut b = IntBits::<BITS>::zero();
         b.set_bit(BITS - 1, true);
         return Int::<BITS> { bits: b };
@@ -1832,7 +1832,7 @@ extend<const BITS: usize> Int<BITS> {
 
     /// The low 64 bits as a signed value, discarding the rest; a width below 64 sign-extends from its
     /// own top bit, so the value survives the trip.
-    pub fn to_i64(self: &Int<BITS>) i64 {
+    pub const fn to_i64(self: &Int<BITS>) i64 {
         if BITS < 64 {
             let sh = (64 - BITS) as u64;
             return (self.bits.get(0) << sh) as i64 >> sh as i64;
@@ -1841,12 +1841,12 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// Limb `i` (little-endian); `i` must be below `limbs()`.
-    pub fn limb(self: &Int<BITS>, i: usize) u64 {
+    pub const fn limb(self: &Int<BITS>, i: usize) u64 {
         return self.bits.get(i);
     }
 
     /// Overwrite limb `i`; bits past the width are masked off.
-    pub fn set_limb(self: &mut Int<BITS>, i: usize, v: u64) {
+    pub const fn set_limb(self: &mut Int<BITS>, i: usize, v: u64) {
         self.bits.set(i, v);
     }
 
@@ -1856,12 +1856,12 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// The sign bit: the top bit of the top limb.
-    pub fn is_negative(self: &Int<BITS>) bool {
+    pub const fn is_negative(self: &Int<BITS>) bool {
         return self.bits.bit(BITS - 1) != 0;
     }
 
     /// True when bit `i` (0 = least significant) is set; `i` must be below BITS.
-    pub fn bit(self: &Int<BITS>, i: usize) bool {
+    pub const fn bit(self: &Int<BITS>, i: usize) bool {
         return self.bits.bit(i) != 0;
     }
 
@@ -2025,12 +2025,12 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// The same bits read as unsigned: a negative value becomes its two's-complement magnitude.
-    pub fn to_unsigned(self: &Int<BITS>) UInt<BITS> {
+    pub const fn to_unsigned(self: &Int<BITS>) UInt<BITS> {
         return UInt::<BITS>::from_bits(self.bits);
     }
 
     /// Reinterpret the bits of a same-width UInt.
-    pub fn from_unsigned(v: &UInt<BITS>) Int<BITS> {
+    pub const fn from_unsigned(v: &UInt<BITS>) Int<BITS> {
         return Int::<BITS>::from_bits(v.raw());
     }
 

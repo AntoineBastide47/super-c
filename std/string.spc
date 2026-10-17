@@ -93,12 +93,12 @@ extend<A: Allocator> String<A> {
     // --- representation helpers (private) ------------------------------------------------------.
 
     // The high bit of the union's last byte: set for the heap layout, clear for the inline one.
-    fn is_large(self: &String<A>) bool {
+    const fn is_large(self: &String<A>) bool {
         return (self.repr.small.len & 0x80) != 0;
     }
 
     // A mutable pointer to the bytes, inline or heap. Re-read after any growth (it may move).
-    fn data_ptr(self: &mut String<A>) *mut u8 {
+    const fn data_ptr(self: &mut String<A>) *mut u8 {
         if self.is_large() {
             return self.repr.large.ptr;
         }
@@ -106,7 +106,7 @@ extend<A: Allocator> String<A> {
     }
 
     // Set the byte length in whichever representation is active (caller keeps a small length <= SSO_CAP).
-    fn set_len(self: &mut String<A>, n: usize) {
+    const fn set_len(self: &mut String<A>, n: usize) {
         if self.is_large() {
             self.repr.large.len = n;
         } else {
@@ -138,7 +138,7 @@ extend<A: Allocator> String<A> {
 
     /// An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
     /// tag): inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
-    pub fn new_in(alloc: A) String<A> {
+    pub const fn new_in(alloc: A) String<A> {
         return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
 
@@ -169,7 +169,7 @@ extend<A: Allocator> String<A> {
 
     /// Bytes currently stored. `s.len()` (this method) is the public accessor; the small/large split is
     /// internal. (A bare `s.len` would be a private member: a compile error outside this module.)
-    pub fn len(self: &String<A>) usize {
+    pub const fn len(self: &String<A>) usize {
         if self.is_large() {
             return self.repr.large.len;
         }
@@ -177,7 +177,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Total bytes available before the next growth: the real heap capacity, or the inline budget.
-    pub fn capacity(self: &String<A>) usize {
+    pub const fn capacity(self: &String<A>) usize {
         if self.is_large() {
             // Drop the discriminant bit.
             return self.repr.large.cap << 1 >> 1;
@@ -186,7 +186,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// True when the length is 0.
-    pub fn is_empty(self: &String<A>) bool {
+    pub const fn is_empty(self: &String<A>) bool {
         return self.len() == 0;
     }
 
@@ -225,7 +225,7 @@ extend<A: Allocator> String<A> {
 
     // `len + additional`, which must stay below LARGE_BIT: the capacity's top bit is the discriminant.
     // Panics otherwise.
-    fn checked_needed(self: &String<A>, additional: usize) usize {
+    const fn checked_needed(self: &String<A>, additional: usize) usize {
         if additional >= LARGE_BIT - self.len() {
             panic("String: capacity overflow");
         }
@@ -259,7 +259,7 @@ extend<A: Allocator> String<A> {
 
     /// Grow the length by `n` bytes written into the spare region via `spare_mut`. Caller guarantees
     /// `len() + n <= capacity()` and that those `n` bytes were initialised.
-    pub fn advance_len(self: &mut String<A>, n: usize) {
+    pub const fn advance_len(self: &mut String<A>, n: usize) {
         self.set_len(self.len() + n);
     }
 
@@ -290,12 +290,12 @@ extend<A: Allocator> String<A> {
     }
 
     /// Free the contents but keep any heap allocation for reuse.
-    pub fn clear(self: &mut String<A>) {
+    pub const fn clear(self: &mut String<A>) {
         self.set_len(0);
     }
 
     /// Shorten to at most `new_len` bytes (no-op if already shorter). Caller keeps UTF-8 boundaries.
-    pub fn truncate(self: &mut String<A>, new_len: usize) {
+    pub const fn truncate(self: &mut String<A>, new_len: usize) {
         if new_len < self.len() {
             self.set_len(new_len);
         }
@@ -550,7 +550,7 @@ extend<A: Allocator> String<A> {
     // --- remove --------------------------------------------------------------------------------.
 
     /// Remove and return the last byte, or 0 if the string is empty.
-    pub fn pop_byte(self: &mut String<A>) u8 {
+    pub const fn pop_byte(self: &mut String<A>) u8 {
         let len = self.len();
         if len == 0 {
             return 0;
@@ -588,7 +588,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Remove and return the byte at index `i`, shifting the tail left. Panics when `i >= len`.
-    pub fn remove_byte(self: &mut String<A>, i: usize) u8 {
+    pub const fn remove_byte(self: &mut String<A>, i: usize) u8 {
         let len = self.len();
         if i >= len {
             panic("String::remove_byte: index out of bounds");
@@ -603,7 +603,7 @@ extend<A: Allocator> String<A> {
     // --- access --------------------------------------------------------------------------------.
 
     /// The byte at `i`. Panics when `i >= len`.
-    pub fn byte(self: &String<A>, i: usize) u8 {
+    pub const fn byte(self: &String<A>, i: usize) u8 {
         if i >= self.len() {
             panic("String::byte: index out of bounds");
         }
@@ -611,7 +611,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Overwrite the byte at `i`. Panics when `i >= len`.
-    pub fn set_byte(self: &mut String<A>, i: usize, b: u8) {
+    pub const fn set_byte(self: &mut String<A>, i: usize, b: u8) {
         if i >= self.len() {
             panic("String::set_byte: index out of bounds");
         }
@@ -620,7 +620,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// A read-only pointer to the bytes (inline or heap). See the module-level caveat on small strings.
-    pub fn as_ptr(self: &String<A>) *const u8 {
+    pub const fn as_ptr(self: &String<A>) *const u8 {
         if self.is_large() {
             return self.repr.large.ptr;
         }
@@ -628,28 +628,28 @@ extend<A: Allocator> String<A> {
     }
 
     /// The bytes as a borrowed `str` view: valid until the next mutation and, for a small string, until a move.
-    pub fn as_str(self: &String<A>) str {
+    pub const fn as_str(self: &String<A>) str {
         return unsafe str::from_raw(self.as_ptr(), self.len());
     }
 
     /// Borrowed iterators over the bytes: delegate to the `str` view: valid until the next mutation, and
     /// only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
-    pub fn bytes(self: &String<A>) Bytes {
+    pub const fn bytes(self: &String<A>) Bytes {
         return self.as_str().bytes();
     }
 
     /// Iterator over the Unicode scalars (assumes valid UTF-8).
-    pub fn chars(self: &String<A>) Chars {
+    pub const fn chars(self: &String<A>) Chars {
         return self.as_str().chars();
     }
 
     /// Iterator over the pieces between occurrences of `sep`.
-    pub fn split<'a>(self: &'a String<A>, sep: str<'a>) Split<'a> {
+    pub const fn split<'a>(self: &'a String<A>, sep: str<'a>) Split<'a> {
         return self.as_str().split(sep);
     }
 
     /// Iterator over the lines without their terminators.
-    pub fn lines(self: &String<A>) Lines {
+    pub const fn lines(self: &String<A>) Lines {
         return self.as_str().lines();
     }
 
@@ -714,7 +714,7 @@ extend<A: Allocator> String<A> {
     // --- compare -------------------------------------------------------------------------------.
 
     /// Byte equality with another String.
-    pub fn equals(self: &String<A>, other: &String<A>) bool {
+    pub const fn equals(self: &String<A>, other: &String<A>) bool {
         let n = self.len();
         if n != other.len() {
             return false;
@@ -726,7 +726,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Byte equality with a `str`.
-    pub fn eq_str(self: &String<A>, text: str) bool {
+    pub const fn eq_str(self: &String<A>, text: str) bool {
         let n = self.len();
         if n != text.len() {
             return false;
@@ -776,7 +776,7 @@ extend<A: Allocator> String<A> {
     // --- search --------------------------------------------------------------------------------.
 
     /// True when the bytes begin with `prefix`.
-    pub fn starts_with(self: &String<A>, prefix: str) bool {
+    pub const fn starts_with(self: &String<A>, prefix: str) bool {
         if prefix.len() > self.len() {
             return false;
         }
@@ -787,7 +787,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// True when the bytes end with `suffix`.
-    pub fn ends_with(self: &String<A>, suffix: str) bool {
+    pub const fn ends_with(self: &String<A>, suffix: str) bool {
         let n = self.len();
         if suffix.len() > n {
             return false;
@@ -1470,7 +1470,7 @@ pub fn sugar_fmt_pad_c(mut s: String, piece: String, width: usize, fill: str) St
     s.pad_at(from, width, sugar_fill_byte(fill), 2u8);
     return s;
 }
-fn sugar_fill_byte(fill: str) u8 {
+const fn sugar_fill_byte(fill: str) u8 {
     if fill.len() == 0 {
         return b' ';
     }

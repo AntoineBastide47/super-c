@@ -13,12 +13,12 @@ extend Error {
     }
 
     /// Takes ownership of `message` (no byte copy).
-    pub fn from_string(code: i32, message: String) Error {
+    pub const fn from_string(code: i32, message: String) Error {
         return Error { code: code, message: message };
     }
 
     /// The message text.
-    pub fn message(self: &Error) &String {
+    pub const fn message(self: &Error) &String {
         return &self.message;
     }
 }

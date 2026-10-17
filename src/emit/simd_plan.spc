@@ -26,7 +26,7 @@ pub struct Plan {
 /// The backend table's order (`Package::simd_table`): by key, then by feature count (an entry's set is
 /// closed under `implies`: an `Sse41` entry outranks an `Sse2` one), the largest first, then by the set
 /// (two entries of one set are adjacent), then by declaration.
-pub fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
+pub const fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
     if x.key != y.key {
         return pick(x.key < y.key, -1, 1);
     }
@@ -146,7 +146,7 @@ pub fn plan(
 
 // Whether lane `i` of operation `op`'s result reads lane `i` of its vector operands only: its chunks
 // are independent.
-fn lane_wise(op: u32) bool {
+const fn lane_wise(op: u32) bool {
     if op < ir::OP_SIMD || op >= ir::OP_CMP_LANES {
         return op != ir::OP_ANY_LANES && op != ir::OP_ALL_LANES;
     }
@@ -158,7 +158,7 @@ fn lane_wise(op: u32) bool {
 // The lane-wise operation that combines two chunks of reduction `op` by its definition: the float
 // tree reductions add or multiply the upper half onto the lower half, and the wrapping and bitwise
 // integer reductions and the integer extremes are order-free. OP_COUNT for every other operation.
-fn combine_op(op: u32) u32 {
+const fn combine_op(op: u32) u32 {
     if op < ir::OP_SIMD || op >= ir::OP_CMP_LANES {
         return ir::OP_COUNT;
     }

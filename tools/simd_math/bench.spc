@@ -234,7 +234,7 @@ fn lib32<const F: Fun>(x: f32, y: f32) f32 {
     };
 }
 
-fn sc32(x: f32) f32 {
+const fn sc32(x: f32) f32 {
     let (s, c) = x.sin_cos();
     return s + c;
 }
@@ -275,7 +275,7 @@ fn lib64<const F: Fun>(x: f64, y: f64) f64 {
     };
 }
 
-fn sc64(x: f64) f64 {
+const fn sc64(x: f64) f64 {
     let (s, c) = x.sin_cos();
     return s + c;
 }
@@ -286,7 +286,7 @@ struct Rng {
 }
 
 extend Rng {
-    pub fn next(self: &mut Rng, lo: f64, hi: f64) f64 {
+    pub const fn next(self: &mut Rng, lo: f64, hi: f64) f64 {
         self.s = self.s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         return lo + (hi - lo) * ((self.s >> 11) as f64 * 0x1p-53);
     }
@@ -355,15 +355,15 @@ struct Dist {
     pub off: f64,
 }
 
-fn uni(lo: f64, hi: f64) Dist {
+const fn uni(lo: f64, hi: f64) Dist {
     return Dist { lo: lo, hi: hi, log: false, sign: false, off: 0.0 };
 }
 
-fn logu(lo: f64, hi: f64, sign: bool, off: f64) Dist {
+const fn logu(lo: f64, hi: f64, sign: bool, off: f64) Dist {
     return Dist { lo: lo, hi: hi, log: true, sign: sign, off: off };
 }
 
-fn draw(g: &mut Rng, d: &Dist) f64 {
+const fn draw(g: &mut Rng, d: &Dist) f64 {
     if !d.log {
         return g.next(d.lo, d.hi);
     }

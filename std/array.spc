@@ -87,7 +87,7 @@ extend<T, const N: usize> Array<T, N> {
     /// Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Unsafe: the caller
     /// promises `n` readable bytes at `src`, `n <= N * sizeof(T)`, and that the bytes form valid `T`s;
     /// overwritten elements are NOT freed (raw overwrite, unlike `set`).
-    pub unsafe fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
+    pub unsafe const fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
         memcpy(&mut self.data[0], src, n);
     }
 

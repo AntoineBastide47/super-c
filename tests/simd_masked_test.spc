@@ -291,7 +291,7 @@ fn masked_stores_borrow_their_slice() {
 }
 
 // The first mode the run reaches: the lane runs mode 2 alone (modes 0 and 1 need a signal handler).
-fn pick_lane(lane: bool) usize {
+const fn pick_lane(lane: bool) usize {
     if lane {
         return 2;
     }

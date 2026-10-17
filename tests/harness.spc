@@ -1119,7 +1119,7 @@ fn c_defines(path: str, function: str) bool {
     return false;
 }
 
-fn asm_label_is(line: str, function: str) bool {
+const fn asm_label_is(line: str, function: str) bool {
     return line.starts_with(function) && line.slice(function.len(), line.len()).starts_with(":");
 }
 

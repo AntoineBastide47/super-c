@@ -8040,7 +8040,7 @@ extend CEmit {
 
     // Whether a pointer may address place `p`: a local whose address the body takes, a static, or a
     // place behind a projection (a field, an element, a dereference).
-    fn addressable(self: &Self, b: &ir::CoreBody, p: ir::PlaceId) bool {
+    const fn addressable(self: &Self, b: &ir::CoreBody, p: ir::PlaceId) bool {
         let pl = *b.places.at(p as usize);
         return pl.proj_len != 0 || *self.sx_addr.at(pl.base as usize) || b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF;
     }
@@ -9427,7 +9427,7 @@ extend CEmit {
     }
 
     // Whether `t` calls core's `sc_popcount64` with one argument.
-    fn popcount_call(self: &Self, t: &ir::Terminator) bool {
+    const fn popcount_call(self: &Self, t: &ir::Terminator) bool {
         if t.kind != ir::TM_CALL || t.args_len != 1 || t.callee.node == NODE_NONE || t.callee.module != self.p().core_module {
             return false;
         }
@@ -17318,7 +17318,7 @@ fn straight(b: &ir::CoreBody, cf: &cfl::CFlow, bd: u32, bu: u32, di: u32, ui: u3
 }
 
 // The whole local operand `x` names, or IR_NONE (a constant, a projection).
-fn lf_local(b: &ir::CoreBody, x: u32) u32 {
+const fn lf_local(b: &ir::CoreBody, x: u32) u32 {
     let o = *b.operands.at(x as usize);
     if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE || b.places.at(o.data as usize).proj_len != 0 {
         return ir::IR_NONE;

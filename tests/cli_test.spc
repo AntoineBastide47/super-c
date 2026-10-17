@@ -11019,6 +11019,41 @@ fn script_builds_share_cached_objects() {
     assert_eq(script_run(tb.as_str()), 4);
 }
 
+// A key of the script namespace: 32 lowercase hex digits, `i` in the last eight.
+fn trim_key(i: u32) String {
+    let mut k = String::from_str("0123456789abcdef01234567");
+    for j in 0..8 {
+        k.push_byte(b"0123456789abcdef"[(i >> (28 - 4 * j) as u32 & 15) as usize]);
+    }
+    return k;
+}
+
+// A trim deletes a dependency list whose object is gone (a hit reads the two together), and above
+// SCRIPT_OBJ_MAX each least recently used object with its list.
+@test
+fn script_trim_deletes_dependency_lists() {
+    let p = cli::proj_new();
+    let ns = format("{}/ns", p.dir());
+    let live = trim_key(0);
+    p.mkfile(format("ns/{}.o", live.as_str()).as_str(), "o");
+    p.mkfile(format("ns/{}.d", live.as_str()).as_str(), "d");
+    p.mkfile(format("ns/{}.d", trim_key(1).as_str()).as_str(), "d");
+    ocache::script_trim(ns.as_str(), 0);
+    assert_eq(cli::dir_count_suffix(ns.as_str(), ".o"), 1);
+    assert_eq(cli::dir_count_suffix(ns.as_str(), ".d"), 1);
+    let lp = format("{}/{}.d", ns.as_str(), live.as_str());
+    assert(cli::read_text(lp.as_str()).as_str() == "d", "the list of a kept object stays");
+    for i in 1..ocache::SCRIPT_OBJ_MAX as u32 + 1 {
+        let k = trim_key(i);
+        p.mkfile(format("ns/{}.o", k.as_str()).as_str(), "o");
+        p.mkfile(format("ns/{}.d", k.as_str()).as_str(), "d");
+    }
+    ocache::script_trim(ns.as_str(), 0);
+    let no = cli::dir_count_suffix(ns.as_str(), ".o");
+    assert(no < ocache::SCRIPT_OBJ_MAX as i32, "the trim deletes objects");
+    assert_eq(cli::dir_count_suffix(ns.as_str(), ".d"), no);
+}
+
 // Units with one file name in two directories (a user module `lib/string` beside the std `string`)
 // compile apart, serially and in parallel, and a rebuild in a fresh tree only reads the cache.
 @test

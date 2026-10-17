@@ -56,7 +56,7 @@ pub fn scalar_model(cases_max: u64, depth_max: u64) ScalarModel {
     };
 }
 
-fn type_name(t: u8) str<'static> {
+const fn type_name(t: u8) str<'static> {
     return switch t {
         0 => "i8",
         1 => "i16",
@@ -74,7 +74,7 @@ fn type_name(t: u8) str<'static> {
 }
 
 // Bit width; isize and usize count as 64 bits, the widest target.
-fn type_bits(t: u8) u64 {
+const fn type_bits(t: u8) u64 {
     return switch t {
         0 | 5 => 8,
         1 | 6 => 16,
@@ -84,7 +84,7 @@ fn type_bits(t: u8) u64 {
 }
 
 // The bits a literal of `t` may use on every target: isize and usize have 32 on wasm32.
-fn literal_bits(t: u8) u64 {
+const fn literal_bits(t: u8) u64 {
     if t == 4 || t == 9 {
         return 32;
     }

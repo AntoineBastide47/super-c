@@ -91,7 +91,7 @@ extend Rng {
         return Rng { state: seed };
     }
 
-    pub fn next(self: &mut Rng) u64 {
+    pub const fn next(self: &mut Rng) u64 {
         self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = self.state;
         z = (z ^ z >> 30).wrapping_mul(0xBF58476D1CE4E5B9);

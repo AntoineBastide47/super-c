@@ -466,7 +466,8 @@ directory whose objects then move into place; a unit whose file name another one
 every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
 The version probe runs beside the compiles when the namespace is new. An install writes a
 temp file and renames it, so concurrent builds never read a torn object. A build that installed an object trims the namespace to 3072 objects, least
-recently used first, once it holds more than 4096. `SC_NO_CACHE` restores the single
+recently used first, once it holds more than 4096, each with the dependency list an engine
+build stored beside it; every trim also deletes a list whose object is gone. `SC_NO_CACHE` restores the single
 compile-and-link command.
 
 Gates set before the implementation for enabling ThinLTO by default: a body-edit relink

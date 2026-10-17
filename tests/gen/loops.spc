@@ -51,7 +51,7 @@ pub fn loop_model(stmts_max: u64) LoopModel {
     return LoopModel { n: 0, slo: 0, shi: 0, stmts: Vector::<Stmt>::new(), stmts_max: stmts_max };
 }
 
-fn container(x: u8) str<'static> {
+const fn container(x: u8) str<'static> {
     if x == 0 {
         return "v";
     }

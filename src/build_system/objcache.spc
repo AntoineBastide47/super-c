@@ -778,10 +778,14 @@ const fn obj_use_older(a: &ObjUse, b: &ObjUse) i32 {
 }
 
 // Keep namespace `ns` within SCRIPT_OBJ_MAX objects: above it, delete the least recently used down to
-// SCRIPT_OBJ_KEEP, and every temp file older than TMP_IDLE. Builds may trim at once: an object one of
-// them deletes is compiled again by the next build that needs it, never read torn.
+// SCRIPT_OBJ_KEEP, each with its dependency list; delete every dependency list whose object is gone
+// (an engine build's hit reads the two together; a script build's object has none) and every temp
+// file older than TMP_IDLE. Builds may trim at once: an
+// entry one of them deletes is compiled again by the next build that needs it, never read torn.
 pub fn script_trim(ns: str, now: i64) {
-    let names = list_dir(ns, false).unwrap_or(Vector::<String>::new());
+    let mut names = list_dir(ns, false).unwrap_or(Vector::<String>::new());
+    // Sorted, `<key>.d` comes right before `<key>.o`.
+    names.sort();
     let mut objs = Vector::<ObjUse>::new();
     for i in 0..names.len() {
         let n = names.at(i).as_str();
@@ -792,6 +796,15 @@ pub fn script_trim(ns: str, now: i64) {
             }
         } else if n.len() == 34 && key_prefixed(n) && n.ends_with(".o") {
             objs.push(ObjUse { mt: 0, at: i });
+        } else if n.len() == 34 && key_prefixed(n) && n.ends_with(".d") {
+            let next = if i + 1 < names.len() {
+                names.at(i + 1).as_str();
+            } else {
+                "";
+            };
+            if !(next.len() == 34 && next.starts_with(n.slice(0, 33)) && next.ends_with(".o")) {
+                let _ = unsafe shim::sc_unlink(p.cstr());
+            }
         }
     }
     if objs.len() <= SCRIPT_OBJ_MAX {
@@ -804,6 +817,9 @@ pub fn script_trim(ns: str, now: i64) {
     objs.sort_by(obj_use_older);
     for i in 0..objs.len() - SCRIPT_OBJ_KEEP {
         let mut p = loader::join2(ns, names.at(objs[i].at).as_str());
+        let _ = unsafe shim::sc_unlink(p.cstr());
+        p.truncate(p.len() - 1);
+        p.push_str("d");
         let _ = unsafe shim::sc_unlink(p.cstr());
     }
 }

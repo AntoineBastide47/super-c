@@ -28,27 +28,27 @@ pub struct Dw {
 }
 
 // Exact sum: `s + e == a + b` (Knuth).
-fn two_sum(a: f64, b: f64) (f64, f64) {
+const fn two_sum(a: f64, b: f64) (f64, f64) {
     let s = a + b;
     let bb = s - a;
     return s, a - (s - bb) + (b - bb);
 }
 
 // Exact sum for `|a| >= |b|` (Dekker).
-fn fast_two_sum(a: f64, b: f64) (f64, f64) {
+const fn fast_two_sum(a: f64, b: f64) (f64, f64) {
     let s = a + b;
     return s, b - (s - a);
 }
 
 // Exact product: `p + e == a * b`.
-fn two_prod(a: f64, b: f64) (f64, f64) {
+const fn two_prod(a: f64, b: f64) (f64, f64) {
     let p = a * b;
     return p, a.mul_add(b, -p);
 }
 
 extend Dw {
     // `x * y` for a double-word `x` and an f64 `y`.
-    fn times_f64(self: Dw, y: f64) Dw {
+    const fn times_f64(self: Dw, y: f64) Dw {
         let (ch, cl1) = two_prod(self.hi, y);
         let (zh, zl) = fast_two_sum(ch, self.lo.mul_add(y, cl1));
         return Dw { hi: zh, lo: zl };

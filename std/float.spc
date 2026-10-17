@@ -224,12 +224,12 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The encoding bits.
-    pub fn to_raw(self: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
+    pub const fn to_raw(self: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
         return self.bits;
     }
 
     /// A float from its encoding bits.
-    pub fn from_raw(b: UInt<{1 + E + F}>) Float<E, F, FAMILY> {
+    pub const fn from_raw(b: UInt<{1 + E + F}>) Float<E, F, FAMILY> {
         return Float::<E, F, FAMILY> { bits: b };
     }
 
@@ -265,7 +265,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return r;
     }
 
-    fn sign(self: &Float<E, F, FAMILY>) bool {
+    const fn sign(self: &Float<E, F, FAMILY>) bool {
         return self.bits.bit(E + F);
     }
 
@@ -291,7 +291,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// +0.0.
-    pub fn zero() Float<E, F, FAMILY> {
+    pub const fn zero() Float<E, F, FAMILY> {
         return Float::<E, F, FAMILY> { bits: UInt::<{1 + E + F}>::zero() };
     }
 
@@ -408,7 +408,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// True when the sign bit is set.
-    pub fn is_negative(self: &Float<E, F, FAMILY>) bool {
+    pub const fn is_negative(self: &Float<E, F, FAMILY>) bool {
         return self.sign();
     }
 
@@ -2017,25 +2017,25 @@ union Pun32 {
 }
 
 /// The IEEE encoding of an f64.
-pub fn f64_bits(v: f64) u64 {
+pub const fn f64_bits(v: f64) u64 {
     let p = Pun64 { f: v };
     return p.u;
 }
 
 /// The f64 with encoding `b`.
-pub fn f64_from_bits(b: u64) f64 {
+pub const fn f64_from_bits(b: u64) f64 {
     let p = Pun64 { u: b };
     return p.f;
 }
 
 /// The IEEE encoding of an f32.
-pub fn f32_bits(v: f32) u32 {
+pub const fn f32_bits(v: f32) u32 {
     let p = Pun32 { f: v };
     return p.u;
 }
 
 /// The f32 with encoding `b`.
-pub fn f32_from_bits(b: u32) f32 {
+pub const fn f32_from_bits(b: u32) f32 {
     let p = Pun32 { u: b };
     return p.f;
 }

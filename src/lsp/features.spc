@@ -186,7 +186,7 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
 }
 
 // A line ends at `\n`, `\r\n` or a lone `\r` (text::line_starts).
-fn is_eol(b: u8) bool {
+const fn is_eol(b: u8) bool {
     return b == b'\n' || b == b'\r';
 }
 
@@ -200,7 +200,7 @@ fn line_start_of(src: str, pos: usize) usize {
 }
 
 // The line end before the line starting at `ls` (> 0): the first byte of its terminator.
-fn prev_line_end(src: str, ls: usize) usize {
+const fn prev_line_end(src: str, ls: usize) usize {
     if ls >= 2 && src[ls - 1] == b'\n' && src[ls - 2] == b'\r' {
         return ls - 2;
     }
@@ -208,7 +208,7 @@ fn prev_line_end(src: str, ls: usize) usize {
 }
 
 // Start of the line after the line end at `le`.
-fn next_line_start(src: str, le: usize) usize {
+const fn next_line_start(src: str, le: usize) usize {
     if le + 1 < src.len() && src[le] == b'\r' && src[le + 1] == b'\n' {
         return le + 2;
     }
@@ -1733,7 +1733,7 @@ pub struct SigInfo {
 }
 
 /// The generic parameters of declaration `n`: empty for a kind without them.
-fn decl_generics(n: &Node) NodeList {
+const fn decl_generics(n: &Node) NodeList {
     if n.kind == NodeKind::NODE_FUNCTION {
         return n.as_data.function.generics;
     } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
@@ -1749,7 +1749,7 @@ fn decl_generics(n: &Node) NodeList {
 }
 
 // Whether top-level item `n` is visible outside its module.
-fn item_public(n: &Node) bool {
+const fn item_public(n: &Node) bool {
     if n.kind == NodeKind::NODE_FUNCTION {
         return n.as_data.function.is_public();
     } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {

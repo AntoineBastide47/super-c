@@ -145,15 +145,15 @@ fn draw(rng: &mut Rng, t64: bool) u64 {
     return (q as i64 + d) as u64 & 0x7FFFFFFF | sign << 31;
 }
 
-fn bits64(v: f64) u64 {
+const fn bits64(v: f64) u64 {
     return Simd::<f64, 2>::splat(v).to_bits()[0];
 }
 
-fn bits32(v: f32) u64 {
+const fn bits32(v: f32) u64 {
     return Simd::<f32, 2>::splat(v).to_bits()[0];
 }
 
-fn lanes(t64: bool) usize {
+const fn lanes(t64: bool) usize {
     return if t64 {
         2;
     } else {

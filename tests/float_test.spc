@@ -162,7 +162,7 @@ fn wide_formats_compute_exactly() {
 // One f128 operand: random bits; or a random sign and fraction with the exponent field 0 (zeros and
 // subnormals), all ones (infinities and NaN), tiny or huge (results that underflow or overflow), or near
 // `near` (cancelling sums, quotients near 1).
-fn f128_operand(r: &mut u64, near: u64) f128 {
+const fn f128_operand(r: &mut u64, near: u64) f128 {
     *r = r.wrapping_add(0x9E3779B97F4A7C15);
     let mut z = *r;
     z = (z ^ z >> 30).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -656,7 +656,7 @@ fn from_str_zero_with_huge_exponent() {
     assert(f16::from_str("-0e5000").unwrap().is_negative());
 }
 
-fn step(s: &mut u64) u64 {
+const fn step(s: &mut u64) u64 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     return *s ^ *s >> 29;
 }

@@ -102,7 +102,7 @@ const fn relaxed(b: &ir::CoreBody, opid: u32) bool {
 
 /// True when `t` calls the borrow-pure prelude length getter `fn len(&self)` on a place: its shared
 /// receiver cannot mutate the collection.
-pub fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool {
+pub const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool {
     if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || t.args_len != 1 || t.dests_len != 1 {
         return false;
     }
@@ -1321,7 +1321,7 @@ extend Facts {
     }
 
     // Can item `d` change: anything but a constant or a non-extern immutable static?
-    fn item_mutable(self: &Self, d: DefId) bool {
+    const fn item_mutable(self: &Self, d: DefId) bool {
         let pk = unsafe &*self.pkg;
         if d.node == NODE_NONE || Ast::in_body(d.node) || d.module as usize >= pk.modules.len() || !pk.modules.at(
             d.module as usize,
@@ -1526,7 +1526,7 @@ extend Facts {
     }
 
     /// Is `sub` the field named `name` of the prelude view `view_ty` (a type of `b`'s module)?
-    pub fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
+    pub const fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
         if view_ty == TYPE_NONE || sub == NODE_NONE {
             return false;
         }
@@ -1740,7 +1740,7 @@ extend Facts {
     }
 
     // Every local, base and the heap: the bound of a scan or an effect was exceeded.
-    fn kill_all(self: &mut Self) {
+    const fn kill_all(self: &mut Self) {
         self.vclock += 1;
         self.vfloor = self.vclock; // every version and base generation so far is dead
         self.heapgen += 1;
@@ -2743,7 +2743,7 @@ extend Facts {
     }
 
     /// The fact of local `l` at the evaluation point.
-    pub fn ilocal(self: &Self, l: u32) IFact {
+    pub const fn ilocal(self: &Self, l: u32) IFact {
         if !self.ion || self.iw[l as usize] == 0 || self.cst[l as usize] != self.stamp {
             return itop(64, false); // unknown at any width: no bound, no stride, no known bits
         }

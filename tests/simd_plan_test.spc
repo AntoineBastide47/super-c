@@ -118,7 +118,7 @@ fn table() Vector<cf::SimdEntry> {
 }
 
 // The node of the entry a plan names (`combine`: of its combining entry), 0 for none.
-fn node_of(t: &Vector<cf::SimdEntry>, pl: &sp::Plan, combine: bool) u32 {
+const fn node_of(t: &Vector<cf::SimdEntry>, pl: &sp::Plan, combine: bool) u32 {
     if pl.form == sp::PF_SCALAR || combine && pl.combine == ir::IR_NONE {
         return 0;
     }

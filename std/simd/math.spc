@@ -263,7 +263,7 @@ pub fn hypot<T: Lane, const N: usize>(x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
 
 // sqrt(hi^2 + lo^2) for hi >= lo: the sum as a double word rounded once, then its root (0.25 ULP from
 // the sum, 0.5 from the root).
-fn hypot_dw<T: Lane, const N: usize>(hi: Simd<T, N>, lo: Simd<T, N>) Simd<T, N> {
+const fn hypot_dw<T: Lane, const N: usize>(hi: Simd<T, N>, lo: Simd<T, N>) Simd<T, N> {
     let (h2, h2l) = two_prod(hi, hi);
     let (l2, l2l) = two_prod(lo, lo);
     let (sh, sl) = fast_two_sum(h2, l2);

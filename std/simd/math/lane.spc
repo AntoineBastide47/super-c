@@ -157,12 +157,12 @@ pub fn inf<T: Lane, const N: usize>() Simd<T, N> {
 
 /// max_num(v, lo) for a bound lo that is neither NaN nor -0, as one comparison and choice (x86's
 /// `maxps`; its `max_num` is a sequence): lo for a NaN v.
-pub fn at_least<T: Lane, const N: usize>(v: Simd<T, N>, lo: Simd<T, N>) Simd<T, N> {
+pub const fn at_least<T: Lane, const N: usize>(v: Simd<T, N>, lo: Simd<T, N>) Simd<T, N> {
     return choose(v.greater_than(lo), v, lo);
 }
 
 /// min_num(v, hi) for a nonzero bound hi that is not NaN, as `at_least`: hi for a NaN v.
-pub fn at_most<T: Lane, const N: usize>(v: Simd<T, N>, hi: Simd<T, N>) Simd<T, N> {
+pub const fn at_most<T: Lane, const N: usize>(v: Simd<T, N>, hi: Simd<T, N>) Simd<T, N> {
     return choose(v.less_than(hi), v, hi);
 }
 
@@ -236,20 +236,20 @@ fn col<T: Lane, const N: usize>(t: []T, b: &[u32; N], k: usize) Simd<T, N> {
 }
 
 /// `(s, e)` with s + e = a + b exactly (Knuth).
-pub fn two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+pub const fn two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = a + b;
     let bb = s - a;
     return s, a - (s - bb) + (b - bb);
 }
 
 /// `two_sum` when |a| >= |b| or a = 0 in every lane (Dekker).
-pub fn fast_two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+pub const fn fast_two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = a + b;
     return s, b - (s - a);
 }
 
 /// `(p, e)` with p + e = a b exactly.
-pub fn two_prod<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+pub const fn two_prod<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let p = a * b;
     return p, a.fma(b, -p);
 }
@@ -672,13 +672,13 @@ pub fn cos_core<T: Lane, const N: usize>(rh: Simd<T, N>, rl: Simd<T, N>) Simd<T,
 
 // k as an integer for an integer-valued |k| < 2^51 (NaN as 0, as a cast), and back: the low bits of k +
 // 1.5 2^52, exact (an f64 to i64 conversion has no AVX2 instruction).
-fn f2i<const N: usize>(k: Simd<f64, N>) Simd<i64, N> {
+const fn f2i<const N: usize>(k: Simd<f64, N>) Simd<i64, N> {
     return (choose(k.equal(k), k, Simd::splat(0.0)) + 0x1.8p52).to_bits().wrapping_sub(
         Simd::splat(0x4338000000000000u64),
     ).bitcast::<i64, N>();
 }
 
-fn i2f<const N: usize>(i: Simd<i64, N>) Simd<f64, N> {
+const fn i2f<const N: usize>(i: Simd<i64, N>) Simd<f64, N> {
     return Simd::<f64, N>::from_bits(i.bitcast::<u64, N>().wrapping_add(Simd::splat(0x4338000000000000u64))) - 0x1.8p52;
 }
 
