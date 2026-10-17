@@ -43,11 +43,8 @@ jobs:
 
   run:
     needs: cross
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04-arm, ubuntu-22.04-arm]
-    runs-on: ${{ matrix.os }}
+    # Ubuntu 24.04: the cross toolchain's glibc (2.39) links symbols of 2.38, which 22.04 (2.35) lacks.
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         shell: bash
@@ -64,11 +61,11 @@ jobs:
           printf '#include <arm_sve.h>\n#include <stdio.h>\nint main(void) { printf("sve vector bits: %%d\\n", (int)svcntb() * 8); return 0; }\n' >vl.c
           gcc -O2 -march=armv8.2-a+sve vl.c -o vl && ./vl
 
-      - name: Run the kernels three times
+      - name: Run the kernels five times
         run: |
           set -u
           chmod +x bench-bin
-          for r in 1 2 3; do
+          for r in 1 2 3 4 5; do
             ./bench-bin >out$r.txt 2>&1
             echo "run $r: exit $?"
             grep -E '^simd' out$r.txt
@@ -77,5 +74,5 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: sve-probe-${{ matrix.os }}
+          name: sve-probe
           path: out*.txt

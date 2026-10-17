@@ -1,6 +1,7 @@
-// SVE kernels: vector-length agnostic loops whose tail is one WHILELT-predicated pass, except the two
-// fixed 32-lane trees, which hold 8 vectors of 4 lanes (a 128-bit vector length). `sb_sve` returns the
-// table only on Linux when the CPU has SVE and a 128-bit vector length.
+// SVE kernels: vector-length agnostic loops over whole vectors under an all-true predicate, unrolled by
+// hand (a trip count of `svcntw()` steps is not a constant, so the C compiler does not unroll it), and one
+// WHILELT-predicated pass for the tail; the two fixed 32-lane trees hold 8 vectors of 4 lanes (a 128-bit
+// vector length). `sb_sve` returns the table only on Linux when the CPU has SVE and a 128-bit length.
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,9 +22,11 @@
 static void saxpy_f32(float a, const float *x, float *y, size_t n) {
     svbool_t all = svptrue_b32();
     size_t w = svcntw(), i = 0;
-    for (; i + 4 * w <= n; i += 4 * w)
-        for (size_t j = i; j < i + 4 * w; j += w)
-            svst1_f32(all, y + j, svadd_f32_x(all, svmul_n_f32_x(all, svld1_f32(all, x + j), a), svld1_f32(all, y + j)));
+    for (; i + 4 * w <= n; i += 4 * w) {
+#define F(u) svst1_vnum_f32(all, y + i, u, svadd_f32_x(all, svmul_n_f32_x(all, svld1_vnum_f32(all, x + i, u), a), svld1_vnum_f32(all, y + i, u)));
+        F(0) F(1) F(2) F(3)
+#undef F
+    }
     for (; i < n; i += w) {
         svbool_t pg = svwhilelt_b32_u64(i, n);
         svst1_f32(pg, y + i, svadd_f32_x(pg, svmul_n_f32_x(pg, svld1_f32(pg, x + i), a), svld1_f32(pg, y + i)));
@@ -62,14 +65,17 @@ static float dot_f32_tree(const float *x, const float *y, size_t n) {
 // A count per byte lane, summed before it can wrap.
 static size_t count_eq_u8(const uint8_t *x, size_t n, uint8_t v) {
     svbool_t all = svptrue_b8();
-    size_t w = svcntb(), i = 0, c = 0;
-    while (i + 4 * w <= n) {
+    size_t w = svcntb(), blocks = n / (4 * w), i = blocks * 4 * w, c = 0;
+    const uint8_t *p = x;
+    while (blocks > 0) {
+        size_t k = blocks < 255 ? blocks : 255; // blocks before a byte count can wrap
+        blocks -= k;
         svuint8_t z = svdup_n_u8(0), a0 = z, a1 = z, a2 = z, a3 = z;
-        for (int b = 0; b < 255 && i + 4 * w <= n; b++, i += 4 * w) {
-            a0 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_u8(all, x + i), v), a0, 1);
-            a1 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_u8(all, x + i + w), v), a1, 1);
-            a2 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_u8(all, x + i + 2 * w), v), a2, 1);
-            a3 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_u8(all, x + i + 3 * w), v), a3, 1);
+        for (const uint8_t *e = p + k * 4 * w; p != e; p += 4 * w) {
+            a0 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_vnum_u8(all, p, 0), v), a0, 1);
+            a1 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_vnum_u8(all, p, 1), v), a1, 1);
+            a2 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_vnum_u8(all, p, 2), v), a2, 1);
+            a3 = svadd_n_u8_m(svcmpeq_n_u8(all, svld1_vnum_u8(all, p, 3), v), a3, 1);
         }
         c += svaddv_u8(all, a0) + svaddv_u8(all, a1) + svaddv_u8(all, a2) + svaddv_u8(all, a3);
     }
@@ -84,12 +90,12 @@ static int32_t sum_i32(const int32_t *x, size_t n) {
     const uint32_t *u = (const uint32_t *)x;
     svbool_t all = svptrue_b32();
     svuint32_t z = svdup_n_u32(0), a0 = z, a1 = z, a2 = z, a3 = z;
-    size_t w = svcntw(), i = 0;
-    for (; i + 4 * w <= n; i += 4 * w) {
-        a0 = svadd_u32_x(all, a0, svld1_u32(all, u + i));
-        a1 = svadd_u32_x(all, a1, svld1_u32(all, u + i + w));
-        a2 = svadd_u32_x(all, a2, svld1_u32(all, u + i + 2 * w));
-        a3 = svadd_u32_x(all, a3, svld1_u32(all, u + i + 3 * w));
+    size_t w = svcntw(), i = n - n % (4 * w);
+    for (const uint32_t *p = u, *e = u + i; p != e; p += 4 * w) {
+        a0 = svadd_u32_x(all, a0, svld1_vnum_u32(all, p, 0));
+        a1 = svadd_u32_x(all, a1, svld1_vnum_u32(all, p, 1));
+        a2 = svadd_u32_x(all, a2, svld1_vnum_u32(all, p, 2));
+        a3 = svadd_u32_x(all, a3, svld1_vnum_u32(all, p, 3));
     }
     for (; i < n; i += w) {
         svbool_t pg = svwhilelt_b32_u64(i, n);
@@ -159,19 +165,29 @@ static float gather_sum_f32(const float *x, const uint32_t *idx, size_t n) {
     return sb_tree(l);
 }
 
+// The whole vectors of a row and the predicate of its last one are the same for every row.
 static void tail_load_f32(float a, const float *x, float *y, size_t rows) {
-    size_t w = svcntw();
-    for (size_t r = 0; r < rows; r++, x += SB_ROW, y += SB_STRIDE)
-        for (size_t j = 0; j < SB_ROW; j += w) {
-            svbool_t pg = svwhilelt_b32_u64(j, SB_ROW);
-            svst1_f32(pg, y + j, svmul_n_f32_x(pg, svld1_f32(pg, x + j), a));
-        }
+    svbool_t all = svptrue_b32();
+    size_t w = svcntw(), full = SB_ROW / w;
+    svbool_t pt = svwhilelt_b32_u64(full * w, SB_ROW);
+    for (size_t r = 0; r < rows; r++, x += SB_ROW, y += SB_STRIDE) {
+        for (size_t j = 0; j < full; j++)
+            svst1_vnum_f32(all, y, j, svmul_n_f32_x(all, svld1_vnum_f32(all, x, j), a));
+        svst1_vnum_f32(pt, y, full, svmul_n_f32_x(pt, svld1_vnum_f32(pt, x, full), a));
+    }
 }
 
 // Four f32 predicates pack into one byte predicate: UZP1 keeps each element's low predicate bit.
 static void mix_width(const float *x, float t, const uint8_t *p, const uint8_t *q, uint8_t *out, size_t n) {
-    size_t w = svcntw(), b = svcntb();
-    for (size_t i = 0; i < n; i += b) {
+    svbool_t all = svptrue_b32();
+    size_t w = svcntw(), b = svcntb(), i = 0;
+    for (; i + b <= n; i += b) {
+#define F(u) svcmpgt_n_f32(all, svld1_vnum_f32(all, x + i, u), t)
+        svbool_t m = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
+#undef F
+        svst1_u8(all, out + i, svsel_u8(m, svld1_u8(all, p + i), svld1_u8(all, q + i)));
+    }
+    if (i < n) {
 #define F(u) svcmpgt_n_f32(svwhilelt_b32_u64(i + u * w, n), svld1_f32(svwhilelt_b32_u64(i + u * w, n), x + i + u * w), t)
         svbool_t m = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
 #undef F
@@ -183,9 +199,11 @@ static void mix_width(const float *x, float t, const uint8_t *p, const uint8_t *
 static void abs_diff_u8(const uint8_t *a, const uint8_t *b, uint8_t *out, size_t n) {
     svbool_t all = svptrue_b8();
     size_t w = svcntb(), i = 0;
-    for (; i + 4 * w <= n; i += 4 * w)
-        for (size_t j = i; j < i + 4 * w; j += w)
-            svst1_u8(all, out + j, svabd_u8_x(all, svld1_u8(all, a + j), svld1_u8(all, b + j)));
+    for (; i + 4 * w <= n; i += 4 * w) {
+#define F(u) svst1_vnum_u8(all, out + i, u, svabd_u8_x(all, svld1_vnum_u8(all, a + i, u), svld1_vnum_u8(all, b + i, u)));
+        F(0) F(1) F(2) F(3)
+#undef F
+    }
     for (; i < n; i += w) {
         svbool_t pg = svwhilelt_b8_u64(i, n);
         svst1_u8(pg, out + i, svabd_u8_x(pg, svld1_u8(pg, a + i), svld1_u8(pg, b + i)));
