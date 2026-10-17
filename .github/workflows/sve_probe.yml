@@ -66,11 +66,12 @@ jobs:
           set -u
           chmod +x bench-bin
           for r in 1 2 3 4 5; do
-            ./bench-bin >out$r.txt 2>&1
-            echo "run $r: exit $?"
-            grep -E '^simd' out$r.txt
+            rc=0
+            ./bench-bin >out$r.txt 2>&1 || rc=$?
+            echo "run $r: exit $rc"
+            grep -E '^simd' out$r.txt || true
+            if [ "$rc" != 0 ]; then tail -n 40 out$r.txt; exit 1; fi
           done
-          tail -n 20 out1.txt
 
       - uses: actions/upload-artifact@v7
         with:

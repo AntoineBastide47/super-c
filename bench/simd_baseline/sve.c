@@ -179,13 +179,13 @@ static void tail_load_f32(float a, const float *x, float *y, size_t rows) {
 
 // Four f32 predicates pack into one byte predicate: UZP1 keeps each element's low predicate bit.
 static void mix_width(const float *x, float t, const uint8_t *p, const uint8_t *q, uint8_t *out, size_t n) {
-    svbool_t all = svptrue_b32();
+    svbool_t all = svptrue_b32(), bytes = svptrue_b8();
     size_t w = svcntw(), b = svcntb(), i = 0;
     for (; i + b <= n; i += b) {
 #define F(u) svcmpgt_n_f32(all, svld1_vnum_f32(all, x + i, u), t)
         svbool_t m = svuzp1_b8(svuzp1_b16(F(0), F(1)), svuzp1_b16(F(2), F(3)));
 #undef F
-        svst1_u8(all, out + i, svsel_u8(m, svld1_u8(all, p + i), svld1_u8(all, q + i)));
+        svst1_u8(bytes, out + i, svsel_u8(m, svld1_u8(bytes, p + i), svld1_u8(bytes, q + i)));
     }
     if (i < n) {
 #define F(u) svcmpgt_n_f32(svwhilelt_b32_u64(i + u * w, n), svld1_f32(svwhilelt_b32_u64(i + u * w, n), x + i + u * w), t)
