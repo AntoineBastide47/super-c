@@ -118,7 +118,9 @@ predecessors that alone reach it by a goto, a constant switch or an assertion; a
 nothing between writes memory, a projection, an address-taken local or the load's operands, and no
 address-taken local's storage ends) reads its indexes in its lane loop from the slice,
 `s.ptr[start + i]` (`gather_loads`, `sx_gload`): Clang 18 keeps a loaded index vector in registers and
-widens and extracts each lane, 1.6 to 1.9 times a scalar index read on Neoverse N2.
+widens and extracts each lane. With the slice read, the portable `gather_sum_f32` runs at the Neon
+kernel's speed on Neoverse N2 under Clang 18 (0.224 and 0.217 ns per element at 4 KiB, 0.275 and 0.275
+at 64 KiB; run 39072972330).
 `compress_store` over chunks of at most 8 lanes moves each chunk's active lanes to its front
 with `SwizzleOrZero` and a byte-index table emitted at the site, stores whole chunks at the next
 free element, and restores the elements after the last written one, read first

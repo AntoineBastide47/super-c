@@ -3375,7 +3375,11 @@ extend CEmit {
                     let rm = *b.rvalues.at(sm.rvalue as usize);
                     let stores = rm.kind == ir::RV_SIMD && (ir::simd_op(rm.c).rule == ir::SR_STORE || ir::simd_op(rm.c).rule == ir::SR_MSTORE);
                     let writes = rm.kind == ir::RV_INTRINSIC && !ir::is_check(rm.c);
-                    if pm.proj_len != 0 || stores || writes || *self.sx_addr.at(pm.base as usize) || CEmit::rv_reads(b, &lr, pm.base) {
+                    if pm.proj_len != 0 || stores || writes || *self.sx_addr.at(pm.base as usize) || CEmit::rv_reads(
+                        b,
+                        &lr,
+                        pm.base,
+                    ) {
                         quiet = false;
                     }
                 }
@@ -3399,9 +3403,11 @@ extend CEmit {
         let lr = *b.rvalues.at(load as usize);
         let mut sl = String::new();
         let mut st = String::new();
-        if self.emit_operand(b, b.oper_pool[lr.a as usize], &mut sl) && self.emit_operand(b, b.oper_pool[(lr.a + 1) as usize], &mut st) && plain_spelling(
-            sl.as_str(),
-        ) && (plain_spelling(st.as_str()) || int_literal(st.as_str())) {
+        if self.emit_operand(b, b.oper_pool[lr.a as usize], &mut sl) && self.emit_operand(
+            b,
+            b.oper_pool[(lr.a + 1) as usize],
+            &mut st,
+        ) && plain_spelling(sl.as_str()) && (plain_spelling(st.as_str()) || int_literal(st.as_str())) {
             out.format_into("{}.ptr[{} + __sc_i]", sl.as_str(), st.as_str());
         }
         return out;

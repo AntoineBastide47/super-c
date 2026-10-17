@@ -45,7 +45,7 @@
    This is the 1 VL x 4 VL shape of MpGEMM (arXiv 2512.21473): about 1.9 to 2.0 TFLOP/s on one Apple M5
    Pro core from n = 512 to 2048, the unit's peak; a 2 VL x 2 VL block without the B panel reached
    0.7 TFLOP/s at n = 2048 (B rows a page apart). */
-SC_SME2 __arm_new("za") __arm_locally_streaming static void mul_f32_za(float *c, const float *a, const float *b, size_t m,
+__arm_new("za") __arm_locally_streaming SC_SME2 static void mul_f32_za(float *c, const float *a, const float *b, size_t m,
                                                                size_t k, size_t n, float *pa, float *pb) {
     uint64_t L = svcntw();
     svbool_t all = svptrue_b32();
@@ -191,7 +191,7 @@ __arm_new("za") __arm_locally_streaming static void mul_f64_za(double *c, const 
    and per group, each column's four bytes. Zeros pad the rows, columns and the last group. Each
    L x 4L block takes one A vector and one SME2 four-vector load of B per group, one SMOPA per tile.
    Integer sums wrap modulo 2^32 in any order: the portable kernel's results. */
-SC_SME2 __arm_new("za") __arm_locally_streaming static void mul_i8_za(int32_t *c, const int8_t *pa, const int8_t *pb,
+__arm_new("za") __arm_locally_streaming SC_SME2 static void mul_i8_za(int32_t *c, const int8_t *pa, const int8_t *pb,
                                                                       size_t m, size_t g, size_t n) {
     uint64_t L = svcntw();
     svbool_t all8 = svptrue_b8(), all32 = svptrue_b32();
