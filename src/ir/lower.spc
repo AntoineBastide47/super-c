@@ -98,6 +98,10 @@ const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
 // `Lowerer.err` when lowering met a TYPE_ERROR node or generic argument.
 const ERR_TYPE_SLUG: str<'static> = "error type";
 
+/// `Lowerer.err` for a call of an `@intrinsic` this compiler does not know, which only
+/// `--bootstrap-tags` accepts: the newer compiler that knows it checks the body.
+pub const UNKNOWN_INTRINSIC_SLUG: str<'static> = "an intrinsic this compiler does not know";
+
 // The `data` of a member projection: IR_NONE for a named field (its identity is the decl in
 // `sub`, as a member access spells it), else the positional index.
 const fn member_data(sub: NodeId, index: u32) u32 {
@@ -5194,7 +5198,8 @@ extend Lowerer {
     fn lower_intrinsic(self: &mut Self, f: DefId, ops: &mut Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
         let k = self.intrinsic_code(f);
         if k == 0 {
-            self.fail_at("intrinsic", NODE_NONE);
+            // A name only `--bootstrap-tags` accepts (`tc_check_intrinsic`): a newer compiler's.
+            self.fail_at(UNKNOWN_INTRINSIC_SLUG, NODE_NONE);
             return ir::IR_NONE;
         }
         let fa = unsafe &*(&*self.pkg).module_ast_const(f.module);

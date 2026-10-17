@@ -156,7 +156,9 @@ A comparison in lane-mask temporaries (`ml_lanes`), and the copy its `choose` re
 variable. A split reads and writes 16-byte chunks in place (`v.c[k]`) where the vector names them
 (`Mangler::vec_chunked`: wider than the build's widest register, `vec_reg_bytes`); only a raw form
 whose pointer may address an address-taken vector (`vec_addr_taken`) copies its vectors first, and
-a vector held in one C vector (`vec_def`) is copied out to chunks and back. A split reduction is
+a vector held in one C vector (`vec_def`) is copied out to chunks and back. A half or `concat` whose
+vectors name their chunks, or whose half is one chunk, copies whole chunks (`chunk_halves`), never a
+lane loop: GCC builds a half that a lane loop copies out of the chunks' union one lane at a time. A split reduction is
 one expression over the chunks in place, else over copied chunks; a narrowing passes each pair of
 chunks as a compound literal of the wider vector's `c`, or of `__builtin_shufflevector` of their
 lanes for a C vector; pointers, masks, scalars, names and literals are spelled at each use, an
@@ -200,6 +202,53 @@ and an entry no unit calls is not written. A split copies each operand into an a
 spells each pointer, scalar and mask once before any call, and copies the result's chunks back
 after the last: a pointer may alias an operand or the result. The C compiler keeps the chunks
 in registers.
+
+## New instruction sets
+
+A fixed-width backend for another architecture is added only when all three hold:
+
+1. A user or project asks for the architecture and names a client program or kernel.
+2. The compiler targets the architecture (`--arch=`): layout (`ir::layout::target_for`), the C
+   toolchain, a test lane that runs binaries, and the loader's `backends` name of its backend file
+   (`load_prelude`). Adding the architecture is a separate task that comes first.
+3. A CI or local runner runs the conformance suite natively or under an emulator the project
+   already uses.
+
+Each decision, accepted or rejected with its reason, is recorded below.
+
+The work for an accepted architecture `A`, in order:
+
+1. Its rows in `CPU_FEATURES` (name, implies, C flag, per-OS baseline) and the matching
+   `cpu::Feature` variants in the same order (`tests/target_feature_test.spc` asserts both).
+2. A binding module `ffi/<header>.spc` with `@arch(A)`: the register types as `@c.value` types,
+   `@target_feature` on each intrinsic, and `@c.reads`/`@c.writes` with the exact byte count on
+   every intrinsic that reads or writes memory through a pointer.
+3. `std/simd/backend/<A>.spc` with `@simd_impl` entries: lane arithmetic, the lane-form
+   comparisons, `ChooseLanes`, contiguous `Load` and `Store` and the integer reductions first, then
+   `LanesToMask`, `MaskToLanes`, `AnyLanes` and `AllLanes`. Every other operation keeps the lane
+   loop until it has a verified entry; an entry needs no compiler change. Each entry states each
+   semantic gap of its instructions (NaN rule, zero sign, shift count range, float to integer
+   conversion, saturation) and the sequence that restores the language rule.
+4. Detection in `ffi/sc_cpu.c` for each OS of `A` through the OS capability interface
+   (`getauxval` on Linux), every error read as "absent", callable before `main` with no allocation
+   and no lock, every feature reachable through `sc_cpu_has`, the 16-byte compare-exchange feature
+   among them when it is optional.
+5. The C target attribute spelling and the `-m`/`-march` flags of `A` as probes in
+   `src/build_system/probe.spc`.
+6. A module `std::simd::<A>` only for operations with no portable meaning and a named client.
+
+The backend is accepted when the full vector conformance suite gives the lane loop's results; every
+entry of the file passes `tests/simd_entry_test.spc`; `expect_asm` finds the hardware instructions
+of lane arithmetic, a comparison, `choose`, a load, a store and an integer reduction; every memory
+intrinsic of the binding module has a memory annotation; a baseline build runs on the minimum CPU of
+`A`; the portable arithmetic kernels of `bench/simd_baseline` are within 10% of hand-written
+intrinsic kernels for `A`; and the fixpoint and `check.sh` pass on the host.
+
+Decisions: no architecture beyond x86_64, aarch64 and wasm32 has been requested. RISC-V with a
+fixed `VLEN` (`zvl128b`, `zvl256b`, RVV intrinsics), POWER VSX (`<altivec.h>`), LoongArch LSX/LASX
+and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 are
+detected only: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
+size) describes, so no fixed-width backend uses them.
 
 ## Tests
 

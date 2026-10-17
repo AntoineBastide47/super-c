@@ -75,16 +75,21 @@ const fn copy_msg(dst: *mut char, s: &String) {
 /// root) for instruction set `arch` (loader arch codes, -1 for the host's): the std-only attributes
 /// apply, and the backend table's diagnostics (`build_simd_table`) count as the module's.
 pub fn compile_std(src: str, arch: i32, stop: i32) Compiled {
-    return compile_in(src, stop, true, arch);
+    return compile_in(src, stop, true, arch, false);
+}
+
+/// `compile_std` for the host's instruction set as a `--bootstrap-tags` build sees it.
+pub fn compile_std_bootstrap(src: str, stop: i32) Compiled {
+    return compile_in(src, stop, true, -1, true);
 }
 
 // Run `src` through the pipeline up to `stop`, reporting the user module (index 0) diagnostics.
 /// Compile `src` in process through stage `stop` (STAGE_*), collecting diagnostics.
 pub fn compile(src: str, stop: i32) Compiled {
-    return compile_in(src, stop, false, -1);
+    return compile_in(src, stop, false, -1, false);
 }
 
-fn compile_in(src: str, stop: i32, as_std: bool, arch: i32) Compiled {
+fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Compiled {
     let mut r = Compiled {};
 
     // Parse stage: lex + parse standalone (no package needed to see syntax errors). The lexer pads its
@@ -126,6 +131,7 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32) Compiled {
             unsafe shim::sc_host_arch();
         },
     );
+    p.bootstrap = bootstrap;
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;

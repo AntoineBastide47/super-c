@@ -1102,6 +1102,7 @@
 1.09	tests::simd_aarch64_test::arch_operations_need_their_feature
 1.16	tests::simd_aarch64_test::concurrent_queries_agree_without_a_race
 1.64	tests::simd_aarch64_test::detection_reports_the_machine
+1.00	tests::simd_aarch64_test::halves_and_concat_copy_chunks
 0.16	tests::simd_aarch64_test::harness_c_calls_the_backend_entries
 0.00	tests::simd_aarch64_test::neon_memory_bindings_state_their_range
 0.96	tests::simd_aarch64_test::operations_lower_to_their_instructions
@@ -1168,6 +1169,7 @@
 3.11	tests::simd_ops_test::operators_dispatch_through_bounds_and_values
 8.32	tests::simd_ops_test::operators_match_constants_and_scalar_loops
 4.16	tests::simd_ops_test::rearrangements_match
+0.10	tests::simd_ops_test::unknown_intrinsic_under_bootstrap_tags
 5.31	tests::simd_ops_test::vector_access_borrows_its_slice
 1.57	tests::simd_ops_test::vector_c_is_portable
 14.43	tests::simd_ops_test::vector_loads_and_stores_check_their_range

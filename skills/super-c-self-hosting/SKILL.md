@@ -123,7 +123,10 @@ four ordered steps:
 3. Validate the release: download its binary and build the tree with it.
 4. Write source in the new syntax.
 
-The same order binds new std surface that the release cannot parse or fold. The formatter
+The same order binds new std surface that the release cannot parse or fold, except a new
+`@intrinsic`: a release whose `--bootstrap-tags` accepts unknown intrinsics builds a std that declares
+and calls one, as long as the compiler's own build emits no body that calls it, so the intrinsic,
+its lowering and its std use land in one commit. The formatter
 ships in the same commit as the parser: an old `fmt` deletes syntax it does not know. Until
 step 4, tests embed the new syntax only inside string literals.
 

@@ -1942,7 +1942,8 @@ extend tc::TypeChecker {
     ) {
         let a = self.cur_ast();
         let fnd = unsafe (*a).at_const(id).as_data.function;
-        if fnd.body == NODE_NONE {
+        // An intrinsic only `--bootstrap-tags` accepts has no operation to fill its empty body with.
+        if fnd.body == NODE_NONE || self.tc_unknown_intrinsic(self.cur_module(), id) {
             return;
         }
         self.bc_flow_reset(id);

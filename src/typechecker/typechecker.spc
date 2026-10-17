@@ -10655,7 +10655,8 @@ extend<'a> TypeChecker<'a> {
     }
 
     // An `@intrinsic` function `id`: only a `std` module declares one, and its name is one the lowering
-    // knows (`ir::simd_intrinsic`).
+    // knows (`ir::simd_intrinsic`), or any name under `--bootstrap-tags` (a previous release building a
+    // std with newer intrinsics; a call of one cannot lower, `Lower::lower_intrinsic`).
     fn tc_check_intrinsic(self: &mut Self, id: NodeId) {
         // No body names the result types: type them for the body the lowering builds.
         let rets = unsafe (*self.cur_ast()).at_const(id).as_data.function.returns;
@@ -10669,7 +10670,7 @@ extend<'a> TypeChecker<'a> {
         if !self.tc_in_std() {
             self.errors.emit_span(sp, format("'@intrinsic' is reserved for the standard library"));
         }
-        if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 {
+        if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 && !unsafe (*self.package).bootstrap {
             self.errors.emit_span(sp, format("unknown intrinsic '{}'", diag::span_str(self.source, sp.start, sp.end)));
         }
     }
@@ -10764,6 +10765,19 @@ extend<'a> TypeChecker<'a> {
             }
         }
         return r;
+    }
+
+    // Whether function `f` of module `fm` is an `@intrinsic` whose name this compiler does not know:
+    // only `--bootstrap-tags` accepts its declaration (`tc_check_intrinsic`).
+    pub fn tc_unknown_intrinsic(self: &mut Self, fm: ModuleId, f: NodeId) bool {
+        let n = unsafe (*self.mod_ast(fm)).at_const(f);
+        if n.kind != NodeKind::NODE_FUNCTION || !n.as_data.function.is_intrinsic() {
+            return false;
+        }
+        let at = self.tc_attr(fm, f, AttrKind::ATTR_INTRINSIC);
+        return at != null && ir::simd_intrinsic(
+            diag::span_str(self.mod_src(fm), unsafe (*at).str_span.start, unsafe (*at).str_span.end),
+        ) == 0;
     }
 
     // The `ir::simd_intrinsic` lowering of function `f` when it is a vector operation with a constant

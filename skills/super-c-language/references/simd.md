@@ -186,7 +186,7 @@ message>` ("lane 2: attempt to add with overflow", "lane 0: attempt to narrow a 
 fit"), as a constant and at run time.
 
 The named operations are signatures with `@intrinsic("simd.<name>")` and no body, in `std` only
-(else "'@intrinsic' is reserved for the standard library"; an unknown name is "unknown intrinsic").
+(else "'@intrinsic' is reserved for the standard library"; an unknown name is "unknown intrinsic", except in a `--bootstrap-tags` build, super-c-binary).
 A call lowers to the operation itself; a bound call or a function value runs a body the compiler
 builds from the same operation.
 
@@ -476,7 +476,8 @@ such operands as const parameters with a range check.
 
 To add a backend: write the file with entries for the operations whose instructions match
 the lane rule exactly, and a binding module for the header; an operation without an entry
-keeps its lane loop.
+keeps its lane loop. A backend for another architecture follows the acceptance rules and work
+order of super-c-compiler-internals `references/simd-backends.md` (New instruction sets).
 
 ### Lowering planner
 

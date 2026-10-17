@@ -222,6 +222,20 @@ fn operator_misuse_is_diagnosed() {
     );
 }
 
+// Under --bootstrap-tags a std intrinsic whose name this compiler does not know is accepted, and so is a
+// std body that calls it, unchecked (a previous release building a std with newer intrinsics; the newer
+// compiler checks the body, and an emission of it fails).
+@test
+fn unknown_intrinsic_under_bootstrap_tags() {
+    let mut src = String::from_str(
+        "@intrinsic(\"simd.nope\")\npub const fn nope<T: SimdElement, const N: usize>(a: Simd<T, N>) Simd<T, N>;\n",
+    );
+    src.push_str("pub fn twice(a: f32x4) f32x4 {\n    return nope(a) + a;\n}\n");
+    let r = h::compile_std(src.as_str(), -1, h::STAGE_BORROWCK);
+    assert(!r.ok() && r.msg_has("unknown intrinsic 'simd.nope'"), "rejected without the flag");
+    assert(h::compile_std_bootstrap(src.as_str(), h::STAGE_BORROWCK).ok(), "accepted under --bootstrap-tags");
+}
+
 // A lane scalar beside an operator is the scalar in every lane: a variable, a literal and literal-only
 // arithmetic, on either side, in concrete code and in code generic over the lanes.
 @test

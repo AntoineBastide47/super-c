@@ -10682,6 +10682,12 @@ pub fn run_package(
                 "error: internal: the backend refused %llu emissions\n".ptr() as *const char,
                 co.skips,
             );
+            if p.bootstrap {
+                // `bc_lower_err` lets such a body go unchecked; it cannot lower for the emission.
+                eprint(
+                    "  = note: under --bootstrap-tags, a body that calls an intrinsic this compiler does not know cannot be emitted\n",
+                );
+            }
         }
         err = true;
     }

@@ -943,6 +943,11 @@ extend tc::TypeChecker {
     // A body the lowering cannot express is a hard error (no body may go unchecked, and no other
     // checker exists): reported at the failing construct with the lowerer's reason slug.
     fn bc_lower_err(self: &mut Self, lw: &irl::Lowerer, owner: NodeId) {
+        // Under `--bootstrap-tags` a body that calls an intrinsic this compiler does not know goes
+        // unchecked: the newer compiler checks it, and an emission of it fails.
+        if lw.err == irl::UNKNOWN_INTRINSIC_SLUG && unsafe (*self.package).bootstrap {
+            return;
+        }
         let a = self.cur_ast();
         let sp = if lw.err_node != NODE_NONE {
             unsafe (*a).at_const(lw.err_node).span;

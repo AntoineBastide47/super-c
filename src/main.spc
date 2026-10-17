@@ -779,7 +779,7 @@ struct CommonOpts {
     pub ce_mem: u64, // --const-eval-memory=BYTES[K|M|G]
     pub target: i32, // --target=windows|macos|linux|ios|android|wasm: @platform gate (default: host)
     pub arch: i32, // --arch=x86_64|aarch64|wasm32: @arch gate (default: the host's instruction set)
-    pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes (build across a new tag)
+    pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes and std intrinsics (build across a new tag)
     pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     pub bad: bool, // malformed argument list: print usage and exit 1
     pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
