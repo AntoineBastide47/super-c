@@ -6993,6 +6993,20 @@ extend CEmit {
                 sp[2].as_str(),
                 pick(fz[2], "", ".l[__sc_i]"),
             );
+        } else if (c == ir::SIMD_LOW_HALF || c == ir::SIMD_HIGH_HALF) && self.chunk_halves(
+            rn as u64 * lane_bytes(rbt),
+            fz[0],
+        ) {
+            // Whole 16-byte chunks: GCC builds a half that a lane loop copies out of the chunks'
+            // union one lane at a time.
+            let hc = rn as u64 * lane_bytes(rbt) / 16;
+            let at = pick(c == ir::SIMD_HIGH_HALF, hc, 0);
+            if hc == 1 {
+                o.format_into("  {} = {}.c[{}];\n", d.as_str(), sp[0].as_str(), at);
+            }
+            for j in 0..pick(hc == 1, 0, hc) {
+                o.format_into("  {}.c[{}] = {}.c[{}];\n", d.as_str(), j, sp[0].as_str(), at + j);
+            }
         } else if c == ir::SIMD_LOW_HALF || c == ir::SIMD_HIGH_HALF {
             o.format_into(
                 "{}{}; __sc_i++) {}.l[__sc_i] = {}.l[__sc_i + {}];\n",
@@ -7002,6 +7016,17 @@ extend CEmit {
                 sp[0].as_str(),
                 pick(c == ir::SIMD_HIGH_HALF, rn, 0),
             );
+        } else if c == ir::SIMD_CONCAT && self.chunk_halves(n as u64 * lane_bytes(bt), fz[0] || fz[1]) {
+            let hc = n as u64 * lane_bytes(bt) / 16;
+            for j in 0..hc {
+                for h in 0..2u64 {
+                    o.format_into("  {}.c[{}] = {}", d.as_str(), h * hc + j, unsafe sp[h as usize].as_str());
+                    if hc > 1 {
+                        o.format_into(".c[{}]", j);
+                    }
+                    o.push_str(";\n");
+                }
+            }
         } else if c == ir::SIMD_CONCAT {
             o.format_into(
                 "{}{}; __sc_i++) {{ {}.l[__sc_i] = {}.l[__sc_i]; {}.l[__sc_i + {}] = {}.l[__sc_i]; }}\n",
@@ -7950,6 +7975,13 @@ extend CEmit {
         let tg = self.mg.method_target(en.module, en.node);
         let _ = self.mg.fn_sym(en.module, en.node, tg, out);
         self.mg.need_name(out.as_str().slice(st, out.len()).hash(), true);
+    }
+
+    // Whether a vector of `2 * hb` bytes and its halves of `hb` bytes are whole 16-byte chunks: the
+    // vector names its chunks (`Mangler::vec_chunked`), and a half is one chunk or names its own. A
+    // merged operand (`fused`) is a lane value, not a vector.
+    fn chunk_halves(self: &Self, hb: u64, fused: bool) bool {
+        return !fused && self.mg.vec_chunked(2 * hb, 16) && (hb == 16 || self.mg.vec_chunked(hb, 16));
     }
 
     // Whether vector statement `rv` writing `place` names a vector whose address the body takes: a raw
