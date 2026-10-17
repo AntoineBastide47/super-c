@@ -1767,3 +1767,67 @@ fn a_group_drop_joins_its_children_with_a_request_pending(fx: &mut Base) {
     rt::shutdown();
     let _ = fx;
 }
+
+// A destructor completes: one whose wait could accept a cancellation runs masked, so the wait
+// finishes and no accepted request is left behind for a caller whose drop carries no edge (the next
+// call's real result was misread as poison and leaked).
+static mut G_MASK_MADE: i64 = 0;
+static mut G_MASK_DROPPED: i64 = 0;
+
+struct MaskNoisy {
+    pub s: String,
+}
+extend MaskNoisy as Free {
+    fn free(self: &mut Self) {
+        let _ = unsafe atomic::add_i64(&mut unsafe G_MASK_DROPPED, 1, 0);
+    }
+}
+
+struct MaskSleeper {
+    pub k: i64,
+}
+extend MaskSleeper as Free {
+    fn free(self: &mut Self) {
+        time::sleep(time::Duration::from_millis(100));
+    }
+}
+
+fn mask_sleeper() i64 {
+    let _p = MaskSleeper { k: 0 };
+    return 7;
+}
+
+fn mask_make(wait: bool) MaskNoisy {
+    let n = MaskNoisy { s: String::from_str("a heap string long enough not to be inline, really") };
+    let _ = unsafe atomic::add_i64(&mut unsafe G_MASK_MADE, 1, 0);
+    if wait {
+        time::sleep(short());
+    }
+    return n;
+}
+
+@test
+fn a_destructor_runs_masked(fx: &mut Base) {
+    let _ = fx;
+    rt::set_worker_count(2);
+    let (src, tok) = task::CancelSource::new();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        defer w.done();
+        tok.bind_current();
+        let k = mask_sleeper();
+        let n = mask_make(false);
+        let _ = k + n.s.len() as i64;
+    };
+    time::sleep(short());
+    src.cancel(rt::CR_USER);
+    wg.wait();
+    let made = unsafe atomic::load_i64(&mut unsafe G_MASK_MADE, 0);
+    let dropped = unsafe atomic::load_i64(&mut unsafe G_MASK_DROPPED, 0);
+    assert_eq(made, dropped);
+    assert_eq(made, 1);
+    assert(ph::wait_quiescent(), "every task is gone");
+    rt::shutdown();
+}

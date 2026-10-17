@@ -8815,6 +8815,12 @@ fn bc_job(ctx: *mut void, j: u32) {
             continue; // an interface's members have no body of their own to analyze
         }
         let kd = meta.kind;
+        if kd == loader::ItemKind::IK_EXTEND as u8 {
+            // Its methods are items of their own; the extend checks only its declaration.
+            tck.bc_check_assoc_lifetimes(meta.node);
+            *unsafe &mut *(st.outs + it) = take_errs(&mut tck.errors);
+            continue;
+        }
         if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 {
             continue;
         }

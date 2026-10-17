@@ -1377,10 +1377,6 @@ extend Solver {
                     if lo.view {
                         continue;
                     }
-                    if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
-                        // The pinned container's ownership travelled with a move.
-                        continue;
-                    }
                     if self.body().places.at(lo.place as usize).base != ac.local || self.body().place_has_deref(
                         lo.place,
                     ) {
@@ -1394,14 +1390,6 @@ extend Solver {
                     if !self.kind_conflicts(&lo, &ac) {
                         continue;
                     }
-                    if lo.pin && (ac.kind == bf::ACC_MOVE || ac.kind == bf::ACC_FREE) && self.body().places.at(
-                        ac.place as usize,
-                    ).proj_len == 0 {
-                        // Element views ride a whole-container move (heap storage is stable):
-                        // the walk accepts this, so the pin must too.
-                        continue;
-                    }
-
                     if !bf::places_conflict(self.body(), lo.place, ac.place) {
                         continue;
                     }
@@ -1496,10 +1484,6 @@ extend Solver {
             let lo = *f.loans.at(li);
             if lo.view {
                 // A borrow OF a view chains to the view's own origin, not local storage.
-                continue;
-            }
-            if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
-                // A moved container carries its pinned views with it.
                 continue;
             }
             let pl = *bd.places.at(lo.place as usize);

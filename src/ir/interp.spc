@@ -2152,14 +2152,15 @@ extend Interp {
                     unsafe (*self.obj_ptr(id)).at[gi as usize] = gt2;
                 }
             }
+            // The fields take the arguments as the frame binds them: a generic body zeroes `W<T>`.
             let mut zam: [ModuleId; OBJ_ARGS] = [[0] = 0];
             let mut zat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
             let mut zn: u8 = 0;
             if has_inst {
                 zn = inst.n;
                 for gi in 0..zn {
-                    unsafe zam[gi as usize] = m;
-                    unsafe zat[gi as usize] = unsafe inst.args[gi as usize];
+                    unsafe zam[gi as usize] = unsafe (*self.obj_ptr(id)).am[gi as usize];
+                    unsafe zat[gi as usize] = unsafe (*self.obj_ptr(id)).at[gi as usize];
                 }
             }
             let mut si: usize = 0;
@@ -5521,8 +5522,8 @@ extend Interp {
         let da = unsafe &*self.p().module_ast_const(fm);
         if da.type_valid(ft) {
             let y = *da.type_at(ft);
-            if y.arr_sym() {
-                // a symbolic length folds through the decl's own parameter bindings
+            if y.arr_sym() || y.kind == TypeKind::TYPE_ARRAY && da.type_at(y.as_data.arr.elem).kind == TypeKind::TYPE_GENERIC {
+                // a symbolic length or a generic element folds through the decl's own parameter bindings
                 let a0 = unsafe &*self.p().module_ast_const(dm);
                 let nlen = self.arr_count(fm, &y, dm, dn, nargs, am, at);
                 if nlen <= 0 {

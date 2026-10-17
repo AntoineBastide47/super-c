@@ -523,7 +523,7 @@ and `remez.spc` (minimax fits). Build each in release and run it from the reposi
 
 ```sh
 ./super-c release tools/simd_math                          # simd-math-gen
-tools/simd_math/build/release/simd-math-gen                # rewrites std/simd/math/coeffs_*.spc
+tools/simd_math/build/release/simd-math-gen                # rewrites std/simd/math/coeffs_f32.spc and coeffs_f64.spc
 ./super-c release tools/simd_math --bin=simd-math-check
 tools/simd_math/build/release-bin-simd-math-check/simd-math-check --write   # the full check
 ./super-c release tools/simd_math --bin=simd-math-bench

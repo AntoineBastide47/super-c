@@ -1586,7 +1586,6 @@ extend Bce {
                             lp_bg: lp.bg,
                             lp_pg: lp.pg,
                             lp_fg: lp.fg,
-                            lp_fg: lp.fg,
                         },
                     );
                 }

@@ -99,7 +99,7 @@
         },
         {
           "name": "keyword.other.super-c",
-          "match": "\\b(fn|let|mut|pub|const|static|struct|enum|union|interface|extend|extern|import|type|unsafe|move|new|dyn|as|sizeof|alignof|static_assert|va_arg|va_end|va_start)\\b"
+          "match": "\\b(fn|let|mut|pub|const|static|struct|enum|union|interface|extend|extern|import|type|unsafe|move|dyn|as|sizeof|alignof|static_assert|va_arg|va_end|va_start)\\b"
         },
         {
           "name": "constant.language.super-c",

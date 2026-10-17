@@ -57,10 +57,10 @@ struct Row {
 }
 
 /// The pattern-compiler context for one match: pools + budget.
-pub struct PatCx {
+pub struct PatCx<'a> {
     pub pkg: *const loader::Package,
     pub f: facts::TypedFacts,
-    pub src: str<'static>,
+    pub src: str<'a>,
     pub pats: Vector<NPat>,
     pub subs: Vector<u32>, // flat sub-pattern id pool
     cols: Vector<u32>, // flat row storage (NPat ids)
@@ -222,9 +222,9 @@ struct ChildAlts {
     pub cursor: u32,
 }
 
-extend PatCx {
+extend<'a> PatCx<'a> {
     /// A pattern context over module `ast` of `pkg` (both must outlive it) with empty pools.
-    pub fn new(pkg: *const loader::Package, ast: *const Ast, src: str) PatCx {
+    pub fn new(pkg: *const loader::Package, ast: *const Ast, src: str<'a>) Self {
         return PatCx {
             pkg: pkg,
             f: facts::TypedFacts::of(ast),

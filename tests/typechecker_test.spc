@@ -162,9 +162,10 @@ fn errors() {
         "initialized on every branch before read",
         "fn main() i32 { let mut x: i32; if true { x = 5; } else { x = 6; } return x; }\n",
     );
-    h::expect_ok(
-        "address of uninitialized buffer is not a read",
+    h::expect_err_msg(
+        "a borrow of an uninitialized buffer reads it",
         "extern \"C\" { fn memset(p: *mut char, c: i32, n: usize) i32; }\nfn main() i32 { let mut buf: [char; 8]; unsafe memset(&mut buf[0], 0, 8); return 0; }\n",
+        "use of possibly uninitialized value",
     );
     h::expect_err_msg("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
     h::expect_err_msg(
@@ -506,7 +507,12 @@ fn ffi() {
     );
     h::expect_ok(
         "defined variadic ok",
+        "fn s(n: i32, ...) i32 { let mut ap: va_list; va_start(ap, n); let v: i32 = unsafe va_arg(ap, i32); va_end(ap); return v; }\n",
+    );
+    h::expect_err_msg(
+        "va_arg needs unsafe",
         "fn s(n: i32, ...) i32 { let mut ap: va_list; va_start(ap, n); let v: i32 = va_arg(ap, i32); va_end(ap); return v; }\n",
+        "reading a variadic argument with 'va_arg' requires an 'unsafe' block",
     );
     h::expect_err_msg("variadic needs a fixed param", "fn f(...) i32 { return 0; }\n", "at least one fixed parameter");
     h::expect_err_msg("va_arg needs a va_list", "fn f(n: i32) i32 { return va_arg(n, i32); }\n", "expected a 'va_list'");
@@ -3896,8 +3902,8 @@ fn static_region() {
     );
     h::expect_err_msg(
         "a signature lifetime does not outlive 'static",
-        "struct Slot { pub r: &'static i32 }\nfn put<'a>(s: &mut Slot, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let s = Slot { r: &a };\n    return *s.r - 1;\n}\n",
-        "stored into caller-visible data",
+        "struct Slot { pub r: &'static i32 }\nfn put<'a>(s: &mut Slot, x: &'a i32) { s.r = x; }\nconst K: i32 = 1;\nfn main() i32 {\n    let s = Slot { r: &K };\n    return *s.r - 1;\n}\n",
+        "this argument's lifetime is not declared to outlive 'static",
     );
 }
 
@@ -4026,7 +4032,7 @@ fn undeclared_lifetime_rejected() {
     );
     h::expect_ok(
         "declared, extend, `for<..>`, 'static and '_ lifetimes resolve",
-        "struct S<'a> { pub r: &'a u8 }\nextend<'a> S<'a> {\n    fn get(self: &Self) &'a u8 { return self.r; }\n    fn m<'c>(self: &Self, x: &'c u8) &'c u8 { let _ = self; return x; }\n}\nfn st(x: &'static u8) &'static u8 { return x; }\nfn un(x: &'_ u8) &'_ u8 { return x; }\nfn hr<F>(f: F) where F: for<'q> fn(&'q u8) &'q u8 { let _ = f; }\nfn lb<'x, 'y: 'x>(a: &'x u8, b: &'y u8) { let _ = a; let _ = b; }\nfn main() i32 {\n    let v: u8 = 1;\n    let s = S { r: &v };\n    let _ = s.get();\n    let _ = s.m(&v);\n    let _ = st;\n    let _ = un(&v);\n    return 0;\n}\n",
+        "struct S<'a> { pub r: &'a u8 }\nextend<'a> S<'a> {\n    fn get(self: &Self) &'a u8 { return self.r; }\n    fn m<'c>(self: &Self, x: &'c u8) &'c u8 { let _ = self; return x; }\n}\nfn st(x: &'static u8) &'static u8 { return x; }\nfn un(x: &'_ u8) &'_ u8 { return x; }\nfn hr<F>(f: F) where F: for<'q> fn(&'q u8) &'q u8 { let _ = f; }\nfn lb<'x, 'y: 'x>(a: &'x u8, b: &'y u8) { let _ = a; let _ = b; }\nconst K: u8 = 2;\nfn main() i32 {\n    let v: u8 = 1;\n    let s = S { r: &v };\n    let _ = s.get();\n    let _ = s.m(&v);\n    let _ = st(&K);\n    let _ = un(&v);\n    return 0;\n}\n",
     );
 }
 
@@ -4212,7 +4218,7 @@ fn static_parameter_borrows() {
     h::expect_err_msg(
         "a local's borrow passed as `&'static`",
         "fn keep(r: &'static u8) { let _ = r; }\nfn main() i32 {\n    let x = 1u8;\n    keep(&x);\n    return 0;\n}\n",
-        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:4:10",
+        "error: borrowed value does not live long enough: this value must satisfy 'static\n--> <harness>:4:10",
     );
     h::expect_err_msg(
         "a parameter's region passed as `&'static`",
@@ -4222,7 +4228,7 @@ fn static_parameter_borrows() {
     h::expect_err_msg(
         "a local's borrow behind a `'static` position",
         "fn keep(v: &Vector<&'static u8>) { let _ = v; }\nfn main() i32 {\n    let a = 1u8;\n    let mut v = Vector::<&u8>::new();\n    v.push(&a);\n    keep(&v);\n    return 0;\n}\n",
-        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:5:12",
+        "error: borrowed value does not live long enough: this value must satisfy 'static\n--> <harness>:5:12",
     );
     h::expect_exit(
         "a constant's and a static's borrows are 'static",
@@ -4317,7 +4323,7 @@ fn static_receiver_autoref() {
     h::expect_err_msg(
         "a local's implicit autoref for a `&'static` receiver",
         "struct S { pub v: i32 }\nextend S {\n    pub fn k(self: &'static Self) i32 { return self.v; }\n}\nfn main() i32 {\n    let s = S { v: 3 };\n    return s.k();\n}\n",
-        "error: borrowed value does not live long enough: this argument must satisfy 'static\n--> <harness>:7:12",
+        "error: borrowed value does not live long enough: this value must satisfy 'static\n--> <harness>:7:12",
     );
     h::expect_exit(
         "a constant receiver and a `&'static` reference",
@@ -4422,6 +4428,145 @@ fn region_outlives_transitive() {
         "no declared relationship between the lifetimes is still rejected",
         "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'c>(s: &mut Slot<'c>, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut s = Slot::<i32> { r: &a };\n    put(&mut s, &a);\n    return *s.r - 1;\n}\n",
         "stored into caller-visible data",
+    );
+}
+
+// A call follows the outlives bounds the callee declares (`'b: 'a`) as it follows a shared lifetime
+// name, and the bounds its parameter types imply (`S<'x>` of `struct S<'a: 'static>` makes 'x 'static):
+// a store, a returned borrow, or a `'static` requirement the bound licenses binds the caller too.
+@test
+fn call_site_outlives_bounds() {
+    h::expect_err_msg(
+        "a 'b: 'a store through a &mut argument",
+        "fn put<'a, 'b: 'a>(x: &mut &'a i32, y: &'b i32) { *x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    {\n        let l = Box::<i32>::new(52);\n        put(&mut out, &*l);\n    }\n    return *out;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a 'b: 'a return",
+        "fn pass<'a, 'b: 'a>(x: &'b i32) &'a i32 { return x; }\nfn main() i32 {\n    let r: &i32;\n    {\n        let l = Box::<i32>::new(52);\n        r = pass(&*l);\n    }\n    return *r;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a tie through a tuple parameter",
+        "fn put<'a>(x: &mut &'a i32, y: (&'a i32, i32)) { *x = y.0; }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    {\n        let l = Box::<i32>::new(52);\n        put(&mut out, (&*l, 1));\n    }\n    return *out;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a lifetime parameter bounded by 'static",
+        "fn keep<'a: 'static>(x: &'a i32) { let _ = x; }\nfn main() i32 {\n    let l = Box::<i32>::new(52);\n    keep(&*l);\n    return 0;\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "'static implied by a parameter's struct type",
+        "struct S<'a: 'static> { pub r: &'a i32 }\nfn set<'x>(s: &mut S<'x>, v: &'x i32) { s.r = v; }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut s = S { r: &K };\n    let l = Box::<i32>::new(52);\n    set(&mut s, &*l);\n    return *s.r;\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_ok(
+        "a 'b: 'a store whose argument outlives the target",
+        "fn put<'a, 'b: 'a>(x: &mut &'a i32, y: &'b i32) { *x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let l = Box::<i32>::new(52);\n    let mut out: &i32 = &K;\n    put(&mut out, &*l);\n    return *out - 52;\n}\n",
+    );
+}
+
+// A struct's own bounds bind every value of it (rust-lang/rust#164250). `T: 'static` makes an argument
+// that holds a borrow ill-formed, as for a function's argument. A member whose type names `'static`, or
+// a lifetime the struct bounds by it, takes only `'static` borrows, at construction and at any later
+// store. A member naming a lifetime the struct declares to outlive another (`'b: 'a`) may be stored on
+// through the struct's references (its `Free` may do so), so it must outlive what they reach.
+@test
+fn struct_outlives_bounds() {
+    h::expect_err_msg(
+        "a borrow for T: 'static",
+        "struct Q<T: 'static> { pub v: T }\nfn main() i32 {\n    let a = 1;\n    let q = Q::<&i32> { v: &a };\n    return *q.v - 1;\n}\n",
+        "does not satisfy bound ''static'",
+    );
+    h::expect_err_msg(
+        "a borrow for T: 'static, inferred by a tuple-struct constructor",
+        "struct Q<T: 'static>(Option<T>);\nfn main() i32 {\n    let l = 1;\n    let q = Q(Option::<&i32>::Some(&l));\n    let _ = q;\n    return 0;\n}\n",
+        "does not satisfy bound ''static'",
+    );
+    h::expect_err_msg(
+        "an unbounded type parameter for T: 'static",
+        "struct Q<T: 'static> { pub v: T }\nfn wrap<U>(u: U) Q<U> { return Q { v: u }; }\nfn main() i32 {\n    return wrap(1).v - 1;\n}\n",
+        "does not satisfy bound ''static'",
+    );
+    h::expect_ok(
+        "owned values and 'static-bounded parameters for T: 'static",
+        "struct Q<T: 'static> { pub v: T }\nfn wrap<U: 'static>(u: U) Q<U> { return Q { v: u }; }\nfn main() i32 {\n    let q = Q { v: 5 };\n    return q.v + wrap(1).v - 6;\n}\n",
+    );
+    h::expect_err_msg(
+        "a later store into a member of a 'a: 'static struct",
+        "struct Q<'a: 'static>(Option<&'a String>);\nfn main() i32 {\n    let l = String::from_str(\"abc\");\n    let mut q = Q(Option::<&String>::None);\n    q.0 = Option::<&String>::Some(&l);\n    return 0;\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a local borrow in a 'static field",
+        "struct S { pub r: &'static i32 }\nfn main() i32 {\n    let a = 1;\n    let s = S { r: &a };\n    return *s.r - 1;\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a 'b: 'a member stored later, then on through the struct's reference",
+        "struct M<'a, 'b: 'a, 'c>(&'c mut str<'a>, str<'b>);\nextend<'a, 'b: 'a, 'c> M<'a, 'b, 'c> as Free {\n    fn free(self: &mut Self) { *self.0 = self.1; }\n}\nfn main() i32 {\n    let mut out = \"rarw\";\n    {\n        let l = String::from_str(\"some cool string\");\n        let mut q = M(&mut out, \"\");\n        q.1 = l.as_str();\n    }\n    return out.len() as i32;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a 'b: 'a member given at construction",
+        "struct M<'a, 'b: 'a, 'c>(&'c mut str<'a>, str<'b>);\nextend<'a, 'b: 'a, 'c> M<'a, 'b, 'c> as Free {\n    fn free(self: &mut Self) { *self.0 = self.1; }\n}\nfn main() i32 {\n    let mut out = \"rarw\";\n    {\n        let l = String::from_str(\"some cool string\");\n        let q = M(&mut out, l.as_str());\n    }\n    return out.len() as i32;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_ok(
+        "a 'b: 'a member that outlives the target",
+        "struct M<'a, 'b: 'a, 'c>(&'c mut str<'a>, str<'b>);\nextend<'a, 'b: 'a, 'c> M<'a, 'b, 'c> as Free {\n    fn free(self: &mut Self) { *self.0 = self.1; }\n}\nfn main() i32 {\n    let l = String::from_str(\"some cool string\");\n    let mut out = \"rarw\";\n    {\n        let q = M(&mut out, l.as_str());\n    }\n    return out.len() as i32 - 16;\n}\n",
+    );
+    h::expect_err_msg(
+        "a store through a member's &mut without the bound",
+        "struct M<'a, 'b, 'c>(&'c mut str<'a>, str<'b>);\nextend<'a, 'b, 'c> M<'a, 'b, 'c> as Free {\n    fn free(self: &mut Self) { *self.0 = self.1; }\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a store through a named field's &mut",
+        "struct P<'a, 'b> { pub x: &'a mut &'a i32, pub y: &'b i32 }\nfn h<'a, 'b>(p: &mut P<'a, 'b>) { *p.x = p.y; }\nfn main() i32 {\n    return 0;\n}\n",
+        "stored into caller-visible data",
+    );
+}
+
+// A function value is called through a function type, which takes its arguments at any lifetime. A
+// function whose parameter must be `'static`, or whose body may store one parameter into another's
+// pointee, is no such value; a closure parameter names no lifetime, and a closure stores no argument
+// into a capture.
+@test
+fn function_values_take_any_lifetime() {
+    h::expect_err_msg(
+        "a 'static parameter",
+        "fn keep(s: &'static i32) { let _ = s; }\nfn main() i32 {\n    let f: fn(&i32) = keep;\n    let _ = f;\n    return 0;\n}\n",
+        "'keep' cannot be used as a value: parameter 1 must be 'static",
+    );
+    h::expect_err_msg(
+        "a lifetime shared with a &mut parameter's pointee",
+        "fn put<'a>(x: &mut &'a i32, y: &'a i32) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut &i32, &i32) = put;\n    let _ = f;\n    return 0;\n}\n",
+        "'put' cannot be used as a value: parameter 2 may be stored into parameter 1",
+    );
+    h::expect_err_msg(
+        "a type parameter bound to a borrow",
+        "fn put<T>(x: &mut T, y: T) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut &i32, &i32) = put::<&i32>;\n    let _ = f;\n    return 0;\n}\n",
+        "'put' cannot be used as a value: parameter 2 may be stored into parameter 1",
+    );
+    h::expect_ok(
+        "a type parameter bound to a value without borrows",
+        "fn put<T>(x: &mut T, y: T) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut i32, i32) = put::<i32>;\n    let mut a = 0;\n    f(&mut a, 3);\n    return a - 3;\n}\n",
+    );
+    h::expect_resolve_err_msg(
+        "a closure parameter naming 'static",
+        "fn main() i32 {\n    let c = |s: &'static i32| *s;\n    let _ = c;\n    return 0;\n}\n",
+        "a closure parameter cannot name lifetime `'static`",
+    );
+    h::expect_err_msg(
+        "a closure argument stored into a capture",
+        "const K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    let mut c = |x: &i32| { out = x; };\n    let l = 5;\n    c(&l);\n    return *out;\n}\n",
+        "a closure argument is stored where it must outlive the closure",
+    );
+    h::expect_ok(
+        "a closure reading its argument into a capture's value",
+        "fn main() i32 {\n    let a = 5;\n    let mut sum = 0;\n    let mut d = |x: &i32| { sum += *x; };\n    d(&a);\n    return sum - 5;\n}\n",
     );
 }
 
@@ -5303,6 +5448,11 @@ fn more_rejection_messages() {
         "owning static mut",
         "static mut G: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n",
         "a 'static mut' cannot hold an owning (Free) type",
+    );
+    // A reference never owns its referent, also as a `Free`-bounded type argument.
+    h::expect_ok(
+        "static mut of an Option of a reference to an owning type",
+        "static mut G: Option<&'static String> = Option::<&'static String>::None;\nfn main() i32 { return 0; }\n",
     );
     h::expect_err_msg(
         "non-formattable argument",
@@ -6614,7 +6764,7 @@ fn aggregate_generic_argument_counts() {
     h::expect_ok(
         "a default fills the rest; a literal infers a bare name",
         format(
-            "{}fn f(d: D<u8>) i32 {{ return d.b; }}\nfn main() i32 {{ let p = P {{ v: 1 }}; let b = new P {{ v: 2 }}; return p.v + unsafe (*b).v + f(D::<u8> {{ a: 1, b: 2 }}); }}\n",
+            "{}fn f(d: D<u8>) i32 {{ return d.b; }}\nfn main() i32 {{ let p = P {{ v: 1 }}; return p.v + f(D::<u8> {{ a: 1, b: 2 }}); }}\n",
             HEAD,
         ).as_str(),
     );
@@ -6782,5 +6932,395 @@ fn whole_value_writes_through_self_fold() {
         "a write through *self reaches the caller",
         "struct C {\n    pub v: u64,\n}\nextend C {\n    fn bump(self: &mut C, by: u64) {\n        *self = C { v: self.v + by };\n    }\n}\nextend<const W: usize> UInt<W> {\n    fn add_shift(self: &mut UInt<W>, low: &UInt<W>) {\n        *self = self.wrapping_add(low).shl(1);\n    }\n}\nfn whole(a: u64) u64 {\n    let mut c = C { v: a };\n    c.bump(10);\n    let mut x = UInt::<240>::one();\n    let y = UInt::<240>::from_u64(a);\n    x.add_shift(&y);\n    return c.v * 100 + x.limb(0);\n}\nstatic_assert(whole(5) == 1512);\nfn main() i32 {\n    return whole(5) as i32 - 1512;\n}\n",
         0,
+    );
+}
+
+// Every borrow reads the place's current value: a `&mut` of a moved or uninitialized place is a use
+// of it, so its holder cannot read or drop stale bytes. An index operand that moves the indexed
+// value leaves the access a use of a moved value.
+@test
+fn mut_borrow_requires_init() {
+    h::expect_err_msg(
+        "`&mut` of a moved value",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    let m = v;\n    let r = &mut v;\n    r.push(1);\n    return m.len() as i32;\n}\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "`&mut` of an uninitialized value",
+        "fn get(p: &mut bool) bool { return *p; }\nfn main() i32 {\n    let mut b: bool;\n    return get(&mut b) as i32;\n}\n",
+        "use of possibly uninitialized value",
+    );
+    h::expect_err_msg(
+        "an index operand moves the indexed vector",
+        "fn main() i32 {\n    let mut row = Vector::<i32>::new();\n    row.push(42);\n    let mut arr = Vector::<Vector<i32>>::new();\n    arr.push(row);\n    let alias = &mut arr[0][switch 0 { _ => { let moved = arr; 0usize; } }];\n    return *alias;\n}\n",
+        "use of moved value",
+    );
+}
+
+@test
+fn struct_literal_duplicate_field() {
+    h::expect_err_msg(
+        "a field initialized twice",
+        "struct P { pub a: i32, pub b: i32 }\nfn main() i32 {\n    let p = P { a: 1, b: 2, b: 3 };\n    return p.a + p.b;\n}\n",
+        "field 'b' is initialized twice",
+    );
+}
+
+// An omitted struct-literal field is zero-filled, so its type must have an all-zero value: scalars,
+// raw pointers, payload-free enums with implicit discriminants, the prelude containers, and structs of
+// such whose fields are visible. A reference, a function, a Box (private fields) or an enum with a
+// payload is rejected.
+@test
+fn struct_literal_omitted_fields() {
+    h::expect_ok(
+        "zero-valid omitted fields",
+        "enum K { A, B }\nstruct P { pub a: i32, pub p: *const u8, pub k: K, pub v: Vector<i32>, pub s: String, pub m: Map<u32, u32>, pub x: [u64; 4] }\nfn main() i32 {\n    let p = P { a: 1 };\n    return p.a + p.v.len() as i32;\n}\n",
+    );
+    h::expect_err_msg(
+        "an omitted reference field",
+        "struct P { pub a: i32, pub r: &'static i32 }\nfn main() i32 {\n    let p = P { a: 1 };\n    return *p.r;\n}\n",
+        "missing field 'r'",
+    );
+    h::expect_err_msg(
+        "an omitted function field",
+        "struct P { pub a: i32, pub f: fn() i32 }\nfn main() i32 {\n    let p = P { a: 1 };\n    return (p.f)();\n}\n",
+        "missing field 'f'",
+    );
+    h::expect_err_msg(
+        "a Box built without its private fields",
+        "fn main() i32 {\n    let b = Box::<i32> {};\n    return *b;\n}\n",
+        "missing field 'ptr'",
+    );
+    h::expect_err_msg(
+        "an omitted enum with a payload",
+        "struct P { pub a: i32, pub q: Option<&'static i32> }\nfn main() i32 {\n    let p = P { a: 1 };\n    return p.a;\n}\n",
+        "missing field 'q'",
+    );
+}
+
+// A value read through a reference reaches its store whole: a `str<'b>` (no field names its lifetime)
+// stored through a `&mut str<'a>` needs `'b: 'a`.
+@test
+fn store_of_a_view_through_a_reference() {
+    h::expect_err_msg(
+        "a str stored through a &mut str",
+        "fn f<'a, 'b>(x: &mut str<'a>, y: &str<'b>) { *x = *y; }\nfn main() i32 {\n    return 0;\n}\n",
+        "stored into caller-visible data",
+    );
+    h::expect_ok(
+        "a str stored through a &mut str under 'b: 'a",
+        "fn f<'a, 'b: 'a>(x: &mut str<'a>, y: &str<'b>) { *x = *y; }\nfn main() i32 {\n    let mut s = \"ab\";\n    let t = \"xyz\";\n    f(&mut s, &t);\n    return s.len() as i32 - 3;\n}\n",
+    );
+}
+
+// A field read through a user Deref (`b.v` on a Box) borrows the referent: moving the Box while the
+// field's borrow lives is rejected.
+@test
+fn deref_field_borrow_holds_owner() {
+    h::expect_err_msg(
+        "move of a Box under a field borrow",
+        "struct P { pub v: i32 }\nfn drop_it(b: Box<P>) { let _ = b; }\nfn main() i32 {\n    let b = Box::<P>::new(P { v: 52 });\n    let x = &b.v;\n    drop_it(b);\n    return *x;\n}\n",
+        "cannot move this value while it is borrowed",
+    );
+}
+
+// A store through several `&mut` levels lands in the storage the last one reaches: directly
+// (`**mm = v`), through a struct's `&mut` member, and through a callee storing into `**x`.
+@test
+fn deep_reference_stores() {
+    h::expect_err_msg(
+        "a store through `**mm`",
+        "const K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    let mut m = &mut out;\n    let mm = &mut m;\n    {\n        let b = Box::<i32>::new(52);\n        **mm = &*b;\n    }\n    return *out;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a store through a member's `&mut` reached by `&mut`",
+        "struct H<'a, 'b> { pub r: &'b mut &'a i32 }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    let mut h = H { r: &mut out };\n    let hr = &mut h;\n    {\n        let b = Box::<i32>::new(52);\n        *hr.r = &*b;\n    }\n    return *out;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a callee storing into `**x`",
+        "fn put<'a, 'b, 'c>(x: &'c mut &'b mut &'a i32, y: &'a i32) { **x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    let mut m = &mut out;\n    {\n        let b = Box::<i32>::new(52);\n        put(&mut m, &*b);\n    }\n    return *out;\n}\n",
+        "destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_exit(
+        "a deep store of a long enough borrow",
+        "fn put<'a, 'b, 'c>(x: &'c mut &'b mut &'a i32, y: &'a i32) { **x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut out: &i32 = &K;\n    let mut m = &mut out;\n    put(&mut m, &*b);\n    let mm = &mut m;\n    **mm = &*b;\n    return *out - 52;\n}\n",
+        0,
+    );
+}
+
+// A conformance may store an interface's lifetime and type parameters in `Self`: a call through
+// `dyn` or a generic bound stores the arguments those parameters type into the receiver, as the
+// direct call does. A generic body storing through its bound stays legal.
+@test
+fn interface_call_stores() {
+    let decls = "interface Put<'a> { fn put(self: &mut Self, x: &'a i32); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\n";
+    let mut s1 = String::from_str(decls);
+    s1.push_str(
+        "fn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
+    );
+    h::expect_err_msg("a store through `&mut dyn`", s1.as_str(), "destroyed at the end of this block");
+    let mut s2 = String::from_str(decls);
+    s2.push_str(
+        "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let b = Box::<i32>::new(52);\n        call(&mut h, &*b);\n    }\n    return h.get();\n}\n",
+    );
+    h::expect_err_msg("a store through a generic bound", s2.as_str(), "destroyed at the end of this block");
+    let mut s3 = String::from_str(decls);
+    s3.push_str(
+        "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut h = H { r: &K };\n    call(&mut h, &*b);\n    let d: &mut dyn Put = &mut h;\n    d.put(&*b);\n    return h.get() - 52;\n}\n",
+    );
+    h::expect_exit("stores of long enough borrows", s3.as_str(), 0);
+    h::expect_err_msg(
+        "a store through `&mut dyn Put<&i32>`",
+        "interface Put<X> { fn put(self: &mut Self, x: X); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<&'a i32> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put<&i32> = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
+        "destroyed at the end of this block",
+    );
+}
+
+// An owned `dyn I` in a signature is `dyn I + 'static`: a `Box<dyn ..>` returned or passed on holds
+// only `'static` borrows, and a `'static` bound (`launch`) rejects one holding a local borrow. Inside
+// one function a boxed closure may still borrow a local.
+@test
+fn owned_dyn_is_static_at_boundaries() {
+    h::expect_err_msg(
+        "a returned boxed closure borrowing a parameter",
+        "fn yikes(x: &Box<i32>) Box<dyn fn() i32> {\n    return Box::new(|| **x);\n}\nfn main() i32 {\n    let t = Box::<i32>::new(52);\n    let c = yikes(&t);\n    return c() - 52;\n}\n",
+        "the returned value's lifetime is not declared to outlive the return type's lifetime",
+    );
+    h::expect_err_msg(
+        "a returned interface object borrowing a parameter",
+        "interface Get { fn get(self: &Self) i32; }\nstruct Ref<'a> { pub r: &'a Box<i32> }\nextend<'a> Ref<'a> as Get { fn get(self: &Self) i32 { return **self.r; } }\nfn mk(x: &Box<i32>) Box<dyn Get> {\n    return Box::new(Ref { r: x });\n}\nfn main() i32 {\n    let t = Box::<i32>::new(52);\n    let c = mk(&t);\n    return c.get() - 52;\n}\n",
+        "the returned value's lifetime is not declared to outlive the return type's lifetime",
+    );
+    h::expect_err_msg(
+        "a 'static bound on a value holding a borrowing interface object",
+        "interface Show { fn show(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Show { fn show(self: &Self) i32 { return *self.r; } }\nfn keep<F: fn() i32 + 'static>(f: F) i32 { return f(); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let d: Box<dyn Show> = Box::<H>::new(H { r: &*b });\n    return keep(move || d.show()) - 52;\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_exit(
+        "a local boxed closure borrowing a local",
+        "fn main() i32 {\n    let a = 10;\n    let ra = &a;\n    let g: Box<dyn fn() i32> = Box::new(|| *ra);\n    return g() - 10;\n}\n",
+        0,
+    );
+}
+
+// A closure takes its arguments at any lifetime: storing one argument into another's referent is
+// rejected, and a closure whose body names an enclosing function's lifetime holds that region.
+@test
+fn closure_argument_and_lifetime_regions() {
+    h::expect_err_msg(
+        "a closure storing one argument into another",
+        "fn main() i32 {\n    let mut out: Option<&Box<i32>> = Option::<&Box<i32>>::None;\n    let c = |x: &Box<i32>, o: &mut Option<&Box<i32>>| { *o = Option::<&Box<i32>>::Some(x); };\n    let b = Box::<i32>::new(52);\n    c(&b, &mut out);\n    return 0;\n}\n",
+        "a closure argument is stored where it must outlive the closure",
+    );
+    h::expect_err_msg(
+        "a returned closure naming the caller's lifetime",
+        "static mut S: *const Box<i32> = null;\nunsafe fn get<'a>() &'a Box<i32> { return unsafe &*S; }\nfn yikes<'a>(x: &'a Box<i32>) Box<dyn fn() i32> {\n    unsafe { S = x; }\n    return Box::new(fn() i32 {\n        let p: &'a Box<i32> = unsafe get();\n        return **p;\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "the returned value's lifetime is not declared to outlive the return type's lifetime",
+    );
+}
+
+// A type argument kept behind an `UnsafeCell` is invariant: a shared reference may store values of
+// it (`Sender::send`, a `Mutex` guard), and the values tied through it (a channel and its endpoints)
+// share what is stored, whichever endpoint stores or reads.
+@test
+fn interior_mutability_stores() {
+    h::expect_build_err(
+        "a short borrow sent, read from the receiver after the sender is gone",
+        "import std::parallel::channel as *;\nfn main() i32 {\n    let ch = Channel::<&i32>::unbounded();\n    let rx = ch.receiver();\n    {\n        let b = Box::<i32>::new(52);\n        let tx = ch.sender();\n        let _ = tx.send(&*b);\n    }\n    let r = rx.recv().unwrap();\n    return *r;\n}\n",
+        "destroyed at the end of this block",
+    );
+    h::expect_build_err(
+        "a short borrow pushed through a mutex guard",
+        "import std::parallel::sync as *;\nfn main() i32 {\n    let m = Mutex::<Vector<&i32>>::new(Vector::<&i32>::new());\n    {\n        let b = Box::<i32>::new(52);\n        let mut g = m.lock();\n        g.push(&*b);\n    }\n    let g = m.lock();\n    return **g.at(0);\n}\n",
+        "destroyed at the end of this block",
+    );
+    h::expect_run(
+        "long enough borrows through a channel and a mutex",
+        "import std::parallel::channel as *;\nimport std::parallel::sync as *;\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let ch = Channel::<&i32>::unbounded();\n    let rx = ch.receiver();\n    let tx = ch.sender();\n    let _ = tx.send(&*b);\n    let r = rx.recv().unwrap();\n    let m = Mutex::<Vector<&i32>>::new(Vector::<&i32>::new());\n    {\n        let mut g = m.lock();\n        g.push(r);\n    }\n    let g = m.lock();\n    return **g.at(0) - 52;\n}\n",
+        "",
+        "",
+    );
+}
+
+// A map's and a set's iterators borrow the collection: they cannot outlive it or see it grow.
+@test
+fn map_iterators_borrow_the_map() {
+    h::expect_err_msg(
+        "a values iterator outliving its map",
+        "fn main() i32 {\n    let mut it: MapValues<i32>;\n    {\n        let mut m = Map::<i32, i32>::new();\n        m.insert(3, 4);\n        it = m.values();\n    }\n    let mut t = 0;\n    while let Some(k) = it.next() { t += *k; }\n    return t;\n}\n",
+        "destroyed at the end of this block",
+    );
+    h::expect_err_msg(
+        "inserting while a keys iterator lives",
+        "fn main(args: Vector<str>) i32 {\n    let mut m = Map::<u8, i32>::new();\n    m.insert(1, 2);\n    let mut it = m.keys();\n    for i in 0..args.len() { m.insert(i as u8, 0); }\n    let mut t = 0;\n    while let Some(k) = it.next() { t += *k as i32; }\n    return t;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "a set iterator returned from its set's function",
+        "fn mk() MapKeys<i32> { let mut s = Set::<i32>::new(); s.insert(5); return s.iter(); }\nfn main() i32 { return 0; }\n",
+        "missing lifetime specifier",
+    );
+}
+
+// A sub-view of a `[]mut T` reborrows it: the outer view cannot be written or handed on mutably while
+// the sub-view lives.
+@test
+fn mut_view_sub_slices_reborrow() {
+    h::expect_err_msg(
+        "a write through a []mut while its sub-view lives",
+        "fn main() i32 {\n    let mut a: [i32; 4] = [1, 2, 3, 4];\n    let x: []mut i32 = a;\n    let y = x[0..2];\n    x[0] = 9;\n    return y[0];\n}\n",
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a []mut and its shared sub-view passed together",
+        "fn f(x: []mut i32, y: []i32) i32 {\n    x[0] = 9;\n    return y[0];\n}\nfn main() i32 {\n    let mut arr: [i32; 2] = [1, 2];\n    let x: []mut i32 = arr;\n    let y = x[0..2];\n    return f(x, y);\n}\n",
+        "already borrowed as immutable",
+    );
+    h::expect_exit(
+        "a sub-view used before the outer view",
+        "fn main() i32 {\n    let mut a: [i32; 4] = [1, 2, 3, 4];\n    let x: []mut i32 = a;\n    let y = x[1..3];\n    let s = y[0] + y[1];\n    x[0] = s;\n    return x[0] - 5;\n}\n",
+        0,
+    );
+}
+
+// An associated type holds what its conformance's type holds: an extend lifetime it names must be
+// fixed by the target or the interface's arguments, and `T::Output` is `'static` only when `T` is.
+@test
+fn associated_type_lifetimes() {
+    h::expect_err_msg(
+        "an associated type naming an unconstrained extend lifetime",
+        "interface Producer { type Output; }\nstruct P {}\nstruct Ref<'a> { pub r: &'a i32 }\nextend<'a> P as Producer { type Output = Ref<'a>; }\nfn main() i32 { return 0; }\n",
+        "the lifetime 'a of this extend is named by an associated type",
+    );
+    h::expect_err_msg(
+        "a projection passed where 'static is required",
+        "fn keep<U: 'static>(u: U) { let _ = u; }\ninterface Producer { type Output; }\nstruct Ref<'a> { pub r: &'a i32 }\nstruct Q<'a> { pub q: &'a i32 }\nextend<'a> Q<'a> as Producer { type Output = Ref<'a>; }\nfn write_any<T: Producer>(t: T, x: T::Output) { let _ = t; keep(x); }\nfn main() i32 { return 0; }\n",
+        "this value must satisfy 'static",
+    );
+}
+
+// A constant is one value every task reaches: one holding an `UnsafeCell` must be `Sync`.
+@test
+fn interior_mutable_constants() {
+    h::expect_err_msg(
+        "a non-Sync cell constant",
+        "struct MyCell { c: UnsafeCell<i64> }\nextend MyCell {\n    pub const fn new(v: i64) MyCell { return MyCell { c: UnsafeCell::<i64>::new(v) }; }\n}\nconst K: MyCell = MyCell::new(0);\nfn main() i32 { return 0; }\n",
+        "a constant of type 'MyCell' holds an 'UnsafeCell' but is not 'Sync'",
+    );
+    h::expect_ok(
+        "a Sync cell constant",
+        "struct MyCell { c: UnsafeCell<i64> }\nunsafe extend MyCell as Sync {}\nextend MyCell {\n    pub const fn new(v: i64) MyCell { return MyCell { c: UnsafeCell::<i64>::new(v) }; }\n}\nconst K: MyCell = MyCell::new(0);\nfn main() i32 { return 0; }\n",
+    );
+}
+
+// A by-value pattern cannot move an owning part out of a value whose type has a user `free`: that
+// `free` would not run. Without a user `free` the parts move out and the rest drops per part.
+@test
+fn pattern_moves_from_user_free() {
+    h::expect_err_msg(
+        "a struct with a user free destructured by value",
+        "struct H { pub name: String, pub n: i32 }\nextend H as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    };\n    return 0;\n}\n",
+        "cannot move a part out of a value whose type implements Free",
+    );
+    h::expect_err_msg(
+        "an enum with a user free destructured by value",
+        "enum E { S(String), N }\nextend E as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let e = E::S(String::from_str(\"abc\"));\n    switch e {\n        S(s) => drop_it(s),\n        N => {},\n    };\n    return 0;\n}\n",
+        "cannot move a part out of a value whose type implements Free",
+    );
+    h::expect_ok(
+        "a struct without a user free destructured by value",
+        "struct H { pub name: String, pub n: i32 }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    };\n    return 0;\n}\n",
+    );
+}
+
+// `*b` through `deref_mut` needs a mutable binding, and the write claims the Box exclusively.
+@test
+fn box_deref_mut_rules() {
+    h::expect_err_msg(
+        "an immutable Box written through *b",
+        "fn main() i32 {\n    let b = Box::<i32>::new(52);\n    *b = 1;\n    return *b - 1;\n}\n",
+        "cannot assign to this expression",
+    );
+    h::expect_err_msg(
+        "a write through *b while a shared borrow lives",
+        "fn main() i32 {\n    let mut b = Box::<i32>::new(52);\n    let x = &*b;\n    *b = 2;\n    return *x;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
+// A store into a container field of a parameter follows that field's declared element lifetime.
+@test
+fn store_into_parameter_field_container() {
+    h::expect_exit(
+        "a 'a borrow pushed into a Vector<&'a i32> field",
+        "struct H<'a> { pub v: Vector<&'a i32> }\nextend<'a> H<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.v.push(x); }\n}\nfn put2<'a>(h: &mut H<'a>, x: &'a i32) { h.v.push(x); }\nfn main() i32 {\n    let a = 5;\n    let mut h = H { v: Vector::<&i32>::new() };\n    h.put(&a);\n    put2(&mut h, &a);\n    return **h.v.at(0) + **h.v.at(1) - 10;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a 'b borrow pushed into a Vector<&'a i32> field",
+        "struct H<'a> { pub v: Vector<&'a i32> }\nfn put<'a, 'b>(h: &mut H<'a>, x: &'b i32) { h.v.push(x); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+}
+
+@test
+fn array_length_limit_message() {
+    h::expect_err_msg(
+        "an array length past u32::MAX",
+        "fn main() i32 {\n    let a: [u8; 4611686018427387904] = [0; 4611686018427387904];\n    return 0;\n}\n",
+        "array length 4611686018427387904 exceeds the maximum of 4294967295",
+    );
+}
+
+// A field of a `@c.packed` struct may sit at any address: no reference to one that needs an
+// alignment above 1, and no field that its drop would have to reach by reference.
+@test
+fn packed_struct_fields() {
+    h::expect_err_msg(
+        "a reference to a misaligned packed field",
+        "@c.packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let r = &p.v;\n    return (*r - 42) as i32;\n}\n",
+        "cannot borrow a field of a '@c.packed' struct",
+    );
+    h::expect_err_msg(
+        "a packed field needing a free",
+        "@c.packed\nstruct P { pub tag: u8, pub s: String }\nfn main() i32 { return 0; }\n",
+        "a field of a '@c.packed' struct cannot need a 'free'",
+    );
+    h::expect_exit(
+        "packed fields read by value and byte fields by reference",
+        "@c.packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let t = &p.tag;\n    let v = p.v;\n    return (v - 41) as i32 - *t as i32;\n}\n",
+        0,
+    );
+}
+
+// User names stay out of the namespace of generated C symbols, so two types never share one.
+@test
+fn reserved_generated_names() {
+    h::expect_err_msg(
+        "a type named like a pointer's C name",
+        "struct ptrm_A { pub a: f64 }\nfn main() i32 { return 0; }\n",
+        "the name 'ptrm_A' is reserved",
+    );
+    h::expect_err_msg(
+        "a function name with an inner '__'",
+        "fn sz__i32() i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "the name 'sz__i32' is reserved",
+    );
+    h::expect_ok(
+        "leading underscores and plain names",
+        "struct ptrA { pub a: f64 }\nfn __helper() i32 { return 0; }\nfn main() i32 { return __helper(); }\n",
+    );
+}
+
+// No object may be larger than the target's isize::MAX: such a type is reported, an array or an
+// aggregate alike.
+@test
+fn type_size_limit() {
+    h::expect_err_msg(
+        "an array past isize::MAX",
+        "type Row = [u16; 4294967295];\ntype Grid = [Row; 4294967295];\nfn main() i32 {\n    return sizeof(Grid) as i32;\n}\n",
+        "is too large for the target",
     );
 }

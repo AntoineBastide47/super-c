@@ -120,7 +120,7 @@ extend<T, const N: usize> Array<T, N> {
     /// `self` and leaves it owning its elements, so it must not consume them (passing a Free element by
     /// value would free the Array's still-owned copy).
     pub const fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
-        let mut out = Array::<U, N> {};
+        let mut out = unsafe zeroed::<Array<U, N>>(); // every slot is written below before a read
         let p = (&mut unsafe out.data[0]) as *mut U;
         for i in 0..N {
             unsafe p[i] = f(self.at(i));
@@ -149,7 +149,7 @@ extend<T, const N: usize> Array<T, N> {
 extend<T: Default, const N: usize> Array<T, N> {
     /// An array of N default values.
     pub const fn new() Array<T, N> {
-        let mut a = Array::<T, N> {};
+        let mut a = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
         let p = (&mut unsafe a.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = T::default();
@@ -161,7 +161,7 @@ extend<T: Default, const N: usize> Array<T, N> {
 extend<T: Clone, const N: usize> Array<T, N> {
     /// An array of N clones of `x`.
     pub const fn filled(x: &T) Array<T, N> {
-        let mut a = Array::<T, N> {};
+        let mut a = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
         let p = (&mut unsafe a.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = x.clone();
@@ -440,7 +440,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
 extend<T: Clone, const N: usize> Array<T, N> as Clone {
     /// A deep copy whose elements are independent clones.
     pub const fn clone(self: &Array<T, N>) Array<T, N> {
-        let mut out = Array::<T, N> {};
+        let mut out = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
         let p = (&mut unsafe out.data[0]) as *mut T;
         for i in 0..N {
             let e = self.at(i);

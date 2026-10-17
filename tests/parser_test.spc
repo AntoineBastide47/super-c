@@ -83,15 +83,12 @@ fn functions_and_expressions() {
 }
 
 @test
-fn traits_impls_match_and_new() {
-    let src = "interface Factory<T> { type Output; fn make(value: T) Self::Output; }\nextend<T> Box<T> as Factory<T> {\n  type Output = Box<T>;\n  fn make(value: T) Box<T> { return new Box<T> { value: value }; }\n}\nfn classify(c: u8) int {\n  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n}\n";
+fn traits_impls_and_match() {
+    let src = "interface Factory<T> { type Output; fn make(value: T) Self::Output; }\nextend<T> Box<T> as Factory<T> {\n  type Output = Box<T>;\n  fn make(value: T) Box<T> { return Box::<T> { value: value }; }\n}\nfn classify(c: u8) int {\n  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n}\n";
     let c = h::parse_ast(src);
-    assert(c.errors == 0, "interfaces extensions switch and new parses");
+    assert(c.errors == 0, "interfaces extensions and switch parse");
     let root = c.ast.root;
-    assert(
-        c.ast.at_const(root).as_data.program.items.len == 3,
-        "interfaces extensions switch and new: expected 3 items",
-    );
+    assert(c.ast.at_const(root).as_data.program.items.len == 3, "interfaces extensions and switch: expected 3 items");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_INTERFACE, "expected interface");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "expected extension");
     assert(item(&c.ast, 2).kind == NodeKind::NODE_FUNCTION, "expected function");
@@ -785,22 +782,22 @@ fn attribute_constant_expression_errors() {
     h::expect_err_msg(
         "evaluated alignment not a power of two",
         "const W: u32 = 24;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 268435456, found 24",
+        "'@c.align' needs a power of two from 1 to 4096, found 24",
     );
     h::expect_err_msg(
         "literal alignment not a power of two",
         "@c.align(3)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 268435456, found 3",
+        "'@c.align' needs a power of two from 1 to 4096, found 3",
     );
     h::expect_err_msg(
         "zero alignment",
         "@c.align(0)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 268435456, found 0",
+        "'@c.align' needs a power of two from 1 to 4096, found 0",
     );
     h::expect_err_msg(
         "alignment past the limit",
-        "@c.align(536870912)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 268435456, found 536870912",
+        "@c.align(8192)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@c.align' needs a power of two from 1 to 4096, found 8192",
     );
     // The layout reads the value: a declaration checked earlier folds `sizeof` of the aligned one.
     h::expect_ok(

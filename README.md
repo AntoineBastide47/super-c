@@ -311,19 +311,21 @@ let r = (*on_event.at(0))(5);          // 15
 A capturing closure is borrowed as `&dyn fn(..)` with `&f`, or moved into a `Box<dyn fn>`. Generic
 `F: fn(..)` parameters stay the zero-cost default; use `dyn` only where generics cannot help.
 
-### Memory: pointers, references, `new`
+### Memory: pointers and references
 
 ```superc
 fn main() i32 {
-    let p = new i32(41);        // allocate an i32 on the heap: p is a *mut i32
+    let mut x = 41;
+    let p = &mut x as *mut i32; // a raw pointer to x
     unsafe { *p = *p + 1; }     // using a raw pointer requires `unsafe`
     let r: &i32 = unsafe &*p;   // turn the raw pointer into a reference
     return *r;                  // 42 (references need no `unsafe`)
 }
 ```
 
-`*const T` and `*mut T` are raw pointers. `&T` and `&mut T` are references. `new T(expr)` and
-`new T { .. }` allocate. `sizeof(T)` and `alignof(T)` give a type's size and alignment in bytes.
+`*const T` and `*mut T` are raw pointers. `&T` and `&mut T` are references. `Box::<T>::new(v)`
+allocates `v` on the heap and frees it when the box goes out of scope. `sizeof(T)` and `alignof(T)`
+give a type's size and alignment in bytes.
 
 The compiler cannot check raw pointers or C functions. So every raw-pointer operation
 (dereference, indexing, arithmetic, field access) and every call to an `extern "C"` function must
@@ -416,11 +418,15 @@ For cleanup that automatic freeing does not cover, such as a raw pointer or a C 
 runs a statement when the block ends:
 
 ```superc
-extern "C" { fn free(p: *mut void) void; }
+extern "C" {
+    fn malloc(n: usize) *mut void;
+    fn free(p: *mut void) void;
+}
 
 fn main() i32 {
-    let p = new i32(42);
+    let p = unsafe malloc(sizeof(i32)) as *mut i32;
     defer unsafe free(p);   // runs when main returns
+    unsafe *p = 42;
     return unsafe *p;       // the return value is computed before the defer runs
 }
 ```

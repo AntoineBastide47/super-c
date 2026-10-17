@@ -1003,7 +1003,7 @@ extend tc::TypeChecker {
                     let idx = self.tc_capture_index(c, d);
                     // An owning capture the env holds is mutated in place: no `&mut` capture
                     // (the checker already moved any it borrows into mut_caps).
-                    if idx >= 0 && !self.tc_capture_owns(
+                    if idx >= 0 && !self.tc_value_owns(
                         unsafe (*self.cur_ast()).type_of(
                             unsafe (*self.cur_ast()).list(unsafe (*self.cur_ast()).at_const(c).as_data.closure.captures)[idx as usize],
                         ),
@@ -1046,6 +1046,7 @@ extend tc::TypeChecker {
                 ctx.st.tally_ir(bodies.at(b));
             }
             let n0 = out.len();
+            self.bc_fn_values(ow, &bodies.at(b).body, &mut seen, out);
             self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
             if ctx.keep != null {
                 // A rejected body never reaches emission, and its elaboration has no correct
@@ -1054,6 +1055,96 @@ extend tc::TypeChecker {
                 bc_elaborate(ow, ctx, &mut bodies.index_mut(b).body, !rejected);
             }
             ctx.trim_scratch();
+        }
+    }
+
+    // A function named as a value is called through a function type, which takes its arguments at
+    // any lifetime. Report one whose signature needs more: a parameter that must be `'static` (a
+    // lifetime named or bounded so), or a parameter its body may store into another parameter's
+    // pointee (a lifetime, or a type parameter bound to a borrow-holding type, shared with the pointee
+    // of a `&mut` parameter, directly or through a declared bound).
+    fn bc_fn_values(
+        self: &mut Self,
+        ow: &mut bfx::Owner,
+        body: &ir::CoreBody,
+        seen: &mut Vector<u64>,
+        out: &mut Vector<FlowErr>,
+    ) {
+        for c in 0..body.constants.len() {
+            let k = *body.constants.at(c);
+            if k.kind != ir::CK_ITEM || k.item.node == NODE_NONE || ow.ast_of(k.item.module).at_const(k.item.node).kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let fm = k.item.module;
+            let fd = *ow.ast_of(fm).at_const(k.item.node);
+            let ext = ow.ast_of(fm).container_of(k.item.node);
+            let extn = if ext != NODE_NONE && ow.ast_of(fm).at_const(ext).kind == NodeKind::NODE_EXTEND {
+                ext;
+            } else {
+                NODE_NONE;
+            };
+            let rel = ow.callee_rel(k.item);
+            let mut stat = Vector::<u64>::new();
+            ow.rel_static(rel, &mut stat);
+            // The type parameters bound to a type that holds no borrow tie nothing.
+            let gens = fd.as_data.function.generics;
+            let mut inert = Vector::<u64>::new();
+            for g in 0..gens.len.min(k.targ_len()) {
+                let ty = body.targ_pool[(k.targ_start() + g) as usize];
+                if !ow.carries(body.module, ty) {
+                    inert.push(fm as u64 << 32 | (unsafe ow.ast_of(fm).list(gens)[g as usize]) as u64);
+                }
+            }
+            let ps = fd.as_data.function.params;
+            let mut why = String::new();
+            let mut pi = Vector::<u64>::new();
+            let mut pj = Vector::<u64>::new();
+            for i in 0..ps.len {
+                let ptn = ow.ast_of(fm).at_const(unsafe ow.ast_of(fm).list(ps)[i as usize]).as_data.parameter.ty;
+                pi.truncate(0);
+                ow.type_toks(fm, extn, ptn, &mut pi, 0);
+                for t in 0..pi.len() {
+                    if stat.contains(&pi[t]) {
+                        why = format("parameter {} must be 'static", i + 1);
+                    }
+                }
+                if why.len() != 0 {
+                    break;
+                }
+                ow.rel_widen(rel, false, &mut pi);
+                for j in 0..ps.len {
+                    let jtn = ow.ast_of(fm).at_const(unsafe ow.ast_of(fm).list(ps)[j as usize]).as_data.parameter.ty;
+                    let jn = *ow.ast_of(fm).at_const(jtn);
+                    // A `&mut P` or `[]mut P` parameter is a store target.
+                    if j == i || jn.kind != NodeKind::NODE_REFERENCE_TYPE && jn.kind != NodeKind::NODE_SLICE_TYPE || jn.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT {
+                        continue;
+                    }
+                    pj.truncate(0);
+                    ow.type_toks(fm, extn, jn.as_data.indirect_type.ty, &mut pj, 0);
+                    for t in 0..pi.len() {
+                        if pj.contains(&pi[t]) && !inert.contains(&pi[t]) {
+                            why = format("parameter {} may be stored into parameter {}", i + 1, j + 1);
+                        }
+                    }
+                }
+                if why.len() != 0 {
+                    break;
+                }
+            }
+            if why.len() != 0 {
+                let nm = ow.ast_of(fm).at_const(fd.as_data.function.name).as_data.name.text;
+                self.bc_ir_push(
+                    out,
+                    seen,
+                    CAT_U_STORE,
+                    k.raw,
+                    format(
+                        "'{}' cannot be used as a value: {}, but a function value takes its arguments at any lifetime",
+                        self.mod_src(fm).slice(nm.start as usize, nm.end as usize),
+                        why,
+                    ),
+                );
+            }
         }
     }
 
@@ -1432,7 +1523,90 @@ extend tc::TypeChecker {
         if ctx.built && body.owner.node == self.icx.current_fn {
             self.bc_ir_universal(body, ctx, seen, out);
         }
+        if ctx.built && body.owner.node != NODE_NONE && unsafe (*self.mod_ast(body.owner.module)).at_const(
+            body.owner.node,
+        ).kind == NodeKind::NODE_CLOSURE {
+            self.bc_closure_escape(body, &ctx.facts, seen, out);
+        }
         ctx.st.pr.stop(BP_RULES, tr);
+    }
+
+    // A closure takes its arguments at any lifetime (its parameters name none): what an argument
+    // borrows outlives no capture, no other argument and not `'static`. Report a flow from a
+    // parameter's placeholder into a capture's, another parameter's or `'static`, flow-insensitively,
+    // at the edge that reaches it.
+    fn bc_closure_escape(
+        self: &mut Self,
+        body: &ir::CoreBody,
+        f: &bfx::BodyFacts,
+        seen: &mut Vector<u64>,
+        out: &mut Vector<FlowErr>,
+    ) {
+        let np = unsafe (*self.mod_ast(body.owner.module)).at_const(body.owner.node).as_data.closure.params.len.min(
+            body.args,
+        );
+        let no = f.norigins as usize;
+        if no == 0 {
+            // A loan-skipped body: no origin, no flow.
+            return;
+        }
+        let mut ext = Vector::<bool>::new();
+        let mut reach = Vector::<bool>::new();
+        for p in 0..np {
+            let up = f.arg_universal[(body.returns + p) as usize];
+            if up == bfx::BF_NONE {
+                continue;
+            }
+            // The placeholders outside parameter `p`: `'static`, each capture's, each other parameter's.
+            ext.truncate(0);
+            ext.resize_default(no);
+            ext.set(0, true);
+            for i in 0..body.args {
+                let uo = f.arg_universal[(body.returns + i) as usize];
+                if uo != bfx::BF_NONE && uo != up {
+                    ext.set(uo as usize, true);
+                }
+            }
+            // The origins the parameter's placeholder reaches.
+            reach.truncate(0);
+            reach.resize_default(no);
+            reach.set(up as usize, true);
+            let mut grew = true;
+            // Each pass that grows the set marks one more of `no` origins.
+            for _pass in 0..no + 1 {
+                if !grew {
+                    break;
+                }
+                grew = false;
+                for k in 0..f.subsets.len() {
+                    let e = *f.subsets.at(k);
+                    if !reach[e.from as usize] || reach[e.to as usize] {
+                        continue;
+                    }
+                    if ext[e.to as usize] {
+                        let mut si: u32 = 0;
+                        let blk = *body.blocks.at(self.bc_uni_site(f, e.point, &mut si));
+                        let sp = if si < blk.stmt_len {
+                            body.statements.at((blk.stmt_start + si) as usize).span;
+                        } else {
+                            blk.term.span;
+                        };
+                        self.bc_ir_push(
+                            out,
+                            seen,
+                            CAT_U_STORE,
+                            sp,
+                            format(
+                                "borrowed value does not live long enough: a closure argument is stored where it must outlive the closure",
+                            ),
+                        );
+                        continue;
+                    }
+                    reach.set(e.to as usize, true);
+                    grew = true;
+                }
+            }
+        }
     }
 
     fn bc_ir_conflict(
@@ -1683,6 +1857,20 @@ extend tc::TypeChecker {
                 u.argof.set(lo as usize, i);
             }
         }
+        // A closure naming one of this function's lifetimes holds that region at its own level.
+        for k in 0..f.named.len() {
+            let to = (f.named[k] >> 32) as usize;
+            let nm = f.uni_name[(f.named[k] & 0xFFFFFFFFu64) as usize];
+            for i in 1..u.names.len() {
+                if tc::spans_eq2(self.source, u.names[i], self.source, nm) {
+                    u.st.set(to * 3, u.st[to * 3] | 1u64 << i as u64);
+                    if !u.queued[to] {
+                        u.queued.set(to, true);
+                        u.queue.push(to as u32);
+                    }
+                }
+            }
+        }
         // The body locals whose members keep their regions apart (never a parameter or return slot).
         u.mb.truncate(0);
         u.mem.truncate(0);
@@ -1847,12 +2035,18 @@ extend tc::TypeChecker {
                     "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime",
                 );
             }
-            // A declaration-level check already reported this relation at its operand.
+            // A declaration-level check already reported this relation at its operand, or this store
+            // was reported as reaching `'static` (a `'static` member) or caller storage.
             let mut dup = false;
             for d in self.err_wm..self.errors.errors.len() {
                 if self.errors.errors[d].msg.equals(&msg) {
                     dup = true;
                 }
+            }
+            if cat == CAT_U_STORE && seen.contains(&(CAT_U_STATIC as u64 << 32 | sp.start as u64)) || cat == CAT_U_STATIC && seen.contains(
+                &(CAT_U_STORE as u64 << 32 | sp.start as u64),
+            ) {
+                dup = true;
             }
             if !dup {
                 self.bc_ir_push(out, seen, cat, sp, msg);
@@ -2127,7 +2321,61 @@ extend tc::TypeChecker {
         if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union || dn.as_data.aggregate.members.len > UNI_MEMBERS_MAX {
             return 0;
         }
-        return dn.as_data.aggregate.members.len;
+        // A lifetime no member names (a view's `str<'a>` over a raw pointer) lives on the whole value.
+        let da = self.mod_ast(d.module);
+        let lts = unsafe (*da).lifetimes_of(d.node);
+        let ms = dn.as_data.aggregate.members;
+        for k in 0..lts.len {
+            let nm = self.tc_lt_name_in(d.module, unsafe (*da).list(lts)[k as usize]);
+            let mut named = false;
+            for j in 0..ms.len {
+                let fd = unsafe (*da).at_const(unsafe (*da).list(ms)[j as usize]);
+                if fd.kind == NodeKind::NODE_FIELD && self.bc_names_lt(d.module, fd.as_data.field.ty, nm, 0) {
+                    named = true;
+                    break;
+                }
+            }
+            if !named {
+                return 0;
+            }
+        }
+        return ms.len;
+    }
+
+    // Does type node `tyn` of module `m` name lifetime `nm` (a span of `m`'s source)?
+    pub fn bc_names_lt(self: &Self, m: ModuleId, tyn: NodeId, nm: tok::Span, depth: i32) bool {
+        if tyn == NODE_NONE || depth > 6 {
+            return false;
+        }
+        let a = self.mod_ast(m);
+        let n = *unsafe (*a).at_const(tyn);
+        if n.kind == NodeKind::NODE_LIFETIME {
+            return tc::spans_eq2(self.mod_src(m), self.tc_lt_name_in(m, tyn), self.mod_src(m), nm);
+        }
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+            return self.bc_names_lt(m, n.as_data.indirect_type.lifetime, nm, depth + 1) || self.bc_names_lt(
+                m,
+                n.as_data.indirect_type.ty,
+                nm,
+                depth + 1,
+            );
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            return self.bc_names_lt(m, n.as_data.array_type.element, nm, depth + 1);
+        }
+        let args = if n.kind == NodeKind::NODE_TYPE_PATH {
+            n.as_data.type_path.args;
+        } else if n.kind == NodeKind::NODE_TUPLE_TYPE {
+            n.as_data.array_literal.elements;
+        } else {
+            NodeList { start: 0, len: 0 };
+        };
+        for i in 0..args.len {
+            if self.bc_names_lt(m, unsafe (*a).list(args)[i as usize], nm, depth + 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // The member of origin `x`'s local that `place` names by its first projection, or UNI_NONE (the
@@ -2401,7 +2649,7 @@ extend tc::TypeChecker {
                 tyn = n.as_data.array_type.element;
                 continue;
             }
-            if pj.kind != ir::PJ_FIELD || pj.sub == NODE_NONE {
+            if pj.kind != ir::PJ_FIELD {
                 return false;
             }
             let d = self.bc_uni_enter(u, m, decl, tyn);
@@ -2409,22 +2657,27 @@ extend tc::TypeChecker {
                 return false;
             }
             let da = self.mod_ast(d.module);
-            if unsafe (*da).at_const(pj.sub).kind != NodeKind::NODE_FIELD {
-                return false;
-            }
             let mems = unsafe (*da).at_const(d.node).as_data.aggregate.members;
-            let mut member = false;
-            for j in 0..mems.len {
-                if unsafe (*da).list(mems)[j as usize] == pj.sub {
-                    member = true;
+            let mut mt = NODE_NONE;
+            if pj.sub != NODE_NONE {
+                for j in 0..mems.len {
+                    if unsafe (*da).list(mems)[j as usize] == pj.sub && unsafe (*da).at_const(pj.sub).kind == NodeKind::NODE_FIELD {
+                        mt = unsafe (*da).at_const(pj.sub).as_data.field.ty;
+                    }
+                }
+            } else if pj.data < mems.len {
+                // A tuple struct's positional member.
+                mt = unsafe (*da).list(mems)[pj.data as usize];
+                if unsafe (*da).at_const(mt).kind == NodeKind::NODE_FIELD {
+                    mt = unsafe (*da).at_const(mt).as_data.field.ty;
                 }
             }
-            if !member {
+            if mt == NODE_NONE {
                 return false;
             }
             m = d.module;
             decl = d.node;
-            tyn = unsafe (*da).at_const(pj.sub).as_data.field.ty;
+            tyn = mt;
         }
         u.pm = m;
         u.pdecl = decl;
@@ -2646,6 +2899,21 @@ extend tc::TypeChecker {
             }
             return m;
         }
+        if n.kind == NodeKind::NODE_DYN_TYPE {
+            // An erased object holds borrows its type does not show: an owned `dyn I` only `'static`
+            // ones (Rust's default object lifetime), a `&'a dyn I` ones that outlive `'a`.
+            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
+                u.mark(0, behind);
+                return 1u64;
+            }
+            let r = self.bc_uni_region(u, n.as_data.indirect_type.lifetime, elide, tyn, 0);
+            if r == UNI_NONE {
+                return 0;
+            }
+            u.mark(r, behind);
+            u.mark(r, true);
+            return 1u64 << r as u64;
+        }
         if n.kind != NodeKind::NODE_TYPE_PATH {
             return 0;
         }
@@ -2664,8 +2932,35 @@ extend tc::TypeChecker {
             );
         }
         let d = unsafe (*a).path_def(tyn);
-        if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+        if d.node == NODE_NONE {
             return 0;
+        }
+        if unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+            // A type parameter holds the regions its bounds name (`T: Put<'a>` may be an `H<'a>`).
+            if d.module != self.cur_module() {
+                return 0;
+            }
+            let mut gm = self.bc_uni_bounds(
+                u,
+                unsafe (*a).at_const(d.node).as_data.generic_param.bounds,
+                behind,
+                elide,
+                depth,
+            );
+            for w in 0..unsafe (*a).where_bounds.len() {
+                let sc = unsafe (*a).where_scope(w, d.node, self.icx.current_fn);
+                if sc == WHERE_OWN || sc == WHERE_IN {
+                    let pred = unsafe (*a).where_bounds.at(w).pred;
+                    gm = gm | self.bc_uni_bounds(
+                        u,
+                        unsafe (*a).at_const(pred).as_data.where_predicate.bounds,
+                        behind,
+                        elide,
+                        depth,
+                    );
+                }
+            }
+            return gm;
         }
         let mut m: u64 = 0;
         let mut named: u32 = 0;
@@ -2695,6 +2990,32 @@ extend tc::TypeChecker {
         return m;
     }
 
+    // The regions the arguments of bound list `bs` (current module) name, as `bc_uni_type` adds them.
+    fn bc_uni_bounds(self: &Self, u: &mut UniSt, bs: NodeList, behind: bool, elide: u32, depth: i32) u64 {
+        let a = self.cur_ast();
+        let mut m: u64 = 0;
+        for i in 0..bs.len {
+            let b = unsafe (*a).list(bs)[i as usize];
+            if unsafe (*a).at_const(b).kind != NodeKind::NODE_TYPE_PATH {
+                continue;
+            }
+            let args = unsafe (*a).at_const(b).as_data.type_path.args;
+            for j in 0..args.len {
+                let aid = unsafe (*a).list(args)[j as usize];
+                if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    let r = self.bc_uni_region(u, aid, elide, b, j);
+                    if r != UNI_NONE {
+                        u.mark(r, behind);
+                        m = m | 1u64 << r as u64;
+                    }
+                } else {
+                    m = m | self.bc_uni_type(u, aid, behind, elide, depth + 1);
+                }
+            }
+        }
+        return m;
+    }
+
     // A local-storage borrow reaching a placeholder escapes through the returned value when a
     // return carries it, else through a store into storage a parameter reaches.
     fn bc_ir_escape(
@@ -2718,7 +3039,7 @@ extend tc::TypeChecker {
         }
         if ret == bfx::BF_NONE {
             let msg = if sv.origin_reaches(lo.origin, 0) {
-                format("borrowed value does not live long enough: this argument must satisfy 'static");
+                format("borrowed value does not live long enough: this value must satisfy 'static");
             } else {
                 format(
                     "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",

@@ -18,6 +18,7 @@ import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
 import ir::lower as irl;
 import ir::core as ir;
+import utils::errors as diag;
 
 // Capacities of the TypeChecker's flow tables: `moved`, and `late` and `borrows`.
 // FlowState snapshots have the same sizes, so saving a state never truncates it.
@@ -29,22 +30,18 @@ const fn rep_bm(st: &mut bfi::RepSt) u32 {
     return st.bms.pop().unwrap_or(0);
 }
 
-// Depth-slot flow push: existing slots are refilled row-wise (no whole-FlowState copies). Out of
-// line so the two FlowState temporaries of the first push at a depth stay out of bc_replay's frame.
+// Depth-slot flow push: slots are refilled row-wise (no whole-FlowState copies). Out of line so the
+// two FlowState temporaries of the first push at a depth stay out of bc_replay's frame.
 @c.noinline
 fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
     let d = st.fdepth;
     if st.pre.len() <= d {
-        let mut ps: FlowState;
-        t.tc_flow_save(&mut ps);
-        st.pre.push(ps);
-        let mut ac: FlowState;
-        t.tc_flow_clear(&mut ac);
-        st.acc.push(ac);
-    } else {
-        t.tc_flow_save(&mut st.pre[d]);
-        t.tc_flow_clear(&mut st.acc[d]);
+        // Zero bytes are a valid FlowState: empty tables of plain data.
+        st.pre.push(unsafe zeroed::<FlowState>());
+        st.acc.push(unsafe zeroed::<FlowState>());
     }
+    t.tc_flow_save(&mut st.pre[d]);
+    t.tc_flow_clear(&mut st.acc[d]);
     st.fdepth = d + 1;
 }
 
@@ -111,9 +108,15 @@ extend tc::TypeChecker {
             NODE_STRUCT | NODE_ENUM => {
                 let td = ctx.st.pr.start();
                 self.tc_check_field_lifetimes(id, unsafe (*a).at_const(id).as_data.aggregate.members);
+                // Every layout is settled here: a type no object can hold is reported once.
+                let agg = unsafe (*a).at_const(id).as_data.aggregate;
+                if agg.generics.len == 0 {
+                    let _ = self.tc_size_limit(self.named_type_of(self.cur_module(), id), self.name_span(agg.name));
+                }
                 ctx.st.pr.stop(bfi::BP_DECL, td);
             },
             NODE_EXTEND => {
+                self.bc_check_assoc_lifetimes(id);
                 let ms = unsafe (*a).at_const(id).as_data.extend_def.items;
                 for j in 0..ms.len {
                     self.bc_item(unsafe (*a).list(ms)[j as usize], ow, ctx, bodies);
@@ -121,6 +124,43 @@ extend tc::TypeChecker {
             },
             _ => {},
         };
+    }
+
+    // A lifetime of extend `id` that an associated type names must appear in the target or in the
+    // interface's arguments: otherwise the conformance hands out the type at every lifetime at once
+    // (`type Output = Ref<'a>` for any `'a`), so a `'static` bound on it proves nothing.
+    pub fn bc_check_assoc_lifetimes(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        let ed = unsafe (*a).at_const(id).as_data.extend_def;
+        if ed.interface_type == NODE_NONE {
+            return;
+        }
+        let m = self.cur_module();
+        let lts = unsafe (*a).lifetimes_of(id);
+        for k in 0..lts.len {
+            let nm = self.tc_lt_name_in(m, unsafe (*a).list(lts)[k as usize]);
+            if nm.end <= nm.start || self.bc_names_lt(m, ed.target_type, nm, 0) || self.bc_names_lt(
+                m,
+                ed.interface_type,
+                nm,
+                0,
+            ) {
+                continue;
+            }
+            for j in 0..ed.items.len {
+                let it = unsafe (*a).at_const(unsafe (*a).list(ed.items)[j as usize]);
+                if it.kind == NodeKind::NODE_TYPE_ALIAS && self.bc_names_lt(m, it.as_data.type_alias.ty, nm, 0) {
+                    self.errors.emit_span(
+                        nm,
+                        format(
+                            "the lifetime {} of this extend is named by an associated type but appears neither in its target nor in its interface's arguments",
+                            diag::span_str(self.source, nm.start, nm.end),
+                        ),
+                    );
+                    break;
+                }
+            }
+        }
     }
 
     /// Definition-site elision: a return type with an elided lifetime is an error unless rule 3 (a
@@ -1116,21 +1156,39 @@ extend tc::TypeChecker {
             return;
         }
         self.outlives.clear();
-        let lts = unsafe (*self.cur_ast()).lifetimes_of(fnid);
-        for i in 0..lts.len {
-            let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
-            let r = self.region_new();
-            self.lt_region.insert(lp, r);
-        }
-        // Seed the declared outlives edges: `<'a: 'b>` param bounds and `where 'a: 'b` predicates.
-        for i in 0..lts.len {
-            let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
-            let sup = self.tc_lt_region_of_name(self.tc_lt_name(lp));
-            let bnds = unsafe (*self.cur_ast()).at_const(lp).as_data.generic_param.bounds;
-            for b in 0..bnds.len {
-                let bid = unsafe (*self.cur_ast()).list(bnds)[b as usize];
-                self.region_add_outlives(sup, self.tc_lt_region_of_name(self.tc_lt_name(bid)));
+        // The function's lifetime parameters, then its extend's.
+        for which in 0..2u32 {
+            let lts = self.tc_scope_lts(fnid, which);
+            for i in 0..lts.len {
+                let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
+                let r = self.region_new();
+                self.lt_region.insert(lp, r);
             }
+        }
+        // Seed the declared outlives edges: `<'a: 'b>` param bounds (the extend's too) and `where 'a:
+        // 'b` predicates.
+        for which in 0..2u32 {
+            let lts = self.tc_scope_lts(fnid, which);
+            for i in 0..lts.len {
+                let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
+                let sup = self.tc_lt_region_of_name(self.tc_lt_name(lp));
+                let bnds = unsafe (*self.cur_ast()).at_const(lp).as_data.generic_param.bounds;
+                for b in 0..bnds.len {
+                    let bid = unsafe (*self.cur_ast()).list(bnds)[b as usize];
+                    self.region_add_outlives(sup, self.tc_lt_region_of_name(self.tc_lt_name(bid)));
+                }
+            }
+        }
+        // The bounds the parameter types and the extend's target imply (`s: &S<'x>` of `struct S<'a:
+        // 'static>` gives `'x: 'static`): a caller proves them for its arguments.
+        let ps = unsafe (*self.cur_ast()).at_const(fnid).as_data.function.params;
+        for i in 0..ps.len {
+            let ptn = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(ps)[i as usize]).as_data.parameter.ty;
+            self.region_implied(ptn, 0);
+        }
+        let ext = self.enclosing(self.cur_module(), fnid, NodeKind::NODE_EXTEND);
+        if ext != NODE_NONE {
+            self.region_implied(unsafe (*self.cur_ast()).at_const(ext).as_data.extend_def.target_type, 0);
         }
         let wc = unsafe (*self.cur_ast()).at_const(fnid).as_data.function.where_clause;
         for w in 0..wc.len {
@@ -1163,19 +1221,109 @@ extend tc::TypeChecker {
             return REGION_NONE;
         }
         let a = self.cur_ast();
-        let lts = unsafe (*a).lifetimes_of(self.icx.current_fn);
-        for i in 0..lts.len {
-            let lp = unsafe (*a).list(lts)[i as usize];
-            if spans_eq2(self.source, self.tc_lt_name(lp), self.source, name) {
-                switch self.lt_region.get(&lp) {
-                    Some(v) => {
-                        return *v;
-                    },
-                    _ => {},
-                };
+        for which in 0..2u32 {
+            let lts = self.tc_scope_lts(self.icx.current_fn, which);
+            for i in 0..lts.len {
+                let lp = unsafe (*a).list(lts)[i as usize];
+                if spans_eq2(self.source, self.tc_lt_name(lp), self.source, name) {
+                    switch self.lt_region.get(&lp) {
+                        Some(v) => {
+                            return *v;
+                        },
+                        _ => {},
+                    };
+                }
             }
         }
         return REGION_NONE;
+    }
+
+    /// The lifetime parameters in scope in function `fnid`: its own (`which` 0), its extend's (1).
+    pub fn tc_scope_lts(self: &Self, fnid: NodeId, which: u32) NodeList {
+        if which == 0 {
+            return unsafe (*self.cur_ast()).lifetimes_of(fnid);
+        }
+        let ext = self.enclosing(self.cur_module(), fnid, NodeKind::NODE_EXTEND);
+        if ext == NODE_NONE {
+            return NodeList { start: 0, len: 0 };
+        }
+        return unsafe (*self.cur_ast()).lifetimes_of(ext);
+    }
+
+    // Record the outlives edges type node `tyn` (current module) implies: a path to a struct or enum
+    // whose lifetime parameters are bounded relates the path's lifetime arguments the same way.
+    fn region_implied(self: &mut Self, tyn: NodeId, depth: i32) {
+        if tyn == NODE_NONE || depth > 6 {
+            return;
+        }
+        let a = self.cur_ast();
+        let n = *unsafe (*a).at_const(tyn);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+            self.region_implied(n.as_data.indirect_type.ty, depth + 1);
+            return;
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.region_implied(n.as_data.array_type.element, depth + 1);
+            return;
+        }
+        let mut es = NodeList { start: 0, len: 0 };
+        if n.kind == NodeKind::NODE_TUPLE_TYPE {
+            es = n.as_data.array_literal.elements;
+        } else if n.kind == NodeKind::NODE_TYPE_PATH {
+            es = n.as_data.type_path.args;
+        }
+        for i in 0..es.len {
+            let e = unsafe (*a).list(es)[i as usize];
+            if unsafe (*a).at_const(e).kind != NodeKind::NODE_LIFETIME {
+                self.region_implied(e, depth + 1);
+            }
+        }
+        if n.kind != NodeKind::NODE_TYPE_PATH {
+            return;
+        }
+        let d = unsafe (*a).path_def(tyn);
+        if d.node == NODE_NONE {
+            return;
+        }
+        let da = self.mod_ast(d.module);
+        let dk = unsafe (*da).at_const(d.node).kind;
+        let lts = unsafe (*da).lifetimes_of(d.node);
+        if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || lts.len == 0 {
+            return;
+        }
+        // The region of each lifetime argument, by parameter position (REGION_NONE: elided).
+        let mut rs = Vector::<u32>::new();
+        for _i in 0..lts.len {
+            rs.push(REGION_NONE);
+        }
+        let mut k: usize = 0;
+        for i in 0..es.len {
+            let e = unsafe (*a).list(es)[i as usize];
+            if unsafe (*a).at_const(e).kind == NodeKind::NODE_LIFETIME && k < rs.len() {
+                rs.set(k, self.tc_lt_region_of_name(self.tc_lt_name(e)));
+                k += 1;
+            }
+        }
+        for i in 0..lts.len {
+            let bs = unsafe (*da).at_const(unsafe (*da).list(lts)[i as usize]).as_data.generic_param.bounds;
+            for b in 0..bs.len {
+                let bn = self.tc_lt_name_in(d.module, unsafe (*da).list(bs)[b as usize]);
+                if span_is(self.mod_src(d.module), bn, "'static") {
+                    self.region_add_outlives(rs[i as usize], REGION_STATIC);
+                    continue;
+                }
+                for j in 0..lts.len {
+                    if spans_eq2(
+                        self.mod_src(d.module),
+                        self.tc_lt_name_in(d.module, unsafe (*da).list(lts)[j as usize]),
+                        self.mod_src(d.module),
+                        bn,
+                    ) {
+                        self.region_add_outlives(rs[i as usize], rs[j as usize]);
+                    }
+                }
+            }
+        }
     }
 
     /// Record the declared edge `sup: sub` (sup outlives sub); trivial or REGION_NONE edges are
@@ -1862,14 +2010,14 @@ extend tc::TypeChecker {
                 }
                 let aid = unsafe (*self.cur_ast()).list(args)[ai as usize];
                 let at = unsafe (*self.cur_ast()).type_of(aid);
-                if at == TYPE_NONE || !self.tc_carries_borrow(at) {
+                if at == TYPE_NONE || !self.tc_may_borrow(at, 0) {
                     continue;
                 }
                 let asp = unsafe (*self.cur_ast()).at_const(aid).span;
                 let di = self.tc_region_diag(
                     asp.start,
                     asp.end - asp.start,
-                    format("borrowed value does not live long enough: this argument must satisfy 'static"),
+                    format("borrowed value does not live long enough: this value must satisfy 'static"),
                 );
                 self.tc_region_note(
                     di,
@@ -1880,6 +2028,14 @@ extend tc::TypeChecker {
                         di,
                         format(
                             "this closure captures a borrow (or mutates a capture, which captures `&mut`); move the value in instead, or share it through an `Arc`",
+                        ),
+                    );
+                }
+                if !self.tc_carries_borrow(at) {
+                    self.tc_region_note(
+                        di,
+                        format(
+                            "its type names a type parameter that may hold a borrow: bound that parameter by `'static`",
                         ),
                     );
                 }
@@ -1897,22 +2053,6 @@ extend tc::TypeChecker {
         for w in 0..wc.len {
             let wp = unsafe (*fa).at_const(unsafe (*fa).list(wc)[w as usize]).as_data.where_predicate;
             if unsafe (*fa).resolution(wp.ty) == g && self.tc_bounds_have_static(fmod, wp.bounds) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // True when bound list `bnds` of module `fmod` names `'static`.
-    fn tc_bounds_have_static(self: &Self, fmod: ModuleId, bnds: NodeList) bool {
-        let fa = self.mod_ast(fmod);
-        for b in 0..bnds.len {
-            let bid = unsafe (*fa).list(bnds)[b as usize];
-            if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_LIFETIME && span_is(
-                self.mod_src(fmod),
-                self.tc_lt_name_in(fmod, bid),
-                "'static",
-            ) {
                 return true;
             }
         }
@@ -1987,127 +2127,6 @@ extend tc::TypeChecker {
         }
         let t = unsafe (*self.cur_ast()).type_of(root);
         return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
-    }
-
-    /// Does `ty` transitively contain a reference or a lifetime-parameterized aggregate? Memoized
-    /// unless the answer read a closure's capture state, which changes as bodies are lowered.
-    pub fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
-        if ty == TYPE_NONE {
-            return false;
-        }
-        let key = self.cur_module() as u64 << 32 | ty as u64;
-        switch self.carries_memo.get(&key) {
-            Some(v) => {
-                return *v != 0;
-            },
-            None => {},
-        };
-        let mut pure = true;
-        let r = self.tc_carries_borrow_rec(ty, 0, &mut pure);
-        if pure {
-            self.carries_memo.insert(key, r as u8);
-        }
-        return r;
-    }
-
-    // Memoized per (ty, depth) (the depth cutoff makes results depth-dependent), but ONLY for
-    // computations whose recursion never touched a TYPE_FUNCTION: a closure's answer reads the
-    // capture analysis' mut_caps bits and the current module, both of which change under the walk.
-    fn tc_carries_borrow_rec(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
-        if ty == TYPE_NONE || depth > 4 {
-            return false;
-        }
-        let slot = ty_dense(ty) * 5 + depth as usize;
-        let c = memo2_get(&self.carries_borrow_memo, slot);
-        if c >= 0 {
-            return c != 0;
-        }
-        let mut p2 = true;
-        let r = self.tc_carries_borrow_impl(ty, depth, &mut p2);
-        if p2 {
-            memo2_set(&mut self.carries_borrow_memo, slot, r);
-        } else {
-            *pure = false;
-        }
-        return r;
-    }
-
-    fn tc_carries_borrow_impl(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
-        if self.type_at(ty).kind == TypeKind::TYPE_REFERENCE {
-            return true;
-        }
-        // A closure's ENVIRONMENT is where its borrows live, and none of it shows in its type: `fn(..)`
-        // erases the captures. So look at them directly: a captured `&T` (or a value the capture
-        // analysis turned into an implicit `&mut`, i.e. a mutated capture) is a borrow of the enclosing
-        // frame, and a closure holding one is not `'static` no matter what its signature says.
-        if self.type_at(ty).kind == TypeKind::TYPE_FUNCTION {
-            // Capture state and the current module change under the walk.
-            *pure = false;
-            let fmod = self.type_at(ty).module;
-            if fmod != self.cur_module() {
-                // A foreign closure cannot have captured one of our locals.
-                return false;
-            }
-            let fdecl = self.type_at(ty).as_data.decl;
-            if fdecl == NODE_NONE || unsafe (*self.cur_ast()).at_const(fdecl).kind != NodeKind::NODE_CLOSURE {
-                // A plain function pointer captures nothing.
-                return false;
-            }
-            let cl = unsafe (*self.cur_ast()).at_const(fdecl).as_data.closure;
-            if (cl.mut_caps | cl.ref_caps) != 0 {
-                return true;
-            }
-            let cids = unsafe (*self.cur_ast()).list(cl.captures);
-            for ci in 0..cl.captures.len {
-                let cty = unsafe (*self.cur_ast()).type_of(unsafe cids[ci as usize]);
-                if self.tc_carries_borrow_rec(cty, depth + 1, pure) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        // A RAW POINTER is the language's lifetime hand-off boundary: dereferencing it needs
-        // `unsafe`, and the checker deliberately ends borrow tracking at the cast that produced
-        // it (the `interp_new(&mut p)` precedent). Peeling it here made every pointer to a
-        // str-carrying aggregate count as a borrow, which rejected 'static task payloads built
-        // from raw handles.
-        if self.type_at(ty).kind == TypeKind::TYPE_POINTER {
-            return false;
-        }
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
-        let mut gn: i32 = 0;
-        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
-            return false;
-        }
-        for gi in 0..gn {
-            if self.tc_carries_borrow_rec(ga[gi as usize], depth + 1, pure) {
-                return true;
-            }
-        }
-        let ma = self.mod_ast(om);
-        if unsafe (*ma).lifetimes_of(od).len != 0 {
-            // `struct S<'a>` borrows by construction.
-            return true;
-        }
-        let is_tuple = unsafe (*ma).at_const(od).as_data.aggregate.is_tuple;
-        let members = unsafe (*ma).at_const(od).as_data.aggregate.members;
-        for i in 0..members.len {
-            let mid = unsafe (*ma).list(members)[i as usize];
-            let fnode = unsafe (*ma).member_type_node(mid, is_tuple);
-            if fnode == NODE_NONE {
-                continue;
-            }
-            if unsafe (*ma).at_const(fnode).kind == NodeKind::NODE_REFERENCE_TYPE {
-                return true;
-            }
-            if self.tc_carries_borrow_rec(self.node_type_in(om, fnode), depth + 1, pure) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /// A use through `recv_n` re-exposes the borrows its base binding holds, as fresh borrows with
@@ -2916,7 +2935,6 @@ extend tc::TypeChecker {
             NODE_MEMBER => self.tc_scan_returns_attributable(m, n.as_data.member.object, d),
             NODE_CAST => self.tc_scan_returns_attributable(m, n.as_data.cast.expression, d),
             NODE_GENERIC_SPECIALIZATION => self.tc_scan_returns_attributable(m, n.as_data.specialization.expression, d),
-            NODE_NEW => self.tc_scan_returns_attributable(m, n.as_data.new_expr.initializer, d),
             NODE_ARRAY_LITERAL | NODE_TUPLE => self.tc_scan_list_attributable(m, n.as_data.array_literal.elements, d),
             NODE_STRUCT_INITIALIZER => self.tc_scan_list_attributable(m, n.as_data.struct_initializer.fields, d),
             NODE_FIELD_INITIALIZER => self.tc_scan_returns_attributable(m, n.as_data.field_initializer.value, d),
@@ -3145,6 +3163,7 @@ extend tc::TypeChecker {
                 cur,
                 store_root,
                 is_recv,
+                recv_n,
                 recv_ty,
                 ps_elem,
                 ps_pointee,
@@ -3152,6 +3171,24 @@ extend tc::TypeChecker {
                 arg_end,
             );
         }
+    }
+
+    /// Is the storage of a call the parameter binding itself (the receiver `self`, or an argument
+    /// naming the parameter), rather than a place inside it?
+    fn tc_storage_is_root(self: &mut Self, is_recv: bool, recv_n: NodeId, args: NodeList, sidx: i32, skip: u32) bool {
+        let a = self.cur_ast();
+        if is_recv {
+            return recv_n != NODE_NONE && unsafe (*a).at_const(unsafe (*a).peel(recv_n, true)).kind == NodeKind::NODE_IDENTIFIER;
+        }
+        if sidx < skip as i32 || sidx as u32 - skip >= args.len {
+            return false;
+        }
+        let e = unsafe (*a).peel(unsafe (*a).list(args)[(sidx as u32 - skip) as usize], true);
+        let n = unsafe (*a).at_const(e);
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+            return unsafe (*a).at_const(unsafe (*a).peel(n.as_data.unary.operand, true)).kind == NodeKind::NODE_IDENTIFIER;
+        }
+        return n.kind == NodeKind::NODE_IDENTIFIER;
     }
 
     /// Tie every consumer argument that shares the storage's region to the storage, and diagnose a
@@ -3165,6 +3202,7 @@ extend tc::TypeChecker {
         sidx: i32,
         store_root: NodeId,
         is_recv: bool,
+        recv_n: NodeId,
         recv_ty: TypeId,
         ps_elem: TypeId,
         ps_pointee: NodeId,
@@ -3211,9 +3249,11 @@ extend tc::TypeChecker {
                 }
                 if sp == store_root {
                     escapes = !self.relate_store_lts_ok(md, c, sp, cp, ps_pointee);
-                } else {
+                } else if self.tc_storage_is_root(is_recv, recv_n, args, sidx, skip) {
                     escapes = !self.tc_lifetime_outlives(self.tc_value_source_lifetime(aid), elem_lt);
                 }
+                // A storage place inside the parameter (`self.v`) has its own declared element
+                // lifetime: the flow analysis's universal check reads it there.
             }
             if escapes {
                 let asp = unsafe (*self.cur_ast()).at_const(aid).span;
@@ -3433,7 +3473,7 @@ extend tc::TypeChecker {
             let cid = unsafe (*a).list(caps)[i as usize];
             let cty = unsafe (*a).type_of(cid);
             let by_ptr = ((mut_caps | ref_caps) >> i as u64 & 1u64) != 0;
-            if by_ptr || !self.tc_capture_owns(cty) {
+            if by_ptr || !self.tc_value_owns(cty) {
                 continue;
             }
             // Capture-of-moved is IR-owned (CAT_C_CAP).

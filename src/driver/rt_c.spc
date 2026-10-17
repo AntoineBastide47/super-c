@@ -307,12 +307,6 @@ void sc_lk_bt_resume(void);
 /* std/alloc.h routes its over-aligned blocks through sc_lk_aligned_* when this is defined. */
 #define SC_LK_ALIGNED 1
 #endif
-/* `new T`: traps on a null result. Always inlined, so the leak tracker records the caller's site. */
-static inline __attribute__((unused, always_inline)) void *__sc_new(size_t __n) {
-  void *__p = malloc(__n);
-  if (!__p) __sc_panic("out of memory");
-  return __p;
-}
 )".ptr() as *const char;
 }
 

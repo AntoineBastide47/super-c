@@ -1603,7 +1603,8 @@ extend Facts {
     pub fn write_place(self: &mut Self, b: &ir::CoreBody, pl: u32) {
         let p = *b.places.at(pl as usize);
         if p.proj_len == 0 {
-            self.bump_local(p.base);
+            // A new value: the lengths of places rooted at it change too.
+            self.kill_root(p.base);
             return;
         }
         if b.place_has_deref(pl) {
@@ -2072,7 +2073,7 @@ extend Facts {
     fn lwrite(self: &mut Self, b: &ir::CoreBody, pl: u32) {
         let p = *b.places.at(pl as usize);
         if p.proj_len == 0 {
-            self.lop(0, p.base, 0);
+            self.lop(1, p.base, 0);
         } else if b.place_has_deref(pl) {
             let mut pb: u32 = 0;
             let mut pp: u32 = 0;

@@ -613,6 +613,11 @@ pub struct TypeChecker<'a> {
     pub ph_allocator: loader::LookupHit,
     pub ph_slice: loader::LookupHit,
     pub ph_slicemut: loader::LookupHit,
+    pub ph_vector: loader::LookupHit,
+    in_extern: bool, // checking an `extern` block's items: they keep the C names they declare
+    pub ph_array: loader::LookupHit,
+    pub ph_map: loader::LookupHit,
+    pub ph_set: loader::LookupHit,
     pub ph_range: loader::LookupHit,
     pub ph_box: loader::LookupHit,
     pub ph_global: loader::LookupHit,
@@ -1074,6 +1079,10 @@ extend<'a> TypeChecker<'a> {
             ph_allocator: ph_lookup(package, "Allocator"),
             ph_slice: ph_lookup(package, "Slice"),
             ph_slicemut: ph_lookup(package, "SliceMut"),
+            ph_vector: ph_lookup(package, "Vector"),
+            ph_array: ph_lookup(package, "Array"),
+            ph_map: ph_lookup(package, "Map"),
+            ph_set: ph_lookup(package, "Set"),
             ph_range: ph_lookup(package, "Range"),
             ph_box: ph_lookup(package, "Box"),
             ph_global: ph_lookup(package, "Global"),
@@ -3361,7 +3370,7 @@ extend<'a> TypeChecker<'a> {
             if idx >= 0 {
                 let cl = unsafe (*a).at_const(c).as_data.closure;
                 let bit = 1u32 << idx as u32;
-                if self.tc_capture_owns(unsafe (*a).type_of(unsafe (*a).list(cl.captures)[idx as usize])) {
+                if self.tc_value_owns(unsafe (*a).type_of(unsafe (*a).list(cl.captures)[idx as usize])) {
                     unsafe (*a).at(c).as_data.closure.own_mut = cl.own_mut | bit;
                 } else {
                     unsafe (*a).at(c).as_data.closure.mut_caps = cl.mut_caps | bit;
@@ -3399,7 +3408,7 @@ extend<'a> TypeChecker<'a> {
         let mut add: u32 = 0;
         for i in 0..cl.captures.len {
             let bit = 1u32 << i;
-            if ((cl.mut_caps | cl.ref_caps) & bit) == 0 && self.tc_capture_owns(
+            if ((cl.mut_caps | cl.ref_caps) & bit) == 0 && self.tc_value_owns(
                 unsafe (*a).type_of(unsafe (*a).list(cl.captures)[i as usize]),
             ) {
                 add = add | bit;
@@ -3445,9 +3454,9 @@ extend<'a> TypeChecker<'a> {
         return (unsafe &*self.mod_ast(fm)).type_of(n);
     }
 
-    /// Does a non-`mut` capture of a binding of type `cty` move an owning value into the env? A
-    /// reference or pointer binding never owns what it points at, whatever that is.
-    pub fn tc_capture_owns(self: &mut Self, cty: TypeId) bool {
+    /// Does a value of type `cty` own memory (a non-`mut` capture of it moves into the env, a `T: Free`
+    /// argument of it is covered by the Free extend)? A reference or pointer never owns what it points at.
+    pub fn tc_value_owns(self: &mut Self, cty: TypeId) bool {
         if cty == TYPE_NONE {
             return false;
         }
@@ -3475,7 +3484,7 @@ extend<'a> TypeChecker<'a> {
             if (by_ptr >> i as u64 & 1u64) == 0 {
                 let ct0 = self.tc_foreign_type_of(fy.module, cid);
                 let rt = unsafe (*self.cur_ast()).reintern(unsafe &*fa, ct0);
-                if self.tc_capture_owns(rt) {
+                if self.tc_value_owns(rt) {
                     return true;
                 }
             }
@@ -3656,18 +3665,23 @@ extend<'a> TypeChecker<'a> {
         return false;
     }
 
-    // `S { .. }`, `&S { .. }` or `&mut S { .. }` where `S` names a generic struct (or generic alias)
-    // without type arguments.
+    // `S { .. }`, `S(..)`, `&S { .. }` or `&mut S { .. }` where `S` names a generic struct (or generic
+    // alias) without type arguments (a tuple struct for `S(..)`).
     const fn tc_bare_generic_struct_lit(self: &Self, node: NodeId) bool {
         let a = self.cur_ast();
         let mut n = node;
         while unsafe (*a).at_const(n).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(n).as_data.unary.op == TokenType::Ampersand {
             n = unsafe (*a).at_const(n).as_data.unary.operand;
         }
-        if unsafe (*a).at_const(n).kind != NodeKind::NODE_STRUCT_INITIALIZER {
+        let ctor = unsafe (*a).at_const(n).kind == NodeKind::NODE_CALL;
+        if !ctor && unsafe (*a).at_const(n).kind != NodeKind::NODE_STRUCT_INITIALIZER {
             return false;
         }
-        let stn = unsafe (*a).at_const(n).as_data.struct_initializer.ty;
+        let stn = if ctor {
+            unsafe (*a).at_const(n).as_data.call.callee;
+        } else {
+            unsafe (*a).at_const(n).as_data.struct_initializer.ty;
+        };
         if unsafe (*a).at_const(stn).kind != NodeKind::NODE_IDENTIFIER {
             return false;
         }
@@ -3676,6 +3690,9 @@ extend<'a> TypeChecker<'a> {
             return false;
         }
         let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node);
+        if ctor {
+            return dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_tuple && dn.as_data.aggregate.generics.len > 0;
+        }
         return dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.generics.len > 0 || self.tc_lit_generic_alias(
             stn,
         ).node != NODE_NONE;
@@ -5486,7 +5503,7 @@ extend<'a> TypeChecker<'a> {
         self.icx.sv.type_conflicts.truncate(self.icx.sv.sess.type_conflicts as usize);
     }
 
-    fn named_type_of(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
+    pub fn named_type_of(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
         let a = self.mod_ast(m);
         let dk = unsafe (*a).at_const(decl).kind;
         if dk == NodeKind::NODE_STRUCT {
@@ -6839,9 +6856,13 @@ extend<'a> TypeChecker<'a> {
         self.ev_err = false;
         let lv = self.ev(m, lenNode);
         if lv.kind == iri::IV_INT && lv.i >= 0 && lv.i <= 0xFFFFFFFFi64 {
-            return unsafe (*self.cur_ast()).intern_type(
+            let at = unsafe (*self.cur_ast()).intern_type(
                 Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: lv.i as u32 } } },
             );
+            if m == self.cur_module() && self.st_nocache == 0 {
+                let _ = self.tc_size_limit(at, unsafe (*self.mod_ast(m)).at_const(lenNode).span);
+            }
+            return at;
         }
         if lv.kind == iri::IV_NONE {
             let lt = self.tc_sym_len(m, lenNode);
@@ -6870,6 +6891,9 @@ extend<'a> TypeChecker<'a> {
         if unsafe (*ceptr).trap_get().len() != 0 {
             self.reported.insert(key);
             self.errors.emit_span(sp, format("array length cannot be evaluated: {}", unsafe (*ceptr).trap_detail()));
+        } else if lv.kind == iri::IV_INT && lv.i > 0xFFFFFFFFi64 {
+            self.reported.insert(key);
+            self.errors.emit_span(sp, format("array length {} exceeds the maximum of 4294967295", lv.i));
         } else if lv.kind != iri::IV_NONE {
             self.reported.insert(key);
             self.errors.emit_span(sp, format("array length must be a non-negative constant expression"));
@@ -12086,6 +12110,201 @@ extend<'a> TypeChecker<'a> {
         }
         return true;
     }
+    // Does a value of `ty` hold an `UnsafeCell` in its own storage (not behind a pointer)?
+    fn tc_has_interior(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 8 {
+            return false;
+        }
+        let y = *self.type_at(ty);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_has_interior(y.as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_INSTANCE || !self.aggregate_of(
+            ty,
+            &mut om,
+            &mut od,
+            &mut gp,
+            &mut ga,
+            &mut gn,
+        ) {
+            return false;
+        }
+        if om == self.ph_unsafecell.mid && od == self.ph_unsafecell.node {
+            return true;
+        }
+        let dn = unsafe (*self.mod_ast(om)).at_const(od);
+        if dn.kind != NodeKind::NODE_STRUCT {
+            return false;
+        }
+        let ms = dn.as_data.aggregate.members;
+        for j in 0..ms.len {
+            let fid = unsafe (*self.mod_ast(om)).list(ms)[j as usize];
+            if unsafe (*self.mod_ast(om)).at_const(fid).kind == NodeKind::NODE_FIELD && self.tc_has_interior(
+                self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn),
+                depth + 1,
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The emitted C spells generated symbols in a namespace user names must stay out of: `__` joins
+    // the parts of an instance or a method symbol, the runtime's names start with `__sc`, and a type's
+    // C name starts with these prefixes when it is a pointer, slice, array, function or dyn type.
+    fn tc_reserved_name(self: &mut Self, id: NodeId, nk: NodeKind) {
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(id);
+        let mut is_type = true;
+        let nm = if nk == NodeKind::NODE_FUNCTION {
+            is_type = false;
+            n.as_data.function.name;
+        } else if nk == NodeKind::NODE_STRUCT || nk == NodeKind::NODE_ENUM {
+            n.as_data.aggregate.name;
+        } else if nk == NodeKind::NODE_INTERFACE {
+            n.as_data.interface_def.name;
+        } else if nk == NodeKind::NODE_TYPE_ALIAS {
+            n.as_data.type_alias.name;
+        } else if nk == NodeKind::NODE_CONST {
+            is_type = false;
+            n.as_data.const_def.name;
+        } else {
+            NODE_NONE;
+        };
+        if nm == NODE_NONE {
+            return;
+        }
+        let sp = self.name_span(nm);
+        let t = diag::span_str(self.source, sp.start, sp.end);
+        let mut lead: usize = 0;
+        while lead < t.len() && t.byte_at(lead) == b'_' {
+            lead += 1;
+        }
+        let mut bad = t.starts_with("__sc") || t.slice(lead, t.len()).contains("__");
+        if is_type && !bad {
+            let pfx = ["ptr_", "ptrm_", "slice_", "dyn_", "dynm_", "dynb_", "arr_"];
+            for i in 0..7 {
+                if t.starts_with(unsafe pfx[i]) {
+                    bad = true;
+                }
+            }
+            let dig = ["arr", "fn", "fnm", "fnt"];
+            for i in 0..4 {
+                let p = unsafe dig[i];
+                if t.starts_with(p) && t.len() > p.len() && t.byte_at(p.len()) >= b'0' && t.byte_at(p.len()) <= b'9' {
+                    bad = true;
+                }
+            }
+        }
+        if bad {
+            self.errors.emit_span(sp, format("the name '{}' is reserved for the symbols the compiler generates", t));
+            self.errors.note(
+                format(
+                    "a name may not contain '__' after its leading underscores, start with '__sc', or, for a type, start with 'ptr_', 'ptrm_', 'slice_', 'arr<N>', 'fn<N>' or 'dyn_'",
+                ),
+            );
+        }
+    }
+
+    // Does place expression `e` lie in a field of a `@c.packed` struct whose type needs an alignment
+    // above 1? A reference to it could be misaligned.
+    fn tc_packed_misaligned(self: &mut Self, e0: NodeId, depth: i32) bool {
+        if e0 == NODE_NONE || depth > 16 {
+            return false;
+        }
+        let a = self.cur_ast();
+        let e = unsafe (*a).peel(e0, true);
+        let n = *unsafe (*a).at_const(e);
+        if n.kind == NodeKind::NODE_INDEX {
+            return self.tc_packed_misaligned(n.as_data.index.object, depth + 1);
+        }
+        if n.kind != NodeKind::NODE_MEMBER || n.as_data.member.path {
+            return false;
+        }
+        let ot = unsafe (*a).type_of(n.as_data.member.object);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if ot != TYPE_NONE && self.type_at(ot).kind != TypeKind::TYPE_REFERENCE && self.type_at(ot).kind != TypeKind::TYPE_POINTER && self.aggregate_decl(
+            ot,
+            &mut om,
+            &mut od,
+        ) && self.tc_attr(om, od, AttrKind::ATTR_PACKED) != null {
+            let ft = unsafe (*a).type_of(e);
+            let ce = self.cir();
+            if ft != TYPE_NONE && ce != null {
+                let l = self.tc_layout(ft);
+                if !l.ok || l.align > 1 {
+                    return true;
+                }
+            }
+        }
+        return self.tc_packed_misaligned(n.as_data.member.object, depth + 1);
+    }
+
+    // The layout of `ty` (current module) from the package's shared layout service, under the
+    // engine's lock: typecheck jobs run concurrently and the service caches.
+    fn tc_layout(self: &mut Self, ty: TypeId) lay::Layout {
+        let ce = self.cir();
+        self.eng_hold(true);
+        let l = unsafe (*ce).lsvc.layout(self.cur_module(), ty);
+        self.eng_hold(false);
+        return l;
+    }
+
+    // Report a value of type `ty` at `sp` when its size passes the target's `isize::MAX`; true then.
+    pub fn tc_size_limit(self: &mut Self, ty: TypeId, sp: tok::Span) bool {
+        let ce = self.cir();
+        if ty == TYPE_NONE || ty == TYPE_ERROR || ce == null || !unsafe (*self.cur_ast()).type_concrete(ty) {
+            return false;
+        }
+        let l = self.tc_layout(ty);
+        if l.ok || !l.big {
+            return false;
+        }
+        let tn = self.type_buf(ty);
+        self.errors.emit_span(
+            sp,
+            format(
+                "the type '{}' is too large for the target: no object may exceed isize::MAX bytes",
+                str::from_cbuf(tn.as_slice()),
+            ),
+        );
+        return true;
+    }
+
+    // A field of a `@c.packed` struct whose type needs a `free` and an alignment above 1: its drop
+    // would take a misaligned `&mut`.
+    fn tc_packed_field(self: &mut Self, tyn: NodeId, ft: TypeId) {
+        if ft == TYPE_NONE || !self.tc_type_is_free(ft) {
+            return;
+        }
+        let ce = self.cir();
+        if ce == null {
+            return;
+        }
+        let l = self.tc_layout(ft);
+        if l.ok && l.align <= 1 {
+            return;
+        }
+        self.errors.emit_span(
+            unsafe (*self.cur_ast()).at_const(tyn).span,
+            format("a field of a '@c.packed' struct cannot need a 'free': its drop would take a misaligned reference"),
+        );
+    }
+
+    fn err_packed_ref(self: &mut Self, sp: tok::Span) {
+        self.errors.emit_span(
+            sp,
+            format("cannot borrow a field of a '@c.packed' struct: the reference may be misaligned"),
+        );
+        self.errors.note(format("copy the field into a local first"));
+    }
+
     const fn marker_iface(self: &mut Self, sync: bool) DefId {
         let h = if sync {
             self.ph_sync;
@@ -12544,58 +12763,56 @@ extend<'a> TypeChecker<'a> {
         if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
-        // The (first) Free extend of a (module, decl) is a parse-time fact; memoize it and
-        // re-run only the per-instance bound check below. 0 = "no Free extend".
-        let key = om as u64 << 32 | od as u64;
-        let mut fm: ModuleId = 0;
-        let mut fx = NODE_NONE;
-        let mut have = false;
-        switch self.free_ext_memo.get(&key) {
-            Some(v) => {
-                if *v == 0u64 {
-                    return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
-                }
-                fm = (*v >> 32) as ModuleId;
-                fx = (*v & 0xFFFFFFFFu64) as NodeId;
-                have = true;
-            },
-            _ => {},
-        };
-        if !have {
-            let mut c = self.ext_begin(om, od);
-            while !have {
-                let e = self.ext_next(&mut c);
-                if e.node == NODE_NONE {
-                    break;
-                }
-                let a = self.mod_ast(e.module);
-                let it = unsafe (*a).at_const(e.node);
-                if it.as_data.extend_def.interface_type != NODE_NONE && self.is_free_iface(
-                    unsafe (*a).resolution_def(it.as_data.extend_def.interface_type),
-                ) {
-                    fm = e.module;
-                    fx = e.node;
-                    have = true;
-                }
-            }
-            if !have {
-                self.free_ext_memo.insert(key, 0u64);
-                return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
-            }
-            self.free_ext_memo.insert(key, fm as u64 << 32 | fx as u64);
+        let fe = self.tc_free_extend(om, od);
+        if fe.node == NODE_NONE {
+            return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
         }
+        let fm = fe.module;
+        let fx = fe.node;
         let fa = self.mod_ast(fm);
         let gens = unsafe (*fa).at_const(fx).as_data.extend_def.generics;
         let mut k: u32 = 0;
         while k < gens.len && k as i32 < gn {
             let gid = unsafe (*fa).list(gens)[k as usize];
-            if self.tc_param_has_free_bound(fm, gid) && !self.tc_type_is_free(ga[k as usize]) {
+            if self.tc_param_has_free_bound(fm, gid) && !self.tc_value_owns(ga[k as usize]) {
                 // The extend does not cover this instance: it derives Free from its members.
                 return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
             }
             k = k + 1;
         }
         return true;
+    }
+
+    // The (first) `Free` extend of aggregate `(om, od)`, or a NODE_NONE def: a parse-time fact,
+    // memoized (0 = "no Free extend").
+    fn tc_free_extend(self: &mut Self, om: ModuleId, od: NodeId) DefId {
+        let key = om as u64 << 32 | od as u64;
+        switch self.free_ext_memo.get(&key) {
+            Some(v) => {
+                if *v == 0u64 {
+                    return DefId { module: 0, node: NODE_NONE };
+                }
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
+            },
+            _ => {},
+        };
+        let mut c = self.ext_begin(om, od);
+        loop {
+            let e = self.ext_next(&mut c);
+            if e.node == NODE_NONE {
+                break;
+            }
+            let a = self.mod_ast(e.module);
+            let it = unsafe (*a).at_const(e.node);
+            if it.as_data.extend_def.interface_type != NODE_NONE && self.is_free_iface(
+                unsafe (*a).resolution_def(it.as_data.extend_def.interface_type),
+            ) {
+                self.free_ext_memo.insert(key, e.module as u64 << 32 | e.node as u64);
+                return e;
+            }
+        }
+        self.free_ext_memo.insert(key, 0u64);
+        return DefId { module: 0, node: NODE_NONE };
     }
 
     // Does user `free` method `md` destroy `target`? Its extend covers an instance only when
@@ -12614,7 +12831,7 @@ extend<'a> TypeChecker<'a> {
         let mut k: u32 = 0;
         while k < gens.len && k as i32 < gn {
             let gid = unsafe (*self.mod_ast(md.module)).list(gens)[k as usize];
-            if self.tc_param_has_free_bound(md.module, gid) && !self.tc_type_is_free(ga[k as usize]) {
+            if self.tc_param_has_free_bound(md.module, gid) && !self.tc_value_owns(ga[k as usize]) {
                 return false;
             }
             k = k + 1;
@@ -14095,8 +14312,15 @@ extend<'a> TypeChecker<'a> {
             if unsafe (*a).at_const(node).as_data.unary.op != TokenType::Star {
                 return false;
             }
-            let ot = self.type_at(unsafe (*a).type_of(unsafe (*a).at_const(node).as_data.unary.operand));
-            return (ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE) && ot.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+            let opnd = unsafe (*a).at_const(node).as_data.unary.operand;
+            let ot = self.type_at(unsafe (*a).type_of(opnd));
+            if ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE {
+                return ot.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+            }
+            // `*b` through a user Deref mutates through `deref_mut`, which needs `b` mutable.
+            return unsafe (*a).deref_use_mut(node) != null && self.tc_deref_hops_mut(node) == TYPE_NONE && self.is_assignable(
+                opnd,
+            );
         }
         if nk == NodeKind::NODE_INDEX || nk == NodeKind::NODE_MEMBER {
             if nk == NodeKind::NODE_MEMBER && unsafe (*a).at_const(node).as_data.member.path {
@@ -16069,6 +16293,9 @@ extend TypeChecker {
                 let osp = unsafe (*a).at_const(operand).span;
                 self.errors.emit_span(osp, format("cannot take '&mut' of an immutable binding (bind it with 'mut')"));
             }
+            if self.tc_packed_misaligned(operand, 0) {
+                self.err_packed_ref(unsafe (*a).at_const(operand).span);
+            }
             let opw = unsafe (*a).peel(operand, false);
             let onk = unsafe (*a).at_const(opw).kind;
             if !self.is_place(opw) && !untyped(opnd) && self.type_at(opnd).kind != TypeKind::TYPE_BUILTIN && (onk == NodeKind::NODE_CALL || onk == NodeKind::NODE_IF || onk == NodeKind::NODE_MATCH || onk == NodeKind::NODE_BLOCK || onk == NodeKind::NODE_BINARY || onk == NodeKind::NODE_ASSIGNMENT || onk == NodeKind::NODE_CAST) {
@@ -17180,6 +17407,41 @@ extend TypeChecker {
         let inst = self.tc_infer_agg_instance(unsafe (*a).at_const(id).span, enum_ty, &ptys, &vals, true);
         if inst != TYPE_NONE {
             unsafe (*self.cur_ast()).set_type(unsafe (*a).at_const(id).as_data.call.callee, inst);
+            self.tc_inst_bounds(id, inst);
+        }
+        return inst;
+    }
+
+    // Is `ct` a generic tuple struct (named without type arguments)?
+    fn tc_tuple_ctor_generic(self: &Self, ct: &Ty) bool {
+        let sd = unsafe (*self.mod_ast(ct.module)).at_const(ct.as_data.decl);
+        return sd.kind == NodeKind::NODE_STRUCT && sd.as_data.aggregate.is_tuple && sd.as_data.aggregate.generics.len != 0;
+    }
+
+    // The instance of generic tuple struct `st` that the checked arguments of constructor call `id` give,
+    // as `tc_infer_variant_instance` gives an enum's. `st` itself when the arity is wrong (the caller
+    // reports it); TYPE_NONE when a parameter stays open (reported).
+    fn tc_infer_tuple_ctor_instance(self: &mut Self, id: NodeId, st: TypeId) TypeId {
+        let y = *self.type_at(st);
+        let sa = self.mod_ast(y.module);
+        let members = unsafe (*sa).at_const(y.as_data.decl).as_data.aggregate.members;
+        let a = self.cur_ast();
+        let args = unsafe (*a).at_const(id).as_data.call.args;
+        if args.len != members.len {
+            return st;
+        }
+        let mut ptys = Vector::<TypeId>::new();
+        let mut vals = Vector::<NodeId>::new();
+        ptys.reserve(args.len as usize);
+        vals.reserve(args.len as usize);
+        for k in 0..args.len {
+            ptys.push(self.node_type_in(y.module, unsafe (*sa).list(members)[k as usize]));
+            vals.push(unsafe (*a).list(args)[k as usize]);
+        }
+        let inst = self.tc_infer_agg_instance(unsafe (*a).at_const(id).span, st, &ptys, &vals, true);
+        if inst != TYPE_NONE {
+            unsafe (*self.cur_ast()).set_type(unsafe (*a).at_const(id).as_data.call.callee, inst);
+            self.tc_inst_bounds(id, inst);
         }
         return inst;
     }
@@ -19132,6 +19394,20 @@ extend TypeChecker {
                 return rt3;
             }
         }
+        // A generic tuple struct named without type arguments takes the expected instance of itself
+        // (`let q: Q<i64> = Q(7)`), as a struct literal does: its elements then expect concrete types.
+        if callee != TYPE_NONE && want != TYPE_NONE && self.type_at(callee).kind == TypeKind::TYPE_STRUCT && self.type_at(
+            want,
+        ).kind == TypeKind::TYPE_INSTANCE && self.tc_tuple_ctor_generic(self.type_at(callee)) {
+            let mut wm: ModuleId = 0;
+            let mut wd = NODE_NONE;
+            if self.aggregate_decl(want, &mut wm, &mut wd) && wm == self.type_at(callee).module && wd == self.type_at(
+                callee,
+            ).as_data.decl {
+                callee = want;
+                unsafe (*self.cur_ast()).set_type(callee_id, want);
+            }
+        }
         let args = unsafe (*a).at_const(id).as_data.call.args;
         for i in 0..args.len {
             if i < 8 && (pre >> i as u8 & 1) != 0 {
@@ -19188,6 +19464,17 @@ extend TypeChecker {
         // aggregate construction, not a call. aggregate_of covers both the plain struct and its
         // instances, binding the element types under the instance's generic args.
         if ct.kind == TypeKind::TYPE_STRUCT || ct.kind == TypeKind::TYPE_INSTANCE {
+            if ct.kind == TypeKind::TYPE_STRUCT && self.tc_tuple_ctor_generic(&ct) {
+                // A generic tuple struct named without type arguments (`Wrap(5)`): the elements bind its
+                // parameters, as a generic enum variant's payload does.
+                callee = self.tc_infer_tuple_ctor_instance(id, callee);
+                if callee == TYPE_NONE {
+                    return TYPE_NONE;
+                }
+            } else if ct.kind == TypeKind::TYPE_INSTANCE && pck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                // `Wrap::<A>(a)`: the turbofish names the instance here.
+                self.tc_inst_bounds(id, callee);
+            }
             let mut tmod: ModuleId = 0;
             let mut tdecl = NODE_NONE;
             let mut tgp = Defs8 {};
@@ -20173,6 +20460,18 @@ extend TypeChecker {
                 i = i + 1;
             }
         }
+        // A `&self` / `&mut self` receiver borrows the place: not a misaligned packed field.
+        if skip == 1 && cn_kind == NodeKind::NODE_MEMBER && params.len > 0 {
+            let selfk = self.type_at(self.decl_type_in(fmod, unsafe (*fa).list(params)[0])).kind;
+            let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
+            let rk = self.type_at(unsafe (*a).type_of(recv)).kind;
+            if selfk == TypeKind::TYPE_REFERENCE && rk != TypeKind::TYPE_REFERENCE && rk != TypeKind::TYPE_POINTER && self.tc_packed_misaligned(
+                recv,
+                0,
+            ) {
+                self.err_packed_ref(unsafe (*a).at_const(recv).span);
+            }
+        }
         // &mut self receiver mutability.
         if skip == 1 && cn_kind == NodeKind::NODE_MEMBER && params.len > 0 {
             let selfp = *self.type_at(self.decl_type_in(fmod, unsafe (*fa).list(params)[0]));
@@ -20494,6 +20793,213 @@ extend TypeChecker {
 }
 
 extend TypeChecker {
+    /// Does `ty` transitively contain a reference or a lifetime-parameterized aggregate? Memoized
+    /// unless the answer read a closure's capture state, which changes as bodies are lowered.
+    pub fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let key = self.cur_module() as u64 << 32 | ty as u64;
+        switch self.carries_memo.get(&key) {
+            Some(v) => {
+                return *v != 0;
+            },
+            None => {},
+        };
+        let mut pure = true;
+        let r = self.tc_carries_borrow_rec(ty, 0, &mut pure);
+        if pure {
+            self.carries_memo.insert(key, r as u8);
+        }
+        return r;
+    }
+
+    // Memoized per (ty, depth) (the depth cutoff makes results depth-dependent), but ONLY for
+    // computations whose recursion never touched a TYPE_FUNCTION: a closure's answer reads the
+    // capture analysis' mut_caps bits and the current module, both of which change under the walk.
+    fn tc_carries_borrow_rec(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
+        if ty == TYPE_NONE || depth > 4 {
+            return false;
+        }
+        let slot = ty_dense(ty) * 5 + depth as usize;
+        let c = memo2_get(&self.carries_borrow_memo, slot);
+        if c >= 0 {
+            return c != 0;
+        }
+        let mut p2 = true;
+        let r = self.tc_carries_borrow_impl(ty, depth, &mut p2);
+        if p2 {
+            memo2_set(&mut self.carries_borrow_memo, slot, r);
+        } else {
+            *pure = false;
+        }
+        return r;
+    }
+
+    fn tc_carries_borrow_impl(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
+        if self.type_at(ty).kind == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        // A closure's ENVIRONMENT is where its borrows live, and none of it shows in its type: `fn(..)`
+        // erases the captures. So look at them directly: a captured `&T` (or a value the capture
+        // analysis turned into an implicit `&mut`, i.e. a mutated capture) is a borrow of the enclosing
+        // frame, and a closure holding one is not `'static` no matter what its signature says.
+        if self.type_at(ty).kind == TypeKind::TYPE_FUNCTION {
+            // Capture state and the current module change under the walk.
+            *pure = false;
+            let fmod = self.type_at(ty).module;
+            if fmod != self.cur_module() {
+                // A foreign closure cannot have captured one of our locals.
+                return false;
+            }
+            let fdecl = self.type_at(ty).as_data.decl;
+            if fdecl == NODE_NONE || unsafe (*self.cur_ast()).at_const(fdecl).kind != NodeKind::NODE_CLOSURE {
+                // A plain function pointer captures nothing.
+                return false;
+            }
+            let cl = unsafe (*self.cur_ast()).at_const(fdecl).as_data.closure;
+            if (cl.mut_caps | cl.ref_caps) != 0 {
+                return true;
+            }
+            let cids = unsafe (*self.cur_ast()).list(cl.captures);
+            for ci in 0..cl.captures.len {
+                let cty = unsafe (*self.cur_ast()).type_of(unsafe cids[ci as usize]);
+                if self.tc_carries_borrow_rec(cty, depth + 1, pure) {
+                    return true;
+                }
+            }
+            // A body naming an enclosing function's lifetime holds that region (its value may be a
+            // borrow of it, obtained by any means).
+            let cls = &unsafe (*self.cur_ast()).closure_lts;
+            for k in 0..cls.len() {
+                if (cls[k] >> 32) as NodeId == fdecl {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // A RAW POINTER is the language's lifetime hand-off boundary: dereferencing it needs
+        // `unsafe`, and the checker deliberately ends borrow tracking at the cast that produced
+        // it (the `interp_new(&mut p)` precedent). Peeling it here made every pointer to a
+        // str-carrying aggregate count as a borrow, which rejected 'static task payloads built
+        // from raw handles.
+        if self.type_at(ty).kind == TypeKind::TYPE_POINTER {
+            return false;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        for gi in 0..gn {
+            if self.tc_carries_borrow_rec(ga[gi as usize], depth + 1, pure) {
+                return true;
+            }
+        }
+        let ma = self.mod_ast(om);
+        if unsafe (*ma).lifetimes_of(od).len != 0 {
+            // `struct S<'a>` borrows by construction.
+            return true;
+        }
+        let is_tuple = unsafe (*ma).at_const(od).as_data.aggregate.is_tuple;
+        let members = unsafe (*ma).at_const(od).as_data.aggregate.members;
+        for i in 0..members.len {
+            let mid = unsafe (*ma).list(members)[i as usize];
+            let fnode = unsafe (*ma).member_type_node(mid, is_tuple);
+            if fnode == NODE_NONE {
+                continue;
+            }
+            if unsafe (*ma).at_const(fnode).kind == NodeKind::NODE_REFERENCE_TYPE {
+                return true;
+            }
+            if self.tc_carries_borrow_rec(self.node_type_in(om, fnode), depth + 1, pure) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// True when bound list `bnds` of module `fmod` names `'static`.
+    pub fn tc_bounds_have_static(self: &Self, fmod: ModuleId, bnds: NodeList) bool {
+        let fa = self.mod_ast(fmod);
+        for b in 0..bnds.len {
+            let bn = unsafe (*fa).at_const(unsafe (*fa).list(bnds)[b as usize]);
+            if bn.kind == NodeKind::NODE_LIFETIME && span_is(self.mod_src(fmod), bn.as_data.name.text, "'static") {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Can a value of `ty` hold a borrow: does it carry one (`tc_carries_borrow`), or name a type
+    // parameter that no `'static` bound keeps from being bound to one?
+    pub fn tc_may_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 8 {
+            return false;
+        }
+        let y = *self.type_at(ty);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            return !self.tc_param_static(y.module, y.as_data.decl);
+        }
+        if y.kind == TypeKind::TYPE_ASSOC {
+            // `T::Output` holds what the conformance's type holds: `'static` when the projected type and
+            // the interface's arguments are, since an extend lifetime it names must appear in those.
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            for i in 0..it.n {
+                if self.tc_may_borrow(unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if self.tc_carries_borrow(ty) {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_may_borrow(y.as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if y.kind == TypeKind::TYPE_INSTANCE && self.aggregate_of(ty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            for i in 0..gn {
+                if self.tc_may_borrow(ga[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Is generic parameter `gp` of module `m` bounded by `'static`, inline or by a `where` predicate of
+    // the function under check?
+    fn tc_param_static(self: &Self, m: ModuleId, gp: NodeId) bool {
+        let pa = self.mod_ast(m);
+        if unsafe (*pa).at_const(gp).kind != NodeKind::NODE_GENERIC_PARAM {
+            return false;
+        }
+        if self.tc_bounds_have_static(m, unsafe (*pa).at_const(gp).as_data.generic_param.bounds) {
+            return true;
+        }
+        let f = self.icx.current_fn;
+        if f == NODE_NONE || m != self.cur_module() || unsafe (*pa).at_const(f).kind != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        let wc = unsafe (*pa).at_const(f).as_data.function.where_clause;
+        for w in 0..wc.len {
+            let wp = unsafe (*pa).at_const(unsafe (*pa).list(wc)[w as usize]).as_data.where_predicate;
+            if unsafe (*pa).resolution(wp.ty) == gp && self.tc_bounds_have_static(m, wp.bounds) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Whether every argument of instance `ty` of a generic struct or enum satisfies the bounds its
     // parameter declares (with their interface arguments, under the instance's other arguments);
     // each failure is reported at `node`.
@@ -20523,6 +21029,23 @@ extend TypeChecker {
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
         for g in 0..gn {
             let pb = unsafe (*da).at_const(gp[g as usize].node).as_data.generic_param.bounds;
+            // `T: 'static`, as for a function's argument: the type must hold no borrow, since nothing
+            // borrowed from a local outlives the program.
+            if self.tc_bounds_have_static(it.module, pb) && self.tc_may_borrow(ga[g as usize], 0) {
+                let tn = self.type_buf(ga[g as usize]);
+                self.errors.emit_span(
+                    sp,
+                    format("type '{}' does not satisfy bound ''static'", str::from_cbuf(tn.as_slice())),
+                );
+                self.errors.note(format("the parameter is declared `: 'static`, so its argument cannot hold a borrow"));
+                if !self.tc_carries_borrow(ga[g as usize]) {
+                    self.errors.note(
+                        format(
+                            "its type names a type parameter that may hold a borrow: bound that parameter by `'static`",
+                        ),
+                    );
+                }
+            }
             for b in 0..pb.len {
                 let bid = unsafe (*da).list(pb)[b as usize];
                 let bi = unsafe (*da).resolution_def(bid);
@@ -21889,6 +22412,16 @@ extend TypeChecker {
                 }
                 continue;
             }
+            for j in 0..i {
+                let pn = unsafe (*a).at_const(unsafe (*a).list(fields)[j as usize]).as_data.field_initializer.name;
+                if unsafe (*a).resolution_def(pn).node == field {
+                    self.errors.emit_span(
+                        fname,
+                        format("field '{}' is initialized twice", diag::span_str(self.source, fname.start, fname.end)),
+                    );
+                    break;
+                }
+            }
             unsafe (*self.cur_ast()).set_resolution_def(fnn, DefId { module: smod, node: field });
             if variant == NODE_NONE {
                 self.check_field_visibility(smod, field, decl, fname);
@@ -21897,7 +22430,142 @@ extend TypeChecker {
                 self.err_mismatch(fval, ft);
             }
         }
+        if decl != NODE_NONE && sty != TYPE_ERROR {
+            self.tc_omitted_fields(id, smod, decl, variant, &gp[0], &ga[0], gn);
+        }
         return sty;
+    }
+
+    // The fields struct literal `id` omits are zero-filled: each must be visible here and of a type
+    // whose all-zero bytes are a valid value.
+    fn tc_omitted_fields(
+        self: &mut Self,
+        id: NodeId,
+        m: ModuleId,
+        decl: NodeId,
+        variant: NodeId,
+        gp: *const DefId,
+        ga: *const TypeId,
+        gn: i32,
+    ) {
+        let a = self.cur_ast();
+        let da = self.mod_ast(m);
+        if variant == NODE_NONE && (unsafe (*da).at_const(decl).kind != NodeKind::NODE_STRUCT || unsafe (*da).at_const(
+            decl,
+        ).as_data.aggregate.is_union) {
+            return; // a union literal sets one member
+        }
+        let members = if variant != NODE_NONE {
+            unsafe (*da).at_const(variant).as_data.variant.payload;
+        } else {
+            unsafe (*da).at_const(decl).as_data.aggregate.members;
+        };
+        let fields = unsafe (*a).at_const(id).as_data.struct_initializer.fields;
+        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zero_empty(m, decl);
+        for j in 0..members.len {
+            let mid = unsafe (*da).list(members)[j as usize];
+            let mn = unsafe (*da).at_const(mid);
+            if mn.kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let mut given = false;
+            for i in 0..fields.len {
+                let fnn = unsafe (*a).at_const(unsafe (*a).list(fields)[i as usize]).as_data.field_initializer.name;
+                if unsafe (*a).resolution_def(fnn).node == mid {
+                    given = true;
+                    break;
+                }
+            }
+            if given {
+                continue;
+            }
+            let ft = self.subst_type(self.decl_type_in(m, mid), gp, ga, gn);
+            if (mn.as_data.field.is_public || inside || variant != NODE_NONE) && self.tc_zero_ok(ft, 0) {
+                continue;
+            }
+            let nm = unsafe (*da).at_const(mn.as_data.field.name).as_data.name.text;
+            self.errors.emit_span(
+                unsafe (*a).at_const(id).span,
+                format(
+                    "missing field '{}': an omitted field is zero-filled, and zero is not a valid value of its type here",
+                    diag::span_str(self.mod_src(m), nm.start, nm.end),
+                ),
+            );
+        }
+    }
+
+    // Are all-zero bytes a valid value of `ty`, every field it holds visible here? Scalars, raw
+    // pointers and vectors are; a reference, a function, an enum, a `dyn` or an unknown type is not.
+    fn tc_zero_ok(self: &mut Self, ty: TypeId, depth: u32) bool {
+        if ty == TYPE_NONE || depth > 8 {
+            return false;
+        }
+        let y = *self.type_at(ty);
+        let k = y.kind;
+        if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_SIMD || k == TypeKind::TYPE_MASK || k == TypeKind::TYPE_ERROR {
+            return true;
+        }
+        if k == TypeKind::TYPE_ARRAY {
+            return self.tc_zero_ok(y.as_data.arr.elem, depth + 1);
+        }
+        if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM {
+            return false;
+        }
+        let mut m: ModuleId = 0;
+        let mut decl = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(ty, &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        let dn = unsafe (*self.mod_ast(m)).at_const(decl);
+        if dn.kind == NodeKind::NODE_ENUM {
+            return self.tc_zero_enum(m, dn.as_data.aggregate.members);
+        }
+        if dn.kind != NodeKind::NODE_STRUCT {
+            return false;
+        }
+        if dn.as_data.aggregate.is_union || m == self.ph_int.mid && decl == self.ph_int.node || m == self.ph_uint.mid && decl == self.ph_uint.node {
+            return true;
+        }
+        // The prelude views, containers, arrays and wide integers are empty or zero when zero: their
+        // private fields hold no other invariant.
+        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zero_empty(m, decl);
+        let members = dn.as_data.aggregate.members;
+        for j in 0..members.len {
+            let mid = unsafe (*self.mod_ast(m)).list(members)[j as usize];
+            let mn = unsafe (*self.mod_ast(m)).at_const(mid);
+            if mn.kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if !mn.as_data.field.is_public && !inside {
+                return false;
+            }
+            if !self.tc_zero_ok(self.subst_type(self.decl_type_in(m, mid), &gp[0], &ga[0], gn), depth + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // A payload-free enum whose variants take the implicit discriminants: zero is its first variant.
+    const fn tc_zero_enum(self: &Self, m: ModuleId, variants: NodeList) bool {
+        let da = self.mod_ast(m);
+        for i in 0..variants.len {
+            let v = unsafe (*da).at_const(unsafe (*da).list(variants)[i as usize]);
+            if v.kind != NodeKind::NODE_VARIANT || v.as_data.variant.payload.len != 0 || v.as_data.variant.value != NODE_NONE {
+                return false;
+            }
+        }
+        return variants.len != 0;
+    }
+
+    const fn tc_zero_empty(self: &Self, m: ModuleId, d: NodeId) bool {
+        return d != NODE_NONE && (m == self.ph_str.mid && d == self.ph_str.node || m == self.ph_string.mid && d == self.ph_string.node || m == self.ph_vector.mid && d == self.ph_vector.node || m == self.ph_array.mid && d == self.ph_array.node || m == self.ph_map.mid && d == self.ph_map.node || m == self.ph_set.mid && d == self.ph_set.node || self.tc_is_view_decl(
+            m,
+            d,
+        ));
     }
 
     // Is `ty` an instance of aggregate `decl` of module `m`?
@@ -23092,7 +23760,8 @@ extend TypeChecker {
                     }
                     unsafe (*self.cur_ast()).set_type(v, vt);
                 } else {
-                    self.resolve_type(v);
+                    let st = self.resolve_type(v);
+                    self.tc_size_limit(st, unsafe (*a).at_const(v).span);
                 }
                 result = Ast::builtin(BuiltinType::BT_USIZE);
             },
@@ -23111,6 +23780,10 @@ extend TypeChecker {
                     }
                 }
                 if vo.op == VA_ARG {
+                    // Nothing checks that the caller passed a value of this type, or one at all.
+                    if self.tc_needs_unsafe() {
+                        self.err_unsafe(unsafe (*a).at_const(id).span, "reading a variadic argument with 'va_arg'");
+                    }
                     result = self.resolve_type(vo.extra);
                 } else {
                     if vo.op == VA_START {
@@ -23213,35 +23886,6 @@ extend TypeChecker {
             },
             NODE_MATCH => {
                 result = self.check_match_expr(id, expected);
-            },
-            NODE_NEW => {
-                let init = unsafe (*a).at_const(id).as_data.new_expr.initializer;
-                // `new S { .. }` infers a bare generic `S` as its literal does.
-                let declared = self.resolve_type_at(
-                    unsafe (*a).at_const(id).as_data.new_expr.ty,
-                    init != NODE_NONE && unsafe (*a).at_const(init).kind == NodeKind::NODE_STRUCT_INITIALIZER,
-                );
-                let mut inner = declared;
-                if init != NODE_NONE {
-                    // `new S { .. }` for an expected `*mut S<..>`: the literal expects the pointee.
-                    let mut iwant = TYPE_NONE;
-                    if expected != TYPE_NONE && self.type_at(expected).kind == TypeKind::TYPE_POINTER {
-                        iwant = self.type_at(expected).as_data.elem;
-                    }
-                    let it = self.check_expr_w(init, iwant);
-                    if unsafe (*a).at_const(init).kind == NodeKind::NODE_STRUCT_INITIALIZER {
-                        inner = it;
-                    } else if !self.compatible(declared, init) {
-                        self.err_mismatch(init, declared);
-                    }
-                }
-                result = unsafe (*self.cur_ast()).intern_type(
-                    Ty {
-                        kind: TypeKind::TYPE_POINTER,
-                        qualifier: TypeQualifier::TYPE_QUAL_MUT as u8,
-                        as_data: TyAs { elem: inner },
-                    },
-                );
             },
             NODE_ARRAY_LITERAL => {
                 result = self.check_array_literal(id, expected);
@@ -25779,6 +26423,73 @@ extend TypeChecker {
         if id == NODE_NONE {
             return;
         }
+        self.check_pattern_inner(id, expected, mode);
+        // A by-value destructuring of a type with a user `free` cannot move an owning part out: that
+        // `free` would never run.
+        let k = unsafe (*self.cur_ast()).at_const(id).kind;
+        if mode == 0 && (k == NodeKind::NODE_PATTERN_STRUCT || k == NodeKind::NODE_PATTERN_TUPLE) && expected != TYPE_NONE && self.type_at(
+            expected,
+        ).kind != TypeKind::TYPE_REFERENCE {
+            let mut om: ModuleId = 0;
+            let mut od = NODE_NONE;
+            let fe = if self.aggregate_decl(expected, &mut om, &mut od) {
+                self.tc_free_extend(om, od);
+            } else {
+                DefId { module: 0, node: NODE_NONE };
+            };
+            // A prelude `Free` (Option's) only frees the parts, as the per-part drops do anyway.
+            if fe.node != NODE_NONE && !unsafe (&*self.package).modules[fe.module as usize].prelude && self.tc_pattern_moves(
+                id,
+                0,
+            ) {
+                self.errors.emit_span(
+                    unsafe (*self.cur_ast()).at_const(id).span,
+                    format(
+                        "cannot move a part out of a value whose type implements Free: its 'free' would not run; bind by reference or move the whole value",
+                    ),
+                );
+            }
+        }
+    }
+
+    // Does pattern `id` bind an owning value by value?
+    fn tc_pattern_moves(self: &mut Self, id: NodeId, depth: i32) bool {
+        if id == NODE_NONE || depth > 16 {
+            return false;
+        }
+        let n = *unsafe (*self.cur_ast()).at_const(id);
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            // A binding, unless the name is a unit variant or a constant compared against.
+            let d = unsafe (*self.cur_ast()).resolution_def(id);
+            if d.node != NODE_NONE {
+                let dk = unsafe (*self.mod_ast(d.module)).at_const(d.node).kind;
+                if dk == NodeKind::NODE_VARIANT || dk == NodeKind::NODE_CONST {
+                    return false;
+                }
+            }
+            return self.tc_type_is_free(unsafe (*self.cur_ast()).type_of(id));
+        }
+        if n.kind != NodeKind::NODE_PATTERN_STRUCT && n.kind != NodeKind::NODE_PATTERN_TUPLE && n.kind != NodeKind::NODE_PATTERN_FIELD && n.kind != NodeKind::NODE_PATTERN_NAME {
+            return false;
+        }
+        if n.kind == NodeKind::NODE_PATTERN_NAME && self.tc_type_is_free(unsafe (*self.cur_ast()).type_of(id)) {
+            return true;
+        }
+        let cs = n.as_data.pattern.children;
+        if n.kind == NodeKind::NODE_PATTERN_FIELD && cs.len == 0 {
+            // Shorthand `S { f }`: the field binds itself.
+            let fd = unsafe (*self.cur_ast()).resolution_def(n.as_data.pattern.name);
+            return fd.node != NODE_NONE && self.tc_type_is_free(self.decl_type_in(fd.module, fd.node));
+        }
+        for i in 0..cs.len {
+            if self.tc_pattern_moves(unsafe (*self.cur_ast()).list(cs)[i as usize], depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn check_pattern_inner(self: &mut Self, id: NodeId, expected: TypeId, mode: i32) {
         let a = self.cur_ast();
         let nk = unsafe (*a).at_const(id).kind;
         let mut bind_ref = mode;
@@ -26224,6 +26935,9 @@ extend TypeChecker {
         self.tc_attr_exprs(id);
         let a = self.cur_ast();
         let nk = unsafe (*a).at_const(id).kind;
+        if !self.in_extern {
+            self.tc_reserved_name(id, nk);
+        }
         switch nk {
             NODE_STATIC_ASSERT => {
                 self.check_static_assert(id);
@@ -26442,11 +27156,15 @@ extend TypeChecker {
             NODE_STRUCT | NODE_ENUM => {
                 let agg = unsafe (*a).at_const(id).as_data.aggregate;
                 let members = agg.members;
+                let packed = nk == NodeKind::NODE_STRUCT && self.tc_attr(self.cur_module(), id, AttrKind::ATTR_PACKED) != null;
                 if agg.is_tuple {
                     for i in 0..members.len {
                         let mid = unsafe (*self.cur_ast()).list(members)[i as usize];
                         let ft = self.resolve_type(mid);
                         self.tc_no_reg(mid, ft);
+                        if packed {
+                            self.tc_packed_field(mid, ft);
+                        }
                     }
                 } else {
                     for i in 0..members.len {
@@ -26456,6 +27174,9 @@ extend TypeChecker {
                             // The field's own record: every reader takes it from the slot.
                             let ft = self.decl_type(mid);
                             self.tc_no_reg(mn.as_data.field.ty, ft);
+                            if packed {
+                                self.tc_packed_field(mn.as_data.field.ty, ft);
+                            }
                         } else {
                             if mn.as_data.variant.value != NODE_NONE {
                                 let ct0 = self.ct_n;
@@ -26562,7 +27283,10 @@ extend TypeChecker {
                 let _ = self.resolve_type(unsafe (*a).at_const(id).as_data.type_alias.ty);
             },
             NODE_EXTERN_BLOCK => {
+                let ie = self.in_extern;
+                self.in_extern = true;
                 self.check_associated(unsafe (*a).at_const(id).as_data.extern_block.items);
+                self.in_extern = ie;
             },
             _ => {},
         };
@@ -26598,6 +27322,22 @@ extend TypeChecker {
                     ),
                 );
             }
+        }
+        // A constant is one value every task reaches: interior mutability in it must be `Sync`.
+        if !cd.is_extern && !cd.is_static_mut && self.tc_has_interior(declared, 0) && !self.type_satisfies(
+            declared,
+            self.marker_iface(true),
+            0,
+        ) {
+            let sp = self.name_span(cd.name);
+            let tn = self.type_buf(declared);
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a constant of type '{}' holds an 'UnsafeCell' but is not 'Sync': every task shares it",
+                    str::from_cbuf(tn.as_slice()),
+                ),
+            );
         }
         if cd.value != NODE_NONE {
             let init0 = self.const_init;

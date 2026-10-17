@@ -970,10 +970,12 @@ pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
         run(env);
         return;
     }
-    let mut rec: Raw;
+    let mut rec = Raw {
+        job: Job { next: null, run: run_raw, co: null, token: 0, done: 0, t: null },
+        run: run,
+        env: env,
+    };
     let rp = (&mut rec) as *mut Raw;
-    unsafe (*rp).run = run;
-    unsafe (*rp).env = env;
     let co = runtime::current();
     if co == null {
         let _ = unsafe atomic::add_usize(&mut unsafe G_EXT, 1, 4);
@@ -983,7 +985,6 @@ pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
             run(env);
             return;
         }
-        unsafe (*rp).job = Job { next: null, run: run_raw, co: null, token: 0, done: 0, t: null };
         if submit_ext(p, rp as *mut Job) {
             wait_ext(rp as *mut Job);
         } else {

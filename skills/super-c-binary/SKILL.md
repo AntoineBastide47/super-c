@@ -362,7 +362,7 @@ edit never moves a chunk between shards.
 
 | Profile | Character | Use |
 |---------|-----------|-----|
-| `dev` | `opt-level = 1`, `-g` + full ASan/UBSan set, frame pointers | Development (**default**) |
+| `dev` | `opt-level = 1`, `-g` + full ASan/UBSan set, frame pointers | Development (**default** of a manifest build) |
 | `debug` | `opt-level = 0`, `-g` + sanitizers | Unoptimized debugging |
 | `release` | `opt-level = 3`, `-DNDEBUG -fPIE` + section GC, `link-args = ["-O2"]`, strip, `lto = "auto"` | Shipping |
 | `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` (+ PGO ingest of `<out-dir>/pgo.profdata` when that file exists) | Benchmarking/profiling |
@@ -673,7 +673,7 @@ the build's set included: a program can choose code at run time, never a result.
 
 | Flag | Effect |
 |------|--------|
-| `--profile=NAME` | Select build profile (also the value of `PROFILE`; a bare build without it reports `dev`) |
+| `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile flags (no sanitizers) while `PROFILE` still reads `dev`: pass `--profile=dev` for the sanitized build |
 | `--jobs=N` | Worker count for parallel stages + cc (default: one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
 | `--cc=CMD` | Override C compiler (manifest and bare builds alike) |

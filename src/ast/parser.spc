@@ -261,9 +261,7 @@ extend Parser {
 
     @c.always_inline
     pub fn callable_name(self: &mut Self) NodeId {
-        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) && !self.check(
-            TokenType::New,
-        ) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.error_skip("expected identifier");
         }
         let token = self.advance();
@@ -2487,21 +2485,6 @@ extend Parser {
                 NodeAs { single: SingleData { value: ty } },
             );
         }
-        if self.match(TokenType::New) {
-            let new_type = self.parse_type();
-            let mut initializer = NODE_NONE;
-            if self.check(TokenType::LeftBrace) {
-                initializer = self.parse_struct_initializer_after(new_type, self.node_span(new_type).start);
-            } else if self.match(TokenType::LeftParen) {
-                initializer = self.parse_expression();
-                self.expect(TokenType::RightParen, "')'");
-            }
-            return self.fin(
-                NodeKind::NODE_NEW,
-                start,
-                NodeAs { new_expr: NewData { ty: new_type, initializer: initializer } },
-            );
-        }
         if self.check(TokenType::LeftBracket) {
             return self.parse_array_literal();
         }
@@ -2944,7 +2927,7 @@ extend Parser {
         if context == RangeContext::RANGE_PATTERN {
             return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
         }
-        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::SelfUpper || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || t == TokenType::MatchertextBegin || Parser::unary_operator(
+        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::SelfUpper || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || t == TokenType::MatchertextBegin || Parser::unary_operator(
             t,
         );
     }

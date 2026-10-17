@@ -15,9 +15,7 @@ pub struct StaticVector<T, const N: usize> {
 extend<T, const N: usize> StaticVector<T, N> {
     /// Empty vector. The unused slots hold no elements (they are never read or freed).
     pub const fn new() StaticVector<T, N> {
-        let mut v = StaticVector::<T, N> {};
-        v.len = 0;
-        return v;
+        return unsafe zeroed::<StaticVector<T, N>>(); // len 0: no slot is read or freed
     }
 
     /// Number of live elements.

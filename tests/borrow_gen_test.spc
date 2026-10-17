@@ -561,9 +561,9 @@ fn third_audit() {
         false,
     );
     check_case(
-        "K15 out-param init via &mut",
+        "K15 &mut of an uninitialized value is a use",
         "fn init(p: &mut i32) { *p = 42; }\nfn main() i32 { let mut x: i32; init(&mut x); return x; }\n",
-        true,
+        false,
     );
     check_case(
         "K15 shared borrow does not init",

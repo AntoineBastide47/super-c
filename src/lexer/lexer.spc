@@ -171,9 +171,6 @@ const fn keywords(lexeme: *const u8, len: usize) TokenType {
             if first == b'm' && memeq(lexeme, "mut") {
                 return TokenType::Mut;
             }
-            if first == b'n' && memeq(lexeme, "new") {
-                return TokenType::New;
-            }
             if first == b'p' && memeq(lexeme, "pub") {
                 return TokenType::Pub;
             }

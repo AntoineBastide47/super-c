@@ -146,6 +146,7 @@ pub struct Lowerer {
     pub tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
     tape_mute: u32,
     in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
+    free_mask: bool, // a `Free::free` body that can accept a cancellation: it runs masked
     // The clean nodes of the open root (`chk_nodes[chk_base..]`, see `chk_open`): the calls among
     // them may carry a cancellation check. Any other call is evaluated with pending sibling
     // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
@@ -349,6 +350,7 @@ extend Lowerer {
             tape: Vector::<u64>::new(),
             tape_mute: 0,
             in_defer: 0,
+            free_mask: false,
             chk_nodes: Vector::<NodeId>::new(),
             chk_base: 0,
             chk_narrow: false,
@@ -451,6 +453,7 @@ extend Lowerer {
         self.lay.reset();
         self.tape_mute = 0;
         self.in_defer = 0;
+        self.free_mask = false;
         self.chk_nodes.truncate(0);
         self.chk_base = 0;
         self.chk_narrow = unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str().starts_with(
@@ -907,6 +910,12 @@ extend Lowerer {
             self.scope_locals.push(rets.len + i);
         }
         self.scope_enter();
+        // A destructor completes: one that can reach a cancellation acceptance runs masked, so its
+        // waits finish and no accepted request is left for a caller whose drop carries no edge.
+        if self.free_can_accept(fnode) {
+            self.free_mask = true;
+            self.mask_call(loader::SugarItem::SI_CANCEL_MENTER, sp);
+        }
         if fd.is_intrinsic() {
             // The operation itself over the arguments: the body a function value or a bound call runs.
             let mut ops = self.avget();
@@ -1032,7 +1041,48 @@ extend Lowerer {
 
     // Seal the open block with the fall-off return, drop the unsealed trailing block, and report
     // success.
+    // Is `fnode` the `free` of a `Free` conformance that can reach a cancellation acceptance?
+    fn free_can_accept(self: &mut Self, fnode: NodeId) bool {
+        let fd = self.f.node(fnode).as_data.function;
+        let nm = self.f.node(fd.name).as_data.name.text;
+        if self.src.slice(nm.start as usize, nm.end as usize) != "free" || !self.chk_enabled() {
+            return false;
+        }
+        let pk = unsafe &*self.pkg;
+        let ext = unsafe (&*pk.module_ast_const(self.module)).container_of(fnode);
+        if ext == NODE_NONE || self.f.node(ext).kind != NodeKind::NODE_EXTEND || self.f.node(ext).as_data.extend_def.interface_type == NODE_NONE {
+            return false;
+        }
+        let iface = self.f.res(self.f.node(ext).as_data.extend_def.interface_type);
+        let fh = pk.prelude_lookup("Free", true);
+        if iface.module != fh.mid || iface.node != fh.node {
+            return false;
+        }
+        return pk.cancel_on(self.module, self.f.node(fnode).span);
+    }
+
+    // A call to runtime hook `si` (no arguments, no result, no edge).
+    fn mask_call(self: &mut Self, si: loader::SugarItem, sp: tok::Span) {
+        let pk = unsafe &*self.pkg;
+        let c0 = self.body.oper_pool.len() as u32;
+        let _ = self.emit_call(
+            pk.sugar_item(si),
+            ir::IR_NONE,
+            c0,
+            0,
+            0,
+            0,
+            TYPE_NONE,
+            TYPE_NONE,
+            Ast::builtin(BuiltinType::BT_VOID),
+            sp,
+        );
+    }
+
     fn finish_body(self: &mut Self, sp: tok::Span) bool {
+        if self.free_mask {
+            self.mask_call(loader::SugarItem::SI_CANCEL_MEXIT, sp);
+        }
         let t = ir::term0(ir::TM_RETURN, sp);
         let end = self.open_block();
         self.seal(t, end);
@@ -1265,6 +1315,9 @@ extend Lowerer {
         self.tp(ir::TP_RET_POST, 0, id);
         self.emit_defers_down_to(0);
         self.emit_deads_down_to(0);
+        if self.free_mask {
+            self.mask_call(loader::SugarItem::SI_CANCEL_MEXIT, sp);
+        }
         let t = ir::term0(ir::TM_RETURN, sp);
         let next = self.open_block();
         self.seal(t, next);
@@ -3731,22 +3784,6 @@ extend Lowerer {
             // A path in value position: unit variant construction or an item constant.
             return self.lower_path_value(id);
         }
-        if k == NodeKind::NODE_NEW {
-            let nd = self.f.node(id).as_data.new_expr;
-            let mut start = 0 as u32;
-            let mut n9 = 0 as u32;
-            if nd.initializer != NODE_NONE {
-                let iop = self.lower_expr(nd.initializer);
-                if iop == ir::IR_NONE {
-                    return ir::IR_NONE;
-                }
-                start = self.body.oper_pool.len() as u32;
-                self.body.oper_pool.push(iop);
-                n9 = 1;
-            }
-            let pl = self.rv_temp(ir::rv(ir::RV_INTRINSIC, start, n9, ir::IN_NEW, ty), sp);
-            return self.copy_op(pl);
-        }
         self.fail_at("expr-kind", id);
         return ir::IR_NONE;
     }
@@ -5464,12 +5501,13 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         self.note_mut_bind(d.left);
         self.tp(ir::TP_ASSIGN_PRE, 0, id);
-        let pl = self.lower_place(d.left);
-        if pl == ir::IR_NONE {
-            return ir::IR_NONE;
-        }
         switch self.f.op_method(id) {
             Some(m) => {
+                // An operator method takes the place first, as a call takes its receiver.
+                let pl = self.lower_place(d.left);
+                if pl == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
                 // compound assignment through an operator method: place = method(place, rhs)
                 let lop = self.copy_op(pl);
                 let lt = self.body.places.at(pl as usize).ty;
@@ -5507,7 +5545,9 @@ extend Lowerer {
         if split != ir::IR_NONE {
             self.pending_lets.push(split);
         }
-        let rop = self.lower_expr(d.right);
+        // The value first, then the place it lands in (Rust's order): a place reached through a
+        // `&mut` (`v.index_mut(k).f = v[k].f`) is claimed only once the value no longer reads it.
+        let mut rop = self.lower_expr(d.right);
         if split != ir::IR_NONE {
             let _ = self.pending_lets.pop();
         }
@@ -5515,6 +5555,15 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         self.mark_user_move(rop);
+        // A value read through a reference is read now, so the reference ends before the place.
+        let ro = *self.body.operands.at(rop as usize);
+        if (ro.kind == ir::OP_COPY || ro.kind == ir::OP_MOVE) && self.body.place_has_deref(ro.data) {
+            rop = self.copy_op(self.spill(rop, sp));
+        }
+        let pl = self.lower_place(d.left);
+        if pl == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
         let lt = self.body.places.at(pl as usize).ty;
         if d.op == tt::TokenType::Equal {
             let rv = self.rv_use(rop, lt);
@@ -6513,14 +6562,18 @@ extend Lowerer {
             if base == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-        } else {
-            // implicit deref through references/pointers on field access
+        }
+        // Implicit derefs through references or pointers on field access (`mm.r` on `&mut &mut H`),
+        // also through the `&Target` a user Deref hop returns: the field lies in the referent's
+        // storage, not the reference's.
+        for _ in 0..8 {
             let bty = self.body.places.at(base as usize).ty;
             let byk = self.f.ty(bty).kind;
-            if byk == TypeKind::TYPE_REFERENCE || byk == TypeKind::TYPE_POINTER {
-                let inner = self.f.ty(bty).as_data.elem;
-                base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: inner });
+            if byk != TypeKind::TYPE_REFERENCE && byk != TypeKind::TYPE_POINTER {
+                break;
             }
+            let inner = self.f.ty(bty).as_data.elem;
+            base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: inner });
         }
         let fd = self.f.res(d.member);
         // Union members overlap: the marker data value makes place conflicts treat every field
@@ -6751,6 +6804,41 @@ extend Lowerer {
         return self.bounds_check_len(iop, lop, pick(vec, ir::CHECK_LANES, NODE_NONE), sp);
     }
 
+    // Does a statement from index `from` on store to a place other than a fresh temporary?
+    fn writes_since(self: &Self, from: usize) bool {
+        for i in from..self.body.statements.len() {
+            let st = *self.body.statements.at(i);
+            if st.kind == ir::ST_ASSIGN {
+                let pl = *self.body.places.at(st.place as usize);
+                if pl.proj_len != 0 || self.body.locals.at(pl.base as usize).storage != ir::LS_TEMP {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // `base` rebuilt with a fresh bounds check before each checked element projection, in order.
+    fn recheck_indices(self: &mut Self, base: ir::PlaceId, sp: tok::Span) ir::PlaceId {
+        let bp = *self.body.places.at(base as usize);
+        let mut pl = self.place_of_local(bp.base);
+        for i in 0..bp.proj_len {
+            let mut pj = *self.body.projections.at((bp.proj_start + i) as usize);
+            let vt = self.peeled_view_ty(pl);
+            if pj.kind == ir::PJ_INDEX_OP && self.checked_view(vt) {
+                pj.data = self.copy_op(self.bounds_check(pl, pj.data, sp));
+            } else if pj.kind == ir::PJ_INDEX_CONST && self.checked_view(vt) && self.f.ty(vt).kind != TypeKind::TYPE_SIMD {
+                let _ = self.bounds_check(
+                    pl,
+                    self.kop(ir::CK_INT, Ast::builtin(BuiltinType::BT_USIZE), pj.data, sp),
+                    sp,
+                );
+            }
+            pl = self.place_project(pl, pj);
+        }
+        return pl;
+    }
+
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {
         let d = self.f.node(id).as_data.index;
         let ty = self.nty(id);
@@ -6881,9 +6969,16 @@ extend Lowerer {
                 ety = self.storage_ty(ty, self.f.instance(by.as_data.inst).args[0]);
             }
         }
+        let blk = self.cur;
+        let nst = self.body.statements.len();
         let iop = self.lower_expr(d.index);
         if iop == ir::IR_NONE {
             return ir::IR_NONE;
+        }
+        // The place reads its base again after the index operand: an operand that can write (a call,
+        // a branch, a store to a user place) may change an element the base's checks already proved.
+        if self.cur != blk || self.writes_since(nst) {
+            base = self.recheck_indices(base, sp);
         }
         // A plain-decimal constant index keeps its value in the projection: `a[0]` and `a[1]` name
         // disjoint storage, so simultaneous `&mut` borrows of distinct slots stay legal.

@@ -28,7 +28,6 @@ pub enum TokenType {
     Switch,
     Move,
     Mut,
-    New,
     Null,
     Pub,
     Sizeof,
