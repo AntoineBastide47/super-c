@@ -27,7 +27,7 @@ enum {
   F_CRC, F_LSE, F_SVE, F_SVE2, F_SSE3, F_SSSE3, F_SSE41, F_SSE42, F_POPCNT, F_CX16, F_LAHF_SAHF, F_AVX,
   F_AVX2, F_FMA, F_BMI1, F_BMI2, F_F16C, F_LZCNT, F_MOVBE, F_AVX512F, F_AVX512BW, F_AVX512CD, F_AVX512DQ,
   F_AVX512VL, F_AVX512VBMI, F_AVX512VBMI2, F_AVX512BITALG, F_AVX512VPOPCNTDQ, F_AVX512VNNI, F_AVX512FP16,
-  F_GFNI, F_VAES, F_VPCLMULQDQ, F_AESNI, F_PCLMULQDQ, F_AVX101, F_AVX102
+  F_GFNI, F_VAES, F_VPCLMULQDQ, F_AESNI, F_PCLMULQDQ, F_AVX101, F_AVX102, F_SME, F_SME2, F_SME_F64F64
 };
 
 #define SC_BIT(f) ((uint64_t)1 << (f))
@@ -81,6 +81,15 @@ static const uint64_t sc_cpu_static = 0
 #endif
 #ifdef __ARM_FEATURE_SVE2
     | SC_BIT(F_SVE2)
+#endif
+#ifdef __ARM_FEATURE_SME
+    | SC_BIT(F_SME)
+#endif
+#ifdef __ARM_FEATURE_SME2
+    | SC_BIT(F_SME2)
+#endif
+#ifdef __ARM_FEATURE_SME_F64F64
+    | SC_BIT(F_SME_F64F64)
 #endif
 #ifdef __SSE3__
     | SC_BIT(F_SSE3)
@@ -226,6 +235,8 @@ static uint64_t sc_cpu_detect(void) {
       {"hw.optional.arm.FEAT_BF16", F_BF16}, {"hw.optional.arm.FEAT_AES", F_AES},
       {"hw.optional.arm.FEAT_SHA256", F_SHA2}, {"hw.optional.arm.FEAT_SHA3", F_SHA3},
       {"hw.optional.arm.FEAT_CRC32", F_CRC}, {"hw.optional.arm.FEAT_LSE", F_LSE},
+      {"hw.optional.arm.FEAT_SME", F_SME},   {"hw.optional.arm.FEAT_SME2", F_SME2},
+      {"hw.optional.arm.FEAT_SME_F64F64", F_SME_F64F64},
   };
   w |= SC_BIT(F_NEON);
   for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
@@ -240,6 +251,7 @@ static uint64_t sc_cpu_detect(void) {
   static const struct { DWORD pf; int f; } rows[] = {
       {67, F_FP16}, {43, F_DOTPROD}, {66, F_I8MM}, {68, F_BF16}, {30, F_AES}, {30, F_SHA2},
       {64, F_SHA3}, {31, F_CRC},     {34, F_LSE},  {46, F_SVE},  {47, F_SVE2},
+      {70, F_SME},  {71, F_SME2},    {85, F_SME_F64F64},
   };
   w |= SC_BIT(F_NEON);
   for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++)
@@ -251,7 +263,7 @@ static uint64_t sc_cpu_detect(void) {
   static const struct { unsigned char word, bit; int f; } rows[] = {
       {0, 1, F_NEON},     {0, 20, F_DOTPROD}, {0, 12, F_RDM},  {1, 13, F_I8MM}, {1, 14, F_BF16},
       {0, 3, F_AES},      {0, 6, F_SHA2},     {0, 17, F_SHA3}, {0, 7, F_CRC},   {0, 8, F_LSE},
-      {0, 22, F_SVE},     {1, 1, F_SVE2},
+      {0, 22, F_SVE},     {1, 1, F_SVE2},     {1, 23, F_SME},  {1, 37, F_SME2}, {1, 25, F_SME_F64F64},
   };
   unsigned long hw[2] = {getauxval(AT_HWCAP), 0};
 #ifdef AT_HWCAP2

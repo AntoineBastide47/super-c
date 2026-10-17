@@ -1,0 +1,112 @@
+# Probe: the SIMD baseline kernels (scalar, portable, neon, sve) on an Arm Linux runner with SVE. The
+# bench binary is cross-built on x86_64 (no aarch64 Linux release compiler exists), then run natively.
+name: SVE probe
+on:
+  push:
+    branches: [probe/sme-gather]
+permissions:
+  contents: read
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          cache: ccache-linux-build
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the compiler and cross-build the bench
+        run: |
+          set -eu
+          ./super-c-boot build --bootstrap-tags
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -n 1
+          ./super-c bench --no-run --filter=simd_baseline --target=linux --arch=aarch64 --cc=aarch64-linux-gnu-gcc
+          mv build/bench-bin bench-gcc
+          file bench-gcc
+          # The same bench built by Clang, against the cross toolchain's sysroot; optional.
+          clang --version | head -n 1
+          ld=""
+          if command -v ld.lld >/dev/null 2>&1; then ld=" -fuse-ld=lld"; fi
+          if ./super-c bench --no-run --filter=simd_baseline --target=linux --arch=aarch64 --cc="clang --target=aarch64-linux-gnu$ld"; then
+            mv build/bench-bin bench-clang
+            file bench-clang
+          else
+            echo "the Clang build failed"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-bin
+          path: bench-*
+          if-no-files-found: error
+
+  run:
+    needs: cross
+    # Ubuntu 24.04: the cross toolchain's glibc (2.39) links symbols of 2.38, which 22.04 (2.35) lacks.
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bench-bin
+
+      # ffi/sc_sme.c under the build's strict flags: GCC 14 is the first GCC with <arm_sme.h>; the program
+      # prints sc_sme_built() (1: the kernels compiled; the runner has no SME, so they do not run).
+      - name: Compile the SME kernels with GCC 14 and Clang 18
+        continue-on-error: true
+        run: |
+          set -eu
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y gcc-14 >/dev/null
+          printf '#include <stdio.h>\n#include "sc_sme.h"\nint main(void) { printf("built %%d\\n", sc_sme_built()); return 0; }\n' >built.c
+          for cc in gcc-14 clang-18; do
+            echo "== $cc"
+            $cc --version | head -n 1
+            $cc -std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -O2 -Wall -Wextra -Werror -c ffi/sc_sme.c -o sc_sme.o
+            $cc -std=c11 -O2 -Iffi built.c sc_sme.o -o built
+            ./built
+          done
+
+      - name: Machine
+        run: |
+          set -eu
+          lscpu
+          grep -m1 -i features /proc/cpuinfo
+          printf '#include <arm_sve.h>\n#include <stdio.h>\nint main(void) { printf("sve vector bits: %%d\\n", (int)svcntb() * 8); return 0; }\n' >vl.c
+          gcc -O2 -march=armv8.2-a+sve vl.c -o vl && ./vl
+
+      - name: Run the kernels five times per compiler
+        run: |
+          set -u
+          for cc in gcc clang; do
+            [ -f bench-$cc ] || { echo "no bench-$cc"; continue; }
+            chmod +x bench-$cc
+            for r in 1 2 3 4 5; do
+              rc=0
+              ./bench-$cc >out-$cc-$r.txt 2>&1 || rc=$?
+              echo "$cc run $r: exit $rc"
+              grep -E '^simd' out-$cc-$r.txt || true
+              if [ "$rc" != 0 ]; then tail -n 40 out-$cc-$r.txt; exit 1; fi
+            done
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sve-probe
+          path: out*.txt

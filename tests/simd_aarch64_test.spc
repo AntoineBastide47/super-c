@@ -264,7 +264,7 @@ fn operations_lower_to_their_instructions() {
         "all of a comparison",
         "fn k(a: u16x8, b: u16x8) bool {\n    return a.equal(b).all();\n}\n",
         "k(u16x8::splat(n as u16), u16x8::splat(1))",
-        ["cmeq", "uminv"],
+        ["cmeq", "uminv|umaxv"],
         ["=bl", "addv"],
     );
     ks.add(
@@ -816,4 +816,21 @@ fn halves_and_concat_copy_chunks() {
     assert(b.len() != 0, "mix is emitted");
     assert(!b.contains("__sc_i +"), "no half or concat lane loop");
     assert(b.contains(".c[2];") && b.contains(".c[3] = "), "the halves and concat copy chunks");
+}
+
+// A gather whose index vector a slice load gave, with nothing between that writes memory, reads its
+// indexes from the slice in its lane loop (a C compiler keeping the vector in registers extracts and
+// widens each lane); a write between keeps the loaded vector, whose indexes the write cannot change.
+@test
+fn a_gather_reads_its_loaded_indexes_from_the_slice() {
+    let src = "import std::simd;\n@c.noinline\nfn g(x: []f32, idx: []u32) f32x4 {\n    return unsafe simd::gather_unchecked(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@c.noinline\nfn c(x: []f32, idx: []u32) f32x4 {\n    return simd::gather(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@c.noinline\nfn w(x: []f32, idx: []mut u32) f32x4 {\n    let v = simd::load::<u32, 4>(idx, 0);\n    idx[0] = 0;\n    return unsafe simd::gather_unchecked(x, v, Mask::<4>::splat(true), f32x4::splat(0.0));\n}\nfn main() i32 {\n    let x: [f32; 4] = [10.0, 11.0, 12.0, 13.0];\n    let mut i: [u32; 4] = [3, 2, 1, 0];\n    let a = g(x, i);\n    let b = c(x, i);\n    let d = w(x, i);\n    return (a[0] == 13.0 && a[3] == 10.0 && b[1] == 12.0 && d[0] == 13.0 && i[0] == 0) as i32;\n}\n";
+    let cc = h::compile_c_arch(src, 1);
+    assert(cc.ok(), "the program builds");
+    if aarch64_host() {
+        h::expect_exit("gathers", src, 1);
+    }
+    let code = unsafe str::from_cstr(cc.code);
+    assert(fn_body(code, "main__g").contains(".ptr[idx.ptr["), "the unchecked gather reads the slice");
+    assert(fn_body(code, "main__c").contains(".ptr[idx.ptr["), "the checked gather reads the slice");
+    assert(!fn_body(code, "main__w").contains(".ptr[idx.ptr["), "a write between keeps the vector");
 }

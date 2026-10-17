@@ -397,10 +397,11 @@ pub const SIMD_STORE_MASKED: u8 = 87; // (slice, start, m, v)
 pub const SIMD_GATHER: u8 = 88; // (slice, idx, m, fallback)
 pub const SIMD_SCATTER: u8 = 89; // (slice, idx, m, v)
 pub const SIMD_COMPRESS_STORE: u8 = 90; // (slice, start, m, v): the active lane count
-pub const SIMD_GATHER_PTR: u8 = 91; // ([*const T; N], m, fallback)
-pub const SIMD_SCATTER_PTR: u8 = 92; // ([*mut T; N], m, v)
-pub const SIMD_LOAD_MASKED_PTR: u8 = 93; // (pointer, m, fallback)
-pub const SIMD_STORE_MASKED_PTR: u8 = 94; // (pointer, m, v)
+pub const SIMD_GATHER_UNCHECKED: u8 = 91; // (slice, idx, m, fallback): `GATHER` with no index check
+pub const SIMD_GATHER_PTR: u8 = 92; // ([*const T; N], m, fallback)
+pub const SIMD_SCATTER_PTR: u8 = 93; // ([*mut T; N], m, v)
+pub const SIMD_LOAD_MASKED_PTR: u8 = 94; // (pointer, m, fallback)
+pub const SIMD_STORE_MASKED_PTR: u8 = 95; // (pointer, m, v)
 
 /// SimdOp.rule: how the operands and the result relate (V is operand 0's vector type, N its lanes).
 pub const SR_VEC: u8 = 0; // every operand and the result are V
@@ -456,7 +457,7 @@ const fn mop(name: str<'static>, arity: u8, rule: u8, effect: u8) SimdOp {
 }
 
 /// The number of RV_SIMD codes.
-pub const SIMD_CODES: usize = 95;
+pub const SIMD_CODES: usize = 96;
 
 pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
     sop("iota", 0, SR_ANY, SE_ANY),
@@ -550,6 +551,7 @@ pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
     mop("gather", 4, SR_MLOAD, SM_READ_LANES),
     mop("scatter", 4, SR_MSTORE, SM_WRITE_LANES),
     mop("compress_store", 4, SR_MSTORE, SM_WRITE_LANES),
+    mop("gather_unchecked", 4, SR_MLOAD, SM_READ_LANES),
     mop("gather_ptr", 3, SR_MLOAD, SM_READ_LANES),
     mop("scatter_ptr", 3, SR_MSTORE, SM_WRITE_LANES),
     mop("load_masked_ptr", 3, SR_MLOAD, SM_READ_LANES),

@@ -30,6 +30,7 @@
 #include <unistd.h>
 #if !defined(_WIN32) && !defined(__wasi__)
 #  include <spawn.h>
+#  include <sys/resource.h>
 #endif
 #if defined(_WIN32)
 #  include <direct.h>  /* _mkdir, _rmdir */
@@ -1334,3 +1335,21 @@ static void sc_trace_abort(int sig) {
 #endif
 void sc_trace_install(void) { signal(SIGABRT, sc_trace_abort); }
 #endif
+
+int sc_raise_open_files(uint64_t need) {
+#if !defined(_WIN32) && !defined(__wasi__)
+  struct rlimit r;
+  if (getrlimit(RLIMIT_NOFILE, &r) != 0)
+    return -1;
+  if (r.rlim_cur != RLIM_INFINITY && r.rlim_cur < need) {
+    if (r.rlim_max != RLIM_INFINITY && r.rlim_max < need)
+      return -1;
+    r.rlim_cur = (rlim_t)need;
+    if (setrlimit(RLIMIT_NOFILE, &r) != 0)
+      return -1;
+  }
+#else
+  (void)need;
+#endif
+  return 0;
+}

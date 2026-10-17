@@ -128,6 +128,13 @@ extern "C" "neon.h" {
     fn sb_neon() *const void;
 }
 
+@arch(aarch64)
+extern "C" "sve.h" {
+    fn sb_sve() *const void;
+    fn sb_sve_tuned() *const void;
+    fn sb_sve_neon() *const void;
+}
+
 @arch(wasm32)
 extern "C" "simd128.h" {
     fn sb_simd128() *const void;
@@ -348,6 +355,9 @@ fn implementations() Vector<&'static Kernels> {
         push_table(&mut v, unsafe sb_avx512());
     } else if ARCH == Arch::AArch64 {
         push_table(&mut v, unsafe sb_neon());
+        push_table(&mut v, unsafe sb_sve());
+        push_table(&mut v, unsafe sb_sve_tuned());
+        push_table(&mut v, unsafe sb_sve_neon());
     } else if ARCH == Arch::Wasm32 {
         push_table(&mut v, unsafe sb_simd128());
     }

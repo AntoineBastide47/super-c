@@ -44,6 +44,9 @@ extern "C" "driver_shim.h" {
     /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other
     /// (the default --arch).
     pub fn sc_host_arch() i32;
+    /// Raise this process's soft limit of open descriptors to `need`, within the hard limit: 0, or -1 when
+    /// the hard limit is lower or the call fails; 0 where no such limit exists (Windows, WASI).
+    pub fn sc_raise_open_files(need: u64) i32;
     /// chdir(2): 0 on success, -1 on failure.
     pub fn sc_chdir(path: *const char) i32;
     /// Create one directory: 0 on success, -1 on failure (including an existing path).

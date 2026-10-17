@@ -314,7 +314,7 @@ fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: 
             // a start or index vector, the mask, then the vector.
             let p = *da.type_at(tys[0]);
             let raw = r.c >= ir::SIMD_GATHER_PTR;
-            let gat = r.c == ir::SIMD_GATHER || r.c == ir::SIMD_SCATTER;
+            let gat = r.c == ir::SIMD_GATHER || r.c == ir::SIMD_SCATTER || r.c == ir::SIMD_GATHER_UNCHECKED;
             let mut pe = TYPE_NONE;
             if r.c == ir::SIMD_GATHER_PTR || r.c == ir::SIMD_SCATTER_PTR {
                 if p.kind == TypeKind::TYPE_ARRAY && da.type_at(p.as_data.arr.elem).kind == TypeKind::TYPE_POINTER && (vn == 0 || p.as_data.arr.len as u64 == vn) {

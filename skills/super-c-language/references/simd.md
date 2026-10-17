@@ -279,7 +279,8 @@ active scatter lanes with one index, the highest writes last and wins (Rust's `s
 order). `compress_store` changes exactly `count` elements; it may rewrite at most 8 elements after
 them with their own values, since the slice is borrowed alone. No masked store reads and writes
 back the whole vector: another thread may own an inactive element. A store borrows its slice
-mutably, a load shared; the raw forms and `gather_unchecked` are `unsafe` and check nothing: the
+mutably, a load shared; the raw forms and `gather_unchecked` (its own operation, which takes the
+`Gather` entry where one exists) are `unsafe` and check nothing: the
 caller guarantees each active lane's element (every active index below `s.len()`), for input it
 trusts or after its own check.
 
@@ -377,6 +378,36 @@ Speed, measured by `simd-math-bench` (ns per element at the native lane count; a
 Each class module starts with its measured table (`tools/simd_math`, super-c-testing: the largest
 error per function and lane type) and states its reductions and approximations. The coefficients
 (`std/simd/math/coeffs_f32.spc`, `coeffs_f64.spc`) are generated; never edit them by hand.
+
+## Matrix products
+
+```text
+matrix::mul_f32(c: []mut f32, a: []f32, b: []f32, m, k, n)   // c = a * b, row-major: a m x k, b k x n, c m x n
+matrix::mul_f64(c: []mut f64, a: []f64, b: []f64, m, k, n)
+matrix::mul_i8(c: []mut i32, a: []i8, b: []i8, m, k, n)      // each element the i32 sum of the products modulo 2^32
+```
+
+`std::simd::matrix` (import it). Element (i, j) of `c` is `fma(a[i][k-1], b[k-1][j], .. fma(a[i][0],
+b[0][j], +0.0))`, one rounding per step, in p order: the same bits on every machine and kernel (NaN
+payloads aside). A slice whose length is not its matrix's element count panics ("matrix::mul_f32: a
+slice's length is not its matrix's element count"). The portable kernel runs `Simd` lanes over each
+row of `b`; on aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.c` where the CPU has
+`sme2` (f32, i8) or `sme-f64f64` (f64) and the C compiler has `<arm_sme.h>`. An i8 product is exact
+modulo 2^32 in any order; its kernel packs `a` and `b` in groups of four (SMOPA sums four products per
+element) before it enters streaming mode. Each kernel enters streaming
+mode itself (`__arm_locally_streaming`, `__arm_new("za")`): `a` is packed into column-major panels
+through a ZA tile, each block of `b`'s columns into a contiguous panel, and each block of `c` takes one
+outer product (FMOPA, a fused add from the zeroed tile: the chain above) per tile per p. f32 blocks are
+1 VL x 4 VL on the four 32-bit tiles (MpGEMM's shape, arXiv 2512.21473) with SME2 four-vector loads;
+f64 blocks 2 VL x 4 VL on the eight 64-bit tiles. A B row of at most 1 KiB is read in place (the panel
+copy costs more there). One thread: an SME unit serves a CPU cluster, macOS has no way to place a thread
+on a cluster, and 2 to 6 threads splitting the rows of one product ran no faster than one on an M5
+Pro.
+
+Speed on one Apple M5 Pro core (user-interactive QoS; GFLOP/s or GOP/s, n x n): f32 1480 to 1990 from
+n = 128 to 2048 (the unit's peak is about 2000), f64 430 to 520 (peak about 500), i8 1240 to 3980
+(peak about 4000; the packing is O(n^2)), against 41, 21 and 26 for the portable kernels. Super-C has
+no 16-bit float type, so no f16 or bf16 product exists.
 
 ## Target features and backends
 

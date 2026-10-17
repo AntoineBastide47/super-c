@@ -1149,6 +1149,8 @@
 2.44	tests::simd_math_test::simd_math_specials_fast_f64
 3.02	tests::simd_math_test::simd_math_specials_precise_f32
 2.87	tests::simd_math_test::simd_math_specials_precise_f64
+2.34	tests::simd_matrix_test::a_slice_of_another_length_panics
+1.09	tests::simd_matrix_test::every_kernel_gives_the_fma_chain
 3.16	tests::simd_ops_test::a_lane_scalar_operand_is_splat
 3.08	tests::simd_ops_test::a_store_reads_its_vector_first
 6.08	tests::simd_ops_test::casts_of_every_lane_type_pair_match

@@ -189,6 +189,10 @@ pub struct CEmit {
     sx_used: Vector<bool>,
     /// `sx_addr[l]`: the body takes the address of local `l` or of a part of it (`&`, a raw address).
     sx_addr: Vector<bool>,
+    /// `sx_gload[r]`: for the gather of rvalue `r`, the slice load (an rvalue) that defined its index
+    /// vector earlier in its block with nothing between that writes memory (`gather_loads`): its lane
+    /// loop reads the indexes from that slice. IR_NONE otherwise.
+    sx_gload: Vector<u32>,
     /// `sx_inline[l]` is the rvalue that defines a single-use pure temporary whose sole read is
     /// adjacent to its definition (nothing runs between them): the definition statement is skipped
     /// and the rvalue is spelled directly at the read, so `_t = a + b; x = _t;` reads `x = a + b;`.
@@ -441,6 +445,7 @@ extend CEmit {
             sx_nm_len: Vector::<u32>::new(),
             sx_used: Vector::<bool>::new(),
             sx_addr: Vector::<bool>::new(),
+            sx_gload: Vector::<u32>::new(),
             sx_inline: Vector::<u32>::new(),
             sx_call_fwd: Vector::<bool>::new(),
             sx_cs_pool: String::new(),
@@ -3275,6 +3280,133 @@ extend CEmit {
         self.uput(reads);
     }
 
+    // For each gather (`simd.gather`, `simd.gather_unchecked`), the slice load that defined its index
+    // vector, through whole copies, at most 32 statements before it on its straight path: its block,
+    // then each block whose goto, constant switch or assertion alone reaches the one before (an inlined
+    // body's blocks; a call may write memory and ends the path). When no statement between writes memory, a projection, an
+    // address-taken local or a local the load reads, and no address-taken local's storage ends, the
+    // slice still holds the indexes, and the lane loop reads `s.ptr[start + i]`: a C compiler that
+    // keeps the loaded vector in registers otherwise extracts each lane and widens it (Clang 18 on
+    // aarch64: 1.6 to 1.9 times a scalar index read). A scatter writes in its loop, so its indexes stay
+    // in the vector.
+    fn gather_loads(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
+        self.sx_gload.clear();
+        for _ in 0..b.rvalues.len() {
+            self.sx_gload.push(ir::IR_NONE);
+        }
+        let mut path = self.uget(); // the statements walked, latest first
+        for bi in 0..b.blocks.len() {
+            if !*cf.reach.at(bi) {
+                continue;
+            }
+            let blk = *b.blocks.at(bi);
+            for k in 0..blk.stmt_len {
+                let sk = *b.statements.at((blk.stmt_start + k) as usize);
+                if sk.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let rv = *b.rvalues.at(sk.rvalue as usize);
+                if rv.kind != ir::RV_SIMD || rv.c != ir::SIMD_GATHER && rv.c != ir::SIMD_GATHER_UNCHECKED {
+                    continue;
+                }
+                let x = *b.operands.at(b.oper_pool[(rv.a + 1) as usize] as usize);
+                if x.kind == ir::OP_CONST || b.places.at(x.data as usize).proj_len != 0 {
+                    continue;
+                }
+                let mut cur = b.places.at(x.data as usize).base;
+                let mut load = ir::IR_NONE;
+                let mut stop = false;
+                path.truncate(0);
+                let mut cb = bi as u32; // the block walked
+                let mut j = k; // statements of `cb` before `j` remain
+                while !stop && load == ir::IR_NONE && path.len() < 32 {
+                    if j == 0 {
+                        // The one reachable predecessor, when it ends in a goto to this block.
+                        if *cf.preds.at(cb as usize) != 1 {
+                            break;
+                        }
+                        let pb = *cf.pred_list.at((*cf.pred_start.at(cb as usize)) as usize);
+                        let tk = b.blocks.at(pb as usize).term.kind;
+                        if tk != ir::TM_GOTO && tk != ir::TM_ASSERT && cfl::const_switch_edge(b, pb) == cfl::NONE {
+                            break;
+                        }
+                        cb = pb;
+                        j = b.blocks.at(pb as usize).stmt_len;
+                        continue;
+                    }
+                    j -= 1;
+                    let at = b.blocks.at(cb as usize).stmt_start + j;
+                    let sj = *b.statements.at(at as usize);
+                    if sj.kind != ir::ST_ASSIGN || b.places.at(sj.place as usize).base != cur {
+                        path.push(at);
+                        continue;
+                    }
+                    if b.places.at(sj.place as usize).proj_len != 0 {
+                        stop = true;
+                        continue;
+                    }
+                    let dr = *b.rvalues.at(sj.rvalue as usize);
+                    if dr.kind == ir::RV_SIMD && dr.c == ir::SIMD_LOAD {
+                        load = sj.rvalue;
+                    } else if dr.kind == ir::RV_USE && b.operands.at(dr.a as usize).kind != ir::OP_CONST && b.places.at(
+                        b.operands.at(dr.a as usize).data as usize,
+                    ).proj_len == 0 {
+                        cur = b.places.at(b.operands.at(dr.a as usize).data as usize).base;
+                        path.push(at);
+                    } else {
+                        stop = true;
+                    }
+                }
+                if load == ir::IR_NONE {
+                    continue;
+                }
+                let lr = *b.rvalues.at(load as usize);
+                let mut quiet = true;
+                for q in 0..path.len() {
+                    let sm = *b.statements.at(path[q] as usize);
+                    // Only an address-taken local can hold the elements a slice views.
+                    if sm.kind == ir::ST_STORAGE_DEAD && *self.sx_addr.at(sm.a as usize) {
+                        quiet = false;
+                    }
+                    if sm.kind != ir::ST_ASSIGN {
+                        continue;
+                    }
+                    let pm = *b.places.at(sm.place as usize);
+                    let rm = *b.rvalues.at(sm.rvalue as usize);
+                    let stores = rm.kind == ir::RV_SIMD && (ir::simd_op(rm.c).rule == ir::SR_STORE || ir::simd_op(rm.c).rule == ir::SR_MSTORE);
+                    let writes = rm.kind == ir::RV_INTRINSIC && !ir::is_check(rm.c);
+                    if pm.proj_len != 0 || stores || writes || *self.sx_addr.at(pm.base as usize) || CEmit::rv_reads(b, &lr, pm.base) {
+                        quiet = false;
+                    }
+                }
+                if quiet {
+                    self.sx_gload.set(sk.rvalue as usize, load);
+                }
+            }
+        }
+        self.uput(path);
+    }
+
+    // The index of lane `__sc_i` of gather `r` read from the slice its load named (`gather_loads`):
+    // `s.ptr[start + __sc_i]`, or empty (the index vector's lane) when there is none or an operand of the
+    // load spells more than a name or an integer literal, which the loop would evaluate once per lane.
+    fn gather_index_lane(self: &mut Self, b: &ir::CoreBody, r: u32) String {
+        let mut out = String::new();
+        let load = *self.sx_gload.at(r as usize);
+        if load == ir::IR_NONE {
+            return out;
+        }
+        let lr = *b.rvalues.at(load as usize);
+        let mut sl = String::new();
+        let mut st = String::new();
+        if self.emit_operand(b, b.oper_pool[lr.a as usize], &mut sl) && self.emit_operand(b, b.oper_pool[(lr.a + 1) as usize], &mut st) && plain_spelling(
+            sl.as_str(),
+        ) && (plain_spelling(st.as_str()) || int_literal(st.as_str())) {
+            out.format_into("{}.ptr[{} + __sc_i]", sl.as_str(), st.as_str());
+        }
+        return out;
+    }
+
     // Whether `rv` computes a vector lane by lane in a lane loop: a lane-wise operator, conversion or
     // operation (as the reader: also a comparison); as a merged definition (`def`): also a slice
     // load, and no operation that can trap or gives a mask.
@@ -4211,6 +4343,8 @@ extend CEmit {
         self.compute_fusion(b, cf);
         self.compute_call_fwd(b, cf);
         self.lf_scan(b, cf);
+        // A gather whose indexes a slice load gave on its straight path: its lanes read the slice.
+        self.gather_loads(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
         // The instances of inlined calls whose per-instantiation static_asserts still run: their
         // symbols demand them, as the calls did.
@@ -7204,7 +7338,7 @@ extend CEmit {
                 // A gather's or scatter's index check through the comparison entries, then its entry
                 // (an indexed load or store of the active lanes) after it.
                 let mut checked = false;
-                if self.simd_on && (c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER) {
+                if self.simd_on && (c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER || c == ir::SIMD_GATHER_UNCHECKED) {
                     let mut xn: i64 = 0;
                     let mut ib = BuiltinType::BT_VOID;
                     let _ = self.vec_ty(
@@ -7214,8 +7348,14 @@ extend CEmit {
                         &mut ib,
                     );
                     let m = unsafe sp[(op.arity - 2) as usize].as_str();
-                    checked = self.index_check_planned(o, sp[0].as_str(), sp[1].as_str(), m, n, ib);
-                    let ge = self.ventry_whole(ir::OP_SIMD + c as u32, bt, ib, n as u64);
+                    let unchecked = c == ir::SIMD_GATHER_UNCHECKED;
+                    checked = unchecked || self.index_check_planned(o, sp[0].as_str(), sp[1].as_str(), m, n, ib);
+                    let ge = self.ventry_whole(
+                        ir::OP_SIMD + pick(unchecked, ir::SIMD_GATHER, c) as u32,
+                        bt,
+                        ib,
+                        n as u64,
+                    );
                     if ge >= 0 {
                         if !checked {
                             index_bits(o, n, m, sp[1].as_str(), sp[0].as_str());
@@ -7225,7 +7365,7 @@ extend CEmit {
                         call.format_into("({}.ptr, {}, (", sp[0].as_str(), sp[1].as_str());
                         ok = self.entry_ty(ge as u32, 2, "", &mut call) && ok;
                         call.format_into("){}, {})", m, sp[3].as_str());
-                        if c == ir::SIMD_GATHER {
+                        if c != ir::SIMD_SCATTER {
                             o.format_into("  {} = {};\n", d.as_str(), call.as_str());
                         } else {
                             o.format_into("  {};\n", call.as_str());
@@ -7242,7 +7382,8 @@ extend CEmit {
                     cs = self.compress_store_planned(o, &sp, n, bt, &mut ok);
                 }
                 if cs != 2 {
-                    self.emit_vec_mem(o, c, &sp, n, cs == 1);
+                    let xl = self.gather_index_lane(b, s.rvalue);
+                    self.emit_vec_mem(o, c, &sp, n, cs == 1 || checked, xl.as_str());
                 }
             },
         };
@@ -7709,14 +7850,14 @@ extend CEmit {
     // `__sc_r` for a load. `checked`: a planned form wrote a gather's or scatter's index check
     // (`index_check_planned`), or a `compress_store`'s range check and the `else` this lane loop
     // closes (`compress_store_planned`).
-    fn emit_vec_mem(self: &mut Self, o: &mut String, c: u8, sp: &[String; 4], n: i64, checked: bool) {
+    fn emit_vec_mem(self: &mut Self, o: &mut String, c: u8, sp: &[String; 4], n: i64, checked: bool, xl: str) {
         let op = ir::simd_op(c);
         let s = sp[0].as_str();
         let st = sp[1].as_str();
         let m = unsafe sp[(op.arity - 2) as usize].as_str();
         let v = unsafe sp[(op.arity - 1) as usize].as_str();
         let store = op.rule == ir::SR_MSTORE;
-        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER;
+        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER || c == ir::SIMD_GATHER_UNCHECKED;
         let lp = "  for (uint32_t __sc_i = 0; __sc_i < ";
         if c == ir::SIMD_COMPRESS_STORE {
             if !checked {
@@ -7747,6 +7888,8 @@ extend CEmit {
             e.format_into("*{}[__sc_i]", s);
         } else if c >= ir::SIMD_GATHER_PTR {
             e.format_into("{}[__sc_i]", s);
+        } else if gat && xl.len() != 0 {
+            e.format_into("{}.ptr[{}]", s, xl);
         } else if gat {
             e.format_into("{}.ptr[{}.l[__sc_i]]", s, st);
         } else {
@@ -7766,7 +7909,7 @@ extend CEmit {
             );
             return;
         }
-        if c < ir::SIMD_GATHER_PTR && !checked {
+        if c < ir::SIMD_GATHER_PTR && !checked && c != ir::SIMD_GATHER_UNCHECKED {
             // Every active lane's check before any access; one trap, at the lowest failing lane.
             if gat {
                 index_bits(o, n, m, st, s);
@@ -17378,6 +17521,20 @@ fn reduce_tree(o: &mut String, cn: str, x: str, chunks: u64, l: u64, i: u64) {
 // Whether C spelling `s` is a name or a member of one: reading it twice reads one value and runs
 // nothing. (A literal stays bound: compared with an unsigned length, GCC's `-Wtype-limits` rejects
 // `0 <= len`.)
+// Whether `s` is an integer literal (`0ULL`, `16`): digits, then letters of a suffix.
+fn int_literal(s: str) bool {
+    if s.len() == 0 || s.byte_at(0) < b'0' || s.byte_at(0) > b'9' {
+        return false;
+    }
+    for i in 0..s.len() {
+        let c = s.byte_at(i);
+        if !(c >= b'0' && c <= b'9' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z') {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn plain_spelling(s: str) bool {
     if s.len() == 0 || s.byte_at(0) >= b'0' && s.byte_at(0) <= b'9' {
         return false;

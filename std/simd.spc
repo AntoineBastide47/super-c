@@ -1172,16 +1172,16 @@ pub unsafe fn gather_unchecked<T: SimdElement, I: SimdInt, const N: usize>(
     fallback: Simd<T, N>,
 ) Simd<T, N> {
     static_assert(sizeof(I) >= 4 && type_info::<I>().kind == type_info::<u8>().kind, "gather_unchecked: the indexes must be u32 or u64");
-    let bits = m.to_bits();
-    let mut p: [*const T; N] = [s.as_ptr(); N];
-    for i in 0..N {
-        // An inactive lane's pointer stays at the start: its index may be past the end.
-        if (bits >> i as u64 & 1) != 0 {
-            p[i] = s.as_ptr() + idx[i] as usize;
-        }
-    }
-    return gather_ptr(p, m, fallback);
+    return gather_unchecked_lanes(s, idx, m, fallback);
 }
+
+@intrinsic("simd.gather_unchecked")
+unsafe const fn gather_unchecked_lanes<T: SimdElement, I: SimdInt, const N: usize>(
+    s: []T,
+    idx: Simd<I, N>,
+    m: Mask<N>,
+    fallback: Simd<T, N>,
+) Simd<T, N>;
 
 /// Store active lane `i` of `v` to `s[idx[i]]`, in lane order: of active lanes with one index, the
 /// highest is written last. Panics before any write: an active index past `s`.
@@ -1496,6 +1496,7 @@ pub enum Op {
     Gather,
     Scatter,
     CompressStore,
+    GatherUnchecked,
     GatherPtr,
     ScatterPtr,
     LoadMaskedPtr,

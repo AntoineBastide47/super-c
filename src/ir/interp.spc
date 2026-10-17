@@ -6245,7 +6245,9 @@ extend Interp {
         let store = op.rule == ir::SR_MSTORE;
         let v = unsafe x[(op.arity - 1) as usize];
         let ptrs = c == ir::SIMD_GATHER_PTR || c == ir::SIMD_SCATTER_PTR;
-        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER;
+        // The unchecked gather keeps the index check here: an active index past the slice is the
+        // caller's broken guarantee, and evaluation traps on it.
+        let gat = c == ir::SIMD_GATHER || c == ir::SIMD_SCATTER || c == ir::SIMD_GATHER_UNCHECKED;
         // The base pointer and the length of a slice; a raw form has no length.
         let mut p = x[0];
         let mut len: u64 = 0;
