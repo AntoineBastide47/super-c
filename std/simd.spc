@@ -1172,15 +1172,18 @@ pub unsafe fn gather_unchecked<T: SimdElement, I: SimdInt, const N: usize>(
     fallback: Simd<T, N>,
 ) Simd<T, N> {
     static_assert(sizeof(I) >= 4 && type_info::<I>().kind == type_info::<u8>().kind, "gather_unchecked: the indexes must be u32 or u64");
+    // Each active lane loads its element into the result; an inactive one keeps the fallback and reads
+    // nothing (its index may be past the end). No array of pointers: a C compiler then widens every
+    // index to 64 bits in vector registers to add it to the base (Clang 18 on aarch64).
     let bits = m.to_bits();
-    let mut p: [*const T; N] = [s.as_ptr(); N];
+    let p = s.as_ptr();
+    let mut r = fallback;
     for i in 0..N {
-        // An inactive lane's pointer stays at the start: its index may be past the end.
         if (bits >> i as u64 & 1) != 0 {
-            p[i] = s.as_ptr() + idx[i] as usize;
+            r[i] = *(p + idx[i] as usize);
         }
     }
-    return gather_ptr(p, m, fallback);
+    return r;
 }
 
 /// Store active lane `i` of `v` to `s[idx[i]]`, in lane order: of active lanes with one index, the
