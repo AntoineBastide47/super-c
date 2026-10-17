@@ -1193,15 +1193,11 @@ extend InstGraph {
         if cast_ok(unsafe &*self.pkg, a, s, d, self.fn_ptr_param(a, rv.target, b.owner.node)) {
             return;
         }
-        let mut sb = Array::<char, 128> {};
-        let mut db = Array::<char, 128> {};
         let src = unsafe (&*self.pkg).modules.at(a.module as usize).source.as_str();
-        tc::render_type_into(self.pkg, a, src, s, &mut sb[0], 128);
-        tc::render_type_into(self.pkg, a, src, d, &mut db[0], 128);
         self.fault_msg = format(
             "invalid cast from '{}' to '{}'",
-            str::from_cbuf(sb.as_slice()),
-            str::from_cbuf(db.as_slice()),
+            tc::type_str_of(self.pkg, a, src, s),
+            tc::type_str_of(self.pkg, a, src, d),
         );
         self.take_fault(a.module, st.span);
     }

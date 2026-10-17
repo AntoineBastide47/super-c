@@ -218,7 +218,7 @@ extend Parser {
     }
 
     pub const fn is_type_start(kind: TokenType) bool {
-        return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::AmpersandAmpersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
+        return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::AmpersandAmpersand || kind == TokenType::LeftBracket || kind == TokenType::Fn || kind == TokenType::For;
     }
 
     pub const fn is_identifier_token(kind: TokenType) bool {
@@ -642,16 +642,25 @@ extend Parser {
                 NodeAs { array_type: ArrayTypeData { element: element, length: length } },
             );
         }
+        // `for<'a> fn(&'a T) &'a T`: lifetimes the function type binds itself.
+        let hr = self.parse_hrtb();
+        if hr.len != 0 && !self.check(TokenType::Fn) {
+            return self.error_skip("expected 'fn' after 'for<..>' in a type");
+        }
         if self.match(TokenType::Fn) {
             self.expect(TokenType::LeftParen, "'('");
             let params = self.parse_comma_types(TokenType::RightParen);
             self.expect(TokenType::RightParen, "')'");
             let returns = self.parse_function_returns();
-            return self.fin(
+            let fnty = self.fin(
                 NodeKind::NODE_FUNCTION_TYPE,
                 start,
                 NodeAs { function_type: FunctionTypeData { params: params, returns: returns } },
             );
+            if hr.len != 0 {
+                self.ast.set_lifetimes(fnty, hr);
+            }
+            return fnty;
         }
         if self.match(TokenType::LeftParen) {
             let elems = self.parse_comma_types(TokenType::RightParen);

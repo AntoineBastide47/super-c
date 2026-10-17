@@ -213,6 +213,15 @@ replay-tape category table are in
 instructions through the CPU feature set, the `@simd_impl` backend table and the lowering
 planner: [simd-backends.md](references/simd-backends.md).
 
+**Index operands with effects:** lowering checks an element place's bounds where it projects
+the index; when a later index operand stores to a place (`v[{ v = w; 0 }]`, `writes_since`),
+`recheck_indices` checks the base's projected indexes again after it, so the access traps
+instead of reading past the new length.
+
+**Layout queries in the typechecker** (the type size limit, packed-field alignment) go through
+`tc_layout`, which holds the engine lock: the layout service's cache is shared by the module
+jobs. A type larger than the target's `isize::MAX` sets `Layout.big`.
+
 **One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of `KeptBody`
 records (the elaborated body and its closures) keyed by body. Borrowck's lowerings are recycled into it, and emission's
 `InstGraph` walks those kept bodies instead of re-lowering. Bodies with `has_reflect` or
@@ -299,7 +308,8 @@ than defining a new context. Two layers:
    - `bc_replay` replays that tape: the same helper calls the old AST walk made
      (`bc_let_post`, `bc_assign_pre`, `tc_scope_exit`, ...), without traversing the
      expression tree. The AST walk itself was deleted.
-   - `bc_ir_analyze` runs the analyses over the lowered bodies through one reusable
+   - `bc_ir_analyze` runs the analyses over the lowered bodies, a closure's before every body
+     that can call it (children first, in source order), through one reusable
      `BorrowCtx` (`flow_ir.spc`): `body_features` reads the typed IR into feature bits
      (`FT_CARRIER`, `FT_BORROWED_PARAM`, `FT_BORROW_OP`, `FT_GENERIC`, `FT_OWNED`,
      `FT_UNINIT`, `FT_UNKNOWN`; locals' types through the ownership oracle, rvalue
@@ -334,8 +344,12 @@ than defining a new context. Two layers:
      local of its own kind moves (`plain_copy`); one stored into a field, a literal member or a
      copied closure capture issues a `LK_MUT` loan on it with `deref` set (`reborrow_store`),
      held by the destination's origin, which a fn-value call passes on to its result. Only a type with an explicit `Free` (itself or a member) reads its stored
-     borrows at destruction (`Owner::observes`); `Access.def` marks true stores for
-     origin liveness.
+     borrows at destruction (`Owner::observes`); a closure, through the captures it owns. Such a
+     closure local gets a drop origin (`BodyFacts.drop_origin`) with its own liveness slot past the
+     locals (`drop_slot`, `nlive`): its destruction keeps that origin live, not the closure's own,
+     and every flow into the closure value reaches it but the loans and copies of captures the
+     destruction cannot read (`Gen::no_drop`, `Owner::cap_keep` from the closure body,
+     `bc_closure_keep`). `Access.def` marks true stores for origin liveness.
    - The signature walks (`lt_tokens`, `behind_walk`, `names_static`) read a `Self` of the
      callee's signature as its extend's target type (`Gen::enter_callee`, `unself`), so a
      `Self` result, a `&mut Self` store target or a `Self` argument ties to the extend's
@@ -379,6 +393,90 @@ than defining a new context. Two layers:
      again. `SC_BC_VALIDATE=1` also runs the structural verifier and `verify_drops` (the
      ownership verifier) over every elaborated body, checks every loan's source operation,
      every move path's parent, the init rows' sizes and each fixpoint's push bound.
+   - The AST lifetime walks take a lifetime position from every node `Node::has_lt_slot` (a
+     reference, a slice, a borrowed `dyn`) and a reference's from `Node::is_ref_type` (a
+     reference or a borrowed `dyn`): `&'a dyn I` is a reference to every rule.
+   - `&mut` of a moved or uninitialized place is a use (`Gen::borrow_place`).
+   - A store through more than one reference level (`**mm = &x`, a `&mut` field, a callee
+     storing into `**x`) keeps the remaining `&mut` levels (`StoreVia.more`, `store_more`);
+     `resolve_stores` follows them, and past its bound the store reaches `'static`.
+   - A `dyn` or generic receiver whose interface (or bound) names a lifetime is a store target
+     (`bound_tokens`: a generic parameter carries its bounds' arguments; an interface's `Self`
+     carries the interface's lifetime and type arguments). A shared reference is a store target
+     where its pointee keeps a type argument behind an `UnsafeCell` (`Owner::interior_mask`,
+     `interior_tokens`); `resolve_interior` ties the stored borrows of a channel, its
+     endpoints and a `Mutex` to each other (`Gen::ties`, `istores`).
+   - A closure body may not flow a parameter's placeholder into `'static`, a capture's
+     placeholder or storage, or another parameter's placeholder (`bc_closure_escape`), which also
+     records per parameter the captures it reaches (`Owner::cap_reach`). A capture the body writes
+     into (taken by `&mut`, or held by value: the closure value keeps it across calls) maps to its
+     placeholder (`Gen::cap_ph`), so a reference to the body's own copy of a capture cannot be
+     stored into one. A closure whose body names a lifetime of the
+     enclosing item (`Ast.closure_lts`) carries a borrow (`carries_go`), and that region seeds
+     `bc_ir_universal` (`BodyFacts.named`).
+   - A call through a function value follows its type's lifetime classes (`TyInstance.lts`,
+     [type-identity.md](references/type-identity.md)): `Gen::value_sig` takes the signature of
+     a function pointer, a `dyn fn` or a generic parameter's `fn(..)` bound (`Owner::gen_sigs`,
+     which `bc_gen_sigs` fills per body), and `Gen::sig_call` flows `'static` positions into
+     origin 0, stores an argument sharing a group with what a `&mut` argument (or a shared
+     one's interior) points at, stores an argument at a fixed lifetime (`LC_OUTER`) through the
+     callee value (`store(.., through)`: a parameter's caller storage; for a closure only the
+     captures its body stores that parameter into, `StoreVia.caps`, through the loans and copy
+     edges its creation tags per capture, `Gen::cap_tags`, `cap_skip`, and the closure value
+     itself for a capture it owns), and
+     ties the result to the callee value and the arguments in its groups. A function pointer
+     with a fixed lifetime carries an origin (`carries_go`); `bc_uni_fn` gives a parameter of
+     such a type (or `dyn fn`, or `F: fn(..)` bound) those regions, and `Gen::fn_type_names`
+     links a `let` annotated with one to the named universal origin (`fn_type_names`: names no
+     enclosing function type's `for<..>` binds; its universal origins precede every inference
+     origin). A closure whose parameters name lifetimes gets
+     its own signature and its classes, unpacked, for its calls (`tc_closure_sig`, in
+     `Owner::gen_sigs` and `Owner::gen_cls`), and `bc_closure_escape` lets such a parameter reach
+     the captures (and a `'static` one anything). With no classes the result takes the callee
+     value and every argument. A call through a local holding a function item analyzes as a call
+     of that function (`Gen::call_term`).
+   - The typechecker checks a function value against a function type where it converts
+     (`tc_lt_value_fits`): `tc_lt_pair` walks the value's own signature (`tc_own_sig` and
+     `tc_item_classes` for a function or closure) beside the type's, of one shape but for
+     lifetimes (`tc_same_shape`, `tc_erase_lts`), into outlives constraints (`LtSys`); a nested
+     function type is compared under its own binder (`tc_lt_pair_fn`: the subtype's binder
+     chooses, the supertype's gives, invariant needs one type), and `ls_solve` checks them.
+     Classes are canonical in `Vector<u8>` (`LC_OUTER` = 128) and encoded into a type by
+     `Ast::lts_encode` (packed, `LP_OUTER`, or class slots, `LTS_EXT`); read them with
+     `Ast::sig_lt_len` and `sig_lt_class`. Two lifetimes the target type takes from outside it
+     (`LS_FIXED`) that the value ties must be one, or named by the type node that writes the
+     target and related by the function's bounds (`tc_lt_declared`): `TypeChecker::lt_env` holds a
+     frame per expression whose context writes its type (a `let`, a return, an assignment's target
+     or `*r`, a struct, variant, tuple or array literal's member, a called value's parameter, and a
+     generic call's parameter its receiver's or result's written type gives, `tc_frame_call`), each
+     naming an aggregate's lifetime and type parameters through the instance path of the frame
+     above (`tc_frame_member`, `tc_frame_tok`); `lt_conv` is the expression a conversion is for
+     (`check_expr_w`, `compatible_in`), and `tc_ann_names` reads its frame. The value's side is
+     named by its declaration (`tc_frame_value`, `tc_value_names`, `LS_VNAMED`), also where both
+     sides are one type (`compatible_in`: a type keeps no lifetime names). An unannotated `let` of a
+     literal is pending (`LtPend`): its lifetime parameters are inference variables (`LT_VAR`
+     tokens) whose pairs `lt_pool` keeps and every later conversion takes in (`tc_pool_ok`), and a
+     conversion of the local binds them to the written type's lifetimes (`tc_pend_bind`); a
+     target of a function's own type takes its signature's lifetimes. At a call (`TypeChecker::lt_call`), the callee's
+     lifetimes are `LS_CALLEE`: chosen to fit, and what they must outlive is exported per call
+     span (`Ast::call_lts`) as token pairs, which `Gen` reads (`call_lt_pairs`): a direct call
+     extends its relation (`Owner::rel_extend`, then the `'static` parameters), a call through
+     a value its classes (`call_lt_classes`, `tc::lt_class_tok`). The lifetime positions of a
+     type come from `Package::lt_walk` (flags `LTF_*`), which reads a declaration's lifetime
+     parameters from its module (`decl_nlt`) and holds one per lifetime a nested function type
+     takes from outside it (`sig_outer`); `tc_lt_walk` spells them from the type node, expanding
+     an alias (`tc_lt_alias`), a `Box<dyn ..>`'s argument and a nested function type
+     (`tc_lt_nested` replays its walk; `LtWalk.recs` records what spells each position), and
+     `tc_lt_subst_nested` carries them through substitution. A struct, enum or instance position
+     takes its slot's inferred variance (`TypeChecker::variance_infer`, passed as
+     `loader::SlotVariance`; a `*mut T` field is invariant in `T`, a bivariant slot counts as
+     invariant). Past the last class (`LC_TOO_MANY`: 126 groups chosen at each call, 127 fixed
+     outside) a type or a function value is an error, and a substitution gives `LTS_WIDE`, which
+     no call or conversion accepts. A mismatch prints a type as a declaration writes it
+     (`tc_type_text`, `tc_value_text` through an unannotated `let` and a field with its base's
+     lifetime arguments, `render_slot_str`), since a type keeps no lifetime names; else
+     `render_sig_lts` names a lifetime from outside the type `'1`, `'2`, .., and a nested
+     function type's own under a `for<..>`.
    - Scratch is bounded: `BorrowCtx::trim_scratch` releases the analyses' and the
      elaboration's capacity after a body that pushed it past `BC_SCRATCH_BUDGET`.
      Published results never point into it (diagnostics are copied `FlowErr`s; kept
@@ -392,8 +490,9 @@ than defining a new context. Two layers:
 Callee resolution is never re-derived: the typechecker's `call_info` side table is the
 bridge (`bc_call_info`).
 
-Lifetimes are erased structurally: no `Ty` or `TyInstance` carries a region
-([type-identity.md](references/type-identity.md)). The parser keeps a declaration's
+Lifetimes are erased structurally: no `Ty` or `TyInstance` carries a region, except a
+function-pointer signature's lifetime classes (`TyInstance.lts`, 0 on every other record;
+[type-identity.md](references/type-identity.md)). The parser keeps a declaration's
 lifetime parameters in a separate list (`Ast::set_lifetimes`, `lifetimes_of`), so
 `generics` holds only mono-relevant parameters. Variance has little to act on, because
 aggregate lifetime arguments are erased.

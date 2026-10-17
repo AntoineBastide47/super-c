@@ -94,7 +94,8 @@ for one invocation and frees it with the package; workers read it and write disj
    item under check and the checker hands it to the engine per evaluation (`set_reader`).
 4. The borrow check moves every item of a module to IrReady when the module's last job ends.
 5. `finalize` on demand, after the checks and before the body release: the final ranges (the
-   resolution tables again, now with the resolutions typecheck added, plus the dynamic edges)
+   resolution tables again, now with the resolutions typecheck added, plus the dynamic edges in
+   ascending order: the set's iteration order depends on the order the engine recorded them in)
    and the signature hashes. No production consumer asks yet (invalidation and instance work
    are later plans), so a build pays nothing for it; the measurement and the tests do.
 

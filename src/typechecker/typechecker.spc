@@ -5,7 +5,6 @@
 // region fields here are its state. Invariant: TC-* memoizations must not change type-pool interning
 // order: emitted C is byte-compared across bootstrap generations.
 import string as cstring;
-import stdio;
 import math;
 import lexer::token as tok;
 import lexer::token_type as *;
@@ -85,18 +84,7 @@ pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
 pub const PS_DEREF: u8 = 2;
 
-/// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
-/// (lifetime params first, then type params). Drives subtyping: `C<'a> <: C<'b>` requires 'a and 'b
-/// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
-/// the top. Bit 0 marks a covariant use and bit 1 a contravariant one, so the join (v_join) is a bitwise
-/// or; composition is v_transform.
-pub const V_BIVARIANT: u32 = 0;
-pub const V_COVARIANT: u32 = 1;
-pub const V_CONTRAVARIANT: u32 = 2;
-pub const V_INVARIANT: u32 = 3;
-
 /// Fixed-size scratch arrays (a struct field zero-inits its array).
-pub type Buf96 = Array<char, 96>;
 pub type Defs8 = Array<DefId, 8>;
 pub type Tys8 = Array<TypeId, 8>;
 pub type BoundArr8 = Array<BoundIface, 8>;
@@ -416,9 +404,21 @@ pub struct TypeChecker<'a> {
     // Per-aggregate variance of each lifetime-then-type parameter, 2 bits each (V_*), packed LSB-first,
     // keyed by decl (module << 32 | node). Lazy + memoized; a recursive-type cycle resolves to the
     // conservative all-V_INVARIANT (over-restricts only recursion). `variance_wip` marks a decl whose
-    // inference is on the stack. Consumed by the invariance check and by `relate` for subtyping.
+    // inference is on the stack. Consumed by the invariance check and by the function-type lifetime
+    // positions (`loader::SlotVariance`).
     pub variance_of: Map<u64, u64>,
     pub variance_wip: Map<u64, bool>,
+    // The call whose argument conversion is under check (`tc_lt_call_toks`).
+    pub lt_call: LtCall,
+    // The written types the expressions under check are checked against, innermost last
+    // (`tc_ann_names`), and the expression whose conversion `compatible_in` checks.
+    pub lt_env: Vector<LtFrame>,
+    pub lt_conv: NodeId,
+    // The function's pending locals, the outlives pairs (sup, sub tokens: a name's `lt_tok_of`, or
+    // `LT_VAR`) their inference variables take part in, and the span of each name token.
+    pub lt_pend: Vector<LtPend>,
+    pub lt_pool: Vector<u64>,
+    pub lt_tnames: Vector<u64>,
     // A declared lifetime param node -> the universal RegionVid standing for it in this function.
     pub lt_region: Map<u32, u32>,
     // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
@@ -645,6 +645,424 @@ struct FnShape {
     pub ret: TypeId,
     pub sig: TypeId,
     pub np: u32,
+}
+
+/// A lifetime-class walk over a signature (`tc_lt_walk`): per lifetime position (`Ast::lt_positions`
+/// order) its class (LC_FREE, LC_STATIC, or LC_GROUP + an index into `keys`) and whether no
+/// lifetime was written for it. A key is a lifetime name's span (`start << 32 | end` in module `m`)
+/// or, from LT_KEY_GEN on, a generic parameter's position or an elided result's source.
+struct LtWalk {
+    pub cls: Vector<u8>,
+    pub elided: Vector<bool>,
+    pub keys: Vector<u64>,
+    pub kouter: Vector<bool>, // per key: a lifetime fixed outside the walked signature
+    pub names: Vector<u64>, // name spans seen, first spelling of each name
+    pub m: ModuleId,
+    pub item: NodeId, // the function whose signature is walked; NODE_NONE for a function type
+    pub binder: NodeId, // the walked function type (module `bm`), whose `for<..>` binds lifetimes
+    pub bm: ModuleId,
+    pub statics: Vector<u64>, // name keys a bound makes `'static`
+    pub alias: Vector<u64>, // (name key, representative key) pairs of lifetimes a bound relates
+    pub hidden: Vector<u64>, // name keys a type path's lifetime argument names (an item's)
+    pub bad: NodeId, // the first lifetime a function type names where no position is
+    pub frames: Vector<LtAlias>, // the aliases being expanded, innermost last
+    pub recs: Vector<LtRec>, // per position, what spells it (`tc_lt_nested`)
+}
+
+// A walk of module `m` over function `item`'s signature, or over function type `binder`'s.
+fn lt_walk_new(m: ModuleId, item: NodeId, binder: NodeId) LtWalk {
+    return LtWalk {
+        cls: Vector::<u8>::new(),
+        elided: Vector::<bool>::new(),
+        keys: Vector::<u64>::new(),
+        kouter: Vector::<bool>::new(),
+        names: Vector::<u64>::new(),
+        m: m,
+        item: item,
+        statics: Vector::<u64>::new(),
+        alias: Vector::<u64>::new(),
+        hidden: Vector::<u64>::new(),
+        bad: NODE_NONE,
+        frames: Vector::<LtAlias>::new(),
+        binder: binder,
+        bm: m,
+        recs: Vector::<LtRec>::new(),
+    };
+}
+
+/// A call whose argument conversion is under check (empty `span`: none): to function `item` of module
+/// `m`, the argument's parameter type node `ptn`; or through a value of function type `sig`, the
+/// parameter's type `slot`, whose positions start at `off` among `sig`'s.
+pub struct LtCall {
+    pub span: tok::Span,
+    pub m: ModuleId,
+    pub item: NodeId,
+    pub ptn: NodeId,
+    pub sig: TypeId,
+    pub slot: TypeId,
+    pub off: u32,
+}
+
+/// A type node that writes the type expression `expr` (this module) is checked against (`lt_env`):
+/// `node` of module `m`, which names the lifetime and type parameters of aggregate `owner` (module `m`;
+/// NODE_NONE: a node of the function under check) that the instance path `inst` of frame `parent`
+/// gives arguments.
+struct LtFrame {
+    pub expr: NodeId,
+    pub m: ModuleId,
+    pub node: NodeId,
+    pub owner: NodeId,
+    pub inst: NodeId,
+    pub parent: i32,
+}
+
+/// An unannotated local whose initializer is a literal of aggregate `owner` (module `m`), let `decl`:
+/// its lifetime parameters are inference variables (`LT_VAR` tokens) the function's later uses of it
+/// bind (`lt_pool`). A frame whose `parent` is `-2 - index` stands for it.
+struct LtPend {
+    pub decl: NodeId,
+    pub owner: NodeId,
+    pub m: ModuleId,
+}
+
+/// The token of lifetime parameter `k` of the literal of pending local `p` (`LtPend`): LT_VAR | p << 32
+/// | k; a name's (`lt_tok_of`) has bit 63 set.
+const LT_VAR: u64 = 1u64 << 62;
+
+// Whether lifetime token `t` is an inference variable's.
+const fn lt_is_var(t: u64) bool {
+    return t >> 63 == 0 && (t & LT_VAR) != 0;
+}
+
+/// What spells a position of a lifetime walk: a lifetime name `sp` of module `m` (empty: elided), or
+/// the group keyed `key` (non-zero: a generic parameter's position; `'static` when `st`).
+struct LtRec {
+    pub m: ModuleId,
+    pub sp: tok::Span,
+    pub key: u64,
+    pub st: bool,
+}
+
+/// An alias a lifetime walk expands (`tc_lt_walk`): path `path` of module `m` names alias `alias`
+/// of module `am`, whose parameters stand for the path's arguments.
+struct LtAlias {
+    pub m: ModuleId,
+    pub path: NodeId,
+    pub am: ModuleId,
+    pub alias: NodeId,
+}
+
+const LT_KEY_GEN: u64 = 1u64 << 63;
+
+// The class of the group keyed `k` in walk `w`.
+fn lt_group(w: &mut LtWalk, k: u64, outer: bool) u8 {
+    for i in 0..w.keys.len() {
+        if w.keys[i] == k {
+            return LC_GROUP + (i as u32).min(200) as u8;
+        }
+    }
+    w.keys.push(k);
+    w.kouter.push(outer);
+    return LC_GROUP + ((w.keys.len() - 1) as u32).min(200) as u8;
+}
+
+// Finish walk `w` over `nres` result positions: its elided results take the class of position
+// `src` (none when -1), a group of one position becomes that position's own lifetime, and groups
+// renumber in first-use order.
+fn lt_finish(w: &mut LtWalk, nres: u32, src: i32) {
+    if src >= 0 {
+        let mut c = w.cls[src as usize];
+        if c == LC_FREE {
+            c = lt_group(w, LT_KEY_GEN | 1u64 << 62, false);
+            w.cls.set(src as usize, c);
+        }
+        for k in 0..nres {
+            if w.elided[k as usize] {
+                w.cls.set(k as usize, c);
+            }
+        }
+    }
+    let mut count = Vector::<u32>::new();
+    count.resize_default(256);
+    for k in 0..w.cls.len() {
+        count.set(w.cls[k] as usize, count[w.cls[k] as usize] + 1);
+    }
+    // A group chosen at each call, renumbered from LC_GROUP; a fixed one, kept with one position too,
+    // from LC_OUTER on; past the last class of its kind, LC_TOO_MANY.
+    let mut map = Vector::<u8>::new();
+    map.resize_default(256);
+    let mut next: u32 = LC_GROUP;
+    let mut next_outer: u32 = LC_OUTER;
+    for k in 0..w.cls.len() {
+        let c = w.cls[k];
+        if c < LC_GROUP {
+            continue;
+        }
+        let outer = (c - LC_GROUP) as usize < w.kouter.len() && w.kouter[(c - LC_GROUP) as usize];
+        if count[c as usize] == 1 && !outer {
+            w.cls.set(k, LC_FREE);
+            continue;
+        }
+        if map[c as usize] == 0 {
+            if outer {
+                map.set(c as usize, next_outer.min(LC_TOO_MANY) as u8);
+                next_outer += 1;
+            } else {
+                map.set(
+                    c as usize,
+                    if next < LC_OUTER {
+                        next as u8;
+                    } else {
+                        LC_TOO_MANY;
+                    },
+                );
+                next += 1;
+            }
+        }
+        w.cls.set(k, map[c as usize]);
+    }
+}
+
+// Append the old class at `*cur` (a group keyed by its old class) and advance.
+fn lt_keep(w: &mut LtWalk, c_old: &Vector<u8>, cur: &mut u32) {
+    lt_keep_at(w, c_old, *cur);
+    *cur = *cur + 1;
+}
+
+// Append the old class at `i` (a group keyed by its old class).
+fn lt_keep_at(w: &mut LtWalk, c_old: &Vector<u8>, i: u32) {
+    let c = if i as usize < c_old.len() {
+        c_old[i as usize];
+    } else {
+        LC_FREE;
+    };
+    w.cls.push(
+        if c >= LC_GROUP {
+            lt_group(w, LT_KEY_GEN | 1u64 << 61 | c as u64, c >= LC_OUTER);
+        } else {
+            c;
+        },
+    );
+}
+
+// The kinds of a symbol of a lifetime constraint system (`LtSys`): chosen to fit (the subtype's
+// binder picks it); given (any lifetime the supertype's binder may take); fixed outside both types
+// (its relation to another such one is the borrow checker's); a lifetime of the callee a call
+// passes the value to (chosen to fit, what it must outlive exported); fixed outside the type the value
+// converts to, which the value holds no region of (its relation to another such one is a
+// declaration's, which no type shows: the two must be one); fixed outside the value's type and
+// named by its declaration (as LS_OUTER, but its relation to a named one is the declaration's).
+const fn ls_fixed(k: u8) bool {
+    return k == LS_OUTER || k == LS_FIXED || k == LS_VNAMED;
+}
+
+// Whether a symbol of kind `k` is a lifetime the value holds (LS_OUTER), named by its declaration
+// (LS_VNAMED) or not.
+const fn ls_held(k: u8) bool {
+    return k == LS_OUTER || k == LS_VNAMED;
+}
+
+/// The token of lifetime name `name`, as the borrow checker spells a signature's (`Owner::lt_tok`).
+pub fn lt_tok_of(name: str) u64 {
+    return 1u64 << 63 | name.hash() & 0x7FFFFFFFFFFFFFFF;
+}
+
+/// The token of a function value's lifetime class `c` (a group), or of its position `p` with a
+/// lifetime of its own (`c` LC_OUTER), at a call through it (`Ast::call_lts`).
+pub const fn lt_class_tok(c: u8, p: u32) u64 {
+    return 1u64 << 62 | c as u64 << 32 | p as u64;
+}
+
+const LS_VAR: u8 = 0;
+const LS_ATOM: u8 = 1;
+const LS_OUTER: u8 = 2;
+const LS_CALLEE: u8 = 3;
+const LS_FIXED: u8 = 4;
+const LS_VNAMED: u8 = 5;
+
+// The outlives constraints a conversion between function types needs (`tc_lt_conv`). Symbol 0 is
+// `'static`.
+struct LtSys {
+    pub kind: Vector<u8>,
+    pub tok: Vector<u64>, // per symbol: the token an LS_CALLEE one exports as
+    pub edges: Vector<u64>, // sup << 32 | sub: sup outlives sub
+    pub ok: bool,
+}
+
+// One side of a conversion at one binder: its positions' classes and the next one, the symbols of
+// its outer classes and of its groups (plus one; 0: none yet), and the kind its own lifetimes get.
+struct LtSide {
+    pub cls: Vector<u8>,
+    pub cur: u32,
+    pub outer: Vector<u32>,
+    pub groups: Vector<u32>,
+    pub own: u8,
+}
+
+fn ls_sys() LtSys {
+    let mut s = LtSys { kind: Vector::<u8>::new(), tok: Vector::<u64>::new(), edges: Vector::<u64>::new(), ok: true };
+    let _ = ls_new(&mut s, LS_ATOM, lt_tok_of("'static"));
+    return s;
+}
+
+fn ls_new(s: &mut LtSys, k: u8, tok: u64) u32 {
+    s.kind.push(k);
+    s.tok.push(tok);
+    return (s.kind.len() - 1) as u32;
+}
+
+// The number of outer classes of canonical classes `cls`.
+fn ls_nouter(cls: &Vector<u8>) u32 {
+    let mut n: u32 = 0;
+    for k in 0..cls.len() {
+        if cls[k] >= LC_OUTER && cls[k] != LC_TOO_MANY {
+            n = n.max((cls[k] - LC_OUTER) as u32 + 1);
+        }
+    }
+    return n;
+}
+
+// A side over classes `cls` whose own lifetimes are of kind `own`, its outer ones `outer`.
+fn ls_side(cls: Vector<u8>, outer: Vector<u32>, own: u8) LtSide {
+    return LtSide { cls: cls, cur: 0, outer: outer, groups: Vector::<u32>::new(), own: own };
+}
+
+// The symbol of the next position of side `d`, and advance.
+fn ls_take(s: &mut LtSys, d: &mut LtSide) u32 {
+    let c = if d.cur as usize < d.cls.len() {
+        d.cls[d.cur as usize];
+    } else {
+        LC_FREE;
+    };
+    d.cur += 1;
+    if c == LC_STATIC {
+        return 0;
+    }
+    if c == LC_FREE || c == LC_TOO_MANY {
+        return ls_new(s, d.own, 0);
+    }
+    if c >= LC_OUTER {
+        let g = (c - LC_OUTER) as usize;
+        if g < d.outer.len() {
+            return d.outer[g];
+        }
+        return ls_new(s, LS_OUTER, 0);
+    }
+    let g = (c - LC_GROUP) as usize;
+    while d.groups.len() <= g {
+        d.groups.push(0);
+    }
+    if d.groups[g] == 0 {
+        let y = ls_new(s, d.own, 0);
+        d.groups.set(g, y + 1);
+    }
+    return d.groups[g] - 1;
+}
+
+// The value's lifetime `a` and the type's `b` at a position of variance `v`: covariant, the value's
+// outlives the type's; contravariant, the reverse; invariant, both.
+fn ls_relate(s: &mut LtSys, a: u32, b: u32, v: u32) {
+    if v != V_CONTRAVARIANT {
+        s.edges.push(a as u64 << 32 | b as u64);
+    }
+    if v != V_COVARIANT {
+        s.edges.push(b as u64 << 32 | a as u64);
+    }
+}
+
+// The variance of a position of a slot of variance `sv` under variance `v`: a bivariant slot
+// counts as invariant (`ltf_vary`).
+const fn lt_vary(v: u32, sv: u32) u32 {
+    if v == V_INVARIANT || sv != V_COVARIANT && sv != V_CONTRAVARIANT {
+        return V_INVARIANT;
+    }
+    if sv == V_CONTRAVARIANT {
+        return v ^ V_INVARIANT;
+    }
+    return v;
+}
+
+// The flipped variance `v` (a parameter's under it).
+const fn lt_flip(v: u32) u32 {
+    if v == V_INVARIANT {
+        return v;
+    }
+    return v ^ V_INVARIANT;
+}
+
+// Whether system `s` holds: through the lifetimes chosen to fit, every given or fixed lifetime it
+// makes outlive another is `'static`, or the two are fixed outside both types and one is the
+// value's (LS_OUTER: a call through the value stores where it holds it), or two named ones
+// (LS_FIXED or LS_VNAMED with a token), appended to `need` as (sup, sub) symbol pairs for the
+// declaration to show. A callee's lifetime that must outlive a given or fixed one must be `'static`. Appends to
+// `out` what the callee's lifetimes must outlive, as (sup, sub) token pairs (sub 0: `'static`).
+fn ls_solve(s: &mut LtSys, out: &mut Vector<u64>, need: &mut Vector<u64>) bool {
+    if !s.ok {
+        return false;
+    }
+    let n = s.kind.len();
+    let mut r = Vector::<bool>::new();
+    for round in 0..2 {
+        r.truncate(0);
+        r.resize_default(n * n);
+        for i in 0..n {
+            r.set(i * n + i, true);
+        }
+        for e in 0..s.edges.len() {
+            r.set((s.edges[e] >> 32) as usize * n + (s.edges[e] & 0xFFFFFFFF) as usize, true);
+        }
+        for k in 0..n {
+            for i in 0..n {
+                if !r[i * n + k] {
+                    continue;
+                }
+                for j in 0..n {
+                    if r[k * n + j] {
+                        r.set(i * n + j, true);
+                    }
+                }
+            }
+        }
+        if round == 1 {
+            break;
+        }
+        for i in 0..n {
+            for j in 1..n {
+                if s.kind[i] == LS_CALLEE && r[i * n + j] && (s.kind[j] == LS_ATOM || ls_fixed(s.kind[j])) {
+                    s.edges.push(i as u64 << 32);
+                }
+            }
+        }
+    }
+    for i in 1..n {
+        let ki = s.kind[i];
+        for j in 0..n {
+            if i == j || !r[i * n + j] {
+                continue;
+            }
+            let kj = if j == 0 {
+                LS_ATOM;
+            } else {
+                s.kind[j];
+            };
+            if ki == LS_CALLEE && (j == 0 || kj == LS_CALLEE) {
+                out.push(s.tok[i]);
+                out.push(s.tok[j]);
+            }
+            if (ki == LS_FIXED || ki == LS_VNAMED) && (kj == LS_FIXED || kj == LS_VNAMED) && s.tok[i] != 0 && s.tok[j] != 0 {
+                if s.tok[i] != s.tok[j] {
+                    need.push(i as u64 << 32 | j as u64);
+                }
+                continue;
+            }
+            if (ki == LS_ATOM || ls_fixed(ki)) && (kj == LS_ATOM || ls_fixed(kj)) && !(ls_fixed(ki) && ls_fixed(kj) && j != 0 && (ls_held(
+                ki,
+            ) || ls_held(kj))) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 /// True when span `s` of `src` spells exactly `lit`.
@@ -998,6 +1416,20 @@ extend<'a> TypeChecker<'a> {
             region_next: 1,
             variance_of: Map::<u64, u64>::new(),
             variance_wip: Map::<u64, bool>::new(),
+            lt_call: LtCall {
+                span: tok::Span { start: 0, end: 0 },
+                m: 0,
+                item: NODE_NONE,
+                ptn: NODE_NONE,
+                sig: TYPE_NONE,
+                slot: TYPE_NONE,
+                off: 0,
+            },
+            lt_env: Vector::<LtFrame>::new(),
+            lt_conv: NODE_NONE,
+            lt_pend: Vector::<LtPend>::new(),
+            lt_pool: Vector::<u64>::new(),
+            lt_tnames: Vector::<u64>::new(),
             lt_region: Map::<u32, u32>::new(),
             outlives: Vector::<u64>::new(),
             err_wm: 0,
@@ -1913,23 +2345,15 @@ extend<'a> TypeChecker<'a> {
         return false;
     }
 
-    fn render_type(self: &Self, tid: TypeId, buf: *mut char, cap: usize) {
-        render_type_into(self.package, self.cur_ast(), self.source, tid, buf, cap);
-    }
-
     @c.cold
     fn err_no_field(self: &mut Self, name: tok::Span, ty: TypeId) {
         if ty == TYPE_ERROR {
             return;
         }
-        let tb = self.type_buf(ty);
+        let tb = self.type_str(ty);
         self.errors.emit_span(
             name,
-            format(
-                "no field '{}' on '{}'",
-                diag::span_str(self.source, name.start, name.end),
-                str::from_cbuf(tb.as_slice()),
-            ),
+            format("no field '{}' on '{}'", diag::span_str(self.source, name.start, name.end), tb.as_str()),
         );
     }
 
@@ -1939,16 +2363,13 @@ extend<'a> TypeChecker<'a> {
         if untyped(c) || self.is_bool(c) {
             return true;
         }
-        let ty = self.type_buf(c);
+        let ty = self.type_str(c);
         let sp = unsafe (*self.cur_ast()).at_const(cond).span;
         if self.type_at(self.strip(c)).is_vec() {
             self.errors.emit_span(sp, format("a mask is not a `bool`; use `.any()` or `.all()`"));
             return false;
         }
-        self.errors.emit_span(
-            sp,
-            format("{} condition must be 'bool', found '{}'", what, str::from_cbuf(ty.as_slice())),
-        );
+        self.errors.emit_span(sp, format("{} condition must be 'bool', found '{}'", what, ty.as_str()));
         return false;
     }
 
@@ -2652,17 +3073,17 @@ extend<'a> TypeChecker<'a> {
 
     @c.cold
     fn err_lit_range(self: &mut Self, node: NodeId, ty: TypeId) {
-        let tn = self.type_buf(ty);
+        let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("integer literal is out of range for '{}'", str::from_cbuf(tn.as_slice())));
+        self.errors.emit_span(sp, format("integer literal is out of range for '{}'", tn.as_str()));
     }
 
     // A negation `node` of unsigned type `ty`: no unsigned value has one.
     @c.cold
     fn err_neg_unsigned(self: &mut Self, node: NodeId, ty: TypeId) {
-        let tn = self.type_buf(ty);
+        let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("cannot apply unary operator '-' to type '{}'", str::from_cbuf(tn.as_slice())));
+        self.errors.emit_span(sp, format("cannot apply unary operator '-' to type '{}'", tn.as_str()));
     }
 
     // An unpinned literal operand, or literal-only arithmetic of kind `k` (`2 * 3`), takes the other
@@ -3152,14 +3573,14 @@ extend<'a> TypeChecker<'a> {
                 return t;
             }
         }
-        let tn = self.type_buf(t);
+        let tn = self.type_str(t);
         let what = if self.tc_lit_is_leaf(id) {
             "float literal";
         } else {
             "float constant expression";
         };
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(sp, format("{} is out of range for '{}'", what, str::from_cbuf(tn.as_slice())));
+        self.errors.emit_span(sp, format("{} is out of range for '{}'", what, tn.as_str()));
         return t;
     }
 
@@ -3203,28 +3624,242 @@ extend<'a> TypeChecker<'a> {
 
     /// `tid` rendered for a diagnostic.
     @c.cold
-    fn type_buf(self: &Self, tid: TypeId) Buf96 {
-        let mut b = Buf96 {};
-        self.render_type(tid, &mut b[0], 96);
-        return b;
+    fn type_str(self: &Self, tid: TypeId) String {
+        return type_str_of(self.package, self.cur_ast(), self.source, tid);
     }
 
     @c.cold
     fn err_mismatch(self: &mut Self, node: NodeId, expected: TypeId) {
+        self.err_mismatch_ann(node, expected, 0, NODE_NONE);
+    }
+
+    // `err_mismatch` with the type node `ann` of module `am` that wrote `expected` (NODE_NONE: none).
+    @c.cold
+    fn err_mismatch_ann(self: &mut Self, node: NodeId, expected: TypeId, am: ModuleId, ann: NodeId) {
         if expected == TYPE_ERROR || unsafe (*self.cur_ast()).type_of(node) == TYPE_ERROR {
             return; // reported where the type was rejected
         }
-        let e = self.type_buf(expected);
-        let f = self.type_buf(unsafe (*self.cur_ast()).type_of(node));
+        let e = self.tc_type_text(expected, am, ann);
+        let found = unsafe (*self.cur_ast()).type_of(node);
+        let mut f = self.tc_value_text(node, found, 0);
+        if f.len() == 0 {
+            f = self.tc_type_text(found, 0, NODE_NONE);
+        }
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(
-            sp,
-            format(
-                "mismatched types: expected '{}', found '{}'",
-                str::from_cbuf(e.as_slice()),
-                str::from_cbuf(f.as_slice()),
-            ),
-        );
+        // A function value erased to a `dyn fn` whose lifetimes it does not fit: compare signatures.
+        let mut exs = expected;
+        let mut fv = found;
+        let ey0 = *self.type_at(expected);
+        if ey0.kind == TypeKind::TYPE_DYN && self.tc_dyn_fn_sig(&ey0) != TYPE_NONE {
+            exs = self.tc_dyn_fn_sig(&ey0);
+            let fy0 = *self.type_at(found);
+            if fy0.kind == TypeKind::TYPE_REFERENCE {
+                fv = fy0.as_data.elem;
+            }
+        }
+        if exs != expected && self.type_at(fv).kind == TypeKind::TYPE_FUNCTION && self.dynfn_types_ok(exs, fv) {
+            let fy1 = *self.type_at(fv);
+            let mut what = format("'{}'", self.tc_type_text(fv, 0, NODE_NONE));
+            if !fy1.fn_sig() && unsafe (*self.mod_ast(fy1.module)).at_const(fy1.as_data.decl).kind == NodeKind::NODE_CLOSURE {
+                what = String::from_str("this closure");
+            }
+            let x = self.tc_type_text(exs, 0, NODE_NONE);
+            self.errors.emit_span(sp, format("mismatched types: the lifetimes of {} do not fit 'dyn {}'", what, x));
+            self.note_outer_lts(&what, &x);
+            return;
+        }
+        if self.type_at(expected).fn_sig() && self.type_at(found).kind == TypeKind::TYPE_FUNCTION && !self.fn_is_capturing(
+            found,
+        ) && self.dynfn_types_ok(expected, found) {
+            let fy = *self.type_at(found);
+            let mut what = format("'{}'", f);
+            if !fy.fn_sig() && unsafe (*self.mod_ast(fy.module)).at_const(fy.as_data.decl).kind == NodeKind::NODE_FUNCTION {
+                let nm = unsafe (*self.mod_ast(fy.module)).at_const(
+                    unsafe (*self.mod_ast(fy.module)).at_const(fy.as_data.decl).as_data.function.name,
+                ).as_data.name.text;
+                what = format("function '{}'", self.mod_src(fy.module).slice(nm.start as usize, nm.end as usize));
+            }
+            self.errors.emit_span(sp, format("mismatched types: the lifetimes of {} do not fit '{}'", what, e));
+            self.errors.note(
+                format(
+                    "each lifetime a function value needs ('static, or one shared by several positions) must be one the function type gives those positions",
+                ),
+            );
+            self.note_outer_lts(&what, &e);
+            return;
+        }
+        if self.type_at(expected).fn_sig() && self.fn_is_capturing(found) {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "mismatched types: a capturing closure is not a function pointer '{}'; use '&dyn fn', 'Box<dyn fn>' or a generic 'F: fn(..)' parameter",
+                    e,
+                ),
+            );
+            return;
+        }
+        self.errors.emit_span(sp, format("mismatched types: expected '{}', found '{}'", e, f));
+        self.note_outer_lts(&e, &f);
+    }
+
+    // Type `t` as written by type node `tn` of module `m` when that names a lifetime and lowers to
+    // `t` (a type does not keep lifetime names), else as rendered.
+    fn tc_type_text(self: &mut Self, t: TypeId, m: ModuleId, tn: NodeId) String {
+        let w = self.tc_written(t, m, tn);
+        if w.len() != 0 {
+            return w;
+        }
+        return self.type_str(t);
+    }
+
+    // Type `t` as type node `tn` of module `m` writes it, on one line, when that names a lifetime
+    // and lowers to `t`; empty otherwise.
+    fn tc_written(self: &Self, t: TypeId, m: ModuleId, tn: NodeId) String {
+        if tn == NODE_NONE || unsafe (*self.mod_ast(m)).type_of(tn) != t {
+            return String::new();
+        }
+        let sp = unsafe (*self.mod_ast(m)).at_const(tn).span;
+        let w = self.mod_src(m).slice(sp.start as usize, sp.end as usize);
+        if !w.contains("'") {
+            return String::new();
+        }
+        return one_line(w);
+    }
+
+    // Type `t` of value `node` (this module) as its declaration writes it (`tc_written`): a
+    // parameter's or a `let`'s (an unannotated one's initializer's), or a field's with the lifetime
+    // arguments its base's declaration writes; empty otherwise.
+    fn tc_value_text(self: &Self, node: NodeId, t: TypeId, depth: u32) String {
+        let a = self.cur_ast();
+        let e = unsafe (*a).peel(node, true);
+        let en = *unsafe (*a).at_const(e);
+        if en.kind == NodeKind::NODE_MEMBER && !en.as_data.member.path {
+            let fd = unsafe (*a).resolution_def(en.as_data.member.member);
+            if fd.node == NODE_NONE || unsafe (*self.mod_ast(fd.module)).at_const(fd.node).kind != NodeKind::NODE_FIELD {
+                return String::new();
+            }
+            let w = self.tc_written(t, fd.module, unsafe (*self.mod_ast(fd.module)).member_type_node(fd.node, false));
+            if w.len() == 0 {
+                return w;
+            }
+            // The base's type: its declaration's, through references, names the struct's lifetimes.
+            let ot = self.strip(unsafe (*a).type_of(en.as_data.member.object));
+            let mut om: ModuleId = 0;
+            let mut od = NODE_NONE;
+            if !self.aggregate_decl(ot, &mut om, &mut od) {
+                return String::new();
+            }
+            let mut bt = self.tc_value_decl_node(en.as_data.member.object, 0);
+            for _ in 0..8 {
+                if bt == NODE_NONE || !unsafe (*a).at_const(bt).has_lt_slot() {
+                    break;
+                }
+                bt = unsafe (*a).at_const(bt).as_data.indirect_type.ty;
+            }
+            let mut args = NodeList { start: 0, len: 0 };
+            if bt != NODE_NONE && unsafe (*a).at_const(bt).kind == NodeKind::NODE_TYPE_PATH {
+                args = unsafe (*a).at_const(bt).as_data.type_path.args;
+            }
+            return self.tc_lt_rename(&w, om, od, args);
+        }
+        let tn = self.tc_value_decl_node(e, depth);
+        if tn == NODE_NONE {
+            return String::new();
+        }
+        return self.tc_written(t, self.cur_module(), tn);
+    }
+
+    // The type node of this module that declares value `node`: a parameter's or an annotated
+    // `let`'s, an unannotated `let`'s initializer's (at most 4 deep); NODE_NONE for another value.
+    fn tc_value_decl_node(self: &Self, node: NodeId, depth: u32) NodeId {
+        let a = self.cur_ast();
+        let e = unsafe (*a).peel(node, true);
+        if unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.cur_module() || d.node == NODE_NONE {
+            return NODE_NONE;
+        }
+        let dn = unsafe (*a).at_const(d.node);
+        if dn.kind == NodeKind::NODE_PARAMETER {
+            return dn.as_data.parameter.ty;
+        }
+        if dn.kind == NodeKind::NODE_LET {
+            if dn.as_data.let_stmt.ty != NODE_NONE || depth >= 4 {
+                return dn.as_data.let_stmt.ty;
+            }
+            return self.tc_value_decl_node(dn.as_data.let_stmt.value, depth + 1);
+        }
+        return NODE_NONE;
+    }
+
+    // Text `w` of a field type of declaration `d` (module `m`) with each lifetime parameter of `d`
+    // spelled as the lifetime argument of `args` (this module) at its place (`'_` past them).
+    fn tc_lt_rename(self: &Self, w: &String, m: ModuleId, d: NodeId, args: NodeList) String {
+        let a = self.cur_ast();
+        let lts = unsafe (*self.mod_ast(m)).lifetimes_of(d);
+        let mut out = String::new();
+        let s = w.as_str();
+        let mut i: usize = 0;
+        while i < s.len() {
+            let c = s.byte_at(i);
+            if c != b'\'' {
+                out.push_byte(c);
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < s.len() && (s.byte_at(j) == b'_' || s.byte_at(j) >= b'a' && s.byte_at(j) <= b'z' || s.byte_at(j) >= b'A' && s.byte_at(
+                j,
+            ) <= b'Z' || s.byte_at(j) >= b'0' && s.byte_at(j) <= b'9') {
+                j += 1;
+            }
+            let name = s.slice(i, j);
+            let mut hit = false;
+            for g in 0..lts.len {
+                let pn = self.tc_lt_name_in(m, unsafe (*self.mod_ast(m)).list(lts)[g as usize]);
+                if pn.end <= pn.start || self.mod_src(m).slice(pn.start as usize, pn.end as usize) != name {
+                    continue;
+                }
+                // The g-th lifetime argument.
+                let mut k: u32 = 0;
+                let mut arg = tok::Span { start: 0, end: 0 };
+                for x in 0..args.len {
+                    let aid = unsafe (*a).list(args)[x as usize];
+                    if unsafe (*a).at_const(aid).kind != NodeKind::NODE_LIFETIME {
+                        continue;
+                    }
+                    if k == g {
+                        arg = self.tc_lt_name_in(self.cur_module(), aid);
+                    }
+                    k += 1;
+                }
+                if arg.end > arg.start {
+                    out.push_str(self.source.slice(arg.start as usize, arg.end as usize));
+                } else {
+                    out.push_str("'_");
+                }
+                hit = true;
+                break;
+            }
+            if !hit {
+                out.push_str(name);
+            }
+            i = j;
+        }
+        return out;
+    }
+
+    // After an error printing types `x` and `y`: what a `'1` in them stands for.
+    fn note_outer_lts(self: &mut Self, x: &String, y: &String) {
+        if x.contains("'1") || y.contains("'1") {
+            self.errors.note(
+                format(
+                    "'1, '2, ..: lifetimes a function type takes from outside it that no declaration here names (a type argument's, an instance's), in order of first use",
+                ),
+            );
+        }
     }
 
     // The parameter list and return type of function type `fid`.
@@ -3293,7 +3928,7 @@ extend<'a> TypeChecker<'a> {
         return ap && bp && at.qualifier == bt.qualifier && at.as_data.elem == bt.as_data.elem;
     }
 
-    fn generic_fn_bound(self: &Self, m: ModuleId, decl: NodeId) NodeId {
+    pub fn generic_fn_bound(self: &Self, m: ModuleId, decl: NodeId) NodeId {
         let a = self.mod_ast(m);
         let gp = unsafe (*a).at_const(decl);
         if gp.kind != NodeKind::NODE_GENERIC_PARAM {
@@ -3813,14 +4448,20 @@ extend<'a> TypeChecker<'a> {
         // The substituted signature must be exactly what was asked for.
         for i in 0..params.len {
             let pid = unsafe (*fa).list(params)[i as usize];
-            if self.subst_type(self.decl_type_in(d.module, pid), &gp[0], &ga[0], g) != self.fn_param(&es, i) {
+            if !self.tc_same_shape(
+                self.subst_type(self.decl_type_in(d.module, pid), &gp[0], &ga[0], g),
+                self.fn_param(&es, i),
+            ) {
                 return false;
             }
         }
         if rets.len > 1 {
             for i in 0..rets.len {
                 let ri = unsafe (*fa).list(rets)[i as usize];
-                if self.subst_type(self.node_type_in(d.module, ri), &gp[0], &ga[0], g) != self.fn_ret_i(expected, i) {
+                if !self.tc_same_shape(
+                    self.subst_type(self.node_type_in(d.module, ri), &gp[0], &ga[0], g),
+                    self.fn_ret_i(expected, i),
+                ) {
                     return false;
                 }
             }
@@ -3830,9 +4471,14 @@ extend<'a> TypeChecker<'a> {
                 let r0 = unsafe (*fa).list(rets)[0];
                 ar = self.subst_type(self.node_type_in(d.module, r0), &gp[0], &ga[0], g);
             }
-            if !self.ret_eq(es.ret, ar) {
+            if !self.ret_eq(es.ret, ar) && !self.tc_same_shape(es.ret, ar) {
                 return false;
             }
+        }
+        // The lifetimes of the instance's signature (an error reported there needs no second one).
+        let vsig = self.tc_sig_subst(node, d, &gp[0], &ga[0], g);
+        if vsig != TYPE_ERROR && !self.tc_lt_value_fits(expected, vsig) {
+            return false;
         }
         self.check_generic_bounds(node, d.module, d.node, gens, &gp[0], &ga[0], g, &gp[0], &ga[0], 0);
         unsafe (*self.cur_ast()).set_type(node, expected);
@@ -3856,12 +4502,12 @@ extend<'a> TypeChecker<'a> {
             gp[i as usize] = DefId { module: d.module, node: unsafe (*fa).list(f.generics)[i as usize] };
         }
         self.check_generic_bounds(node, d.module, d.node, f.generics, &gp[0], ga, g, &gp[0], ga, 0);
-        return self.tc_sig_subst(d, &gp[0], ga, g);
+        return self.tc_sig_subst(node, d, &gp[0], ga, g);
     }
 
     // The function-pointer type of function `d`'s signature with parameters `gp[0..g]` bound to
-    // `ga[0..g]`.
-    fn tc_sig_subst(self: &mut Self, d: DefId, gp: *const DefId, ga: *const TypeId, g: i32) TypeId {
+    // `ga[0..g]`, named as a value at `node`: its lifetime classes are the function's.
+    fn tc_sig_subst(self: &mut Self, node: NodeId, d: DefId, gp: *const DefId, ga: *const TypeId, g: i32) TypeId {
         let f = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function;
         let mut slots = Vector::<TypeId>::with_capacity((f.returns.len + f.params.len) as usize);
         for i in 0..f.returns.len {
@@ -3872,13 +4518,61 @@ extend<'a> TypeChecker<'a> {
             let pid = unsafe (*self.mod_ast(d.module)).list(f.params)[i as usize];
             slots.push(self.subst_type(self.decl_type_in(d.module, pid), gp, ga, g));
         }
-        return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), f.returns.len, f.params.len, false);
+        let sig = unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), f.returns.len, f.params.len, false, 0);
+        let sy = *self.type_at(sig);
+        let mut cls = Vector::<u8>::new();
+        let mut c0 = Vector::<u8>::new();
+        let mut inv = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        self.tc_sig_classes(&sy, &mut c0, &mut inv, &mut nres);
+        if !self.tc_item_classes(d, &sy, &mut cls) {
+            self.err_fn_value_lts(node, d);
+            return TYPE_ERROR;
+        }
+        let lts = unsafe (*self.cur_ast()).lts_encode(&cls, nres, &mut slots);
+        if lts == 0 {
+            return sig;
+        }
+        return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), f.returns.len, f.params.len, false, lts);
+    }
+
+    // Function `d`, named as a value at `node`, relates lifetimes no function type can show.
+    @c.cold
+    fn err_fn_value_lts(self: &mut Self, node: NodeId, d: DefId) {
+        let nm = unsafe (*self.mod_ast(d.module)).at_const(
+            unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name,
+        ).as_data.name.text;
+        self.errors.emit_span(
+            unsafe (*self.cur_ast()).at_const(node).span,
+            format(
+                "'{}' cannot be used as a value: a function type cannot show how its signature relates lifetimes",
+                self.mod_src(d.module).slice(nm.start as usize, nm.end as usize),
+            ),
+        );
+        self.note_lt_limits();
+    }
+
+    // Where a function type can show lifetimes, after an error that it cannot.
+    @c.cold
+    pub fn note_lt_limits(self: &mut Self) {
+        self.errors.note(
+            format(
+                "a function type shows a lifetime only at its own positions, with at most {} lifetimes it chooses at each call and {} it takes from outside",
+                LC_OUTER - LC_GROUP,
+                LC_TOO_MANY - LC_OUTER,
+            ),
+        );
     }
 
     fn dynfn_sig_ok(self: &mut Self, exid: TypeId, acid: TypeId) bool {
+        return self.dynfn_types_ok(exid, acid) && self.tc_lt_value_fits(exid, acid);
+    }
+
+    // `dynfn_sig_ok` over the slot types alone.
+    fn dynfn_types_ok(self: &mut Self, exid: TypeId, acid: TypeId) bool {
         let es = self.fn_sig(exid);
         let as2 = self.fn_sig(acid);
-        if es.np != as2.np || !self.ret_eq(es.ret, as2.ret) {
+        if es.np != as2.np || !self.ret_eq(es.ret, as2.ret) && !self.tc_same_shape(es.ret, as2.ret) {
             return false;
         }
         // `ret` stands for one result only: several results compare by count, then in order.
@@ -3889,17 +4583,2633 @@ extend<'a> TypeChecker<'a> {
         }
         if ne > 1 {
             for i in 0..ne {
-                if self.fn_ret_i(exid, i) != self.fn_ret_i(acid, i) {
+                if !self.tc_same_shape(self.fn_ret_i(exid, i), self.fn_ret_i(acid, i)) {
                     return false;
                 }
             }
         }
         for i in 0..es.np {
-            if self.fn_param(&es, i) != self.fn_param(&as2, i) {
+            if !self.tc_same_shape(self.fn_param(&es, i), self.fn_param(&as2, i)) {
                 return false;
             }
         }
         return true;
+    }
+
+    // Whether types `a` and `b` are one type but for the lifetimes of the function types in them
+    // (`tc_lt_value_fits` relates those).
+    fn tc_same_shape(self: &mut Self, a: TypeId, b: TypeId) bool {
+        return a == b || self.tc_erase_lts(a, 0) == self.tc_erase_lts(b, 0);
+    }
+
+    // Type `t` with every function type in it naming no lifetime.
+    fn tc_erase_lts(self: &mut Self, t: TypeId, depth: u32) TypeId {
+        if t == TYPE_NONE || depth > 16 {
+            return t;
+        }
+        let y = *self.type_at(t);
+        let a = self.cur_ast();
+        if y.fn_sig() {
+            let it = *unsafe (*a).instance(y.rec());
+            let mut changed = it.lts != 0;
+            let mut sl = Vector::<TypeId>::with_capacity((it.module as u32 + it.decl) as usize);
+            for i in 0..it.module as u32 + it.decl {
+                let o = unsafe (*a).rec_slot(&it, i);
+                sl.push(self.tc_erase_lts(o, depth + 1));
+                changed = changed || sl[i as usize] != o;
+            }
+            if !changed {
+                return t;
+            }
+            return unsafe (*a).intern_fn_sig(sl.as_ptr(), it.module, it.decl, (y.qualifier & FN_MOVE) != 0, 0);
+        }
+        if y.kind == TypeKind::TYPE_DYN && unsafe (*a).dyn_fn_sig(&y) != TYPE_NONE {
+            let sig = unsafe (*a).dyn_fn_sig(&y);
+            let e = self.tc_erase_lts(sig, depth + 1);
+            if e == sig {
+                return t;
+            }
+            return unsafe (*a).intern_dyn_fn(e, y.qualifier);
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
+            let e = self.tc_erase_lts(y.as_data.elem, depth + 1);
+            if e == y.as_data.elem {
+                return t;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            return unsafe (*a).intern_type(nt);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let src = *unsafe (*a).instance(y.as_data.inst);
+            let mut na = Tys8 {};
+            let mut changed = false;
+            for i in 0..src.n {
+                na[i as usize] = self.tc_erase_lts(unsafe src.args[i as usize], depth + 1);
+                changed = changed || na[i as usize] != unsafe src.args[i as usize];
+            }
+            if changed {
+                return unsafe (*a).intern_instance(src.module, src.decl, &na[0], src.n);
+            }
+        }
+        return t;
+    }
+
+    /// `tc_lt_name` for a node of module `m`.
+    pub fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
+        if lt == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(lt);
+        if n.kind == NodeKind::NODE_GENERIC_PARAM {
+            return self.tc_lt_name_in(m, n.as_data.generic_param.name);
+        }
+        if span_is(self.mod_src(m), n.as_data.name.text, "'_") {
+            return tok::Span { start: 0, end: 0 };
+        }
+        return n.as_data.name.text;
+    }
+
+    /// True for an empty or unset span.
+    pub const fn tc_span_empty(self: &Self, s: tok::Span) bool {
+        return s.end <= s.start;
+    }
+
+    /// Append every lifetime name written in type node `tyn` to `out`.
+    pub fn tc_typenode_lifetimes(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Vector<tok::Span>, depth: i32) {
+        if tyn == NODE_NONE || depth > 6 {
+            return;
+        }
+        let node = unsafe (*self.mod_ast(m)).at_const(tyn);
+        if node.has_lt_slot() {
+            let l = self.tc_lt_name_in(m, node.as_data.indirect_type.lifetime);
+            if !self.tc_span_empty(l) {
+                out.push(l);
+            }
+            self.tc_typenode_lifetimes(m, node.as_data.indirect_type.ty, out, depth + 1);
+            return;
+        }
+        if node.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.tc_typenode_lifetimes(m, node.as_data.array_type.element, out, depth + 1);
+            return;
+        }
+        if node.kind == NodeKind::NODE_TUPLE_TYPE {
+            let es = node.as_data.array_literal.elements;
+            for i in 0..es.len {
+                self.tc_typenode_lifetimes(m, unsafe (*self.mod_ast(m)).list(es)[i as usize], out, depth + 1);
+            }
+            return;
+        }
+        if node.kind == NodeKind::NODE_TYPE_PATH {
+            let args = node.as_data.type_path.args;
+            for i in 0..args.len {
+                let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    let l = self.tc_lt_name_in(m, aid);
+                    if !self.tc_span_empty(l) {
+                        out.push(l);
+                    }
+                } else {
+                    self.tc_typenode_lifetimes(m, aid, out, depth + 1);
+                }
+            }
+        }
+    }
+
+    /// True when type path `tyn` of module `m` is `Self`: its lifetimes are the ones the enclosing
+    /// declaration names, so none of them is elided.
+    pub const fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
+        let sa = self.mod_ast(m);
+        let parts = unsafe (*sa).at_const(tyn).as_data.type_path.parts;
+        return parts.len == 1 && span_is(
+            self.mod_src(m),
+            unsafe (*sa).at_const(unsafe (*sa).list(parts)[0]).as_data.name.text,
+            "Self",
+        );
+    }
+
+    /// The function-pointer type of closure type `ct`'s own slots when its parameters name a lifetime,
+    /// with its lifetime classes (`tc_item_classes`) into `cls`; TYPE_ERROR when no classes can show
+    /// them; TYPE_NONE otherwise.
+    pub fn tc_closure_sig(self: &mut Self, ct: TypeId, cls: &mut Vector<u8>) TypeId {
+        let y = *self.type_at(ct);
+        if y.kind != TypeKind::TYPE_FUNCTION || y.fn_sig() {
+            return TYPE_NONE;
+        }
+        let a = self.mod_ast(y.module);
+        if unsafe (*a).at_const(y.as_data.decl).kind != NodeKind::NODE_CLOSURE {
+            return TYPE_NONE;
+        }
+        let ps = unsafe (*a).at_const(y.as_data.decl).as_data.closure.params;
+        let mut named = Vector::<tok::Span>::new();
+        for i in 0..ps.len {
+            self.tc_typenode_lifetimes(
+                y.module,
+                unsafe (*a).slot_type_node(unsafe (*a).list(ps)[i as usize]),
+                &mut named,
+                0,
+            );
+        }
+        if named.len() == 0 {
+            return TYPE_NONE;
+        }
+        let sig = self.tc_own_sig(ct);
+        let sy = *self.type_at(sig);
+        if !self.tc_item_classes(DefId { module: y.module, node: y.as_data.decl }, &sy, cls) {
+            return TYPE_ERROR;
+        }
+        return sig;
+    }
+
+    /// Whether function-pointer type `y`'s classes hold a lifetime past the last class (`LTS_WIDE`).
+    fn tc_lts_wide(self: &Self, y: &Ty) bool {
+        return unsafe (*self.cur_ast()).instance(y.as_data.fnp.sig).lts == LTS_WIDE;
+    }
+
+    /// The lifetime positions of `t` (`Package::lt_count`).
+    fn tc_lt_count(self: &Self, t: TypeId) u32 {
+        return unsafe (*self.package).lt_count(unsafe &*self.cur_ast(), t);
+    }
+
+    /// `C<'a>` is a subtype of `C<'b>` only if 'a and 'b relate per C's variance in that slot:
+    /// covariant needs 'a: 'b, contravariant 'b: 'a, invariant both directions. Inferred by rustc's
+    /// algorithm over the field types: `&T` and `*const T` covariant, `&mut T` and `*mut T` invariant in the pointee, a nested
+    /// aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
+    /// cycle resolves to all-invariant (sound: over-restricts only recursive types).
+    pub const fn v_flip(self: &Self, v: u32) u32 {
+        // Bit 0 is a covariant use and bit 1 a contravariant one (V_* values): flipping swaps them.
+        return (v >> 1 | v << 1) & 3;
+    }
+
+    /// Lattice join of two variances (BIVARIANT is the identity, mismatches become INVARIANT).
+    pub const fn v_join(self: &Self, a: u32, b: u32) u32 {
+        // The union of the use bits (see v_flip): BIVARIANT (0) is the identity, COVARIANT | CONTRAVARIANT
+        // is INVARIANT.
+        return a | b;
+    }
+
+    /// The variance of a position with variance `v` nested inside a context of variance `ctx`.
+    pub const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
+        if ctx == V_COVARIANT {
+            return v;
+        }
+        if ctx == V_CONTRAVARIANT {
+            return self.v_flip(v);
+        }
+        if ctx == V_BIVARIANT || v == V_BIVARIANT {
+            return V_BIVARIANT;
+        }
+        return V_INVARIANT;
+    }
+
+    /// Number of lifetime params declared by aggregate `dd`.
+    pub fn variance_nlt(self: &Self, dd: DefId) i32 {
+        return (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
+    }
+
+    /// Number of variance slots of aggregate `dd`: lifetime params then type params.
+    pub fn variance_nparams(self: &Self, dd: DefId) i32 {
+        let sa = self.mod_ast(dd.module);
+        let nk = unsafe (*sa).at_const(dd.node).kind;
+        let mut nty: i32 = 0;
+        if nk == NodeKind::NODE_STRUCT || nk == NodeKind::NODE_ENUM {
+            nty = (unsafe (*sa).at_const(dd.node).as_data.aggregate.generics.len) as i32;
+        }
+        return self.variance_nlt(dd) + nty;
+    }
+
+    /// `packed` with slot `idx` set to `v` (2 bits per slot); indexes past 32 leave it unchanged.
+    pub const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
+        if idx < 0 || idx >= 32 {
+            return packed;
+        }
+        let sh = (idx * 2) as u64;
+        let cur = (packed >> sh & 0x3u64) as u32;
+        let nv = self.v_join(cur, v);
+        return packed & ~(0x3u64 << sh) | nv as u64 << sh;
+    }
+
+    /// The packed variance vector with every slot of `dd` INVARIANT (the conservative answer).
+    pub fn variance_all_invariant(self: &Self, dd: DefId) u64 {
+        let n = self.variance_nparams(dd);
+        let mut packed: u64 = 0;
+        let mut i: i32 = 0;
+        while i < n && i < 32 {
+            packed = packed | V_INVARIANT as u64 << (i * 2) as u64;
+            i = i + 1;
+        }
+        return packed;
+    }
+
+    /// The inferred variance of slot `idx` of aggregate `dd`; INVARIANT past 32 slots.
+    pub fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
+        if idx < 0 || idx >= 32 {
+            return V_INVARIANT;
+        }
+        return (self.variance_infer(dd) >> (idx * 2) as u64 & 0x3u64) as u32;
+    }
+
+    /// Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
+    pub fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
+        if self.tc_span_empty(name) {
+            return -1;
+        }
+        let sa = self.mod_ast(dd.module);
+        let lts = unsafe (*sa).lifetimes_of(dd.node);
+        for i in 0..lts.len {
+            let lp = unsafe (*sa).list(lts)[i as usize];
+            if spans_eq2(self.mod_src(dd.module), self.tc_lt_name_in(dd.module, lp), self.mod_src(dd.module), name) {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    /// Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
+    pub fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
+        let sa = self.mod_ast(dd.module);
+        let rd = unsafe (*sa).resolution_def(tyn);
+        if rd.node == NODE_NONE || rd.module != dd.module {
+            return -1;
+        }
+        let gens = unsafe (*sa).at_const(dd.node).as_data.aggregate.generics;
+        for j in 0..gens.len {
+            if unsafe (*sa).list(gens)[j as usize] == rd.node {
+                return self.variance_nlt(dd) + j as i32;
+            }
+        }
+        return -1;
+    }
+
+    /// The packed variance vector of aggregate `dd`, inferred from its field types and memoized; a
+    /// recursive query answers INVARIANT.
+    pub fn variance_infer(self: &mut Self, dd: DefId) u64 {
+        if dd.node == NODE_NONE {
+            return 0;
+        }
+        let key = dd.module as u64 << 32 | dd.node as u64;
+        switch self.variance_of.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        switch self.variance_wip.get(&key) {
+            Some(_) => {
+                return self.variance_all_invariant(dd);
+            },
+            None => {},
+        };
+        let nk = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).kind;
+        if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM {
+            self.variance_of.insert(key, 0);
+            return 0;
+        }
+        self.variance_wip.insert(key, true);
+        let mut packed: u64 = 0;
+        let is_tuple = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).as_data.aggregate.is_tuple;
+        let members = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).as_data.aggregate.members;
+        for i in 0..members.len {
+            let mid = unsafe (*self.mod_ast(dd.module)).list(members)[i as usize];
+            let mk = unsafe (*self.mod_ast(dd.module)).at_const(mid).kind;
+            if mk == NodeKind::NODE_FIELD || is_tuple {
+                let tn = unsafe (*self.mod_ast(dd.module)).member_type_node(mid, is_tuple);
+                packed = self.variance_walk(dd, tn, V_COVARIANT, packed, 0);
+            } else if mk == NodeKind::NODE_VARIANT {
+                let pl = unsafe (*self.mod_ast(dd.module)).at_const(mid).as_data.variant.payload;
+                for p in 0..pl.len {
+                    packed = self.variance_walk(
+                        dd,
+                        unsafe (*self.mod_ast(dd.module)).list(pl)[p as usize],
+                        V_COVARIANT,
+                        packed,
+                        0,
+                    );
+                }
+            }
+        }
+        self.variance_wip.remove(&key);
+        self.variance_of.insert(key, packed);
+        return packed;
+    }
+
+    /// Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
+    /// into `packed`, under the accumulated context variance `ctx`.
+    pub fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
+        if tyn == NODE_NONE || depth > 8 || ctx == V_BIVARIANT {
+            return packed;
+        }
+        let sa = self.mod_ast(dd.module);
+        let n = unsafe (*sa).at_const(tyn);
+        let nk = n.kind;
+        if nk == NodeKind::NODE_LIFETIME {
+            return self.variance_pack_set(packed, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, tyn)), ctx);
+        }
+        if nk == NodeKind::NODE_REFERENCE_TYPE || nk == NodeKind::NODE_SLICE_TYPE {
+            let mut p = packed;
+            let lifen = n.as_data.indirect_type.lifetime;
+            if nk == NodeKind::NODE_REFERENCE_TYPE && lifen != NODE_NONE {
+                p = self.variance_pack_set(p, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, lifen)), ctx);
+            }
+            let mut inner = ctx;
+            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                inner = self.v_transform(ctx, V_INVARIANT);
+            }
+            return self.variance_walk(dd, n.as_data.indirect_type.ty, inner, p, depth + 1);
+        }
+        if nk == NodeKind::NODE_DYN_TYPE {
+            // `&'a dyn I` is covariant in `'a`. The interface's arguments are invariant (Rust's rule:
+            // a method may take or return them); a `dyn fn(..)` signature has its function variance.
+            let mut p = packed;
+            let lifen = n.as_data.indirect_type.lifetime;
+            if n.is_ref_type() && lifen != NODE_NONE {
+                p = self.variance_pack_set(p, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, lifen)), ctx);
+            }
+            let tn = n.as_data.indirect_type.ty;
+            if tn == NODE_NONE || unsafe (*sa).at_const(tn).kind != NodeKind::NODE_TYPE_PATH {
+                return self.variance_walk(dd, tn, ctx, p, depth + 1);
+            }
+            let args = unsafe (*sa).at_const(tn).as_data.type_path.args;
+            for i in 0..args.len {
+                p = self.variance_walk(
+                    dd,
+                    unsafe (*sa).list(args)[i as usize],
+                    self.v_transform(ctx, V_INVARIANT),
+                    p,
+                    depth + 1,
+                );
+            }
+            return p;
+        }
+        if nk == NodeKind::NODE_POINTER_TYPE {
+            // Rust's rule: `*const T` is covariant in T, `*mut T` invariant.
+            let mut inner = ctx;
+            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                inner = self.v_transform(ctx, V_INVARIANT);
+            }
+            return self.variance_walk(dd, n.as_data.indirect_type.ty, inner, packed, depth + 1);
+        }
+        if nk == NodeKind::NODE_ARRAY_TYPE {
+            return self.variance_walk(dd, n.as_data.array_type.element, ctx, packed, depth + 1);
+        }
+        if nk == NodeKind::NODE_TUPLE_TYPE {
+            let mut p = packed;
+            let es = n.as_data.array_literal.elements;
+            for i in 0..es.len {
+                p = self.variance_walk(dd, unsafe (*sa).list(es)[i as usize], ctx, p, depth + 1);
+            }
+            return p;
+        }
+        if nk == NodeKind::NODE_FUNCTION_TYPE {
+            let mut p = packed;
+            let ps = n.as_data.function_type.params;
+            for i in 0..ps.len {
+                p = self.variance_walk(
+                    dd,
+                    unsafe (*sa).list(ps)[i as usize],
+                    self.v_transform(ctx, V_CONTRAVARIANT),
+                    p,
+                    depth + 1,
+                );
+            }
+            let rs = n.as_data.function_type.returns;
+            for i in 0..rs.len {
+                p = self.variance_walk(dd, unsafe (*sa).list(rs)[i as usize], ctx, p, depth + 1);
+            }
+            return p;
+        }
+        if nk == NodeKind::NODE_TYPE_PATH {
+            let tidx = self.variance_ty_index(dd, tyn);
+            if tidx >= 0 {
+                return self.variance_pack_set(packed, tidx, ctx);
+            }
+            let rd = unsafe (*sa).resolution_def(tyn);
+            let args = n.as_data.type_path.args;
+            if rd.node == NODE_NONE || args.len == 0 {
+                return packed;
+            }
+            let ncalleeLt = self.variance_nlt(rd);
+            let mut p = packed;
+            let mut lti: i32 = 0;
+            let mut tyi: i32 = 0;
+            for i in 0..args.len {
+                let aid = unsafe (*sa).list(args)[i as usize];
+                let mut cvar: u32 = V_INVARIANT;
+                if unsafe (*sa).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    cvar = self.variance_param(rd, lti);
+                    lti = lti + 1;
+                } else {
+                    cvar = self.variance_param(rd, ncalleeLt + tyi);
+                    tyi = tyi + 1;
+                }
+                p = self.variance_walk(dd, aid, self.v_transform(ctx, cvar), p, depth + 1);
+            }
+            return p;
+        }
+        return packed;
+    }
+
+    /// `Package::sig_classes` of function-pointer type `y`.
+    fn tc_sig_classes(self: &mut Self, y: &Ty, cls: &mut Vector<u8>, fl: &mut Vector<u8>, nres: &mut u32) {
+        let pkg = self.package;
+        let a = self.cur_ast();
+        unsafe (*pkg).sig_classes(unsafe &*a, y, cls, fl, nres, self);
+    }
+
+    /// Whether function value `acid` (a function, a closure or a function pointer whose slot types
+    /// equal those of function-pointer type `exid`, or of function `exid`'s own type, but for
+    /// lifetimes) honours `exid`'s lifetimes: Rust's subtyping between function types (`tc_lt_pair`,
+    /// `ls_solve`).
+    fn tc_lt_value_fits(self: &mut Self, exid0: TypeId, acid: TypeId) bool {
+        let ey0 = *self.type_at(exid0);
+        if !ey0.fn_sig() && (exid0 == acid || ey0.kind != TypeKind::TYPE_FUNCTION || unsafe (*self.mod_ast(ey0.module)).at_const(
+            ey0.as_data.decl,
+        ).kind != NodeKind::NODE_FUNCTION) {
+            return true;
+        }
+        // One type may still name its lifetimes from outside it otherwise than the value's
+        // declaration (`fn(&'p T) &'q T` and `fn(&'q T) &'p T` are one type).
+        if exid0 == acid && !self.tc_has_outer(&ey0) {
+            return true;
+        }
+        // A function's own type takes the lifetimes of its signature.
+        let mut c2 = Vector::<u8>::new();
+        let mut fl = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        let exid = if ey0.fn_sig() {
+            exid0;
+        } else {
+            self.tc_own_sig(exid0);
+        };
+        let ey = *self.type_at(exid);
+        if ey0.fn_sig() {
+            self.tc_sig_classes(&ey, &mut c2, &mut fl, &mut nres);
+        } else if !self.tc_item_classes(DefId { module: ey0.module, node: ey0.as_data.decl }, &ey, &mut c2) {
+            return false;
+        }
+        let ay = *self.type_at(acid);
+        if self.tc_lts_wide(&ey) || ay.fn_sig() && self.tc_lts_wide(&ay) {
+            return false;
+        }
+        let mut c1 = Vector::<u8>::new();
+        let mut own = acid;
+        if ay.fn_sig() {
+            self.tc_sig_classes(&ay, &mut c1, &mut fl, &mut nres);
+        } else {
+            own = self.tc_own_sig(acid);
+            let oy = *self.type_at(own);
+            if !self.tc_item_classes(DefId { module: ay.module, node: ay.as_data.decl }, &oy, &mut c1) {
+                return false;
+            }
+        }
+        // The lifetimes the value's own declaration names at its outer classes.
+        let vnames = if ay.fn_sig() {
+            self.tc_value_names(acid, &c1);
+        } else {
+            Vector::<u64>::new();
+        };
+        let mut named = false;
+        for g in 0..vnames.len() {
+            named = named || vnames[g] != 0;
+        }
+        if exid0 == acid && !named {
+            return true;
+        }
+        let mut s = ls_sys();
+        let mut ov = Vector::<u32>::new();
+        for g in 0..ls_nouter(&c1) {
+            let nm = if g as usize < vnames.len() {
+                vnames[g as usize];
+            } else {
+                0u64;
+            };
+            ov.push(
+                if nm != 0 {
+                    ls_new(&mut s, LS_VNAMED, nm);
+                } else {
+                    ls_new(&mut s, LS_OUTER, 0);
+                },
+            );
+        }
+        let toks = self.tc_lt_call_toks(exid, &c2);
+        let names = self.tc_ann_names(exid, &c2);
+        let mut ot = Vector::<u32>::new();
+        for g in 0..ls_nouter(&c2) {
+            let tk = if g as usize < toks.len() {
+                toks[g as usize];
+            } else {
+                0u64;
+            };
+            let nm = if g as usize < names.len() {
+                names[g as usize];
+            } else {
+                0u64;
+            };
+            ot.push(
+                if tk != 0 {
+                    ls_new(&mut s, LS_CALLEE, tk);
+                } else {
+                    ls_new(&mut s, LS_FIXED, nm);
+                },
+            );
+        }
+        let mut sv = ls_side(c1, ov, LS_VAR);
+        let mut st = ls_side(c2, ot, LS_ATOM);
+        let oy = *self.type_at(own);
+        let a = self.cur_ast();
+        for i in 0..unsafe (*a).sig_len(&ey, true) {
+            self.tc_lt_pair(
+                &mut s,
+                &mut sv,
+                &mut st,
+                unsafe (*a).sig_at(&oy, true, i),
+                unsafe (*a).sig_at(&ey, true, i),
+                V_COVARIANT,
+                0,
+            );
+        }
+        for i in 0..unsafe (*a).sig_len(&ey, false) {
+            self.tc_lt_pair(
+                &mut s,
+                &mut sv,
+                &mut st,
+                unsafe (*a).sig_at(&oy, false, i),
+                unsafe (*a).sig_at(&ey, false, i),
+                V_CONTRAVARIANT,
+                0,
+            );
+        }
+        // What the pending locals' inference variables already take part in relates their symbols here.
+        if self.lt_pool.len() != 0 {
+            let n = s.kind.len();
+            for x in 1..n {
+                if s.tok[x] == 0 || s.kind[x] != LS_FIXED && s.kind[x] != LS_VNAMED {
+                    continue;
+                }
+                for y in 1..n {
+                    if x != y && s.tok[y] != 0 && (s.kind[y] == LS_FIXED || s.kind[y] == LS_VNAMED) && s.tok[x] != s.tok[y] && self.tc_pool_reaches(
+                        s.tok[x],
+                        s.tok[y],
+                    ) {
+                        s.edges.push(x as u64 << 32 | y as u64);
+                    }
+                }
+            }
+        }
+        let mut out = Vector::<u64>::new();
+        let mut need = Vector::<u64>::new();
+        if !ls_solve(&mut s, &mut out, &mut need) {
+            return false;
+        }
+        // Two named lifetimes the value ties: the function must declare the relation; one an
+        // inference variable: the pair joins the pool, which must still hold.
+        let mut pooled = false;
+        for k in 0..need.len() {
+            let ti = s.tok[(need[k] >> 32) as usize];
+            let tj = s.tok[(need[k] & 0xFFFFFFFFu64) as usize];
+            if lt_is_var(ti) || lt_is_var(tj) {
+                self.lt_pool.push(ti);
+                self.lt_pool.push(tj);
+                pooled = true;
+            } else if !self.tc_tok_declared(ti, tj) {
+                return false;
+            }
+        }
+        if pooled && !self.tc_pool_ok() {
+            return false;
+        }
+        if out.len() != 0 {
+            self.tc_lt_call_export(&out);
+        }
+        return true;
+    }
+
+    // Whether this function's declaration makes its lifetime `sup` outlive `sub` (names of this
+    // module): one name, `'static`, or a chain of the bounds it and its extend declare.
+    fn tc_lt_declared(self: &Self, sup: tok::Span, sub: tok::Span) bool {
+        let m = self.cur_module();
+        let src = self.source;
+        let f = self.icx.current_fn;
+        let fa = self.mod_ast(m);
+        // (a, b) name pairs: `a: b`.
+        let mut pairs = Vector::<tok::Span>::new();
+        for o in 0..2 {
+            let owner = if o == 0 {
+                f;
+            } else {
+                unsafe (*fa).container_of(f);
+            };
+            if owner == NODE_NONE {
+                continue;
+            }
+            let lts = unsafe (*fa).lifetimes_of(owner);
+            for i in 0..lts.len {
+                let lp = unsafe (*fa).list(lts)[i as usize];
+                let bs = unsafe (*fa).at_const(lp).as_data.generic_param.bounds;
+                for b in 0..bs.len {
+                    pairs.push(self.tc_lt_name_in(m, lp));
+                    pairs.push(self.tc_lt_name_in(m, unsafe (*fa).list(bs)[b as usize]));
+                }
+            }
+        }
+        if unsafe (*fa).at_const(f).kind == NodeKind::NODE_FUNCTION {
+            let wc = unsafe (*fa).at_const(f).as_data.function.where_clause;
+            for i in 0..wc.len {
+                let wp = unsafe (*fa).at_const(unsafe (*fa).list(wc)[i as usize]).as_data.where_predicate;
+                if unsafe (*fa).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME {
+                    continue;
+                }
+                for b in 0..wp.bounds.len {
+                    let bid = unsafe (*fa).list(wp.bounds)[b as usize];
+                    if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_LIFETIME {
+                        pairs.push(self.tc_lt_name_in(m, wp.ty));
+                        pairs.push(self.tc_lt_name_in(m, bid));
+                    }
+                }
+            }
+        }
+        // The names `sup` outlives; each enters once.
+        let mut reach = Vector::<tok::Span>::new();
+        reach.push(sup);
+        let mut i: usize = 0;
+        while i < reach.len() {
+            let x = reach[i];
+            i += 1;
+            if spans_eq2(src, x, src, sub) || span_is(src, x, "'static") {
+                return true;
+            }
+            for k in 0..pairs.len() / 2 {
+                if !spans_eq2(src, pairs[2 * k], src, x) {
+                    continue;
+                }
+                let y = pairs[2 * k + 1];
+                let mut seen = false;
+                for r in 0..reach.len() {
+                    seen = seen || spans_eq2(src, reach[r], src, y);
+                }
+                if !seen {
+                    reach.push(y);
+                }
+            }
+        }
+        return false;
+    }
+
+    // Per outer class of function-pointer type `exid` (classes `c2`): the lifetime of this function
+    // that the written type of the expression under conversion (`lt_conv`, `lt_env`) gives its first
+    // position (an empty span: none).
+    fn tc_ann_names(self: &mut Self, exid: TypeId, c2: &Vector<u8>) Vector<u64> {
+        return self.tc_names_at(self.tc_frame_of(self.lt_conv), exid, c2);
+    }
+
+    // Per outer class of function-pointer type `acid` (classes `c1`) of the value under conversion
+    // (`lt_conv`): the token of the lifetime its declaration names at its first position
+    // (`tc_frame_value`, `tc_frame_tok`; 0: none).
+    fn tc_value_names(self: &mut Self, acid: TypeId, c1: &Vector<u8>) Vector<u64> {
+        let fm = self.lt_env.len();
+        let names = if self.tc_frame_value(self.lt_conv, 0) {
+            self.tc_names_at((self.lt_env.len() - 1) as i32, acid, c1);
+        } else {
+            Vector::<u64>::new();
+        };
+        self.lt_env.truncate(fm);
+        return names;
+    }
+
+    // Whether function-pointer type `y` takes a lifetime from outside it.
+    fn tc_has_outer(self: &Self, y: &Ty) bool {
+        for k in 0..unsafe (*self.cur_ast()).sig_lt_len(y) {
+            if unsafe (*self.cur_ast()).sig_lt_class(y, k) >= LC_OUTER {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // `tc_ann_names` for frame `fi` of `lt_env` writing function-pointer type `exid` (classes `c2`).
+    fn tc_names_at(self: &mut Self, fi: i32, exid: TypeId, c2: &Vector<u8>) Vector<u64> {
+        let mut names = Vector::<u64>::new();
+        let n = ls_nouter(c2);
+        if n == 0 || fi < 0 || self.icx.current_fn == NODE_NONE {
+            return names;
+        }
+        let fr = *self.lt_env.at(fi as usize);
+        let fnode = self.tc_fn_node_in(fr.m, fr.node);
+        if fnode == NODE_NONE {
+            return names;
+        }
+        // The frame names the positions of the type the node writes, which must be the converted-to one.
+        let fa0 = self.mod_ast(fr.m);
+        let mut wt = unsafe (*fa0).type_of(fnode);
+        if wt != TYPE_NONE && fr.m != self.cur_module() {
+            wt = unsafe (*self.cur_ast()).reintern(unsafe &*fa0, wt);
+        }
+        if wt == TYPE_NONE || !self.tc_same_shape(wt, exid) {
+            return names;
+        }
+        let ey = *self.type_at(exid);
+        let mut w = lt_walk_new(fr.m, pick(fr.owner == NODE_NONE, self.icx.current_fn, NODE_NONE), NODE_NONE);
+        let a = self.mod_ast(fr.m);
+        let ft = unsafe (*a).at_const(fnode).as_data.function_type;
+        let cur = self.cur_ast();
+        for i in 0..unsafe (*cur).sig_len(&ey, true).min(ft.returns.len) {
+            let sl = unsafe (*a).list(ft.returns)[i as usize];
+            self.tc_lt_walk(&mut w, unsafe (*a).slot_type_node(sl), unsafe (*cur).sig_at(&ey, true, i), 0);
+        }
+        for i in 0..unsafe (*cur).sig_len(&ey, false).min(ft.params.len) {
+            let sl = unsafe (*a).list(ft.params)[i as usize];
+            self.tc_lt_walk(&mut w, unsafe (*a).slot_type_node(sl), unsafe (*cur).sig_at(&ey, false, i), 0);
+        }
+        for g in 0..n {
+            let mut nm: u64 = 0;
+            for j in 0..c2.len().min(w.recs.len()) {
+                if c2[j] != LC_OUTER + g as u8 {
+                    continue;
+                }
+                let r = *w.recs.at(j);
+                if r.key == 0 && r.m == fr.m {
+                    nm = self.tc_frame_tok(fi, r.sp);
+                }
+                break;
+            }
+            names.push(nm);
+        }
+        return names;
+    }
+
+    // The innermost frame of `lt_env` for expression `e` (this module, parentheses peeled), or -1.
+    fn tc_frame_of(self: &Self, e: NodeId) i32 {
+        if e == NODE_NONE {
+            return -1;
+        }
+        let pe = unsafe (*self.cur_ast()).peel(e, false);
+        let mut i = self.lt_env.len();
+        while i > 0 {
+            i -= 1;
+            if self.lt_env.at(i).expr == pe {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // Push a frame: type node `node` of module `m` writes the type expression `e` is checked against
+    // (`LtFrame`).
+    fn tc_frame_push(self: &mut Self, e: NodeId, m: ModuleId, node: NodeId, owner: NodeId, inst: NodeId, parent: i32) {
+        if node == NODE_NONE {
+            return;
+        }
+        let pe = if e == NODE_NONE {
+            e;
+        } else {
+            unsafe (*self.cur_ast()).peel(e, false);
+        };
+        self.lt_env.push(LtFrame { expr: pe, m: m, node: node, owner: owner, inst: inst, parent: parent });
+    }
+
+    // Push a frame for each element of tuple or array literal `id` (elements `elems`) whose context's
+    // written type is a tuple type node (`k` NODE_TUPLE_TYPE) or an array type node: its element types.
+    fn tc_frame_parts(self: &mut Self, id: NodeId, elems: NodeList, k: NodeKind) {
+        let pf = self.tc_frame_of(id);
+        if pf < 0 {
+            return;
+        }
+        let fr = *self.lt_env.at(pf as usize);
+        let fa = self.mod_ast(fr.m);
+        let tn = *unsafe (*fa).at_const(fr.node);
+        if tn.kind != k {
+            return;
+        }
+        let a = self.cur_ast();
+        for i in 0..elems.len {
+            let en = if k == NodeKind::NODE_TUPLE_TYPE {
+                if i >= tn.as_data.array_literal.elements.len {
+                    break;
+                }
+                unsafe (*fa).list(tn.as_data.array_literal.elements)[i as usize];
+            } else {
+                tn.as_data.array_type.element;
+            };
+            self.tc_frame_push(unsafe (*a).list(elems)[i as usize], fr.m, en, fr.owner, fr.inst, fr.parent);
+        }
+    }
+
+    // Push the frame of member `e` of the value frame `pf` writes, whose declared type node is `tyn`
+    // (module `m`) in aggregate `owner`: a type parameter of `owner` stands for the argument the
+    // frame's instance path writes for it. None when the frame names no instance of `owner`.
+    fn tc_frame_member(self: &mut Self, e: NodeId, pf: i32, m: ModuleId, tyn: NodeId, owner: NodeId) {
+        if pf < 0 || tyn == NODE_NONE {
+            return;
+        }
+        let fr = *self.lt_env.at(pf as usize);
+        if fr.node == NODE_NONE {
+            // A pending local's literal: its lifetime parameters are inference variables, its type
+            // parameters unknown.
+            if fr.parent <= -2 && fr.owner == owner && fr.m == m && !self.tc_names_generic(m, tyn, owner) {
+                self.tc_frame_push(e, m, tyn, owner, NODE_NONE, pf);
+            }
+            return;
+        }
+        let fa = self.mod_ast(fr.m);
+        let pn = *unsafe (*fa).at_const(fr.node);
+        let d = if pn.kind == NodeKind::NODE_TYPE_PATH {
+            unsafe (*fa).path_def(fr.node);
+        } else {
+            DefId { module: 0, node: NODE_NONE };
+        };
+        if d.node != owner || d.module != m {
+            return;
+        }
+        let ma = self.mod_ast(m);
+        let tn = *unsafe (*ma).at_const(tyn);
+        if tn.kind == NodeKind::NODE_TYPE_PATH {
+            let g = unsafe (*ma).path_def(tyn);
+            let gens = self.tc_owner_generics(m, owner);
+            for j in 0..gens.len {
+                if g.module == m && g.node == unsafe (*ma).list(gens)[j as usize] {
+                    let arg = self.tc_path_arg(fr.m, fr.node, false, j);
+                    self.tc_frame_push(e, fr.m, arg, fr.owner, fr.inst, fr.parent);
+                    return;
+                }
+            }
+        }
+        self.tc_frame_push(e, m, tyn, owner, fr.node, pf);
+    }
+
+    // Push the frames of the arguments of call `id` (callee type `callee`, node `callee_id`) whose
+    // parameter type is a type parameter of the callee or of its extend that the written types of the
+    // call's context give: the receiver's declaration for a method, the written type the call's own
+    // value is checked against for its result.
+    fn tc_frame_call(self: &mut Self, id: NodeId, callee: TypeId, callee_id: NodeId, args: NodeList) {
+        let a = self.cur_ast();
+        let cn = *unsafe (*a).at_const(callee_id);
+        let mut cd = unsafe (*a).resolution_def(callee_id);
+        if cd.node == NODE_NONE && cn.kind == NodeKind::NODE_MEMBER {
+            cd = unsafe (*a).resolution_def(cn.as_data.member.member);
+        }
+        if callee != TYPE_NONE {
+            let ct = *self.type_at(callee);
+            if ct.kind == TypeKind::TYPE_FUNCTION && !ct.fn_sig() {
+                cd = DefId { module: ct.module, node: ct.as_data.decl };
+            }
+        }
+        if cd.node == NODE_NONE || cd.module as usize >= self.pkg_count() || unsafe (*self.mod_ast(cd.module)).at_const(
+            cd.node,
+        ).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        let np = unsafe (*self.mod_ast(cd.module)).at_const(cd.node).as_data.function.params.len;
+        let skip: u32 = if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path && np != 0 {
+            1u32;
+        } else {
+            0u32;
+        };
+        self.tc_frame_call_in(id, cd, skip, callee_id, args);
+    }
+
+    // `tc_frame_call` for callee function `cd`, whose first `skip` parameters the receiver of callee
+    // node `callee_id` takes.
+    fn tc_frame_call_in(self: &mut Self, id: NodeId, cd: DefId, skip: u32, callee_id: NodeId, args: NodeList) {
+        let a = self.cur_ast();
+        let cn = *unsafe (*a).at_const(callee_id);
+        let fa = self.mod_ast(cd.module);
+        let fd = unsafe (*fa).at_const(cd.node).as_data.function;
+        let ext = self.enclosing(cd.module, cd.node, NodeKind::NODE_EXTEND);
+        let mut gk = Vector::<NodeId>::new();
+        let mut gf = Vector::<LtFrame>::new();
+        if skip == 1 && cn.kind == NodeKind::NODE_MEMBER {
+            let rn = self.tc_value_decl_node(cn.as_data.member.object, 0);
+            if rn != NODE_NONE {
+                self.tc_frame_push(NODE_NONE, self.cur_module(), rn, NODE_NONE, NODE_NONE, -1);
+                let side = *self.lt_env.at(self.lt_env.len() - 1);
+                let sn = unsafe (*fa).slot_type_node(unsafe (*fa).list(fd.params)[0]);
+                self.tc_frame_match(cd.module, sn, ext, side, &mut gk, &mut gf, 0);
+            }
+        }
+        let rf = self.tc_frame_of(id);
+        if rf >= 0 && fd.returns.len == 1 {
+            let side = *self.lt_env.at(rf as usize);
+            self.tc_frame_match(
+                cd.module,
+                unsafe (*fa).slot_type_node(unsafe (*fa).list(fd.returns)[0]),
+                ext,
+                side,
+                &mut gk,
+                &mut gf,
+                0,
+            );
+        }
+        for i in 0..args.len {
+            if i + skip >= fd.params.len {
+                break;
+            }
+            let pn = unsafe (*fa).slot_type_node(unsafe (*fa).list(fd.params)[(i + skip) as usize]);
+            if pn == NODE_NONE || unsafe (*fa).at_const(pn).kind != NodeKind::NODE_TYPE_PATH {
+                continue;
+            }
+            let g = unsafe (*fa).path_def(pn);
+            for k in 0..gk.len() {
+                if g.module == cd.module && g.node == gk[k] {
+                    let f = *gf.at(k);
+                    self.tc_frame_push(unsafe (*a).list(args)[i as usize], f.m, f.node, f.owner, f.inst, f.parent);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Match the callee's type node `cn` (module `cm`; `Self` is extend `ext`'s target) against the
+    // written type node of frame `side`: each type parameter `cn` places gets the node `side` writes
+    // there (into `gk`, `gf`).
+    fn tc_frame_match(
+        self: &Self,
+        cm: ModuleId,
+        cn: NodeId,
+        ext: NodeId,
+        side: LtFrame,
+        gk: &mut Vector<NodeId>,
+        gf: &mut Vector<LtFrame>,
+        depth: u32,
+    ) {
+        if cn == NODE_NONE || side.node == NODE_NONE || depth > 8 {
+            return;
+        }
+        let ca = self.mod_ast(cm);
+        let c = *unsafe (*ca).at_const(cn);
+        let sn = *unsafe (*self.mod_ast(side.m)).at_const(side.node);
+        let mut inner = side;
+        if c.kind == NodeKind::NODE_REFERENCE_TYPE || c.kind == NodeKind::NODE_POINTER_TYPE {
+            if sn.kind == c.kind {
+                inner.node = sn.as_data.indirect_type.ty;
+            }
+            self.tc_frame_match(cm, c.as_data.indirect_type.ty, ext, inner, gk, gf, depth + 1);
+            return;
+        }
+        if sn.kind == NodeKind::NODE_REFERENCE_TYPE {
+            inner.node = sn.as_data.indirect_type.ty;
+            self.tc_frame_match(cm, cn, ext, inner, gk, gf, depth + 1);
+            return;
+        }
+        if c.kind != NodeKind::NODE_TYPE_PATH {
+            return;
+        }
+        if ext != NODE_NONE && self.tc_path_is_self(cm, cn) {
+            self.tc_frame_match(
+                cm,
+                unsafe (*ca).at_const(ext).as_data.extend_def.target_type,
+                NODE_NONE,
+                side,
+                gk,
+                gf,
+                depth + 1,
+            );
+            return;
+        }
+        let d = unsafe (*ca).path_def(cn);
+        if d.node == NODE_NONE {
+            return;
+        }
+        if d.module == cm && unsafe (*ca).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+            gk.push(d.node);
+            gf.push(side);
+            return;
+        }
+        if sn.kind != NodeKind::NODE_TYPE_PATH {
+            return;
+        }
+        let sd = unsafe (*self.mod_ast(side.m)).path_def(side.node);
+        if sd.module != d.module || sd.node != d.node {
+            return;
+        }
+        let mut k: u32 = 0;
+        while k < 8 {
+            let ca2 = self.tc_path_arg(cm, cn, false, k);
+            let sa2 = self.tc_path_arg(side.m, side.node, false, k);
+            if ca2 == NODE_NONE || sa2 == NODE_NONE {
+                break;
+            }
+            inner.node = sa2;
+            self.tc_frame_match(cm, ca2, ext, inner, gk, gf, depth + 1);
+            k += 1;
+        }
+    }
+
+    // Whether type node `tyn` (module `m`) is a type parameter of aggregate `owner`.
+    fn tc_names_generic(self: &Self, m: ModuleId, tyn: NodeId, owner: NodeId) bool {
+        let ma = self.mod_ast(m);
+        if unsafe (*ma).at_const(tyn).kind != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let g = unsafe (*ma).path_def(tyn);
+        let gens = self.tc_owner_generics(m, owner);
+        for j in 0..gens.len {
+            if g.module == m && g.node == unsafe (*ma).list(gens)[j as usize] {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The type parameters of aggregate `d` (module `m`).
+    fn tc_owner_generics(self: &Self, m: ModuleId, d: NodeId) NodeList {
+        let dn = unsafe (*self.mod_ast(m)).at_const(d);
+        if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
+            return dn.as_data.aggregate.generics;
+        }
+        return NodeList { start: 0, len: 0 };
+    }
+
+    // Argument `k` among the lifetime arguments (`lts`) or the type arguments of type path `tn`
+    // (module `m`); NODE_NONE when it writes none there.
+    fn tc_path_arg(self: &Self, m: ModuleId, tn: NodeId, lts: bool, k: u32) NodeId {
+        let a = self.mod_ast(m);
+        let args = unsafe (*a).at_const(tn).as_data.type_path.args;
+        let mut c: u32 = 0;
+        for i in 0..args.len {
+            let x = unsafe (*a).list(args)[i as usize];
+            if unsafe (*a).at_const(x).kind == NodeKind::NODE_LIFETIME != lts {
+                continue;
+            }
+            if c == k {
+                return x;
+            }
+            c += 1;
+        }
+        return NODE_NONE;
+    }
+
+    // The token of the lifetime lifetime name `sp` of frame `fi`'s module stands for, through the
+    // instance arguments of the frames above it: a lifetime of this function (`lt_tok_of`, its span
+    // kept in `lt_tnames`), or an inference variable of a pending local (`LT_VAR`); 0 for none.
+    fn tc_frame_tok(self: &mut Self, fi0: i32, sp0: tok::Span) u64 {
+        let mut fi = fi0;
+        let mut sp = sp0;
+        // Each step moves to an outer frame.
+        for _ in 0..self.lt_env.len() {
+            if fi < 0 {
+                return 0;
+            }
+            let fr = *self.lt_env.at(fi as usize);
+            if fr.owner == NODE_NONE {
+                if fr.m == self.cur_module() && self.tc_lt_of_fn(fr.m, self.icx.current_fn, sp) {
+                    return self.tc_name_tok(sp);
+                }
+                return 0;
+            }
+            let lts = unsafe (*self.mod_ast(fr.m)).lifetimes_of(fr.owner);
+            let mut k: i32 = -1;
+            for i in 0..lts.len {
+                if spans_eq2(
+                    self.mod_src(fr.m),
+                    self.tc_lt_name_in(fr.m, unsafe (*self.mod_ast(fr.m)).list(lts)[i as usize]),
+                    self.mod_src(fr.m),
+                    sp,
+                ) {
+                    k = i as i32;
+                }
+            }
+            if k < 0 || fr.parent < 0 {
+                return 0;
+            }
+            let pf = *self.lt_env.at(fr.parent as usize);
+            if pf.node == NODE_NONE && pf.parent <= -2 {
+                return LT_VAR | (-2 - pf.parent) as u64 << 32 | k as u64;
+            }
+            let arg = self.tc_path_arg(pf.m, fr.inst, true, k as u32);
+            if arg == NODE_NONE {
+                return 0;
+            }
+            sp = self.tc_lt_name_in(pf.m, arg);
+            fi = fr.parent;
+        }
+        return 0;
+    }
+
+    // The token of lifetime name `sp` (this module), recording its span.
+    fn tc_name_tok(self: &mut Self, sp: tok::Span) u64 {
+        let t = lt_tok_of(self.source.slice(sp.start as usize, sp.end as usize));
+        for i in 0..self.lt_tnames.len() / 2 {
+            if self.lt_tnames[2 * i] == t {
+                return t;
+            }
+        }
+        self.lt_tnames.push(t);
+        self.lt_tnames.push(sp.start as u64 << 32 | sp.end as u64);
+        return t;
+    }
+
+    // Whether the declaration makes the lifetime of token `a` outlive the one of token `b`, both
+    // names (`tc_name_tok`).
+    fn tc_tok_declared(self: &Self, a: u64, b: u64) bool {
+        if a == b {
+            return true;
+        }
+        let mut sa = tok::Span { start: 0, end: 0 };
+        let mut sb = sa;
+        for i in 0..self.lt_tnames.len() / 2 {
+            let w = self.lt_tnames[2 * i + 1];
+            if self.lt_tnames[2 * i] == a {
+                sa = tok::Span { start: (w >> 32) as u32, end: w as u32 };
+            }
+            if self.lt_tnames[2 * i] == b {
+                sb = tok::Span { start: (w >> 32) as u32, end: w as u32 };
+            }
+        }
+        return self.tc_lt_declared(sa, sb);
+    }
+
+    // Whether the pairs of `lt_pool` hold: every name one makes outlive another through the
+    // inference variables, the declaration makes outlive it.
+    fn tc_pool_ok(self: &Self) bool {
+        let n = self.lt_pool.len() / 2;
+        let mut seen = Vector::<u64>::new();
+        let mut stack = Vector::<u64>::new();
+        for e in 0..n {
+            let a = self.lt_pool[2 * e];
+            if lt_is_var(a) || seen.contains(&a) {
+                continue;
+            }
+            seen.push(a);
+            // The tokens `a` reaches; each enters once.
+            let mut reach = Vector::<u64>::new();
+            stack.truncate(0);
+            stack.push(a);
+            while stack.len() != 0 {
+                let x = stack[stack.len() - 1];
+                stack.truncate(stack.len() - 1);
+                for f in 0..n {
+                    let y = self.lt_pool[2 * f + 1];
+                    if self.lt_pool[2 * f] == x && !reach.contains(&y) {
+                        reach.push(y);
+                        stack.push(y);
+                    }
+                }
+            }
+            for r in 0..reach.len() {
+                if !lt_is_var(reach[r]) && !self.tc_tok_declared(a, reach[r]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Whether pool token `a` reaches token `b` through `lt_pool`.
+    fn tc_pool_reaches(self: &Self, a: u64, b: u64) bool {
+        let n = self.lt_pool.len() / 2;
+        let mut reach = Vector::<u64>::new();
+        let mut stack = Vector::<u64>::new();
+        stack.push(a);
+        while stack.len() != 0 {
+            let x = stack[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            for f in 0..n {
+                let y = self.lt_pool[2 * f + 1];
+                if self.lt_pool[2 * f] == x && !reach.contains(&y) {
+                    if y == b {
+                        return true;
+                    }
+                    reach.push(y);
+                    stack.push(y);
+                }
+            }
+        }
+        return false;
+    }
+
+    // The pending local value `e` (this module) is, through unannotated `let`s, or -1.
+    fn tc_pend_of(self: &Self, e0: NodeId) i32 {
+        let a = self.cur_ast();
+        let mut e = e0;
+        for _ in 0..4 {
+            e = unsafe (*a).peel(e, true);
+            if e == NODE_NONE || unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+                return -1;
+            }
+            let d = unsafe (*a).resolution_def(e);
+            if d.module != self.cur_module() || d.node == NODE_NONE || unsafe (*a).at_const(d.node).kind != NodeKind::NODE_LET {
+                return -1;
+            }
+            for i in 0..self.lt_pend.len() {
+                if self.lt_pend.at(i).decl == d.node {
+                    return i as i32;
+                }
+            }
+            if unsafe (*a).at_const(d.node).as_data.let_stmt.ty != NODE_NONE {
+                return -1;
+            }
+            e = unsafe (*a).at_const(d.node).as_data.let_stmt.value;
+        }
+        return -1;
+    }
+
+    // Push the frame that writes the type of value `e` (this module): its declaration's (a parameter's,
+    // a `let`'s, a pending local's, an unannotated `let`'s initializer's), a field's through its base's,
+    // what `*r` points at. False when none does.
+    fn tc_frame_value(self: &mut Self, e0: NodeId, depth: u32) bool {
+        if depth > 4 {
+            return false;
+        }
+        let a = self.cur_ast();
+        let e = unsafe (*a).peel(e0, true);
+        if e == NODE_NONE {
+            return false;
+        }
+        let en = *unsafe (*a).at_const(e);
+        if en.kind == NodeKind::NODE_IDENTIFIER {
+            let d = unsafe (*a).resolution_def(e);
+            if d.module != self.cur_module() || d.node == NODE_NONE {
+                return false;
+            }
+            let dn = *unsafe (*a).at_const(d.node);
+            if dn.kind == NodeKind::NODE_PARAMETER && dn.as_data.parameter.ty != NODE_NONE {
+                self.tc_frame_push(NODE_NONE, self.cur_module(), dn.as_data.parameter.ty, NODE_NONE, NODE_NONE, -1);
+                return true;
+            }
+            if dn.kind != NodeKind::NODE_LET {
+                return false;
+            }
+            if dn.as_data.let_stmt.ty != NODE_NONE {
+                self.tc_frame_push(NODE_NONE, self.cur_module(), dn.as_data.let_stmt.ty, NODE_NONE, NODE_NONE, -1);
+                return true;
+            }
+            let p = self.tc_pend_of(e);
+            if p >= 0 && self.lt_pend.at(p as usize).decl == d.node {
+                self.tc_frame_pend(NODE_NONE, p);
+                return true;
+            }
+            return self.tc_frame_value(dn.as_data.let_stmt.value, depth + 1);
+        }
+        if en.kind == NodeKind::NODE_MEMBER && !en.as_data.member.path {
+            let fd = unsafe (*a).resolution_def(en.as_data.member.member);
+            if fd.node == NODE_NONE || unsafe (*self.mod_ast(fd.module)).at_const(fd.node).kind != NodeKind::NODE_FIELD {
+                return false;
+            }
+            let mut om: ModuleId = 0;
+            let mut od = NODE_NONE;
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
+            let mut gn: i32 = 0;
+            if !self.aggregate_of(
+                self.strip(unsafe (*a).type_of(en.as_data.member.object)),
+                &mut om,
+                &mut od,
+                &mut gp,
+                &mut ga,
+                &mut gn,
+            ) || !self.tc_frame_value(en.as_data.member.object, depth + 1) {
+                return false;
+            }
+            self.tc_frame_peel_ref();
+            let n0 = self.lt_env.len();
+            self.tc_frame_member(
+                NODE_NONE,
+                (n0 - 1) as i32,
+                om,
+                unsafe (*self.mod_ast(fd.module)).member_type_node(fd.node, false),
+                od,
+            );
+            return self.lt_env.len() > n0;
+        }
+        if en.kind == NodeKind::NODE_UNARY && en.as_data.unary.op == TokenType::Star {
+            if !self.tc_frame_value(en.as_data.unary.operand, depth + 1) {
+                return false;
+            }
+            return self.tc_frame_peel_ref();
+        }
+        return false;
+    }
+
+    // Make the innermost frame write what its reference type points at; false when it writes no
+    // reference.
+    fn tc_frame_peel_ref(self: &mut Self) bool {
+        let i = self.lt_env.len() - 1;
+        let mut f = *self.lt_env.at(i);
+        if f.node == NODE_NONE {
+            return true;
+        }
+        let n = *unsafe (*self.mod_ast(f.m)).at_const(f.node);
+        if n.kind != NodeKind::NODE_REFERENCE_TYPE {
+            return false;
+        }
+        f.node = n.as_data.indirect_type.ty;
+        self.lt_env.set(i, f);
+        return true;
+    }
+
+    // Push the frame of pending local `p` for expression `e`.
+    fn tc_frame_pend(self: &mut Self, e: NodeId, p: i32) {
+        let pd = *self.lt_pend.at(p as usize);
+        let pe = if e == NODE_NONE {
+            e;
+        } else {
+            unsafe (*self.cur_ast()).peel(e, false);
+        };
+        self.lt_env.push(
+            LtFrame { expr: pe, m: pd.m, node: NODE_NONE, owner: pd.owner, inst: NODE_NONE, parent: -2 - p },
+        );
+    }
+
+    // Value `node` of pending local `p` converts to the type of its context: each inference variable
+    // takes the lifetime the written type gives that parameter, per its variance (`lt_pool`); with no
+    // written type, the value must have no pair. False when the pairs no longer hold.
+    fn tc_pend_bind(self: &mut Self, node: NodeId, p: i32) bool {
+        let pd = *self.lt_pend.at(p as usize);
+        let lts = unsafe (*self.mod_ast(pd.m)).lifetimes_of(pd.owner);
+        let fi = self.tc_frame_of(node);
+        let mut ok = fi >= 0;
+        let fm = self.lt_env.len();
+        if ok {
+            let f = *self.lt_env.at(fi as usize);
+            self.lt_env.push(f);
+            for _ in 0..4 {
+                if !self.tc_frame_peel_ref() {
+                    break;
+                }
+            }
+            let t = *self.lt_env.at(self.lt_env.len() - 1);
+            let fa = self.mod_ast(t.m);
+            ok = t.node != NODE_NONE && unsafe (*fa).at_const(t.node).kind == NodeKind::NODE_TYPE_PATH;
+            if ok {
+                let d = unsafe (*fa).path_def(t.node);
+                ok = d.module == pd.m && d.node == pd.owner;
+            }
+            let ti = (self.lt_env.len() - 1) as i32;
+            for k in 0..lts.len {
+                if !ok {
+                    break;
+                }
+                let arg = self.tc_path_arg(t.m, t.node, true, k);
+                let tk = if arg == NODE_NONE {
+                    0u64;
+                } else {
+                    self.tc_frame_tok(ti, self.tc_lt_name_in(t.m, arg));
+                };
+                if tk == 0 {
+                    ok = false;
+                    break;
+                }
+                let vk = LT_VAR | p as u64 << 32 | k as u64;
+                let v = self.variance_param(DefId { module: pd.m, node: pd.owner }, k as i32);
+                if v != V_CONTRAVARIANT {
+                    self.lt_pool.push(vk);
+                    self.lt_pool.push(tk);
+                }
+                if v != V_COVARIANT {
+                    self.lt_pool.push(tk);
+                    self.lt_pool.push(vk);
+                }
+            }
+        }
+        self.lt_env.truncate(fm);
+        if ok {
+            return self.tc_pool_ok();
+        }
+        // No written type: the value may go anywhere, so no pair may hold its variables.
+        for e in 0..self.lt_pool.len() {
+            let t = self.lt_pool[e];
+            if lt_is_var(t) && (t >> 32 & 0x3FFFFFFF) == p as u64 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Relate the positions of the value's type `tv` (side `sv`) to those of the type's `tt` (side
+    // `st`), of the same shape but for lifetimes, at variance `v` (`Package::lt_walk` order).
+    fn tc_lt_pair(
+        self: &mut Self,
+        s: &mut LtSys,
+        sv: &mut LtSide,
+        st: &mut LtSide,
+        tv: TypeId,
+        tt: TypeId,
+        v: u32,
+        depth: u32,
+    ) {
+        if tv == TYPE_NONE || tt == TYPE_NONE || depth > 16 || !s.ok {
+            return;
+        }
+        let yv = *self.type_at(tv);
+        let yt = *self.type_at(tt);
+        let k = yv.kind;
+        if k != yt.kind {
+            s.ok = false;
+            return;
+        }
+        if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+            let a = ls_take(s, sv);
+            let b = ls_take(s, st);
+            ls_relate(s, a, b, v);
+            let inner = if yv.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                V_INVARIANT;
+            } else {
+                v;
+            };
+            self.tc_lt_pair(s, sv, st, yv.as_data.elem, yt.as_data.elem, inner, depth + 1);
+        } else if k == TypeKind::TYPE_POINTER {
+            self.tc_lt_pair(s, sv, st, yv.as_data.elem, yt.as_data.elem, V_INVARIANT, depth + 1);
+        } else if yv.arr_like() {
+            self.tc_lt_pair(s, sv, st, yv.as_data.arr.elem, yt.as_data.arr.elem, v, depth + 1);
+        } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+            for i in 0..unsafe (*self.package).decl_nlt(unsafe &*self.cur_ast(), yv.module, yv.as_data.decl) {
+                let a = ls_take(s, sv);
+                let b = ls_take(s, st);
+                let sl = self.variance_param(DefId { module: yv.module, node: yv.as_data.decl }, i as i32);
+                ls_relate(s, a, b, lt_vary(v, sl));
+            }
+        } else if yv.fn_sig() {
+            self.tc_lt_pair_fn(s, sv, st, tv, tt, v, depth);
+        } else if k == TypeKind::TYPE_DYN || k == TypeKind::TYPE_INSTANCE {
+            let iv = *unsafe (*self.cur_ast()).instance(yv.as_data.inst);
+            let it = *unsafe (*self.cur_ast()).instance(yt.as_data.inst);
+            let mut base = v;
+            if k == TypeKind::TYPE_DYN {
+                if yv.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 {
+                    let a = ls_take(s, sv);
+                    let b = ls_take(s, st);
+                    ls_relate(s, a, b, v);
+                }
+                if iv.decl == NODE_NONE {
+                    let fv = unsafe (*self.cur_ast()).dyn_fn_sig(&yv);
+                    let ft = unsafe (*self.cur_ast()).dyn_fn_sig(&yt);
+                    if fv != TYPE_NONE && ft != TYPE_NONE {
+                        self.tc_lt_pair_fn(s, sv, st, fv, ft, v, depth);
+                    }
+                    return;
+                }
+                base = V_INVARIANT;
+            }
+            let d = DefId { module: iv.module, node: iv.decl };
+            let nlt = unsafe (*self.package).decl_nlt(unsafe &*self.cur_ast(), iv.module, iv.decl);
+            for i in 0..nlt {
+                let a = ls_take(s, sv);
+                let b = ls_take(s, st);
+                let sl = self.variance_param(d, i as i32);
+                ls_relate(s, a, b, lt_vary(base, sl));
+            }
+            for i in 0..iv.n.min(it.n) {
+                let sl = self.variance_param(d, (nlt + i as u32) as i32);
+                self.tc_lt_pair(
+                    s,
+                    sv,
+                    st,
+                    unsafe iv.args[i as usize],
+                    unsafe it.args[i as usize],
+                    lt_vary(base, sl),
+                    depth + 1,
+                );
+            }
+        }
+    }
+
+    // `tc_lt_pair` over function-pointer types `nv` and `nt`: their positions are the lifetimes each
+    // takes from outside it, and inside them, under its own binder, Rust's subtyping between the two
+    // (the subtype's binder chooses, the supertype's gives; invariant, the two are one type).
+    fn tc_lt_pair_fn(
+        self: &mut Self,
+        s: &mut LtSys,
+        sv: &mut LtSide,
+        st: &mut LtSide,
+        nv: TypeId,
+        nt: TypeId,
+        v: u32,
+        depth: u32,
+    ) {
+        let yv = *self.type_at(nv);
+        let yt = *self.type_at(nt);
+        if self.tc_lts_wide(&yv) || self.tc_lts_wide(&yt) {
+            s.ok = false;
+            return;
+        }
+        let mut cv = Vector::<u8>::new();
+        let mut ct = Vector::<u8>::new();
+        let mut fl = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        self.tc_sig_classes(&yv, &mut cv, &mut fl, &mut nres);
+        self.tc_sig_classes(&yt, &mut ct, &mut fl, &mut nres);
+        let mut ov = Vector::<u32>::new();
+        for _ in 0..ls_nouter(&cv) {
+            ov.push(ls_take(s, sv));
+        }
+        let mut ot = Vector::<u32>::new();
+        for _ in 0..ls_nouter(&ct) {
+            ot.push(ls_take(s, st));
+        }
+        if v == V_INVARIANT {
+            if nv != nt {
+                s.ok = false;
+                return;
+            }
+            for g in 0..ov.len() {
+                ls_relate(s, ov[g], ot[g], V_INVARIANT);
+            }
+            return;
+        }
+        let (own_v, own_t) = if v == V_COVARIANT {
+            (LS_VAR, LS_ATOM);
+        } else {
+            (LS_ATOM, LS_VAR);
+        };
+        let mut nsv = ls_side(cv, ov, own_v);
+        let mut nst = ls_side(ct, ot, own_t);
+        let a = self.cur_ast();
+        for i in 0..unsafe (*a).sig_len(&yt, true) {
+            self.tc_lt_pair(
+                s,
+                &mut nsv,
+                &mut nst,
+                unsafe (*a).sig_at(&yv, true, i),
+                unsafe (*a).sig_at(&yt, true, i),
+                v,
+                depth + 1,
+            );
+        }
+        for i in 0..unsafe (*a).sig_len(&yt, false) {
+            self.tc_lt_pair(
+                s,
+                &mut nsv,
+                &mut nst,
+                unsafe (*a).sig_at(&yv, false, i),
+                unsafe (*a).sig_at(&yt, false, i),
+                lt_flip(v),
+                depth + 1,
+            );
+        }
+    }
+
+    // The function-pointer type of function or closure type `fid`'s own slot types.
+    fn tc_own_sig(self: &mut Self, fid: TypeId) TypeId {
+        let es = self.fn_sig(fid);
+        let nr = self.fn_nret(fid);
+        let mut slots = Vector::<TypeId>::new();
+        // An expression-bodied closure has no result list: its one result is the body's type.
+        for i in 0..nr {
+            slots.push(
+                if nr == 1 {
+                    es.ret;
+                } else {
+                    self.fn_ret_i(fid, i);
+                },
+            );
+        }
+        for i in 0..es.np {
+            slots.push(self.fn_param(&es, i));
+        }
+        return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), nr, es.np, false, 0);
+    }
+
+    // The tokens of the lifetimes function-pointer type `exid` (classes `c2`) takes from outside it,
+    // when a call passes the value to a parameter of that type: the callee's lifetimes, chosen at
+    // the call (0: another lifetime).
+    fn tc_lt_call_toks(self: &mut Self, exid: TypeId, c2: &Vector<u8>) Vector<u64> {
+        let mut toks = Vector::<u64>::new();
+        let c = self.lt_call;
+        let n = ls_nouter(c2);
+        if c.span.end <= c.span.start || n == 0 {
+            return toks;
+        }
+        let ey = *self.type_at(exid);
+        if c.sig == TYPE_NONE {
+            // A function: its lifetime parameters (and its extend's), by name; its type parameters'
+            // positions, by parameter.
+            let fnode = self.tc_fn_node_in(c.m, c.ptn);
+            if fnode == NODE_NONE {
+                return toks;
+            }
+            let mut w = lt_walk_new(c.m, c.item, NODE_NONE);
+            let a = self.mod_ast(c.m);
+            let ft = unsafe (*a).at_const(fnode).as_data.function_type;
+            let cur = self.cur_ast();
+            for i in 0..unsafe (*cur).sig_len(&ey, true).min(ft.returns.len) {
+                let sl = unsafe (*a).list(ft.returns)[i as usize];
+                self.tc_lt_walk(&mut w, unsafe (*a).slot_type_node(sl), unsafe (*cur).sig_at(&ey, true, i), 0);
+            }
+            for i in 0..unsafe (*cur).sig_len(&ey, false).min(ft.params.len) {
+                let sl = unsafe (*a).list(ft.params)[i as usize];
+                self.tc_lt_walk(&mut w, unsafe (*a).slot_type_node(sl), unsafe (*cur).sig_at(&ey, false, i), 0);
+            }
+            for g in 0..n {
+                let mut tk: u64 = 0;
+                for j in 0..c2.len().min(w.recs.len()) {
+                    if c2[j] != LC_OUTER + g as u8 {
+                        continue;
+                    }
+                    let r = *w.recs.at(j);
+                    if r.key != 0 && !r.st {
+                        tk = c.m as u64 << 32 | r.key >> 8 & 0xFFFFFFFF;
+                    } else if r.key == 0 && r.m == c.m && self.tc_lt_of_fn(c.m, c.item, r.sp) {
+                        tk = lt_tok_of(self.mod_src(c.m).slice(r.sp.start as usize, r.sp.end as usize));
+                    }
+                    break;
+                }
+                toks.push(tk);
+            }
+            return toks;
+        }
+        // A function value: its classes at the positions standing for them.
+        let sy = *self.type_at(c.slot);
+        let inner = if c.slot == exid {
+            0u32;
+        } else if sy.kind == TypeKind::TYPE_DYN && self.tc_dyn_fn_sig(&sy) == exid {
+            pick(sy.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8, 1u32, 0u32);
+        } else {
+            return toks;
+        };
+        let cy = *self.type_at(c.sig);
+        let mut cc = Vector::<u8>::new();
+        let mut fl = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        self.tc_sig_classes(&cy, &mut cc, &mut fl, &mut nres);
+        for g in 0..n {
+            let p = c.off + inner + g;
+            let k = if p as usize < cc.len() {
+                cc[p as usize];
+            } else {
+                LC_STATIC;
+            };
+            toks.push(
+                if k == LC_FREE {
+                    lt_class_tok(LC_OUTER, p);
+                } else if k >= LC_GROUP && k < LC_OUTER {
+                    lt_class_tok(k, 0);
+                } else {
+                    0u64;
+                },
+            );
+        }
+        return toks;
+    }
+
+    // The function type node parameter type node `tyn` (module `m`) spells its function type with:
+    // itself, or through a `dyn`, a `Box<..>` or a reference; NODE_NONE for another.
+    fn tc_fn_node_in(self: &Self, m: ModuleId, tyn: NodeId) NodeId {
+        let a = self.mod_ast(m);
+        let mut n = tyn;
+        for _ in 0..4 {
+            if n == NODE_NONE {
+                return NODE_NONE;
+            }
+            let nd = *unsafe (*a).at_const(n);
+            if nd.kind == NodeKind::NODE_FUNCTION_TYPE {
+                return n;
+            }
+            if nd.kind == NodeKind::NODE_DYN_TYPE || nd.kind == NodeKind::NODE_REFERENCE_TYPE {
+                n = nd.as_data.indirect_type.ty;
+            } else if nd.kind == NodeKind::NODE_TYPE_PATH && nd.as_data.type_path.args.len == 1 {
+                n = unsafe (*a).list(nd.as_data.type_path.args)[0];
+            } else {
+                return NODE_NONE;
+            }
+        }
+        return NODE_NONE;
+    }
+
+    // Whether lifetime name `sp` (module `m`) is a lifetime parameter of function `f` or of its
+    // extend: one a call to `f` chooses.
+    fn tc_lt_of_fn(self: &Self, m: ModuleId, f: NodeId, sp: tok::Span) bool {
+        let a = self.mod_ast(m);
+        let c = unsafe (*a).container_of(f);
+        for o in 0..2 {
+            let owner = if o == 0 {
+                f;
+            } else {
+                c;
+            };
+            if owner == NODE_NONE {
+                continue;
+            }
+            let lts = unsafe (*a).lifetimes_of(owner);
+            for i in 0..lts.len {
+                if spans_eq2(
+                    self.mod_src(m),
+                    self.tc_lt_name_in(m, unsafe (*a).list(lts)[i as usize]),
+                    self.mod_src(m),
+                    sp,
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Record what the callee's lifetimes must outlive at the call under check: (sup, sub) token
+    // pairs (`Ast::call_lts`).
+    fn tc_lt_call_export(self: &mut Self, out: &Vector<u64>) {
+        let sp = self.lt_call.span;
+        if sp.end <= sp.start {
+            return;
+        }
+        let key = sp.start as u64 << 32 | sp.end as u64;
+        let a = self.cur_ast();
+        for i in 0..out.len() / 2 {
+            let head = switch unsafe (*a).call_lt_at.get(&key) {
+                Some(v) => *v,
+                None => 0u32,
+            };
+            unsafe (*a).call_lts.push(key);
+            unsafe (*a).call_lts.push(out[2 * i]);
+            unsafe (*a).call_lts.push(out[2 * i + 1]);
+            unsafe (*a).call_lts.push(head);
+            unsafe (*a).call_lt_at.insert(key, (unsafe (*a).call_lts.len() / 4) as u32);
+        }
+    }
+
+    /// The lifetime classes of function `d`'s signature over the slot types of function-pointer type
+    /// `ey` (the function's own, generic parameters substituted), canonical (`lt_finish`): its
+    /// lifetime parameters, each generic type parameter's positions (one lifetime per position of
+    /// the type it stands for), and its elided results' source. False when the signature relates
+    /// lifetimes no function type can show (through a type's lifetime arguments).
+    fn tc_item_classes(self: &mut Self, d: DefId, ey: &Ty, out: &mut Vector<u8>) bool {
+        let fa = self.mod_ast(d.module);
+        let mut ps = NodeList { start: 0, len: 0 };
+        let mut rs = NodeList { start: 0, len: 0 };
+        let _ = unsafe (*fa).sig_lists(d.node, &mut ps, &mut rs);
+        let mut w = lt_walk_new(d.module, d.node, NODE_NONE);
+        self.tc_lt_bounds(&mut w);
+        let nr = unsafe (*self.cur_ast()).sig_len(ey, true);
+        for i in 0..nr {
+            let rtn = if i < rs.len {
+                unsafe (*fa).slot_type_node(unsafe (*fa).list(rs)[i as usize]);
+            } else {
+                NODE_NONE;
+            };
+            self.tc_lt_walk(&mut w, rtn, unsafe (*self.cur_ast()).sig_at(ey, true, i), 0);
+        }
+        let nres = w.cls.len() as u32;
+        // The elided results take the lifetime of the receiver, else of the only input position.
+        let mut src: i32 = -1;
+        let mut inputs: u32 = 0;
+        let mut recv = false;
+        let np = unsafe (*self.cur_ast()).sig_len(ey, false);
+        for i in 0..np.min(ps.len) {
+            let pid = unsafe (*fa).list(ps)[i as usize];
+            let start = w.cls.len() as i32;
+            self.tc_lt_walk(&mut w, unsafe (*fa).slot_type_node(pid), unsafe (*self.cur_ast()).sig_at(ey, false, i), 0);
+            let c = w.cls.len() as u32 - start as u32;
+            if i == 0 && c != 0 && unsafe (*fa).at_const(pid).kind == NodeKind::NODE_PARAMETER && span_is(
+                self.mod_src(d.module),
+                unsafe (*fa).at_const(unsafe (*fa).at_const(pid).as_data.parameter.name).as_data.name.text,
+                "self",
+            ) {
+                recv = true;
+                src = start;
+            }
+            if !recv && c != 0 && inputs == 0 {
+                src = start;
+            }
+            inputs = inputs + c;
+        }
+        // A lifetime a type's lifetime argument names relates positions no function type shows.
+        for i in 0..w.hidden.len() {
+            let h = w.hidden[i];
+            if w.statics.contains(&h) || w.keys.contains(&h) {
+                return false;
+            }
+            for j in 0..i {
+                if w.hidden[j] == h {
+                    return false;
+                }
+            }
+        }
+        if !recv && inputs != 1 {
+            src = -1;
+        }
+        if unsafe (*fa).at_const(d.node).kind == NodeKind::NODE_CLOSURE {
+            // What a closure returns may come from any parameter its type does not fix: its results
+            // and those share one lifetime.
+            src = -1;
+            if nres != 0 {
+                for k in 0..w.cls.len() {
+                    if k as u32 < nres || w.cls[k] == LC_FREE {
+                        let g = lt_group(&mut w, LT_KEY_GEN | 1u64 << 60, false);
+                        w.cls.set(k, g);
+                    }
+                }
+            }
+        }
+        lt_finish(&mut w, nres, src);
+        if w.cls.contains(&LC_TOO_MANY) {
+            return false;
+        }
+        out.truncate(0);
+        for i in 0..w.cls.len() {
+            out.push(w.cls[i]);
+        }
+        return true;
+    }
+
+    // The relations function `w.item`'s lifetime bounds declare: `'a: 'static` makes `'a` static,
+    // `'a: 'b` ties the two (a store between them must keep them one lifetime). Its extend's and
+    // its where clause's bounds count too.
+    fn tc_lt_bounds(self: &mut Self, w: &mut LtWalk) {
+        let fa = self.mod_ast(w.m);
+        let mut owners = Vector::<NodeId>::new();
+        owners.push(w.item);
+        let c = unsafe (*fa).container_of(w.item);
+        if c != NODE_NONE {
+            owners.push(c);
+        }
+        for o in 0..owners.len() {
+            let lts = unsafe (*fa).lifetimes_of(owners[o]);
+            for i in 0..lts.len {
+                let lp = unsafe (*fa).list(lts)[i as usize];
+                let bs = unsafe (*fa).at_const(lp).as_data.generic_param.bounds;
+                for b in 0..bs.len {
+                    self.tc_lt_relate(w, lp, unsafe (*fa).list(bs)[b as usize]);
+                }
+            }
+        }
+        if unsafe (*fa).at_const(w.item).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        let wc = unsafe (*fa).at_const(w.item).as_data.function.where_clause;
+        for i in 0..wc.len {
+            let wp = unsafe (*fa).at_const(unsafe (*fa).list(wc)[i as usize]).as_data.where_predicate;
+            if unsafe (*fa).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME {
+                continue;
+            }
+            for b in 0..wp.bounds.len {
+                let bid = unsafe (*fa).list(wp.bounds)[b as usize];
+                if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_LIFETIME {
+                    self.tc_lt_relate(w, wp.ty, bid);
+                }
+            }
+        }
+    }
+
+    // Record bound `a: b` (lifetime nodes of `w.m`).
+    fn tc_lt_relate(self: &mut Self, w: &mut LtWalk, a: NodeId, b: NodeId) {
+        let sa = self.tc_lt_name_in(w.m, a);
+        let sb = self.tc_lt_name_in(w.m, b);
+        if sa.end <= sa.start || sb.end <= sb.start {
+            return;
+        }
+        let ka = self.tc_lt_key(w, sa);
+        if span_is(self.mod_src(w.m), sb, "'static") {
+            w.statics.push(ka);
+            return;
+        }
+        let kb = self.tc_lt_key(w, sb);
+        let ra = self.tc_lt_rep(w, ka);
+        let rb = self.tc_lt_rep(w, kb);
+        if ra != rb {
+            w.alias.push(ra);
+            w.alias.push(rb);
+        }
+    }
+
+    // The key of lifetime name span `sp` in `w.m`: the first span spelling the same name.
+    fn tc_lt_key(self: &Self, w: &mut LtWalk, sp: tok::Span) u64 {
+        let src = self.mod_src(w.m);
+        for i in 0..w.names.len() {
+            let k = w.names[i];
+            if spans_eq2(src, tok::Span { start: (k >> 32) as u32, end: k as u32 }, src, sp) {
+                return k;
+            }
+        }
+        let k = sp.start as u64 << 32 | sp.end as u64;
+        w.names.push(k);
+        return k;
+    }
+
+    // The representative of key `k` under the ties `w.alias` records.
+    const fn tc_lt_rep(self: &Self, w: &LtWalk, k0: u64) u64 {
+        let mut k = k0;
+        for _ in 0..w.alias.len() {
+            let mut moved = false;
+            for i in 0..w.alias.len() / 2 {
+                if w.alias[2 * i] == k {
+                    k = w.alias[2 * i + 1];
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        return k;
+    }
+
+    // Append the class of a position whose lifetime node is `lt` (NODE_NONE: elided); a lifetime
+    // parameter of the alias being expanded stands for the path's lifetime argument.
+    fn tc_lt_push(self: &mut Self, w: &mut LtWalk, lt: NodeId) {
+        let sp = self.tc_lt_name_in(w.m, lt);
+        if sp.end > sp.start && w.frames.len() != 0 {
+            let f = *w.frames.at(w.frames.len() - 1);
+            let lts = unsafe (*self.mod_ast(f.am)).lifetimes_of(f.alias);
+            for g in 0..lts.len {
+                let pn = self.tc_lt_name_in(f.am, unsafe (*self.mod_ast(f.am)).list(lts)[g as usize]);
+                if w.m != f.am || !spans_eq2(self.mod_src(f.am), pn, self.mod_src(f.am), sp) {
+                    continue;
+                }
+                let pa = unsafe (*self.mod_ast(f.m)).at_const(f.path).as_data.type_path.args;
+                let mut arg = NODE_NONE;
+                let mut k: u32 = 0;
+                for i in 0..pa.len {
+                    let aid = unsafe (*self.mod_ast(f.m)).list(pa)[i as usize];
+                    if unsafe (*self.mod_ast(f.m)).at_const(aid).kind != NodeKind::NODE_LIFETIME {
+                        continue;
+                    }
+                    if k == g {
+                        arg = aid;
+                    }
+                    k += 1;
+                }
+                let fr = w.frames.pop().unwrap();
+                let m0 = w.m;
+                w.m = f.m;
+                self.tc_lt_push(w, arg);
+                w.m = m0;
+                w.frames.push(fr);
+                return;
+            }
+        }
+        self.tc_lt_class(w, sp);
+    }
+
+    // Append the class of a position lifetime name `sp` of module `w.m` spells (empty: elided).
+    fn tc_lt_class(self: &mut Self, w: &mut LtWalk, sp: tok::Span) {
+        w.recs.push(LtRec { m: w.m, sp: sp, key: 0, st: false });
+        if sp.end <= sp.start {
+            w.cls.push(LC_FREE);
+            w.elided.push(true);
+            return;
+        }
+        w.elided.push(false);
+        if span_is(self.mod_src(w.m), sp, "'static") {
+            w.cls.push(LC_STATIC);
+            return;
+        }
+        let k = self.tc_lt_rep(w, self.tc_lt_key(w, sp));
+        let outer = !self.tc_lt_bound_here(w, sp);
+        w.cls.push(
+            if w.statics.contains(&k) {
+                LC_STATIC;
+            } else {
+                lt_group(w, k, outer);
+            },
+        );
+    }
+
+    // The positions function type node `fnode` (module `w.m`) of type `t` (a function-pointer type)
+    // holds: one per lifetime `t` takes from outside it, spelled by the first of its positions of
+    // that class. A scratch walk of the node finds what spells each position.
+    fn tc_lt_nested(self: &mut Self, w: &mut LtWalk, fnode: NodeId, t: TypeId, depth: u32) {
+        let y = *self.type_at(t);
+        let npos = unsafe (*self.cur_ast()).sig_lt_len(&y);
+        let mut nout: u32 = 0;
+        for j in 0..npos {
+            let c = unsafe (*self.cur_ast()).sig_lt_class(&y, j);
+            if c >= LC_OUTER {
+                nout = nout.max((c - LC_OUTER) as u32 + 1);
+            }
+        }
+        if nout == 0 {
+            return;
+        }
+        let c0 = w.cls.len();
+        let k0 = w.keys.len();
+        let h0 = w.hidden.len();
+        let s0 = w.statics.len();
+        let r0 = w.recs.len();
+        let bad0 = w.bad;
+        let a = self.mod_ast(w.m);
+        let ft = unsafe (*a).at_const(fnode).as_data.function_type;
+        let nr = unsafe (*self.cur_ast()).sig_len(&y, true);
+        let np = unsafe (*self.cur_ast()).sig_len(&y, false);
+        for i in 0..nr.min(ft.returns.len) {
+            let sl = unsafe (*a).list(ft.returns)[i as usize];
+            self.tc_lt_walk(w, unsafe (*a).slot_type_node(sl), unsafe (*self.cur_ast()).sig_at(&y, true, i), depth + 1);
+        }
+        for i in 0..np.min(ft.params.len) {
+            let sl = unsafe (*a).list(ft.params)[i as usize];
+            self.tc_lt_walk(w, unsafe (*a).slot_type_node(sl), unsafe (*self.cur_ast()).sig_at(&y, false, i), depth + 1);
+        }
+        let mut rs = Vector::<LtRec>::new();
+        for i in r0..w.recs.len() {
+            rs.push(*w.recs.at(i));
+        }
+        w.cls.truncate(c0);
+        w.elided.truncate(c0);
+        w.recs.truncate(r0);
+        w.keys.truncate(k0);
+        w.kouter.truncate(k0);
+        w.hidden.truncate(h0);
+        w.statics.truncate(s0);
+        w.bad = bad0;
+        for g in 0..nout {
+            let mut j: u32 = 0;
+            while j < npos && unsafe (*self.cur_ast()).sig_lt_class(&y, j) != LC_OUTER + g as u8 {
+                j += 1;
+            }
+            if j as usize >= rs.len() {
+                // The node spells fewer positions than the type holds (`tc_lt_unspelled`).
+                w.recs.push(LtRec { m: w.m, sp: tok::Span { start: 0, end: 0 }, key: 0, st: false });
+                w.cls.push(LC_FREE);
+                w.elided.push(true);
+                continue;
+            }
+            let r = *rs.at(j as usize);
+            if r.key != 0 {
+                self.tc_lt_keyed(w, r.key, r.st);
+            } else {
+                let m0 = w.m;
+                w.m = r.m;
+                self.tc_lt_class(w, r.sp);
+                w.m = m0;
+            }
+        }
+    }
+
+    // Append the class of a position of the group keyed `key` (a generic parameter's, fixed outside
+    // the signature; `'static` when `st`).
+    fn tc_lt_keyed(self: &mut Self, w: &mut LtWalk, key: u64, st: bool) {
+        w.recs.push(LtRec { m: w.m, sp: tok::Span { start: 0, end: 0 }, key: key, st: st });
+        w.elided.push(false);
+        w.cls.push(
+            if st {
+                LC_STATIC;
+            } else {
+                lt_group(w, key, true);
+            },
+        );
+    }
+
+    // Whether lifetime name `sp` (module `w.m`) is one the walked signature binds itself: the
+    // function's own lifetime parameter, or the function type's `for<..>`. Any other (the enclosing
+    // item's, an extend's) is fixed outside it.
+    fn tc_lt_bound_here(self: &Self, w: &LtWalk, sp: tok::Span) bool {
+        let owner = if w.item != NODE_NONE {
+            w.item;
+        } else {
+            w.binder;
+        };
+        if owner == NODE_NONE || w.m != w.bm {
+            return false;
+        }
+        let lts = unsafe (*self.mod_ast(w.bm)).lifetimes_of(owner);
+        for i in 0..lts.len {
+            let pn = self.tc_lt_name_in(w.bm, unsafe (*self.mod_ast(w.bm)).list(lts)[i as usize]);
+            if spans_eq2(self.mod_src(w.bm), pn, self.mod_src(w.m), sp) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Append the classes of the positions of type `t`, which type node `tyn` (module `w.m`, NODE_NONE
+    // when none) spells: a written lifetime gives its class, an elided one its own; a substituted
+    // generic parameter of `w.item` one lifetime per position of what it stands for. A position the
+    // node does not spell (an alias, a defaulted argument) has its own lifetime; a lifetime named
+    // there is recorded (`w.hidden`, `w.bad`).
+    fn tc_lt_walk(self: &mut Self, w: &mut LtWalk, tyn0: NodeId, t: TypeId, depth: u32) {
+        if t == TYPE_NONE || depth > 16 {
+            return;
+        }
+        let a = self.mod_ast(w.m);
+        let mut tyn = tyn0;
+        if tyn != NODE_NONE && unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH && self.tc_lt_alias(
+            w,
+            tyn,
+            t,
+            depth,
+        ) {
+            return;
+        }
+        if tyn != NODE_NONE && w.item != NODE_NONE && unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH {
+            if self.tc_path_is_self(w.m, tyn) {
+                let c = unsafe (*a).container_of(w.item);
+                tyn = if c != NODE_NONE && unsafe (*a).at_const(c).kind == NodeKind::NODE_EXTEND {
+                    unsafe (*a).at_const(c).as_data.extend_def.target_type;
+                } else {
+                    NODE_NONE;
+                };
+            } else {
+                let d = unsafe (*a).path_def(tyn);
+                if d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+                    self.tc_lt_generic(w, d, t);
+                    return;
+                }
+            }
+        }
+        let y = *self.type_at(t);
+        let k = y.kind;
+        if tyn == NODE_NONE {
+            self.tc_lt_unspelled(w, tyn, t);
+            return;
+        }
+        let mut n = *unsafe (*a).at_const(tyn);
+        let qual_none = TypeQualifier::TYPE_QUAL_NONE as u8;
+        if k == TypeKind::TYPE_DYN && y.qualifier == qual_none && n.kind == NodeKind::NODE_TYPE_PATH && n.as_data.type_path.args.len != 0 {
+            // `Box<dyn ..>` spells the owned `dyn` as its argument.
+            let an = unsafe (*a).list(n.as_data.type_path.args)[0];
+            if unsafe (*a).at_const(an).kind == NodeKind::NODE_DYN_TYPE {
+                n = *unsafe (*a).at_const(an);
+            }
+        }
+        if k == TypeKind::TYPE_REFERENCE && n.kind == NodeKind::NODE_REFERENCE_TYPE || k == TypeKind::TYPE_SLICE && n.kind == NodeKind::NODE_SLICE_TYPE {
+            self.tc_lt_push(w, n.as_data.indirect_type.lifetime);
+            self.tc_lt_walk(w, n.as_data.indirect_type.ty, y.as_data.elem, depth + 1);
+        } else if k == TypeKind::TYPE_POINTER && n.kind == NodeKind::NODE_POINTER_TYPE {
+            self.tc_lt_walk(w, n.as_data.indirect_type.ty, y.as_data.elem, depth + 1);
+        } else if y.arr_like() && n.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.tc_lt_walk(w, n.as_data.array_type.element, y.as_data.arr.elem, depth + 1);
+        } else if k == TypeKind::TYPE_DYN && n.kind == NodeKind::NODE_DYN_TYPE && y.qualifier == qual_none == (n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE) {
+            if y.qualifier != qual_none {
+                self.tc_lt_push(w, n.as_data.indirect_type.lifetime);
+            }
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            let fnode = n.as_data.indirect_type.ty;
+            if it.decl != NODE_NONE {
+                self.tc_lt_args(w, fnode, &it, depth);
+            } else if fnode != NODE_NONE && unsafe (*a).at_const(fnode).kind == NodeKind::NODE_FUNCTION_TYPE {
+                self.tc_lt_nested(w, fnode, unsafe (*self.cur_ast()).dyn_fn_sig(&y), depth);
+            } else {
+                self.tc_lt_unspelled(w, fnode, unsafe (*self.cur_ast()).dyn_fn_sig(&y));
+            }
+        } else if y.fn_sig() && n.kind == NodeKind::NODE_FUNCTION_TYPE {
+            self.tc_lt_nested(w, tyn, t, depth);
+        } else if (k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM) && n.kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).path_def(
+            tyn,
+        ).node == y.as_data.decl {
+            self.tc_lt_decl(w, tyn, y.module, y.as_data.decl);
+        } else if k == TypeKind::TYPE_INSTANCE && (n.kind == NodeKind::NODE_TUPLE_TYPE || n.kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).path_def(
+            tyn,
+        ).node == unsafe (*self.cur_ast()).instance(y.as_data.inst).decl) {
+            // A path spells the instance's arguments only when it names the instance's declaration
+            // (an alias may reorder them).
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            self.tc_lt_args(w, tyn, &it, depth);
+        } else if self.tc_lt_count(t) != 0 {
+            self.tc_lt_unspelled(w, tyn, t);
+        } else if n.kind != NodeKind::NODE_FUNCTION_TYPE {
+            self.tc_lt_names(w, tyn);
+        }
+    }
+
+    // The positions of declaration `d` (module `dm`)'s lifetime parameters, which type path `tyn`
+    // spells: its lifetime arguments in order, elided past them.
+    fn tc_lt_decl(self: &mut Self, w: &mut LtWalk, tyn: NodeId, dm: ModuleId, d: NodeId) {
+        let nlt = unsafe (*self.package).decl_nlt(unsafe &*self.cur_ast(), dm, d);
+        let a = self.mod_ast(w.m);
+        let mut k: u32 = 0;
+        if unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH {
+            let args = unsafe (*a).at_const(tyn).as_data.type_path.args;
+            for i in 0..args.len {
+                let aid = unsafe (*a).list(args)[i as usize];
+                if k < nlt && unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    self.tc_lt_push(w, aid);
+                    k += 1;
+                }
+            }
+        }
+        while k < nlt {
+            self.tc_lt_push(w, NODE_NONE);
+            k += 1;
+        }
+    }
+
+    // Expand type path `tyn` when it names an alias (walk its type, its parameters standing for the
+    // path's arguments) or a type parameter of the alias being expanded (walk the path's argument
+    // for it); true when it did.
+    fn tc_lt_alias(self: &mut Self, w: &mut LtWalk, tyn: NodeId, t: TypeId, depth: u32) bool {
+        let d = unsafe (*self.mod_ast(w.m)).path_def(tyn);
+        if d.node == NODE_NONE {
+            return false;
+        }
+        let dn = *unsafe (*self.mod_ast(d.module)).at_const(d.node);
+        if dn.kind == NodeKind::NODE_TYPE_ALIAS && dn.as_data.type_alias.ty != NODE_NONE && w.frames.len() < 8 {
+            w.frames.push(LtAlias { m: w.m, path: tyn, am: d.module, alias: d.node });
+            let m0 = w.m;
+            w.m = d.module;
+            self.tc_lt_walk(w, dn.as_data.type_alias.ty, t, depth + 1);
+            w.m = m0;
+            let _ = w.frames.pop();
+            return true;
+        }
+        if dn.kind != NodeKind::NODE_GENERIC_PARAM || w.frames.len() == 0 {
+            return false;
+        }
+        let f = *w.frames.at(w.frames.len() - 1);
+        let gens = unsafe (*self.mod_ast(f.am)).at_const(f.alias).as_data.type_alias.generics;
+        for g in 0..gens.len {
+            if d.module != f.am || unsafe (*self.mod_ast(f.am)).list(gens)[g as usize] != d.node {
+                continue;
+            }
+            // The path's g-th type argument, walked where the path is.
+            let pa = unsafe (*self.mod_ast(f.m)).at_const(f.path).as_data.type_path.args;
+            let mut arg = NODE_NONE;
+            let mut k: u32 = 0;
+            for i in 0..pa.len {
+                let aid = unsafe (*self.mod_ast(f.m)).list(pa)[i as usize];
+                if unsafe (*self.mod_ast(f.m)).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    continue;
+                }
+                if k == g {
+                    arg = aid;
+                }
+                k += 1;
+            }
+            let fr = w.frames.pop().unwrap();
+            let m0 = w.m;
+            w.m = f.m;
+            self.tc_lt_walk(w, arg, t, depth + 1);
+            w.m = m0;
+            w.frames.push(fr);
+            return true;
+        }
+        return false;
+    }
+
+    // The positions of instance record `it`'s arguments against type path or tuple node `tyn`: the
+    // declaration's lifetime parameters, then its type arguments in order.
+    fn tc_lt_args(self: &mut Self, w: &mut LtWalk, tyn: NodeId, it: &TyInstance, depth: u32) {
+        self.tc_lt_decl(w, tyn, it.module, it.decl);
+        let a = self.mod_ast(w.m);
+        let n = *unsafe (*a).at_const(tyn);
+        let args = if n.kind == NodeKind::NODE_TUPLE_TYPE {
+            n.as_data.array_literal.elements;
+        } else if n.kind == NodeKind::NODE_TYPE_PATH {
+            n.as_data.type_path.args;
+        } else {
+            NodeList { start: 0, len: 0 };
+        };
+        let mut j: u32 = 0;
+        for i in 0..args.len {
+            let aid = unsafe (*a).list(args)[i as usize];
+            if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                continue;
+            }
+            if j < it.n as u32 {
+                self.tc_lt_walk(w, aid, unsafe it.args[j as usize], depth + 1);
+            }
+            j += 1;
+        }
+        while j < it.n as u32 {
+            self.tc_lt_unspelled(w, NODE_NONE, unsafe it.args[j as usize]);
+            j += 1;
+        }
+    }
+
+    // The positions of `t`, the type generic parameter `d` of `w.item` stands for: one lifetime per
+    // position, `'static` under a `'static` bound.
+    fn tc_lt_generic(self: &mut Self, w: &mut LtWalk, d: DefId, t: TypeId) {
+        let n = self.tc_lt_count(t);
+        let bs = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.generic_param.bounds;
+        let mut st = false;
+        for b in 0..bs.len {
+            let bid = unsafe (*self.mod_ast(d.module)).list(bs)[b as usize];
+            st = st || unsafe (*self.mod_ast(d.module)).at_const(bid).kind == NodeKind::NODE_LIFETIME && span_is(
+                self.mod_src(d.module),
+                self.tc_lt_name_in(d.module, bid),
+                "'static",
+            );
+        }
+        for j in 0..n {
+            self.tc_lt_keyed(w, LT_KEY_GEN | d.node as u64 << 8 | j as u64, st);
+        }
+    }
+
+    // The positions of `t` where node `tyn` spells none of them: each its own lifetime.
+    fn tc_lt_unspelled(self: &mut Self, w: &mut LtWalk, tyn: NodeId, t: TypeId) {
+        for _ in 0..self.tc_lt_count(t) {
+            w.recs.push(LtRec { m: w.m, sp: tok::Span { start: 0, end: 0 }, key: 0, st: false });
+            w.cls.push(LC_FREE);
+            w.elided.push(true);
+        }
+        if tyn != NODE_NONE {
+            self.tc_lt_names(w, tyn);
+        }
+    }
+
+    // Record the lifetimes type node `tyn` names where no position stands for them.
+    fn tc_lt_names(self: &mut Self, w: &mut LtWalk, tyn: NodeId) {
+        let mut out = Vector::<tok::Span>::new();
+        if unsafe (*self.mod_ast(w.m)).at_const(tyn).kind == NodeKind::NODE_LIFETIME {
+            let l = self.tc_lt_name_in(w.m, tyn);
+            if l.end > l.start {
+                out.push(l);
+            }
+        } else {
+            self.tc_typenode_lifetimes(w.m, tyn, &mut out, 0);
+        }
+        for i in 0..out.len() {
+            let sp = out[i];
+            if span_is(self.mod_src(w.m), sp, "'_") {
+                continue;
+            }
+            if w.item == NODE_NONE {
+                if w.bad == NODE_NONE {
+                    w.bad = tyn;
+                }
+            } else if span_is(self.mod_src(w.m), sp, "'static") {
+                w.hidden.push(LT_KEY_GEN - 1);
+                w.statics.push(LT_KEY_GEN - 1);
+            } else {
+                w.hidden.push(self.tc_lt_rep(w, self.tc_lt_key(w, sp)));
+            }
+        }
+    }
+
+    // The function-pointer type of function type node `id` (module `m`) over its lowered slots.
+    // Its lifetime classes (`TyInstance.lts`) come from the lifetimes it writes; a result it
+    // writes none for takes the only input position's (else it is an error, as a function's).
+    // The class slots an LTS_EXT value needs are appended to `slots`.
+    fn tc_fn_type_lts(self: &mut Self, m: ModuleId, id: NodeId, slots: &mut Vector<TypeId>, nret: u32) u64 {
+        let a = self.mod_ast(m);
+        let ft = unsafe (*a).at_const(id).as_data.function_type;
+        let mut w = lt_walk_new(m, NODE_NONE, id);
+        for i in 0..slots.len() {
+            let sl = if i as u32 < nret {
+                unsafe (*a).list(ft.returns)[i];
+            } else {
+                unsafe (*a).list(ft.params)[i - nret as usize];
+            };
+            self.tc_lt_walk(&mut w, unsafe (*a).slot_type_node(sl), slots[i], 0);
+        }
+        let mut nres: u32 = 0;
+        {
+            for i in 0..nret {
+                nres = nres + self.tc_lt_count(slots[i as usize]);
+            }
+        }
+        if w.bad != NODE_NONE {
+            self.errors.emit_span(
+                unsafe (*a).at_const(w.bad).span,
+                format(
+                    "a function type cannot name a lifetime here: only a reference, a slice or a borrowed 'dyn' has a lifetime it tracks",
+                ),
+            );
+        }
+        let total = w.cls.len() as u32;
+        let mut elided_res = false;
+        for k in 0..nres {
+            elided_res = elided_res || w.elided[k as usize];
+        }
+        if elided_res && total != nres + 1 {
+            self.errors.emit_span(
+                unsafe (*a).at_const(id).span,
+                format(
+                    "missing lifetime specifier: this function type's result borrows, but which input it borrows from cannot be inferred",
+                ),
+            );
+            self.errors.note(
+                format("name it, e.g. `fn(&'a T, &U) &'a T`; elision only applies with exactly one input lifetime"),
+            );
+            return 0;
+        }
+        lt_finish(
+            &mut w,
+            nres,
+            if elided_res {
+                nres as i32;
+            } else {
+                -1;
+            },
+        );
+        if w.cls.contains(&LC_TOO_MANY) {
+            self.errors.emit_span(
+                unsafe (*a).at_const(id).span,
+                format(
+                    "a function type has at most {} lifetimes it chooses at each call and {} it takes from outside",
+                    LC_OUTER - LC_GROUP,
+                    LC_TOO_MANY - LC_OUTER,
+                ),
+            );
+            return 0;
+        }
+        return unsafe (*self.cur_ast()).lts_encode(&w.cls, nres, slots);
+    }
+
+    // The lifetime classes of function-pointer type `old` once substitution gives it the slots of
+    // record `it`: a position the old slots spell keeps its class; the positions a substituted
+    // generic parameter brings share one lifetime per position wherever that parameter occurs (it
+    // stands for one type). The class slots an LTS_EXT value needs are appended to `slots`.
+    fn tc_lts_subst(self: &mut Self, old: &Ty, it: &TyInstance, slots: &mut Vector<TypeId>) u64 {
+        let oi0 = *unsafe (*self.cur_ast()).instance(old.as_data.fnp.sig);
+        if oi0.lts == LTS_WIDE {
+            return LTS_WIDE;
+        }
+        if oi0.lts == 0 {
+            // No class to keep: only positions the substitution brings can make some.
+            let mut any = false;
+            for s in 0..it.module as u32 + it.decl {
+                any = any || self.tc_lt_count(unsafe (*self.cur_ast()).rec_slot(it, s)) != 0;
+            }
+            if !any {
+                return 0;
+            }
+        }
+        let mut c_old = Vector::<u8>::new();
+        let mut inv = Vector::<u8>::new();
+        let mut nres_old: u32 = 0;
+        self.tc_sig_classes(old, &mut c_old, &mut inv, &mut nres_old);
+        let oi = *unsafe (*self.cur_ast()).instance(old.as_data.fnp.sig);
+        let mut w = lt_walk_new(0, NODE_NONE, NODE_NONE);
+        let mut cur: u32 = 0;
+        let mut nres: u32 = 0;
+        for s in 0..it.module as u32 + it.decl {
+            let ot = unsafe (*self.cur_ast()).rec_slot(&oi, s);
+            let nt = unsafe (*self.cur_ast()).rec_slot(it, s);
+            self.tc_lt_subst_walk(&mut w, &c_old, &mut cur, ot, nt, 0);
+            if s + 1 == it.module as u32 {
+                nres = w.cls.len() as u32;
+            }
+        }
+        for _ in 0..w.cls.len() {
+            w.elided.push(false);
+        }
+        lt_finish(&mut w, nres, -1);
+        return unsafe (*self.cur_ast()).lts_encode(&w.cls, nres, slots);
+    }
+
+    // Append the classes of the positions of `nt`, which substitution made of `ot`, whose own
+    // positions have the classes `c_old` from `*cur` on.
+    fn tc_lt_subst_walk(
+        self: &mut Self,
+        w: &mut LtWalk,
+        c_old: &Vector<u8>,
+        cur: &mut u32,
+        ot: TypeId,
+        nt: TypeId,
+        depth: u32,
+    ) {
+        if nt == TYPE_NONE || depth > 16 {
+            return;
+        }
+        let on = self.tc_lt_count(ot);
+        if ot == nt {
+            for _ in 0..on {
+                lt_keep(w, c_old, cur);
+            }
+            return;
+        }
+        let oy = *self.type_at(ot);
+        let ny = *self.type_at(nt);
+        if oy.fn_sig() && ny.fn_sig() {
+            self.tc_lt_subst_nested(w, c_old, cur, ot, nt, depth);
+            return;
+        }
+        let os = self.tc_dyn_fn_sig(&oy);
+        let ns = self.tc_dyn_fn_sig(&ny);
+        if os != TYPE_NONE && ns != TYPE_NONE && oy.qualifier == ny.qualifier {
+            if oy.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 {
+                lt_keep(w, c_old, cur);
+            }
+            self.tc_lt_subst_nested(w, c_old, cur, os, ns, depth);
+            return;
+        }
+        if on == 0 {
+            // A generic parameter (or a type holding none of the positions): one lifetime per new
+            // position, shared by every occurrence of the same type.
+            for j in 0..self.tc_lt_count(nt) {
+                w.cls.push(lt_group(w, LT_KEY_GEN | ot as u64 << 8 | j as u64, true));
+            }
+            return;
+        }
+        if oy.kind != ny.kind {
+            *cur = *cur + on;
+            for _ in 0..self.tc_lt_count(nt) {
+                w.cls.push(LC_FREE);
+            }
+            return;
+        }
+        let k = oy.kind;
+        if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+            lt_keep(w, c_old, cur);
+            self.tc_lt_subst_walk(w, c_old, cur, oy.as_data.elem, ny.as_data.elem, depth + 1);
+        } else if k == TypeKind::TYPE_POINTER {
+            self.tc_lt_subst_walk(w, c_old, cur, oy.as_data.elem, ny.as_data.elem, depth + 1);
+        } else if oy.arr_like() {
+            self.tc_lt_subst_walk(w, c_old, cur, oy.as_data.arr.elem, ny.as_data.arr.elem, depth + 1);
+        } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+            for _ in 0..on {
+                lt_keep(w, c_old, cur);
+            }
+        } else if k == TypeKind::TYPE_DYN || k == TypeKind::TYPE_INSTANCE {
+            if k == TypeKind::TYPE_DYN && oy.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 {
+                lt_keep(w, c_old, cur);
+            }
+            let oit = *unsafe (*self.cur_ast()).instance(oy.as_data.inst);
+            let nit = *unsafe (*self.cur_ast()).instance(ny.as_data.inst);
+            if k == TypeKind::TYPE_DYN && oit.decl == NODE_NONE {
+                return;
+            }
+            for _ in 0..unsafe (*self.package).decl_nlt(unsafe &*self.cur_ast(), oit.module, oit.decl) {
+                lt_keep(w, c_old, cur);
+            }
+            for i in 0..oit.n.min(nit.n) {
+                self.tc_lt_subst_walk(
+                    w,
+                    c_old,
+                    cur,
+                    unsafe oit.args[i as usize],
+                    unsafe nit.args[i as usize],
+                    depth + 1,
+                );
+            }
+        }
+    }
+
+    // `tc_lt_subst_walk` over function-pointer types `ot` and `nt`, whose positions are the lifetimes
+    // each takes from outside it: an old one keeps its class at the old position standing for it, and
+    // one substitution brings is the group of the generic parameter position it comes from (the
+    // classes `tc_lts_subst` gave `nt`, replayed).
+    fn tc_lt_subst_nested(
+        self: &mut Self,
+        w: &mut LtWalk,
+        c_old: &Vector<u8>,
+        cur: &mut u32,
+        ot: TypeId,
+        nt: TypeId,
+        depth: u32,
+    ) {
+        let base = *cur;
+        *cur = *cur + self.tc_lt_count(ot);
+        let oy = *self.type_at(ot);
+        let ny = *self.type_at(nt);
+        if self.tc_lt_count(nt) == 0 {
+            return;
+        }
+        let mut c2 = Vector::<u8>::new();
+        let mut fl2 = Vector::<u8>::new();
+        let mut nr2: u32 = 0;
+        self.tc_sig_classes(&oy, &mut c2, &mut fl2, &mut nr2);
+        let oi = *unsafe (*self.cur_ast()).instance(oy.as_data.fnp.sig);
+        let ni = *unsafe (*self.cur_ast()).instance(ny.as_data.fnp.sig);
+        let mut w2 = lt_walk_new(0, NODE_NONE, NODE_NONE);
+        let mut cur2: u32 = 0;
+        for s in 0..ni.module as u32 + ni.decl {
+            let os = unsafe (*self.cur_ast()).rec_slot(&oi, s);
+            let ns = unsafe (*self.cur_ast()).rec_slot(&ni, s);
+            self.tc_lt_subst_walk(&mut w2, &c2, &mut cur2, os, ns, depth + 1);
+        }
+        let npos = unsafe (*self.cur_ast()).sig_lt_len(&ny);
+        for g in 0..npos {
+            let mut j: u32 = 0;
+            while j < npos && unsafe (*self.cur_ast()).sig_lt_class(&ny, j) != LC_OUTER + g as u8 {
+                j += 1;
+            }
+            if j >= npos || j as usize >= w2.cls.len() {
+                break;
+            }
+            let pre = w2.cls[j as usize];
+            let key = if pre >= LC_GROUP {
+                w2.keys[(pre - LC_GROUP) as usize];
+            } else {
+                0u64;
+            };
+            let kept = (key & (LT_KEY_GEN | 1u64 << 61)) == (LT_KEY_GEN | 1u64 << 61) && (key & 255u64) as u8 >= LC_OUTER;
+            if kept {
+                lt_keep_at(w, c_old, base + (key & 255u64) as u32 - LC_OUTER as u32);
+            } else if key != 0 {
+                w.cls.push(lt_group(w, key, true));
+            } else {
+                w.cls.push(LC_FREE);
+            }
+        }
     }
 
     // The result count of function type `fid`: its signature's or declaration's result list, one for
@@ -3934,6 +7244,19 @@ extend<'a> TypeChecker<'a> {
         return self.node_type_in(m, unsafe (*fa).list(rs)[i as usize]);
     }
 
+    /// A callee type a call reaches through references: a `dyn fn` (borrowed or owned) or a function
+    /// pointer, behind at most 8 references.
+    const fn tc_ref_callable(self: &mut Self, t: TypeId) bool {
+        let mut y = *self.type_at(t);
+        for _ in 0..8 {
+            if y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            y = *self.type_at(y.as_data.elem);
+        }
+        return y.fn_sig() || self.tc_dyn_fn_sig(&y) != TYPE_NONE;
+    }
+
     const fn tc_dyn_fn_sig(self: &mut Self, ty: &Ty) TypeId {
         if ty.kind != TypeKind::TYPE_DYN {
             return TYPE_NONE;
@@ -3962,10 +7285,6 @@ const fn plural(n: u64) str<'static> {
     return "s";
 }
 
-const fn src_at(p: str, off: u32) *const char {
-    return (unsafe (p.ptr() + off as usize)) as *const char;
-}
-
 // The Ast to read for module `m`'s decls when rendering against the current ast `a` (mirrors
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
 const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
@@ -3985,36 +7304,26 @@ const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: Mod
 // rather than lowering (no checker here); an uncached slot renders `..`, so a signature never checked
 // still names itself. Without this every function type printed as a bare "fn" and a mismatch between
 // two of them read "expected 'fn', found 'fn'".
-fn render_fn_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, buf: *mut char, cap: usize) {
+fn render_fn_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
     if ty.fn_sig() {
-        render_sig_into(pkg, a, cur_src, ty, buf, cap);
+        render_sig_str(pkg, a, cur_src, ty, out);
         return;
     }
     let ma = rt_ast(pkg, a, ty.module);
     let mut ps = NodeList { start: 0, len: 0 };
     let mut rs = NodeList { start: 0, len: 0 };
     if !unsafe (*ma).sig_lists(ty.as_data.decl, &mut ps, &mut rs) {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn".ptr() as *const char);
+        out.push_str("fn");
         return;
     }
-    let mut at: usize = 0;
-    at = at + (unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn(".ptr() as *const char)) as usize;
+    out.push_str("fn(");
     for i in 0..ps.len {
-        let mut pb = Buf96 {};
-        render_slot_into(pkg, a, cur_src, ma, unsafe (*ma).list(ps)[i as usize], &mut pb[0], 96);
-        let mut sep = ", ".ptr() as *const char;
-        if i == 0 {
-            sep = "".ptr() as *const char;
+        if i != 0 {
+            out.push_str(", ");
         }
-        if at >= cap {
-            return;
-        }
-        at = at + (unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &pb[0])) as usize;
+        render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(ps)[i as usize], out);
     }
-    if at >= cap {
-        return;
-    }
-    let mut rb = Buf96 {};
+    out.push_str(")");
     let dn = unsafe (*ma).at_const(ty.as_data.decl);
     // An expression-body closure lists no return: its body's type is the return type.
     let bt = if dn.kind == NodeKind::NODE_CLOSURE && dn.as_data.closure.expr_body && rs.len == 0 {
@@ -4023,55 +7332,103 @@ fn render_fn_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, 
         TYPE_NONE;
     };
     if rs.len == 1 {
-        render_slot_into(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[0], &mut rb[0], 96);
-        unsafe stdio::snprintf(buf + at, cap - at, ") %s".ptr() as *const char, &rb[0]);
+        out.push_str(" ");
+        render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[0], out);
     } else if rs.len > 1 {
-        // Several results in parentheses, as `render_sig_into` spells them.
-        at = at + (unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ") (".ptr() as *const char)) as usize;
+        // Several results in parentheses, as `render_sig_str` spells them.
+        out.push_str(" (");
         for i in 0..rs.len {
-            if at >= cap {
-                return;
+            if i != 0 {
+                out.push_str(", ");
             }
-            render_slot_into(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[i as usize], &mut rb[0], 96);
-            let sep = if i == 0 {
-                "".ptr() as *const char;
-            } else {
-                ", ".ptr() as *const char;
-            };
-            at = at + (unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &rb[0])) as usize;
+            render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[i as usize], out);
         }
-        if at < cap {
-            unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ")".ptr() as *const char);
-        }
+        out.push_str(")");
     } else if bt != TYPE_NONE && !(unsafe (*ma).type_at(bt).kind == TypeKind::TYPE_BUILTIN && unsafe (*ma).type_at(bt).as_data.builtin == BuiltinType::BT_VOID) {
-        render_type_into(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), bt, &mut rb[0], 96);
-        unsafe stdio::snprintf(buf + at, cap - at, ") %s".ptr() as *const char, &rb[0]);
-    } else {
-        unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ")".ptr() as *const char);
+        out.push_str(" ");
+        render_type_str(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), bt, out);
     }
 }
 
 // Function-pointer type `ty` (pool `a`): `fn(P, ..) R`, `move fn(..)`, several results in parentheses.
-fn render_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, buf: *mut char, cap: usize) {
-    let mut out = String::new();
+fn render_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
+    let mut next: u8 = 0;
+    let none = Vector::<String>::new();
+    render_sig_lts(pkg, a, cur_src, ty, &none, &mut next, false, out);
+}
+
+// Append function-pointer type `ty` with the lifetimes it names: a lifetime it takes from outside it
+// as `outer` names it (else `'1`, `'2`, ..), its own groups as letters from `*next` on, under a
+// `for<..>` when `binder`.
+fn render_sig_lts(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    ty: &Ty,
+    outer: &Vector<String>,
+    next: &mut u8,
+    binder: bool,
+    out: &mut String,
+) {
+    let mut cls = Vector::<u8>::new();
+    let mut fl = Vector::<u8>::new();
+    let mut nres: u32 = 0;
+    if pkg != null && unsafe (*a).instance(ty.as_data.fnp.sig).lts != 0 {
+        unsafe (*pkg).sig_classes(unsafe &*a, ty, &mut cls, &mut fl, &mut nres, &mut loader::Invariant {});
+    }
+    // The name at each position.
+    let first = *next;
+    let mut names = Vector::<String>::new();
+    let mut letter = Vector::<u8>::new();
+    letter.resize_default(LC_OUTER as usize);
+    for k in 0..cls.len() {
+        let c = cls[k];
+        let mut nm = String::new();
+        if c == LC_STATIC {
+            nm.push_str("'static");
+        } else if c >= LC_OUTER && c != LC_TOO_MANY {
+            let g = (c - LC_OUTER) as usize;
+            if g < outer.len() {
+                nm.push_str(outer[g].as_str());
+            } else {
+                nm.push_byte(b'\'');
+                nm.push_u64(g as u64 + 1);
+            }
+        } else if c >= LC_GROUP && c < LC_OUTER {
+            if letter[c as usize] == 0 {
+                letter.set(c as usize, *next + 1);
+                *next = *next + 1;
+            }
+            lt_letter(&mut nm, letter[c as usize] - 1);
+        }
+        names.push(nm);
+    }
     if (ty.qualifier & FN_MOVE) != 0 {
         out.push_str("move ");
     }
+    if binder && *next != first {
+        out.push_str("for<");
+        for l in first..*next {
+            if l != first {
+                out.push_str(", ");
+            }
+            lt_letter(out, l);
+        }
+        out.push_str("> ");
+    }
     out.push_str("fn(");
     let np = unsafe (*a).sig_len(ty, false);
+    let nr = unsafe (*a).sig_len(ty, true);
+    let mut pos = nres;
     for i in 0..np {
-        let mut pb = Buf96 {};
-        render_type_into(pkg, a, cur_src, unsafe (*a).sig_at(ty, false, i), &mut pb[0], 96);
         if i != 0 {
             out.push_str(", ");
         }
-        out.push_str(str::from_cbuf(pb.as_slice()));
+        render_lt_type(pkg, a, cur_src, unsafe (*a).sig_at(ty, false, i), &names, &mut pos, out, 0, next);
     }
     out.push_str(")");
-    let nr = unsafe (*a).sig_len(ty, true);
+    pos = 0;
     for i in 0..nr {
-        let mut rb = Buf96 {};
-        render_type_into(pkg, a, cur_src, unsafe (*a).sig_at(ty, true, i), &mut rb[0], 96);
         if i != 0 {
             out.push_str(", ");
         } else if nr > 1 {
@@ -4079,181 +7436,350 @@ fn render_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty:
         } else {
             out.push_str(" ");
         }
-        out.push_str(str::from_cbuf(rb.as_slice()));
+        render_lt_type(pkg, a, cur_src, unsafe (*a).sig_at(ty, true, i), &names, &mut pos, out, 0, next);
     }
     if nr > 1 {
         out.push_str(")");
     }
-    unsafe stdio::snprintf(buf, cap, "%.*s".ptr() as *const char, out.len() as i32, out.as_str().ptr());
+}
+
+// Append lifetime letter `l`: `'a` .. `'z`, then `'a26` ...
+fn lt_letter(out: &mut String, l: u8) {
+    out.push_byte(b'\'');
+    out.push_byte(b'a' + l % 26);
+    if l >= 26 {
+        out.push_u64(l);
+    }
+}
+
+// The lifetime positions of `t` (`Package::lt_count`), 0 without a package.
+fn rt_lt_count(pkg: *const loader::Package, a: *const Ast, t: TypeId) u32 {
+    if pkg == null {
+        return 0;
+    }
+    return unsafe (*pkg).lt_count(unsafe &*a, t);
+}
+
+// Append type `t` with the lifetime names `names` at its positions, from `*pos` on, and advance
+// `*pos` past them (`Package::lt_walk` order; `depth` its depth there). A function type in it names
+// its own lifetimes from `*next` on.
+fn render_lt_type(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    t: TypeId,
+    names: &Vector<String>,
+    pos: &mut u32,
+    out: &mut String,
+    depth: u32,
+    next: &mut u8,
+) {
+    let n = if depth > 16 {
+        0;
+    } else {
+        rt_lt_count(pkg, a, t);
+    };
+    let mut named = false;
+    for k in *pos..(*pos + n).min(names.len() as u32) {
+        named = named || names[k as usize].len() != 0;
+    }
+    let y = *unsafe (*a).type_at(t);
+    let k = y.kind;
+    let dsig = if k == TypeKind::TYPE_DYN {
+        unsafe (*a).dyn_fn_sig(&y);
+    } else {
+        TYPE_NONE;
+    };
+    if !named && !y.fn_sig() && dsig == TYPE_NONE {
+        render_type_str(pkg, a, cur_src, t, out);
+        *pos = *pos + n;
+        return;
+    }
+    if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+        out.push_str(
+            if k == TypeKind::TYPE_SLICE {
+                "[]";
+            } else {
+                "&";
+            },
+        );
+        render_lt_name(names, pos, out, false);
+        if k == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+            out.push_str("mut ");
+        }
+        render_lt_type(pkg, a, cur_src, y.as_data.elem, names, pos, out, depth + 1, next);
+    } else if k == TypeKind::TYPE_POINTER {
+        out.push_str(
+            if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                "*mut ";
+            } else if y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
+                "*const ";
+            } else {
+                "*";
+            },
+        );
+        render_lt_type(pkg, a, cur_src, y.as_data.elem, names, pos, out, depth + 1, next);
+    } else if k == TypeKind::TYPE_ARRAY {
+        out.push_str("[");
+        render_lt_type(pkg, a, cur_src, y.as_data.arr.elem, names, pos, out, depth + 1, next);
+        out.push_str("; ");
+        if y.arr_sym() {
+            render_type_str(pkg, a, cur_src, y.as_data.arr.len, out);
+        } else {
+            out.push_u64(y.as_data.arr.len);
+        }
+        out.push_str("]");
+    } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+        render_type_str(pkg, a, cur_src, t, out);
+        out.push_str("<");
+        for i in 0..n {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            render_lt_name(names, pos, out, true);
+        }
+        out.push_str(">");
+    } else if y.fn_sig() {
+        render_lt_fn(pkg, a, cur_src, &y, names, pos, out, next);
+    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+        let mut it = *unsafe (*a).instance(y.as_data.inst);
+        if k == TypeKind::TYPE_INSTANCE {
+            let _ = unsafe (*a).targs_of(t, &mut it);
+        }
+        let ma = rt_ast(pkg, a, it.module);
+        if k == TypeKind::TYPE_DYN {
+            if y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
+                out.push_str("Box<");
+            } else {
+                out.push_str("&");
+                render_lt_name(names, pos, out, false);
+                if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    out.push_str("mut ");
+                }
+            }
+            out.push_str("dyn ");
+            if dsig != TYPE_NONE {
+                render_lt_fn(pkg, a, cur_src, unsafe (*a).type_at(dsig), names, pos, out, next);
+                if y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
+                    out.push_str(">");
+                }
+                return;
+            }
+        }
+        let nm = if k == TypeKind::TYPE_DYN {
+            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.interface_def.name).as_data.name.text;
+        } else {
+            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
+        };
+        out.push_str(rt_src(pkg, a, cur_src, it.module).slice(nm.start as usize, nm.end as usize));
+        let nlt = unsafe (*pkg).decl_nlt(unsafe &*a, it.module, it.decl);
+        if nlt + it.n as u32 != 0 {
+            out.push_str("<");
+            for i in 0..nlt {
+                if i != 0 {
+                    out.push_str(", ");
+                }
+                render_lt_name(names, pos, out, true);
+            }
+            for i in 0..it.n {
+                if nlt + i as u32 != 0 {
+                    out.push_str(", ");
+                }
+                render_lt_type(pkg, a, cur_src, unsafe it.args[i as usize], names, pos, out, depth + 1, next);
+            }
+            out.push_str(">");
+        }
+        if k == TypeKind::TYPE_DYN && y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
+            out.push_str(">");
+        }
+    }
+}
+
+// Append function-pointer type `y` inside a rendered type: its positions there (`names` from `*pos`
+// on) name the lifetimes it takes from outside it; one with no name is a lifetime of the enclosing
+// type's own, named from `*next` on.
+fn render_lt_fn(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    y: &Ty,
+    names: &Vector<String>,
+    pos: &mut u32,
+    out: &mut String,
+    next: &mut u8,
+) {
+    let mut outer = Vector::<String>::new();
+    let mut vs = Vector::<u32>::new();
+    if pkg != null {
+        unsafe (*pkg).sig_outer(unsafe &*a, y, &mut vs, 0, &mut loader::Invariant {});
+    }
+    for _ in 0..vs.len() {
+        let mut nm = String::new();
+        if (*pos) as usize < names.len() && names[(*pos) as usize].len() != 0 {
+            nm.push_str(names[(*pos) as usize].as_str());
+        } else {
+            lt_letter(&mut nm, *next);
+            *next = *next + 1;
+        }
+        outer.push(nm);
+        *pos = *pos + 1;
+    }
+    render_sig_lts(pkg, a, cur_src, y, &outer, next, true, out);
+}
+
+// Append the lifetime name at position `*pos` of `names` and advance; an elided one is `'_` as an
+// argument (`whole`), or nothing after `&` and `[]`. Not as an argument, a space follows a name.
+fn render_lt_name(names: &Vector<String>, pos: &mut u32, out: &mut String, whole: bool) {
+    let p = (*pos) as usize;
+    *pos = *pos + 1;
+    if p >= names.len() || names[p].len() == 0 {
+        if whole {
+            out.push_str("'_");
+        }
+        return;
+    }
+    out.push_str(names[p].as_str());
+    if !whole {
+        out.push_byte(b' ');
+    }
+}
+
+// Text `w` on one line: each run of white space as one space.
+fn one_line(w: str) String {
+    let mut s = String::new();
+    let mut gap = false;
+    for i in 0..w.len() {
+        let c = w.byte_at(i);
+        if c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' {
+            gap = true;
+            continue;
+        }
+        if gap && s.len() != 0 {
+            s.push_byte(b' ');
+        }
+        gap = false;
+        s.push_byte(c);
+    }
+    return s;
 }
 
 // One parameter/return slot of a function type: the node is either a NODE_PARAMETER wrapping a type
-// node or the type node itself.
-fn render_slot_into(
+// node or the type node itself. A type that names a lifetime renders as written (a type does not keep
+// lifetime names).
+fn render_slot_str(
     pkg: *const loader::Package,
     a: *const Ast,
     cur_src: str,
     ma: *const Ast,
     slot: NodeId,
-    buf: *mut char,
-    cap: usize,
+    out: &mut String,
 ) {
     let tn = unsafe (*ma).slot_type_node(slot);
     let mut t = TYPE_NONE;
     if tn != NODE_NONE {
         t = unsafe (*ma).type_of(tn);
+        let sp = unsafe (*ma).at_const(tn).span;
+        let w = rt_src(pkg, a, cur_src, unsafe (*ma).module).slice(sp.start as usize, sp.end as usize);
+        if t != TYPE_NONE && w.contains("'") {
+            out.push_str(one_line(w).as_str());
+            return;
+        }
     }
     if t == TYPE_NONE {
         t = unsafe (*ma).type_of(slot);
     }
     if t == TYPE_NONE {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "..".ptr() as *const char);
+        out.push_str("..");
         return;
     }
-    render_type_into(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), t, buf, cap);
+    render_type_str(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), t, out);
 }
 
-/// Render `tid` as Super-C surface syntax into `buf` (NUL-terminated, truncating at `cap`). The
-/// standalone form of TypeChecker::render_type: `a` is the Ast owning the type pool (a checker's
-/// in-flight ast, or a module's held ast after the build), `cur_src` that module's source, `pkg` the
-/// package for cross-module decl names (null falls back to `a`/`cur_src` for everything). Also serves
-/// LSP hover, which renders from a fully built package.
-// Print name span `s` of module `m`'s source into `buf` (at most `cap` bytes) between `pre` and `post`;
-// the snprintf count.
-fn rt_put_name(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    m: ModuleId,
-    s: tok::Span,
-    buf: *mut char,
-    cap: usize,
-    pre: *const char,
-    post: *const char,
-) i32 {
-    return unsafe stdio::snprintf(
-        buf,
-        cap,
-        "%s%.*s%s".ptr() as *const char,
-        pre,
-        (s.end - s.start) as i32,
-        src_at(rt_src(pkg, a, cur_src, m), s.start),
-        post,
-    );
+// Append name span `s` of module `m`'s source.
+fn rt_put_name(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId, s: tok::Span, out: &mut String) {
+    out.push_str(rt_src(pkg, a, cur_src, m).slice(s.start as usize, s.end as usize));
 }
 
 /// The interface instance a `dyn` type `t` erases to, as written in a bound or a conformance:
-/// `Mul<Simd<f32, 4>>`, `fn(i32) i32`.
-pub fn render_iface_into(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    t: TypeId,
-    buf: *mut char,
-    cap: usize,
-) {
+/// `Mul<Simd<f32, 4>>`, `fn(i32) i32`, appended to `out`.
+pub fn render_iface_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t: TypeId, out: &mut String) {
     let ty = *unsafe (*a).type_at(t);
-    rt_dyn_into(pkg, a, cur_src, &ty, buf, cap, "".ptr() as *const char, "".ptr() as *const char);
+    rt_dyn_str(pkg, a, cur_src, &ty, out);
 }
 
-// `dyn` type `ty` between `pfx` and `sfx`.
-fn rt_dyn_into(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    ty: &Ty,
-    buf: *mut char,
-    cap: usize,
-    pfx: *const char,
-    sfx: *const char,
-) {
+// Append the interface or function type `dyn` type `ty` erases to.
+fn rt_dyn_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
     let ma = rt_ast(pkg, a, ty.module);
     let dsig = unsafe (*a).dyn_fn_sig(ty);
     if dsig != TYPE_NONE {
-        let mut sb = Buf96 {};
-        render_type_into(pkg, a, cur_src, dsig, &mut sb[0], 96);
-        unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, &sb[0], sfx);
-    } else {
-        let ddecl = unsafe (*a).dyn_decl_of(ty);
-        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
-        let di = *unsafe (*a).instance(ty.as_data.inst);
-        if di.n == 0 {
-            rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, sfx);
-        } else {
-            // A generic interface names its arguments: `&dyn I<bool>`, never a bare `&dyn I`.
-            let mut at = rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, pfx, "<".ptr() as *const char) as usize;
-            let mut i: u8 = 0;
-            while i < di.n && at < cap {
-                let mut argb = Buf96 {};
-                render_type_into(pkg, a, cur_src, unsafe di.args[i as usize], &mut argb[0], 64);
-                let sep = if i != 0 {
-                    ", ".ptr() as *const char;
-                } else {
-                    "".ptr() as *const char;
-                };
-                let w = unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &argb[0]);
-                at = at + w as usize;
-                i = i + 1;
-            }
-            if at < cap {
-                unsafe stdio::snprintf(buf + at, cap - at, ">%s".ptr() as *const char, sfx);
-            }
-        }
+        render_type_str(pkg, a, cur_src, dsig, out);
+        return;
     }
+    let ddecl = unsafe (*a).dyn_decl_of(ty);
+    let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
+    rt_put_name(pkg, a, cur_src, ty.module, s, out);
+    let di = *unsafe (*a).instance(ty.as_data.inst);
+    if di.n == 0 {
+        return;
+    }
+    // A generic interface names its arguments: `&dyn I<bool>`, never a bare `&dyn I`.
+    out.push_str("<");
+    for i in 0..di.n {
+        if i != 0 {
+            out.push_str(", ");
+        }
+        render_type_str(pkg, a, cur_src, unsafe di.args[i as usize], out);
+    }
+    out.push_str(">");
 }
 
-pub fn render_type_into(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    tid: TypeId,
-    buf: *mut char,
-    cap: usize,
-) {
+/// Render `tid` as Super-C surface syntax. The standalone form of TypeChecker::type_str: `a` is the
+/// Ast owning the type pool (a checker's in-flight ast, or a module's held ast after the build),
+/// `cur_src` that module's source, `pkg` the package for cross-module decl names (null falls back to
+/// `a`/`cur_src` for everything). Also serves LSP hover, which renders from a fully built package.
+pub fn type_str_of(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId) String {
+    let mut out = String::new();
+    render_type_str(pkg, a, cur_src, tid, &mut out);
+    return out;
+}
+
+/// Append `tid` as Super-C surface syntax to `out` (`type_str_of`).
+pub fn render_type_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId, out: &mut String) {
     if tid == TYPE_NONE {
         // No type was ever assigned: there is nothing IN the value to render. Instance arguments
         // recover the parameter's NAME from their declaration below; a bare hole has no declaration.
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "_".ptr() as *const char);
+        out.push_str("_");
         return;
     }
     let ty = *unsafe (*a).type_at(tid);
     if ty.kind == TypeKind::TYPE_ERROR {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "_".ptr() as *const char);
-        return;
-    }
-    if ty.kind == TypeKind::TYPE_BUILTIN {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, bt_name(ty.as_data.builtin).ptr() as *const char);
+        out.push_str("_");
+    } else if ty.kind == TypeKind::TYPE_BUILTIN {
+        out.push_str(bt_name(ty.as_data.builtin));
     } else if ty.kind == TypeKind::TYPE_NEVER {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "never".ptr() as *const char);
+        out.push_str("never");
     } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
-        let mut inb = Buf96 {};
-        render_type_into(pkg, a, cur_src, ty.as_data.elem, &mut inb[0], 96);
-        let mut pfx = "&".ptr() as *const char;
-        if ty.kind == TypeKind::TYPE_POINTER {
-            pfx = "*".ptr() as *const char;
-        }
-        let mut mq = "".ptr() as *const char;
+        out.push_str(pick(ty.kind == TypeKind::TYPE_POINTER, "*", "&"));
         if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            mq = "mut ".ptr() as *const char;
+            out.push_str("mut ");
         } else if ty.kind == TypeKind::TYPE_POINTER && ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
             // A bare `*T` and `*const T` are distinct types.
-            mq = "const ".ptr() as *const char;
+            out.push_str("const ");
         }
-        unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, mq, &inb[0]);
+        render_type_str(pkg, a, cur_src, ty.as_data.elem, out);
     } else if ty.kind == TypeKind::TYPE_SLICE {
-        let mut inb = Buf96 {};
-        render_type_into(pkg, a, cur_src, ty.as_data.elem, &mut inb[0], 96);
-        unsafe stdio::snprintf(buf, cap, "[]%s".ptr() as *const char, &inb[0]);
+        out.push_str("[]");
+        render_type_str(pkg, a, cur_src, ty.as_data.elem, out);
     } else if ty.kind == TypeKind::TYPE_ARRAY {
-        let mut inb = Buf96 {};
-        render_type_into(pkg, a, cur_src, ty.as_data.arr.elem, &mut inb[0], 96);
+        out.push_str("[");
+        render_type_str(pkg, a, cur_src, ty.as_data.arr.elem, out);
+        out.push_str("; ");
         if ty.arr_sym() {
-            let mut lb = Buf96 {};
-            render_type_into(pkg, a, cur_src, ty.as_data.arr.len, &mut lb[0], 96);
-            unsafe stdio::snprintf(buf, cap, "[%s; %s]".ptr() as *const char, &inb[0], &lb[0]);
+            render_type_str(pkg, a, cur_src, ty.as_data.arr.len, out);
         } else {
-            unsafe stdio::snprintf(buf, cap, "[%s; %u]".ptr() as *const char, &inb[0], ty.as_data.arr.len);
+            out.push_u64(ty.as_data.arr.len);
         }
+        out.push_str("]");
     } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM || ty.kind == TypeKind::TYPE_GENERIC {
         let ma = rt_ast(pkg, a, ty.module);
         let d = unsafe (*ma).at_const(ty.as_data.decl);
@@ -4261,53 +7787,30 @@ pub fn render_type_into(
         if d.kind == NodeKind::NODE_GENERIC_PARAM {
             nm = d.as_data.generic_param.name;
         }
-        let s = unsafe (*ma).at_const(nm).as_data.name.text;
-        rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, "".ptr() as *const char, "".ptr() as *const char);
+        rt_put_name(pkg, a, cur_src, ty.module, unsafe (*ma).at_const(nm).as_data.name.text, out);
     } else if ty.kind == TypeKind::TYPE_OPAQUE {
         let ma = rt_ast(pkg, a, ty.module);
         let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ty.as_data.decl).as_data.type_alias.name).as_data.name.text;
-        rt_put_name(pkg, a, cur_src, ty.module, s, buf, cap, "".ptr() as *const char, "".ptr() as *const char);
+        rt_put_name(pkg, a, cur_src, ty.module, s, out);
     } else if ty.kind == TypeKind::TYPE_ASSOC {
         // `T::Output`: the projected type, then the associated type's name.
         let it = *unsafe (*a).instance(ty.as_data.inst);
-        let mut ob = Buf96 {};
-        render_type_into(pkg, a, cur_src, it.args[0], &mut ob[0], 96);
+        render_type_str(pkg, a, cur_src, it.args[0], out);
+        out.push_str("::");
         let ma = rt_ast(pkg, a, it.module);
         let s = unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.type_alias.name).as_data.name.text;
-        let at = unsafe stdio::snprintf(buf, cap, "%s::".ptr() as *const char, &ob[0]);
-        if at >= 0 && at as usize < cap {
-            rt_put_name(
-                pkg,
-                a,
-                cur_src,
-                it.module,
-                s,
-                unsafe (buf + at as usize),
-                cap - at as usize,
-                "".ptr() as *const char,
-                "".ptr() as *const char,
-            );
-        }
+        rt_put_name(pkg, a, cur_src, it.module, s, out);
     } else if ty.kind == TypeKind::TYPE_INSTANCE || ty.is_vec() {
         let mut it = TyInstance {};
         let _ = unsafe (*a).targs_of(tid, &mut it);
         let ma = rt_ast(pkg, a, it.module);
         let s = unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
-        let at0 = rt_put_name(
-            pkg,
-            a,
-            cur_src,
-            it.module,
-            s,
-            buf,
-            cap,
-            "".ptr() as *const char,
-            "<".ptr() as *const char,
-        );
-        let mut at = at0 as usize;
-        let mut i: u8 = 0;
-        while i < it.n && at < cap {
-            let mut argb = Buf96 {};
+        rt_put_name(pkg, a, cur_src, it.module, s, out);
+        out.push_str("<");
+        for i in 0..it.n {
+            if i != 0 {
+                out.push_str(", ");
+            }
             let ai = unsafe it.args[i as usize];
             if ai == TYPE_NONE || unsafe (*a).type_at(ai).kind == TypeKind::TYPE_ERROR {
                 // An argument inference never filled: name the declaration's own parameter;
@@ -4316,57 +7819,35 @@ pub fn render_type_into(
                 if i as u32 < gens.len {
                     let gid = unsafe (*ma).list(gens)[i as usize];
                     let gn = unsafe (*ma).at_const(unsafe (*ma).at_const(gid).as_data.generic_param.name).as_data.name.text;
-                    rt_put_name(
-                        pkg,
-                        a,
-                        cur_src,
-                        it.module,
-                        gn,
-                        &mut argb[0],
-                        96,
-                        "".ptr() as *const char,
-                        "".ptr() as *const char,
-                    );
+                    rt_put_name(pkg, a, cur_src, it.module, gn, out);
                 } else {
-                    unsafe stdio::snprintf(&mut argb[0], 96, "%s".ptr() as *const char, "?".ptr() as *const char);
+                    out.push_str("?");
                 }
             } else {
-                render_type_into(pkg, a, cur_src, ai, &mut argb[0], 64);
+                render_type_str(pkg, a, cur_src, ai, out);
             }
-            let mut sep = "".ptr() as *const char;
-            if i != 0 {
-                sep = ", ".ptr() as *const char;
-            }
-            let mut room: usize = 0;
-            if cap > at {
-                room = cap - at;
-            }
-            let w = unsafe stdio::snprintf(buf + at, room, "%s%s".ptr() as *const char, sep, &argb[0]);
-            at = at + w as usize;
-            i = i + 1;
         }
-        if at < cap {
-            unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ">".ptr() as *const char);
-        }
+        out.push_str(">");
     } else if ty.kind == TypeKind::TYPE_FUNCTION {
-        render_fn_sig_into(pkg, a, cur_src, &ty, buf, cap);
+        render_fn_sig_str(pkg, a, cur_src, &ty, out);
     } else if ty.kind == TypeKind::TYPE_DYN {
-        let mut pfx = "Box<dyn ".ptr() as *const char;
-        if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            pfx = "&mut dyn ".ptr() as *const char;
-        } else if ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-            pfx = "&dyn ".ptr() as *const char;
-        }
-        let mut sfx = "".ptr() as *const char;
+        out.push_str(
+            if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                "&mut dyn ";
+            } else if ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
+                "&dyn ";
+            } else {
+                "Box<dyn ";
+            },
+        );
+        rt_dyn_str(pkg, a, cur_src, &ty, out);
         if ty.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-            sfx = ">".ptr() as *const char;
+            out.push_str(">");
         }
-        rt_dyn_into(pkg, a, cur_src, &ty, buf, cap, pfx, sfx);
     } else if ty.kind == TypeKind::TYPE_CONST {
         // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>`; the number is the
         // whole point of the diagnostic.
-        let v = ty.cval().to_string();
-        unsafe stdio::snprintf(buf, cap, "%.*s".ptr() as *const char, v.len() as i32, v.as_str().ptr());
+        out.push_str(ty.cval().to_string().as_str());
     } else if ty.kind == TypeKind::TYPE_CONST_EXPR {
         // Printed from the canonical form rather than as written: two of these failing to match is the
         // one diagnostic this type produces, and the forms are what differ.
@@ -4398,15 +7879,13 @@ pub fn render_type_into(
             t.format_into("{}", l.div_of());
         }
         t.push_str("}");
-        unsafe stdio::snprintf(buf, cap, "%.*s".ptr() as *const char, t.len() as i32, t.as_str().ptr());
+        out.push_str(t.as_str());
     } else if ty.kind == TypeKind::TYPE_FIELD_PROJECTION {
         // The symbolic per-field type of a reflection loop: name it by what it projects.
-        let at = (unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "field of ".ptr() as *const char)) as usize;
-        if at < cap {
-            render_type_into(pkg, a, cur_src, ty.as_data.proj.owner, unsafe (buf + at), cap - at);
-        }
+        out.push_str("field of ");
+        render_type_str(pkg, a, cur_src, ty.as_data.proj.owner, out);
     } else {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "?".ptr() as *const char);
+        out.push_str("?");
     }
 }
 
@@ -4633,7 +8112,18 @@ extend<'a> TypeChecker<'a> {
             if y.kind == TypeKind::TYPE_DYN {
                 return unsafe (*self.cur_ast()).intern_dyn_fn(it.args[0], y.qualifier);
             }
-            return unsafe (*self.cur_ast()).intern_sig_rec(&it, y.qualifier);
+            let mut sl = Vector::<TypeId>::with_capacity(rec_len(&it) as usize);
+            for i in 0..it.module as u32 + it.decl {
+                sl.push(unsafe (*self.cur_ast()).rec_slot(&it, i));
+            }
+            let lts = self.tc_lts_subst(&y, &it, &mut sl);
+            return unsafe (*self.cur_ast()).intern_fn_sig(
+                sl.as_ptr(),
+                it.module,
+                it.decl,
+                (y.qualifier & FN_MOVE) != 0,
+                lts,
+            );
         }
         return ty;
     }
@@ -5489,14 +8979,14 @@ extend<'a> TypeChecker<'a> {
     fn tc_report_type_conflicts(self: &mut Self, sp: tok::Span) {
         for ci in self.icx.sv.sess.type_conflicts as usize..self.icx.sv.type_conflicts.len() {
             let cf = *self.icx.sv.type_conflicts.at(ci);
-            let first = self.type_buf(cf.first);
-            let later = self.type_buf(cf.later);
+            let first = self.type_str(cf.first);
+            let later = self.type_str(cf.later);
             self.errors.emit_span(
                 sp,
                 format(
                     "mismatched types: generic parameter was constrained to both '{}' and '{}'",
-                    str::from_cbuf(first.as_slice()),
-                    str::from_cbuf(later.as_slice()),
+                    first.as_str(),
+                    later.as_str(),
                 ),
             );
         }
@@ -6094,14 +9584,10 @@ extend<'a> TypeChecker<'a> {
             self.errors.emit_span(sp, format("expected a type for generic parameter '{}', found a constant", pname));
             return TYPE_ERROR;
         }
-        let ty = self.type_buf(t);
+        let ty = self.type_str(t);
         self.errors.emit_span(
             sp,
-            format(
-                "expected a constant for const parameter '{}', found type '{}'",
-                pname,
-                str::from_cbuf(ty.as_slice()),
-            ),
+            format("expected a constant for const parameter '{}', found type '{}'", pname, ty.as_str()),
         );
         return TYPE_ERROR;
     }
@@ -7093,11 +10579,11 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let e = *self.type_at(y.as_data.arr.elem);
-        let tb = self.type_buf(y.as_data.arr.elem);
+        let tb = self.type_str(y.as_data.arr.elem);
         let msg = vec_err(
             y.kind == TypeKind::TYPE_MASK,
             pick(e.kind == TypeKind::TYPE_BUILTIN, e.as_data.builtin, BuiltinType::BT_COUNT),
-            str::from_cbuf(tb.as_slice()),
+            tb.as_str(),
             unsafe (*self.cur_ast()).lanes(&y),
         );
         if msg.len() != 0 {
@@ -7134,20 +10620,17 @@ extend<'a> TypeChecker<'a> {
             if t == TYPE_NONE || !y.is_vec() {
                 continue;
             }
-            let vb = self.type_buf(t);
-            let eb = self.type_buf(y.as_data.arr.elem);
+            let vb = self.type_str(t);
+            let eb = self.type_str(y.as_data.arr.elem);
             let msg = if y.kind == TypeKind::TYPE_SIMD {
                 format(
                     "`{}` has no stable C ABI; pass `[{}; {}]` and convert with `from_array`/`to_array`",
-                    str::from_cbuf(vb.as_slice()),
-                    str::from_cbuf(eb.as_slice()),
+                    vb.as_str(),
+                    eb.as_str(),
                     unsafe (*a).lanes(&y),
                 );
             } else {
-                format(
-                    "`{}` has no stable C ABI; pass `u64` and convert with `from_bits`/`to_bits`",
-                    str::from_cbuf(vb.as_slice()),
-                );
+                format("`{}` has no stable C ABI; pass `u64` and convert with `from_bits`/`to_bits`", vb.as_str());
             };
             self.errors.emit_span(unsafe (*a).at_const(n).span, msg);
         }
@@ -7230,8 +10713,8 @@ extend<'a> TypeChecker<'a> {
         let e = *self.type_at(vy.as_data.arr.elem);
         if e.kind == TypeKind::TYPE_BUILTIN {
             // The result's lane count is the list's length.
-            let tb = self.type_buf(vy.as_data.arr.elem);
-            let msg = vec_err(false, e.as_data.builtin, str::from_cbuf(tb.as_slice()), lst.len() as u64);
+            let tb = self.type_str(vy.as_data.arr.elem);
+            let msg = vec_err(false, e.as_data.builtin, tb.as_str(), lst.len() as u64);
             if msg.len() != 0 {
                 self.errors.emit_span(sp, msg);
                 return;
@@ -7339,21 +10822,15 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        let vb = self.type_buf(pick(s.is_vec(), src, dst));
+        let vb = self.type_str(pick(s.is_vec(), src, dst));
         if storage {
             let hint = pick(v.kind == TypeKind::TYPE_SIMD, "`from_array` or `to_array`", "`from_bits` or `to_bits`");
-            self.errors.emit_span(
-                sp,
-                format("only `std` casts `{}` to or from its storage; use {}", str::from_cbuf(vb.as_slice()), hint),
-            );
+            self.errors.emit_span(sp, format("only `std` casts `{}` to or from its storage; use {}", vb.as_str(), hint));
             return;
         }
-        let sb = self.type_buf(src);
-        let db = self.type_buf(dst);
-        self.errors.emit_span(
-            sp,
-            format("invalid cast from '{}' to '{}'", str::from_cbuf(sb.as_slice()), str::from_cbuf(db.as_slice())),
-        );
+        let sb = self.type_str(src);
+        let db = self.type_str(dst);
+        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", sb.as_str(), db.as_str()));
     }
     // The type generic alias `d` names at type path `id` of module `m`: the alias body with each
     // parameter replaced by its argument. The body lowers with its own parameters as generics, so
@@ -8018,7 +11495,8 @@ extend<'a> TypeChecker<'a> {
             }
             slots.push(self.lower_type_in(m, anchor));
         }
-        return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), ft.returns.len, ft.params.len, ft.is_move);
+        let lts = self.tc_fn_type_lts(m, id, &mut slots, ft.returns.len);
+        return unsafe (*self.cur_ast()).intern_fn_sig(slots.as_ptr(), ft.returns.len, ft.params.len, ft.is_move, lts);
     }
 
     fn tc_intern_dynfn(self: &mut Self, m: ModuleId, sig: NodeId, qual: TypeQualifier) TypeId {
@@ -9324,7 +12802,7 @@ extend<'a> TypeChecker<'a> {
         for i in 0..f.params.len {
             slots[(f.returns.len + i) as usize] = self.tc_method_sig(recv, c, conf, i as i32);
         }
-        return unsafe (*self.cur_ast()).intern_fn_sig(&slots[0], f.returns.len, f.params.len, false);
+        return unsafe (*self.cur_ast()).intern_fn_sig(&slots[0], f.returns.len, f.params.len, false, 0);
     }
 
     // Candidates `first` and `second` of `tc_pick_conf_method` fit a use of `name` on `recv` equally.
@@ -9343,13 +12821,13 @@ extend<'a> TypeChecker<'a> {
             let iface = self.enclosing(cm[first].module, cm[first].node, NodeKind::NODE_INTERFACE);
             let ia = self.mod_ast(cm[first].module);
             let isp = unsafe (*ia).at_const(unsafe (*ia).at_const(iface).as_data.interface_def.name).as_data.name.text;
-            let tb = self.type_buf(recv);
+            let tb = self.type_str(recv);
             self.errors.emit_span(
                 name,
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
                     diag::span_str(self.source, name.start, name.end),
-                    str::from_cbuf(tb.as_slice()),
+                    tb.as_str(),
                     diag::span_str(self.mod_src(cm[first].module), isp.start, isp.end),
                 ),
             );
@@ -9512,7 +12990,7 @@ extend<'a> TypeChecker<'a> {
             return none;
         }
         if hits > 1 && !matched {
-            let tb = self.type_buf(rt);
+            let tb = self.type_str(rt);
             let ina = self.mod_ast(iface.module);
             let isp = unsafe (*ina).at_const(unsafe (*ina).at_const(iface.node).as_data.interface_def.name).as_data.name.text;
             self.errors.emit_span(
@@ -9520,7 +12998,7 @@ extend<'a> TypeChecker<'a> {
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
                     nm,
-                    str::from_cbuf(tb.as_slice()),
+                    tb.as_str(),
                     diag::span_str(self.mod_src(iface.module), isp.start, isp.end),
                 ),
             );
@@ -10766,14 +14244,10 @@ extend<'a> TypeChecker<'a> {
             }
             let t = self.tc_assoc_make(ad.module, ad.node, &args[0], (gn + 1) as u8);
             if found != TYPE_NONE && found != t {
-                let pb = self.type_buf(pty);
+                let pb = self.type_str(pty);
                 self.errors.emit_span(
                     sp,
-                    format(
-                        "ambiguous associated type '{}': several bounds of '{}' declare it",
-                        name,
-                        str::from_cbuf(pb.as_slice()),
-                    ),
+                    format("ambiguous associated type '{}': several bounds of '{}' declare it", name, pb.as_str()),
                 );
                 self.note_decl_site("the bounds are declared here", DefId { module: pmod, node: pdecl });
                 return TYPE_ERROR;
@@ -11175,15 +14649,15 @@ extend<'a> TypeChecker<'a> {
                 if !notes {
                     return false;
                 }
-                let on = self.type_buf(owner);
-                let fn2 = self.type_buf(ft);
+                let on = self.type_str(owner);
+                let fn2 = self.type_str(ft);
                 if ag.is_tuple {
                     self.errors.note(
                         format(
                             "field {} of '{}' is '{}', which does not satisfy the bound",
                             idx,
-                            str::from_cbuf(on.as_slice()),
-                            str::from_cbuf(fn2.as_slice()),
+                            on.as_str(),
+                            fn2.as_str(),
                         ),
                     );
                 } else {
@@ -11192,8 +14666,8 @@ extend<'a> TypeChecker<'a> {
                         format(
                             "field '{}' of '{}' is '{}', which does not satisfy the bound",
                             diag::span_str(self.mod_src(om), fsp3.start, fsp3.end),
-                            str::from_cbuf(on.as_slice()),
-                            str::from_cbuf(fn2.as_slice()),
+                            on.as_str(),
+                            fn2.as_str(),
                         ),
                     );
                 }
@@ -11345,13 +14819,13 @@ extend<'a> TypeChecker<'a> {
                     continue;
                 }
                 if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
-                    let on2 = self.type_buf(owner2);
+                    let on2 = self.type_str(owner2);
                     let sp2 = unsafe (*self.cur_ast()).at_const(mu.node).span;
                     self.errors.emit_span(
                         sp2,
                         format(
                             "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
-                            str::from_cbuf(on2.as_slice()),
+                            on2.as_str(),
                         ),
                     );
                     let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
@@ -11417,13 +14891,13 @@ extend<'a> TypeChecker<'a> {
         if self.proj_fields_satisfy(owner, ob_iface, 0, false) {
             return;
         }
-        let on2 = self.type_buf(owner);
+        let on2 = self.type_str(owner);
         let sp2 = unsafe (*self.cur_ast()).at_const(itype).span;
         self.errors.emit_span(
             sp2,
             format(
                 "a field of '{}' does not satisfy a bound required by the interface's default method '{}'",
-                str::from_cbuf(on2.as_slice()),
+                on2.as_str(),
                 diag::span_str(self.mod_src(imod), rn.start, rn.end),
             ),
         );
@@ -12266,13 +15740,10 @@ extend<'a> TypeChecker<'a> {
         if l.ok || !l.big {
             return false;
         }
-        let tn = self.type_buf(ty);
+        let tn = self.type_str(ty);
         self.errors.emit_span(
             sp,
-            format(
-                "the type '{}' is too large for the target: no object may exceed isize::MAX bytes",
-                str::from_cbuf(tn.as_slice()),
-            ),
+            format("the type '{}' is too large for the target: no object may exceed isize::MAX bytes", tn.as_str()),
         );
         return true;
     }
@@ -12868,14 +16339,14 @@ extend<'a> TypeChecker<'a> {
         return en < 0 || en == gens.len as i32 && self.ext_bounds_hold(md.module, extnode, &ea[0], en, 0);
     }
     fn err_method_extend_bounds(self: &mut Self, at: tok::Span, target: TypeId, md: DefId) {
-        let ty = self.type_buf(self.strip(target));
+        let ty = self.type_str(self.strip(target));
         let ma = self.mod_ast(md.module);
         let mn = unsafe (*ma).at_const(unsafe (*ma).at_const(md.node).as_data.function.name).as_data.name.text;
         self.errors.emit_span(
             at,
             format(
                 "cannot call '{}::{}': unsatisfied interface bounds",
-                str::from_cbuf(ty.as_slice()),
+                ty.as_str(),
                 diag::span_str(self.mod_src(md.module), mn.start, mn.end),
             ),
         );
@@ -13072,15 +16543,15 @@ extend<'a> TypeChecker<'a> {
         if other.node == NODE_NONE || probe {
             return DYN_CONF_NONE;
         }
-        let sn = self.type_buf(src);
-        let dn = self.type_buf(dyn_ty);
+        let sn = self.type_str(src);
+        let dn = self.type_str(dyn_ty);
         self.errors.emit_span(
             sp,
             format(
                 "cannot erase '{}' to '{}': '{}' conforms to this interface only with other arguments",
-                str::from_cbuf(sn.as_slice()),
-                str::from_cbuf(dn.as_slice()),
-                str::from_cbuf(sn.as_slice()),
+                sn.as_str(),
+                dn.as_str(),
+                sn.as_str(),
             ),
         );
         let oa = self.mod_ast(other.module);
@@ -13231,21 +16702,14 @@ extend<'a> TypeChecker<'a> {
             let mid = unsafe (*ia).list(items)[i as usize];
             if self.dyn_method(iface.module, mid) {
                 let mn = unsafe (*ia).at_const(unsafe (*ia).at_const(mid).as_data.function.name).as_data.name.text;
-                let mut nmb = Buf96 {};
-                unsafe stdio::snprintf(
-                    &mut nmb[0],
-                    96,
-                    "%.*s".ptr() as *const char,
-                    (mn.end - mn.start) as i32,
-                    src_at(isrc, mn.start),
-                );
+                let nm = isrc.slice(mn.start as usize, mn.end as usize);
                 // The vtable calls the matching conformance's own method: mark that one used.
-                let cm = self.tc_ext_method(conf, str::from_cbuf(nmb.as_slice()));
+                let cm = self.tc_ext_method(conf, nm);
                 if cm.node != NODE_NONE {
                     self.tc_mark_method_used(cm);
                     continue;
                 }
-                if self.find_method_cstr(tmod, tdecl, str::from_cbuf(nmb.as_slice())).node != NODE_NONE {
+                if self.find_method_cstr(tmod, tdecl, nm).node != NODE_NONE {
                     continue;
                 }
                 let mut emod: ModuleId = 0;
@@ -13260,14 +16724,10 @@ extend<'a> TypeChecker<'a> {
                 if probe {
                     return false;
                 }
-                let tn = self.type_buf(src);
+                let tn = self.type_str(src);
                 self.errors.emit_span(
                     sp,
-                    format(
-                        "cannot erase '{}' to 'dyn': method '{}' has no emittable implementation",
-                        str::from_cbuf(tn.as_slice()),
-                        str::from_cbuf(nmb.as_slice()),
-                    ),
+                    format("cannot erase '{}' to 'dyn': method '{}' has no emittable implementation", tn.as_str(), nm),
                 );
                 self.errors.note(format("implement the method in an 'extend .. as ..' block or give it a default body"));
                 return true;
@@ -13355,21 +16815,16 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         self.reported.insert(key);
-        let mut f = Buf96 {};
-        if ot == TYPE_NONE {
-            unsafe stdio::snprintf(&mut f[0], 96, "%s".ptr() as *const char, "null".ptr() as *const char);
+        let f = if ot == TYPE_NONE {
+            String::from_str("null");
         } else {
-            self.render_type(ot, &mut f[0], 96);
-        }
-        let d = self.type_buf(expected);
+            self.type_str(ot);
+        };
+        let d = self.type_str(expected);
         let sp = unsafe (*a).at_const(nid).span;
         self.errors.warn_span(
             sp,
-            format(
-                "unnecessary cast: '{}' converts to '{}' implicitly here",
-                str::from_cbuf(f.as_slice()),
-                str::from_cbuf(d.as_slice()),
-            ),
+            format("unnecessary cast: '{}' converts to '{}' implicitly here", f.as_str(), d.as_str()),
         );
         self.tc_cast_drop_fix(nid);
     }
@@ -13383,10 +16838,32 @@ extend<'a> TypeChecker<'a> {
     // `let a: u128 = 42`, `a + 1`, `f(a)`. Tried only after every built-in rule has failed, so nothing
     // that converted before converts differently now.
     fn compatible_in(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
-        if self.compatible_core(expected, node, probe) {
-            return true;
+        let o = self.lt_conv;
+        self.lt_conv = node;
+        let mut r = self.compatible_core(expected, node, probe) || self.tc_coerce_from(expected, node, probe);
+        // One function type may name its lifetimes from outside it otherwise than the value's
+        // declaration does: the names relate as the declaration says (`tc_lt_value_fits`).
+        if r && expected != TYPE_NONE && unsafe (*self.cur_ast()).type_of(node) == expected {
+            let ey = *self.type_at(expected);
+            let sig = if ey.kind == TypeKind::TYPE_DYN {
+                self.tc_dyn_fn_sig(&ey);
+            } else {
+                expected;
+            };
+            if sig != TYPE_NONE && self.type_at(sig).fn_sig() && self.tc_has_outer(self.type_at(sig)) {
+                r = self.tc_lt_value_fits(sig, sig);
+            }
         }
-        return self.tc_coerce_from(expected, node, probe);
+        // A pending local converts to its context's type: its inference variables take the
+        // lifetimes that type writes (`tc_pend_bind`).
+        if r && self.lt_pend.len() != 0 {
+            let p = self.tc_pend_of(node);
+            if p >= 0 && self.lt_pend.at(p as usize).owner != NODE_NONE {
+                r = self.tc_pend_bind(node, p);
+            }
+        }
+        self.lt_conv = o;
+        return r;
     }
 
     fn tc_coerce_from(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
@@ -13503,13 +16980,10 @@ extend<'a> TypeChecker<'a> {
                 }
             }
         }
-        let s = self.type_buf(src);
-        let d = self.type_buf(dst);
+        let s = self.type_str(src);
+        let d = self.type_str(dst);
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(
-            sp,
-            format("invalid cast from '{}' to '{}'", str::from_cbuf(s.as_slice()), str::from_cbuf(d.as_slice())),
-        );
+        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
         return true;
     }
 
@@ -13842,6 +17316,16 @@ extend<'a> TypeChecker<'a> {
                     return true;
                 }
                 if exsig != TYPE_NONE {
+                    if rel.fn_sig() {
+                        if probe {
+                            return false;
+                        }
+                        self.errors.emit_span(
+                            sp,
+                            format("a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure"),
+                        );
+                        return true;
+                    }
                     if rel.kind != TypeKind::TYPE_FUNCTION || !self.dynfn_sig_ok(exsig, ac.as_data.elem) {
                         return false;
                     }
@@ -14042,12 +17526,9 @@ extend<'a> TypeChecker<'a> {
                 if probe {
                     return false;
                 }
-                let tn = self.type_buf(expected);
+                let tn = self.type_str(expected);
                 let sp = unsafe (*self.cur_ast()).at_const(node).span;
-                self.errors.emit_span(
-                    sp,
-                    format("float literal is out of range for '{}'", str::from_cbuf(tn.as_slice())),
-                );
+                self.errors.emit_span(sp, format("float literal is out of range for '{}'", tn.as_str()));
                 return true;
             }
             // Record the CONTEXT's type on the literal, exactly as the integer branch does. The emitted C
@@ -15207,7 +18688,7 @@ extend<'a> TypeChecker<'a> {
                     let at = unsafe (*self.cur_ast()).at_const(
                         unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,
                     ).span;
-                    let tn = self.type_buf(self_ty);
+                    let tn = self.type_str(self_ty);
                     let kind = if self.tc_type_is_union(self_ty) {
                         "a union";
                     } else {
@@ -15215,12 +18696,7 @@ extend<'a> TypeChecker<'a> {
                     };
                     self.errors.emit_span(
                         at,
-                        format(
-                            "'{}' is {}, which the default '{}' does not support",
-                            str::from_cbuf(tn.as_slice()),
-                            kind,
-                            reflect_m,
-                        ),
+                        format("'{}' is {}, which the default '{}' does not support", tn.as_str(), kind, reflect_m),
                     );
                     self.errors.note(format("define '{}' in an 'extend' of the type", reflect_m));
                 }
@@ -15319,13 +18795,13 @@ extend<'a> TypeChecker<'a> {
         }
         let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
         let sp = unsafe (*self.cur_ast()).at_const(itype).span;
-        let ty = self.type_buf(self_ty);
+        let ty = self.type_str(self_ty);
         let why = if self.tc_type_is_free(self_ty) {
             "it owns memory, and a bitwise copy would free that memory twice";
         } else {
             "a member is not 'Copy'";
         };
-        self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", str::from_cbuf(ty.as_slice()), why));
+        self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", ty.as_str(), why));
     }
     // `Send` and `Sync` are the two conformances the compiler cannot verify. Every other interface is checked
     // against its requirements; these two are DERIVED structurally, and writing one by hand overrides that
@@ -16196,13 +19672,10 @@ extend TypeChecker {
             if !untyped(opnd) && self.type_at(opnd).kind == TypeKind::TYPE_SIMD {
                 // Lane by lane, as on a scalar of the lane type.
                 if !self.tc_lanes_are(opnd, "SimdSigned") {
-                    let ty = self.type_buf(opnd);
+                    let ty = self.type_str(opnd);
                     self.errors.emit_span(
                         sp,
-                        format(
-                            "cannot apply unary operator '-' to type '{}' (its lanes have no sign)",
-                            str::from_cbuf(ty.as_slice()),
-                        ),
+                        format("cannot apply unary operator '-' to type '{}' (its lanes have no sign)", ty.as_str()),
                     );
                 }
                 return opnd;
@@ -16350,14 +19823,14 @@ extend TypeChecker {
                 if conv.node != NODE_NONE {
                     unsafe (*self.cur_ast()).set_resolution_def(id, conv);
                 } else {
-                    let a1 = self.type_buf(oa[1]);
-                    let a2 = self.type_buf(fa[1]);
+                    let a1 = self.type_str(oa[1]);
+                    let a2 = self.type_str(fa[1]);
                     self.errors.emit_span(
                         sp,
                         format(
                             "'?' error type '{}' does not match the function's error type '{}'",
-                            str::from_cbuf(a1.as_slice()),
-                            str::from_cbuf(a2.as_slice()),
+                            a1.as_str(),
+                            a2.as_str(),
                         ),
                     );
                 }
@@ -16482,12 +19955,12 @@ extend TypeChecker {
         if lt.kind == TypeKind::TYPE_GENERIC {
             if !self.tc_bound_op(id, ls, m, right, out) && !self.tc_blanket_op(id, ls, m, right, out) {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                let ty = self.type_buf(ls);
+                let ty = self.type_str(ls);
                 self.errors.emit_span(
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
-                        str::from_cbuf(ty.as_slice()),
+                        ty.as_str(),
                         m,
                     ),
                 );
@@ -16538,11 +20011,8 @@ extend TypeChecker {
             }
             if md.node == NODE_NONE {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                let ty = self.type_buf(ls);
-                self.errors.emit_span(
-                    sp,
-                    format("'{}' has no '{}' method for this operator", str::from_cbuf(ty.as_slice()), m),
-                );
+                let ty = self.type_str(ls);
+                self.errors.emit_span(sp, format("'{}' has no '{}' method for this operator", ty.as_str(), m));
                 *out = TYPE_NONE;
             } else {
                 if !self.method_extend_bounds_hold(ls, md) {
@@ -16966,12 +20436,12 @@ extend TypeChecker {
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         if ot.kind == TypeKind::TYPE_GENERIC {
             if !self.tc_bound_op(id, os, "bit_not", NODE_NONE, out) {
-                let ty = self.type_buf(os);
+                let ty = self.type_str(os);
                 self.errors.emit_span(
                     sp,
                     format(
                         "type parameter '{}' has no 'bit_not' method for this operator (add a bound that provides it)",
-                        str::from_cbuf(ty.as_slice()),
+                        ty.as_str(),
                     ),
                 );
                 *out = TYPE_NONE;
@@ -17000,11 +20470,8 @@ extend TypeChecker {
                 self.tc_record_op_keyed(id, md, &mut ka, kn);
             }
             if md.node == NODE_NONE {
-                let ty = self.type_buf(os);
-                self.errors.emit_span(
-                    sp,
-                    format("type '{}' has no 'bit_not' method for this operator", str::from_cbuf(ty.as_slice())),
-                );
+                let ty = self.type_str(os);
+                self.errors.emit_span(sp, format("type '{}' has no 'bit_not' method for this operator", ty.as_str()));
                 *out = TYPE_NONE;
                 return true;
             }
@@ -17163,13 +20630,10 @@ extend TypeChecker {
             }
             let rk = self.type_at(rs).kind;
             if rk == TypeKind::TYPE_STRUCT || rk == TypeKind::TYPE_INSTANCE {
-                let ty = self.type_buf(rs);
+                let ty = self.type_str(rs);
                 self.errors.emit_span(
                     sp,
-                    format(
-                        "cannot compare '{}' with 'null' (it is a value, not a pointer)",
-                        str::from_cbuf(ty.as_slice()),
-                    ),
+                    format("cannot compare '{}' with 'null' (it is a value, not a pointer)", ty.as_str()),
                 );
                 return Ast::builtin(BuiltinType::BT_BOOL);
             }
@@ -17212,12 +20676,12 @@ extend TypeChecker {
         if lsk == TypeKind::TYPE_SIMD || lsk == TypeKind::TYPE_ARRAY {
             // Float lanes are not reflexive and a lane comparison yields a mask, not a `bool`; C
             // compares arrays by address.
-            let ty = self.type_buf(ls);
+            let ty = self.type_str(ls);
             self.errors.emit_span(
                 sp,
                 format(
                     "`{}` does not implement `{}`; compare {}",
-                    str::from_cbuf(ty.as_slice()),
+                    ty.as_str(),
                     pick(ord, "Ord", "Eq"),
                     pick(lsk == TypeKind::TYPE_SIMD, "lanes", "elements"),
                 ),
@@ -17236,13 +20700,10 @@ extend TypeChecker {
                 }
                 let rnn = unsafe (*self.cur_ast()).at_const(rn);
                 if !ls_enum && rnn.kind == NodeKind::NODE_LITERAL && rnn.as_data.literal.token_type == TokenType::Null {
-                    let ty = self.type_buf(ls);
+                    let ty = self.type_str(ls);
                     self.errors.emit_span(
                         sp,
-                        format(
-                            "cannot compare '{}' with 'null' (it is a value, not a pointer)",
-                            str::from_cbuf(ty.as_slice()),
-                        ),
+                        format("cannot compare '{}' with 'null' (it is a value, not a pointer)", ty.as_str()),
                     );
                     return Ast::builtin(BuiltinType::BT_BOOL);
                 }
@@ -17256,19 +20717,14 @@ extend TypeChecker {
                     // No conformance: the native discriminant comparison below.
                     native_enum = true;
                 } else if md.node == NODE_NONE {
-                    let ty = self.type_buf(ls);
+                    let ty = self.type_str(ls);
                     let mut iface = "Eq";
                     if ord {
                         iface = "Ord";
                     }
                     self.errors.emit_span(
                         sp,
-                        format(
-                            "'{}' has no '{}' method for this operator (implement {})",
-                            str::from_cbuf(ty.as_slice()),
-                            mm,
-                            iface,
-                        ),
+                        format("'{}' has no '{}' method for this operator (implement {})", ty.as_str(), mm, iface),
                     );
                     self.errors.note(format("operator overloads are resolved through interface-style methods"));
                 } else if !self.method_extend_bounds_hold(ls, md) {
@@ -17334,6 +20790,18 @@ extend TypeChecker {
         let mut ga0 = Tys8 {};
         let mut gn0: i32 = 0;
         let _ = self.aggregate_of(callee_ty, &mut amod0, &mut adecl0, &mut gp0, &mut ga0, &mut gn0);
+        // Each payload argument is checked against the payload type its context's written type gives.
+        let fm = self.lt_env.len();
+        let pf = self.tc_frame_of(id);
+        for i in 0..args.len.min(payload.len) {
+            self.tc_frame_member(
+                unsafe (*a).list(args)[i as usize],
+                pf,
+                vmod,
+                unsafe (*va).list(payload)[i as usize],
+                adecl0,
+            );
+        }
         for i in 0..args.len {
             let mut want = TYPE_NONE;
             if i < payload.len {
@@ -17352,6 +20820,7 @@ extend TypeChecker {
         if enum_ty != TYPE_NONE && self.type_at(enum_ty).kind == TypeKind::TYPE_ENUM {
             enum_ty = self.tc_infer_variant_instance(id, vmod, variant, enum_ty);
             if enum_ty == TYPE_NONE {
+                self.lt_env.truncate(fm);
                 return TYPE_NONE;
             }
         }
@@ -17374,10 +20843,11 @@ extend TypeChecker {
                 }
                 let aid = unsafe (*a).list(args)[k as usize];
                 if !self.compatible(pt, aid) {
-                    self.err_mismatch(aid, pt);
+                    self.err_mismatch_ann(aid, pt, vmod, pid);
                 }
             }
         }
+        self.lt_env.truncate(fm);
         return enum_ty;
     }
 
@@ -18562,11 +22032,8 @@ extend TypeChecker {
             }
         }
         if !comparable {
-            let ty = self.type_buf(lt);
-            self.errors.emit_span(
-                sp,
-                format("'{}' cannot compare values of type '{}'", nm, str::from_cbuf(ty.as_slice())),
-            );
+            let ty = self.type_str(lt);
+            self.errors.emit_span(sp, format("'{}' cannot compare values of type '{}'", nm, ty.as_str()));
             self.errors.note(format("implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead"));
         }
         return Ast::builtin(BuiltinType::BT_VOID);
@@ -18894,7 +22361,7 @@ extend TypeChecker {
         if wy.rec() != NO_REC {
             let wi = *unsafe (*self.cur_ast()).instance(wy.rec());
             let ci = *unsafe (*self.cur_ast()).instance(cy.rec());
-            if wi.module != ci.module || wi.decl != ci.decl || wi.n != ci.n {
+            if wi.module != ci.module || wi.decl != ci.decl || wi.n != ci.n || wi.lts != ci.lts {
                 return false;
             }
             for i in 0..wi.n {
@@ -18973,7 +22440,7 @@ extend TypeChecker {
                 continue;
             }
             let nsp = unsafe (*fa).at_const(unsafe (*fa).at_const(gid).as_data.generic_param.name).as_data.name.text;
-            let tb = self.type_buf(self_ty);
+            let tb = self.type_str(self_ty);
             let isp = unsafe (*self.mod_ast(iface.module)).at_const(
                 unsafe (*self.mod_ast(iface.module)).at_const(iface.node).as_data.interface_def.name,
             ).as_data.name.text;
@@ -18982,7 +22449,7 @@ extend TypeChecker {
                 format(
                     "cannot infer '{}': '{}' conforms to '{}' with several arguments",
                     diag::span_str(self.mod_src(fmod), nsp.start, nsp.end),
-                    str::from_cbuf(tb.as_slice()),
+                    tb.as_str(),
                     diag::span_str(self.mod_src(iface.module), isp.start, isp.end),
                 ),
             );
@@ -19033,16 +22500,16 @@ extend TypeChecker {
             return false;
         }
         let er2 = self.subst_type(self.subst_type(es.ret, rp, ra, rn), gp, ga, gn);
-        if !self.ret_eq(er2, as2.ret) {
+        if !self.ret_eq(er2, as2.ret) && !self.tc_same_shape(er2, as2.ret) {
             return false;
         }
         for i in 0..es.np {
             let ep2 = self.subst_type(self.subst_type(self.fn_param(&es, i), rp, ra, rn), gp, ga, gn);
-            if ep2 != self.fn_param(&as2, i) {
+            if !self.tc_same_shape(ep2, self.fn_param(&as2, i)) {
                 return false;
             }
         }
-        return true;
+        return self.tc_lt_value_fits(self.subst_type(self.subst_type(exid, rp, ra, rn), gp, ga, gn), acid);
     }
 
     fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) {
@@ -19054,6 +22521,13 @@ extend TypeChecker {
     }
 
     fn check_call(self: &mut Self, id: NodeId, want: TypeId) TypeId {
+        let fm = self.lt_env.len();
+        let r = self.check_call_i(id, want);
+        self.lt_env.truncate(fm);
+        return r;
+    }
+
+    fn check_call_i(self: &mut Self, id: NodeId, want: TypeId) TypeId {
         let a = self.cur_ast();
         let callee_id = unsafe (*a).at_const(id).as_data.call.callee;
         let pck = unsafe (*a).at_const(callee_id).kind;
@@ -19409,6 +22883,8 @@ extend TypeChecker {
             }
         }
         let args = unsafe (*a).at_const(id).as_data.call.args;
+        // An argument is checked against the written type the call's context gives its parameter.
+        self.tc_frame_call(id, callee, callee_id, args);
         for i in 0..args.len {
             if i < 8 && (pre >> i as u8 & 1) != 0 {
                 continue;
@@ -19446,6 +22922,14 @@ extend TypeChecker {
         }
         let mut ct = *self.type_at(callee);
         let sp = unsafe (*a).at_const(id).span;
+        // A reference to a `dyn fn` value or a function pointer calls its pointee (lowering derefs).
+        for _ in 0..8 {
+            if ct.kind != TypeKind::TYPE_REFERENCE || !self.tc_ref_callable(ct.as_data.elem) {
+                break;
+            }
+            callee = ct.as_data.elem;
+            ct = *self.type_at(callee);
+        }
         if ct.kind == TypeKind::TYPE_GENERIC {
             let fb = self.generic_fn_bound(ct.module, ct.as_data.decl);
             if fb != NODE_NONE {
@@ -19459,6 +22943,16 @@ extend TypeChecker {
                 callee = ds;
                 ct = *self.type_at(callee);
             }
+        }
+        if ct.fn_sig() && self.tc_lts_wide(&ct) {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "this function value cannot be called: substitution gave its type more lifetimes than a function type can show",
+                ),
+            );
+            self.note_lt_limits();
+            return TYPE_ERROR;
         }
         // Tuple-struct constructor `Wrap(a, b)` (and the generic `Pair::<A, B>(a, b)`): positional
         // aggregate construction, not a call. aggregate_of covers both the plain struct and its
@@ -19607,6 +23101,21 @@ extend TypeChecker {
         return ret;
     }
 
+    // The type node of parameter `i` of the function type the callee of call `id` (a value of this
+    // module) is declared with; NODE_NONE when none writes one.
+    fn tc_sig_param_node(self: &Self, id: NodeId, i: u32) NodeId {
+        let a = self.cur_ast();
+        let tn = self.tc_value_decl_node(unsafe (*a).at_const(id).as_data.call.callee, 0);
+        if tn == NODE_NONE || unsafe (*a).at_const(tn).kind != NodeKind::NODE_FUNCTION_TYPE {
+            return NODE_NONE;
+        }
+        let ps = unsafe (*a).at_const(tn).as_data.function_type.params;
+        if i >= ps.len {
+            return NODE_NONE;
+        }
+        return unsafe (*a).slot_type_node(unsafe (*a).list(ps)[i as usize]);
+    }
+
     // A call through a value of function-pointer type `callee`: arity, each argument against its
     // parameter, then the results (several go through the multi-result stash, as for a function).
     fn check_sig_call(self: &mut Self, id: NodeId, callee: TypeId, args: NodeList) TypeId {
@@ -19620,9 +23129,27 @@ extend TypeChecker {
         } else {
             let none = Defs8 {};
             let nonet = Tys8 {};
+            let mut off: u32 = 0;
+            for i in 0..unsafe (*a).sig_len(&fy, true) {
+                off = off + self.tc_lt_count(unsafe (*a).sig_at(&fy, true, i));
+            }
             for i in 0..np {
                 let pt = unsafe (*a).sig_at(&fy, false, i);
                 let aid = unsafe (*a).list(args)[i as usize];
+                self.lt_call = LtCall {
+                    span: unsafe (*a).at_const(id).span,
+                    m: 0,
+                    item: NODE_NONE,
+                    ptn: NODE_NONE,
+                    sig: callee,
+                    slot: pt,
+                    off: off,
+                };
+                let fm = self.lt_env.len();
+                self.tc_frame_push(aid, self.cur_module(), self.tc_sig_param_node(id, i), NODE_NONE, NODE_NONE, -1);
+                let oc = self.lt_conv;
+                self.lt_conv = aid;
+                off = off + self.tc_lt_count(pt);
                 if unsafe (*a).at_const(aid).kind == NodeKind::NODE_CLOSURE && unsafe (*a).type_of(aid) == TYPE_NONE {
                     let _ct = self.check_expr_w(aid, pt);
                 }
@@ -19644,11 +23171,14 @@ extend TypeChecker {
                         &nonet[0],
                         0,
                     ) && !self.tc_coerce_generic_fn(pt, aid) {
-                        self.err_mismatch(aid, pt);
+                        self.err_mismatch_ann(aid, pt, self.cur_module(), self.tc_sig_param_node(id, i));
                     }
                 } else if !self.compatible(pt, aid) {
-                    self.err_mismatch(aid, pt);
+                    self.err_mismatch_ann(aid, pt, self.cur_module(), self.tc_sig_param_node(id, i));
                 }
+                self.lt_call.span = tok::Span { start: 0, end: 0 };
+                self.lt_conv = oc;
+                self.lt_env.truncate(fm);
             }
         }
         let nr = unsafe (*a).sig_len(&fy, true);
@@ -20406,11 +23936,31 @@ extend TypeChecker {
                 self.errors.emit_span(sp, format("expected {} argument{}, found {}", expected, s2, args.len));
             }
         } else {
+            // The callee is known now: an argument is checked against the written type its context
+            // gives the parameter (`tc_frame_call`).
+            let fm = self.lt_env.len();
+            if named && unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION {
+                self.tc_frame_call_in(id, DefId { module: fmod, node: fdecl }, skip, callee_id, args);
+            }
             for i in 0..expected {
                 let pid = unsafe (*fa).list(params)[(i + skip) as usize];
                 let raw = self.node_type_in(fmod, pid);
                 let pt = self.subst_type(self.subst_type(raw, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
                 let aid = unsafe (*a).list(args)[i as usize];
+                let oc = self.lt_conv;
+                self.lt_conv = aid;
+                // A function value the argument converts to may fix the lifetimes the call chooses.
+                if unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION {
+                    self.lt_call = LtCall {
+                        span: sp,
+                        m: fmod,
+                        item: fdecl,
+                        ptn: unsafe (*fa).slot_type_node(pid),
+                        sig: TYPE_NONE,
+                        slot: TYPE_NONE,
+                        off: 0,
+                    };
+                }
                 // A closure postponed on a path that skipped call inference is checked here, once,
                 // with the fully substituted parameter type.
                 if unsafe (*a).at_const(aid).kind == NodeKind::NODE_CLOSURE && unsafe (*a).type_of(aid) == TYPE_NONE {
@@ -20434,12 +23984,15 @@ extend TypeChecker {
                         &rsuba[0],
                         nrsub,
                     ) && !self.tc_coerce_generic_fn(pt, aid) {
-                        self.err_mismatch(aid, pt);
+                        self.err_mismatch_ann(aid, pt, fmod, unsafe (*fa).slot_type_node(pid));
                     }
                 } else if !self.compatible(pt, aid) {
-                    self.err_mismatch(aid, pt);
+                    self.err_mismatch_ann(aid, pt, fmod, unsafe (*fa).slot_type_node(pid));
                 }
+                self.lt_call.span = tok::Span { start: 0, end: 0 };
+                self.lt_conv = oc;
             }
+            self.lt_env.truncate(fm);
         }
         // C-vararg string-literal default to *const char.
         if variadic && !fmt_builtin && args.len >= expected {
@@ -20614,11 +24167,11 @@ extend TypeChecker {
                 nrsub,
             );
             if have != want && have != TYPE_ERROR && want != TYPE_ERROR {
-                let hb = self.type_buf(have);
+                let hb = self.type_str(have);
                 self.bind_miss = format(
                     "its '{}' is '{}'",
                     self.mod_src(fmod).slice(nt.start as usize, nt.end as usize),
-                    str::from_cbuf(hb.as_slice()),
+                    hb.as_str(),
                 );
                 return false;
             }
@@ -20678,7 +24231,7 @@ extend TypeChecker {
                 let bid = unsafe (*fa).list(pb)[b as usize];
                 let garg = unsafe gargs[i as usize];
                 if !self.bound_holds(fmod, bid, garg, gparams, gargs, gn, rsubp, rsuba, nrsub) {
-                    let tn = self.type_buf(garg);
+                    let tn = self.type_str(garg);
                     let bsp = unsafe (*fa).at_const(bid).span;
                     if self.bind_miss.len() != 0 {
                         self.err_bind_miss(
@@ -20704,7 +24257,7 @@ extend TypeChecker {
                         sp,
                         format(
                             "type '{}' does not satisfy bound '{}'",
-                            str::from_cbuf(tn.as_slice()),
+                            tn.as_str(),
                             diag::span_str(self.mod_src(fmod), bsp.start, bsp.end),
                         ),
                     );
@@ -20738,12 +24291,12 @@ extend TypeChecker {
                     continue;
                 }
                 if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
-                    let on2 = self.type_buf(owner2);
+                    let on2 = self.type_str(owner2);
                     self.errors.emit_span(
                         sp,
                         format(
                             "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
-                            str::from_cbuf(on2.as_slice()),
+                            on2.as_str(),
                         ),
                     );
                     let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
@@ -20781,11 +24334,8 @@ extend TypeChecker {
                         );
                         continue;
                     }
-                    let tn = self.type_buf(wt);
-                    self.errors.emit_span(
-                        sp,
-                        format("type '{}' does not satisfy a where-clause bound", str::from_cbuf(tn.as_slice())),
-                    );
+                    let tn = self.type_str(wt);
+                    self.errors.emit_span(sp, format("type '{}' does not satisfy a where-clause bound", tn.as_str()));
                 }
             }
         }
@@ -21032,11 +24582,8 @@ extend TypeChecker {
             // `T: 'static`, as for a function's argument: the type must hold no borrow, since nothing
             // borrowed from a local outlives the program.
             if self.tc_bounds_have_static(it.module, pb) && self.tc_may_borrow(ga[g as usize], 0) {
-                let tn = self.type_buf(ga[g as usize]);
-                self.errors.emit_span(
-                    sp,
-                    format("type '{}' does not satisfy bound ''static'", str::from_cbuf(tn.as_slice())),
-                );
+                let tn = self.type_str(ga[g as usize]);
+                self.errors.emit_span(sp, format("type '{}' does not satisfy bound ''static'", tn.as_str()));
                 self.errors.note(format("the parameter is declared `: 'static`, so its argument cannot hold a borrow"));
                 if !self.tc_carries_borrow(ga[g as usize]) {
                     self.errors.note(
@@ -21075,11 +24622,8 @@ extend TypeChecker {
                     self.err_bound_other_args(sp, arg, format("bound '{}'", bs), om, osp);
                     continue;
                 }
-                let tn = self.type_buf(arg);
-                self.errors.emit_span(
-                    sp,
-                    format("type '{}' does not satisfy bound '{}'", str::from_cbuf(tn.as_slice()), bs),
-                );
+                let tn = self.type_str(arg);
+                self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs));
                 self.tc_note_blanket_conf(bi);
             }
         }
@@ -21152,28 +24696,23 @@ extend TypeChecker {
     @c.cold
     // A bound `what` that failed on an associated type binding (`bind_miss`), reported at `at`.
     fn err_bind_miss(self: &mut Self, at: tok::Span, ty: TypeId, what: String) {
-        let tn = self.type_buf(ty);
+        let tn = self.type_str(ty);
         self.errors.emit_span(
             at,
-            format(
-                "type '{}' does not satisfy {}: {}",
-                str::from_cbuf(tn.as_slice()),
-                what.as_str(),
-                self.bind_miss.as_str(),
-            ),
+            format("type '{}' does not satisfy {}: {}", tn.as_str(), what.as_str(), self.bind_miss.as_str()),
         );
         self.bind_miss.clear();
     }
 
     fn err_bound_other_args(self: &mut Self, at: tok::Span, ty: TypeId, what: String, m: ModuleId, sp: tok::Span) {
-        let tn = self.type_buf(ty);
+        let tn = self.type_str(ty);
         self.errors.emit_span(
             at,
             format(
                 "type '{}' does not satisfy {}: '{}' conforms to this interface only with other arguments",
-                str::from_cbuf(tn.as_slice()),
+                tn.as_str(),
                 what.as_str(),
-                str::from_cbuf(tn.as_slice()),
+                tn.as_str(),
             ),
         );
         let site = diag::render_site(
@@ -21491,15 +25030,8 @@ extend TypeChecker {
                     unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: tnode });
                     return self.subst_type(self.node_type_in(bmod, tnode), &gp[0], &ga[0], gn);
                 }
-                let mut fld = Buf96 {};
-                unsafe stdio::snprintf(
-                    &mut fld[0],
-                    8,
-                    "_%.*s".ptr() as *const char,
-                    (name.end - name.start) as i32,
-                    src_at(self.source, name.start),
-                );
-                fhit = self.find_member_cstr(bmod, bdecl, str::from_cbuf(fld.as_slice()));
+                let fld = format("_{}", self.source.slice(name.start as usize, name.end as usize));
+                fhit = self.find_member_cstr(bmod, bdecl, fld.as_str());
             }
             let mut dconf = TYPE_NONE;
             if fhit == NODE_NONE && prefer_method {
@@ -21524,8 +25056,8 @@ extend TypeChecker {
                 return self.subst_type(self.decl_type_in(mhit.module, mhit.node), &gp[0], &ga[0], gn);
             }
             if fhit != NODE_NONE && self.type_at(base).is_vec() {
-                let tb = self.type_buf(base);
-                self.errors.emit_span(name, format("`{}` has no fields", str::from_cbuf(tb.as_slice())));
+                let tb = self.type_str(base);
+                self.errors.emit_span(name, format("`{}` has no fields", tb.as_str()));
                 return TYPE_NONE;
             }
             if fhit != NODE_NONE {
@@ -21730,12 +25262,12 @@ extend TypeChecker {
                     if sk == 2 {
                         let bad = self.tc_deref_hops_mut(mname);
                         if bad != TYPE_NONE {
-                            let tn = self.type_buf(bad);
+                            let tn = self.type_str(bad);
                             self.errors.emit_span(
                                 name,
                                 format(
                                     "cannot call a '&mut self' method through '{}': it has 'deref' but no 'deref_mut'",
-                                    str::from_cbuf(tn.as_slice()),
+                                    tn.as_str(),
                                 ),
                             );
                             return TYPE_NONE;
@@ -21770,14 +25302,10 @@ extend TypeChecker {
             );
             return TYPE_NONE;
         }
-        let ty = self.type_buf(base);
+        let ty = self.type_str(base);
         self.errors.emit_span(
             name,
-            format(
-                "no field or method '{}' on '{}'",
-                diag::span_str(self.source, name.start, name.end),
-                str::from_cbuf(ty.as_slice()),
-            ),
+            format("no field or method '{}' on '{}'", diag::span_str(self.source, name.start, name.end), ty.as_str()),
         );
         let mut bm: ModuleId = 0;
         let mut bd = NODE_NONE;
@@ -22201,7 +25729,7 @@ extend TypeChecker {
                 let mut k: i32 = 0;
                 self.frame_ext(method.module, mext, &ga[0], gn, &mut ps[0], &mut ts[0], &mut k);
                 unsafe (*self.cur_ast()).set_type_args(id, &ga[0], gn as u8);
-                return self.tc_sig_subst(method, &ps[0], &ts[0], k);
+                return self.tc_sig_subst(id, method, &ps[0], &ts[0], k);
             }
             return self.decl_type_in(method.module, method.node);
         }
@@ -22240,12 +25768,12 @@ extend TypeChecker {
                 return TYPE_NONE;
             }
             if !self.ext_bounds_hold(ac.module, ext, &ea[0], en, 0) {
-                let ty = self.type_buf(inst_ty);
+                let ty = self.type_str(inst_ty);
                 self.errors.emit_span(
                     mname,
                     format(
                         "cannot use '{}::{}': unsatisfied interface bounds",
-                        str::from_cbuf(ty.as_slice()),
+                        ty.as_str(),
                         diag::span_str(self.source, mname.start, mname.end),
                     ),
                 );
@@ -22379,6 +25907,25 @@ extend TypeChecker {
             self.tc_inst_bounds(id, sty);
         }
         let fields = unsafe (*a).at_const(id).as_data.struct_initializer.fields;
+        // The written type of the literal: its context's, else its own path's arguments.
+        let fm = self.lt_env.len();
+        let mut pf = self.tc_frame_of(id);
+        let pend = pf >= 0 && self.lt_env.at(pf as usize).node == NODE_NONE && self.lt_env.at(pf as usize).parent <= -2;
+        if (pf < 0 || pend) && unsafe (*a).at_const(stn).kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).at_const(stn).as_data.type_path.args.len != 0 {
+            self.tc_frame_push(id, self.cur_module(), stn, NODE_NONE, NODE_NONE, -1);
+            pf = self.tc_frame_of(id);
+        } else if pend && decl != NODE_NONE {
+            // A pending local's literal: its aggregate is known now.
+            let mut f = *self.lt_env.at(pf as usize);
+            f.owner = decl;
+            f.m = smod;
+            self.lt_env.set(pf as usize, f);
+            let p = (-2 - f.parent) as usize;
+            let mut pd = *self.lt_pend.at(p);
+            pd.owner = decl;
+            pd.m = smod;
+            self.lt_pend.set(p, pd);
+        }
         for i in 0..fields.len {
             let fid = unsafe (*a).list(fields)[i as usize];
             let fnn = unsafe (*a).at_const(fid).as_data.field_initializer.name;
@@ -22391,6 +25938,10 @@ extend TypeChecker {
             } else {
                 NODE_NONE;
             };
+            let fm2 = self.lt_env.len();
+            if field != NODE_NONE {
+                self.tc_frame_member(fval, pf, smod, unsafe (*self.mod_ast(smod)).member_type_node(field, false), decl);
+            }
             let ft = pick(
                 field != NODE_NONE,
                 self.subst_type(self.decl_type_in(smod, field), &gp[0], &ga[0], gn),
@@ -22404,12 +25955,14 @@ extend TypeChecker {
                 self.check_expr_w(fval, pick(self.tc_expected_known(ft), ft, TYPE_NONE));
             }
             if variant == NODE_NONE && decl == NODE_NONE {
+                self.lt_env.truncate(fm2);
                 continue;
             }
             if field == NODE_NONE {
                 if !inferred {
                     self.err_no_field(fname, sty);
                 }
+                self.lt_env.truncate(fm2);
                 continue;
             }
             for j in 0..i {
@@ -22427,9 +25980,11 @@ extend TypeChecker {
                 self.check_field_visibility(smod, field, decl, fname);
             }
             if !self.compatible(ft, fval) {
-                self.err_mismatch(fval, ft);
+                self.err_mismatch_ann(fval, ft, smod, unsafe (*self.mod_ast(smod)).member_type_node(field, false));
             }
+            self.lt_env.truncate(fm2);
         }
+        self.lt_env.truncate(fm);
         if decl != NODE_NONE && sty != TYPE_ERROR {
             self.tc_omitted_fields(id, smod, decl, variant, &gp[0], &ga[0], gn);
         }
@@ -22906,28 +26461,24 @@ extend TypeChecker {
                 self.errors.emit_span(sp, format("cannot assign to this expression"));
             } else if !self.tc_bound_op(id, ls, m, bd.right, &mut res) {
                 let sp = unsafe (*a).at_const(id).span;
-                let ty = self.type_buf(ls);
+                let ty = self.type_str(ls);
                 self.errors.emit_span(
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
-                        str::from_cbuf(ty.as_slice()),
+                        ty.as_str(),
                         m,
                     ),
                 );
             } else if res != ls && res != TYPE_ERROR {
                 let sp = unsafe (*a).at_const(id).span;
-                let rb = self.type_buf(res);
-                let tb = self.type_buf(ls);
+                let rb = self.type_str(res);
+                let tb = self.type_str(ls);
                 self.errors.emit_span(
                     sp,
-                    format(
-                        "mismatched types: the operator's result '{}' is not '{}'",
-                        str::from_cbuf(rb.as_slice()),
-                        str::from_cbuf(tb.as_slice()),
-                    ),
+                    format("mismatched types: the operator's result '{}' is not '{}'", rb.as_str(), tb.as_str()),
                 );
-                self.errors.note(format("bind the result in the bound: 'Output = {}'", str::from_cbuf(tb.as_slice())));
+                self.errors.note(format("bind the result in the bound: 'Output = {}'", tb.as_str()));
             }
             return l;
         }
@@ -22942,6 +26493,9 @@ extend TypeChecker {
             return l;
         }
         let pt = self.compound_param_type(bd.op, l);
+        // The right side is checked against the type the target's declaration writes.
+        let fm = self.lt_env.len();
+        self.tc_frame_target(bd.left, bd.right);
         self.check_expr_w(bd.right, pick(pt != TYPE_NONE, pt, l));
         if !self.is_assignable(bd.left) {
             let sp = unsafe (*a).at_const(bd.left).span;
@@ -22951,10 +26505,29 @@ extend TypeChecker {
                 self.err_mismatch(bd.right, pt);
             }
         } else if !self.compatible(l, bd.right) {
-            self.err_mismatch(bd.right, l);
+            let fi = self.tc_frame_of(bd.right);
+            if fi >= 0 {
+                self.err_mismatch_ann(bd.right, l, self.lt_env.at(fi as usize).m, self.lt_env.at(fi as usize).node);
+            } else {
+                self.err_mismatch(bd.right, l);
+            }
         }
+        self.lt_env.truncate(fm);
         return l;
     }
+
+    // Push the frame of value `v` assigned to `target` (this module): the type the target's
+    // declaration writes (`tc_frame_value`).
+    fn tc_frame_target(self: &mut Self, target: NodeId, v: NodeId) {
+        if !self.tc_frame_value(target, 0) {
+            return;
+        }
+        let i = self.lt_env.len() - 1;
+        let mut f = *self.lt_env.at(i);
+        f.expr = unsafe (*self.cur_ast()).peel(v, false);
+        self.lt_env.set(i, f);
+    }
+
     // True when `t` still mentions unresolved generics. A decl-referenced function type reports
     // concrete, so its signature components are inspected one level deep.
     fn tc_infer_ty_open(self: &mut Self, t: TypeId) bool {
@@ -23148,11 +26721,8 @@ extend TypeChecker {
                 if self.aggregate_decl(self.strip(obj), &mut om, &mut od) {
                     let md = self.find_method_cstr(om, od, "index_range");
                     if md.node == NODE_NONE {
-                        let ty = self.type_buf(self.strip(obj));
-                        self.errors.emit_span(
-                            sp,
-                            format("'{}' has no 'index_range' method for '[..]'", str::from_cbuf(ty.as_slice())),
-                        );
+                        let ty = self.type_str(self.strip(obj));
+                        self.errors.emit_span(sp, format("'{}' has no 'index_range' method for '[..]'", ty.as_str()));
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                         self.err_method_extend_bounds(sp, self.strip(obj), md);
                     } else {
@@ -23161,12 +26731,12 @@ extend TypeChecker {
                             od,
                             "len",
                         ).node == NODE_NONE {
-                            let ty = self.type_buf(self.strip(obj));
+                            let ty = self.type_str(self.strip(obj));
                             self.errors.emit_span(
                                 sp,
                                 format(
                                     "an open-ended range index needs a 'len' method on '{}' to supply the end",
-                                    str::from_cbuf(ty.as_slice()),
+                                    ty.as_str(),
                                 ),
                             );
                         }
@@ -23299,11 +26869,8 @@ extend TypeChecker {
                 if self.aggregate_decl(self.strip(obj), &mut om, &mut od) {
                     let md = self.find_method_cstr(om, od, "index");
                     if md.node == NODE_NONE {
-                        let ty = self.type_buf(self.strip(obj));
-                        self.errors.emit_span(
-                            sp,
-                            format("'{}' has no 'index' method for '[]'", str::from_cbuf(ty.as_slice())),
-                        );
+                        let ty = self.type_str(self.strip(obj));
+                        self.errors.emit_span(sp, format("'{}' has no 'index' method for '[]'", ty.as_str()));
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                         self.err_method_extend_bounds(sp, self.strip(obj), md);
                         result = TYPE_NONE;
@@ -23323,12 +26890,12 @@ extend TypeChecker {
                 overloaded = true;
                 if !self.tc_bound_op(id, obj, "index", index_n, &mut result) {
                     let sp = unsafe (*a).at_const(obj_n).span;
-                    let ty = self.type_buf(obj);
+                    let ty = self.type_str(obj);
                     self.errors.emit_span(
                         sp,
                         format(
                             "type parameter '{}' has no 'index' method for '[]' (add a bound that provides it)",
-                            str::from_cbuf(ty.as_slice()),
+                            ty.as_str(),
                         ),
                     );
                     result = TYPE_NONE;
@@ -23534,6 +27101,15 @@ extend TypeChecker {
     // expectation a parent grants this one child: never shared state, so a nested expectation
     // cannot leak to a sibling expression.
     fn check_expr_w(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
+        // A conversion while checking `id` against `expected` is `id`'s (`tc_ann_names`).
+        let oc = self.lt_conv;
+        self.lt_conv = id;
+        let r = self.check_expr_w_i(id, expected);
+        self.lt_conv = oc;
+        return r;
+    }
+
+    fn check_expr_w_i(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
@@ -23730,17 +27306,10 @@ extend TypeChecker {
                         self.err_unsafe(unsafe (*a).at_const(id).span, "casting an address to a function pointer");
                     }
                     if aggregate && !enum_int && !fn_ptr && !fn_addr || complex_lossy {
-                        let s = self.type_buf(src);
-                        let d = self.type_buf(dst);
+                        let s = self.type_str(src);
+                        let d = self.type_str(dst);
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(
-                            sp,
-                            format(
-                                "invalid cast from '{}' to '{}'",
-                                str::from_cbuf(s.as_slice()),
-                                str::from_cbuf(d.as_slice()),
-                            ),
-                        );
+                        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
                     }
                 }
                 result = dst;
@@ -23772,11 +27341,8 @@ extend TypeChecker {
                     let ay = *self.type_at(apt);
                     if !(ay.kind == TypeKind::TYPE_BUILTIN && ay.as_data.builtin == BuiltinType::BT_VALIST) {
                         let sp = unsafe (*a).at_const(vo.ap).span;
-                        let ty = self.type_buf(apt);
-                        self.errors.emit_span(
-                            sp,
-                            format("expected a 'va_list', found '{}'", str::from_cbuf(ty.as_slice())),
-                        );
+                        let ty = self.type_str(apt);
+                        self.errors.emit_span(sp, format("expected a 'va_list', found '{}'", ty.as_str()));
                     }
                 }
                 if vo.op == VA_ARG {
@@ -24435,7 +28001,17 @@ extend TypeChecker {
 
     fn check_array_literal(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         self.eng_hold(true);
+        // Each element is checked against the element type its context's written array type gives.
+        let fm = self.lt_env.len();
+        if !unsafe (*self.cur_ast()).at_const(id).as_data.array_literal.repeat {
+            self.tc_frame_parts(
+                id,
+                unsafe (*self.cur_ast()).at_const(id).as_data.array_literal.elements,
+                NodeKind::NODE_ARRAY_TYPE,
+            );
+        }
         let r9 = self.check_array_literal_i(id, expected);
+        self.lt_env.truncate(fm);
         self.eng_hold(false);
         return r9;
     }
@@ -24713,13 +28289,10 @@ extend TypeChecker {
                     format("an array repeat needs a value that can be copied; this one owns resources"),
                 );
             } else {
-                let tb = self.type_buf(elem);
+                let tb = self.type_str(elem);
                 self.errors.emit_span(
                     vsp,
-                    format(
-                        "an array repeat needs a value that can be copied; '{}' is not 'Copy'",
-                        str::from_cbuf(tb.as_slice()),
-                    ),
+                    format("an array repeat needs a value that can be copied; '{}' is not 'Copy'", tb.as_str()),
                 );
             }
             return TYPE_NONE;
@@ -24849,6 +28422,9 @@ extend TypeChecker {
             self.errors.emit_span(sp, format("tuple arity is limited to 4 elements"));
             return TYPE_NONE;
         }
+        // Each element is checked against the element type its context's written tuple type gives.
+        let fm = self.lt_env.len();
+        self.tc_frame_parts(id, elems, NodeKind::NODE_TUPLE_TYPE);
         let mut wargs = Tys8 {};
         let mut wn: i32 = -1;
         if expected != TYPE_NONE {
@@ -24868,6 +28444,7 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
             }
         }
+        self.lt_env.truncate(fm);
         if elems.len == 2 {
             self.tc_feature_row(unsafe (*a).list(elems)[0], unsafe (*a).list(elems)[1], targs[0], own);
         }
@@ -24943,7 +28520,7 @@ extend TypeChecker {
                 return;
             }
         } else if declared != TYPE_NONE && !self.compatible(declared, value) {
-            self.err_mismatch(value, declared);
+            self.err_mismatch_ann(value, declared, self.cur_module(), tyn);
             return;
         }
         let mut targs = Tys8 {};
@@ -25022,6 +28599,21 @@ extend TypeChecker {
             let r0 = unsafe (*a).list(rets)[0];
             rvwant = self.resolve_type(unsafe (*a).slot_type_node(r0));
         }
+        // Each value is checked against the return type its slot writes.
+        let fm = self.lt_env.len();
+        if !returns_void && values.len == rets.len {
+            for i in 0..values.len {
+                let r0 = unsafe (*a).list(rets)[i as usize];
+                self.tc_frame_push(
+                    unsafe (*a).list(values)[i as usize],
+                    self.cur_module(),
+                    unsafe (*a).slot_type_node(r0),
+                    NODE_NONE,
+                    NODE_NONE,
+                    -1,
+                );
+            }
+        }
         for i in 0..values.len {
             let vid = unsafe (*a).list(values)[i as usize];
             self.check_expr_w(vid, rvwant);
@@ -25031,9 +28623,11 @@ extend TypeChecker {
             let sp = unsafe (*a).at_const(id).span;
             let s2 = plural(expected);
             self.errors.emit_span(sp, format("expected {} return value{}, found {}", expected, s2, values.len));
+            self.lt_env.truncate(fm);
             return;
         }
         if returns_void {
+            self.lt_env.truncate(fm);
             return;
         }
         for i in 0..values.len {
@@ -25041,9 +28635,10 @@ extend TypeChecker {
             let r0 = unsafe (*a).list(rets)[i as usize];
             let rt = self.resolve_type(unsafe (*a).slot_type_node(r0));
             if !self.compatible(rt, vid) {
-                self.err_mismatch(vid, rt);
+                self.err_mismatch_ann(vid, rt, self.cur_module(), unsafe (*a).slot_type_node(r0));
             }
         }
+        self.lt_env.truncate(fm);
     }
 
     // Does the expression contain a call? A call-bearing const initializer requires execution to
@@ -25294,12 +28889,12 @@ extend TypeChecker {
                 y.as_data.arr.elem,
             ).as_data.decl == fd.node;
             if !ok {
-                let tb = self.type_buf(t);
+                let tb = self.type_str(t);
                 self.errors.emit_span(
                     sp,
                     format(
                         "expected a nonempty list of 'cpu::Feature' values, e.g. '[cpu::Feature::Simd128]', found '{}'",
-                        str::from_cbuf(tb.as_slice()),
+                        tb.as_str(),
                     ),
                 );
                 return false;
@@ -25523,10 +29118,10 @@ extend TypeChecker {
         if !self.tc_reg_type(t) {
             return;
         }
-        let tb = self.type_buf(t);
+        let tb = self.type_str(t);
         self.errors.emit_span(
             unsafe (*self.cur_ast()).at_const(id).span,
-            format("`{}` is a register type; store it through `Simd<T, N>`", str::from_cbuf(tb.as_slice())),
+            format("`{}` is a register type; store it through `Simd<T, N>`", tb.as_str()),
         );
     }
 
@@ -26285,13 +29880,22 @@ extend TypeChecker {
                 let valued = value != NODE_NONE;
                 let declared = pick(annotated, self.resolve_type(tyn), TYPE_NONE);
                 let ne = self.errors.errors.len();
+                let fm = self.lt_env.len();
+                if annotated {
+                    self.tc_frame_push(value, self.cur_module(), tyn, NODE_NONE, NODE_NONE, -1);
+                } else if valued && unsafe (*a).at_const(unsafe (*a).peel(value, true)).kind == NodeKind::NODE_STRUCT_INITIALIZER {
+                    // A literal no written type names: its lifetime parameters are inference variables
+                    // its later uses bind (`LtPend`).
+                    self.lt_pend.push(LtPend { decl: id, owner: NODE_NONE, m: 0 });
+                    self.tc_frame_pend(value, (self.lt_pend.len() - 1) as i32);
+                }
                 if valued {
                     self.check_expr_w(value, declared);
                 }
                 let mut binding = TYPE_NONE;
                 if annotated {
                     if valued && !self.compatible(declared, value) {
-                        self.err_mismatch(value, declared);
+                        self.err_mismatch_ann(value, declared, self.cur_module(), tyn);
                     }
                     binding = declared;
                 } else if valued {
@@ -26317,6 +29921,7 @@ extend TypeChecker {
                         format("cannot infer type of '{}'", diag::span_str(self.source, sp.start, sp.end)),
                     );
                 }
+                self.lt_env.truncate(fm);
                 unsafe (*self.cur_ast()).set_type(id, binding);
                 if !annotated && self.errors.errors.len() == ne {
                     self.tc_no_held_reg(nm, binding);
@@ -26636,13 +30241,13 @@ extend TypeChecker {
             if nameId != NODE_NONE && base != TYPE_ERROR {
                 let vname = self.name_span(nameId);
                 if decl == NODE_NONE {
-                    let ty = self.type_buf(base);
+                    let ty = self.type_str(base);
                     self.errors.emit_span(
                         vname,
                         format(
                             "pattern '{}(..)' expects an enum, but the value has type '{}'",
                             diag::span_str(self.source, vname.start, vname.end),
-                            str::from_cbuf(ty.as_slice()),
+                            ty.as_str(),
                         ),
                     );
                 } else {
@@ -26650,13 +30255,13 @@ extend TypeChecker {
                     if variant != NODE_NONE {
                         unsafe (*self.cur_ast()).set_resolution_def(nameId, DefId { module: bmod, node: variant });
                     } else {
-                        let ty = self.type_buf(base);
+                        let ty = self.type_str(base);
                         self.errors.emit_span(
                             vname,
                             format(
                                 "no variant '{}' on '{}'",
                                 diag::span_str(self.source, vname.start, vname.end),
-                                str::from_cbuf(ty.as_slice()),
+                                ty.as_str(),
                             ),
                         );
                     }
@@ -26823,14 +30428,10 @@ extend TypeChecker {
         let mut targs = Tys8 {};
         let tn = self.tuple_args_of(base, &mut targs[0], 4);
         if !untyped(base) && tn != children.len as i32 {
-            let ty = self.type_buf(base);
+            let ty = self.type_str(base);
             self.errors.emit_span(
                 unsafe (*self.cur_ast()).at_const(id).span,
-                format(
-                    "a tuple pattern with {} elements cannot match a value of type '{}'",
-                    children.len,
-                    str::from_cbuf(ty.as_slice()),
-                ),
+                format("a tuple pattern with {} elements cannot match a value of type '{}'", children.len, ty.as_str()),
             );
         }
         for i in 0..children.len {
@@ -27063,6 +30664,9 @@ extend TypeChecker {
                 let saved = self.icx.current_returns;
                 let savedfn = self.icx.current_fn;
                 let saved_wm = self.err_wm;
+                let saved_pend = replace(&mut self.lt_pend, Vector::<LtPend>::new());
+                let saved_pool = replace(&mut self.lt_pool, Vector::<u64>::new());
+                let saved_tn = replace(&mut self.lt_tnames, Vector::<u64>::new());
                 self.icx.current_returns = fnd.returns;
                 self.icx.current_fn = id;
                 self.err_wm = self.errors.errors.len();
@@ -27152,6 +30756,9 @@ extend TypeChecker {
                 self.icx.current_returns = saved;
                 self.icx.current_fn = savedfn;
                 self.err_wm = saved_wm;
+                self.lt_pend = saved_pend;
+                self.lt_pool = saved_pool;
+                self.lt_tnames = saved_tn;
             },
             NODE_STRUCT | NODE_ENUM => {
                 let agg = unsafe (*a).at_const(id).as_data.aggregate;
@@ -27311,11 +30918,8 @@ extend TypeChecker {
             let bad = self.tc_const_alloc_state(declared, 0);
             if bad != TYPE_NONE {
                 let sp = self.name_span(cd.name);
-                let tn = self.type_buf(bad);
-                self.errors.emit_span(
-                    sp,
-                    format("a constant cannot use the stateful allocator '{}'", str::from_cbuf(tn.as_slice())),
-                );
+                let tn = self.type_str(bad);
+                self.errors.emit_span(sp, format("a constant cannot use the stateful allocator '{}'", tn.as_str()));
                 self.errors.note(
                     format(
                         "a constant's storage is static data that no allocator provided, so allocator state beside it describes memory that does not exist; use a zero-sized allocator",
@@ -27330,12 +30934,12 @@ extend TypeChecker {
             0,
         ) {
             let sp = self.name_span(cd.name);
-            let tn = self.type_buf(declared);
+            let tn = self.type_str(declared);
             self.errors.emit_span(
                 sp,
                 format(
                     "a constant of type '{}' holds an 'UnsafeCell' but is not 'Sync': every task shares it",
-                    str::from_cbuf(tn.as_slice()),
+                    tn.as_str(),
                 ),
             );
         }
@@ -27356,7 +30960,7 @@ extend TypeChecker {
             self.ct_cd = cd0;
             self.const_init = init0;
             if !self.compatible(declared, cd.value) {
-                self.err_mismatch(cd.value, declared);
+                self.err_mismatch_ann(cd.value, declared, self.cur_module(), cd.ty);
             }
             // A `static mut` starts as static data too, so its initializer is evaluated as a constant's.
             if !cd.is_extern && self.ct_n == ct0 {
@@ -27963,4 +31567,10 @@ const fn bt_bytes(bt: BuiltinType) u64 {
         BT_I64 | BT_U64 | BT_F64 => 8,
         _ => 0,
     };
+}
+
+extend TypeChecker as loader::SlotVariance {
+    fn slot_variance(self: &mut Self, m: ModuleId, d: NodeId, i: u32) u32 {
+        return self.variance_param(DefId { module: m, node: d }, i as i32);
+    }
 }

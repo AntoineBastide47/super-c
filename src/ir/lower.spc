@@ -4681,6 +4681,18 @@ extend Lowerer {
             if callee_op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
+            // A reference to a `dyn fn` value or a function pointer calls its pointee (the
+            // checker's `tc_ref_callable`).
+            for _ in 0..8 {
+                let cy = *self.f.ty(self.body.operands.at(callee_op as usize).ty);
+                if cy.kind != TypeKind::TYPE_REFERENCE || !self.ref_callable(cy.as_data.elem) {
+                    break;
+                }
+                let pl = self.spill(callee_op, sp);
+                callee_op = self.copy_op(
+                    self.place_project(pl, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: cy.as_data.elem }),
+                );
+            }
         } else {
             // direct call: nothing to evaluate for the callee
         }
@@ -6417,6 +6429,19 @@ extend Lowerer {
             }
         }
         return base;
+    }
+
+    // A `dyn fn` value (its record names no interface) or a function pointer, behind at most 8
+    // references: a call through a reference to it calls the pointee.
+    const fn ref_callable(self: &Self, t: TypeId) bool {
+        let mut y = *self.f.ty(t);
+        for _ in 0..8 {
+            if y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            y = *self.f.ty(y.as_data.elem);
+        }
+        return y.fn_sig() || y.kind == TypeKind::TYPE_DYN && self.f.instance(y.as_data.inst).decl == NODE_NONE;
     }
 
     fn deref_ret_ty(self: &mut Self, m: DefId, recv: TypeId) TypeId {

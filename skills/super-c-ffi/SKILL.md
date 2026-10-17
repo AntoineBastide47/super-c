@@ -215,7 +215,9 @@ fn format_into(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 ```
 
 `va_list`, `va_start`, `va_arg(ap, T)`, and `va_end` are compiler intrinsics. The
-binding does not need `mut` (the lint flags it). Do not name such a helper `format`:
+binding does not need `mut` (the lint flags it). `va_arg` needs `unsafe`: nothing checks the
+caller passed a `T` ("reading a variadic argument with 'va_arg'"). It reads C's promoted type and
+converts: `f32` reads a `double`, `bool`, `char`, `i8`, `u8`, `i16` and `u16` read an `int`. Do not name such a helper `format`:
 that collides with the prelude's `format()` shim in the generated C.
 
 ## The ffi/ Convention

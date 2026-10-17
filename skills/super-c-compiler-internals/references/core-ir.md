@@ -237,7 +237,8 @@ panic-guard folding).
   has glue), `EF_ASM` (inline assembly: an unknown heap write plus its output places), `EF_NONE`
   (a relaxed atomic load or fence, the prelude `len(&self)`, a drop without glue).
 - **Versions and generations.** A value fact keys on (local, version); a length identity on
-  (place, heap generation, base generation, path generation, buffer generation). A write into one
+  (place, heap generation, base generation, path generation, buffer generation). A write of a
+  whole local (`x = y`) kills its root, so a length identity of `x` dies with it. A write into one
   subtree of a base logs a path kill; a place survives the logged kills that do not overlap it
   (different fields, different constant indexes). A write into a prelude view's element buffer
   (`ptr` field then index or deref) bumps only the buffer generation, which only places heap

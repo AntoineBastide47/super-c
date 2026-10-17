@@ -1647,6 +1647,7 @@ fn pub_key(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &m
         for q in 0..it.n {
             unsafe k.w[2 + q as usize] = unsafe it.args[q as usize];
         }
+        k.w[10] = it.lts;
     } else if kd == TypeKind::TYPE_CONST {
         k.w[1] = y.as_data.value as u64;
     } else {
@@ -1668,7 +1669,206 @@ fn pub_child(map: &Vector<TypeId>, t: TypeId, i: usize) TypeId {
     return map[pi];
 }
 
+/// The variance of an aggregate's parameters, for `Package::lt_walk`.
+pub interface SlotVariance {
+    /// The variance (`V_*`) of slot `i` (its lifetime parameters, then its type parameters) of
+    /// declaration `d` of module `m`.
+    fn slot_variance(self: &mut Self, m: ModuleId, d: NodeId, i: u32) u32;
+}
+
+/// Every slot invariant: for a walk that reads only positions and reference flags.
+pub struct Invariant {}
+
+extend Invariant as SlotVariance {
+    fn slot_variance(self: &mut Self, m: ModuleId, d: NodeId, i: u32) u32 {
+        return V_INVARIANT;
+    }
+}
+
+// Flags `f` of a position under a slot of variance `v`: a bivariant slot (one its declaration does
+// not use) counts as invariant.
+const fn ltf_vary(f: u8, v: u32) u8 {
+    if (f & LTF_INV) != 0 || v != V_COVARIANT && v != V_CONTRAVARIANT {
+        return f & ~LTF_CONTRA | LTF_INV;
+    }
+    if v == V_CONTRAVARIANT {
+        return f ^ LTF_CONTRA;
+    }
+    return f;
+}
+
 extend Package {
+    /// The number of lifetime parameters declaration `d` of module `m` declares (`a` is the
+    /// reading module's tree, whose tables may not be in the module table yet).
+    pub fn decl_nlt(self: &Self, a: &Ast, m: ModuleId, d: NodeId) u32 {
+        if d == NODE_NONE {
+            return 0;
+        }
+        if m == a.module {
+            return a.lifetimes_of(d).len;
+        }
+        return self.modules.at(m as usize).ast.lifetimes_of(d).len;
+    }
+
+    /// Append the flags (`LTF_*`) of the lifetime positions of type `t` (read through `a`) in walk
+    /// order: a reference, a slice and a borrowed `dyn` hold one ahead of what they point at; a
+    /// struct, an enum, an instance and an interface `dyn` hold one per lifetime parameter of their
+    /// declaration, ahead of their type arguments'; a raw pointer and an array hold their element's.
+    /// A function type (or `dyn fn`) binds its own and holds one per lifetime it takes from outside
+    /// it (`sig_outer`). `f` holds the flags inherited from above; `v` gives the variance of an
+    /// aggregate's parameters (an interface's are invariant).
+    pub fn lt_walk<V: SlotVariance>(self: &Self, a: &Ast, t: TypeId, f: u8, out: &mut Vector<u8>, depth: u32, v: &mut V) {
+        if t == TYPE_NONE || depth > 16 {
+            return;
+        }
+        let y = *a.type_at(t);
+        let k = y.kind;
+        if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+            out.push(f);
+            let mut g = f | LTF_REF | LTF_BEHIND;
+            if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                g = g | LTF_INV;
+            }
+            self.lt_walk(a, y.as_data.elem, g, out, depth + 1, v);
+        } else if k == TypeKind::TYPE_POINTER {
+            self.lt_walk(a, y.as_data.elem, f | LTF_INV | LTF_REF | LTF_BEHIND, out, depth + 1, v);
+        } else if y.arr_like() {
+            self.lt_walk(a, y.as_data.arr.elem, f, out, depth + 1, v);
+        } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+            for i in 0..self.decl_nlt(a, y.module, y.as_data.decl) {
+                out.push(ltf_vary(f, v.slot_variance(y.module, y.as_data.decl, i)) | LTF_BEHIND);
+            }
+        } else if y.fn_sig() {
+            self.lt_outer(a, &y, f, out, depth, v);
+        } else if k == TypeKind::TYPE_DYN || k == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(y.as_data.inst);
+            let mut g = f;
+            if k == TypeKind::TYPE_DYN {
+                g = g | LTF_BEHIND;
+                if y.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 {
+                    out.push(f);
+                    g = g | LTF_REF;
+                }
+                if it.decl == NODE_NONE {
+                    let s = a.dyn_fn_sig(&y);
+                    if s != TYPE_NONE {
+                        self.lt_outer(a, a.type_at(s), g, out, depth, v);
+                    }
+                    return;
+                }
+                g = g | LTF_INV;
+            }
+            let nlt = self.decl_nlt(a, it.module, it.decl);
+            for i in 0..nlt {
+                out.push(ltf_vary(g, v.slot_variance(it.module, it.decl, i)) | LTF_BEHIND);
+            }
+            for i in 0..it.n {
+                let w = ltf_vary(g, v.slot_variance(it.module, it.decl, nlt + i));
+                self.lt_walk(a, unsafe it.args[i as usize], w, out, depth + 1, v);
+            }
+        }
+    }
+
+    // The positions of function-pointer type `y` (`lt_walk`, flags `f` from above): one per lifetime
+    // it takes from outside it, which it holds.
+    fn lt_outer<V: SlotVariance>(self: &Self, a: &Ast, y: &Ty, f: u8, out: &mut Vector<u8>, depth: u32, v: &mut V) {
+        let mut vs = Vector::<u32>::new();
+        self.sig_outer(a, y, &mut vs, depth + 1, v);
+        for g in 0..vs.len() {
+            out.push(ltf_vary(f, vs[g]) | LTF_BEHIND);
+        }
+    }
+
+    /// The variance (`V_*`) of each lifetime function-pointer type `y` takes from outside it, in
+    /// class order: how its positions of that class use it (`v` as in `lt_walk`).
+    pub fn sig_outer<V: SlotVariance>(self: &Self, a: &Ast, y: &Ty, out: &mut Vector<u32>, depth: u32, v: &mut V) {
+        out.truncate(0);
+        let lts = a.instance(y.as_data.fnp.sig).lts;
+        if lts == 0 || lts == LTS_WIDE || depth > 16 {
+            return;
+        }
+        let mut cls = Vector::<u8>::new();
+        let mut fl = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        self.sig_classes_at(a, y, &mut cls, &mut fl, &mut nres, depth, v);
+        for k in 0..cls.len() {
+            if cls[k] < LC_OUTER {
+                continue;
+            }
+            let g = (cls[k] - LC_OUTER) as usize;
+            while out.len() <= g {
+                out.push(V_BIVARIANT);
+            }
+            let mut d = if k as u32 < nres {
+                V_COVARIANT;
+            } else {
+                V_CONTRAVARIANT;
+            };
+            if (fl[k] & LTF_INV) != 0 {
+                d = V_INVARIANT;
+            } else if (fl[k] & LTF_CONTRA) != 0 {
+                d = d ^ V_INVARIANT;
+            }
+            out.set(g, out[g] | d);
+        }
+    }
+
+    /// The number of lifetime positions of type `t` (`lt_walk`).
+    pub fn lt_count(self: &Self, a: &Ast, t: TypeId) u32 {
+        let mut fl = Vector::<u8>::new();
+        self.lt_walk(a, t, 0, &mut fl, 0, &mut Invariant {});
+        return fl.len() as u32;
+    }
+
+    /// The lifetime class of each position of function-pointer type `y` (`LTS_*`), results first:
+    /// its `lts`, or with none every position its own lifetime but elided results, which take the
+    /// only input position's. `fl` gets each position's flags (`LTF_*`, relative to its slot; `v`
+    /// gives the variance as in `lt_walk`) and `*nres` the result positions.
+    pub fn sig_classes<V: SlotVariance>(
+        self: &Self,
+        a: &Ast,
+        y: &Ty,
+        cls: &mut Vector<u8>,
+        fl: &mut Vector<u8>,
+        nres: &mut u32,
+        v: &mut V,
+    ) {
+        self.sig_classes_at(a, y, cls, fl, nres, 0, v);
+    }
+
+    // `sig_classes` at walk depth `depth`.
+    fn sig_classes_at<V: SlotVariance>(
+        self: &Self,
+        a: &Ast,
+        y: &Ty,
+        cls: &mut Vector<u8>,
+        fl: &mut Vector<u8>,
+        nres: &mut u32,
+        depth: u32,
+        v: &mut V,
+    ) {
+        cls.truncate(0);
+        fl.truncate(0);
+        let it = *a.instance(y.as_data.fnp.sig);
+        for i in 0..it.module as u32 {
+            self.lt_walk(a, a.sig_at(y, true, i), 0, fl, depth, v);
+        }
+        *nres = fl.len() as u32;
+        for i in 0..it.decl {
+            self.lt_walk(a, a.sig_at(y, false, i), 0, fl, depth, v);
+        }
+        let total = fl.len() as u32;
+        for k in 0..total {
+            if it.lts != 0 {
+                cls.push(a.sig_lt_class(y, k));
+            } else if *nres != 0 && total == *nres + 1 {
+                cls.push(LC_GROUP);
+            } else {
+                cls.push(LC_FREE);
+            }
+        }
+    }
+
     /// The CPU features function `f` of module `m` states (`@target_feature`, `@simd_impl`); empty for
     /// another.
     pub fn fn_features(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
@@ -2465,6 +2665,10 @@ extend Package {
                 for q in 0..it.n {
                     out.push_byte(b' ');
                     out.push_u64(unsafe it.args[q as usize]);
+                }
+                if it.lts != 0 {
+                    out.push_str(" L");
+                    out.push_u64(it.lts);
                 }
             } else if k == TypeKind::TYPE_CONST {
                 out.push_i64(y.as_data.value);

@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 9;
+const TUC_VER: u32 = 11;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -436,6 +436,7 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         for i in 0..it.n {
             w32(&mut r.tab, ar[i as usize]);
         }
+        w64(&mut r.tab, it.lts);
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         let orf = tt_ref(p, r, am, ty.as_data.proj.owner);
         r.tab.push_byte(TT_PROJ);
@@ -487,6 +488,7 @@ pub struct TtEnt {
     pub idecl: u32,
     pub n: u8,
     pub argr: [u32; 8],
+    pub lts: u64,
     pub raw: [u8; 16],
     pub lin: ConstLin,
 }
@@ -555,7 +557,7 @@ pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>
         } else if e.kind as TypeKind == TypeKind::TYPE_ASSOC {
             a.intern_assoc(e.im as ModuleId, e.idecl, &ar[0], e.n);
         } else if e.kind as TypeKind == TypeKind::TYPE_FUNCTION {
-            let mut it = TyInstance { module: e.im as ModuleId, decl: e.idecl, n: e.n };
+            let mut it = TyInstance { module: e.im as ModuleId, decl: e.idecl, n: e.n, lts: e.lts };
             for i in 0..e.n {
                 unsafe it.args[i as usize] = ar[i as usize];
             }
@@ -814,6 +816,7 @@ extend Rd {
                 idecl: 0,
                 n: 0,
                 argr: [0; 8],
+                lts: 0,
                 raw: [0; 16],
                 lin: ConstLin::new(BuiltinType::BT_COUNT),
             };
@@ -847,6 +850,7 @@ extend Rd {
                 for i in 0..e.n {
                     unsafe e.argr[i as usize] = self.r32();
                 }
+                e.lts = self.r64();
             } else if e.tag == TT_PROJ {
                 e.qual = self.r8();
                 e.conc = self.r8();

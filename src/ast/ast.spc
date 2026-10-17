@@ -889,6 +889,20 @@ pub struct Node {
     pub as_data: NodeAs,
 }
 
+extend Node {
+    /// A reference type node or a borrowed `dyn` (`&'a dyn I`, whose object holds only borrows that
+    /// outlive `'a`): its lifetime is `indirect_type.lifetime`, its pointee `indirect_type.ty`.
+    pub const fn is_ref_type(self: &Self) bool {
+        return self.kind == NodeKind::NODE_REFERENCE_TYPE || self.kind == NodeKind::NODE_DYN_TYPE && self.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE;
+    }
+
+    /// A type node with a lifetime position in `indirect_type.lifetime`: a reference, a borrowed
+    /// `dyn` or a slice.
+    pub const fn has_lt_slot(self: &Self) bool {
+        return self.is_ref_type() || self.kind == NodeKind::NODE_SLICE_TYPE;
+    }
+}
+
 pub type TypeId = u32;
 pub const TYPE_NONE: TypeId = 0;
 /// The type of every construct the checker rejected: seeded right after the builtins, never
@@ -1935,6 +1949,86 @@ pub struct TyProj {
 /// are one type and substitution reaches its parameters and result. FN_MOVE marks `move fn(..)`.
 pub const FN_SIG: u8 = 1;
 pub const FN_MOVE: u8 = 2;
+/// The lifetime classes of a function-pointer type (`TyInstance.lts`), one per lifetime position
+/// of its results then its parameters (`Package::lt_walk`; `Ast::sig_lt_class`). 0: every position
+/// has its own lifetime, which an elided result takes from the only input position (Rust's
+/// elision). Packed when they fit: bits 0..3 hold the position count (at most LTS_MAX) and position
+/// k's class bits 4 + 4k.., a group g as LC_GROUP + g and an outer one g as LP_OUTER + g, at most
+/// LP_GROUPS of each. Else LTS_EXT | count << 8: the signature record holds the canonical classes
+/// after its results and parameters, eight per TYPE_CONST slot (`lts_slots`), position k in byte
+/// k % 8 of slot k / 8, so they take part in the type's identity like its slots.
+pub const LTS_MAX: u32 = 15;
+/// The classes of a function type substitution gave a lifetime past the last class (LC_TOO_MANY):
+/// a value of it can be neither called nor converted.
+pub const LTS_WIDE: u64 = 0x10;
+pub const LTS_EXT: u64 = 0x20;
+/// A position's lifetime class, canonical: LC_FREE (its own lifetime, chosen at each call),
+/// LC_STATIC, LC_GROUP + g (the positions of group g share one lifetime chosen at each call: elided
+/// or bound by the type's `for<..>`; at least two positions), or LC_OUTER + g (a lifetime fixed
+/// outside the type: the enclosing item's, or a type argument's). Groups number in first-use order;
+/// LC_TOO_MANY marks a group past the last class.
+pub const LC_FREE: u8 = 0;
+pub const LC_STATIC: u8 = 1;
+pub const LC_GROUP: u8 = 2;
+pub const LC_OUTER: u8 = 128;
+pub const LC_TOO_MANY: u8 = 255;
+/// The packed base of the outer classes, and the groups of each kind a packed type holds.
+pub const LP_OUTER: u8 = 9;
+pub const LP_GROUPS: u8 = 7;
+/// The flags of a lifetime position (`Package::lt_walk`): invariant; under a reference (or raw
+/// pointer) of the walked type; behind a reference of it, or a lifetime its declaration holds;
+/// contravariant (unless invariant).
+pub const LTF_INV: u8 = 1;
+pub const LTF_REF: u8 = 2;
+pub const LTF_BEHIND: u8 = 4;
+pub const LTF_CONTRA: u8 = 8;
+
+/// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
+/// (lifetime params first, then type params). Drives subtyping: `C<'a> <: C<'b>` requires 'a and 'b
+/// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
+/// the top. Bit 0 marks a covariant use and bit 1 a contravariant one, so the join (v_join) is a bitwise
+/// or; composition is v_transform.
+pub const V_BIVARIANT: u32 = 0;
+pub const V_COVARIANT: u32 = 1;
+pub const V_CONTRAVARIANT: u32 = 2;
+pub const V_INVARIANT: u32 = 3;
+
+/// The class slots a signature record with lifetime classes `lts` holds after its results and
+/// parameters.
+pub const fn lts_slots(lts: u64) u32 {
+    if (lts & 255u64) != LTS_EXT {
+        return 0;
+    }
+    return ((lts >> 8) as u32 + 7) / 8;
+}
+
+/// The slots of signature record `it`: its results, its parameters and its class slots.
+pub const fn rec_len(it: &TyInstance) u32 {
+    return it.module as u32 + it.decl + lts_slots(it.lts);
+}
+
+/// Whether lifetime classes `cls` (`nres` result positions first, canonical) are the default ones:
+/// no `'static`, and the results, if any, share the lifetime of the only input position.
+pub fn lt_default(cls: &Vector<u8>, nres: u32) bool {
+    for k in 0..cls.len() {
+        if cls[k] == LC_STATIC || cls[k] >= LC_OUTER || nres == 0 && cls[k] != LC_FREE || nres != 0 && cls[k] != LC_GROUP {
+            return false;
+        }
+    }
+    return nres == 0 || cls.len() as u32 == nres + 1;
+}
+
+/// Position `k`'s canonical class in packed lifetime classes `lts`.
+pub const fn lts_class(lts: u64, k: u32) u8 {
+    if k >= (lts & 15u64) as u32 {
+        return LC_FREE;
+    }
+    let c = (lts >> (4 + 4 * k) as u64 & 15u64) as u8;
+    if c >= LP_OUTER {
+        return c - LP_OUTER + LC_OUTER;
+    }
+    return c;
+}
 /// No instance-table record (`Ty::rec`).
 pub const NO_REC: u32 = 0xFFFFFFFF;
 /// A function-pointer type's payload. `decl` overlays `TyAs.decl` and is NODE_NONE, so a reader of
@@ -2067,6 +2161,8 @@ pub struct TyInstance {
     pub decl: NodeId,
     pub n: u8,
     pub args: [TypeId; 8],
+    /// A function-pointer type's lifetime classes (`LTS_*`); 0 on every other record.
+    pub lts: u64,
 }
 /// One method reference the type checker resolved, with the receiver type it resolved it ON. The
 /// receiver may still mention the enclosing generic's parameters. The unused-item lint reads these
@@ -2133,7 +2229,7 @@ pub struct DerefUse {
     pub method: [DefId; 8],
 }
 
-// Field-wise Hash/Eq over the SIGNIFICANT prefix (module/decl/n + args[0..n]) — deliberately NOT a
+// Field-wise Hash/Eq over the SIGNIFICANT fields (module/decl/n + args[0..n], and lts when set) — deliberately NOT a
 // sizeof-memcmp, so the unused args[n..8] tail (left uninitialized by the `{module,decl,n}` literal) can
 // never affect identity. This exactly mirrors intern_instance's linear comparison, keeping the interned
 // index numbering byte-identical.
@@ -2147,12 +2243,15 @@ extend TyInstance as Hash {
         for i in 0..self.n {
             h = skey_mix(h, unsafe self.args[i]);
         }
+        if self.lts != 0 {
+            h = skey_mix(h, self.lts);
+        }
         return h;
     }
 }
 extend TyInstance as Eq {
     pub fn eq(self: &Self, other: &Self) bool {
-        if self.module != other.module || self.decl != other.decl || self.n != other.n {
+        if self.module != other.module || self.decl != other.decl || self.n != other.n || self.lts != other.lts {
             return false;
         }
         for i in 0..self.n {
@@ -2791,17 +2890,17 @@ extend TypePool {
     pub fn intern_sig_g(self: &mut Self, it: &TyInstance, qual: u8) TypeId {
         let r0 = *self.at(it.args[0] as usize);
         if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
-            let mut ps = Vector::<TypeId>::with_capacity(it.decl as usize);
-            for i in 0..it.decl {
+            let mut ps = Vector::<TypeId>::with_capacity((rec_len(it) - 1) as usize);
+            for i in 0..rec_len(it) - 1 {
                 let mut c = *it;
                 let mut k = i + 1;
-                while k >= 7 && c.module as u32 + c.decl > 8 {
+                while k >= 7 && rec_len(&c) > 8 {
                     c = *self.instance(self.at(c.args[7] as usize).as_data.fnp.sig as usize);
                     k = k - 7;
                 }
                 ps.push(unsafe c.args[k as usize]);
             }
-            return self.intern_sig_slots_g(ps.as_ptr(), 0, it.decl, qual);
+            return self.intern_sig_slots_g(ps.as_ptr(), 0, it.decl, qual, it.lts);
         }
         let idx = self.insert_inst(it);
         return self.intern_g(
@@ -2814,9 +2913,9 @@ extend TypePool {
     }
 
     // `Ast::intern_sig_i` for this table.
-    fn intern_sig_slots_g(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8) TypeId {
-        let total = nret + np;
-        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0 };
+    fn intern_sig_slots_g(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8, lts: u64) TypeId {
+        let total = nret + np + lts_slots(lts);
+        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0, lts: lts };
         if total <= 8 {
             it.n = total as u8;
             for j in 0..total {
@@ -2827,7 +2926,7 @@ extend TypePool {
             for j in 0..7 {
                 unsafe it.args[j as usize] = unsafe slots[j as usize];
             }
-            it.args[7] = self.intern_sig_slots_g(unsafe (slots + 7), 0, total - 7, FN_SIG);
+            it.args[7] = self.intern_sig_slots_g(unsafe (slots + 7), 0, total - 7, FN_SIG, 0);
         }
         return self.intern_sig_g(&it, q);
     }
@@ -2967,6 +3066,11 @@ pub struct Ast {
     pub has_c_value: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
+    /// What a call's arguments make the callee's lifetimes outlive (`TypeChecker::tc_lt_call_export`):
+    /// `(span key, sup token, sub token, next)` quadruples, `next` the index + 1 of the call's next
+    /// one (0: none); `call_lt_at` maps a call's span key (`start << 32 | end`) to its first + 1.
+    pub call_lts: Vector<u64>,
+    pub call_lt_at: Map<u64, u32>,
     /// Per operator node: the method the type checker chose, as (module << 32 | node). Two conformances
     /// may provide one operator for different right operands, so the NAME no longer identifies it and
     /// codegen must not resolve it a second time.
@@ -3061,6 +3165,8 @@ extend Ast as Free {
         self.lane_callers.free();
         self.unsafe_lints.free();
         self.call_info.free();
+        self.call_lts.free();
+        self.call_lt_at.free();
         self.op_method.free();
         self.pat_vals.free();
         self.seeds.free();
@@ -3591,24 +3697,24 @@ extend Ast {
         return self.pool.insert_inst(it) | TYPE_PROV;
     }
 
-    /// The function-pointer type with results `slots[0..nret]` and parameters
-    /// `slots[nret..nret + np]` (`move fn(..)` with `is_move`). Safety: `slots` must point at
-    /// `nret + np` readable TypeIds.
-    pub fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool) TypeId {
+    /// The function-pointer type with results `slots[0..nret]`, parameters `slots[nret..nret + np]`
+    /// (`move fn(..)` with `is_move`) and lifetime classes `lts`, whose class slots follow
+    /// (`lts_encode`). Safety: `slots` must point at `nret + np + lts_slots(lts)` readable TypeIds.
+    pub fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool, lts: u64) TypeId {
         let q = if is_move {
             FN_SIG | FN_MOVE;
         } else {
             FN_SIG;
         };
         self.ilock_enter();
-        let r = self.intern_sig_i(slots, nret, np, q);
+        let r = self.intern_sig_i(slots, nret, np, q, lts);
         self.ilock_leave();
         return r;
     }
 
-    fn intern_sig_i(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8) TypeId {
-        let total = nret + np;
-        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0 };
+    fn intern_sig_i(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, q: u8, lts: u64) TypeId {
+        let total = nret + np + lts_slots(lts);
+        let mut it = TyInstance { module: nret as ModuleId, decl: np, n: 0, lts: lts };
         if total <= 8 {
             it.n = total as u8;
             for j in 0..total {
@@ -3619,7 +3725,7 @@ extend Ast {
             for j in 0..7 {
                 unsafe it.args[j as usize] = unsafe slots[j as usize];
             }
-            it.args[7] = self.intern_sig_i(unsafe (slots + 7), 0, total - 7, FN_SIG);
+            it.args[7] = self.intern_sig_i(unsafe (slots + 7), 0, total - 7, FN_SIG, 0);
         }
         return self.intern_sig_rec(&it, q);
     }
@@ -3632,12 +3738,12 @@ extend Ast {
         }
         let r0 = *self.type_at(it.args[0]);
         if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
-            let mut ps = Vector::<TypeId>::with_capacity(it.decl as usize);
-            for i in 0..it.decl {
-                ps.push(self.rec_slot(it, i + 1));
+            let mut ps = Vector::<TypeId>::with_capacity((rec_len(it) - 1) as usize);
+            for i in 1..rec_len(it) {
+                ps.push(self.rec_slot(it, i));
             }
             self.ilock_enter();
-            let r = self.intern_sig_i(ps.as_ptr(), 0, it.decl, q);
+            let r = self.intern_sig_i(ps.as_ptr(), 0, it.decl, q, it.lts);
             self.ilock_leave();
             return r;
         }
@@ -3695,12 +3801,71 @@ extend Ast {
         return self.rec_slot(it, i + it.module as u32);
     }
 
-    // Slot `i` of signature record `it` (results first, then parameters).
-    const fn rec_slot(self: &Self, it0: &TyInstance, i: u32) TypeId {
+    /// The lifetime positions function-pointer type `y`'s classes record; 0 for the default ones.
+    pub const fn sig_lt_len(self: &Self, y: &Ty) u32 {
+        let lts = self.instance(y.as_data.fnp.sig).lts;
+        if (lts & 15u64) != 0 {
+            return (lts & 15u64) as u32;
+        }
+        if (lts & 255u64) == LTS_EXT {
+            return (lts >> 8) as u32;
+        }
+        return 0;
+    }
+
+    /// Position `k`'s canonical class in function-pointer type `y`'s classes (`k < sig_lt_len`).
+    pub const fn sig_lt_class(self: &Self, y: &Ty, k: u32) u8 {
+        let it = self.instance(y.as_data.fnp.sig);
+        if (it.lts & 255u64) != LTS_EXT {
+            return lts_class(it.lts, k);
+        }
+        let w = self.type_at(self.rec_slot(it, it.module as u32 + it.decl + k / 8)).as_data.value as u64;
+        return (w >> (8 * (k % 8)) as u64 & 255u64) as u8;
+    }
+
+    /// Lifetime classes `cls` (canonical, `nres` result positions first) as `TyInstance.lts`; the
+    /// class slots an LTS_EXT value needs are appended to `slots`.
+    pub fn lts_encode(self: &mut Self, cls: &Vector<u8>, nres: u32, slots: &mut Vector<TypeId>) u64 {
+        if lt_default(cls, nres) {
+            return 0;
+        }
+        if cls.contains(&LC_TOO_MANY) {
+            return LTS_WIDE;
+        }
+        let n = cls.len() as u32;
+        let mut packs = n <= LTS_MAX;
+        for k in 0..cls.len() {
+            let c = cls[k];
+            packs = packs && (c < LC_GROUP + LP_GROUPS || c >= LC_OUTER && c < LC_OUTER + LP_GROUPS);
+        }
+        let mut lts: u64 = n;
+        if packs {
+            for k in 0..n {
+                let mut c = cls[k as usize];
+                if c >= LC_OUTER {
+                    c = c - LC_OUTER + LP_OUTER;
+                }
+                lts = lts | c as u64 << (4 + 4 * k) as u64;
+            }
+            return lts;
+        }
+        let mut w: u64 = 0;
+        for k in 0..n {
+            w = w | cls[k as usize] as u64 << (8 * (k % 8)) as u64;
+            if k % 8 == 7 || k + 1 == n {
+                slots.push(self.const_value(w as i64, BuiltinType::BT_U64));
+                w = 0;
+            }
+        }
+        return LTS_EXT | n as u64 << 8;
+    }
+
+    /// Slot `i` of signature record `it` (results first, then parameters).
+    pub const fn rec_slot(self: &Self, it0: &TyInstance, i: u32) TypeId {
         let mut it = *it0;
         let mut k = i;
         // A record of more than eight slots continues in its last one, seven slots further on.
-        while k >= 7 && it.module as u32 + it.decl > 8 {
+        while k >= 7 && rec_len(&it) > 8 {
             it = *self.instance(self.type_at(it.args[7]).as_data.fnp.sig);
             k = k - 7;
         }

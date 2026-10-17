@@ -371,13 +371,12 @@ extend Solver {
     // Statement-exact liveness points for every inference origin, from one backward replay of each
     // block against the boundary liveness solution.
     fn origin_live_points(self: &mut Self) {
-        let bd = unsafe &*self.b;
         let f = unsafe &*self.f;
         let lw = f.lwords as usize;
         // Invert origin_local into a per-local CSR: each statement pair then touches only the
         // origins whose local is live there (found by scanning the live-word bits), instead of
         // testing every inference origin per pair: the old O(pairs * norigins) hot spot.
-        let nl = bd.locals.len();
+        let nl = f.nlive as usize;
         self.s_lo_start.truncate(0);
         self.s_lo_start.resize_default(nl + 1);
         for o in f.nuniversal..f.norigins {
@@ -419,13 +418,25 @@ extend Solver {
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
             if ac.place == bf::BF_NONE {
-                // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use.
-                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] && (self.s_omask[(ac.local / 64) as usize] >> (ac.local & 63) as u64 & 1u64) != 0 {
-                    uses.push(ac.point as u64 << 32 | ac.local as u64);
+                // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use (of a
+                // closure's drop slot when it has one).
+                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
+                    let l = if f.drop_slot[ac.local as usize] != bf::BF_NONE {
+                        f.drop_slot[ac.local as usize];
+                    } else {
+                        ac.local;
+                    };
+                    if (self.s_omask[(l / 64) as usize] >> (l & 63) as u64 & 1u64) != 0 {
+                        uses.push(ac.point as u64 << 32 | l as u64);
+                    }
                 }
                 continue;
             }
             let pl = *self.body().places.at(ac.place as usize);
+            // A new closure value ends the destruction its drop slot stands for.
+            if ac.def && f.drop_slot[pl.base as usize] != bf::BF_NONE {
+                uses.push(ac.point as u64 << 32 | f.drop_slot[pl.base as usize] as u64 | 1u64 << 63);
+            }
             if (self.s_omask[(pl.base / 64) as usize] >> (pl.base & 63) as u64 & 1u64) == 0 {
                 continue;
             }
@@ -470,7 +481,7 @@ extend Solver {
         self.live_pts.truncate(0);
         self.live_pts.resize_default((ninf * self.pwords) as usize);
         let lw = f.lwords as usize;
-        let nl = bd.locals.len();
+        let nl = f.nlive as usize;
         let uses = replace(&mut self.s_uses, Vector::<u64>::new());
         // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
         // statement (loans and subsets injected there must flow onward) and dead before it.
@@ -612,7 +623,7 @@ extend Solver {
         let c = unsafe &*self.c;
         let lvr = unsafe &*self.lv;
         let lw = f.lwords as usize;
-        let nl = bd.locals.len();
+        let nl = f.nlive as usize;
         let uses = replace(&mut self.s_uses, Vector::<u64>::new());
         let mut open = replace(&mut self.s_open, Vector::<u32>::new());
         let mut opos = replace(&mut self.s_opos, Vector::<u32>::new());

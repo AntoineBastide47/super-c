@@ -63,8 +63,7 @@ pub struct Resolver<'a> {
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
     pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
     pub lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
-    pub closure_param: bool, // resolving a closure parameter's type: it may name no outer lifetime
-    pub closure_lt_floor: u32, // `lt_owners` length when that type started: owners above it are its own
+    pub closure_param: bool, // resolving a closure parameter's type: the lifetimes it names are the call's
     pub build_names: bool, // the module is the build-constant module: it may declare the reserved names
     pub target_names: bool, // the module is std's `target`: it declares the build-constant enums
 }
@@ -790,8 +789,7 @@ extend Resolver {
         return mark;
     }
 
-    /// Report lifetime `lt` unless it is `'static`, `'_` or a lifetime param in scope, and any lifetime
-    /// but `'_` a closure parameter names.
+    /// Report lifetime `lt` unless it is `'static`, `'_` or a lifetime param in scope.
     fn resolve_lifetime(self: &mut Self, lt: NodeId) {
         if lt == NODE_NONE {
             return;
@@ -801,7 +799,6 @@ extend Resolver {
             return;
         }
         let mut found = span_is(self.source, name, "'static");
-        let mut inner = false; // declared inside the closure parameter's type (a `for<..>` binder)
         let mut i = self.lt_owners.len();
         while i > 0 && !found {
             i -= 1;
@@ -810,7 +807,6 @@ extend Resolver {
                 let pn = self.ast.at_const(self.child(lts, k)).as_data.generic_param.name;
                 if span_eq(self.source, self.ast.at_const(pn).as_data.name.text, name) {
                     found = true;
-                    inner = i as u32 >= self.closure_lt_floor;
                     // Every enclosing closure names it: its value holds that region.
                     if !self.closure_param {
                         for c in 0..self.closures.len() {
@@ -829,17 +825,6 @@ extend Resolver {
                 ),
             );
             return;
-        }
-        if self.closure_param && !inner {
-            // A closure value is called through a function type, which takes its arguments at any
-            // lifetime: a named one is a requirement no call checks.
-            self.errors.emit_span(
-                name,
-                format(
-                    "a closure parameter cannot name lifetime `{}`: a closure takes its arguments at any lifetime",
-                    self.source.slice(name.start as usize, name.end as usize),
-                ),
-            );
         }
     }
 
@@ -1002,6 +987,8 @@ extend Resolver {
             return;
         }
         if kind == NodeKind::NODE_FUNCTION_TYPE {
+            // A `for<'a>` function type binds its lifetimes over itself.
+            let lt_mark = self.lt_open(id);
             let ft = self.ast.at_const(id).as_data.function_type;
             let mut i: u32 = 0;
             while i < ft.params.len {
@@ -1015,6 +1002,7 @@ extend Resolver {
                 self.resolve_type(rr);
                 i = i + 1;
             }
+            self.lt_owners.truncate(lt_mark as usize);
             return;
         }
     }
@@ -1695,7 +1683,6 @@ extend Resolver {
             let param = self.ast.at_const(pid).as_data.parameter;
             self.declare(param.name, pid, Namespace::NS_VALUE);
             self.closure_param = true;
-            self.closure_lt_floor = self.lt_owners.len() as u32;
             self.resolve_type(param.ty);
             self.closure_param = false;
         }

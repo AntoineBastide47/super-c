@@ -107,6 +107,19 @@ pub struct StoreVia {
     pub te: u8,
     pub inner: bool,
     pub more: u8, // reference levels the store passes past the container it reaches (`**p`: one)
+    // A call through closure `cnode` stores into its captures in `caps` only (`CapTag`); NODE_NONE: all.
+    pub cnode: NodeId,
+    pub caps: u64,
+}
+
+/// A loan (`loan`) or a copy edge (`from` into `to`, `loan` BF_NONE) that capture `k` of closure
+/// `node` puts into the closure value: a store through the value reaches the capture through it.
+pub struct CapTag {
+    pub loan: u32,
+    pub from: u32,
+    pub to: u32,
+    pub node: NodeId,
+    pub k: u32,
 }
 
 /// `Owner.interior_memo`'s mark of a declaration whose mask is being computed (a recursive type).
@@ -187,12 +200,18 @@ pub struct BodyFacts {
     pub mev_start: Vector<u32>,
     pub rep_blk: Vector<bool>, // per block: any USE/MOVE/MOVE_CUT event (the reporting replay can say something)
     pub easy_blk: Vector<bool>, // per block: only assign/root-leaf-use events, so a clean entry state cannot error
-    pub easy_use: Vector<u64>, // per block x lwords: root-leaf paths the block USES (easy-block clearance mask)
+    pub easy_use: Vector<u64>, // per block x ewords: root-leaf paths the block USES (easy-block clearance mask)
     pub freed: Vector<u32>, // move paths consumed by an explicit `.free()` (wording refinement)
     pub observed: Vector<bool>, // per local: owned carrier whose destruction observes stored borrows
     pub cuts: Vector<u64>, // origin << 32 | stmt entry: whole-local rebind severs earlier flows there
-    pub lwords: u32, // liveness row width (ceil(nlocals/64))
-    pub luse: Vector<u64>, // per block: locals read before any full definition
+    pub ewords: u32, // easy_use row width (ceil(nlocals/64))
+    // Liveness slots: the locals, then one per closure local whose destruction observes what its
+    // owned captures hold (`drop_slot`): its drop origin is live where that destruction is.
+    pub nlive: u32,
+    pub drop_slot: Vector<u32>, // per local: its drop origin's liveness slot, or BF_NONE
+    pub drop_origin: Vector<u32>, // per local: its drop origin, or BF_NONE
+    pub lwords: u32, // liveness row width (ceil(nlive/64))
+    pub luse: Vector<u64>, // per block: liveness slots read before any full definition
     pub ldef: Vector<u64>, // per block: locals fully defined
 }
 
@@ -240,6 +259,16 @@ pub struct Owner {
     tys: Vector<TypeId>,
     // Per-callee and per-type-node caches: call boundaries re-read the same signatures constantly.
     pub callee_flags: Map<u64, u64>, // (mod << 32 | node) -> 4 | self << 0 | free << 1 | elided return << 3
+    pub gen_sigs: Map<u64, TypeId>, // generic parameter or closure (mod << 32 | node) -> its function type
+    pub gen_cls: Map<u64, u64>, // closure (mod << 32 | node) -> its classes, start << 16 | len in gen_cls_pool
+    pub gen_cls_pool: Vector<u8>,
+    // Closure (mod << 32 | node) -> start << 16 | len in cap_reach_pool: per parameter, the captures
+    // (bit k) its argument may be stored into (`bc_closure_escape`).
+    pub cap_reach: Map<u64, u64>,
+    pub cap_reach_pool: Vector<u64>,
+    // Closure (mod << 32 | node) -> the captures (bit k) whose contents its destruction may read:
+    // the ones it owns whose destruction observes borrows, and what its body stores into them.
+    pub cap_keep: Map<u64, u64>,
     pub kinds_memo: Map<u64, u64>, // (mod << 32 | node) -> start << 16 | len into kinds_pool
     pub kinds_pool: Vector<u8>,
     pub tok_memo: Map<u64, u64>, // (mod << 32 | type node) -> start << 16 | len into tok_pool
@@ -322,6 +351,38 @@ fn static_tok() u64 {
     return 1u64 << 63 | "'static".hash() & 0x7FFFFFFFFFFFFFFF;
 }
 
+// Whether position `k` of classes `cls` has the lifetime token `tk` names (`tc::lt_class_tok`).
+fn lt_class_hit(cls: &Vector<u8>, k: usize, tk: u64) bool {
+    let c = (tk >> 32 & 255) as u8;
+    if c == LC_OUTER {
+        return k as u64 == (tk & 0xFFFFFFFF);
+    }
+    return cls[k] == c;
+}
+
+// Whether positions `a0..a1` of classes `ca` and `b0..b1` of `cb` share a lifetime group.
+fn lt_meet(ca: &Vector<u8>, a0: u32, a1: u32, cb: &Vector<u8>, b0: u32, b1: u32) bool {
+    for i in a0..a1 {
+        for j in b0..b1 {
+            if i as usize < ca.len() && j as usize < cb.len() && ca[i as usize] >= LC_GROUP && ca[i as usize] == cb[j as usize] {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Whether positions `s0..s1` of `cls` share a lifetime group with a position `base + k` that
+// `reach[k]` marks.
+fn lt_meet_where(cls: &Vector<u8>, s0: u32, s1: u32, base: u32, reach: &Vector<bool>) bool {
+    for k in 0..reach.len() {
+        if reach[k] && lt_meet(cls, s0, s1, cls, base + k as u32, base + k as u32 + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Record `sup: sub` in an outlives pair list; an elided or trivial pair says nothing.
 fn rel_push(out: &mut Vector<u64>, sup: u64, sub: u64) {
     if sup != 0 && sub != 0 && sup != sub {
@@ -353,6 +414,7 @@ pub struct Gen {
     pub in_caps: bool, // reading closure-capture operands: owned moves record ACC_CAP
     pub calling: bool, // reading a callee-position operand: calling borrows the env, never moves it
     pub plain_copy: bool, // reading an RV_USE operand: a `&mut` place copy consumes the binding
+    pub no_drop: bool, // a flow into a closure value that its destruction never reads (`drop_origin`)
     pub copy_out: bool, // reading a call argument whose value holds no borrow
     pub loans: bool, // record origins, loans, accesses, subsets, kills and liveness rows (else moves only)
     pub seen: Vector<u64>, // per-block first-touch words for luse/ldef construction
@@ -364,6 +426,7 @@ pub struct Gen {
     // Per origin: the placeholder of the closure capture the origin belongs to when the closure
     // captures it by reference (its writes land in the enclosing frame's binding), else BF_NONE.
     pub cap_ph: Vector<u32>,
+    pub cap_tags: Vector<CapTag>, // what each closure creation's captures put into the closure value
     pub ext: NodeId, // the extend of the callee whose signature the type walks read (`unself`)
     pub ext_mod: ModuleId,
     pub rel: u64, // the outlives relation of the callee under walk (`Owner::callee_rel`; 0: none)
@@ -408,6 +471,10 @@ extend BodyFacts {
             freed: Vector::<u32>::new(),
             observed: Vector::<bool>::new(),
             cuts: Vector::<u64>::new(),
+            ewords: 0,
+            nlive: 0,
+            drop_slot: Vector::<u32>::new(),
+            drop_origin: Vector::<u32>::new(),
             lwords: 0,
             luse: Vector::<u64>::new(),
             ldef: Vector::<u64>::new(),
@@ -416,7 +483,7 @@ extend BodyFacts {
 
     /// Heap bytes kept across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.named.capacity() * sizeof(u64) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.loans.capacity() * sizeof(Loan) + (self.origin_loans.capacity() + self.loan_next.capacity()) * sizeof(u32) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.clashes.capacity() * sizeof(ArgClash) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64)) as u64;
+        return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.named.capacity() * sizeof(u64) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.loans.capacity() * sizeof(Loan) + (self.origin_loans.capacity() + self.loan_next.capacity()) * sizeof(u32) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.clashes.capacity() * sizeof(ArgClash) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + (self.drop_slot.capacity() + self.drop_origin.capacity()) * sizeof(u32) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64)) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
@@ -425,6 +492,8 @@ extend BodyFacts {
         self.nmoves = 0;
         self.norigins = 0;
         self.nuniversal = 0;
+        self.ewords = 0;
+        self.nlive = 0;
         self.lwords = 0;
         self.block_base.truncate(0);
         self.local_origin.truncate(0);
@@ -449,6 +518,8 @@ extend BodyFacts {
         self.easy_use.truncate(0);
         self.freed.truncate(0);
         self.observed.truncate(0);
+        self.drop_slot.truncate(0);
+        self.drop_origin.truncate(0);
         self.cuts.truncate(0);
         self.luse.truncate(0);
         self.ldef.truncate(0);
@@ -509,7 +580,7 @@ extend Gen {
         }
         let a = self.owner().ast_of(m);
         let tyn = a.slot_type_node(slot);
-        if tyn == NODE_NONE || a.at_const(tyn).kind != NodeKind::NODE_REFERENCE_TYPE {
+        if tyn == NODE_NONE || !a.at_const(tyn).is_ref_type() {
             return tok::Span::empty();
         }
         return self.lt_name(m, a.at_const(tyn).as_data.indirect_type.lifetime);
@@ -521,6 +592,70 @@ extend Gen {
         }
         let s = self.owner().src_of(self.body().module);
         return s.slice(a.start as usize, a.end as usize) == s.slice(bsp.start as usize, bsp.end as usize);
+    }
+
+    // Append to `out` the lifetime names the function types inside type node `tyn` (module `m`) fix:
+    // those a position names that no enclosing function type's `for<..>` (`binders`) binds,
+    // `'static` aside.
+    fn fn_type_names(
+        self: &Self,
+        m: ModuleId,
+        tyn: NodeId,
+        binders: &mut Vector<NodeId>,
+        out: &mut Vector<tok::Span>,
+        depth: u32,
+    ) {
+        if tyn == NODE_NONE || depth > 8 {
+            return;
+        }
+        let a = self.owner().ast_of(m);
+        let n = *a.at_const(tyn);
+        if n.kind == NodeKind::NODE_FUNCTION_TYPE {
+            binders.push(tyn);
+            for i in 0..n.as_data.function_type.params.len + n.as_data.function_type.returns.len {
+                let sl = if i < n.as_data.function_type.params.len {
+                    unsafe a.list(n.as_data.function_type.params)[i as usize];
+                } else {
+                    unsafe a.list(n.as_data.function_type.returns)[(i - n.as_data.function_type.params.len) as usize];
+                };
+                self.fn_type_names(m, a.slot_type_node(sl), binders, out, depth + 1);
+            }
+            let _ = binders.pop();
+            return;
+        }
+        let mut lt = NODE_NONE;
+        if n.has_lt_slot() {
+            lt = n.as_data.indirect_type.lifetime;
+        } else if n.kind == NodeKind::NODE_LIFETIME {
+            lt = tyn;
+        }
+        if lt != NODE_NONE && binders.len() != 0 {
+            let nm = self.lt_name(m, lt);
+            let mut bound = nm.end <= nm.start || self.owner().span_text_is(m, nm, "'static");
+            for b in 0..binders.len() {
+                let lts = a.lifetimes_of(binders[b]);
+                for i in 0..lts.len {
+                    bound = bound || self.name_eq(self.lt_name(m, unsafe a.list(lts)[i as usize]), nm);
+                }
+            }
+            if !bound {
+                out.push(nm);
+            }
+        }
+        if n.has_lt_slot() || n.kind == NodeKind::NODE_POINTER_TYPE || n.kind == NodeKind::NODE_DYN_TYPE {
+            self.fn_type_names(m, n.as_data.indirect_type.ty, binders, out, depth + 1);
+        } else if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.fn_type_names(m, n.as_data.array_type.element, binders, out, depth + 1);
+        } else if n.kind == NodeKind::NODE_TUPLE_TYPE || n.kind == NodeKind::NODE_TYPE_PATH {
+            let es = if n.kind == NodeKind::NODE_TUPLE_TYPE {
+                n.as_data.array_literal.elements;
+            } else {
+                n.as_data.type_path.args;
+            };
+            for i in 0..es.len {
+                self.fn_type_names(m, unsafe a.list(es)[i as usize], binders, out, depth + 1);
+            }
+        }
     }
 
     // The universal origin for declared name `nm` (empty = always fresh), created on first use.
@@ -596,6 +731,32 @@ extend Gen {
             let u = self.universal_for(nm);
             self.f.ret_origin.push(u);
         }
+        // The placeholders of the enclosing function's lifetimes a local's function type names
+        // (local, placeholder pairs in `fnames`), before the first inference origin.
+        let mut fnames = Vector::<u32>::new();
+        let mut names = Vector::<tok::Span>::new();
+        let mut binders = Vector::<NodeId>::new();
+        for l in 0..nlocals {
+            let d = self.body().locals.at(l).decl;
+            if d == NODE_NONE || self.owner().ast_of(bmod).at_const(d).kind != NodeKind::NODE_LET || !self.owner().carries(
+                bmod,
+                self.body().locals.at(l).ty,
+            ) {
+                continue;
+            }
+            names.truncate(0);
+            self.fn_type_names(
+                bmod,
+                self.owner().ast_of(bmod).at_const(d).as_data.let_stmt.ty,
+                &mut binders,
+                &mut names,
+                0,
+            );
+            for k in 0..names.len() {
+                fnames.push(l as u32);
+                fnames.push(self.universal_for(names[k]));
+            }
+        }
         // Inference origins: one per borrow-carrying local.
         for l in 0..nlocals {
             let ld = *self.body().locals.at(l);
@@ -618,6 +779,34 @@ extend Gen {
             );
             self.f.local_origin.push(o);
         }
+        // A closure local whose destruction observes stored borrows gets a drop origin: what its
+        // owned captures hold, live where it is destroyed, while what it only refers to (a capture
+        // taken by reference) ends at its last use, as Rust drops a closure's fields.
+        self.f.nlive = nlocals as u32;
+        for l in 0..nlocals {
+            let mut d = BF_NONE;
+            if self.f.local_origin[l] != BF_NONE && self.f.observed[l] && self.closure_ty(self.body().locals.at(l).ty) {
+                d = self.f.norigins;
+                self.f.norigins += 1;
+                self.f.origin_local.push(self.f.nlive);
+                self.f.drop_slot.push(self.f.nlive);
+                self.f.nlive += 1;
+                if self.f.arg_universal[l] != BF_NONE {
+                    self.f.subsets.push(SubsetAt { from: self.f.arg_universal[l], to: d, point: 0, delta: SD_KEEP });
+                }
+            } else {
+                self.f.drop_slot.push(BF_NONE);
+            }
+            self.f.drop_origin.push(d);
+        }
+        // A local annotated with a function type naming the enclosing function's lifetimes holds
+        // them: a call through it stores its arguments there (`sig_call`).
+        for k in 0..fnames.len() / 2 {
+            let o = self.f.local_origin[fnames[2 * k] as usize];
+            if o != BF_NONE {
+                self.f.subsets.push(SubsetAt { from: fnames[2 * k + 1], to: o, point: 0, delta: SD_KEEP });
+            }
+        }
         // Loans arriving through arguments: placeholder flows into the argument's own origin. A
         // mutable-reference argument also flows back out (stores through it reach the caller).
         for l in 0..nlocals {
@@ -630,18 +819,20 @@ extend Gen {
             // No omnipresent backflow edge in this direction: a store through the argument (a
             // call's, an assignment's) flows into the placeholder at the store (`resolve_stores`).
         }
-        // A closure's capture taken by `&mut` is the enclosing frame's binding: what the body stores
-        // into it lands in that caller storage (`subset_d`, `push_loan`).
+        // A closure's capture taken by `&mut` is the enclosing frame's binding, and one it holds by
+        // value lives in the closure value across calls: what the body stores into either lands in
+        // storage that outlives the call (`subset_d`, `push_loan`).
         if fnode != NODE_NONE && self.owner().ast_of(bmod).at_const(fnode).kind == NodeKind::NODE_CLOSURE {
             let cf = self.owner().ast_of(bmod).closure_fact(fnode);
-            if cf != null && unsafe (&*cf).mut_caps != 0 {
+            if cf != null && unsafe (&*cf).ncaps != 0 {
                 self.cap_ph.resize_default(self.f.norigins as usize);
                 for o in 0..self.f.norigins as usize {
                     self.cap_ph.set(o, BF_NONE);
                 }
                 for k in 0..unsafe (&*cf).ncaps {
                     let l = (nrets + params.len + k) as usize;
-                    if (unsafe (&*cf).mut_caps >> k as u64 & 1u64) != 0 && l < nlocals && self.f.arg_universal[l] != BF_NONE && self.f.local_origin[l] != BF_NONE {
+                    let shared = k < 64 && (unsafe (&*cf).ref_caps >> k as u64 & 1u64) != 0;
+                    if !shared && l < nlocals && self.f.arg_universal[l] != BF_NONE && self.f.local_origin[l] != BF_NONE {
                         self.cap_ph.set(self.f.local_origin[l] as usize, self.f.arg_universal[l]);
                     }
                 }
@@ -742,6 +933,10 @@ extend Gen {
         let base = self.cur_block as usize * self.f.lwords as usize;
         self.f.ldef.set(base + w, self.f.ldef[base + w] | bit);
         self.seen.set(w, self.seen[w] | bit);
+        // A new value of a closure local ends the destruction its drop origin stands for.
+        if l as usize < self.f.drop_slot.len() && self.f.drop_slot[l as usize] != BF_NONE {
+            self.live_def(self.f.drop_slot[l as usize]);
+        }
     }
 
     // Record a new loan (not yet activated) as its origin's newest.
@@ -766,6 +961,11 @@ extend Gen {
         if o < self.cap_ph.len() && self.cap_ph[o] != BF_NONE {
             // Issued into a `&mut` capture: the enclosing frame's binding holds it.
             self.f.subsets.push(SubsetAt { from: origin, to: self.cap_ph[o], point: issued_at, delta: SD_KEEP });
+        }
+        // Issued into a closure value: its destruction reads it unless the value only refers to it.
+        let d = self.drop_of(origin);
+        if d != BF_NONE && !self.no_drop {
+            self.push_loan(view, pin, deref, deep, place, kind, d, issued_at, span);
         }
         self.f.loans.push(
             Loan {
@@ -830,9 +1030,44 @@ extend Gen {
             return;
         }
         self.f.subsets.push(SubsetAt { from: from, to: to, point: point, delta: delta });
+        // What flows into a closure value reaches its destruction too, unless its creation says the
+        // value only refers to it (`no_drop`); from another one, what reaches that one's.
+        let dt = self.drop_of(to);
+        if dt != BF_NONE && !self.no_drop {
+            let df = self.drop_of(from);
+            self.f.subsets.push(
+                SubsetAt {
+                    from: if df != BF_NONE {
+                        df;
+                    } else {
+                        from;
+                    },
+                    to: dt,
+                    point: point,
+                    delta: delta,
+                },
+            );
+        }
         if to as usize < self.cap_ph.len() && self.cap_ph[to as usize] != BF_NONE && self.cap_ph[to as usize] != from {
             self.f.subsets.push(SubsetAt { from: from, to: self.cap_ph[to as usize], point: point, delta: delta });
         }
+    }
+
+    // Whether `t` (this body's module) is a closure's type.
+    const fn closure_ty(self: &Self, t: TypeId) bool {
+        let y = *self.owner().ast_of(self.body().module).type_at(t);
+        return y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig() && self.owner().ast_of(y.module).at_const(
+            y.as_data.decl,
+        ).kind == NodeKind::NODE_CLOSURE;
+    }
+
+    // The drop origin of the closure local origin `o` belongs to, or BF_NONE.
+    const fn drop_of(self: &Self, o: u32) u32 {
+        let l = self.f.origin_local[o as usize];
+        if l == BF_NONE || l as usize >= self.f.drop_origin.len() {
+            return BF_NONE;
+        }
+        return self.f.drop_origin[l as usize];
     }
 
     // A store of origin `from` through an argument of origin `via`: into a frame-owned container
@@ -844,7 +1079,19 @@ extend Gen {
             self.subset_d(from, via, point, sd_then(e, te));
             self.interior_store(from, via, point, e, te);
             if through {
-                self.stores.push(StoreVia { from: from, via: via, point: point, e: e, te: te, inner: false, more: 0 });
+                self.stores.push(
+                    StoreVia {
+                        from: from,
+                        via: via,
+                        point: point,
+                        e: e,
+                        te: te,
+                        inner: false,
+                        more: 0,
+                        cnode: NODE_NONE,
+                        caps: 0,
+                    },
+                );
             }
             if more != 0 {
                 // The frame's container is the first level: what its references reach takes the rest.
@@ -854,11 +1101,33 @@ extend Gen {
                     SD_REF;
                 };
                 self.stores.push(
-                    StoreVia { from: from, via: via, point: point, e: e, te: te2, inner: false, more: more - 1 },
+                    StoreVia {
+                        from: from,
+                        via: via,
+                        point: point,
+                        e: e,
+                        te: te2,
+                        inner: false,
+                        more: more - 1,
+                        cnode: NODE_NONE,
+                        caps: 0,
+                    },
                 );
             }
         } else {
-            self.stores.push(StoreVia { from: from, via: via, point: point, e: e, te: te, inner: through, more: more });
+            self.stores.push(
+                StoreVia {
+                    from: from,
+                    via: via,
+                    point: point,
+                    e: e,
+                    te: te,
+                    inner: through,
+                    more: more,
+                    cnode: NODE_NONE,
+                    caps: 0,
+                },
+            );
         }
     }
 
@@ -898,7 +1167,7 @@ extend Gen {
     // The pointee of reference type node `tn` (module `cm`), else `tn`.
     const fn pointee_node(self: &Self, cm: ModuleId, tn: NodeId) NodeId {
         let pn = self.owner().ast_of(cm).at_const(tn);
-        if pn.kind == NodeKind::NODE_REFERENCE_TYPE {
+        if pn.is_ref_type() {
             return pn.as_data.indirect_type.ty;
         }
         return tn;
@@ -969,7 +1238,17 @@ extend Gen {
                     sb.delta;
                 };
                 self.stores.push(
-                    StoreVia { from: sb.from, via: dor, point: entry, e: e, te: te, inner: inner, more: more },
+                    StoreVia {
+                        from: sb.from,
+                        via: dor,
+                        point: entry,
+                        e: e,
+                        te: te,
+                        inner: inner,
+                        more: more,
+                        cnode: NODE_NONE,
+                        caps: 0,
+                    },
                 );
             }
         }
@@ -1004,6 +1283,8 @@ extend Gen {
                         te: te,
                         inner: inner,
                         more: more,
+                        cnode: NODE_NONE,
+                        caps: 0,
                     },
                 );
             }
@@ -1166,6 +1447,8 @@ extend Gen {
                     te: SD_KEEP,
                     inner: self.body().place_has_deref(dst),
                     more: 0,
+                    cnode: NODE_NONE,
+                    caps: 0,
                 },
             );
         }
@@ -1203,6 +1486,8 @@ extend Gen {
                         te: SD_KEEP,
                         inner: false,
                         more: 0,
+                        cnode: NODE_NONE,
+                        caps: 0,
                     },
                 );
             }
@@ -1268,7 +1553,19 @@ extend Gen {
     // A store into origin `via` of a value with an interior type also lands in the values tied to it.
     fn interior_store(self: &mut Self, from: u32, via: u32, point: u32, e: u8, te: u8) {
         if self.interior_origin(via) {
-            self.istores.push(StoreVia { from: from, via: via, point: point, e: e, te: te, inner: false, more: 0 });
+            self.istores.push(
+                StoreVia {
+                    from: from,
+                    via: via,
+                    point: point,
+                    e: e,
+                    te: te,
+                    inner: false,
+                    more: 0,
+                    cnode: NODE_NONE,
+                    caps: 0,
+                },
+            );
         }
     }
 
@@ -1278,11 +1575,26 @@ extend Gen {
             return false;
         }
         let l = self.f.origin_local[o as usize];
-        if l == BF_NONE {
+        if l == BF_NONE || l as usize >= self.body().locals.len() {
             return false;
         }
         let d = self.agg_decl(self.body().locals.at(l as usize).ty);
         return d.node != NODE_NONE && self.owner().interior_mask(d.module, d.node, 0) != 0;
+    }
+
+    // Whether store `st` through a closure passes over loan `l`, or the copy edge from `from` into
+    // `to` (`l` BF_NONE): one a capture outside `st.caps` put into the closure value.
+    fn cap_skip(self: &Self, st: &StoreVia, l: u32, from: u32, to: u32) bool {
+        if st.cnode == NODE_NONE {
+            return false;
+        }
+        for i in 0..self.cap_tags.len() {
+            let t = *self.cap_tags.at(i);
+            if t.node == st.cnode && t.k < 64 && (st.caps >> t.k as u64 & 1u64) == 0 && t.loan == l && (l != BF_NONE || t.from == from && t.to == to) {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn resolve_stores(self: &mut Self) {
@@ -1342,7 +1654,9 @@ extend Gen {
                 while l != BF_NONE {
                     let lo = *self.f.loans.at(l as usize);
                     let ob = self.f.local_origin[self.place_of(lo.place).base as usize];
-                    if ob != BF_NONE {
+                    if ob != BF_NONE && self.cap_skip(&st, l, BF_NONE, BF_NONE) {
+                        reached = true;
+                    } else if ob != BF_NONE {
                         reached = true;
                         if lo.deref || self.body().place_has_deref(lo.place) {
                             if !bits::bit_get(&visit, ob) {
@@ -1366,6 +1680,8 @@ extend Gen {
                                         te: st.te,
                                         inner: false,
                                         more: 0,
+                                        cnode: st.cnode,
+                                        caps: st.caps,
                                     },
                                 );
                             }
@@ -1388,6 +1704,8 @@ extend Gen {
                                             te: te2,
                                             inner: false,
                                             more: st.more - 1,
+                                            cnode: st.cnode,
+                                            caps: st.caps,
                                         },
                                     );
                                 } else {
@@ -1401,6 +1719,9 @@ extend Gen {
                 for k in start[x as usize]..start[x as usize + 1] {
                     let src = flat[k as usize];
                     reached = true;
+                    if self.cap_skip(&st, BF_NONE, src, x) {
+                        continue;
+                    }
                     if src < self.f.nuniversal {
                         self.subset_d(st.from, src, st.point, sd_then(st.e, SD_REF));
                     } else if !bits::bit_get(&visit, src) {
@@ -1531,6 +1852,433 @@ extend Gen {
             );
             self.assign_sites.push(KillSite { place: pid, local: BF_NONE, point: point });
         }
+    }
+
+    // The function-pointer type of callee operand `op` when it names lifetimes (`TyInstance.lts`):
+    // a function pointer's, a `dyn fn`'s signature, a generic parameter's `fn(..)` bound; else
+    // TYPE_NONE.
+    fn value_sig(self: &Self, op: u32, ckey: &mut u64) TypeId {
+        let a = self.owner().ast_of(self.body().module);
+        let y = *a.type_at(self.body().operands.at(op as usize).ty);
+        let mut sig = TYPE_NONE;
+        *ckey = 0;
+        if y.fn_sig() {
+            sig = self.body().operands.at(op as usize).ty;
+        } else if y.kind == TypeKind::TYPE_DYN {
+            sig = a.dyn_fn_sig(&y);
+        } else if y.kind == TypeKind::TYPE_GENERIC || y.kind == TypeKind::TYPE_FUNCTION {
+            let key = y.module as u64 << 32 | y.as_data.decl as u64;
+            switch self.owner().gen_sigs.get(&key) {
+                Some(v) => {
+                    sig = *v;
+                },
+                None => {},
+            };
+            if self.owner().gen_cls.contains_key(&key) {
+                *ckey = key;
+            }
+        }
+        if sig == TYPE_NONE || !a.type_at(sig).fn_sig() || *ckey == 0 && a.instance(a.type_at(sig).as_data.fnp.sig).lts == 0 {
+            return TYPE_NONE;
+        }
+        return sig;
+    }
+
+    // The (sup, sub) token pairs the arguments of the call at `sp` make the callee's lifetimes
+    // outlive (`Ast::call_lts`), into `out`.
+    fn call_lt_pairs(self: &Self, sp: tok::Span, out: &mut Vector<u64>) {
+        let a = self.owner().ast_of(self.body().module);
+        let key = sp.start as u64 << 32 | sp.end as u64;
+        let mut i = switch a.call_lt_at.get(&key) {
+            Some(v) => *v,
+            None => 0u32,
+        };
+        for _ in 0..a.call_lts.len() / 4 {
+            if i == 0 {
+                return;
+            }
+            let b = (i - 1) as usize * 4;
+            out.push(a.call_lts[b + 1]);
+            out.push(a.call_lts[b + 2]);
+            i = a.call_lts[b + 3] as u32;
+        }
+    }
+
+    // Apply to the classes `cls` of a call through a function value at `sp` what its arguments make
+    // the value's lifetimes outlive (`lt_class_tok` tokens): `'static` makes their positions
+    // `'static`; another of them, one lifetime with it.
+    fn call_lt_classes(self: &Self, sp: tok::Span, cls: &mut Vector<u8>) {
+        let mut ext = Vector::<u64>::new();
+        self.call_lt_pairs(sp, &mut ext);
+        for i in 0..ext.len() / 2 {
+            let sup = ext[2 * i];
+            let sub = ext[2 * i + 1];
+            if sup >> 62 != 1 {
+                continue;
+            }
+            let mut fresh = LC_GROUP;
+            for k in 0..cls.len() {
+                if cls[k] >= LC_GROUP && cls[k] < LC_OUTER {
+                    fresh = fresh.max(cls[k] + 1);
+                }
+            }
+            let to = if sub == static_tok() {
+                LC_STATIC;
+            } else {
+                fresh.min(LC_OUTER - 1);
+            };
+            for k in 0..cls.len() {
+                if lt_class_hit(cls, k, sup) || sub >> 62 == 1 && lt_class_hit(cls, k, sub) {
+                    cls.set(k, to);
+                }
+            }
+        }
+    }
+
+    // A call `t` through a function value of type `sig`, which names lifetimes: the result borrows
+    // from the callee value and from each argument at a position whose lifetime a result position
+    // has; an argument at a `'static` position flows into `'static`; an argument sharing a lifetime
+    // with what a `&mut` argument points at (or the interior of what a shared one points at) is
+    // stored there.
+    fn sig_call(self: &mut Self, t: &ir::Terminator, sig: TypeId, ckey: u64, entry: u32) {
+        let bm = self.body().module;
+        let sy = *self.owner().ast_of(bm).type_at(sig);
+        let mut cls = Vector::<u8>::new();
+        let mut fl = Vector::<u8>::new();
+        let mut nres: u32 = 0;
+        self.owner().p().sig_classes(
+            self.owner().ast_of(bm),
+            &sy,
+            &mut cls,
+            &mut fl,
+            &mut nres,
+            &mut loader::Invariant {},
+        );
+        // A closure's classes (`Owner::gen_cls`), which its function type may not hold.
+        switch self.owner().gen_cls.get(&ckey) {
+            Some(r) => {
+                let st = (*r >> 16) as usize;
+                for k in 0..cls.len().min((*r & 0xFFFF) as usize) {
+                    cls.set(k, self.owner().gen_cls_pool[st + k]);
+                }
+            },
+            None => {},
+        };
+        self.call_lt_classes(t.span, &mut cls);
+        let np = self.owner().ast_of(bm).sig_len(&sy, false).min(t.args_len);
+        // Parameter `i`'s positions are `at[i]..at[i + 1]`.
+        let mut at = Vector::<u32>::new();
+        let mut p = nres;
+        for i in 0..np {
+            at.push(p);
+            p = p + self.owner().p().lt_count(self.owner().ast_of(bm), self.owner().ast_of(bm).sig_at(&sy, false, i));
+        }
+        at.push(p);
+        for d2 in 0..t.dests_len {
+            let dor = self.origin_of_place(self.body().dest_pool[(t.dests_start + d2) as usize]);
+            if dor == BF_NONE {
+                continue;
+            }
+            if t.a != ir::IR_NONE {
+                let cop = *self.body().operands.at(t.a as usize);
+                if cop.kind == ir::OP_COPY || cop.kind == ir::OP_MOVE {
+                    self.subset(self.origin_of_place(cop.data), dor, entry);
+                }
+            }
+            for i in 0..np {
+                let oi = *self.body().operands.at(self.body().oper_pool[(t.args_start + i) as usize] as usize);
+                if (oi.kind == ir::OP_COPY || oi.kind == ir::OP_MOVE) && lt_meet(
+                    &cls,
+                    at[i as usize],
+                    at[i as usize + 1],
+                    &cls,
+                    0,
+                    nres,
+                ) {
+                    self.subset(self.origin_of_place(oi.data), dor, entry);
+                }
+            }
+        }
+        if !self.loans {
+            return;
+        }
+        for i in 0..np {
+            let oi = *self.body().operands.at(self.body().oper_pool[(t.args_start + i) as usize] as usize);
+            if oi.kind != ir::OP_COPY && oi.kind != ir::OP_MOVE {
+                continue;
+            }
+            let s0 = at[i as usize];
+            let s1 = at[i as usize + 1];
+            // A `'static` position: the whole argument when no reference of the parameter holds it,
+            // else what lies behind the argument.
+            let mut st = false;
+            let mut whole = false;
+            for k in s0..s1 {
+                if cls[k as usize] == LC_STATIC {
+                    st = true;
+                    whole = whole || (fl[k as usize] & LTF_REF) == 0;
+                }
+            }
+            if st {
+                let e = if whole {
+                    SD_KEEP;
+                } else {
+                    SD_DEREF;
+                };
+                self.subset_d(self.origin_of_place(oi.data), 0, entry, sd_then(self.place_edge(oi.data), e));
+            }
+        }
+        // An argument at a lifetime fixed outside the type is stored where the callee value keeps
+        // that lifetime: the captures of a closure its body stores the parameter into
+        // (`Owner::cap_reach`; every capture before its body is checked), or the caller storage a
+        // parameter's type names.
+        let cop = if t.a != ir::IR_NONE {
+            *self.body().operands.at(t.a as usize);
+        } else {
+            ir::Operand { kind: ir::OP_CONST, data: 0, ty: TYPE_NONE };
+        };
+        let reach = switch self.owner().cap_reach.get(&ckey) {
+            Some(r) => *r,
+            None => 0u64,
+        };
+        let cnode = if reach != 0 {
+            (ckey & 0xFFFFFFFFu64) as NodeId;
+        } else {
+            NODE_NONE;
+        };
+        if (cop.kind == ir::OP_COPY || cop.kind == ir::OP_MOVE) && !self.behind_raw(cop.data) {
+            let tor = self.origin_of_place(cop.data);
+            for i in 0..np {
+                let oi = *self.body().operands.at(self.body().oper_pool[(t.args_start + i) as usize] as usize);
+                if tor == BF_NONE || oi.kind != ir::OP_COPY && oi.kind != ir::OP_MOVE {
+                    continue;
+                }
+                let aor = self.origin_of_place(oi.data);
+                let s0 = at[i as usize];
+                let s1 = at[i as usize + 1];
+                let mut outer = false;
+                for k in s0..s1 {
+                    outer = outer || cls[k as usize] >= LC_OUTER;
+                }
+                if aor == BF_NONE || !outer {
+                    continue;
+                }
+                // The argument's own reference is stored only when its lifetime is the fixed one.
+                let mut e = self.place_edge(oi.data);
+                let pk = self.owner().ast_of(bm).type_at(self.owner().ast_of(bm).sig_at(&sy, false, i)).kind;
+                if (pk == TypeKind::TYPE_REFERENCE || pk == TypeKind::TYPE_SLICE) && cls[s0 as usize] < LC_OUTER {
+                    e = sd_then(e, SD_DEREF);
+                }
+                if cnode == NODE_NONE {
+                    self.store(aor, tor, false, entry, e, SD_REF, true, 0);
+                    continue;
+                }
+                let caps = if i < (reach & 0xFFFF) as u32 {
+                    self.owner().cap_reach_pool[(reach >> 16) as usize + i as usize];
+                } else {
+                    0u64;
+                };
+                if caps == 0 {
+                    continue;
+                }
+                self.stores.push(
+                    StoreVia {
+                        from: aor,
+                        via: tor,
+                        point: entry,
+                        e: e,
+                        te: SD_REF,
+                        inner: true,
+                        more: 0,
+                        cnode: cnode,
+                        caps: caps,
+                    },
+                );
+                // A capture the closure owns holds the argument in the closure value itself.
+                if (caps & self.owned_caps(ckey)) == 0 {
+                    continue;
+                }
+                if self.body().place_has_deref(cop.data) {
+                    self.stores.push(
+                        StoreVia {
+                            from: aor,
+                            via: tor,
+                            point: entry,
+                            e: e,
+                            te: SD_KEEP,
+                            inner: false,
+                            more: 0,
+                            cnode: cnode,
+                            caps: 0,
+                        },
+                    );
+                } else {
+                    self.subset_d(aor, tor, entry, e);
+                }
+            }
+        }
+        for j in 0..np {
+            let pt = self.owner().ast_of(bm).sig_at(&sy, false, j);
+            let py = *self.owner().ast_of(bm).type_at(pt);
+            if py.kind != TypeKind::TYPE_REFERENCE {
+                continue;
+            }
+            // The positions a store through argument `j` reaches: behind a `&mut`, or in the
+            // interior arguments of what a shared reference points at.
+            let mut reach = Vector::<bool>::new();
+            reach.push(false);
+            if py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                for _ in at[j as usize] + 1..at[j as usize + 1] {
+                    reach.push(true);
+                }
+            } else {
+                self.interior_reach(py.as_data.elem, &mut reach);
+            }
+            let oj = *self.body().operands.at(self.body().oper_pool[(t.args_start + j) as usize] as usize);
+            if oj.kind != ir::OP_COPY && oj.kind != ir::OP_MOVE || self.behind_raw(oj.data) {
+                continue;
+            }
+            let jty = self.place_of(oj.data).ty;
+            let y = *self.owner().ast_of(bm).type_at(jty);
+            let mut pointee_ty = jty;
+            if y.kind == TypeKind::TYPE_REFERENCE {
+                pointee_ty = y.as_data.elem;
+            }
+            if y.kind == TypeKind::TYPE_POINTER || !self.owner().carries(bm, pointee_ty) {
+                continue;
+            }
+            let tor = self.origin_of_place(oj.data);
+            let owned = y.kind != TypeKind::TYPE_REFERENCE && !self.body().place_has_deref(oj.data);
+            let through = self.type_through(pointee_ty);
+            let mut behind = Vector::<u8>::new();
+            self.owner().p().lt_walk(
+                self.owner().ast_of(bm),
+                py.as_data.elem,
+                0,
+                &mut behind,
+                0,
+                &mut loader::Invariant {},
+            );
+            for i in 0..np {
+                let oi = *self.body().operands.at(self.body().oper_pool[(t.args_start + i) as usize] as usize);
+                if i == j || oi.kind != ir::OP_COPY && oi.kind != ir::OP_MOVE {
+                    continue;
+                }
+                let aor = self.origin_of_place(oi.data);
+                let s0 = at[i as usize];
+                let s1 = at[i as usize + 1];
+                if aor == BF_NONE || !lt_meet_where(&cls, s0, s1, at[j as usize], &reach) {
+                    continue;
+                }
+                // The argument's own reference is stored only when its lifetime is one reached.
+                let mut e = self.place_edge(oi.data);
+                let it = self.owner().ast_of(bm).type_at(self.owner().ast_of(bm).sig_at(&sy, false, i)).kind;
+                if it == TypeKind::TYPE_REFERENCE && !lt_meet_where(&cls, s0, s0 + 1, at[j as usize], &reach) {
+                    e = sd_then(e, SD_DEREF);
+                }
+                // A store reaching a position behind a reference within the pointee lands there.
+                let mut te = SD_KEEP;
+                for k in 0..behind.len() {
+                    let pk = at[j as usize] + 1 + k as u32;
+                    if (behind[k] & LTF_BEHIND) != 0 && pk as usize < cls.len() && cls[pk as usize] >= LC_GROUP && lt_meet(
+                        &cls,
+                        s0,
+                        s1,
+                        &cls,
+                        pk,
+                        pk + 1,
+                    ) {
+                        te = SD_REF;
+                    }
+                }
+                let more = self.sig_store_more(&cls, at[j as usize] + 1, py.as_data.elem, s0, s1);
+                self.store(aor, tor, owned, entry, e, te, through, more);
+            }
+        }
+    }
+
+    // The captures closure `ckey` (mod << 32 | node) holds by value and owns: a store into one stays
+    // in the closure value.
+    fn owned_caps(self: &mut Self, ckey: u64) u64 {
+        let m = (ckey >> 32) as ModuleId;
+        let c = (ckey & 0xFFFFFFFFu64) as NodeId;
+        let cf = self.owner().ast_of(m).closure_fact(c);
+        let by_ptr = if cf != null {
+            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+        } else {
+            0u64;
+        };
+        let caps = self.owner().ast_of(m).at_const(c).as_data.closure.captures;
+        let mut r: u64 = 0;
+        for k in 0..caps.len.min(64) {
+            let ty = self.owner().ast_of(m).type_of(unsafe self.owner().ast_of(m).list(caps)[k as usize]);
+            if (by_ptr >> k as u64 & 1u64) == 0 && self.owner().owns(self.body().owner, m, ty) {
+                r = r | 1u64 << k as u64;
+            }
+        }
+        return r;
+    }
+
+    // The `&mut` levels past pointee `pt` (whose positions start at `p0` of `cls`) a store of an
+    // argument with positions `s0..s1` passes through: `&mut &'a T` takes an `'a` value one level down.
+    fn sig_store_more(self: &Self, cls: &Vector<u8>, p0: u32, pt0: TypeId, s0: u32, s1: u32) u8 {
+        let bm = self.body().module;
+        let mut n: u8 = 0;
+        let mut pt = pt0;
+        let mut p = p0;
+        while n < 255 {
+            let y = *self.owner().ast_of(bm).type_at(pt);
+            if y.kind != TypeKind::TYPE_REFERENCE || y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+                break;
+            }
+            let inner = self.owner().p().lt_count(self.owner().ast_of(bm), y.as_data.elem);
+            if !lt_meet(cls, s0, s1, cls, p + 1, p + 1 + inner) {
+                break;
+            }
+            n += 1;
+            p = p + 1;
+            pt = y.as_data.elem;
+        }
+        return n;
+    }
+
+    // Mark in `reach` (one entry per position of the reference's own, then of pointee `pt`) the
+    // positions of `pt`'s interior arguments: those its declaration keeps behind an `UnsafeCell`.
+    fn interior_reach(self: &mut Self, pt: TypeId, reach: &mut Vector<bool>) {
+        let bm = self.body().module;
+        let y = *self.owner().ast_of(bm).type_at(pt);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            for _ in 0..self.owner().p().lt_count(self.owner().ast_of(bm), pt) {
+                reach.push(false);
+            }
+            return;
+        }
+        let it = *self.owner().ast_of(bm).instance(y.as_data.inst);
+        let mask = self.owner().interior_mask(it.module, it.decl, 0);
+        // The declaration's own lifetimes: reachable where it keeps anything behind an `UnsafeCell`.
+        for _ in 0..self.owner().p().decl_nlt(self.owner().ast_of(bm), it.module, it.decl) {
+            reach.push(mask != 0);
+        }
+        for i in 0..it.n {
+            let c = self.owner().p().lt_count(self.owner().ast_of(bm), unsafe it.args[i as usize]);
+            for _ in 0..c {
+                reach.push(i < 64 && (mask >> i as u64 & 1u64) != 0);
+            }
+        }
+    }
+
+    // Terminator `t0`, a call through a local holding a function (not a closure, not a function
+    // pointer) resolved to that function: the call runs it, so its signature applies.
+    fn call_term(self: &Self, t0: ir::Terminator) ir::Terminator {
+        let mut t = t0;
+        if t.kind != ir::TM_CALL || t.callee.node != NODE_NONE || t.a == ir::IR_NONE {
+            return t;
+        }
+        let y = *self.owner().ast_of(self.body().module).type_at(self.body().operands.at(t.a as usize).ty);
+        if y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig() && self.owner().ast_of(y.module).at_const(y.as_data.decl).kind == NodeKind::NODE_FUNCTION {
+            t.callee = DefId { module: y.module, node: y.as_data.decl };
+        }
+        return t;
     }
 
     // Parameter passing modes for a direct call: 0 = by value, 1 = &, 2 = &mut, 3 = raw pointer.
@@ -1688,13 +2436,15 @@ extend Gen {
         let tyn = self.unself(m, tyn0);
         let mut k = NodeKind::NODE_NONE_KIND;
         let mut lt = NODE_NONE;
+        let mut lts = false;
         let mut inner = NODE_NONE;
         let mut args = NodeList { start: 0, len: 0 };
         {
             let a = self.owner().ast_of(m);
             let node = a.at_const(tyn);
             k = node.kind;
-            if k == NodeKind::NODE_REFERENCE_TYPE || k == NodeKind::NODE_SLICE_TYPE {
+            lts = node.has_lt_slot();
+            if lts {
                 lt = node.as_data.indirect_type.lifetime;
                 inner = node.as_data.indirect_type.ty;
             } else if k == NodeKind::NODE_ARRAY_TYPE {
@@ -1715,7 +2465,7 @@ extend Gen {
             self.lt_name_token(m, tyn, out);
             return;
         }
-        if k == NodeKind::NODE_REFERENCE_TYPE || k == NodeKind::NODE_SLICE_TYPE {
+        if lts {
             self.lt_name_token(m, lt, out);
             self.lt_tokens(m, inner, out, depth + 1);
             return;
@@ -1828,7 +2578,7 @@ extend Gen {
         }
         let tyn = self.unself(m, tyn0);
         let n = *self.owner().ast_of(m).at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             if behind {
                 let mut tk = self.lt_token(m, n.as_data.indirect_type.lifetime);
                 if tk == 0 {
@@ -1896,7 +2646,7 @@ extend Gen {
             return true;
         }
         let pn = self.owner().ast_of(cm).at_const(ptyn[i as usize]);
-        if pn.kind != NodeKind::NODE_REFERENCE_TYPE {
+        if !pn.is_ref_type() {
             return true;
         }
         let tk = self.lt_token(cm, pn.as_data.indirect_type.lifetime);
@@ -1982,7 +2732,7 @@ extend Gen {
             yk = self.owner().ast_of(self.body().module).type_at(ty).kind;
         }
         let pn = self.owner().ast_of(cm).at_const(ptn);
-        if k == 0 || yk == TypeKind::TYPE_POINTER || pn.kind != NodeKind::NODE_REFERENCE_TYPE {
+        if k == 0 || yk == TypeKind::TYPE_POINTER || !pn.is_ref_type() {
             return e;
         }
         let tk = self.lt_token(cm, pn.as_data.indirect_type.lifetime);
@@ -2003,7 +2753,7 @@ extend Gen {
     // with tokens `itok`: a store reaching a position behind a reference of P lands there.
     fn store_target_edge(self: &mut Self, cm: ModuleId, ptn: NodeId, itok: &Vector<u64>) u8 {
         let pn = *self.owner().ast_of(cm).at_const(ptn);
-        if pn.kind != NodeKind::NODE_REFERENCE_TYPE {
+        if !pn.is_ref_type() {
             return SD_REF;
         }
         if self.range_meets(self.behind_range(cm, pn.as_data.indirect_type.ty, false), itok) {
@@ -2039,7 +2789,7 @@ extend Gen {
             }
         }
         let a = self.owner().ast_of(cm);
-        if (kind == 1 || kind == 2) && !pointee_carries && a.at_const(ptn).kind == NodeKind::NODE_REFERENCE_TYPE {
+        if (kind == 1 || kind == 2) && !pointee_carries && a.at_const(ptn).is_ref_type() {
             self.lt_name_token(cm, a.at_const(ptn).as_data.indirect_type.lifetime, out);
         } else {
             // A reference spelled through an alias (`IntRef<'a>`) names its lifetime as an argument.
@@ -2066,7 +2816,7 @@ extend Gen {
             return true;
         }
         let pn = self.owner().ast_of(cm).at_const(ptyn[i as usize]);
-        if pn.kind != NodeKind::NODE_REFERENCE_TYPE {
+        if !pn.is_ref_type() {
             return true;
         }
         let tk = self.lt_token(cm, pn.as_data.indirect_type.lifetime);
@@ -2091,7 +2841,7 @@ extend Gen {
         }
         let a = self.owner().ast_of(m);
         let n = a.at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             let sp = self.lt_name(m, n.as_data.indirect_type.lifetime);
             return sp.end <= sp.start || self.has_elided_lt(m, n.as_data.indirect_type.ty, depth + 1);
         }
@@ -2237,7 +2987,7 @@ extend Gen {
             return 0;
         }
         let n = self.owner().ast_of(m).at_const(ptn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             if stat.contains(&self.lt_token(m, n.as_data.indirect_type.lifetime)) {
                 return 1;
             }
@@ -2264,7 +3014,7 @@ extend Gen {
         if n.kind == NodeKind::NODE_LIFETIME {
             return stat.contains(&self.lt_token(m, tyn));
         }
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             return stat.contains(&self.lt_token(m, n.as_data.indirect_type.lifetime)) || self.names_static(
                 m,
                 n.as_data.indirect_type.ty,
@@ -2286,6 +3036,9 @@ extend Gen {
             // A type parameter bounded `'static` (`F: fn() + 'static`) holds only `'static` borrows.
             let d = a.path_def(tyn);
             if d.node != NODE_NONE && self.owner().ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+                if stat.contains(&(d.module as u64 << 32 | d.node as u64)) {
+                    return true;
+                }
                 let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
                 for i in 0..bs.len {
                     let b = unsafe self.owner().ast_of(d.module).list(bs)[i as usize];
@@ -2461,14 +3214,16 @@ extend Gen {
     fn walk(self: &mut Self) {
         let nlocals = self.body().locals.len() as u32;
         let nb = self.body().blocks.len();
-        let mut lw = (nlocals + 63) / 64;
-        if lw == 0 {
-            lw = 1;
+        let ew = ((nlocals + 63) / 64).max(1);
+        if self.f.nlive < nlocals {
+            self.f.nlive = nlocals;
         }
+        let lw = ((self.f.nlive + 63) / 64).max(1);
+        self.f.ewords = ew;
         self.f.lwords = lw;
         // `generate_into` reset the rows.
         let rows = nb * lw as usize;
-        self.f.easy_use.resize_default(rows);
+        self.f.easy_use.resize_default(nb * ew as usize);
         if self.loans {
             self.f.luse.resize_default(rows);
             self.f.ldef.resize_default(rows);
@@ -2503,14 +3258,20 @@ extend Gen {
                             // An owned carrier's destruction observes what it stores (`Free` runs),
                             // so the local counts as USED here: stored borrows must survive to it.
                             if self.f.observed[s.a as usize] {
-                                self.live_use(s.a);
+                                self.live_use(
+                                    if self.f.drop_slot[s.a as usize] != BF_NONE {
+                                        self.f.drop_slot[s.a as usize];
+                                    } else {
+                                        s.a;
+                                    },
+                                );
                             }
                             self.access(BF_NONE, s.a, ACC_WRITE, exit, s.span);
                         }
                     }
                 }
             }
-            let t = blk.term;
+            let t = self.call_term(blk.term);
             let entry = self.term_entry(bi as u32);
             let exit = entry + 1;
             if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT {
@@ -2523,19 +3284,45 @@ extend Gen {
                 self.calling = false;
             } else if t.kind == ir::TM_CALL {
                 self.enter_callee(t.callee);
-                // A signature relating two lifetimes (`'b: 'a`) ties them as one name would.
+                // A signature relating two lifetimes (`'b: 'a`) ties them as one name would; so do
+                // the function values the call passes (`Ast::call_lts`).
                 self.rel = if self.loans {
                     self.owner().callee_rel(t.callee);
                 } else {
                     0u64;
                 };
+                let mut cext = Vector::<u64>::new();
+                if self.loans && t.callee.node != NODE_NONE {
+                    self.call_lt_pairs(t.span, &mut cext);
+                    if cext.len() != 0 {
+                        self.rel = self.owner().rel_extend(self.rel, &cext);
+                    }
+                }
+                if t.callee.node != NODE_NONE && self.owner().ast_of(t.callee.module).at_const(t.callee.node).kind == NodeKind::NODE_CLOSURE {
+                    // A closure called as its hoisted function follows the lifetimes its parameters name.
+                    let csig = switch self.owner().gen_sigs.get(&(t.callee.module as u64 << 32 | t.callee.node as u64)) {
+                        Some(v) => *v,
+                        None => TYPE_NONE,
+                    };
+                    if csig != TYPE_NONE && csig != TYPE_ERROR {
+                        self.sig_call(&t, csig, t.callee.module as u64 << 32 | t.callee.node as u64, entry);
+                    }
+                }
                 if t.callee.node == NODE_NONE && t.a != ir::IR_NONE {
                     self.calling = true;
                     self.op_read(t.a, entry, t.span);
                     self.calling = false;
-                    // A fn-value call has no named signature; conservatively derive carrying
+                    let mut ckey: u64 = 0;
+                    let sig = self.value_sig(t.a, &mut ckey);
+                    if sig != TYPE_NONE {
+                        self.sig_call(&t, sig, ckey, entry);
+                    }
+                    // A fn-value call without a type naming lifetimes: conservatively derive carrying
                     // dests from every carrying argument AND the callee value's own captures.
                     for d2 in 0..t.dests_len {
+                        if sig != TYPE_NONE {
+                            break;
+                        }
                         let dp2 = self.body().dest_pool[(t.dests_start + d2) as usize];
                         let dor2 = self.origin_of_place(dp2);
                         if dor2 == BF_NONE {
@@ -2722,11 +3509,19 @@ extend Gen {
                 // frame storage escapes, and a caller region must be declared `'static`. An
                 // autoref'd place is the pointee itself: `'static` holds its contents at their own
                 // level, and a `&'static` parameter's implicit borrow of the place.
-                let sfl = if self.loans && t.callee.node != NODE_NONE {
+                let mut sfl = if self.loans && t.callee.node != NODE_NONE {
                     self.callee_flag(t.callee) >> 8;
                 } else {
                     0u64;
                 };
+                if cext.len() != 0 {
+                    let mut stat = Vector::<u64>::new();
+                    self.owner().rel_static(self.rel, &mut stat);
+                    sfl = 0;
+                    for i in 0..ptyn.len().min(STATIC_PARAMS_MAX as usize) {
+                        sfl = sfl | self.static_kind(t.callee.module, ptyn[i], &stat) as u64 << (2 * i) as u64;
+                    }
+                }
                 if sfl != 0 {
                     for i in 0..t.args_len.min(STATIC_PARAMS_MAX) {
                         let sk = (sfl >> (2 * i) as u64 & 3u64) as u8;
@@ -2765,7 +3560,7 @@ extend Gen {
                     let mut pointee = ptyn[j];
                     {
                         let pn = self.owner().ast_of(t.callee.module).at_const(pointee);
-                        if pn.kind == NodeKind::NODE_REFERENCE_TYPE {
+                        if pn.is_ref_type() {
                             pointee = pn.as_data.indirect_type.ty;
                         }
                     }
@@ -3076,7 +3871,7 @@ extend Gen {
             if kind != EV_USE || fo.parent[path as usize] != mp::MP_NONE || !fo.is_leaf(path) {
                 self.f.easy_blk.set(self.cur_block as usize, false);
             } else {
-                let slot = (self.cur_block * self.f.lwords + path / 64) as usize;
+                let slot = (self.cur_block * self.f.ewords + path / 64) as usize;
                 self.f.easy_use.set(slot, self.f.easy_use[slot] | 1u64 << (path & 63) as u64);
             }
         }
@@ -3222,6 +4017,10 @@ extend Gen {
                 if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
                     continue;
                 }
+                let l0 = self.f.loans.len() as u32;
+                // A capture the closure's destruction cannot read flows into it, not into its drop
+                // origin (`Owner::cap_keep`).
+                self.no_drop = i < 64 && (self.owner().cap_keep_of(self.body().module, rv.item.node) >> i as u64 & 1u64) == 0;
                 if (mut_caps >> i as u64 & 1u64) != 0 {
                     // A mutable capture is a mutable borrow held by the closure value.
                     let pl = self.place_of(op.data);
@@ -3264,9 +4063,16 @@ extend Gen {
                     self.in_caps = false;
                     let aor = self.origin_of_place(op.data);
                     self.subset_d(aor, dor, entry, sd_then(self.place_edge(op.data), self.store_edge(s.place)));
+                    if aor != BF_NONE && dor != BF_NONE && aor != dor {
+                        self.cap_tags.push(CapTag { loan: BF_NONE, from: aor, to: dor, node: rv.item.node, k: i });
+                    }
                     // A copied `&mut` or `[]mut T` capture is a unique reborrow held by the closure.
                     self.reborrow_store(op.data, dor, s.place, exit, s.span);
                 }
+                for l in l0..self.f.loans.len() as u32 {
+                    self.cap_tags.push(CapTag { loan: l, from: BF_NONE, to: BF_NONE, node: rv.item.node, k: i });
+                }
+                self.no_drop = false;
             }
             self.write_place(s.place, exit, s.span);
             return;
@@ -3572,6 +4378,12 @@ extend Owner {
             subst: Vector::<OwnSubst>::new(),
             tys: Vector::<TypeId>::new(),
             callee_flags: Map::<u64, u64>::new(),
+            gen_sigs: Map::<u64, TypeId>::new(),
+            gen_cls: Map::<u64, u64>::new(),
+            gen_cls_pool: Vector::<u8>::new(),
+            cap_reach: Map::<u64, u64>::new(),
+            cap_reach_pool: Vector::<u64>::new(),
+            cap_keep: Map::<u64, u64>::new(),
             kinds_memo: Map::<u64, u64>::new(),
             kinds_pool: Vector::<u8>::new(),
             tok_memo: Map::<u64, u64>::new(),
@@ -3648,7 +4460,7 @@ extend Owner {
         let ps = nd.as_data.function.params;
         for i in 0..ps.len {
             let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
-            if ptn != NODE_NONE && a.at_const(ptn).kind == NodeKind::NODE_REFERENCE_TYPE && stat.contains(
+            if ptn != NODE_NONE && a.at_const(ptn).is_ref_type() && stat.contains(
                 &self.lt_tok(callee.module, a.at_const(ptn).as_data.indirect_type.lifetime),
             ) {
                 return true;
@@ -3766,7 +4578,7 @@ extend Owner {
         }
         let a = self.ast_of(m);
         let n = *a.at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             self.rel_implied(m, n.as_data.indirect_type.ty, out, depth + 1);
             return;
         }
@@ -3830,6 +4642,25 @@ extend Owner {
 
     /// Add to `toks` every token relation `rel` relates to one of them, transitively: each token that
     /// outlives one when `up`, else each token one outlives.
+    /// Relation `rel` with the (sup, sub) token pairs `extra` added, those of `tc::lt_class_tok`
+    /// aside.
+    pub fn rel_extend(self: &mut Self, rel: u64, extra: &Vector<u64>) u64 {
+        let st = (rel >> 16) as usize;
+        let n = (rel & 0xFFFF) as usize;
+        let start = self.rel_pool.len();
+        for i in 0..2 * n {
+            let v = self.rel_pool[st + i];
+            self.rel_pool.push(v);
+        }
+        for i in 0..extra.len() / 2 {
+            if extra[2 * i] >> 62 != 1 {
+                self.rel_pool.push(extra[2 * i]);
+                self.rel_pool.push(extra[2 * i + 1]);
+            }
+        }
+        return start as u64 << 16 | ((self.rel_pool.len() - start) / 2) as u64;
+    }
+
     pub fn rel_widen(self: &Self, rel: u64, up: bool, toks: &mut Vector<u64>) {
         let st = (rel >> 16) as usize;
         let n = (rel & 0xFFFF) as usize;
@@ -3861,56 +4692,6 @@ extend Owner {
         out.truncate(0);
         out.push(static_tok());
         self.rel_widen(rel, true, out);
-    }
-
-    /// The lifetime tokens (`lt_tok`) and type-parameter tokens (`module << 32 | decl`) type node `tyn`
-    /// of module `m` names, into `out`; `Self` names the target of extend `ext`.
-    pub fn type_toks(self: &Self, m: ModuleId, ext: NodeId, tyn: NodeId, out: &mut Vector<u64>, depth: i32) {
-        if tyn == NODE_NONE || depth > 6 {
-            return;
-        }
-        let a = self.ast_of(m);
-        let n = *a.at_const(tyn);
-        if n.kind == NodeKind::NODE_LIFETIME {
-            let t = self.lt_tok(m, tyn);
-            if t != 0 {
-                out.push(t);
-            }
-            return;
-        }
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
-            let t = self.lt_tok(m, n.as_data.indirect_type.lifetime);
-            if t != 0 {
-                out.push(t);
-            }
-            self.type_toks(m, ext, n.as_data.indirect_type.ty, out, depth + 1);
-            return;
-        }
-        if n.kind == NodeKind::NODE_ARRAY_TYPE {
-            self.type_toks(m, ext, n.as_data.array_type.element, out, depth + 1);
-            return;
-        }
-        let mut es = NodeList { start: 0, len: 0 };
-        if n.kind == NodeKind::NODE_TUPLE_TYPE {
-            es = n.as_data.array_literal.elements;
-        } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            if ext != NODE_NONE && n.as_data.type_path.parts.len == 1 && self.span_text_is(
-                m,
-                a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
-                "Self",
-            ) {
-                self.type_toks(m, NODE_NONE, a.at_const(ext).as_data.extend_def.target_type, out, depth + 1);
-                return;
-            }
-            let d = a.path_def(tyn);
-            if d.node != NODE_NONE && self.ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
-                out.push(d.module as u64 << 32 | d.node as u64);
-            }
-            es = n.as_data.type_path.args;
-        }
-        for i in 0..es.len {
-            self.type_toks(m, ext, unsafe a.list(es)[i as usize], out, depth + 1);
-        }
     }
 
     /// Does relation `rel` declare a lifetime to outlive another lifetime than `'static`?
@@ -4144,6 +4925,15 @@ extend Owner {
 
     /// Does a value of `(mid, ty)` own memory (Free semantics: value uses are moves) in the body of
     /// `at`? The body decides which `where` bounds apply to a type parameter.
+    /// The captures of closure `node` (module `m`) its destruction may read (`cap_keep`); all when
+    /// its body was not analyzed.
+    pub fn cap_keep_of(self: &Self, m: ModuleId, node: NodeId) u64 {
+        return switch self.cap_keep.get(&(m as u64 << 32 | node as u64)) {
+            Some(v) => *v,
+            None => 0xFFFFFFFFFFFFFFFFu64,
+        };
+    }
+
     pub fn owns(self: &mut Self, at: DefId, mid: ModuleId, ty: TypeId) bool {
         self.low = BUSY_NONE;
         self.at = at;
@@ -4468,6 +5258,27 @@ extend Owner {
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.observes_f(mid, y.as_data.arr.elem, depth + 1);
         }
+        if y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig() && self.ast_of(y.module).at_const(y.as_data.decl).kind == NodeKind::NODE_CLOSURE {
+            // A closure has no destructor of its own: it destroys the captures it holds by value and
+            // never reads one it holds by reference.
+            let cf = self.ast_of(y.module).closure_fact(y.as_data.decl);
+            let by_ptr = if cf != null {
+                unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+            } else {
+                0u64;
+            };
+            let caps = self.ast_of(y.module).at_const(y.as_data.decl).as_data.closure.captures;
+            for k in 0..caps.len {
+                if k < 64 && (by_ptr >> k as u64 & 1u64) != 0 {
+                    continue;
+                }
+                let ct = self.ast_of(y.module).type_of(unsafe self.ast_of(y.module).list(caps)[k as usize]);
+                if self.observes_f(y.module, ct, depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
         let mut om = y.module;
         let mut od = y.as_data.decl;
         if y.kind == TypeKind::TYPE_INSTANCE {
@@ -4669,6 +5480,16 @@ extend Owner {
             // An erased value can hold captured borrows whatever its ownership.
             return true;
         }
+        if y.fn_sig() {
+            // A function pointer whose type fixes a lifetime outside it holds that region: a call
+            // stores those arguments where the value keeps them (`Gen::sig_call`).
+            for k in 0..self.ast_of(mid).sig_lt_len(&y) {
+                if self.ast_of(mid).sig_lt_class(&y, k) >= LC_OUTER {
+                    return true;
+                }
+            }
+            return false;
+        }
         if y.kind == TypeKind::TYPE_FUNCTION {
             let cf = self.ast_of(y.module).closure_fact(y.as_data.decl);
             if cf == null {
@@ -4773,6 +5594,7 @@ extend Owner {
             cur_block: 0,
             in_caps: false,
             plain_copy: false,
+            no_drop: false,
             copy_out: false,
             calling: false,
             loans: loans,
@@ -4781,6 +5603,7 @@ extend Owner {
             ties: ties,
             istores: istores,
             cap_ph: Vector::<u32>::new(),
+            cap_tags: Vector::<CapTag>::new(),
             ext: NODE_NONE,
             ext_mod: 0,
             rel: 0,

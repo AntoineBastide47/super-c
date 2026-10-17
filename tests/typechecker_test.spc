@@ -3443,6 +3443,61 @@ fn closure_capture_regions() {
     );
 }
 
+// A borrowed `dyn` (`&'a dyn I`) has a lifetime position like a reference: call sites honour its
+// `'static`, named and elided lifetimes, and a struct field of that type must name its lifetime.
+@test
+fn borrowed_dyn_lifetimes() {
+    h::expect_err_msg(
+        "a borrowed dyn passed as a &'static dyn parameter is rejected",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nfn keep(f: &'static dyn Get, out: &mut Vector<&'static dyn Get>) { out.push(f); }\nfn main() i32 {\n    let mut v = Vector::<&'static dyn Get>::new();\n    { let k = K { v: 5 }; keep(&k, &mut v); }\n    return (*v.at(0)).get();\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a borrowed closure passed as a &'static dyn fn parameter is rejected",
+        "fn keep(f: &'static dyn fn() i32, out: &mut Vector<&'static dyn fn() i32>) { out.push(f); }\nfn main() i32 {\n    let mut v = Vector::<&'static dyn fn() i32>::new();\n    { let x = 5; let c = move || x; keep(&c, &mut v); }\n    return (*v.at(0))();\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a &'a dyn argument stored under the same 'a is tied to its container",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nfn keep<'a>(f: &'a dyn Get, out: &mut Vector<&'a dyn Get>) { out.push(f); }\nfn main() i32 {\n    let mut v = Vector::<&dyn Get>::new();\n    { let k = K { v: 5 }; keep(&k, &mut v); }\n    return (*v.at(0)).get();\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "an elided &dyn return borrows from its &dyn input",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nfn pass(f: &dyn Get) &dyn Get { return f; }\nfn main() i32 {\n    let r: &dyn Get;\n    { let k = K { v: 5 }; r = pass(&k); }\n    return r.get();\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a named &'a dyn return borrows from the input that names 'a",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nfn pick<'a>(x: &'a dyn Get, y: &dyn Get) &'a dyn Get { return x; }\nfn main() i32 {\n    let a = K { v: 1 };\n    let r: &dyn Get;\n    { let k = K { v: 5 }; r = pick(&k, &a); }\n    return r.get();\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a container of &'static dyn holds only 'static borrows",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nfn keep(f: Vector<&'static dyn Get>, out: &mut Vector<&'static dyn Get>) { let mut g = f; out.push(*g.at(0)); }\nfn main() i32 {\n    let mut v = Vector::<&'static dyn Get>::new();\n    { let k = K { v: 5 }; let mut w = Vector::<&dyn Get>::new(); w.push(&k); keep(w, &mut v); }\n    return (*v.at(0)).get();\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a &'a dyn stored into a struct field of lifetime 'a is tied to the struct",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nstruct H<'a> { pub f: &'a dyn Get }\nfn put<'a>(h: &mut H<'a>, g: &'a dyn Get) { h.f = g; }\nfn main() i32 {\n    let k0 = K { v: 1 };\n    let mut h = H { f: &k0 };\n    { let k = K { v: 5 }; put(&mut h, &k); }\n    return h.f.get();\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a struct field of type &dyn must name a lifetime",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nstruct H { pub f: &dyn Get }\nfn main() i32 {\n    let h: H;\n    { let k = K { v: 5 }; h = H { f: &k }; }\n    return h.f.get();\n}\n",
+        "missing lifetime specifier",
+    );
+    h::expect_err_msg(
+        "a borrowed runtime fn pointer cannot erase to &dyn fn",
+        "fn one() i32 { return 1; }\nfn main() i32 { let p: fn() i32 = one; let d: &dyn fn() i32 = &p; return d(); }\n",
+        "cannot erase to 'dyn fn'",
+    );
+    h::expect_ok(
+        "borrowed dyn lifetimes that hold are accepted",
+        "interface Get { fn get(self: &Self) i32; }\nstruct K { pub v: i32 }\nextend K as Get { pub fn get(self: &K) i32 { return self.v; } }\nstruct H<'a> { pub f: &'a dyn Get }\nfn shorter<'a>(h: H<'static>, x: &'a i32) H<'a> { return h; }\nfn ret<'a>(f: &'a dyn Get) &'a dyn Get { return f; }\nfn first<'a>(f: &'a dyn Get, g: &dyn Get) &'a dyn Get { return f; }\nconst KK: K = K { v: 3 };\nfn main() i32 {\n    let h = shorter(H { f: &KK }, &1);\n    let k = K { v: 4 };\n    let k2 = K { v: 5 };\n    let r: &dyn Get;\n    { let k3 = K { v: 6 }; r = first(&k, &k3); }\n    return h.f.get() + ret(&k2).get() + r.get();\n}\n",
+    );
+}
+
 // Adversarial round 3. A view REBORROW (a sub-slice `s[0..2]`, a `str` sub-view `sv.trim()`) must
 // INHERIT the receiver's borrow of the real container, not drop it: otherwise the sub-view outlives
 // the container borrow and dangles once the intermediate view's own borrow ends. Both were
@@ -4529,35 +4584,232 @@ fn struct_outlives_bounds() {
     );
 }
 
-// A function value is called through a function type, which takes its arguments at any lifetime. A
-// function whose parameter must be `'static`, or whose body may store one parameter into another's
-// pointee, is no such value; a closure parameter names no lifetime, and a closure stores no argument
-// into a capture.
+// A function type's lifetimes are part of it, as in Rust: a function value converts to a function
+// type only when each lifetime it needs (`'static`, or one shared by several positions) is one the
+// type gives those positions, and a call through the type follows them: a `'static` position takes
+// only `'static` borrows, an argument sharing a lifetime with what a `&mut` argument points at is
+// stored there, and the result borrows from the arguments its lifetime names. A lifetime fixed
+// outside the type (the enclosing item's) is stored through the callee value; a closure parameter's
+// lifetimes work the same way, and an unannotated closure parameter goes into no capture.
 @test
-fn function_values_take_any_lifetime() {
+fn function_type_lifetimes() {
     h::expect_err_msg(
-        "a 'static parameter",
+        "a type path's lifetime argument naming 'static in a function type",
+        "struct P<'a> { pub r: &'a i32 }\nfn keep(p: P<'static>) i32 { return *p.r; }\nfn main() i32 { let f: fn(P<'static>) i32 = keep; let x = 5; return f(P { r: &x }); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a type path's lifetime argument tying positions in a function type",
+        "struct P<'a> { pub r: &'a i32 }\nfn put<'a>(x: &'a i32, out: &mut P<'a>) { out.r = x; }\nconst G: i32 = 1;\nfn main() i32 {\n    let f: for<'a> fn(&'a i32, &mut P<'a>) = put;\n    let mut o = P { r: &G };\n    { let x = 5; f(&x, &mut o); }\n    return *o.r;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "a type path's lifetime argument naming the result's lifetime",
+        "struct P<'a> { pub r: &'a i32 }\nfn get<'a>(p: P<'a>) &'a i32 { return p.r; }\nfn main() i32 { let f: for<'a> fn(P<'a>) &'a i32 = get; let x = 5; return *f(P { r: &x }); }\n",
+    );
+    h::expect_err_msg(
+        "an elided str result borrows from the str argument",
+        "fn first(s: str) str { return s.slice(0, 1); }\nfn main() i32 {\n    let f: fn(str) str = first;\n    let r: str;\n    { let o = String::from_str(\"hello\"); r = f(o.as_str()); }\n    return r.len() as i32;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "an alias's lifetime argument in a function type",
+        "type R<'a> = &'a i32;\nfn keep(x: &'static i32) i32 { return *x; }\nfn main() i32 { let f: fn(R<'static>) i32 = keep; let x = 5; return f(&x); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_ok(
+        "an alias's type argument in a function type",
+        "type Pair<T> = (T, T);\nfn take<'a>(p: (&'a i32, &'a i32)) &'a i32 { return p.0; }\nfn main() i32 { let f: for<'a> fn(Pair<&'a i32>) &'a i32 = take; let x = 5; return *f((&x, &x)); }\n",
+    );
+    h::expect_err_msg(
+        "a call through a type fixing the enclosing lifetime with a local",
+        "fn put<'a>(f: fn(&'a i32), x: &'a i32) { let l = 1; f(&l); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_ok(
+        "a call through a type fixing the enclosing lifetime with that lifetime",
+        "fn rd(x: &i32) { let _ = *x; }\nfn put<'a>(f: fn(&'a i32), x: &'a i32) { f(x); }\nfn main() i32 { let x = 1; put(rd, &x); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a call through a type fixing the enclosing lifetime with another lifetime",
+        "fn put<'a, 'b>(f: fn(&'a i32), x: &'b i32) { f(x); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a call through a copy of a value fixing the enclosing lifetime",
+        "fn put<'a>(f: fn(&'a i32), x: &'a i32) { let g = f; let l = 1; g(&l); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a value fixing the enclosing lifetime as a type that does not",
+        "fn conv<'a>(f: fn(&'a i32)) fn(&i32) { return f; }\nfn main() i32 { return 0; }\n",
+        "do not fit 'fn(&i32)'",
+    );
+    h::expect_err_msg(
+        "a call through a field fixing its struct's lifetime with a local",
+        "struct S<'a> { pub f: fn(&'a i32) }\nfn call<'a>(s: &S<'a>) { let l = 2; (s.f)(&l); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a call through a local annotated with the enclosing lifetime",
+        "fn rd(x: &i32) { let _ = *x; }\nfn put<'a>(x: &'a i32) { let g: fn(&'a i32) = rd; let l = 1; g(&l); g(x); }\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a closure parameter naming 'static takes only 'static borrows",
+        "fn main() i32 { let c = |x: &'static i32| *x; let l = 1; return c(&l); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_ok(
+        "a closure parameter naming 'static",
+        "const G: i32 = 4;\nfn main() i32 { let c = |x: &'static i32| *x; return c(&G); }\n",
+    );
+    h::expect_ok(
+        "a closure parameter naming the enclosing lifetime stored into a capture",
+        "fn run<'a>(v: &mut Vector<&'a i32>, x: &'a i32) {\n    let mut c = |y: &'a i32| { v.push(y); };\n    c(x);\n}\nfn main() i32 { let x = 3; let mut v = Vector::<&i32>::new(); run(&mut v, &x); return *v[0] - 3; }\n",
+    );
+    h::expect_err_msg(
+        "a call of a closure storing its argument into a capture with a local",
+        "fn run<'a>(v: &mut Vector<&'a i32>) {\n    let mut c = |y: &'a i32| { v.push(y); };\n    let l = 1;\n    c(&l);\n}\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_ok(
+        "a closure tying two parameters to the enclosing lifetime",
+        "fn run<'a>(x: &'a i32, o: &mut &'a i32) {\n    let c = |p: &'a i32, out: &mut &'a i32| { *out = p; };\n    c(x, o);\n}\nfn main() i32 { let x = 1; let y = 2; let mut o = &y; run(&x, &mut o); return *o - 1; }\n",
+    );
+    h::expect_err_msg(
+        "a call of a closure tying two parameters with a local",
+        "fn run<'a>(o: &mut &'a i32) {\n    let c = |p: &'a i32, out: &mut &'a i32| { *out = p; };\n    let l = 1;\n    c(&l, o);\n}\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a closure storing an annotated parameter into an unrelated one",
+        "fn run<'a>(x: &'a i32) {\n    let c = |p: &'a i32, out: &mut &i32| { *out = p; };\n    let _ = c;\n}\nfn main() i32 { return 0; }\n",
+        "a closure argument is stored where it must outlive the closure",
+    );
+    h::expect_err_msg(
+        "a closure fixing the enclosing lifetime as a dyn fn that does not",
+        "fn run<'a>(x: &'a i32) {\n    let c = |y: &'a i32| { let _ = y; };\n    let d: &dyn fn(&i32) = &c;\n}\nfn main() i32 { return 0; }\n",
+        "the lifetimes of this closure do not fit",
+    );
+    h::expect_ok(
+        "a closure fixing the enclosing lifetime as a dyn fn that does",
+        "fn run<'a>(x: &'a i32) {\n    let c = |y: &'a i32| { let _ = y; };\n    let d: &dyn fn(&'a i32) = &c;\n    d(x);\n}\nfn main() i32 { let x = 1; run(&x); return 0; }\n",
+    );
+    h::expect_ok(
+        "a for<'a> function type ties its positions",
+        "const G: i32 = 1;\nfn leak<'a>(x: &'a i32, out: &mut &'a i32) { *out = x; }\nstruct S { pub f: for<'a> fn(&'a i32, &mut &'a i32) }\nfn main() i32 {\n    let s = S { f: leak };\n    let mut o: &i32 = &G;\n    let x = 2;\n    (s.f)(&x, &mut o);\n    return *o;\n}\n",
+    );
+    h::expect_err_msg(
+        "a call through a for<'a> tying type stores the argument",
+        "const G: i32 = 1;\nfn leak<'a>(x: &'a i32, out: &mut &'a i32) { *out = x; }\nfn main() i32 {\n    let f: for<'a> fn(&'a i32, &mut &'a i32) = leak;\n    let mut o: &i32 = &G;\n    { let x = 5; f(&x, &mut o); }\n    return *o;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "a for<'a> type equal to the elided one",
+        "fn id(x: &i32) &i32 { return x; }\nfn main() i32 { let f: for<'a> fn(&'a i32) &'a i32 = id; let x = 3; return *f(&x); }\n",
+    );
+    h::expect_err_msg(
+        "a function needing 'static as a type taking any lifetime",
         "fn keep(s: &'static i32) { let _ = s; }\nfn main() i32 {\n    let f: fn(&i32) = keep;\n    let _ = f;\n    return 0;\n}\n",
-        "'keep' cannot be used as a value: parameter 1 must be 'static",
+        "the lifetimes of function 'keep' do not fit 'fn(&i32)'",
     );
     h::expect_err_msg(
-        "a lifetime shared with a &mut parameter's pointee",
+        "a store between parameters as a type that does not tie them",
         "fn put<'a>(x: &mut &'a i32, y: &'a i32) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut &i32, &i32) = put;\n    let _ = f;\n    return 0;\n}\n",
-        "'put' cannot be used as a value: parameter 2 may be stored into parameter 1",
+        "the lifetimes of function 'put' do not fit",
     );
     h::expect_err_msg(
-        "a type parameter bound to a borrow",
+        "a generic store between parameters as a type that does not tie them",
         "fn put<T>(x: &mut T, y: T) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut &i32, &i32) = put::<&i32>;\n    let _ = f;\n    return 0;\n}\n",
-        "'put' cannot be used as a value: parameter 2 may be stored into parameter 1",
+        "do not fit 'fn(&mut &i32, &i32)'",
     );
     h::expect_ok(
         "a type parameter bound to a value without borrows",
         "fn put<T>(x: &mut T, y: T) { *x = y; }\nfn main() i32 {\n    let f: fn(&mut i32, i32) = put::<i32>;\n    let mut a = 0;\n    f(&mut a, 3);\n    return a - 3;\n}\n",
     );
-    h::expect_resolve_err_msg(
-        "a closure parameter naming 'static",
-        "fn main() i32 {\n    let c = |s: &'static i32| *s;\n    let _ = c;\n    return 0;\n}\n",
-        "a closure parameter cannot name lifetime `'static`",
+    h::expect_ok(
+        "a function needing 'static as a type naming 'static",
+        "const G: i32 = 4;\nfn rd(x: &'static i32) i32 { return *x; }\nfn main() i32 { let f: fn(&'static i32) i32 = rd; return f(&G); }\n",
+    );
+    h::expect_err_msg(
+        "a call through a 'static parameter type with a local",
+        "fn rd(x: &'static i32) i32 { return *x; }\nfn main() i32 { let f: fn(&'static i32) i32 = rd; let x = 5; return f(&x); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a 'static parameter type widened to any lifetime",
+        "fn wrap(f: fn(&'static i32) i32) fn(&i32) i32 { return f; }\nfn rd(x: &i32) i32 { return *x; }\nfn main() i32 { let x = 5; return wrap(rd)(&x); }\n",
+        "the lifetimes of 'fn(&'static i32) i32' do not fit 'fn(&i32) i32'",
+    );
+    h::expect_ok(
+        "a type taking any lifetime narrowed to 'static",
+        "const G: i32 = 3;\nfn narrow(f: fn(&i32) i32) fn(&'static i32) i32 { return f; }\nfn rd(x: &i32) i32 { return *x; }\nfn main() i32 { return narrow(rd)(&G); }\n",
+    );
+    h::expect_ok(
+        "a store between parameters as a type that ties them",
+        "const G: i32 = 1;\nfn leak<'a>(x: &'a i32, out: &mut &'a i32) { *out = x; }\nfn put<'a>(f: fn(&'a i32, &mut &'a i32), x: &'a i32, o: &mut &'a i32) { f(x, o); }\nfn main() i32 { let mut o: &i32 = &G; let x = 2; put(leak, &x, &mut o); return *o; }\n",
+    );
+    h::expect_err_msg(
+        "a call through a tying type stores the argument",
+        "const G: i32 = 1;\nfn leak<'a>(x: &'a i32, out: &mut &'a i32) { *out = x; }\nfn run<'a>(g: &'a i32) i32 {\n    let f: fn(&'a i32, &mut &'a i32) = leak;\n    let mut o: &i32 = &G;\n    { let x = 5; f(&x, &mut o); }\n    return *o;\n}\nfn main() i32 { let g = 1; return run(&g); }\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "a result tied to one named parameter borrows from it alone",
+        "fn first<'a>(x: &'a i32, y: &i32) &'a i32 { return x; }\nfn use_it<'a>(f: fn(&'a i32, &i32) &'a i32, x: &'a i32) &'a i32 { let y = 1; return f(x, &y); }\nfn main() i32 { let x = 8; return *use_it(first, &x); }\n",
+    );
+    h::expect_err_msg(
+        "a result from another parameter than the type names",
+        "fn second<'b>(x: &i32, y: &'b i32) &'b i32 { return y; }\nfn run<'a>(g: &'a i32) i32 { let f: fn(&'a i32, &i32) &'a i32 = second; return 0; }\nfn main() i32 { let g = 1; return run(&g); }\n",
+        "the lifetimes of function 'second' do not fit",
+    );
+    h::expect_err_msg(
+        "an elided result with two inputs",
+        "fn main() i32 { let f: Option<fn(&i32, &i32) &i32> = Option::None; return 0; }\n",
+        "missing lifetime specifier: this function type's result borrows",
+    );
+    h::expect_err_msg(
+        "an elided result with no input",
+        "fn main() i32 { let f: Option<fn() &i32> = Option::None; return 0; }\n",
+        "missing lifetime specifier: this function type's result borrows",
+    );
+    h::expect_ok(
+        "a 'static result",
+        "const G: i32 = 6;\nfn g() &'static i32 { return &G; }\nfn main() i32 { let f: fn() &'static i32 = g; let r: &'static i32 = f(); return *r; }\n",
+    );
+    h::expect_ok(
+        "a generic function value keeps its 'static parameter",
+        "const G: i32 = 2;\nfn rd<T>(x: &'static T) T where T: Copy { return *x; }\nfn main() i32 { let f = rd::<i32>; return f(&G); }\n",
+    );
+    h::expect_err_msg(
+        "a call through a generic function value needing 'static",
+        "fn rd<T>(x: &'static T) T where T: Copy { return *x; }\nfn main() i32 { let f = rd::<i32>; let x = 1; return f(&x); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a call through a local holding a function needing 'static",
+        "fn rd(x: &'static i32) i32 { return *x; }\nfn main() i32 { let g = rd; let x = 1; return g(&x); }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a call through a generic tying type stores the argument",
+        "fn push<T>(v: &mut Vector<T>, x: T) { v.push(x); }\nfn run<'a>(g: &'a i32) i32 {\n    let f: fn(&mut Vector<&'a i32>, &'a i32) = push::<&i32>;\n    let mut v = Vector::<&i32>::new();\n    { let x = 3; f(&mut v, &x); }\n    return **v.at(0);\n}\nfn main() i32 { let g = 1; return run(&g); }\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a call through a 'static dyn fn parameter with a local",
+        "fn main() i32 {\n    let c = |x: &i32| *x;\n    let d: &dyn fn(&'static i32) i32 = &c;\n    let y = 5;\n    return d(&y);\n}\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_ok(
+        "a generic bound naming 'static takes a function needing it",
+        "const G: i32 = 3;\nfn call<F: fn(&'static i32) i32>(f: F) i32 { return f(&G); }\nfn rd(x: &'static i32) i32 { return *x; }\nfn main() i32 { return call(rd); }\n",
+    );
+    h::expect_err_msg(
+        "a call through a generic bound naming 'static with a local",
+        "fn call<F: fn(&'static i32) i32>(f: F) i32 { let x = 1; return f(&x); }\nfn main() i32 { return 0; }\n",
+        "this value must satisfy 'static",
     );
     h::expect_err_msg(
         "a closure argument stored into a capture",
@@ -4567,6 +4819,281 @@ fn function_values_take_any_lifetime() {
     h::expect_ok(
         "a closure reading its argument into a capture's value",
         "fn main() i32 {\n    let a = 5;\n    let mut sum = 0;\n    let mut d = |x: &i32| { sum += *x; };\n    d(&a);\n    return sum - 5;\n}\n",
+    );
+    h::expect_ok(
+        "calls through references to dyn fn values and function pointers",
+        "fn one() i32 { return 1; }\nfn main() i32 {\n    let mut v = Vector::<Box<dyn fn() i32>>::new();\n    let k = 4;\n    let b: Box<dyn fn() i32> = move || k;\n    v.push(b);\n    let p: fn() i32 = one;\n    let rp = &p;\n    let rrp = &rp;\n    let c = || 2;\n    let d: &dyn fn() i32 = &c;\n    let rd = &d;\n    return v.at(0)() + rp() + rrp() + rd() - 8;\n}\n",
+    );
+    h::expect_err_msg(
+        "a capturing closure as a function pointer",
+        "fn main() i32 { let x = 5; let r = &x; let f: fn() i32 = || *r; return f(); }\n",
+        "a capturing closure is not a function pointer 'fn() i32'",
+    );
+    h::expect_err_msg(
+        "a closure returning a reference to its capture",
+        "fn main() i32 {\n    let r: &i32;\n    { let x = 5; let c = || &x; r = c(); }\n    return *r;\n}\n",
+        "returning a pointer/reference to a closure capture",
+    );
+    h::expect_err_msg(
+        "a borrowed function pointer erased to &dyn fn",
+        "fn one() i32 { return 1; }\nfn main() i32 { let p: fn() i32 = one; let d: &dyn fn() i32 = &p; return d(); }\n",
+        "a runtime 'fn(..)' pointer cannot erase to 'dyn fn'",
+    );
+    h::expect_ok(
+        "a covariant struct's lifetime in a function type",
+        "struct P<'a> { pub v: &'a i32 }\nfn tk<'a>(p: P<'a>, x: &'a i32) i32 { return *p.v + *x; }\nfn main() i32 { let g: fn(P, &i32) i32 = tk; let x = 1; return g(P { v: &x }, &x) - 2; }\n",
+    );
+    h::expect_err_msg(
+        "a struct invariant through a *mut field in a function type",
+        "struct C<'a> { pub p: *mut &'a i32 }\nfn tk<'a>(c: C<'a>, x: &'a i32) { unsafe { *c.p = x; } }\nfn main() i32 { let g: fn(C, &i32) = tk; return 0; }\n",
+        "the lifetimes of function 'tk' do not fit 'fn(C, &i32)'",
+    );
+    h::expect_err_msg(
+        "a contravariant struct's lifetime in a function type",
+        "struct K<'a> { pub f: fn(&'a i32) }\nfn tk<'a>(k: K<'a>, x: &'a i32) { (k.f)(x); }\nfn main() i32 { let g: fn(K, &i32) = tk; return 0; }\n",
+        "the lifetimes of function 'tk' do not fit 'fn(K, &i32)'",
+    );
+    h::expect_err_msg(
+        "a type path's lifetime argument in a rendered function type",
+        "struct P<'a> { pub v: &'a i32 }\nfn tk(p: P, x: &i32) { let _ = *x; let _ = p; }\nfn main() i32 { let f: fn(P<'static>, &i32) = tk; let g: fn(P, &i32) = f; return 0; }\n",
+        "the lifetimes of 'fn(P<'static>, &i32)' do not fit 'fn(P, &i32)'",
+    );
+    h::expect_err_msg(
+        "a function type naming the enclosing lifetime in a message",
+        "fn conv<'a>(f: fn(&'a i32)) fn(&i32) { return f; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of 'fn(&'a i32)' do not fit 'fn(&i32)'",
+    );
+    h::expect_ok(
+        "a function type with nine lifetimes from outside it, called",
+        "fn take<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i>(f: fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'i i32), pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, pi: &'i i32) {\n    f(pa, pb, pc, pd, pe, pf, pg, ph, pi);\n}\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a function type with nine lifetimes from outside it, called with a local",
+        "fn take<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i>(f: fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'i i32), pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, pi: &'i i32) {\n    let l = 1;\n    f(pa, pb, pc, pd, pe, pf, pg, &l, pi);\n}\nfn main() i32 { return 0; }\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_exit(
+        "a function type with sixteen positions and eight lifetimes chosen at each call",
+        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, qa: &'a i32, qb: &'b i32, qc: &'c i32, qd: &'d i32, qe: &'e i32, qf: &'f i32, qg: &'g i32, qh: &'h i32) &'h i32 { return qh; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32) &'h i32 = pick;\n    let x = 7;\n    let r: &i32;\n    {\n        let y = 1;\n        r = f(&y, &y, &y, &y, &y, &y, &y, &x, &y, &y, &y, &y, &y, &y, &y, &x);\n    }\n    return *r - 7;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a function type with sixteen positions keeps each result's lifetime",
+        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, qa: &'a i32, qb: &'b i32, qc: &'c i32, qd: &'d i32, qe: &'e i32, qf: &'f i32, qg: &'g i32, qh: &'h i32) &'h i32 { return qh; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32) &'h i32 = pick;\n    let x = 7;\n    let r: &i32;\n    {\n        let y = 1;\n        r = f(&y, &y, &y, &y, &y, &y, &y, &x, &y, &y, &y, &y, &y, &y, &y, &y);\n    }\n    return *r - 7;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a function with nine lifetimes converted to a type that relates them otherwise",
+        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, pi: &'i i32) &'a i32 { return pa; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'i i32) &'i i32 = pick;\n    return 0;\n}\n",
+        "the lifetimes of function 'pick' do not fit",
+    );
+    h::expect_err_msg(
+        "a function value tying two lifetimes fixed outside the type it converts to",
+        "fn ret_a<'x>(a: &'x i32, b: &i32) &'x i32 { return a; }\nfn run<'a, 'b>(g: fn(fn(&'a i32, &'b i32) &'b i32)) { g(ret_a); }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'ret_a' do not fit",
+    );
+    h::expect_ok(
+        "a function value tying two lifetimes fixed outside the type, as the declaration relates them",
+        "fn ret_a<'x>(a: &'x i32, b: &i32) &'x i32 { return a; }\nfn run<'a: 'b, 'b>(g: fn(fn(&'a i32, &'b i32) &'b i32)) { g(ret_a); }\nfn id<'x>(a: &'x i32) &'x i32 { return a; }\nfn ok<'a, 'b>(pa: &'a i32) where 'a: 'b { let f: fn(&'a i32) &'b i32 = id; let _ = f(pa); }\nfn ret<'a: 'b, 'b>() fn(&'a i32) &'b i32 { return id; }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "a function value tying two lifetimes the written context names and the declaration relates",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nstruct W<'p, 'q> { pub s: S<'p, 'q> }\nstruct G<T> { pub g: T }\nstruct H<T> { pub t: T }\nextend<T> H<T> {\n    pub fn put(self: &mut H<T>, x: T) { self.t = x; }\n}\nenum E<'a, 'b> { V(fn(&'a i32) &'b i32), N }\nfn ok1<'a: 'b, 'b>() S<'a, 'b> { return S { f: id }; }\nfn ok2<'a: 'b, 'b>() W<'a, 'b> { return W { s: S { f: id } }; }\nfn ok3<'a: 'b, 'b>() Option<fn(&'a i32) &'b i32> { return Option::<fn(&'a i32) &'b i32>::Some(id); }\nfn ok4<'a: 'b, 'b>() E<'a, 'b> { return E::V(id); }\nfn ok5<'a: 'b, 'b>() { let t: (fn(&'a i32) &'b i32, i32) = (id, 1); let _ = t; }\nfn ok6<'a: 'b, 'b>() [fn(&'a i32) &'b i32; 2] { return [id, id]; }\nfn ok7<'a: 'b, 'b>(s: &mut S<'a, 'b>) { s.f = id; }\nfn ok8<'a: 'b, 'b>() { let s = S::<'a, 'b> { f: id }; let _ = s; }\nfn ok9<'a: 'b, 'b>() G<fn(&'a i32) &'b i32> { return G { g: id }; }\nfn ok10<'a: 'b, 'b>(h: &mut H<fn(&'a i32) &'b i32>) { h.put(id); }\nfn ok11<'a: 'b, 'b>(v: &mut Vector<fn(&'a i32) &'b i32>) { v.push(id); }\nfn ok12<'a: 'b, 'b>() Box<S<'a, 'b>> { return Box::new(S { f: id }); }\nfn ok13<'a: 'b, 'b>(o: &mut Option<fn(&'a i32) &'b i32>) { *o = Option::<fn(&'a i32) &'b i32>::Some(id); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a struct literal's field tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad<'a, 'b>() S<'a, 'b> { return S { f: id }; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit",
+    );
+    h::expect_err_msg(
+        "a variant's payload tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nenum E<'a, 'b> { V(fn(&'a i32) &'b i32), N }\nfn bad<'a, 'b>() E<'a, 'b> { return E::V(id); }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit",
+    );
+    h::expect_err_msg(
+        "a field assignment tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad<'a, 'b>(s: &mut S<'a, 'b>) { s.f = id; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit",
+    );
+    h::expect_err_msg(
+        "a generic method's argument tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nfn bad<'a, 'b>(v: &mut Vector<fn(&'a i32) &'b i32>) { v.push(id); }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit",
+    );
+    h::expect_err_msg(
+        "a field of an elided instance tying two of its lifetimes",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad(s: &mut S) { s.f = id; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit",
+    );
+    h::expect_ok(
+        "an unannotated local's literal takes the lifetimes its later uses' written types give",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nstruct W<'p, 'q> { pub s: S<'p, 'q> }\nfn ok1<'a: 'b, 'b>() S<'a, 'b> { let s = S { f: id }; return s; }\nfn ok2<'a: 'b, 'b>() fn(&'a i32) &'b i32 { let s = S { f: id }; return s.f; }\nfn ok3<'a: 'b, 'b>() fn(&'a i32) &'b i32 { let s = S { f: id }; let g = s.f; return g; }\nfn ok4<'a: 'b, 'b>() W<'a, 'b> { let w = W { s: S { f: id } }; return w; }\nfn ok5<'a, 'b>(x: &'a i32) i32 { let s = S { f: id }; return *(s.f)(x); }\nfn ok6<'a, 'b>(g: fn(&'a i32) &'b i32) fn(&'a i32) &'b i32 { let s = S { f: g }; return s.f; }\nfn ok7<'a: 'b, 'b>(t: &mut S<'a, 'b>) { let s = S { f: id }; *t = s; }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "a function value returned with its lifetimes swapped, as the declaration relates them",
+        "fn swap<'p, 'q: 'p>(f: fn(&'p i32) &'q i32) fn(&'q i32) &'p i32 { return f; }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "an unannotated local's literal returned as a type its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad<'a, 'b>() S<'a, 'b> { let s = S { f: id }; return s; }\nfn main() i32 { return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "an unannotated local's field returned as a type its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad<'a, 'b>() fn(&'a i32) &'b i32 { let s = S { f: id }; let g = s.f; return g; }\nfn main() i32 { return 0; }\n",
+        "do not fit 'fn(&'a i32) &'b i32'",
+    );
+    h::expect_err_msg(
+        "an unannotated local swapping the lifetimes of the function it holds",
+        "struct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad<'p, 'q>(g: fn(&'p i32) &'q i32) S<'q, 'p> { let s = S { f: g }; return s; }\nfn main() i32 { return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "an unannotated local stored where no written type names its lifetimes",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nstruct S<'a, 'b> { pub f: fn(&'a i32) &'b i32 }\nfn bad(t: &mut S) { let s = S { f: id }; *t = s; }\nfn main() i32 { return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "a function value returned with its lifetimes swapped",
+        "fn swap<'p, 'q>(f: fn(&'p i32) &'q i32) fn(&'q i32) &'p i32 { return f; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of 'fn(&'p i32) &'q i32' do not fit 'fn(&'q i32) &'p i32'",
+    );
+    h::expect_err_msg(
+        "a field's function value returned with its lifetimes swapped",
+        "struct S<'p, 'q> { pub f: fn(&'p i32) &'q i32 }\nfn swap<'p, 'q>(s: S<'p, 'q>) fn(&'q i32) &'p i32 { return s.f; }\nfn main() i32 { return 0; }\n",
+        "do not fit 'fn(&'q i32) &'p i32'",
+    );
+    h::expect_err_msg(
+        "a boxed function value returned with its lifetimes swapped",
+        "fn swap<'p, 'q>(f: Box<dyn fn(&'p i32) &'q i32>) Box<dyn fn(&'q i32) &'p i32> { return f; }\nfn main() i32 { return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "a long type in a message is not cut",
+        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, pi: &'i i32) &'a i32 { return pa; }\nfn main() i32 {\n    let b: Box<dyn for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'i i32) &'i i32> = Box::new(pick);\n    return 0;\n}\n",
+        "&'h i32, &'i i32) &'a i32, Global>'",
+    );
+    h::expect_err_msg(
+        "a let's function type tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nfn bad<'a, 'b>(pa: &'a i32) { let f: fn(&'a i32) &'b i32 = id; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit 'fn(&'a i32) &'b i32'",
+    );
+    h::expect_err_msg(
+        "a returned function tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nfn bad<'a, 'b>() fn(&'a i32) &'b i32 { return id; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit 'fn(&'a i32) &'b i32'",
+    );
+    h::expect_err_msg(
+        "an assigned function tying two lifetimes its function does not relate",
+        "fn id<'x>(a: &'x i32) &'x i32 { return a; }\nfn bad<'a, 'b>(g: fn(&'a i32) &'b i32) { let mut f: fn(&'a i32) &'b i32 = g; f = id; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of function 'id' do not fit 'fn(&'a i32) &'b i32'",
+    );
+    h::expect_err_msg(
+        "a local of a function's own type given a function whose result borrows another parameter",
+        "fn first<'a>(a: &'a i32, b: &i32, c: &i32) &'a i32 { return a; }\nfn last<'p>(a: &i32, b: &i32, p: &'p i32) &'p i32 { return p; }\nfn main() i32 {\n    let x = 5;\n    let mut f = first;\n    f = last;\n    let r: &i32;\n    {\n        let y = 6;\n        r = f(&x, &x, &y);\n    }\n    return *r;\n}\n",
+        "mismatched types",
+    );
+    h::expect_ok(
+        "a called closure naming eight lifetimes from outside it",
+        "fn put<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(a: &'a i32, b: &'b i32, c: &'c i32, d: &'d i32, e: &'e i32, f: &'f i32, g: &'g i32, h: &'h i32) i32 {\n    let k = |p: &'a i32, q: &'b i32, r: &'c i32, s: &'d i32, t: &'e i32, u: &'f i32, v: &'g i32, w: &'h i32| *p + *q + *r + *s + *t + *u + *v + *w;\n    return k(a, b, c, d, e, f, g, h);\n}\nfn main() i32 { let x = 1; return put(&x, &x, &x, &x, &x, &x, &x, &x) - 8; }\n",
+    );
+    h::expect_ok(
+        "a nested function type taking the value's lifetime gets a more general one",
+        "fn tk<'a>(x: &'a i32, b: Box<dyn fn(&'a i32)>) &'a i32 { b(x); return x; }\nconst G: i32 = 4;\nfn main() i32 {\n    let g: fn(&'static i32, Box<dyn fn(&i32)>) &i32 = tk;\n    let b: Box<dyn fn(&i32)> = |x: &i32| { let _ = *x; };\n    return *g(&G, b) - 4;\n}\n",
+    );
+    h::expect_err_msg(
+        "a nested function type narrower than the value's",
+        "fn tk<'a>(x: &'a i32, b: Box<dyn fn(&'a i32)>) &'a i32 { b(x); return x; }\nfn main() i32 { let g: fn(&i32, Box<dyn fn(&'static i32)>) &i32 = tk; return 0; }\n",
+        "the lifetimes of function 'tk' do not fit",
+    );
+    h::expect_err_msg(
+        "a higher-ranked parameter given a narrower function",
+        "fn ap(f: fn(&i32), x: &i32) { f(x); }\nfn main() i32 { let g: fn(fn(&'static i32), &'static i32) = ap; return 0; }\n",
+        "the lifetimes of function 'ap' do not fit",
+    );
+    h::expect_ok(
+        "a parameter taking a narrower function given a higher-ranked one",
+        "const G: i32 = 2;\nfn ap2(f: fn(&'static i32)) { f(&G); }\nfn rd(x: &i32) { let _ = *x; }\nfn main() i32 { let g: fn(fn(&i32)) = ap2; g(rd); return 0; }\n",
+    );
+    h::expect_ok(
+        "a higher-ranked result used as a narrower one",
+        "fn rd(x: &i32) i32 { return *x; }\nfn mk() fn(&i32) i32 { return rd; }\nconst G: i32 = 3;\nfn main() i32 { let g: fn() fn(&'static i32) i32 = mk; return g()(&G) - 3; }\n",
+    );
+    h::expect_err_msg(
+        "a narrower result used as a higher-ranked one",
+        "fn rs(x: &'static i32) i32 { return *x; }\nfn mk2() fn(&'static i32) i32 { return rs; }\nfn main() i32 { let g: fn() fn(&i32) i32 = mk2; return 0; }\n",
+        "the lifetimes of function 'mk2' do not fit",
+    );
+    h::expect_err_msg(
+        "a nested function type substitution fixes",
+        "struct H<T> { pub f: fn(T, fn(T)) }\nfn tk(x: &i32, g: fn(&i32)) { g(x); }\nfn main() i32 { let h = H::<&i32> { f: tk }; return 0; }\n",
+        "do not fit 'fn(&'1 i32, fn(&'1 i32))'",
+    );
+    h::expect_ok(
+        "a call choosing the callee's lifetime as 'static for a function argument",
+        "fn st(x: &'static i32) { let _ = *x; }\nfn put<'a>(f: fn(&'a i32), x: &'a i32) { f(x); }\nconst G: i32 = 1;\nfn main() i32 { put(st, &G); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a call whose function argument makes the callee's lifetime 'static",
+        "fn st(x: &'static i32) { let _ = *x; }\nfn put<'a>(f: fn(&'a i32), x: &'a i32) { f(x); }\nfn main() i32 { let l = 1; put(st, &l); return 0; }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a call whose function argument makes a type parameter's lifetime 'static",
+        "fn st(x: &'static i32) { let _ = *x; }\nfn app<T>(f: fn(T), x: T) { f(x); }\nfn main() i32 { let l = 1; app(st, &l); return 0; }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a call whose function argument ties two of the callee's lifetimes",
+        "fn tie<'x>(a: &'x i32, out: &mut Vector<&'x i32>) { out.push(a); }\nfn run<'a, 'b>(f: fn(&'a i32, &mut Vector<&'b i32>), x: &'a i32, v: &mut Vector<&'b i32>) { f(x, v); }\nfn main() i32 {\n    let mut v = Vector::<&i32>::new();\n    { let l = 1; run(tie, &l, &mut v); }\n    let n = v.len() as i32;\n    v.free();\n    return n;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "a call through a function value choosing its lifetime for a function argument",
+        "fn keep<'a>(f: fn(&'a i32), x: &'a i32) { f(x); }\nconst G: i32 = 3;\nfn st(x: &'static i32) { let _ = *x; }\nfn main() i32 { let k: for<'a> fn(fn(&'a i32), &'a i32) = keep; k(st, &G); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a call through a function value whose function argument makes its lifetime 'static",
+        "fn keep<'a>(f: fn(&'a i32), x: &'a i32) { f(x); }\nfn st(x: &'static i32) { let _ = *x; }\nfn main() i32 { let k: for<'a> fn(fn(&'a i32), &'a i32) = keep; let l = 1; k(st, &l); return 0; }\n",
+        "this value must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "a field's function type named with its base's lifetime argument",
+        "struct S<'a> { pub f: fn(&'a i32) }\nfn conv<'x>(s: &S<'x>) fn(&i32) { return s.f; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of 'fn(&'x i32)' do not fit 'fn(&i32)'",
+    );
+    h::expect_err_msg(
+        "a local's function type named through its initializer",
+        "fn conv<'a>(f: fn(&'a i32)) fn(&i32) { let g = f; return g; }\nfn main() i32 { return 0; }\n",
+        "the lifetimes of 'fn(&'a i32)' do not fit 'fn(&i32)'",
+    );
+    h::expect_err_msg(
+        "a call through a function type substitution made wide, with lifetimes it does not relate",
+        "struct H<T> { pub f: fn(T, T) }\nstruct E<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> { pub a: &'a i32, pub b: &'b i32, pub c: &'c i32, pub d: &'d i32, pub e: &'e i32, pub f: &'f i32, pub g: &'g i32, pub h: &'h i32 }\nfn call(h: &H<E>, e: E) { (h.f)(e, e); }\nfn main() i32 { return 0; }\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "a call through a function type substitution made wide",
+        "struct H<T> { pub f: fn(T, T) }\nstruct E<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> { pub a: &'a i32, pub b: &'b i32, pub c: &'c i32, pub d: &'d i32, pub e: &'e i32, pub f: &'f i32, pub g: &'g i32, pub h: &'h i32 }\nfn call<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(h: &H<E<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>>, e: E<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>) { (h.f)(e, e); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "a closure call stores each argument only into the captures its body stores it into",
+        "fn put<'a, 'h>(a: &'a i32, h: &'h i32, out: &mut Vector<&'h i32>, log: &mut Vector<&'a i32>) {\n    let mut k = |w: &'h i32, p: &'a i32| {\n        out.push(w);\n        log.push(p);\n    };\n    k(h, a);\n}\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "a closure argument at one enclosing lifetime stored into a capture at another",
+        "fn put<'a, 'h>(a: &'a i32, h: &'h i32, out: &mut Vector<&'h i32>) {\n    let mut k = |w: &'h i32, p: &'a i32| { out.push(p); };\n    k(h, a);\n}\nfn main() i32 { return 0; }\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "a closure owning the capture its argument is stored into holds the argument",
+        "fn f<'h>(h: &'h mut i32, g: &'h i32) i32 {\n    let mut v: Vector<&'h i32> = Vector::new();\n    let mut k = |w: &'h i32| { v.push(w); };\n    k(&*h);\n    *h = 6;\n    k(g);\n    return 0;\n}\nfn main() i32 { return 0; }\n",
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a local's function type naming a lifetime no parameter's own reference names",
+        "fn sink(x: &i32) { let _ = *x; }\nfn put<'h>(out: &mut Vector<&'h i32>) {\n    let g: fn(&'h i32) = sink;\n    let y = 1;\n    g(&y);\n}\nfn main() i32 { return 0; }\n",
+        "borrowed value does not live long enough",
     );
 }
 
@@ -7118,6 +7645,26 @@ fn closure_argument_and_lifetime_regions() {
         "a returned closure naming the caller's lifetime",
         "static mut S: *const Box<i32> = null;\nunsafe fn get<'a>() &'a Box<i32> { return unsafe &*S; }\nfn yikes<'a>(x: &'a Box<i32>) Box<dyn fn() i32> {\n    unsafe { S = x; }\n    return Box::new(fn() i32 {\n        let p: &'a Box<i32> = unsafe get();\n        return **p;\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
         "the returned value's lifetime is not declared to outlive the return type's lifetime",
+    );
+    h::expect_err_msg(
+        "a closure storing its argument into a capture it owns",
+        "fn f(h: &i32) i32 {\n    let mut v: Vector<&i32> = Vector::new();\n    let mut k = fn(w: &i32) i32 {\n        v.push(w);\n        return *v[0];\n    };\n    {\n        let y = 5;\n        let _ = k(&y);\n    }\n    return k(h);\n}\nfn main() i32 { let h = 1; return f(&h); }\n",
+        "a closure argument is stored where it must outlive the closure",
+    );
+    h::expect_exit(
+        "a closure's borrow of a capture it does not own ends at its last call",
+        "fn put<'h>(h: &'h i32) i32 {\n    let mut v: Vector<&'h i32> = Vector::new();\n    let mut n = 0;\n    let mut k = |w: &'h i32| {\n        v.push(w);\n        n += 1;\n    };\n    k(h);\n    return n;\n}\nfn main() i32 {\n    let mut v: Vector<i32> = Vector::new();\n    let mut n = 0;\n    let mut k = || {\n        v.push(1);\n        n += 1;\n    };\n    k();\n    let x = 1;\n    return n - put(&x);\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a closure's destruction keeps what its owned captures hold, after a move too",
+        "fn main() i32 {\n    let mut y = 1;\n    let mut v: Vector<&i32> = Vector::new();\n    v.push(&y);\n    let mut n = 0;\n    let k = || { n += v.len() as i32; };\n    let mut k2 = k;\n    k2();\n    y = 2;\n    return 0;\n}\n",
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a closure storing a reference to its own copy of a capture into another capture",
+        "fn main() i32 {\n    let mut b: Vector<Box<dyn fn() i32>> = Vector::new();\n    let m = 5;\n    let mut v: Vector<&i32> = Vector::new();\n    let mut k = fn() i32 {\n        v.push(&m);\n        return *v[0];\n    };\n    let _ = k();\n    b.push(Box::new(k));\n    return b.at(0)();\n}\n",
+        "borrowed value does not live long enough",
     );
 }
 

@@ -681,9 +681,9 @@ extend MoveFlow {
                 // entry maybe-moved bit is set or its entry definitely-init bit is clear: the
                 // block's own assigns strictly improve both. Clean entry bits are proof; a dirty
                 // word falls through to the exact replay.
-                let lb = (bi * f.lwords) as usize;
+                let lb = (bi * f.ewords) as usize;
                 let mut bad: u64 = 0;
-                for k in 0..f.lwords as usize {
+                for k in 0..f.ewords as usize {
                     let um = f.easy_use[lb + k];
                     bad = bad | mf.mm[base + k] & um | um & ~mf.di[base + k];
                 }

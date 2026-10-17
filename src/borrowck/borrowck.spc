@@ -225,7 +225,7 @@ extend tc::TypeChecker {
             return 0;
         }
         let n = unsafe (*self.mod_ast(m)).at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             return 1 + self.tc_count_lt_positions(m, n.as_data.indirect_type.ty, depth + 1);
         }
         if n.kind == NodeKind::NODE_ARRAY_TYPE {
@@ -264,7 +264,7 @@ extend tc::TypeChecker {
             return false;
         }
         let n = unsafe (*self.mod_ast(m)).at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             if self.tc_span_empty(self.tc_lt_name_in(m, n.as_data.indirect_type.lifetime)) {
                 return true;
             }
@@ -338,7 +338,7 @@ extend tc::TypeChecker {
         }
         let a = self.cur_ast();
         let n = unsafe (*a).at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             if self.tc_lt_elided(n.as_data.indirect_type.lifetime) {
                 let sp = n.span;
                 self.errors.emit_span(
@@ -398,18 +398,6 @@ extend tc::TypeChecker {
     /// True when lifetime node `lt` is absent or `'_`.
     const fn tc_lt_elided(self: &Self, lt: NodeId) bool {
         return self.tc_span_empty(self.tc_lt_name(lt));
-    }
-
-    /// True when type path `tyn` of module `m` is `Self`: its lifetimes are the ones the enclosing
-    /// declaration names, so none of them is elided.
-    pub const fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
-        let sa = self.mod_ast(m);
-        let parts = unsafe (*sa).at_const(tyn).as_data.type_path.parts;
-        return parts.len == 1 && span_is(
-            self.mod_src(m),
-            unsafe (*sa).at_const(unsafe (*sa).list(parts)[0]).as_data.name.text,
-            "Self",
-        );
     }
 
     /// Watermark into borrows[]; borrow_release_to(mark) drops the transients created since.
@@ -1042,7 +1030,7 @@ extend tc::TypeChecker {
             return 0;
         }
         let k = unsafe (*self.mod_ast(m)).at_const(tyn).kind;
-        if k == NodeKind::NODE_REFERENCE_TYPE || k == NodeKind::NODE_SLICE_TYPE {
+        if unsafe (*self.mod_ast(m)).at_const(tyn).has_lt_slot() {
             out[0] = self.tc_lt_name_in(m, unsafe (*self.mod_ast(m)).at_const(tyn).as_data.indirect_type.lifetime);
             return 1;
         }
@@ -1258,7 +1246,7 @@ extend tc::TypeChecker {
         }
         let a = self.cur_ast();
         let n = *unsafe (*a).at_const(tyn);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             self.region_implied(n.as_data.indirect_type.ty, depth + 1);
             return;
         }
@@ -1400,256 +1388,6 @@ extend tc::TypeChecker {
         return self.region_outlives(self.tc_lt_region_of_name(src), self.tc_lt_region_of_name(dst));
     }
 
-    /// `C<'a>` is a subtype of `C<'b>` only if 'a and 'b relate per C's variance in that slot:
-    /// covariant needs 'a: 'b, contravariant 'b: 'a, invariant both directions. Inferred by rustc's
-    /// algorithm over the field types: `&T` covariant, `&mut T` invariant in the pointee, a nested
-    /// aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
-    /// cycle resolves to all-invariant (sound: over-restricts only recursive types).
-    pub const fn v_flip(self: &Self, v: u32) u32 {
-        // Bit 0 is a covariant use and bit 1 a contravariant one (V_* values): flipping swaps them.
-        return (v >> 1 | v << 1) & 3;
-    }
-
-    /// Lattice join of two variances (BIVARIANT is the identity, mismatches become INVARIANT).
-    pub const fn v_join(self: &Self, a: u32, b: u32) u32 {
-        // The union of the use bits (see v_flip): BIVARIANT (0) is the identity, COVARIANT | CONTRAVARIANT
-        // is INVARIANT.
-        return a | b;
-    }
-
-    /// The variance of a position with variance `v` nested inside a context of variance `ctx`.
-    pub const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
-        if ctx == V_COVARIANT {
-            return v;
-        }
-        if ctx == V_CONTRAVARIANT {
-            return self.v_flip(v);
-        }
-        if ctx == V_BIVARIANT || v == V_BIVARIANT {
-            return V_BIVARIANT;
-        }
-        return V_INVARIANT;
-    }
-
-    /// Number of lifetime params declared by aggregate `dd`.
-    pub fn variance_nlt(self: &Self, dd: DefId) i32 {
-        return (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
-    }
-
-    /// Number of variance slots of aggregate `dd`: lifetime params then type params.
-    pub fn variance_nparams(self: &Self, dd: DefId) i32 {
-        let sa = self.mod_ast(dd.module);
-        let nk = unsafe (*sa).at_const(dd.node).kind;
-        let mut nty: i32 = 0;
-        if nk == NodeKind::NODE_STRUCT || nk == NodeKind::NODE_ENUM {
-            nty = (unsafe (*sa).at_const(dd.node).as_data.aggregate.generics.len) as i32;
-        }
-        return self.variance_nlt(dd) + nty;
-    }
-
-    /// `packed` with slot `idx` set to `v` (2 bits per slot); indexes past 32 leave it unchanged.
-    pub const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
-        if idx < 0 || idx >= 32 {
-            return packed;
-        }
-        let sh = (idx * 2) as u64;
-        let cur = (packed >> sh & 0x3u64) as u32;
-        let nv = self.v_join(cur, v);
-        return packed & ~(0x3u64 << sh) | nv as u64 << sh;
-    }
-
-    /// The packed variance vector with every slot of `dd` INVARIANT (the conservative answer).
-    pub fn variance_all_invariant(self: &Self, dd: DefId) u64 {
-        let n = self.variance_nparams(dd);
-        let mut packed: u64 = 0;
-        let mut i: i32 = 0;
-        while i < n && i < 32 {
-            packed = packed | V_INVARIANT as u64 << (i * 2) as u64;
-            i = i + 1;
-        }
-        return packed;
-    }
-
-    /// The inferred variance of slot `idx` of aggregate `dd`; INVARIANT past 32 slots.
-    pub fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
-        if idx < 0 || idx >= 32 {
-            return V_INVARIANT;
-        }
-        return (self.variance_infer(dd) >> (idx * 2) as u64 & 0x3u64) as u32;
-    }
-
-    /// Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
-    pub fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
-        if self.tc_span_empty(name) {
-            return -1;
-        }
-        let sa = self.mod_ast(dd.module);
-        let lts = unsafe (*sa).lifetimes_of(dd.node);
-        for i in 0..lts.len {
-            let lp = unsafe (*sa).list(lts)[i as usize];
-            if spans_eq2(self.mod_src(dd.module), self.tc_lt_name_in(dd.module, lp), self.mod_src(dd.module), name) {
-                return i as i32;
-            }
-        }
-        return -1;
-    }
-
-    /// Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
-    pub fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
-        let sa = self.mod_ast(dd.module);
-        let rd = unsafe (*sa).resolution_def(tyn);
-        if rd.node == NODE_NONE || rd.module != dd.module {
-            return -1;
-        }
-        let gens = unsafe (*sa).at_const(dd.node).as_data.aggregate.generics;
-        for j in 0..gens.len {
-            if unsafe (*sa).list(gens)[j as usize] == rd.node {
-                return self.variance_nlt(dd) + j as i32;
-            }
-        }
-        return -1;
-    }
-
-    /// The packed variance vector of aggregate `dd`, inferred from its field types and memoized; a
-    /// recursive query answers INVARIANT.
-    pub fn variance_infer(self: &mut Self, dd: DefId) u64 {
-        if dd.node == NODE_NONE {
-            return 0;
-        }
-        let key = dd.module as u64 << 32 | dd.node as u64;
-        switch self.variance_of.get(&key) {
-            Some(v) => {
-                return *v;
-            },
-            None => {},
-        };
-        switch self.variance_wip.get(&key) {
-            Some(_) => {
-                return self.variance_all_invariant(dd);
-            },
-            None => {},
-        };
-        let nk = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).kind;
-        if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM {
-            self.variance_of.insert(key, 0);
-            return 0;
-        }
-        self.variance_wip.insert(key, true);
-        let mut packed: u64 = 0;
-        let is_tuple = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).as_data.aggregate.is_tuple;
-        let members = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).as_data.aggregate.members;
-        for i in 0..members.len {
-            let mid = unsafe (*self.mod_ast(dd.module)).list(members)[i as usize];
-            let mk = unsafe (*self.mod_ast(dd.module)).at_const(mid).kind;
-            if mk == NodeKind::NODE_FIELD || is_tuple {
-                let tn = unsafe (*self.mod_ast(dd.module)).member_type_node(mid, is_tuple);
-                packed = self.variance_walk(dd, tn, V_COVARIANT, packed, 0);
-            } else if mk == NodeKind::NODE_VARIANT {
-                let pl = unsafe (*self.mod_ast(dd.module)).at_const(mid).as_data.variant.payload;
-                for p in 0..pl.len {
-                    packed = self.variance_walk(
-                        dd,
-                        unsafe (*self.mod_ast(dd.module)).list(pl)[p as usize],
-                        V_COVARIANT,
-                        packed,
-                        0,
-                    );
-                }
-            }
-        }
-        self.variance_wip.remove(&key);
-        self.variance_of.insert(key, packed);
-        return packed;
-    }
-
-    /// Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
-    /// into `packed`, under the accumulated context variance `ctx`.
-    pub fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
-        if tyn == NODE_NONE || depth > 8 || ctx == V_BIVARIANT {
-            return packed;
-        }
-        let sa = self.mod_ast(dd.module);
-        let n = unsafe (*sa).at_const(tyn);
-        let nk = n.kind;
-        if nk == NodeKind::NODE_LIFETIME {
-            return self.variance_pack_set(packed, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, tyn)), ctx);
-        }
-        if nk == NodeKind::NODE_REFERENCE_TYPE || nk == NodeKind::NODE_SLICE_TYPE {
-            let mut p = packed;
-            let lifen = n.as_data.indirect_type.lifetime;
-            if nk == NodeKind::NODE_REFERENCE_TYPE && lifen != NODE_NONE {
-                p = self.variance_pack_set(p, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, lifen)), ctx);
-            }
-            let mut inner = ctx;
-            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                inner = self.v_transform(ctx, V_INVARIANT);
-            }
-            return self.variance_walk(dd, n.as_data.indirect_type.ty, inner, p, depth + 1);
-        }
-        if nk == NodeKind::NODE_POINTER_TYPE {
-            // Raw pointer: regions/borrows erased; no lifetime slot, so variance is moot.
-            return packed;
-        }
-        if nk == NodeKind::NODE_ARRAY_TYPE {
-            return self.variance_walk(dd, n.as_data.array_type.element, ctx, packed, depth + 1);
-        }
-        if nk == NodeKind::NODE_TUPLE_TYPE {
-            let mut p = packed;
-            let es = n.as_data.array_literal.elements;
-            for i in 0..es.len {
-                p = self.variance_walk(dd, unsafe (*sa).list(es)[i as usize], ctx, p, depth + 1);
-            }
-            return p;
-        }
-        if nk == NodeKind::NODE_FUNCTION_TYPE {
-            let mut p = packed;
-            let ps = n.as_data.function_type.params;
-            for i in 0..ps.len {
-                p = self.variance_walk(
-                    dd,
-                    unsafe (*sa).list(ps)[i as usize],
-                    self.v_transform(ctx, V_CONTRAVARIANT),
-                    p,
-                    depth + 1,
-                );
-            }
-            let rs = n.as_data.function_type.returns;
-            for i in 0..rs.len {
-                p = self.variance_walk(dd, unsafe (*sa).list(rs)[i as usize], ctx, p, depth + 1);
-            }
-            return p;
-        }
-        if nk == NodeKind::NODE_TYPE_PATH {
-            let tidx = self.variance_ty_index(dd, tyn);
-            if tidx >= 0 {
-                return self.variance_pack_set(packed, tidx, ctx);
-            }
-            let rd = unsafe (*sa).resolution_def(tyn);
-            let args = n.as_data.type_path.args;
-            if rd.node == NODE_NONE || args.len == 0 {
-                return packed;
-            }
-            let ncalleeLt = self.variance_nlt(rd);
-            let mut p = packed;
-            let mut lti: i32 = 0;
-            let mut tyi: i32 = 0;
-            for i in 0..args.len {
-                let aid = unsafe (*sa).list(args)[i as usize];
-                let mut cvar: u32 = V_INVARIANT;
-                if unsafe (*sa).at_const(aid).kind == NodeKind::NODE_LIFETIME {
-                    cvar = self.variance_param(rd, lti);
-                    lti = lti + 1;
-                } else {
-                    cvar = self.variance_param(rd, ncalleeLt + tyi);
-                    tyi = tyi + 1;
-                }
-                p = self.variance_walk(dd, aid, self.v_transform(ctx, cvar), p, depth + 1);
-            }
-            return p;
-        }
-        return packed;
-    }
-
     /// The lifetime name of the reference `value` evaluates to (through casts, `move`, `unsafe`), or
     /// the empty span.
     pub fn tc_value_source_lifetime(self: &mut Self, value: NodeId) tok::Span {
@@ -1692,7 +1430,7 @@ extend tc::TypeChecker {
             let args = n.as_data.type_path.args;
             for i in 0..args.len {
                 let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
-                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_REFERENCE_TYPE {
+                if unsafe (*self.mod_ast(m)).at_const(aid).is_ref_type() {
                     return self.tc_lt_name_in(m, unsafe (*self.mod_ast(m)).at_const(aid).as_data.indirect_type.lifetime);
                 }
             }
@@ -1772,57 +1510,13 @@ extend tc::TypeChecker {
         return false;
     }
 
-    /// Append every lifetime name written in type node `tyn` to `out` (at most 8, `*n` is the fill
-    /// count).
-    pub fn tc_typenode_lifetimes(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Spans8, n: &mut i32, depth: i32) {
-        if tyn == NODE_NONE || depth > 6 || (*n) as usize >= out.len() {
-            return;
-        }
-        let node = unsafe (*self.mod_ast(m)).at_const(tyn);
-        if node.kind == NodeKind::NODE_REFERENCE_TYPE || node.kind == NodeKind::NODE_SLICE_TYPE {
-            let l = self.tc_lt_name_in(m, node.as_data.indirect_type.lifetime);
-            if !self.tc_span_empty(l) && (*n) as usize < out.len() {
-                out[(*n) as usize] = l;
-                *n = *n + 1;
-            }
-            self.tc_typenode_lifetimes(m, node.as_data.indirect_type.ty, out, n, depth + 1);
-            return;
-        }
-        if node.kind == NodeKind::NODE_ARRAY_TYPE {
-            self.tc_typenode_lifetimes(m, node.as_data.array_type.element, out, n, depth + 1);
-            return;
-        }
-        if node.kind == NodeKind::NODE_TUPLE_TYPE {
-            let es = node.as_data.array_literal.elements;
-            for i in 0..es.len {
-                self.tc_typenode_lifetimes(m, unsafe (*self.mod_ast(m)).list(es)[i as usize], out, n, depth + 1);
-            }
-            return;
-        }
-        if node.kind == NodeKind::NODE_TYPE_PATH {
-            let args = node.as_data.type_path.args;
-            for i in 0..args.len {
-                let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
-                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME {
-                    let l = self.tc_lt_name_in(m, aid);
-                    if !self.tc_span_empty(l) && (*n) as usize < out.len() {
-                        out[(*n) as usize] = l;
-                        *n = *n + 1;
-                    }
-                } else {
-                    self.tc_typenode_lifetimes(m, aid, out, n, depth + 1);
-                }
-            }
-        }
-    }
-
     /// True when type node `node` of module `m` mentions lifetime `lt` anywhere.
     pub fn tc_typenode_covers_lt(self: &Self, m: ModuleId, node: NodeId, lt: tok::Span) bool {
         if node == NODE_NONE || self.tc_span_empty(lt) {
             return false;
         }
         let n = unsafe (*self.mod_ast(m)).at_const(node);
-        if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+        if n.has_lt_slot() {
             let rl = self.tc_lt_name_in(m, n.as_data.indirect_type.lifetime);
             if !self.tc_span_empty(rl) && spans_eq2(self.mod_src(m), rl, self.mod_src(m), lt) {
                 return true;
@@ -2231,26 +1925,6 @@ extend tc::TypeChecker {
     /// occurrence.
     pub fn tc_lt_name(self: &Self, lt: NodeId) tok::Span {
         return self.tc_lt_name_in(self.cur_module(), lt);
-    }
-
-    /// `tc_lt_name` for a node of module `m`.
-    pub fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
-        if lt == NODE_NONE {
-            return tok::Span { start: 0, end: 0 };
-        }
-        let n = unsafe (*self.mod_ast(m)).at_const(lt);
-        if n.kind == NodeKind::NODE_GENERIC_PARAM {
-            return self.tc_lt_name_in(m, n.as_data.generic_param.name);
-        }
-        if span_is(self.mod_src(m), n.as_data.name.text, "'_") {
-            return tok::Span { start: 0, end: 0 };
-        }
-        return n.as_data.name.text;
-    }
-
-    /// True for an empty or unset span.
-    pub const fn tc_span_empty(self: &Self, s: tok::Span) bool {
-        return s.end <= s.start;
     }
 
     // Mirrors the typechecker's evaluation order over an already-typed AST, firing only the
@@ -3011,7 +2685,7 @@ extend tc::TypeChecker {
         let mut only_ref: i32 = -1;
         for pi in skip..params.len {
             let pt = unsafe (*fa).at_const(unsafe (*fa).list(params)[pi as usize]).as_data.parameter.ty;
-            if pt != NODE_NONE && unsafe (*fa).at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE {
+            if pt != NODE_NONE && unsafe (*fa).at_const(pt).is_ref_type() {
                 nref = nref + 1;
                 only_ref = pi as i32;
             }
@@ -3289,19 +2963,18 @@ extend tc::TypeChecker {
             return true;
         }
         let rpointee = unsafe (*self.cur_ast()).at_const(rst).as_data.indirect_type.ty;
-        let mut lts = Spans8 {};
-        let mut nl: i32 = 0;
-        self.tc_typenode_lifetimes(md.module, ps_pointee, &mut lts, &mut nl, 0);
-        for i in 0..nl {
+        let mut lts = Vector::<tok::Span>::new();
+        self.tc_typenode_lifetimes(md.module, ps_pointee, &mut lts, 0);
+        for i in 0..lts.len() {
             let mut ds = Spans8 {};
             let mut nd: i32 = 0;
-            self.tc_caller_lts_at(md.module, ps_pointee, rpointee, lts[i as usize], &mut ds, &mut nd, 0);
+            self.tc_caller_lts_at(md.module, ps_pointee, rpointee, lts[i], &mut ds, &mut nd, 0);
             if nd == 0 {
                 continue;
             }
             let mut ss = Spans8 {};
             let mut ns: i32 = 0;
-            self.tc_caller_lts_at(md.module, ct, rct, lts[i as usize], &mut ss, &mut ns, 0);
+            self.tc_caller_lts_at(md.module, ct, rct, lts[i], &mut ss, &mut ns, 0);
             if ns as usize > ss.len() {
                 // More positions than recorded: fail closed.
                 return false;
@@ -3338,7 +3011,7 @@ extend tc::TypeChecker {
         if cn.kind != rn.kind {
             return;
         }
-        if cn.kind == NodeKind::NODE_REFERENCE_TYPE || cn.kind == NodeKind::NODE_SLICE_TYPE {
+        if cn.has_lt_slot() {
             if spans_eq2(
                 self.mod_src(cm),
                 self.tc_lt_name_in(cm, cn.as_data.indirect_type.lifetime),
@@ -3450,11 +3123,10 @@ extend tc::TypeChecker {
                 return true;
             }
         }
-        let mut vlts = Spans8 {};
-        let mut nvlt: i32 = 0;
-        self.tc_typenode_lifetimes(md.module, pv_ty, &mut vlts, &mut nvlt, 0);
-        for li in 0..nvlt {
-            if self.tc_typenode_covers_lt(md.module, ps_pointee, vlts[li as usize]) {
+        let mut vlts = Vector::<tok::Span>::new();
+        self.tc_typenode_lifetimes(md.module, pv_ty, &mut vlts, 0);
+        for li in 0..vlts.len() {
+            if self.tc_typenode_covers_lt(md.module, ps_pointee, vlts[li]) {
                 return true;
             }
         }
@@ -3556,7 +3228,7 @@ extend tc::TypeChecker {
         if returns.len == 1 && recv_is_owned_temp {
             let fa0 = self.mod_ast(fmod);
             let r0 = unsafe (*fa0).list(returns)[0];
-            if unsafe (*fa0).at_const(r0).kind == NodeKind::NODE_REFERENCE_TYPE {
+            if unsafe (*fa0).at_const(r0).is_ref_type() {
                 let rsp = unsafe (*a).at_const(recv).span;
                 self.errors.emit_span(rsp, format("cannot borrow into a temporary value; bind it to a variable first"));
             }
@@ -3621,7 +3293,7 @@ extend tc::TypeChecker {
             if returns.len == 1 {
                 let rr0 = unsafe (*fa).list(returns)[0];
                 let rtn = unsafe (*fa).slot_type_node(rr0);
-                ret_ref = rtn != NODE_NONE && unsafe (*fa).at_const(rtn).kind == NodeKind::NODE_REFERENCE_TYPE;
+                ret_ref = rtn != NODE_NONE && unsafe (*fa).at_const(rtn).is_ref_type();
             }
             if ret_ref {
                 self.borrow_create(recv, bk, recv);
@@ -3636,7 +3308,7 @@ extend tc::TypeChecker {
             return tok::Span { start: 0, end: 0 };
         }
         let n = unsafe (*self.cur_ast()).at_const(tyn);
-        if n.kind != NodeKind::NODE_REFERENCE_TYPE {
+        if !n.is_ref_type() {
             return tok::Span { start: 0, end: 0 };
         }
         return self.tc_lt_name(n.as_data.indirect_type.lifetime);

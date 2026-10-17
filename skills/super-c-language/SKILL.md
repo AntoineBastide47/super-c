@@ -94,6 +94,19 @@ instance, in any module, is "duplicate definition of 'f' for 'X'" at the later o
 (`extend P<u8>`, `extend P<i32>`) and distinct conformances may each define the name (see the
 generics section of [types.md](references/types.md)).
 
+A struct literal names each field once ("field 'x' is initialized twice"). A field it omits is
+zero-filled, so it must be visible at the literal and its type valid as zero bytes: scalars, raw
+pointers, vectors, arrays and structs of such, an enum without payloads or written discriminants,
+and the prelude views and containers (`str`, `String`, `Vector`, `Array`, `Map`, `Set`, `Slice`,
+`SliceMut`). Else it is "missing field 'f': an omitted field is zero-filled, and zero is not a valid
+value of its type here" (a `&T`, `Box`, `fn` field, ...). A union literal sets one member.
+`unsafe zeroed::<T>()` is the all-zero value of any type.
+
+An item name may not contain `__` after its leading underscores or start with `__sc`, and a type
+name may not start with `ptr_`, `ptrm_`, `slice_`, `dyn_`, `dynm_`, `dynb_`, `arr<N>`, `fn<N>`,
+`fnm<N>` or `fnt<N>`: the generated C symbols use these spellings ("the name '..' is reserved for
+the symbols the compiler generates").
+
 ## Enums and Pattern Matching
 
 ```superc
@@ -157,6 +170,11 @@ also locals declared after the `defer` (a `let _ = f()` result is one): a deferr
 
 Assignment frees the old value first: `s.name = fresh;` never leaks.
 
+A by-value pattern cannot move an owning part out of a value whose type has a user `free`
+(`switch v { W { s } => .. }` for `extend W as Free`): "cannot move a part out of a value whose
+type implements Free: its 'free' would not run; bind by reference or move the whole value". A
+`free` that can accept a task cancellation runs with cancellation masked, so it completes.
+
 `Copy` (a marker interface) names the values a use copies instead of moving. It is derived from
 the type's shape: scalars, `str`, raw pointers, `&T`, `&dyn I`, `fn` pointers and closures that own
 nothing, arrays of Copy, and aggregates that are not `Free` whose members are all Copy. `&mut T`,
@@ -219,6 +237,15 @@ on a constant it is accepted.
 A field names a lifetime its type declares (or `'static`) at every lifetime position: `&'a T`,
 `[]'a T`, `str<'a>`, `Slice<'a, T>`, inside tuples and type arguments too.
 
+`&mut x` needs `x` initialized and not moved: it is a use of `x` ("use of possibly uninitialized
+value", "use of moved value"). There are no out-parameters through `&mut`: initialize first.
+
+A `dyn` value holds borrows its type does not show. `&'a dyn I` (and `&'a mut dyn I`) is a
+reference for every lifetime rule: elision, `'static`, named ties, variance (covariant in `'a`,
+invariant in the interface's arguments), and a field of that type names its lifetime. An owned
+`dyn I` (`Box<dyn I>`) in a signature holds only `'static` borrows, Rust's default object
+lifetime: a returned or stored `Box<dyn fn()>` cannot capture a borrow of a local.
+
 A store through any reference to a container records the stored borrow in the container: a
 `&mut` held in a local, a reborrow of it (`let r2 = &mut *r;`), or a copy of either. After
 `let r = &mut v; put(r, &a);`, `a` stays borrowed while `v` is live. A borrow of a local
@@ -245,6 +272,7 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
 - Naming an `unsafe fn`, or an `extern "C"` function without `@unsafe(safe)`, as a value
   outside a call: a `fn` pointer is called without `unsafe`
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
+- Reading a variadic argument with `va_arg`
 
 A `&mut` reference is exclusive also for unsafe code: reaching its referent through any
 other path while it is live is undefined behavior (its C parameter is `restrict`, see
@@ -334,6 +362,22 @@ Non-capturing closures lower to plain function pointers. Generic bounds use
 `F: fn(..) ..` (or `where F: fn(..) ..`). Ownership-marked bound: `F: fn move(..) ..`.
 Any closure or function, with or without captures, erases to `&dyn fn(..)` or `Box<dyn fn(..)>`
 (`Box::new(closure)` too; a boxed env frees its owned captures once). `move` before a closure literal is the closure itself.
+A runtime `fn(..)` pointer value does not erase (`&p` included): wrap it in a closure. A call
+through a reference to a `dyn fn` value or a function pointer calls the pointee (`v.at(0)()` for
+`Vector<Box<dyn fn() i32>>`).
+
+A closure parameter's type may name lifetimes, with a function type's meaning
+([types.md](references/types.md)): `|x: &'static i32|` takes only `'static` borrows, and
+`|y: &'a i32| v.push(y)` (`'a` the enclosing function's) stores its argument into `v`, so a call's
+argument must outlive what `v` points at (a call stores each argument only into the captures the body
+stores it into; one the closure owns holds it while the closure lives). Destroying a closure reads
+only what the captures it owns hold: a capture taken by reference stays borrowed until the
+closure's last call. A reference to the closure's own copy of a capture cannot be stored into a
+capture. An unannotated parameter goes into no capture,
+`'static` or other argument, and an annotated one into no other argument but one naming the same
+lifetime ("a closure argument is stored where it must outlive the closure"). A closure holds its captures by copy: `|| &x` returns a
+reference into the closure's own copy and is rejected; capture a reference instead (`let r = &x;
+|| r`). The lifetimes of function types are in [types.md](references/types.md).
 
 ## Interfaces
 
@@ -448,6 +492,8 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 
 - A `const` of an owning (`Free`) type lives in static storage. Moving out of it is "cannot
   move a value out of a 'const' binding"; borrow it instead (`K.v.len()`).
+- Every task shares a `const`: one holding an `UnsafeCell` must be `Sync` ("a constant of type
+  '..' holds an 'UnsafeCell' but is not 'Sync'").
 - A constant whose type embeds a stateful allocator is "a constant cannot use the stateful
   allocator '...'". A `static mut` cannot hold an owning type (raw pointers and references are
   allowed).
@@ -550,7 +596,7 @@ An opaque `type X;` renders as its bare C name, so it must name a type some incl
 header actually defines (`FILE` works because stdio.h is auto-included; an invented name
 fails in the C compile). `@c.source("impl.c")` names an implementation elsewhere.
 `@c.link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
-`va_start`, `va_arg`, `va_end`).
+`va_start`, `va_arg`, `va_end`); `va_arg` needs `unsafe` (see `super-c-ffi`).
 
 ## Testing
 
@@ -587,8 +633,8 @@ source text, values, and file:line on failure.
 | `@c.always_inline` | Force inlining |
 | `@c.noinline` | Prevent inlining |
 | `@c.noreturn` | Mark non-returning |
-| `@c.align(N)` | Set alignment: a power of two from 1 to 2^28 (268435456); `N` is an integer literal or a constant expression of type `u32` |
-| `@c.packed` | Pack struct |
+| `@c.align(N)` | Set alignment: a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32` |
+| `@c.packed` | Pack struct. A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
 | `@c.export("sym")` | Pin exact C symbol |
 | `@c.import("sym")` | Import exact C symbol |
 | `@c.section("s")` | Place in section |
@@ -643,8 +689,8 @@ enforced at spawn boundaries.
 | `Box<T>` | Heap-allocated single value |
 | `Option<T>` | `Option::Some(x)` / `Option::None` in values; bare `Some(..)`/`None` in patterns only |
 | `Result<T, E>` | `Ok(T)` or `Err(E)` |
-| `Map<K, V>` | Hash map |
-| `Set<T>` | Hash set |
+| `Map<K, V>` | Hash map; `keys()` and `values()` borrow it (`MapKeys<'a, K>`, `MapValues<'a, V>`) |
+| `Set<T>` | Hash set; `iter()` borrows it |
 | `Array<T, N>` | Fixed-size const-generic array, a type distinct from `[T; N]`. `new()` needs `T: Default`; for raw pointers write `Array::<*mut T, N> {}` |
 | `Slice<T>` / `SliceMut<T>` | Fat-pointer views |
 | `Tuple2<A, B>` ... `Tuple4` | Tuples (access: `.0`, `.1`) |

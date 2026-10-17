@@ -9,8 +9,6 @@ import typechecker::typechecker as tc;
 import ast::parser as par;
 import lsp::text as ltext;
 
-type HovBuf = Array<char, 512>;
-
 /// A definition/reference site: a byte span in `module`'s source.
 pub struct Loc {
     pub module: u32,
@@ -666,7 +664,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     }
     let d = def_at(p, mi, off);
     if t != TYPE_NONE {
-        let mut buf = HovBuf {};
+        let mut buf = String::new();
         let src = p.modules.at(mi).source.as_str();
         // An interface name in a bound, a conformance or a `dyn` type: the interface instance with
         // its defaulted arguments (`Mul<Simd<T, N>>`), not the erased value type that records it.
@@ -674,12 +672,12 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             p,
             d.module as usize,
         )).at_const(d.node).kind == NodeKind::NODE_INTERFACE {
-            tc::render_iface_into(p, a, src, t, &mut buf[0], 512);
+            tc::render_iface_str(p, a, src, t, &mut buf);
         } else {
-            tc::render_type_into(p, a, src, t, &mut buf[0], 512);
+            tc::render_type_str(p, a, src, t, &mut buf);
         }
         out.push_str("```super-c\n");
-        out.push_str(str::from_cbuf(buf.as_slice()));
+        out.push_str(buf.as_str());
         out.push_str("\n```");
     }
     if d.node == NODE_NONE {
@@ -2258,9 +2256,8 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         if t == TYPE_NONE {
             continue;
         }
-        let mut buf = HovBuf {};
-        tc::render_type_into(p, a, p.modules.at(mi).source.as_str(), t, &mut buf[0], 512);
-        let rendered = str::from_cbuf(buf.as_slice());
+        let buf = tc::type_str_of(p, a, p.modules.at(mi).source.as_str(), t);
+        let rendered = buf.as_str();
         if rendered.len() == 0 || rendered.len() > 60 {
             continue;
         }

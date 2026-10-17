@@ -21,8 +21,8 @@ measurement is kept below).
 A function-pointer type (`fn(A) R`) is structural: a `TYPE_FUNCTION` with qualifier `FN_SIG`
 (`| FN_MOVE` for `move fn`) whose payload `TyFn.sig` is an instance-table record, not a
 declaration: `module` is the result count, `decl` the parameter count, `args` the results then
-the parameters (past eight slots, the first seven and then the function-pointer type of the
-rest). A single `void` result is no result, so two spellings of one signature are one id. A
+the parameters, then any lifetime class slots (`lts_slots`; `rec_len` counts all; past eight
+slots, the first seven and then the function-pointer type of the rest). A single `void` result is no result, so two spellings of one signature are one id. A
 `dyn fn(..)` is a `TYPE_DYN` whose record has `decl == NODE_NONE` and holds its function-pointer
 type in `args[0]` (`Ast::dyn_fn_sig`). A closure or a function declaration keeps its nominal
 `TYPE_FUNCTION` (no `FN_SIG`). `Ty::rec` names the record of an instance, a dyn and a signature.
@@ -124,8 +124,25 @@ arm; the intern gate and the pre-seeded builtin pool both pass through it. Witho
 equal types built differently interned twice ("expected 'Mode', found 'Mode'", seen only
 under clang for wasm32). Any new byte-identity hash or equality needs the same gate.
 
-Lifetimes are not part of a type: a region field in `Ty` or `TyInstance` would change the
-bytes of every record and, because ids number in insertion order, renumber every type.
+Lifetimes are not part of a type, with one exception: a region field in `Ty` or every
+`TyInstance` would change the bytes of every record and, because ids number in insertion order,
+renumber every type. A function-pointer signature record carries its lifetime classes
+(`TyInstance.lts`: per lifetime position of its results then parameters, in `Package::lt_walk`
+order, its own lifetime, `'static`, a group chosen at each call, or a lifetime fixed outside the
+type), because a function
+type's parameters are contravariant and no region flow can stand for them. It is 0 for the
+default classes (no lifetime written, elided results from the only input), so a type that names
+no lifetime keeps its record and its id. `Hash`/`Eq`, `PubKey` (`w[10]`), the TU cache table
+(`TUC_VER` 11) and the item index's `ty_hash` include it; `tc_lts_subst` rebuilds it when
+substitution brings positions (`fn(T)` with `T = &i32`: one group per position of `T`), and
+gives `LTS_WIDE` past the last class (`LC_TOO_MANY`). Classes that do not pack (past `LTS_MAX`
+positions or `LP_GROUPS` groups of a kind) are `LTS_EXT | count << 8`, and the record holds them
+after its parameters, eight per `TYPE_CONST` slot (`Ast::lts_encode`, `sig_lt_class`), so they
+take part in its identity, its copies across tables and the TU cache as its slots do; a rebuild
+of the record from its slots (`tc_erase_lts`, `tc_lts_subst`) drops or replaces them. A function type inside another holds one position of the outer one per lifetime it takes
+from outside it. The type keeps no lifetime names: a `'a` of the enclosing item and a `'b` both
+pack as the first outer class. The backend walkers copy it unchanged, and the C spelling ignores
+it.
 
 `Ast::intern_type` (and `intern_instance`, `intern_dyn`, `intern_const_lin`) looks the
 canonical record up in the package table first: a hit is the final id (`mark_used`

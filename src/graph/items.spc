@@ -891,8 +891,15 @@ pub fn finalize(p: &mut loader::Package) {
     for m in 0..p.modules.len() {
         module_edges(p, m, &sps, &mut edges);
     }
+    // A set iterates in an order its insertion history shapes: sort the dynamic edges, so the rows
+    // do not depend on the order the engine recorded them in (worker count and timing).
+    let mut dynv = Vector::<u64>::with_capacity(p.sched.dyn_edges.len());
     for e in p.sched.dyn_edges.iter() {
-        edges.push(*e);
+        dynv.push(*e);
+    }
+    dynv.sort();
+    for i in 0..dynv.len() {
+        edges.push(dynv[i]);
     }
     build_final(p, &edges);
     p.sched.dyn_edges = Set::<u64>::new();
@@ -1072,6 +1079,9 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
     if ty.fn_sig() {
         let sig = *a.instance(ty.as_data.fnp.sig);
         h = mix(h, sig.module as u64 << 32 | sig.decl as u64);
+        if sig.lts != 0 {
+            h = mix(h, sig.lts);
+        }
         for i in 0..sig.n {
             h = ty_hash(p, sps, c, m, unsafe sig.args[i as usize], h, depth + 1);
         }

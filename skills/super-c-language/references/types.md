@@ -102,6 +102,9 @@ Standard C layout (not auto-rounded to power-of-2). Fields ordered as declared. 
 `@c.packed` for wire formats. Use `@c.align(N)` for cache-line alignment. Verify sizes
 with `static_assert(sizeof(T) == N, "...")`.
 
+No type may exceed the target's `isize::MAX` bytes ("the type '..' is too large for the target"),
+nor an array `u32::MAX` elements ("array length N exceeds the maximum of 4294967295").
+
 ## Pointers and References
 
 | Syntax | Meaning |
@@ -350,6 +353,7 @@ type's and the function's arguments: `W::<u8>::conv::<i64>(6)`.
 | `\|x: i32\| x * 2` | Compact closure |
 | `fn(x: i32) i32 { return x + 1; }` | Anonymous function |
 | `fn(i32) i32` | Function pointer type (no captures) |
+| `for<'a> fn(&'a i32, &mut &'a i32)` | Function type with lifetimes it binds itself |
 | `F: fn(i32) i32` | Generic bound (any callable) |
 | `F: fn move(i32) i32` | Ownership-marked bound |
 | `dyn fn(i32) i32` | Structural trait object |
@@ -367,6 +371,51 @@ function of that signature). The prelude marker `FnPtr` admits exactly the funct
 (never a closure), and a `F: FnPtr` value casts the same way; a generic cast whose instance is no
 such type fails at that instance ("invalid cast from 'usize' to 'S'"). `dyn fn(..)` may name generic parameters (`struct D<T> { pub f: Box<dyn fn(T) T> }`) and
 substitutes the same way.
+
+The lifetimes a function type writes are part of it, as in Rust (`fn(..)`, `dyn fn(..)` and a
+`F: fn(..)` bound alike). A lifetime position is a reference, a slice, a borrowed `dyn`, or a
+lifetime parameter of a type the signature names (`P<'a>`, `str<'a>`, an alias's lifetime and type
+arguments), also inside type arguments. Each one has its own lifetime chosen at each call when
+elided; `'static` when it says so; one lifetime chosen at each call shared by the positions naming
+the same lifetime of the type's own `for<'a>`; or a lifetime fixed outside the type, the enclosing
+item's (`fn(&'a T)` in `fn f<'a>`). An elided result takes the lifetime of the only input position;
+with none or several it is "missing lifetime specifier: this function type's result borrows, ...".
+`fn(&'a T) &'a T` with a `for<'a>` and `fn(&T) &T` are one type. A function type inside a position
+(`fn(fn(&'a T))`, `Box<dyn fn(&'a T)>`) binds its own lifetimes; each lifetime it takes from
+outside it is a position of the enclosing type. A function type, like a closure, shows at most 126
+lifetimes chosen at each call and 127 fixed outside it; past that, writing it is an error.
+
+A function value converts to a function type when each lifetime it needs is one the type gives
+those positions (Rust's subtyping): a function with a `'static` parameter fits `fn(&'static T)`,
+not `fn(&T)`; `put<'a>(x: &mut &'a T, y: &'a T)` fits `for<'a> fn(&mut &'a T, &'a T)`, not
+`fn(&mut &T, &T)`; a type parameter stands for one type, so `push::<&i32>` needs the type to tie its
+positions; a value fixing a lifetime fits only a type fixing it too; a value that ties two
+lifetimes the type fixes needs them related: `id::<'x>` fits `fn(&'a T) &'b T` only where the
+function declares `'a: 'b`. The names come from the type the context writes: a `let`'s, a
+return's, an assignment target's (a field's or `*r`'s through its declaration), a struct, variant,
+tuple or array literal member's through the written type of the literal, a called function
+value's parameter, and a generic call's parameter through its receiver's or result's written type.
+An unannotated `let` of a literal takes its lifetimes from its later uses' written types (`let s =
+S { f: id }; return s;` needs the return type's `'a: 'b`); a use no written type names takes it
+only when nothing ties them. Elsewhere, the two must be one lifetime. A value whose declaration
+names the lifetimes from outside its function type converts to a type naming them otherwise only
+as the declaration relates them: `fn(&'p T) &'q T` to `fn(&'q T) &'p T` needs `'q: 'p`. `fn(&T)` converts to
+`fn(&'static T)` and to `fn(&'a T)`, never back. A type's lifetime position has its declaration's
+variance, as in Rust: covariant through `&'a T`, contravariant through a `fn(&'a T)` field,
+invariant through `&mut`, `*mut T` or an interface's arguments; a function type inside one is
+compared under its own binder (`fn(fn(&T))` converts to `fn(fn(&'static T))`, not back). At a
+call, the callee's lifetimes (its own, its extend's, its type parameters') are chosen to fit a
+function argument: passing `fn(&'static T)` to `f: fn(&'a T)` makes `'a` `'static`, so the
+call's other arguments at `'a` must be `'static`. Else "mismatched types: the lifetimes of
+function 'f' do not fit 'fn(..)'". The message prints a type as the parameter, `let`, return or
+field (with its base's lifetime arguments) writes it; a lifetime no declaration there names
+prints as `'1`, `'2`, .. A call through a function value follows its type: a `'static` position
+takes only `'static` borrows; an argument sharing a lifetime with what a `&mut` argument points at
+(or a shared argument's `UnsafeCell` interior) is stored there; an argument at a fixed lifetime is
+stored where the callee value keeps it (the captures the closure's body stores that parameter into,
+or the caller storage of a parameter, field or `let` whose type names that lifetime), so it must
+outlive it; and the result borrows from the callee
+value and the arguments its lifetime names. A function a local holds (`let g = f;`) calls as `f`.
 
 Capture rules:
 - **Read**: value copied at closure creation (default); a fixed-size array copies whole.
@@ -391,6 +440,11 @@ A `dyn` value is a 2-word fat pair `{data, vtable}`. Three spellings: `&dyn I` (
 `&mut dyn I` (mutable), `Box<dyn I>` (owned, drop glue deep-frees). One vtable per source
 type, dyn type and erasure kind: a borrowed erasure's table has no `__free`, an owned one's
 frees the payload (per allocator for `Box<T, A>`).
+
+A `dyn` value holds borrows its type does not show. `&'a dyn I` follows every rule of `&'a T`:
+elision, `'static`, ties between parameters, covariance in `'a`, and a field of that type names its
+lifetime; the interface's arguments are invariant. An owned `dyn I` in a signature holds only
+`'static` borrows (Rust's `Box<dyn I + 'static>`).
 
 A generic interface erases with its arguments: `&dyn I<bool>` needs a conformance whose
 interface arguments (type and const) are exactly `I<bool>`, at every coercion site; a

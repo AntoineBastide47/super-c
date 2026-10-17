@@ -157,7 +157,8 @@ Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:
 | `Arc<T>` | if `T: Send + Sync` | if `T: Send + Sync` |
 | `UnsafeCell<T>` | if `T: Send` | no |
 
-Share through `Arc`. Mutate through `Mutex`, `RwLock`, or atomics. Raw pointers cannot
+A `const` is shared by every task: one holding an `UnsafeCell` must be `Sync`. Share through
+`Arc`. Mutate through `Mutex`, `RwLock`, or atomics. Raw pointers cannot
 cross thread boundaries. A type with an `UnsafeCell` field is not `Sync`, so `Arc` of it
 is neither `Send` nor `Sync` and every `launch` that captures it fails. Assert both with
 `unsafe extend T as Send {}` and `unsafe extend T as Sync {}`, and write the lock argument
@@ -282,6 +283,9 @@ while let Some(val) = rx.recv() {           // Option<T>: None once closed and d
 
 - `bounded(n)` / `unbounded()` return a `Channel<T>` value; handles come from
   `.sender()` / `.receiver()` and are cloneable.
+- A borrow sent into a channel is stored in it: the channel, its senders and its receivers hold
+  it, so a `Channel<&i32>` and its handles cannot outlive what was sent. A `Mutex<&T>` and its
+  guards hold what is stored through them the same way.
 - `send` and `try_send` return `SendResult<T>` (the value comes back on a closed or full
   channel); `recv` returns `Option<T>`, `try_recv` and the timed forms likewise.
 - Timed/batch forms: `send_timeout`, `send_deadline`, `recv_timeout`, `recv_deadline`,
@@ -638,7 +642,9 @@ in `~/Library/Logs/DiagnosticReports` names the function and line.
 `std::parallel::task` owns cooperative cancellation. Only a `CancelSource` requests it;
 a `CancelToken` observes it; a `TaskGroup` bundles a source with the children it spawns.
 Dropping a `TaskGroup` joins its children with cancellation masked, so a group never ends
-before its children even when its owner has a cancellation pending.
+before its children even when its owner has a cancellation pending. Every `free` whose waits
+can accept a cancellation runs masked the same way (the lowering wraps it in
+`cancel_mask_enter`/`cancel_mask_exit`), so a destructor always completes.
 
 ```superc
 let (src, tok) = task::CancelSource::new();
