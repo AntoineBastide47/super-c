@@ -593,11 +593,6 @@ fn generic_struct_literals() {
         6,
     );
     h::expect_exit(
-        "new with an expected pointer",
-        "extern \"C\" { fn free(p: *mut void) void; }\nstruct Pair<A, B> { pub a: A, pub b: B }\nfn main() i32 {\n    let h: *mut Pair<u64, u8> = new Pair { a: 9, b: 10 };\n    let v = unsafe (*h).a as i32 + unsafe (*h).b as i32;\n    unsafe free(h);\n    return v;\n}\n",
-        19,
-    );
-    h::expect_exit(
         "declared default before the literal default",
         "struct D<T = i64> { pub v: T }\nfn main() i32 {\n    let d = D { v: 3 };\n    static_assert(sizeof(d) == 8, \"i64\");\n    let e = D { v: 4u8 };\n    static_assert(sizeof(e) == 1, \"u8\");\n    return d.v as i32 + e.v as i32;\n}\n",
         7,

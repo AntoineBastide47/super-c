@@ -270,7 +270,7 @@ extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> as Default {
 
 /// Borrowing cursors over a Map. `for k in m.keys()` / `for v in m.values()` visit each occupied entry
 /// (in arbitrary slot order). Each borrows the Map, which must outlive the iteration.
-pub struct MapKeys<K> {
+pub struct MapKeys<'a, K> {
     pub keys: *const K,
     pub used: *const u8,
     pub idx: usize,
@@ -278,7 +278,7 @@ pub struct MapKeys<K> {
 }
 
 /// Iterator over a map's values in slot order; borrows the map.
-pub struct MapValues<V> {
+pub struct MapValues<'a, V> {
     pub vals: *const V,
     pub used: *const u8,
     pub idx: usize,

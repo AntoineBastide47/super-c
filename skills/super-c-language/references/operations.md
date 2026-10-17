@@ -147,7 +147,6 @@ order costs nothing at run time.
 | a variadic argument of the wrong kind | undefined |
 | an invalid alignment value | undefined |
 | an invalid allocator size or alignment | undefined |
-| `new T` when the allocator returns null | traps: "out of memory" |
 | element count times element size overflows in `Vector` or `String` | traps ("Vector: capacity overflow", "String: capacity overflow") |
 | a program's own `n * sizeof(T)` | follows the integer rules above |
 

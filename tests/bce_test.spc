@@ -679,3 +679,69 @@ fn vector_access_group_checks() {
     let GUARD: str = "import std::simd;\nfn sum(x: []f32, y: []f32) f32 {\n    let n = x.len();\n    if y.len() < n {\n        return 0.0;\n    }\n    let m = n - n % 4;\n    let mut acc = Simd::<f32, 4>::splat(0.0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc + simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);\n        i += 4;\n    }\n    let mut s = acc[0] + acc[1] + acc[2] + acc[3];\n    for k in m..n {\n        s = s + x[k] * y[k];\n    }\n    return s;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<f32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as f32);\n    }\n    return sum(v[0..v.len()], v[0..v.len()]) as i32 - 204;\n}\n";
     vec_check("a guard proves the other slice and the scalar tail", GUARD, false, "");
 }
+
+// A whole reassignment of a view kills the length facts of its old value: the next access checks
+// the new length, in straight-line code, in a loop, and after an index operand that reassigns the
+// indexed view.
+@test
+fn safety_reassigned_view() {
+    expect_panics(
+        "reassigned view",
+        M"(@c.noinline
+fn f(mut x: []u32, y: []u32) u32 {
+    let a = x[0];
+    x = y;
+    return a + x[0];
+}
+fn main(argv: Vector<str>) i32 {
+    let a0: [u32; 1] = [7];
+    let mut v = Vector::<u32>::new();
+    if argv.len() > 5 {
+        v.push(1);
+    }
+    return f(a0, v[0..v.len()]) as i32;
+}
+)",
+        "index out of bounds",
+    );
+    expect_panics(
+        "view reassigned in a loop",
+        M"(@c.noinline
+fn f(mut x: []u32, y: []u32, n: usize) u32 {
+    let mut s = x[0];
+    for _ in 0..n {
+        s += x[0];
+        x = y;
+    }
+    return s;
+}
+fn main(argv: Vector<str>) i32 {
+    let a0: [u32; 1] = [7];
+    let mut v = Vector::<u32>::new();
+    if argv.len() > 5 {
+        v.push(1);
+    }
+    return f(a0, v[0..v.len()], argv.len() + 1) as i32;
+}
+)",
+        "index out of bounds",
+    );
+    expect_panics(
+        "view reassigned by an index operand",
+        M"(fn pick(mut x: [][]u32, y: [][]u32, go: bool) u32 {
+    if !go {
+        return 0;
+    }
+    return x[0][switch 0 { _ => { x = y; 0; } }];
+}
+fn main(argv: Vector<str>) i32 {
+    let a0: []u32 = [7];
+    let x: [][]u32 = [a0];
+    let back: [[]u32; 1] = [a0];
+    let y: [][]u32 = back[1..1];
+    return pick(x, y, argv.len() < 5) as i32;
+}
+)",
+        "index out of bounds",
+    );
+}

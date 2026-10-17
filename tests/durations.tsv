@@ -1055,7 +1055,7 @@
 0.00	tests::parser_test::soft_keyword_names
 0.00	tests::parser_test::switch_pattern_ranges
 0.00	tests::parser_test::test_attribute_list
-0.00	tests::parser_test::traits_impls_match_and_new
+0.00	tests::parser_test::traits_impls_and_match
 0.61	tests::parser_test::tuple_let_mut_elements
 0.00	tests::parser_test::unions
 0.00	tests::parser_test::unsafe_extend

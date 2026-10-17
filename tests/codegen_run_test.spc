@@ -446,17 +446,6 @@ fn structs_and_methods() {
         "struct Inner { pub v: i32, }\nstruct Outer { pub inner: Inner, }\nfn main() i32 { let o: Outer = Outer { inner: Inner { v: 7, }, }; unsafe exit(o.inner.v); }\n",
         7,
     );
-    run_exit(
-        "heap struct via new",
-        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; let r = unsafe (*b).v; unsafe free(b as *mut void); unsafe exit(r); }\n",
-        9,
-    );
-    // A zero-sized `new` allocates a distinct block that `free` takes.
-    run_exit(
-        "heap zero-sized value via new",
-        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct E {}\nfn main() i32 { let a: *mut E = new E {}; let b: *mut E = new E {}; let d = a != b; unsafe free(a); unsafe free(b); unsafe exit(d as i32); }\n",
-        1,
-    );
 }
 
 @test
@@ -3841,6 +3830,121 @@ fn checked_byte_views() {
     return 0;
 }
 )",
+        0,
+    );
+}
+
+// A generic tuple struct's constructor infers its type arguments from its elements, or takes the
+// expected instance, as a generic enum variant does.
+@test
+fn tuple_struct_constructor_inference() {
+    h::expect_exit(
+        "generic tuple-struct constructors",
+        M"(struct Q<T>(T);
+struct P<A, B>(A, B);
+fn take(q: Q<i64>) i64 { return q.0; }
+fn main() i32 {
+    let a = Q(5);
+    let c: Q<i64> = Q(7);
+    let d = take(Q(9));
+    let e = P(1u8, Q(true));
+    let s = Q(String::from_str("xy"));
+    if a.0 != 5 || c.0 != 7 || d != 9 || e.0 != 1 || !e.1 .0 {
+        return 1;
+    }
+    return s.0.len() as i32 - 2;
+}
+)",
+        0,
+    );
+}
+
+// A capturing closure stored in a generic struct's field embeds its environment there: a mutated
+// capture is a pointer, a moved one its value, and the layout model agrees with the C layout.
+@test
+fn closure_in_generic_struct_field() {
+    h::expect_exit(
+        "closures in struct fields",
+        M"(struct Q<F: fn() i32> { pub v: i64, pub f: F }
+struct M<F: fn(i32)> { pub f: F }
+fn main() i32 {
+    let s = String::from_str("abc");
+    let q = Q { v: 5, f: || s.len() as i32 };
+    let mut n: i64 = 0;
+    let mut m = M { f: |x: i32| { n += x as i64; } };
+    (m.f)(3);
+    (m.f)(4);
+    return (q.f)() + q.v as i32 + n as i32 - 15;
+}
+)",
+        0,
+    );
+}
+
+// `zeroed` of an array is a byte fill, and a generic aggregate zeroes at compile time too.
+@test
+fn zeroed_arrays_and_generic_aggregates() {
+    h::expect_exit(
+        "zeroed arrays",
+        M"(fn mk() [u32; 5] {
+    let a = unsafe zeroed::<[u32; 5]>();
+    return a;
+}
+struct W<T> { pub a: [T; 3] }
+const fn mkw<T>() W<T> {
+    return unsafe zeroed::<W<T>>();
+}
+const V: W<u32> = mkw::<u32>();
+const A: Array<u32, 4> = Array::<u32, 4>::new();
+fn main() i32 {
+    let w = mk();
+    return w[4] as i32 + V.a[2] as i32 + A.len() as i32 - 4;
+}
+)",
+        0,
+    );
+}
+
+// Programs the checker accepts compile: an `Option<Box<dyn fn>>` frees its payload through the
+// vtable's drop slot, a field reached through `&mut &mut H` dereferences twice, and an argument of
+// an associated type that is a reference passes the reference.
+@test
+fn dyn_drop_double_deref_and_assoc_arguments() {
+    run_leak_free(
+        "an Option<Box<dyn fn>> drop",
+        "fn mk(k: i32) Box<dyn fn() i32> {\n    return Box::new(move || k);\n}\nfn main() i32 {\n    let mut c: Option<Box<dyn fn() i32>> = Option::<Box<dyn fn() i32>>::None;\n    c = Option::<Box<dyn fn() i32>>::Some(mk(52));\n    let f = c.unwrap();\n    return f() - 52;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a field through &mut &mut",
+        "struct H<'a> { pub r: &'a i32 }\nconst K: i32 = 7;\nconst Z: i32 = 0;\nfn main() i32 {\n    let mut h = H { r: &Z };\n    let mut m = &mut h;\n    let mm = &mut m;\n    mm.r = &K;\n    return *h.r - 7;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a reference argument of an associated type",
+        "interface Producer { type Output; }\nstruct P {}\nextend P as Producer { type Output = &'static Box<i32>; }\nfn take<T: Producer>(x: T::Output) i32 { let _ = x; return 52; }\nfn main() i32 {\n    let v = Box::<i32>::new(52);\n    let r: &Box<i32> = &v;\n    return take::<P>(r) - 52;\n}\n",
+        0,
+    );
+}
+
+// `*b` on a Box is a mutable place through `deref_mut` when the binding is mutable: an assignment
+// and a `&mut *b` both write the boxed value.
+@test
+fn box_deref_mut_places() {
+    run_leak_free(
+        "*b = v and &mut *b",
+        "fn main() i32 {\n    let mut b = Box::<i32>::new(52);\n    *b = 1;\n    let x = &mut *b;\n    *x += 2;\n    return *b - 3;\n}\n",
+        0,
+    );
+}
+
+// A variadic argument arrives promoted (`float` as `double`, a narrow integer as `int`): `va_arg`
+// reads the promoted type and converts, directly and through a generic.
+@test
+fn va_arg_reads_promoted_types() {
+    h::expect_exit(
+        "va_arg of f32 and u8",
+        "fn take_f32(n: i32, ...) f32 {\n    let ap: va_list;\n    va_start(ap, n);\n    let v = unsafe va_arg(ap, f32);\n    va_end(ap);\n    return v;\n}\nfn take_g<T>(n: i32, ...) T {\n    let ap: va_list;\n    va_start(ap, n);\n    let v = unsafe va_arg(ap, T);\n    va_end(ap);\n    return v;\n}\nfn main() i32 {\n    let a = take_f32(1, 3.25f32);\n    let b = take_g::<f32>(1, 3.25f32);\n    let c = take_g::<u8>(1, 200u8);\n    if a != 3.25 || b != 3.25 || c != 200 {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
 }

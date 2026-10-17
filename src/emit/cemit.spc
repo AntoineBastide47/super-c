@@ -1079,11 +1079,15 @@ extend CEmit {
                     // A GENERIC param decides shapes by its BOUND type under the active
                     // substitution (T = &i64 is a reference param, not a by-value one); an
                     // UNRESOLVED generic decides nothing, so the lowered operand's shape stands.
-                    if pty != TYPE_NONE && unsafe (*fap).type_at(pty).kind == TypeKind::TYPE_GENERIC {
+                    // An associated type (`T::Output`) is known per instance only, like a parameter.
+                    if pty != TYPE_NONE && (unsafe (*fap).type_at(pty).kind == TypeKind::TYPE_GENERIC || unsafe (*fap).type_at(
+                        pty,
+                    ).kind == TypeKind::TYPE_ASSOC) {
                         let mut xm = callee.module;
                         let mut xt = pty;
                         let grounded = self.mg.resolve(callee.module, pty, &mut xm, &mut xt);
-                        if grounded && unsafe (*self.p().module_ast_const(xm)).type_at(xt).kind != TypeKind::TYPE_GENERIC {
+                        let xk = unsafe (*self.p().module_ast_const(xm)).type_at(xt).kind;
+                        if grounded && xk != TypeKind::TYPE_GENERIC && xk != TypeKind::TYPE_ASSOC {
                             pty = xt;
                             fap = self.p().module_ast_const(xm);
                         } else {
@@ -3025,7 +3029,8 @@ extend CEmit {
                 }
                 let s2 = *b.statements.at((blk.stmt_start + sk) as usize);
                 if s2.kind == ir::ST_ASSIGN && self.rvalue_reads_local_bare(b, s2.rvalue, l as u32) {
-                    if scalar || b.rvalues.at(s2.rvalue as usize).kind == ir::RV_USE {
+                    // An array copy is a `memcpy` from the temp's storage: it needs the temp itself.
+                    if scalar || b.rvalues.at(s2.rvalue as usize).kind == ir::RV_USE && self.arr_n(b, b.locals.at(l).ty) < 0 {
                         self.sx_inline.set(l, drv);
                     }
                     // The sole read; stop whether or not it was a foldable position.
@@ -3786,9 +3791,6 @@ extend CEmit {
         }
         if k == ir::RV_AGGREGATE && rv.c == ir::AGG_ARRAY {
             return !self.agg_has_array_field(b, rv);
-        }
-        if k == ir::RV_INTRINSIC && rv.c as u32 == ir::IN_NEW as u32 {
-            return true;
         }
         // Explicit safe-access checks emit as a single call (or the bare operand when PROVEN):
         // fusing the declaration keeps one C statement without reordering anything.
@@ -6473,81 +6475,7 @@ extend CEmit {
                 return self.emit_vec_cast_store(o, b, s, &rv0);
             }
         }
-        // `new T { .. }`: allocate, then store the initializer through the fresh pointer.
-        {
-            let rv0 = *b.rvalues.at(s.rvalue as usize);
-            if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_NEW as u32 {
-                let mut rmN = b.module;
-                let mut rtN = rv0.target;
-                self.rty(b, rv0.target, &mut rmN, &mut rtN);
-                let yN = *unsafe (*self.p().module_ast_const(rmN)).type_at(rtN);
-                if yN.kind != TypeKind::TYPE_POINTER && yN.kind != TypeKind::TYPE_REFERENCE {
-                    return self.fail("new-target");
-                }
-                let mut es = self.sget();
-                let mut lhs = self.sget();
-                let mut iv = self.sget();
-                // A zero-sized `T` has no C storage: one byte gives a distinct block to free, and the
-                // initializer stores nothing.
-                let zN = self.mg.is_zst(rmN, yN.as_data.elem);
-                let mut okn = true;
-                if zN {
-                    es.push_str("1");
-                } else {
-                    es.push_str("sizeof(");
-                    okn = self.ty_c(rmN, yN.as_data.elem, "", &mut es);
-                    es.push_str(")");
-                }
-                okn = okn && self.emit_place(b, s.place, &mut lhs);
-                if okn && rv0.b != 0 && !zN {
-                    okn = self.emit_operand(b, b.oper_pool[rv0.a as usize], &mut iv);
-                }
-                if okn {
-                    okn = self.emit_new_store(o, b, s, &es, &lhs, &iv);
-                }
-                self.sput(es);
-                self.sput(lhs);
-                self.sput(iv);
-                return okn;
-            }
-        }
         return self.emit_stmt_tail(o, b, s);
-    }
-
-    // `Box`-style allocation: `[T ]lhs = __sc_new(size); *lhs = iv;` with the pieces spelled by the
-    // caller (`iv` empty = no initializer).
-    fn emit_new_store(
-        self: &mut Self,
-        o: &mut String,
-        b: &ir::CoreBody,
-        s: &ir::Statement,
-        size: &String,
-        lhs: &String,
-        iv: &String,
-    ) bool {
-        o.push_str("  ");
-        let plN = *b.places.at(s.place as usize);
-        let rootN = *self.sx_coal.at(plN.base as usize);
-        let fuseN = plN.proj_len == 0 && *self.sx_fuse.at(rootN as usize) && !*self.sx_declared.at(rootN as usize);
-        if fuseN {
-            self.sx_declared.set(rootN as usize, true);
-            if !self.ty_c(b.module, b.locals.at(rootN as usize).ty, lhs.as_str(), o) {
-                return false;
-            }
-        } else {
-            o.push_string(lhs);
-        }
-        o.push_str(" = __sc_new(");
-        o.push_string(size);
-        o.push_str(");\n");
-        if iv.len() != 0 {
-            o.push_str("  *");
-            o.push_string(lhs);
-            o.push_str(" = ");
-            o.push_string(iv);
-            o.push_str(";\n");
-        }
-        return true;
     }
 
     // The store forms after the intrinsic ones: erased dyn envs, dead never-typed copies, whole
@@ -6582,27 +6510,29 @@ extend CEmit {
             let an = self.arr_n(b, b.places.at(s.place as usize).ty);
             if an > 0 {
                 let rv0 = *b.rvalues.at(s.rvalue as usize);
-                if rv0.kind != ir::RV_USE {
+                let mut zero = rv0.kind == ir::RV_INTRINSIC && rv0.c == ir::IN_ZEROED;
+                if rv0.kind != ir::RV_USE && !zero {
                     return self.fail("array-store");
                 }
-                let op0 = *b.operands.at(rv0.a as usize);
-                if op0.kind == ir::OP_CONST {
-                    let c0 = *b.constants.at(op0.data as usize);
-                    if c0.kind == ir::CK_INT && c0.val == 0 {
-                        // Zeroing a whole array is a byte fill.
-                        let mut zl = self.sget();
-                        let okz = self.emit_place(b, s.place, &mut zl);
-                        if okz {
-                            o.push_str("  memset(&");
-                            o.push_string(&zl);
-                            o.push_str(", 0, sizeof(");
-                            o.push_string(&zl);
-                            o.push_str("));\n");
-                        }
-                        self.sput(zl);
-                        return okz;
-                    }
+                if !zero && b.operands.at(rv0.a as usize).kind == ir::OP_CONST {
+                    let c0 = *b.constants.at(b.operands.at(rv0.a as usize).data as usize);
+                    zero = c0.kind == ir::CK_INT && c0.val == 0;
                 }
+                if zero {
+                    // Zeroing a whole array is a byte fill.
+                    let mut zl = self.sget();
+                    let okz = self.emit_place(b, s.place, &mut zl);
+                    if okz {
+                        o.push_str("  memset(&");
+                        o.push_string(&zl);
+                        o.push_str(", 0, sizeof(");
+                        o.push_string(&zl);
+                        o.push_str("));\n");
+                    }
+                    self.sput(zl);
+                    return okz;
+                }
+                let op0 = *b.operands.at(rv0.a as usize);
                 if op0.kind != ir::OP_COPY && op0.kind != ir::OP_MOVE {
                     return self.fail("array-store");
                 }
@@ -14609,10 +14539,34 @@ extend CEmit {
                     self.sput(ts);
                     return self.fail("va-arg");
                 }
+                // A variadic argument arrives with C's default promotions: a `float` as a `double`,
+                // a narrower integer as an `int`. Read the promoted type, then convert.
+                let mut rmA = b.module;
+                let mut rtA = rv.target;
+                self.rty(b, rv.target, &mut rmA, &mut rtA);
+                let yA = *unsafe (*self.p().module_ast_const(rmA)).type_at(rtA);
+                let mut promoted = "";
+                if yA.kind == TypeKind::TYPE_BUILTIN {
+                    let bt = yA.as_data.builtin;
+                    if bt == BuiltinType::BT_F32 {
+                        promoted = "double";
+                    } else if bt == BuiltinType::BT_BOOL || bt == BuiltinType::BT_CHAR || bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_U16 {
+                        promoted = "int";
+                    }
+                }
+                if promoted.len() != 0 {
+                    dst.push_str("(");
+                    dst.push_string(&ts);
+                    dst.push_str(")");
+                }
                 dst.push_str("va_arg(");
                 let ok = self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
                 dst.push_str(", ");
-                dst.push_string(&ts);
+                if promoted.len() != 0 {
+                    dst.push_str(promoted);
+                } else {
+                    dst.push_string(&ts);
+                }
                 dst.push_str(")");
                 self.sput(ts);
                 return ok;
@@ -16300,11 +16254,16 @@ extend CEmit {
                     ok = self.emit_dyn_recv(b, dyn_recv, dyn_stars, sink);
                     sink.push_str(".vt->");
                     let ca0 = self.p().module_ast_const(t.callee.module);
-                    self.mg.ident(
-                        t.callee.module,
-                        unsafe (*ca0).at_const(unsafe (*ca0).at_const(t.callee.node).as_data.function.name).as_data.name.text,
-                        sink,
-                    );
+                    let mname = unsafe (*ca0).at_const(unsafe (*ca0).at_const(t.callee.node).as_data.function.name).as_data.name.text;
+                    if self.p().modules.at(t.callee.module as usize).source.as_str().slice(
+                        mname.start as usize,
+                        mname.end as usize,
+                    ) == "free" {
+                        // `Free::free` through a dyn value is its drop glue: the `__free` slot.
+                        sink.push_str("__free");
+                    } else {
+                        self.mg.ident(t.callee.module, mname, sink);
+                    }
                 } else if ok && self.counted_call(b, t) {
                     sink.push_str("(uint32_t)"); // the comparison wrote the count
                 } else if ok {

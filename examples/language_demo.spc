@@ -24,6 +24,7 @@ static_assert(sizeof((i32, bool)) >= sizeof(i32) + sizeof(bool), "tuple layout")
 static mut VISITS: i32 = 0;
 
 extern "C" {
+    fn malloc(size: usize) *mut void;
     fn free(pointer: *mut void) void;
 }
 
@@ -207,8 +208,9 @@ unsafe const fn raw_read_twice(pointer: *const i32) i32 {
 }
 
 fn pointer_and_defer() i32 {
-    let pointer = new i32 (21);
+    let pointer = (unsafe malloc(sizeof(i32))) as *mut i32;
     defer unsafe free(pointer);
+    unsafe *pointer = 21;
     unsafe *pointer += 1;
     let view: &i32 = unsafe &*pointer;
     return unsafe raw_read_twice(view);

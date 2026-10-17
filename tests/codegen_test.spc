@@ -3,7 +3,7 @@
 // the behavior of a built program.
 import tests::harness as h;
 
-const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  let q: *i32 = new i32;\n}\n";
+const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  return y + z;\n}\n";
 
 const CONTROL: str = "fn classify(c: u8) i32 { return switch c { 0 => 1, n => 2, _ => 0, }; }\nfn sum(xs: [i32; 3]) i32 {\n  let mut total: i32 = 0;\n  for x in xs { total = total + x; }\n  return total;\n}\n";
 
@@ -60,10 +60,10 @@ fn structured_backend() {
     let GCOLLIDE: str = "fn id<T>(x: T) T { return x; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32; }\nfn main() i32 { return collide(1) - 8; }\n";
     h::expect_exit("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
 
-    // Both the name AND its `_1` suffix are reserved (a generic call plus a real `id__i32_1`): the
-    // parameter must fall all the way back to `_N`, hiding neither symbol.
+    // A user item cannot spell a generated symbol (`id__i32_1` beside the instance `id__i32`): the
+    // name is reserved, so no item collides with an instance.
     let GCOLLIDE2: str = "fn id<T>(x: T) T { return x; }\nfn id__i32_1(x: i32) i32 { return x + 1; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32_1(id__i32); }\nfn main() i32 { return collide(1) - 9; }\n";
-    h::expect_exit("a doubly-colliding variable falls back to a temp name", GCOLLIDE2, 0);
+    h::expect_err_msg("an item named like an instance symbol", GCOLLIDE2, "the name 'id__i32_1' is reserved");
 
     // A never-read local is a dead store: dropping it must preserve behavior. (The structural check
     // that neither declaration nor assignment is emitted: is in cemit_test on an isolated

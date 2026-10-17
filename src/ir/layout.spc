@@ -27,6 +27,8 @@ pub struct Layout {
     /// A failure because a generic parameter had no binding in the env: the query was asked
     /// under an incomplete substitution, as opposed to a type no env can lay out.
     pub unbound: bool,
+    /// A failure because the size exceeds the target's `isize::MAX`: no object can be that large.
+    pub big: bool,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
@@ -49,6 +51,7 @@ struct LayoutAcc {
     pub packed: bool,
     pub is_union: bool,
     pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
+    pub big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
@@ -288,7 +291,10 @@ extend Svc {
             t0 = ts_now();
         }
         let pending = self.pending;
-        let r = self.layout_raw(m, t, env, depth);
+        let mut r = self.layout_raw(m, t, env, depth);
+        if r.ok && r.size > (1u64 << self.tgt().ptr * 8 - 1) - 1 {
+            r = Layout { ok: false, big: true };
+        }
         if t0 != 0 {
             ts_add(TS_LAY_NS, ts_now() - t0);
         }
@@ -355,7 +361,7 @@ extend Svc {
         if y.kind == TypeKind::TYPE_ARRAY {
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {
-                return Layout { ok: false, unbound: el.unbound };
+                return Layout { ok: false, unbound: el.unbound, big: el.big };
             }
             if el.size == 0 {
                 // A zero-sized element gives size 0 for every length (and keeps the element
@@ -370,7 +376,7 @@ extend Svc {
                 }
             }
             if n as u64 > 0xFFFFFFFFFFFFFFFFu64 / el.size {
-                return Layout { ok: false }; // length * element overflow: unrepresentable
+                return Layout { ok: false, big: true }; // length * element overflow: unrepresentable
             }
             return Layout { ok: true, size: el.size * n as u64, align: el.align };
         }
@@ -452,6 +458,10 @@ extend Svc {
             if ((unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps) >> k as u64 & 1u64) != 0 {
                 fl = Layout { ok: true, size: w, align: w };
             }
+            // Each capture is below isize::MAX, so only the running sum can pass u64.
+            if size > 0xFFFFFFFFFFFFFFFFu64 - fl.align - fl.size {
+                return Layout { ok: false, big: true };
+            }
             size = round_up(size, fl.align) + fl.size;
             align = align.max(fl.align);
         }
@@ -466,6 +476,7 @@ extend Svc {
         let fl = self.member_layout(m, tn, env, depth);
         if !fl.ok {
             unsafe (*acc).unbound = fl.unbound;
+            unsafe (*acc).big = fl.big;
             return false;
         }
         let mut fa = fl.align;
@@ -477,6 +488,11 @@ extend Svc {
                 unsafe (*acc).size = fl.size;
             }
         } else {
+            // Each field is below isize::MAX, so only the running sum can pass u64.
+            if unsafe (*acc).size > 0xFFFFFFFFFFFFFFFFu64 - fa - fl.size {
+                unsafe (*acc).big = true;
+                return false;
+            }
             unsafe (*acc).size = round_up(unsafe (*acc).size, fa) + fl.size;
         }
         if fa > unsafe (*acc).align {
@@ -536,7 +552,7 @@ extend Svc {
                 ftn = ast.at_const(fid).as_data.field.ty;
             }
             if !self.acc_field(&mut acc, dm, ftn, env, depth) {
-                return Layout { ok: false, unbound: acc.unbound };
+                return Layout { ok: false, unbound: acc.unbound, big: acc.big };
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);

@@ -151,7 +151,9 @@ let b = a;            // ownership moves to b
 
 **Never call `.free()` on a local binding.** RAII auto-drops at scope exit. Use `defer`
 only for resources RAII does not manage (file descriptors, C allocations). Use `forget(x)`
-for deliberate leaks.
+for deliberate leaks. At a scope exit the defers run (LIFO) before the scope's locals drop,
+also locals declared after the `defer` (a `let _ = f()` result is one): a deferred signal
+(`defer wg.done()`) fires before them, so put locals that must drop first in an inner block.
 
 Assignment frees the old value first: `s.name = fresh;` never leaks.
 

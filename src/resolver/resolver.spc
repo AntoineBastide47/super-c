@@ -33,6 +33,7 @@ pub struct Symbol {
 pub struct ClosureScope {
     pub floor: u32,
     pub caps: Vector<NodeId>,
+    pub node: NodeId,
 }
 
 /// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference: the Ast
@@ -62,6 +63,8 @@ pub struct Resolver<'a> {
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
     pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
     pub lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
+    pub closure_param: bool, // resolving a closure parameter's type: it may name no outer lifetime
+    pub closure_lt_floor: u32, // `lt_owners` length when that type started: owners above it are its own
     pub build_names: bool, // the module is the build-constant module: it may declare the reserved names
     pub target_names: bool, // the module is std's `target`: it declares the build-constant enums
 }
@@ -787,30 +790,57 @@ extend Resolver {
         return mark;
     }
 
-    /// Report lifetime `lt` unless it is `'static`, `'_` or a lifetime param in scope.
+    /// Report lifetime `lt` unless it is `'static`, `'_` or a lifetime param in scope, and any lifetime
+    /// but `'_` a closure parameter names.
     fn resolve_lifetime(self: &mut Self, lt: NodeId) {
         if lt == NODE_NONE {
             return;
         }
         let name = self.ast.at_const(lt).as_data.name.text;
-        if span_is(self.source, name, "'static") || span_is(self.source, name, "'_") {
+        if span_is(self.source, name, "'_") {
             return;
         }
+        let mut found = span_is(self.source, name, "'static");
+        let mut inner = false; // declared inside the closure parameter's type (a `for<..>` binder)
         let mut i = self.lt_owners.len();
-        while i > 0 {
+        while i > 0 && !found {
             i -= 1;
             let lts = self.ast.lifetimes_of(self.lt_owners[i]);
             for k in 0..lts.len {
                 let pn = self.ast.at_const(self.child(lts, k)).as_data.generic_param.name;
                 if span_eq(self.source, self.ast.at_const(pn).as_data.name.text, name) {
-                    return;
+                    found = true;
+                    inner = i as u32 >= self.closure_lt_floor;
+                    // Every enclosing closure names it: its value holds that region.
+                    if !self.closure_param {
+                        for c in 0..self.closures.len() {
+                            self.ast.closure_lts.push(self.closures[c].node as u64 << 32 | self.child(lts, k) as u64);
+                        }
+                    }
                 }
             }
         }
-        self.errors.emit_span(
-            name,
-            format("use of undeclared lifetime name `{}`", self.source.slice(name.start as usize, name.end as usize)),
-        );
+        if !found {
+            self.errors.emit_span(
+                name,
+                format(
+                    "use of undeclared lifetime name `{}`",
+                    self.source.slice(name.start as usize, name.end as usize),
+                ),
+            );
+            return;
+        }
+        if self.closure_param && !inner {
+            // A closure value is called through a function type, which takes its arguments at any
+            // lifetime: a named one is a requirement no call checks.
+            self.errors.emit_span(
+                name,
+                format(
+                    "a closure parameter cannot name lifetime `{}`: a closure takes its arguments at any lifetime",
+                    self.source.slice(name.start as usize, name.end as usize),
+                ),
+            );
+        }
     }
 
     /// Declare `owner`'s lifetime params, and check their outlives bounds; returns the `lt_owners` mark.
@@ -1531,14 +1561,6 @@ extend Resolver {
                     self.scope_exit();
                 }
             },
-            NODE_NEW => {
-                let ne = self.ast.at_const(id).as_data.new_expr;
-                if ne.initializer != NODE_NONE {
-                    self.resolve_expr(ne.initializer);
-                } else {
-                    self.resolve_type(ne.ty);
-                }
-            },
             NODE_WHILE => {
                 // `loop { .. }` as an expression.
                 let body = self.ast.at_const(id).as_data.while_stmt.body;
@@ -1667,12 +1689,15 @@ extend Resolver {
         }
         let cl = self.ast.at_const(id).as_data.closure;
         self.scope_enter();
-        self.closures.push(ClosureScope { floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new() });
+        self.closures.push(ClosureScope { floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new(), node: id });
         for i in 0..cl.params.len {
             let pid = self.child(cl.params, i);
             let param = self.ast.at_const(pid).as_data.parameter;
             self.declare(param.name, pid, Namespace::NS_VALUE);
+            self.closure_param = true;
+            self.closure_lt_floor = self.lt_owners.len() as u32;
             self.resolve_type(param.ty);
+            self.closure_param = false;
         }
         // The DECLARED return type needs resolving too. Unresolved, it lowers to no type at all for
         // anything that is not a builtin, and a builtin needs no resolution, which is exactly why this

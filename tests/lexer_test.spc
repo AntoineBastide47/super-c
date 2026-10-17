@@ -33,7 +33,7 @@ fn expect_error(src: str) {
 @test
 fn keywords() {
     expect_tokens(
-        "as break case const continue defer do else enum extern false fn for if in let move mut new null return self Self struct static static_assert true type unsafe where while switch interface extend va_start va_arg va_end match protocol augment name _ i32",
+        "as break case const continue defer do else enum extern false fn for if in let move mut null return self Self struct static static_assert true type unsafe where while switch interface extend va_start va_arg va_end match protocol augment name _ i32",
         [
             TokenType::As,
             TokenType::Break,
@@ -53,7 +53,6 @@ fn keywords() {
             TokenType::Let,
             TokenType::Move,
             TokenType::Mut,
-            TokenType::New,
             TokenType::Null,
             TokenType::Return,
             TokenType::SelfLower,

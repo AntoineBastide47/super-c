@@ -111,8 +111,6 @@ with `static_assert(sizeof(T) == N, "...")`.
 | `*T` | The same type as `*const T` |
 | `&T` | Shared reference (borrow-checked) |
 | `&mut T` | Exclusive reference (borrow-checked) |
-| `new T(expr)` | Heap allocate (`*mut T`); "out of memory" panics on a failed allocation |
-| `new T { .. }` | Heap allocate with struct literal |
 | `sizeof(T)` | Byte size |
 | `alignof(T)` | Alignment |
 

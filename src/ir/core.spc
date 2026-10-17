@@ -756,7 +756,6 @@ pub const IN_VA_END: u8 = 4;
 pub const IN_TYPE_INFO: u8 = 5;
 pub const IN_ZEROED: u8 = 6;
 pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
-pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T { .. }`)
 // Inline assembly: `item.node` indexes the body's `asms` record (template, constraints and
 // clobbers as source spans); operands are the outputs' places (as copies) then the input values,
 // in source order.

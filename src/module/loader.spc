@@ -432,6 +432,8 @@ pub enum SugarItem {
     SI_CANCEL_PROBE, // the compiled cancellation-edge probe
     SI_CANCEL_LBEGIN, // ladder open: cleanup masked
     SI_CANCEL_LEND, // ladder close: hand the edge to the caller
+    SI_CANCEL_MENTER, // a destructor's masked region: open
+    SI_CANCEL_MEXIT, // a destructor's masked region: close
     SI_COUNT,
 }
 
@@ -453,6 +455,8 @@ const SI_MODULES: [str<'static>; SI_COUNT_N] = [
     "std::parallel::runtime",
     "std::parallel::runtime",
     "std::parallel::runtime",
+    "std::parallel::runtime",
+    "std::parallel::runtime",
 ];
 const SI_NAMES: [str<'static>; SI_COUNT_N] = [
     "submit",
@@ -469,6 +473,8 @@ const SI_NAMES: [str<'static>; SI_COUNT_N] = [
     "cancel_probe",
     "cancel_ladder_begin",
     "cancel_ladder_end",
+    "cancel_mask_enter",
+    "cancel_mask_exit",
 ];
 
 /// The package declaration index: the immutable package interface built once after every module has
@@ -2193,7 +2199,7 @@ extend Package {
         self.ensure_index();
         self.pub_map.clear();
         // Pass 1: the batch table, records translated so a provisional child is a batch id (tagged).
-        let mut batch = TypePool {};
+        let mut batch = TypePool::new();
         let mut bmaps = Vector::<Vector<TypeId>>::new();
         let mut bimaps = Vector::<Vector<u32>>::new();
         // The const-expression forms of every module pool take their package index in one
@@ -2494,7 +2500,7 @@ extend Package {
                 unsafe G_FEATURES;
             },
             build_module: -1,
-            tt: Box::<TypePool>::new(TypePool {}),
+            tt: Box::<TypePool>::new(TypePool::new()),
             ok: true,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
         };

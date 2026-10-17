@@ -304,8 +304,10 @@ pub const fn attr_in_params(kind: u8) bool {
     return (attr_expr_args(kind) & 15) == AA_PARAM;
 }
 
-/// The largest `@c.align` value: GCC's limit for every target, and clang ignores a larger one.
-pub const C_ALIGN_MAX: u64 = 268435456;
+/// The largest `@c.align` value: the smallest page size of the targets. A larger one is reduced in a
+/// static's section (Mach-O caps it at 16 KiB), and a frame realigned to it can step past a task
+/// stack's guard page.
+pub const C_ALIGN_MAX: u64 = 4096;
 
 /// Whether `v` is a valid `@c.align` value: a power of two, at most `C_ALIGN_MAX`.
 pub const fn c_align_ok(v: u64) bool {
@@ -406,7 +408,6 @@ pub enum NodeKind {
     NODE_GENERIC_SPECIALIZATION,
     NODE_MATCH,
     NODE_MATCH_ARM,
-    NODE_NEW,
     NODE_SIZEOF,
     NODE_ALIGNOF,
     NODE_VA_EXPR,
@@ -808,10 +809,6 @@ pub struct SelectArmData {
     pub body: NodeId,
     pub kind: SelectArmKind,
 }
-pub struct NewData {
-    pub ty: NodeId,
-    pub initializer: NodeId,
-}
 pub struct ArrayLiteralData {
     pub elements: NodeList,
     // `[v; N]`: `elements` holds exactly the value and the count, rather than the elements themselves.
@@ -879,7 +876,6 @@ pub union NodeAs {
     pub match_expr: MatchData,
     pub match_arm: MatchArmData,
     pub select_arm: SelectArmData,
-    pub new_expr: NewData,
     pub array_literal: ArrayLiteralData,
     pub struct_initializer: StructInitializerData,
     pub field_initializer: FieldInitializerData,
@@ -2561,6 +2557,10 @@ pub struct TypePool {
 }
 
 extend TypePool {
+    pub const fn new() TypePool {
+        return TypePool { tys: ChunkPool::<Ty>::new(), insts: ChunkPool::<TyInstance>::new() };
+    }
+
     pub fn free(self: &mut Self) {
         self.tys.free();
         self.tix.free();
@@ -2983,6 +2983,9 @@ pub struct Ast {
     /// checker (`record_closure`), the mutable-capture mask finalized by the borrow checker.
     pub closure_facts: Vector<ClosureFact>,
     pub cap_facts: Vector<CapFact>,
+    /// `closure << 32 | lifetime param` for each enclosing function's lifetime a closure's body names
+    /// (recorded by the resolver): the closure value holds that region.
+    pub closure_lts: Vector<u64>,
     pub closure_at: Map<u32, u32>,
     /// `free` methods' touched declarations, `fn << 32 | decl` for every module declaration a
     /// node inside the method's body resolves to (`record_free_touch`): the free-glue emission
@@ -3062,6 +3065,7 @@ extend Ast as Free {
         self.pat_vals.free();
         self.seeds.free();
         self.closure_facts.free();
+        self.closure_lts.free();
         self.cap_facts.free();
         self.closure_at.free();
         self.free_touched.free();
@@ -3097,6 +3101,7 @@ extend Ast {
             b: BodyArena::new(),
             ilock_sem: psy::Semaphore::new(1),
             resolutions: SplitVec::<DefId>::new(),
+            pool: TypePool::new(),
         };
         // nodes/tokens sits at ~0.78 across real corpora, with bodies holding about 87% of the
         // nodes and 65% of the list entries; the reserves keep the high-ratio outlier modules from
@@ -3271,6 +3276,7 @@ extend Ast {
             let sd = *self.seeds.at(i);
             self.set_resolution_def(sd.at, sd.def);
         }
+        self.closure_lts.clear();
     }
 
     /// Extend the resolution table to cover nodes added since `init_resolutions`. The HIR lowering builds
@@ -3821,7 +3827,7 @@ extend Ast {
         // Every provisional record is published: release the pool's chunks (a module that interns
         // again after the checkpoint allocates one fresh chunk).
         self.pool.free();
-        self.pool = TypePool {};
+        self.pool = TypePool::new();
     }
 
     /// Does any table of this module still hold a provisional id? (Validation after a publication.)
@@ -4700,7 +4706,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the

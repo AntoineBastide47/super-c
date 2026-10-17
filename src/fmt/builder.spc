@@ -1130,27 +1130,6 @@ extend Builder {
             NODE_MATCH => {
                 self.st.push(self.b_match(id));
             },
-            NODE_NEW => {
-                self.st.push(self.p.txt("new "));
-                self.st.push(self.b_type(n.as_data.new_expr.ty));
-                if n.as_data.new_expr.initializer != NODE_NONE {
-                    let init = self.nd(n.as_data.new_expr.initializer);
-                    if init.kind == NodeKind::NODE_STRUCT_INITIALIZER {
-                        self.st.push(self.p.txt(" "));
-                        self.st.push(
-                            self.b_struct_init_fields(
-                                init.as_data.struct_initializer.fields,
-                                self.nd(init.as_data.struct_initializer.ty).span.end,
-                                init.span.end,
-                            ),
-                        );
-                    } else {
-                        self.st.push(self.p.txt(" ("));
-                        self.st.push(self.b_expr(n.as_data.new_expr.initializer));
-                        self.st.push(self.p.txt(")"));
-                    }
-                }
-            },
             NODE_SIZEOF => {
                 self.st.push(self.p.txt("sizeof("));
                 self.st.push(self.b_type(n.as_data.single.value));
