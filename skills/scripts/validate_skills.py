@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS = ROOT / "skills"
 
-SOURCE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])((?:src|std|ffi|tests)/[A-Za-z0-9_./-]+)(?::\d+)?")
+SOURCE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])((?:src|std|ffi|tests)/[A-Za-z0-9_./*-]+)(?::\d+)?")
 LINK_RE = re.compile(r"\[[^]]+\]\(([^)]+)\)")
-FLAG_RE = re.compile(r"(?<![A-Za-z0-9_])--[a-z][a-z0-9-]*")
+FLAG_RE = re.compile(r"(?<![A-Za-z0-9_,])--[a-z][a-z0-9-]*")
 ENV_RE = re.compile(r"\bSC_[A-Z0-9_]+\b")
 ATTRIBUTE_RE = re.compile(r"(?<![A-Za-z0-9_])@[a-z][a-z0-9_.]*(?:\([^\n)]*\))?")
 # Flags of other tools the binary skill shows in their own command lines: samply's `--rate`,
@@ -91,6 +91,10 @@ def check_source_references(errors: list[str]) -> None:
             if match.group(1).endswith("/X.spc"):
                 continue
             path = ROOT / match.group(1)
+            if "*" in match.group(1):
+                if not any(ROOT.glob(match.group(1))):
+                    errors.append(f"{doc.relative_to(ROOT)}: missing source path {match.group(1)}")
+                continue
             if not path.exists():
                 errors.append(f"{doc.relative_to(ROOT)}: missing source path {match.group(1)}")
 

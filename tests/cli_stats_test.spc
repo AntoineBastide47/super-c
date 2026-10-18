@@ -65,3 +65,21 @@ fn build_mem_records_allocation_counters() {
         "survivors are attributed to the phase that allocated them",
     );
 }
+
+// A method whose signature computes a width (`V<{N + 1}>`) gives a speculative instance no new width:
+// the instance graph would otherwise chain V<3>, V<4>, ... until its walk budget stops it. The called
+// width is still defined.
+@test
+fn computed_width_signature_does_not_chain() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "struct V<const N: usize> {\n    pub e: [i32; N],\n}\nextend<const N: usize> V<N> {\n    fn grow(self: V<N>, s: i32) V<{N + 1}> {\n        let mut r = V::<{N + 1}> { e: [s; N + 1] };\n        for i in 0..N {\n            unsafe {\n                r.e[i] = self.e[i];\n            }\n        }\n        return r;\n    }\n}\nfn main() i32 {\n    let v = V::<2> { e: [1, 2] };\n    let w = v.grow(3);\n    return w.e[0] + w.e[1] + w.e[2] - 6;\n}\n",
+    );
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "run");
+    assert(r.ok(), "the program builds and returns 0");
+    assert(r.out_has("cemit-stage collect:"), "the collect line is printed");
+    assert(!r.out_has("budget exhausted"), "the instance graph closes within its budget");
+}

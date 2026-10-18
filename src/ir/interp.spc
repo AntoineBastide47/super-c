@@ -248,6 +248,12 @@ extend Interp {
             }
             o.et = rm_ty(p, o.em, o.et);
         }
+        for i in 0..self.inst_asserts.len() {
+            let r = self.inst_asserts.index_mut(i);
+            for k in 0..r.np {
+                unsafe r.ats[k as usize] = rm_ty(p, unsafe r.ams[k as usize], unsafe r.ats[k as usize]);
+            }
+        }
         for i in 0..self.statics.len() {
             let so = self.statics.index_mut(i);
             for k in 0..OBJ_ARGS {
@@ -567,6 +573,127 @@ const fn libm2(name: str, x: f64, y: f64) DblRes {
     return DblRes { ok: false, v: 0.0 };
 }
 
+// libm1 over the f32 function of the same name (`sqrtf` for "sqrt"): the f64 result narrowed to
+// f32 can differ from the f32 function the program calls.
+const fn libm1f(name: str, x: f32) DblRes {
+    if name == "sqrt" {
+        return DblRes { ok: true, v: math::sqrtf(x) };
+    }
+    if name == "cbrt" {
+        return DblRes { ok: true, v: math::cbrtf(x) };
+    }
+    if name == "exp" {
+        return DblRes { ok: true, v: math::expf(x) };
+    }
+    if name == "exp2" {
+        return DblRes { ok: true, v: math::exp2f(x) };
+    }
+    if name == "expm1" {
+        return DblRes { ok: true, v: math::expm1f(x) };
+    }
+    if name == "log" {
+        return DblRes { ok: true, v: math::logf(x) };
+    }
+    if name == "log2" {
+        return DblRes { ok: true, v: math::log2f(x) };
+    }
+    if name == "log10" {
+        return DblRes { ok: true, v: math::log10f(x) };
+    }
+    if name == "log1p" {
+        return DblRes { ok: true, v: math::log1pf(x) };
+    }
+    if name == "sin" {
+        return DblRes { ok: true, v: math::sinf(x) };
+    }
+    if name == "cos" {
+        return DblRes { ok: true, v: math::cosf(x) };
+    }
+    if name == "tan" {
+        return DblRes { ok: true, v: math::tanf(x) };
+    }
+    if name == "asin" {
+        return DblRes { ok: true, v: math::asinf(x) };
+    }
+    if name == "acos" {
+        return DblRes { ok: true, v: math::acosf(x) };
+    }
+    if name == "atan" {
+        return DblRes { ok: true, v: math::atanf(x) };
+    }
+    if name == "sinh" {
+        return DblRes { ok: true, v: math::sinhf(x) };
+    }
+    if name == "cosh" {
+        return DblRes { ok: true, v: math::coshf(x) };
+    }
+    if name == "tanh" {
+        return DblRes { ok: true, v: math::tanhf(x) };
+    }
+    if name == "asinh" {
+        return DblRes { ok: true, v: math::asinhf(x) };
+    }
+    if name == "acosh" {
+        return DblRes { ok: true, v: math::acoshf(x) };
+    }
+    if name == "atanh" {
+        return DblRes { ok: true, v: math::atanhf(x) };
+    }
+    if name == "floor" {
+        return DblRes { ok: true, v: math::floorf(x) };
+    }
+    if name == "ceil" {
+        return DblRes { ok: true, v: math::ceilf(x) };
+    }
+    if name == "round" {
+        return DblRes { ok: true, v: math::roundf(x) };
+    }
+    if name == "trunc" {
+        return DblRes { ok: true, v: math::truncf(x) };
+    }
+    if name == "fabs" {
+        return DblRes { ok: true, v: math::fabsf(x) };
+    }
+    return DblRes { ok: false, v: 0.0 };
+}
+
+// libm2 over the f32 function of the same name.
+const fn libm2f(name: str, x: f32, y: f32) DblRes {
+    if name == "pow" {
+        return DblRes { ok: true, v: math::powf(x, y) };
+    }
+    if name == "hypot" {
+        return DblRes { ok: true, v: math::hypotf(x, y) };
+    }
+    if name == "atan2" {
+        return DblRes { ok: true, v: math::atan2f(x, y) };
+    }
+    if name == "fmod" {
+        return DblRes { ok: true, v: math::fmodf(x, y) };
+    }
+    if name == "copysign" {
+        return DblRes { ok: true, v: math::copysignf(x, y) };
+    }
+    if name == "fmin" {
+        return DblRes { ok: true, v: math::fminf(x, y) };
+    }
+    if name == "fmax" {
+        return DblRes { ok: true, v: math::fmaxf(x, y) };
+    }
+    return DblRes { ok: false, v: 0.0 };
+}
+
+/// A concrete call's instance of generic function `f` whose body holds a static_assert: its own
+/// parameters `prm[0..np]` bound to `(ams[k], ats[k])`. The driver evaluates the asserts once every
+/// module is typed (`Interp::defer_inst_assert`).
+pub struct InstAssert {
+    pub f: DefId,
+    pub np: u8,
+    pub prm: [NodeId; 8],
+    pub ams: [ModuleId; 8],
+    pub ats: [TypeId; 8],
+}
+
 /// A recorded failed fold (deduped per node); the driver renders these after emission.
 pub struct IFoldErr {
     pub m: ModuleId,
@@ -651,6 +778,9 @@ pub struct Interp {
     pub live_slots: u64,
     pub slot_cap: u64, // slot capacity the object store holds, live and retained
     pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
+    // The lowest object id a reference (IV_OBJ, IV_PTR) was stored into since the running call began
+    // (`note_wr`); `call` reclaims the call's objects only when it is past them. u32::MAX: none.
+    pub wr_min: u32,
     pub failed: bool,
     // `read_place`/`write_place` admit a scalar union member other than the active one (`pun_ok`);
     // `resolve_place` then reports the member asked for (`pun_slot`, -1 for none) and resolves to the
@@ -698,6 +828,8 @@ pub struct Interp {
     pub st_fresh_miss: u64,
     pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
     pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
+    pub conf_memo: Map<MKey, u64>, // conf_ext_scan results per (interface, declaration) once every module is typed: start << 32 | count in `conf_pool`
+    pub conf_pool: Vector<DefId>,
     pub call_memo: CallMemo,
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
@@ -756,6 +888,8 @@ pub struct Interp {
     pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
     pub pending_consts: Vector<u64>, // deferred const decls
     pub pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
+    pub inst_asserts: Vector<InstAssert>, // per-instance static_assert evaluations concrete calls ask for
+    pub inst_asserts_failed: bool, // the instance graph's check reported a failure (driver `graph_inst_asserts`)
     /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
     /// modules whose bodies this engine needed but refused (released, or not typed yet in the
     /// running pass: `body_missing`), and the refusal count (`body_miss_n`) an analysis pass
@@ -781,6 +915,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         live_slots: 0,
         slot_cap: 0,
         zcell: 0,
+        wr_min: 0xFFFFFFFFu32,
         failed: false,
         pun_ok: false,
         pun_slot: -1,
@@ -808,6 +943,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         st_fresh_miss: 0,
         cont_memo: Map::<u64, u64>::new(),
         method_memo: Map::<MKey, u64>::new(),
+        conf_memo: Map::<MKey, u64>::new(),
+        conf_pool: Vector::<DefId>::new(),
         call_memo: CallMemo { ix: Map::<u64, u32>::new(), rows: Vector::<MemoRow>::new(), args: Vector::<IVal>::new() },
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
@@ -857,6 +994,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         pending: Vector::<u64>::new(),
         pending_consts: Vector::<u64>::new(),
         pending_strict: Vector::<bool>::new(),
+        inst_asserts: Vector::<InstAssert>::new(),
+        inst_asserts_failed: false,
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
         dyn_rec: false,
@@ -990,6 +1129,7 @@ extend Interp {
         self.objs_live = 0;
         self.live_slots = 0;
         self.zcell = 0;
+        self.wr_min = 0xFFFFFFFFu32;
         self.item_active.truncate(0);
         if self.item_cells.len() != 0 {
             self.item_cells.clear();
@@ -1119,6 +1259,22 @@ extend Interp {
         return unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
     }
 
+    // Record a store of `v` into object `id` for `call`'s reclamation: a reference stored into an object
+    // older than the running call keeps the call's objects alive.
+    fn note_wr(self: &mut Self, id: u32, v: IVal) {
+        if (v.kind == IV_OBJ || v.kind == IV_PTR) && id < self.wr_min {
+            self.wr_min = id;
+        }
+    }
+
+    // Record that object `id` grew: when it is older than the running call, the call's objects stay
+    // (reclaiming them resets the live-slot count, which now holds the growth).
+    fn note_grow(self: &mut Self, id: u32) {
+        if id < self.wr_min {
+            self.wr_min = id;
+        }
+    }
+
     // A new `n`-slot object of decl (dm, dn); 0 = failed.
     fn obj_decl(self: &mut Self, n: u32, dm: ModuleId, dn: NodeId) u32 {
         let o = self.obj_new(n);
@@ -1184,6 +1340,7 @@ extend Interp {
         }
         let o = self.obj_ptr(id);
         if len > cur {
+            self.note_grow(id);
             let c0 = unsafe (*o).slots.capacity();
             let mut i = cur;
             while i < len {
@@ -1206,6 +1363,7 @@ extend Interp {
         for i in 0..n {
             let c = self.obj_clone(v, depth);
             ok = ok && (v.kind == IV_NONE || c.kind != IV_NONE);
+            self.note_wr(id, c);
             unsafe (*self.obj_ptr(id)).slots.set((from + i) as usize, c);
         }
         return ok;
@@ -1518,6 +1676,42 @@ extend Interp {
             }
         }
         return false;
+    }
+
+    // `rty` for a binding of a callee's frame: a type naming the caller's own parameters (`W<T, 2>`
+    // in a generic body) grounds through the caller's frame, which is still the active one.
+    fn rty_ground(self: &Self, m0: ModuleId, t0: TypeId, om: &mut ModuleId, ot: &mut TypeId) bool {
+        if !self.rty(m0, t0, om, ot) {
+            return false;
+        }
+        if (unsafe &*self.p().module_ast_const(*om)).type_concrete(*ot) {
+            return true;
+        }
+        let mut g = TYPE_NONE;
+        if !self.ground_i(*om, *ot, *om, &mut g, 0) {
+            return false;
+        }
+        *ot = g;
+        return true;
+    }
+
+    // `rty` for an object's instance argument: a const-expression argument (`{N + M}`) becomes its
+    // value under the frame, so the object keeps a concrete instance past the frame.
+    fn rty_arg(self: &Self, m0: ModuleId, t0: TypeId, om: &mut ModuleId, ot: &mut TypeId) bool {
+        if !self.rty(m0, t0, om, ot) {
+            return false;
+        }
+        let mut g = TYPE_NONE;
+        if *ot > BuiltinType::BT_COUNT as u32 && unsafe (*self.p().module_ast_const(*om)).type_at(*ot).kind == TypeKind::TYPE_CONST_EXPR && self.ground_i(
+            *om,
+            *ot,
+            *om,
+            &mut g,
+            0,
+        ) {
+            *ot = g;
+        }
+        return true;
     }
 
     // Under the active frame's bindings, the first const-generic step of function `fnode` (module
@@ -1888,7 +2082,12 @@ extend Interp {
                         );
                     }
                 }
-                if ok && list.len() as u32 == ed.generics.len {
+                if ok && list.len() as u32 == ed.generics.len && self.isub_bounds_hold(
+                    xm as ModuleId,
+                    iid,
+                    &list,
+                    b.module,
+                ) {
                     for q in 0..list.len() {
                         obinds.push(*list.at(q));
                     }
@@ -1897,6 +2096,32 @@ extend Interp {
             }
         }
         return none;
+    }
+
+    // Whether the bounds of extend `ext`'s (module `em`) parameters hold for their bindings `list`
+    // (`Package::ext_bounds_concrete`, grounded into pool `dm`): of conformances whose interface
+    // arguments fit, the call takes the one whose bounds hold, as the checker does.
+    fn isub_bounds_hold(self: &Self, em: ModuleId, ext: NodeId, list: &Vector<ISub>, dm: ModuleId) bool {
+        let xa = unsafe &*self.p().module_ast_const(em);
+        let gens = xa.at_const(ext).as_data.extend_def.generics;
+        if gens.len > 8 {
+            return true;
+        }
+        let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+        let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+        for g in 0..gens.len {
+            let gid = unsafe xa.list(gens)[g as usize];
+            unsafe lp[g as usize] = DefId { module: em, node: gid };
+            for q in 0..list.len() {
+                if list.at(q).pmod == em && list.at(q).pnode == gid {
+                    let mut gt = TYPE_NONE;
+                    if self.ground_i(list.at(q).am, list.at(q).at, dm, &mut gt, 0) {
+                        unsafe la[g as usize] = gt;
+                    }
+                }
+            }
+        }
+        return self.p().ext_bounds_concrete(em, ext, &lp[0], &la[0], gens.len, dm, 0);
     }
 
     // The receiver decl behind Self's static type at a call site (refs/pointers peeled).
@@ -1973,11 +2198,24 @@ extend Interp {
     ) bool {
         let xa = unsafe &*self.p().module_ast_const(xm);
         let gens = xa.at_const(extnode).as_data.extend_def.generics;
-        if gens.len == 0 {
-            return true;
-        }
         let target = xa.at_const(extnode).as_data.extend_def.target_type;
         let pat = xa.type_of(target);
+        if gens.len == 0 {
+            // An extend of one instance (`extend M<3>`) applies to that instance only.
+            let mut pi = TyInstance {};
+            if rn == 0 || pat == TYPE_NONE || !xa.targs_of(pat, &mut pi) {
+                return true;
+            }
+            if pi.n != rn {
+                return false;
+            }
+            for j in 0..rn {
+                if !self.teq(xm, unsafe pi.args[j as usize], unsafe ram[j as usize], unsafe rat[j as usize]) {
+                    return false;
+                }
+            }
+            return true;
+        }
         if pat != TYPE_NONE && !ext_is_identity(xa, pat, xa, xm, extnode) {
             return self.bind_extend_solved(list, xm, extnode, pat, rn, ram, rat);
         }
@@ -2147,7 +2385,7 @@ extend Interp {
                 for gi in 0..inst.n {
                     let mut gm2: ModuleId = m;
                     let mut gt2 = unsafe inst.args[gi as usize];
-                    let _ = self.rty(m, unsafe inst.args[gi as usize], &mut gm2, &mut gt2);
+                    let _ = self.rty_arg(m, unsafe inst.args[gi as usize], &mut gm2, &mut gt2);
                     unsafe (*self.obj_ptr(id)).am[gi as usize] = gm2;
                     unsafe (*self.obj_ptr(id)).at[gi as usize] = gt2;
                 }
@@ -2585,8 +2823,29 @@ extend Interp {
             None => {},
         };
         args.clear();
+        let objs0 = self.objs_live;
+        let slots0 = self.live_slots;
+        let wr0 = self.wr_min;
+        self.wr_min = 0xFFFFFFFFu32;
+        let ncells = self.item_cells.len();
+        let nitems = self.item_objs.len();
         let ok = self.call_in(b, env, t, &mut args);
         self.argpool.push(args);
+        // The objects the call made (its frame, the copies of its by-value arguments, the cells of its
+        // autoref'd ones, its temporaries) die with it unless an older object received a reference
+        // (`wr_min`) or an item cache took one: the call's results are written by now, a reference
+        // among them into an older place. The budget then bounds the live objects, not every
+        // temporary of the evaluation.
+        if ok && self.wr_min as usize > objs0 && self.item_cells.len() == ncells && self.item_objs.len() == nitems {
+            self.objs_live = objs0;
+            self.live_slots = slots0;
+            if self.zcell as usize > objs0 {
+                self.zcell = 0;
+            }
+        }
+        if wr0 < self.wr_min {
+            self.wr_min = wr0;
+        }
         return ok;
     }
 
@@ -2638,18 +2897,7 @@ extend Interp {
         for i in 0..n {
             let mut am2: ModuleId = 0;
             let mut at2 = TYPE_NONE;
-            if !self.rty(b.module, b.targ_pool[(start + i) as usize], &mut am2, &mut at2) {
-                return false;
-            }
-            // A type the caller builds from its own parameters (`UInt::<{F + 8}>`) grounds through
-            // the caller's frame, which is still the active one here.
-            if !(unsafe &*self.p().module_ast_const(am2)).type_concrete(at2) && !self.ground_i(
-                am2,
-                at2,
-                am2,
-                &mut at2,
-                0,
-            ) {
+            if !self.rty_ground(b.module, b.targ_pool[(start + i) as usize], &mut am2, &mut at2) {
                 return false;
             }
             if self.ty_no_const(am2, at2, 0) {
@@ -2679,6 +2927,27 @@ extend Interp {
         let n = (t.args_len as usize).min(ps.len as usize);
         for i in 0..n {
             let v = *args.at(i);
+            if i == 0 && v.kind == IV_PTR {
+                // A by-value scalar receiver reached through a reference (`x.wrapping_sub(1)` with
+                // `x: &u32`): the call reads the referent, as the emitted C does.
+                let pn0 = fa.at_const(unsafe fa.list(ps)[0]);
+                let pt0 = if pn0.kind == NodeKind::NODE_PARAMETER && pn0.as_data.parameter.ty != NODE_NONE {
+                    fa.type_of(pn0.as_data.parameter.ty);
+                } else {
+                    TYPE_NONE;
+                };
+                let ot = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+                if pt0 != TYPE_NONE && fa.type_at(pt0).kind == TypeKind::TYPE_BUILTIN && ot != TYPE_NONE && (unsafe &*self.p().module_ast_const(
+                    b.module,
+                )).type_at(ot).kind == TypeKind::TYPE_REFERENCE {
+                    let mut lv = none();
+                    if !self.loadp(v, &mut lv) {
+                        return false;
+                    }
+                    args.set(0, lv);
+                }
+                continue;
+            }
             if v.kind == IV_PTR || v.kind == IV_OBJ {
                 continue;
             }
@@ -2789,6 +3058,16 @@ extend Interp {
         if is_extern {
             return self.intercept(b, env, t, fm, fnode, args);
         }
+        let probe = self.p().sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
+        if !closure && fnode == probe.node && fm == probe.module {
+            // No task exists at compile time: the cancellation probe reports none, as the combined
+            // safepoint does.
+            if t.dests_len >= 1 {
+                let dp = b.dest_pool[t.dests_start as usize];
+                self.write_place(b, env, dp, iv_int(b.module, b.places.at(dp as usize).ty, 0));
+            }
+            return !self.failed;
+        }
         if !closure {
             // An interface member: the receiver's own override wins; an inherited DEFAULT body
             // runs with Self bound to the receiver type (mirroring the established evaluator).
@@ -2805,6 +3084,15 @@ extend Interp {
                 }
                 let mut sm2: ModuleId = 0;
                 let mut st2 = TYPE_NONE;
+                if st_t != TYPE_NONE && !self.rty(b.module, st_t, &mut sm2, &mut st2) {
+                    // `Float::pow(x, e)`: the interface names no implementor; a `Self` first
+                    // argument does, else the `Self` result, as the emitter reads them.
+                    if t.args_len != 0 && self.p().self_typed_param0(DefId { module: fm, node: fnode }) {
+                        st_t = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+                    } else if t.dests_len >= 1 {
+                        st_t = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+                    }
+                }
                 if st_t == TYPE_NONE || !self.rty(b.module, st_t, &mut sm2, &mut st2) {
                     return self.fail();
                 }
@@ -2877,7 +3165,7 @@ extend Interp {
                         while gi < igens.len && gi < di.n as u32 {
                             let mut wm: ModuleId = 0;
                             let mut wt = TYPE_NONE;
-                            if !self.rty(b.module, unsafe di.args[gi as usize], &mut wm, &mut wt) || !self.subst_add(
+                            if !self.rty_ground(b.module, unsafe di.args[gi as usize], &mut wm, &mut wt) || !self.subst_add(
                                 &mut binds,
                                 fm,
                                 unsafe fa0.list(igens)[gi as usize],
@@ -2895,6 +3183,9 @@ extend Interp {
                         rdm,
                         rdn,
                         rb,
+                        rn,
+                        &ram[0],
+                        &rat[0],
                         DefId { module: fm, node: container },
                         b.module,
                         fnode,
@@ -2939,11 +3230,16 @@ extend Interp {
                         return self.fail();
                     }
                 } else if fa0.at_const(fnode).as_data.function.body != NODE_NONE {
-                    // the interface's default body: only a NON-generic receiver binds Self
-                    if rn != 0 {
-                        return self.fail();
-                    }
-                    if !self.subst_add(&mut binds, fm, container, sm2, st2) {
+                    // the interface's default body: Self binds to the receiver type, an instance too
+                    let mut gm2: ModuleId = 0;
+                    let mut gt2 = TYPE_NONE;
+                    if !self.rty_ground(sm2, st2, &mut gm2, &mut gt2) || !self.subst_add(
+                        &mut binds,
+                        fm,
+                        container,
+                        gm2,
+                        gt2,
+                    ) {
                         return self.fail();
                     }
                 } else {
@@ -2971,9 +3267,17 @@ extend Interp {
                     // the receiver only for a `self` parameter: `H::<13>::conv(&v)` with `v: H<11>`
                     // is H<13>'s.
                     let mut bound = false;
-                    if t.recv != TYPE_NONE {
+                    if ext_keyed(xa, ext) && t.targs_len >= xgens.len {
+                        // A keyed extend's call names every argument of the extend first
+                        // (`tc_record_keyed`): the receiver does not bind them all.
+                        if !self.bind_targs(&mut binds, b, t.targs_start, fm, xa.list(xgens), xgens.len) {
+                            return self.fail();
+                        }
+                        bound = true;
+                    } else if t.recv != TYPE_NONE {
                         bound = self.bind_extend_from(&mut binds, b.module, t.recv, fm, ext);
-                    } else if t.args_len != 0 && self.takes_self(fm, fnode) {
+                    } else if t.args_len != 0 && self.p().self_first(DefId { module: fm, node: fnode }) {
+                        // A method's receiver; an associated function's first argument is none.
                         let rty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
                         bound = self.bind_extend_from(&mut binds, b.module, rty, fm, ext);
                     }
@@ -3325,22 +3629,31 @@ extend Interp {
             let mut v: f64 = 0.0;
             let mut okm = false;
             if nargs == 1 {
-                let r = libm1(name, inv[0]);
+                let r = if f32suf {
+                    libm1f(name, inv[0] as f32);
+                } else {
+                    libm1(name, inv[0]);
+                };
                 okm = r.ok;
                 v = r.v;
             } else if nargs == 2 {
-                let r = libm2(name, inv[0], inv[1]);
+                let r = if f32suf {
+                    libm2f(name, inv[0] as f32, inv[1] as f32);
+                } else {
+                    libm2(name, inv[0], inv[1]);
+                };
                 okm = r.ok;
                 v = r.v;
             } else if name == "fma" {
-                v = math::fma(inv[0], inv[1], inv[2]);
+                v = if f32suf {
+                    math::fmaf(inv[0] as f32, inv[1] as f32, inv[2] as f32);
+                } else {
+                    math::fma(inv[0], inv[1], inv[2]);
+                };
                 okm = true;
             }
             if !okm {
                 return self.fail();
-            }
-            if f32suf {
-                v = v as f32;
             }
             out = iv_float(b.module, rt, v);
         }
@@ -3506,6 +3819,7 @@ extend Interp {
             if cloned.kind == IV_NONE {
                 return self.fail();
             }
+            self.note_wr(did, cloned);
             unsafe (*self.obj_ptr(did)).slots.set((doff + i) as usize, cloned);
         }
         *out = *args.at(0);
@@ -4310,6 +4624,8 @@ extend Interp {
             return v;
         }
         self.live_slots += (want_len - have) as u64;
+        // An older object that grows keeps the call's count of live slots (`call`).
+        self.note_grow(v.i as u32);
         for _ in have..want_len {
             let cloned = self.obj_clone(ez, 0);
             let c0 = unsafe (*self.obj_ptr(v.i as u32)).slots.capacity();
@@ -4395,6 +4711,7 @@ extend Interp {
         } else {
             TYPE_NONE;
         };
+        self.note_wr(so, iv_ptr(0, TYPE_NONE, obj, off));
         unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, obj, off));
         unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
         return IVal { kind: IV_OBJ, tm: m, ty: sty, i: so, f: 0.0 };
@@ -4518,6 +4835,7 @@ extend Interp {
                     return false;
                 }
                 cref = iv_ptr(0, TYPE_NONE, cell, 0);
+                self.note_wr(env, cref);
                 unsafe (*self.obj_ptr(env)).slots.set(pl.base as usize, cref);
             }
             *obj = pv_obj(cref);
@@ -4536,6 +4854,7 @@ extend Interp {
                 if self.failed || sv.kind != IV_OBJ {
                     return self.fail();
                 }
+                self.note_wr(*obj, sv);
                 unsafe (*self.obj_ptr(*obj)).slots.set((*slot) as usize, sv);
                 cur = sv;
             }
@@ -4794,7 +5113,9 @@ extend Interp {
                 return;
             }
             for k in 0..unsafe (*src).slots.len() {
-                unsafe (*dst).slots.set(k, unsafe (*src).slots[k]);
+                let sv = unsafe (*src).slots[k];
+                self.note_wr(target, sv);
+                unsafe (*dst).slots.set(k, sv);
             }
             unsafe (*dst).uactive = unsafe (*src).uactive;
             return;
@@ -4811,18 +5132,8 @@ extend Interp {
         ) {
             unsafe (*op).uactive = slot as i32;
         }
+        self.note_wr(obj, cv);
         unsafe (*op).slots.set(slot as usize, cv);
-    }
-
-    // Whether function `fnode` of module `fm` declares a `self` first parameter.
-    const fn takes_self(self: &Self, fm: ModuleId, fnode: NodeId) bool {
-        let fa = unsafe &*self.p().module_ast_const(fm);
-        let ps = fa.at_const(fnode).as_data.function.params;
-        if ps.len == 0 {
-            return false;
-        }
-        let p0 = fa.at_const(unsafe fa.list(ps)[0]).as_data.parameter.name;
-        return self.span_is(fm, fa.at_const(p0).as_data.name.text, "self");
     }
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
@@ -4991,6 +5302,28 @@ extend Interp {
                     bits = bits & u64::MAX >> pick(n <= 8, 56u64, pick(n <= 16, 48u64, 32u64));
                 }
                 return iv_int(b.module, rv.target, bits as i64);
+            }
+            if rv.b == ir::CAST_UNCHECKED {
+                // Undefined at run time for NaN or a truncation outside the target: an error here.
+                let mut tb = BuiltinType::BT_I64;
+                if v.kind != IV_FLOAT || !self.bt_of(b.module, rv.target, &mut tb) {
+                    return self.bail();
+                }
+                let t = math::trunc(v.f);
+                let half = (1u64 << (bt_bits(tb, self.pw()) - 1) as u64) as f64;
+                let fits = if bt_unsigned(tb) {
+                    t >= 0.0 && t < 2.0 * half;
+                } else {
+                    t >= 0.0 - half && t < half;
+                };
+                if !fits {
+                    self.it_trap(
+                        IT_TRAP_UB_OVERFLOW,
+                        "`to_int_unchecked` of NaN or of a value outside the integer type",
+                    );
+                    return none();
+                }
+                return self.cast(v, b.module, rv.target);
             }
             if rv.b != ir::CAST_NUMERIC {
                 return self.bail(); // coerce-from conversions never fold here
@@ -5387,7 +5720,7 @@ extend Interp {
                         // spells its instance with the frame's own parameters
                         let mut gm2: ModuleId = 0;
                         let mut gt2 = TYPE_NONE;
-                        if self.rty(am0, unsafe it2.args[gi as usize], &mut gm2, &mut gt2) {
+                        if self.rty_arg(am0, unsafe it2.args[gi as usize], &mut gm2, &mut gt2) {
                             unsafe am[gi as usize] = gm2;
                             unsafe at[gi as usize] = gt2;
                         } else {
@@ -7311,7 +7644,7 @@ extend Interp {
                         same = false;
                     }
                 }
-                if same {
+                if same && self.isub_bounds_hold(xm as ModuleId, iid, &list, b.module) {
                     *out = DefId { module: xm as ModuleId, node: iid };
                     for q in 0..list.len() {
                         obinds.push(*list.at(q));
@@ -7333,12 +7666,15 @@ extend Interp {
         rdm: ModuleId,
         rdn: NodeId,
         rb: BuiltinType,
+        rn: u8,
+        ram: *const ModuleId,
+        rat: *const TypeId,
         iface: DefId,
         scope: ModuleId,
         callee: NodeId,
         name: tok::Span,
     ) DefId {
-        let ce = self.conf_ext_of(rdm, rdn, rb, iface);
+        let ce = self.conf_ext_of(rdm, rdn, rb, rn, ram, rat, iface);
         if ce.node != NODE_NONE {
             return self.ext_own_method(ce, iface.module, name);
         }
@@ -7475,7 +7811,7 @@ extend Interp {
                 ) && self.p().modules.at(rdm as usize).prelude {
                     return false;
                 }
-                if self.conf_ext_of(rdm, rdn, BuiltinType::BT_COUNT, iface).node != NODE_NONE {
+                if self.conf_ext_of(rdm, rdn, BuiltinType::BT_COUNT, 0, null, null, iface).node != NODE_NONE {
                     return true;
                 }
             }
@@ -7503,7 +7839,7 @@ extend Interp {
             rdn = NODE_NONE;
         }
         if rb != BuiltinType::BT_COUNT || rdn != NODE_NONE {
-            let ext = self.conf_ext_of(rdm, rdn, rb, iface);
+            let ext = self.conf_ext_of(rdm, rdn, rb, rn, &ram[0], &rat[0], iface);
             if ext.node != NODE_NONE {
                 let mut list = Vector::<ISub>::new();
                 return self.bind_extend(&mut list, ext.module, ext.node, rn, &ram[0], &rat[0]) && self.rt_bounds_hold(
@@ -7638,35 +7974,75 @@ extend Interp {
         }
     }
 
-    // The extend conforming the receiver (aggregate `(rdm, rdn)`, or builtin `rb` for node NODE_NONE)
-    // to interface `iface` with no interface arguments; NODE_NONE when none does.
-    fn conf_ext_of(self: &mut Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId) DefId {
-        // `method_memo` under a key no method lookup uses: bit 63 of `callee`.
+    // The extend conforming the receiver (aggregate `(rdm, rdn)` with instance arguments
+    // `rn`/`ram`/`rat`, or builtin `rb` for node NODE_NONE) to interface `iface` with no interface
+    // arguments; NODE_NONE when none does. Of the extends targeting the declaration, the first whose
+    // target the arguments fit (`extend M<3>` against `extend M<2>`).
+    fn conf_ext_of(
+        self: &mut Self,
+        rdm: ModuleId,
+        rdn: NodeId,
+        rb: BuiltinType,
+        rn: u8,
+        ram: *const ModuleId,
+        rat: *const TypeId,
+        iface: DefId,
+    ) DefId {
         let mid = if rdn == NODE_NONE {
             rb as u64;
         } else {
             rdm as u64;
         };
-        let key = MKey {
-            callee: 1u64 << 63 | iface.module as u64 << 32 | iface.node as u64,
-            recv: mid << 32 | rdn as u64,
+        let key = MKey { callee: iface.module as u64 << 32 | iface.node as u64, recv: mid << 32 | rdn as u64 };
+        // The candidates sit in `conf_pool` from `start`, `n` of them: memoized once every module is
+        // typed, else scanned into the pool's tail and dropped after the search.
+        let mut start = self.conf_pool.len();
+        let mut n: usize = 0;
+        let memo = switch self.conf_memo.get(&key) {
+            Some(v) => {
+                start = (*v >> 32) as usize;
+                n = (*v & 0xFFFFFFFFu64) as usize;
+                true;
+            },
+            None => false,
         };
-        if self.all_typed {
-            switch self.method_memo.get(&key) {
-                Some(v) => {
-                    return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
-                },
-                None => {},
-            };
+        if !memo {
+            let mut found = Vector::<DefId>::new();
+            self.conf_ext_scan(rdm, rdn, rb, iface, &mut found);
+            n = found.len();
+            for i in 0..n {
+                self.conf_pool.push(*found.at(i));
+            }
         }
-        let found = self.conf_ext_scan(rdm, rdn, rb, iface);
-        if self.all_typed {
-            self.method_memo.insert(key, found.module as u64 << 32 | found.node as u64);
+        // Of those, the first whose parameters' bounds hold (`W<T: Num>` is not `W<bool>`'s), else the
+        // first that fits, as the checker chooses: declaration order does not decide.
+        let mut hit = DefId { module: 0, node: NODE_NONE };
+        for i in start..start + n {
+            let c = *self.conf_pool.at(i);
+            let mut list = Vector::<ISub>::new();
+            if self.bind_extend(&mut list, c.module, c.node, rn, ram, rat) {
+                if hit.node == NODE_NONE {
+                    hit = c;
+                }
+                if self.isub_bounds_hold(c.module, c.node, &list, c.module) {
+                    hit = c;
+                    break;
+                }
+            }
         }
-        return found;
+        if !memo {
+            if self.all_typed {
+                self.conf_memo.insert(key, start as u64 << 32 | n as u64);
+            } else {
+                self.conf_pool.truncate(start);
+            }
+        }
+        return hit;
     }
 
-    fn conf_ext_scan(self: &Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId) DefId {
+    // Every extend conforming declaration `(rdm, rdn)` (builtin `rb` for node NODE_NONE) to `iface`,
+    // in module and item order, into `out`.
+    fn conf_ext_scan(self: &Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId, out: &mut Vector<DefId>) {
         for mi in 0..self.p().modules.len() {
             let mm = mi as ModuleId;
             let a = unsafe &*self.p().module_ast_const(mm);
@@ -7696,11 +8072,10 @@ extend Interp {
                     hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && a.type_at(tt).as_data.builtin == rb;
                 }
                 if hit {
-                    return DefId { module: mm, node: iid };
+                    out.push(DefId { module: mm, node: iid });
                 }
             }
         }
-        return DefId { module: 0, node: NODE_NONE };
     }
 
     fn ext_own_method(self: &Self, ext: DefId, nm: ModuleId, name: tok::Span) DefId {
@@ -7908,6 +8283,7 @@ extend Interp {
         };
         let cell = self.obj_new(1);
         if cell != 0 {
+            self.note_wr(cell, t);
             unsafe (*self.obj_ptr(cell)).slots.set(0, t);
             promo.insert(key, cell);
         }
@@ -9452,6 +9828,13 @@ extend Interp {
         self.pending.push(m as u64 << 32 | cond as u64);
     }
 
+    /// Queue the per-instance static_asserts of instance `r` (see `InstAssert`).
+    pub fn defer_inst_assert(self: &mut Self, r: InstAssert) {
+        self.eng_enter();
+        self.inst_asserts.push(r);
+        self.eng_leave();
+    }
+
     /// Queue a const initializer undecidable in module order.
     /// Defer const `decl` of module `m` to `flush_consts`; `strict`: a silent failure then is an error.
     pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId, strict: bool) {
@@ -9489,18 +9872,6 @@ extend Interp {
         for i in 0..items.len {
             let n = a.at_const(unsafe a.list(items)[i as usize]);
             if n.kind == NodeKind::NODE_STATIC_ASSERT && n.as_data.binary.left == cond {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// True when a deferred static_assert of module `m` sits in its body arena: the flush reads
-    /// that syntax, so the driver keeps the module's bodies until then.
-    pub fn pending_in_bodies(self: &Self, m: ModuleId) bool {
-        for i in 0..self.pending.len() {
-            let pk = self.pending[i];
-            if (pk >> 32) as ModuleId == m && Ast::in_body((pk & 0xFFFFFFFFu64) as NodeId) {
                 return true;
             }
         }

@@ -4,9 +4,10 @@ Publishing Core IR directly after typechecking needed a measured decision, a che
 inventory of every Core IR consumer, inline fields for the semantic facts a later pass still
 recovers from an AST side table, and checked release points for body syntax. This is the
 record: the measurement, why the publication point inside the typecheck frontier is
-not reachable, the publication point that was built (the end of each module's borrow pass,
-where the module's body syntax is freed), the facts that had to become records for it, the
-inventory, the tape categories, and the results.
+not reachable, the publication point that was built (the end of each module's borrow pass),
+the per-module release of body syntax built with it and the single release point that
+replaced it, the facts that had to become records, the inventory, the tape categories, and
+the results.
 
 ## Where lowering runs
 
@@ -14,9 +15,10 @@ inventory, the tape categories, and the results.
 the cross-module obligations, publishes the provisional types (checkpoint 1) and then runs the
 borrow jobs. `bc_fn` (`src/borrowck/borrowck.spc`) lowers each function and its closures
 first (`bc_ir_lower`), replays the tape, runs the analyses over the lowered bodies, and hands
-the lowerings to `irl::Keep`. When the module's pass ends, the driver records what later
-passes read of its body syntax and frees the body arena (`Ast::release_bodies`); the passes
-that follow read the kept bodies, the item index, the module arenas and the records below.
+the lowerings to `irl::Keep`. The body syntax stays live until `cemit_package` frees every
+module's body arena (`Package::release_bodies`) after the instance graph; the passes between
+read the kept bodies, the item index, the module arenas and the records below, and
+`emit_order` and the deferred and per-instance `static_assert` checks also read body syntax.
 
 ## Measurement
 
@@ -69,25 +71,26 @@ published inside it would carry provisional type ids (2.5 ms of remap) and would
 
 The reachable point is the end of each module's borrow pass: every choice is final, the
 reachability is computed at the start of the frontier, the module's bodies are lowered, kept
-and analyzed, and the syntax of the whole module can go. The driver releases it there
-(`borrowck_all` serial loop, `bc_run_one` per task) when `Package.free_bodies` is set, which
-`run_package` does for every batch build except the item-index measurement (its final graph
-reads the bodies). The lint driver and the test harness keep the old point. The gate for this
-point was the memory the release frees before the checks phase: 58 MiB of body syntax that
-had stayed live through lint, always-panics, the constant flush and emission planning.
+and analyzed. The driver also released the module's body syntax there (`borrowck_all`
+serial loop, `bc_job` per task) for every batch build except the item-index measurement.
+The gate for that release was the memory it freed before the checks phase: 58 MiB of body
+syntax that had stayed live through lint, always-panics, the constant flush and emission
+planning. The per-module release is gone; the release point section below gives the reason
+and the cost.
 
-What read a released module's body syntax after its pass, and the record that replaces it:
+What read a module's body syntax after its pass while the per-module release stood, and the
+record that replaced it (the records stay unless the row says otherwise):
 
 | Reader | Record |
 |--------|--------|
 | the borrow replay of every caller: `relate_result_precision` scanned the callee's `return` statements (`tc_result_attributable`) | `ItemSched.ret_attr`, one byte per item, recorded by `bc_record_ret_attr` right after the module's type check (the driver calls it after `check()`; 2 = unrecorded, so the harness and the language server scan live syntax as before) |
-| `emit_order`: the generic-call sites of the module's `mono` table name body nodes | `Package.emit_deps`, the module's dependency row (`emit_dep_row`) recorded before its release; `emit_order` reads the rows and computes them itself when none were recorded |
+| `emit_order`: the generic-call sites of the module's `mono` table name body nodes | none now: `emit_order` computes every module's row from live syntax (`emit_dep_row`); the recorded rows went with the per-module release |
 | `lint_unused_items`: every resolution slot, attributed to its item by span | the item index's post-typecheck edges (`ItemSched.fin_edges`: each module's `module_edges` run again at the end of its type check, when the checker has added the type-path call resolutions the resolver cannot make, laid out by `build_final` after the frontier), the same attribution the index makes from the id ranges; the `method_refs` table stays (its owner is the function node) |
 | `compute_emit_live`: every resolution slot | the module arena's resolutions (declarations, signatures, constants, pinned bodies, import paths) plus the post-typecheck edges' target modules; the lint driver builds the index (`build_serial`) for the same reason |
-| the evaluator's folds during the borrow frontier, and the always-panics check and flush after it: `body_of` lowered an ordinary body from syntax when no view was open | the keep's view opens before the frontier (`reserve_bodies` pins every slot; `put`/`absorb` accept bodies into that reserve under the view); a job publishes its bodies into the viewed keep under the evaluator's lock, and the module's last job releases its syntax |
+| the evaluator's folds during the borrow frontier, and the always-panics check and flush after it: `body_of` lowered an ordinary body from syntax when no view was open | the keep's view opens before the frontier (`reserve_bodies` pins every slot; `put`/`absorb` accept bodies into that reserve under the view); a job publishes its bodies into the viewed keep under the evaluator's lock |
 | the evaluator's closure call (`Interp::call` read the callee node's kind) | a callable body-arena node is a closure: no read |
 | the constant pre-pass before emission (the evaluator lowered the callees of every constant from syntax after the view closed) | the pre-pass runs with the view open and `Interp.copy_kept` set: every kept hit becomes an owned compact copy (`own_kept`), then the view closes |
-| the deferred `static_assert` flush: a condition inside a function body | the module keeps its bodies until the flush (`Interp::pending_in_bodies`) |
+| the deferred `static_assert` flush: a condition inside a function body | none now: every body arena lives past the flush; the per-module hold went with the per-module release |
 
 Equivalence: the previous compiler and this one emit byte-identical C over the compiler's
 own sources (one worker, and fourteen under `SC_TASK_DELAY`) and over the test package;
@@ -102,7 +105,8 @@ those calls.
 ## Results
 
 Release compilers over the same sources, one worker, `--cc=true` (`SC_BUILD_STATS=-
-SC_BUILD_MEM=1`, so the allocation tracker is on):
+SC_BUILD_MEM=1`, so the allocation tracker is on); before = the compiler with the release
+after emission planning, after = the per-module release and the records above:
 
 | Measure | Before | After |
 |---------|-------:|------:|
@@ -114,21 +118,47 @@ SC_BUILD_MEM=1`, so the allocation tracker is on):
 | `lower` region allocations and requested bytes | 22,862, 35.8 MiB | 18,364, 5.2 MiB |
 | 14 workers: checks, borrowck | 56, 51 ms | 41, 49 ms |
 
-The high-water mark now sits in the plan and publish phases (kept bodies, instance graph
-and emission buffers); the checks phase runs 58 MiB lighter. The per-function lowering
+The high-water mark sat in the plan and publish phases (kept bodies, instance graph
+and emission buffers); the checks phase ran 58 MiB lighter. The per-function lowering
 vector (`bc_fn` took a fresh `Vector<Lowerer>` whose first push reserved eight slots) is
 owned by the module's borrow entry; the probe gained the `reach` region and the
 lowered-product line (Core IR bytes, type slots, tape entries per kind), the type stats print
 the keep remap per publication, and the emission stats print the lint phase and the
 evaluator's body counters after borrow checking.
 
+## The release point
+
+A batch build frees body syntax at one point: `Package::release_bodies` in `cemit_package`
+(`src/driver/emit.spc`), right after `InstGraph::collect` and `graph_inst_asserts`, with the
+`release` line of `SC_SYNTAX_STATS`. `graph_inst_asserts` evaluates the `static_assert`s of
+every demanded instance of a generic function or method the graph finds, after the
+evaluator's view of the keep has closed, so a condition such as `T::is_signed()` lowers its
+non-generic callee from syntax. Under the per-module release, an instance reached only
+through another generic body was checked only at emission, after its callee bodies were
+released, and the check passed without a diagnostic. The language server's release is
+unchanged.
+
+The measurement behind the decision: release compilers built from the same sources, peak
+RSS of an uncached build, medians of three runs; before = the per-module release, after = the
+release after the instance graph.
+
+| Build | Before | After |
+|-------|-------:|------:|
+| the compiler's own sources, one worker | 243.9 MiB | 244.4 MiB |
+| the compiler's own sources, 14 workers | 281.7 MiB | 316.8 MiB (+35 MiB, +12%) |
+| a small program importing `std::math::all`, one worker / all cores | about 48 / 53 MiB | no change |
+
+A correct per-instance check costs 35 MiB of peak RSS at fourteen workers and 0.5 MiB at one
+worker.
+
 ## Consumer inventory
 
 Every consumer of a lowered body, the record fields it reads, what it reads outside the Core
 IR record, and the condition under which that outside read could go. A consumer marked
 "module arena" reads declarations (fields, variants, parameters, extend targets, names), which
-the release keeps; "body arena" is the releasable syntax, which no consumer after a module's
-borrow pass reads any more.
+the release keeps; "body arena" is the releasable syntax, which after the borrow frontier
+only `emit_order`, the deferred and per-instance `static_assert` checks and the item-index
+measurement (`SC_ITEM_STATS`) read, before the release.
 
 | Consumer (owner) | Core IR fields read | Reads outside the record | Removal condition |
 |------------------|--------------------|--------------------------|-------------------|
@@ -138,12 +168,12 @@ borrow pass reads any more.
 | Generic instance discovery and specialization (`graph/instances.spc`) | calls, item constants, aggregates, casts, closures, intrinsics, `targ_pool`; re-lowers `has_reflect` and `has_zst_cond` bodies (14 per build, pinned syntax) | module arena: generic parameter lists, extend targets, interface members | none needed |
 | Bounds-check elimination and the fact service (`ir/bce.spc`, `ir/facts.spc`) | check intrinsics, every statement and terminator (effects, intrinsic tags), places, operands, constants, locals | module arena: prelude field names (`len`, `ptr`), function names and extern flags, attributes, type kinds | none needed |
 | Core IR inliner (`ir/inline.spc`, `InlineStore`) | kept bodies, callee signatures, `LS_INL` locals | module arena: the callee's function node and extend generics for the vet | none needed |
-| Constant and `const fn` evaluation (`ir/interp.spc`) | kept bodies through the view from the borrow frontier to the constant pre-pass (3,224 kept hits, 690 fresh lowerings: 675 generic instances and 15 bodies not yet kept when a fold in the frontier needed them) | module arena: constant initializers, `const fn` bodies (pinned), variant and field declarations; body arena: none (`body_avail` refuses a released arena; a closure call reads no node) | none needed |
+| Constant and `const fn` evaluation (`ir/interp.spc`) | kept bodies through the view from the borrow frontier to the constant pre-pass (3,224 kept hits, 690 fresh lowerings: 675 generic instances and 15 bodies not yet kept when a fold in the frontier needed them) | module arena: constant initializers, `const fn` bodies (pinned), variant and field declarations; body arena: the callees of the per-instance `static_assert`s, lowered from syntax after the view closes and before the release (`body_avail` refuses a released arena; a closure call reads no node) | none needed |
 | Static object capture and relocations (`interp.spc`, `IN_ZEROED`, `StaticObj`) | constants, aggregates, item operands | module arena: aggregate layouts | none needed |
 | `type_info` (`interp.spc` `ti_*`, `cemit.spc` registry) | `IN_TYPE_INFO` operands and the type payload in `b` | module arena: declaration names and members | none needed |
 | Effect scanning (`interp.spc` `fx_scan_*`) | none: scans the function's syntax spine | body arena, at typecheck time only (the def-site `const fn` check) and under `super-c lint` (the suggestion); a fold never consults a verdict | none needed |
 | Lint and diagnostic probes (`lint_body`, `fn_const_suggest`, `lint_unused_*`) | `lint_body` runs kept bodies | `lint_unused_items`: the item index edges and `method_refs`; `lint_unused_members` and `lint_unused_imports` run under the lint driver, which keeps the syntax | none needed |
-| Emission liveness and order (`compute_emit_live`, `emit_order`) | none | the module arena's resolutions, the index edges, the recorded dependency rows, the type and instance tables | none needed |
+| Emission liveness and order (`compute_emit_live`, `emit_order`) | none | the module arena's resolutions, the index edges, the type and instance tables; `emit_dep_row` reads the body arena's generic-call sites | none needed |
 | Reflection and zero-size specialization (`lower.spc` binder frames, `layout.spc`) | `has_reflect`, `has_zst_cond`, `IN_SIZEOF`/`IN_ALIGNOF` | module arena: aggregate members, generic parameters | none needed |
 | IR printer, verifier and tests (`ir/print.spc`, `ir/verify.spc`, `tests/core_ir_test.spc`) | every pool | module arena: names for the print | none needed |
 
@@ -165,12 +195,12 @@ of every module; lowering reads their marks to place safepoints) and `Keep::rese
 | move, copy, consume intent | `OP_MOVE` / `OP_COPY`, `user_moves` bit per operand |
 | lexical scope and storage lifetime events | `ST_STORAGE_LIVE` / `ST_STORAGE_DEAD` (the drop points) |
 | cleanup source origins | statement and terminator spans; the tape's scope events are the AST-side duplicate the replay needs |
-| dependency record | the item index's post-typecheck edges per item (the two scans that needed a record read them) and the per-module emission row |
+| dependency record | the item index's post-typecheck edges per item (the two scans that needed a record read them) and the per-module emission row `emit_order` computes (`emit_dep_row`) |
 | feature summary | computed once per body by `body_features` from the locals' types and rvalue kinds |
 
-Every fact is explicit in the record; the dependency record is package-owned
-(the item index and the emission rows) rather than a per-body field, since both readers work
-per item and per module and the index already held the edges. The verifier and printer are
+Every fact is explicit in the record; the dependency record is the item index's edges and
+the emission rows rather than a per-body field, since both readers work per item and per
+module and the index already held the edges. The verifier and printer are
 unchanged.
 
 ## Tape categories
@@ -200,7 +230,7 @@ committed IR fact. No category meets it alone: every category feeds one tracker 
 (the lexical borrow list, the region table, the AST move sets) lives in the AST place model,
 so removing one category leaves the tracker reading the same syntax for the rest. The tape
 retains nothing (3.5 MiB of transient capacity in the pooled Lowerers) and runs inside the
-module's own pass, before its release; it stays authoritative.
+module's own pass; it stays authoritative.
 
 ## Validation
 
@@ -212,5 +242,5 @@ switches above. The read table needs a counting build: a static counter array in
 `type_args`, `coerce_of`, `dyn_use_at`, `deref_use_at`, `wide_lit_of` and the two map reads
 of `TypedFacts`, with the phase index set at the driver's phase marks and around lowering,
 replay and analysis in `bc_fn`; the accessors lose `const` for that build. A body read after
-a module's release is a bounds abort in `Vector::at`, so the corpus and the self-build are the
+the release is a bounds abort in `Vector::at`, so the corpus and the self-build are the
 running check that no reader was missed.

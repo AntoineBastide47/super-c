@@ -345,6 +345,31 @@ fn main() i32 {
 
 // A slice access checks its lanes once: `start <= len && N <= len - start`, overflow-free, and the trap
 // names the lanes, the start and the length, as a constant and at run time.
+// A target without vector registers (wasm32 without simd128) copies a vector load's lanes one by one,
+// spelling no vector type: the range check's helper comes with the check itself.
+@test
+fn vector_range_check_without_vector_registers() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+const fn ld(start: usize) i32 {
+    let a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let mut b = [0; 10];
+    simd::store(b, start, simd::load::<i32, 4>(a, start));
+    return unsafe b[start] + unsafe b[start + 3];
+}
+fn main(args: Vector<str>) i32 {
+    return ld(args.len() + 5) - 17;
+}
+)",
+    );
+    assert(p.compile_flags("--target=wasm", "main.spc").ok(), "the program transpiles for wasm32");
+    let c = cli::read_text(format("{}/build/dev/raw/main.c", p.dir()).as_str());
+    assert(c.contains("__sc_bounds_vec("), "the load's range check");
+    assert(c.contains("#include \"__sc_t/__sc_lane_check.h\""), "the check's helper is included");
+}
+
 @test
 fn vector_loads_and_stores_check_their_range() {
     let src = M"(import std::simd;

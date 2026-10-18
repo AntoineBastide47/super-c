@@ -5,8 +5,8 @@ Every module keeps two syntax arenas (`src/ast/ast.spc`). The module arena (`Ast
 every pinned body. The body arena (`Ast.b`) holds the releasable bodies: the block of every
 function that is not generic, not `const fn`, not an interface member and not a member of
 a generic `extend`, with the nodes a desugar appends to such a body. The driver frees the
-body arenas once the last reader of body syntax has run, before emission plans and
-renders the C, which is where the build's memory peaks. This is the record of the
+body arenas once the last reader of body syntax has run, after the instance graph and
+before emission plans and renders the C, which is where the build's memory peaks. This is the record of the
 measurement that gated the change, the design, the release contract and the
 results.
 
@@ -30,8 +30,8 @@ worker) before the split:
 Edit latency does not depend on syntax ownership: the recheck closure is the module because
 the checker keeps module-level tables, and 48 ms of the 67 were a quadratic dead-store lint
 (fixed separately; the round is 17 ms now). The measure that gated the change is the batch peak:
-release the body syntax and its per-node tables before the plan phase. `SC_SYNTAX_STATS=1`
-prints the accounting per phase (parse, resolve, typecheck, borrowck, release, emit).
+release the body syntax and its per-node tables before the C is planned. `SC_SYNTAX_STATS=1`
+prints the accounting per phase (parse, resolve, typecheck, borrowck, prepare, release, emit).
 
 ## Ids and arenas
 
@@ -71,20 +71,17 @@ Rules for every scan and every table indexed by node id:
 
 ## Release contract
 
-A batch build frees each module's body arena at the end of the module's borrow pass
-(`Package.free_bodies`, set by `run_package`; the driver's serial loop and `bc_run_one`):
-the module's bodies are lowered, kept (`irl::Keep`) and analyzed, and what a later pass read
-of the syntax is recorded first: the callees' return attributability (`ItemSched.ret_attr`,
-recorded after the type check), the module's emission dependency row (`Package.emit_deps`),
-and the resolution scans of the unused-item lint and the emission liveness read the item
-index's edges. The evaluator views the keep from the start of the frontier, so a fold reaches
-the bodies of a released module, and the constant pre-pass before emission copies the kept
-bodies it touches (`Interp.copy_kept`) before the view closes. A module with a deferred
-`static_assert` inside a body keeps its arena until the flush. A NODE_BODY read after the
-release is a bounds abort in `Vector::at`. `super-c lint`, the item-index measurement
-(`SC_ITEM_STATS`) and the test harness keep every arena until emission planning
-(`Package::release_bodies`, the point every batch build used before). The LSP releases per
-document, see below. The measurement and the reader inventory are in
+A batch build frees every module's body arena at one point: `Package::release_bodies` in
+`cemit_package` (`src/driver/emit.spc`), right after `InstGraph::collect` and
+`graph_inst_asserts`. By then every body is lowered, kept (`irl::Keep`) and analyzed, every
+constant and `static_assert` is evaluated, and the emission liveness and `emit_order` (each
+module's row from live syntax, `emit_dep_row`) have run. The per-instance check runs after
+the evaluator's view of the keep has closed, so a condition such as `T::is_signed()` lowers
+its non-generic callee from syntax. The constant pre-pass before emission copies the kept
+bodies it touches (`Interp.copy_kept`) before the view closes, so emission's constants need
+no syntax. A NODE_BODY read after the release is a bounds abort in
+`Vector::at`. `super-c lint` does not reach emission and keeps every arena. The LSP
+releases per document, see below. The measurements and the reader inventory are in
 [core-ir-publication.md](core-ir-publication.md).
 
 What emission reads of a body after the release, and the owned record that carries it:
@@ -103,7 +100,9 @@ once the arena is released.
 ## Results
 
 Release compilers over the same source, one worker, `--cc=true` (`SC_BUILD_STATS=-
-SC_BUILD_MEM=1`, `SC_SYNTAX_STATS=1`); before = the compiler without the split:
+SC_BUILD_MEM=1`, `SC_SYNTAX_STATS=1`); before = the compiler without the split; after = the
+split with the release after emission planning, before the instance graph (the release
+point today follows the graph, see [core-ir-publication.md](core-ir-publication.md)):
 
 | Measure | Before | After |
 |---------|-------:|------:|
@@ -118,9 +117,9 @@ SC_BUILD_MEM=1`, `SC_SYNTAX_STATS=1`); before = the compiler without the split:
 | serial self-transpile round, three interleaved pairs (Mcyc medians) | 1710 / 1716 / 1762 | 1757 / 1768 / 1762 (+2.7%) |
 | in-process benchmark: heap requested per round, peak RSS over 100 rounds | 419 MiB, 256 MiB | 435 MiB, 270 MiB |
 
-The peak RSS drops less than the live bytes: the high-water mark now sits in the checks and
+The peak RSS drops less than the live bytes: the high-water mark sat in the checks and
 prepare phases (176 MiB after borrow checking, the always-panics engines and the flush), before
-the release; the plan phase adds 12 MiB over it where it added 44 before. The in-process
+the release; the plan phase added 12 MiB over it where it added 44 before. The in-process
 benchmark, which transpiles a hundred times in one process, reports a higher high-water mark
 than before (the arenas' reserves and the freed body blocks' placement between rounds) even
 though each round retains less. The cycle cost is the arena select in every node accessor

@@ -147,4 +147,19 @@ fn missing_associated_type() {
         "interface I { type A; fn m(self: &Self) Self::B; }\nfn main() i32 { return 0; }\n",
         "no associated type by this name in scope",
     );
+    // A subinterface reads its superinterfaces' associated types; one none declares is the same error,
+    // and the error type matches the conformance's signature (no second error).
+    let c = h::compile(
+        "interface I { type A; }\ninterface J: I { fn m(self: &Self) Self::B; }\nstruct W {}\nextend W as I { type A = i32; }\nextend W as J { pub fn m(self: &W) i32 { return 0; } }\nfn main() i32 { let w = W {}; return w.m(); }\n",
+        h::STAGE_TYPECHECK,
+    );
+    assert(
+        c.errors == 1 && c.msg_has("no associated type by this name in scope"),
+        "one error for an unknown associated type of a subinterface",
+    );
+    h::expect_exit(
+        "a superinterface's associated type through Self",
+        "interface I: Copy { type B; fn get(self: Self) Self::B; }\ninterface J: I { fn get2(self: Self) Self::B; }\nstruct W { pub v: i32 }\nextend W as I { type B = i32; pub fn get(self: W) i32 { return self.v; } }\nextend W as J { pub fn get2(self: W) i32 { return self.v * 2; } }\nfn g<T: J>(t: T) T::B { return t.get2(); }\nfn main() i32 { let w = W { v: 7 }; return g(w) + w.get2() + w.get(); }\n",
+        35,
+    );
 }

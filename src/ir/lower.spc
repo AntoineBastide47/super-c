@@ -156,6 +156,10 @@ pub struct Lowerer {
     // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
     chk_nodes: Vector<NodeId>,
     chk_base: usize,
+    // The first local of the open root (saved per nesting in `chk_lbases`): the temporaries from it
+    // on are the ones a call's sibling operands may still hold (`poison_check_at`).
+    chk_lbase: u32,
+    chk_lbases: Vector<u32>,
     // A std::parallel body: its primitives report cancellation through their results and clean up
     // raw resources after a failed wait, so only the call at the root of an expression statement or
     // a plain `let` carries a check there.
@@ -357,6 +361,8 @@ extend Lowerer {
             free_mask: false,
             chk_nodes: Vector::<NodeId>::new(),
             chk_base: 0,
+            chk_lbase: 0,
+            chk_lbases: Vector::<u32>::new(),
             chk_narrow: false,
             chk_mask: 0,
             pending_lets: Vector::<ir::LocalId>::new(),
@@ -460,6 +466,8 @@ extend Lowerer {
         self.free_mask = false;
         self.chk_nodes.truncate(0);
         self.chk_base = 0;
+        self.chk_lbase = 0;
+        self.chk_lbases.truncate(0);
         self.chk_narrow = unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str().starts_with(
             "std::parallel",
         );
@@ -1296,6 +1304,36 @@ extend Lowerer {
         let rd = self.f.node(id).as_data.return_stmt;
         let sp = self.f.node(id).span;
         self.tp(ir::TP_MARK_PUSH, 0, id);
+        if rd.values.len == 1 && self.body.returns > 1 {
+            // `return pair();`: the call's results, member by member, are the return values.
+            let v = unsafe self.f.list(rd.values)[0];
+            let cb = self.chk_open(v, false);
+            let op = self.lower_expr(v);
+            self.chk_close(cb);
+            if op == ir::IR_NONE {
+                return;
+            }
+            self.mark_user_move(op);
+            let tpl = self.spill(op, sp);
+            for i in 0..self.body.returns {
+                let ty = self.body.locals.at(i as usize).ty;
+                let mpl = self.place_project(
+                    tpl,
+                    ir::Projection { kind: ir::PJ_FIELD, data: member_data(NODE_NONE, i), sub: NODE_NONE, ty: ty },
+                );
+                self.tp(ir::TP_RET_VAL, i, v);
+                let pl = self.place_of_local(i);
+                let rv = self.rv_use(self.copy_op(mpl), ty);
+                self.assign(pl, rv, sp);
+            }
+            self.tp(ir::TP_RET_POST, 0, id);
+            self.emit_defers_down_to(0);
+            self.emit_deads_down_to(0);
+            let t = ir::term0(ir::TM_RETURN, sp);
+            let next = self.open_block();
+            self.seal(t, next);
+            return;
+        }
         for i in 0..rd.values.len {
             let v = unsafe self.f.list(rd.values)[i as usize];
             // A later value would evaluate with this one pending: only a lone value is a root.
@@ -3354,6 +3392,9 @@ extend Lowerer {
         if self.chk_mask == 0 && !self.chk_narrow {
             let top = self.copy_op(tpl);
             self.cancel_check_at(next_def, false, top, opt_ty, sp);
+        } else {
+            let top = self.copy_op(tpl);
+            self.poison_check_at(next_def, false, top, sp);
         }
         let ut = Ast::builtin(BuiltinType::BT_U32);
         let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, tpl, 0, 0, ut), sp);
@@ -4254,9 +4295,9 @@ extend Lowerer {
         reads: bool,
     ) ir::OperandId {
         let sp = self.f.node(id).span;
-        let mut argv = self.avget();
-        argv.push(lop);
         if self.is_intrinsic_fn(DefId { module: m, node: decl }) {
+            let mut argv = self.avget();
+            argv.push(lop);
             // A vector operator: the operation over the values (`lower_intrinsic`), no call.
             let rop = if rhs != NODE_NONE {
                 self.lower_expr(rhs);
@@ -4273,21 +4314,45 @@ extend Lowerer {
             self.avput(argv);
             return r;
         }
-        // A constant receiver (`2.0 * v` through `extend f32 as Mul<V>`) borrows a temporary.
-        if self.body.operands.at(lop as usize).kind == ir::OP_CONST && self.param_is_ref(
-            DefId { module: m, node: decl },
-            0,
-        ) {
-            argv[0] = self.copy_op(self.spill(lop, sp));
-        }
+        let recv = self.op_recv(DefId { module: m, node: decl }, lop, sp);
+        let mut rop = ir::IR_NONE;
         if rhs != NODE_NONE {
-            let mut rop = self.lower_expr(rhs);
+            rop = self.lower_expr(rhs);
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
             if reads {
                 self.own_operand(rop, rhs);
             }
+        }
+        return self.lower_op_call_ops(id, m, decl, recv, rop, ty);
+    }
+
+    // The receiver operand `lop` of operator method `md`: a constant receiver (`2.0 * v` through
+    // `extend f32 as Mul<V>`) of a by-reference `self` borrows a temporary.
+    fn op_recv(self: &mut Self, md: DefId, lop: ir::OperandId, sp: tok::Span) ir::OperandId {
+        if self.body.operands.at(lop as usize).kind == ir::OP_CONST && self.param_is_ref(md, 0) {
+            return self.copy_op(self.spill(lop, sp));
+        }
+        return lop;
+    }
+
+    // The call of operator method `decl` on node `id` over the lowered receiver `lop` (`op_recv`) and
+    // right operand `rop` (IR_NONE: none); `ty` is the result type.
+    fn lower_op_call_ops(
+        self: &mut Self,
+        id: NodeId,
+        m: ModuleId,
+        decl: NodeId,
+        lop: ir::OperandId,
+        rop_in: ir::OperandId,
+        ty: TypeId,
+    ) ir::OperandId {
+        let sp = self.f.node(id).span;
+        let mut argv = self.avget();
+        argv.push(lop);
+        if rop_in != ir::IR_NONE {
+            let mut rop = rop_in;
             // A by-reference parameter (`other: &i32`) borrows the right operand, as `m.add(&n)` does:
             // the operand's place, or a temporary holding a constant (`m + 5`).
             let mut ro = *self.body.operands.at(rop as usize);
@@ -4326,6 +4391,9 @@ extend Lowerer {
         // after it stores the result (`lower_assignment`).
         if self.f.node(id).kind != NodeKind::NODE_ASSIGNMENT {
             self.maybe_cancel_check(id, DefId { module: m, node: decl }, false, res, ty, sp);
+        } else if !self.chk_has(id) || !self.chk_place_clean(self.f.node(id).as_data.binary.left) {
+            // Unchecked after the store: poison must not reach the place.
+            self.poison_check_at(DefId { module: m, node: decl }, false, res, sp);
         }
         return res;
     }
@@ -4790,11 +4858,13 @@ extend Lowerer {
             }
         } else if ck == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path {
             pm9 = d.callee;
-            // `Type::<Args>::f(..)` whose function has parameters of its own: the call's bound args are
-            // the function's, so the qualifying instance names the receiver, as under a turbofish.
-            if target.node != NODE_NONE && self.decl_kind(target) == NodeKind::NODE_FUNCTION && unsafe (*(&*self.pkg).module_ast_const(
-                target.module,
-            )).at_const(target.node).as_data.function.generics.len != 0 {
+            // `Type::<Args>::f(..)`: the qualifying instance names the receiver of an associated
+            // function of a generic extend (it has no receiver value), and of a function with
+            // parameters of its own (the call's bound args are the function's, as under a turbofish).
+            let fa9 = unsafe (&*self.pkg).module_ast_const(target.module);
+            if target.node != NODE_NONE && (unsafe (*fa9).extend_arity(target.node) > 0 && !unsafe (&*self.pkg).self_first(
+                target,
+            ) || self.decl_kind(target) == NodeKind::NODE_FUNCTION && unsafe (*fa9).at_const(target.node).as_data.function.generics.len != 0) {
                 let q9 = self.nty(self.f.node(d.callee).as_data.member.object);
                 if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
                     impl9 = q9;
@@ -4871,44 +4941,99 @@ extend Lowerer {
         sp: tok::Span,
     ) {
         if !self.chk_has(id) {
-            return; // a call evaluated with pending sibling temporaries the ladder cannot see
+            // Pending sibling temporaries: the request waits for the next edge, unless the callee
+            // itself unwound.
+            self.poison_check_at(target, is_fn_value, res, sp);
+            return;
         }
         self.cancel_check_at(target, is_fn_value, res, ty, sp);
     }
 
-    // The check after a call in a clean position (see `maybe_cancel_check`).
-    fn cancel_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, ty: TypeId, sp: tok::Span) {
+    // Whether a call of `target` (a fn value when `is_fn_value`) takes a cancellation check here.
+    fn chk_callee(self: &mut Self, target: DefId, is_fn_value: bool) bool {
         if self.in_defer != 0 {
-            return; // cleanup is masked: no edge inside a defer body
+            return false; // cleanup is masked: no edge inside a defer body
         }
         if !self.chk_enabled() {
-            return;
+            return false;
         }
         let pk = unsafe &*self.pkg;
         if is_fn_value {
-            if !pk.cancel_fnv {
-                return; // no fn value of the package can accept a cancellation
-            }
-        } else {
-            if target.node == NODE_NONE {
-                return;
-            }
-            let ta = unsafe &*pk.module_ast_const(target.module);
-            if ta.at_const(target.node).kind != NodeKind::NODE_FUNCTION {
-                return;
-            }
-            if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
-                return; // this callee can never accept a cancellation
-            }
+            return pk.cancel_fnv; // else no fn value of the package can accept a cancellation
         }
-        if !is_fn_value && target.node == self.chk_caw_n && target.module == self.chk_caw_m {
-            // The acceptance call of a primitive's own wait cleanup: it reports through its result so
-            // the primitive can finish removing its registrations and hand back the value it waited
-            // with, and the edge belongs after the PRIMITIVE, at its caller's check. A check here
-            // unwound the primitive mid-cleanup: a channel's unsent payload leaked on every target
-            // whose reachability analysis marks the primitive.
+        if target.node == NODE_NONE {
+            return false;
+        }
+        let ta = unsafe &*pk.module_ast_const(target.module);
+        if ta.at_const(target.node).kind != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
+            return false; // this callee can never accept a cancellation
+        }
+        // The acceptance call of a primitive's own wait cleanup: it reports through its result so
+        // the primitive can finish removing its registrations and hand back the value it waited
+        // with, and the edge belongs after the PRIMITIVE, at its caller's check. A check here
+        // unwound the primitive mid-cleanup: a channel's unsent payload leaked on every target
+        // whose reachability analysis marks the primitive.
+        return target.node != self.chk_caw_n || target.module != self.chk_caw_m;
+    }
+
+    // The check after a call outside the open root's clean nodes: sibling operands may be pending,
+    // so an accepted request waits for the next edge, but a callee that returned through its own
+    // ladder (probe 1) returned poison, which nothing may read. That edge unwinds at once, its
+    // ladder dropping the pending temporaries with the scope's locals (drop elaboration frees the
+    // ones still initialized). `res` is the call's result, never dropped here.
+    fn poison_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, sp: tok::Span) {
+        if !self.chk_callee(target, is_fn_value) {
             return;
         }
+        let pk = unsafe &*self.pkg;
+        let probe = pk.sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
+        let it = Ast::builtin(BuiltinType::BT_I32);
+        let c0 = self.body.oper_pool.len() as u32;
+        let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, TYPE_NONE, TYPE_NONE, it, sp);
+        let ladder_b = self.open_block();
+        let cont_b = self.open_block();
+        let mut t = ir::term0(ir::TM_SWITCH, sp);
+        t.a = cond;
+        t.sw_start = self.body.switch_pool.len() as u32;
+        self.body.switch_pool.push(1u64 << 32 | ladder_b as u64);
+        t.sw_len = 1;
+        t.t0 = cont_b;
+        self.seal(t, ladder_b);
+        let mut rl = ir::IR_NONE;
+        if res != ir::IR_NONE {
+            let ro = *self.body.operands.at(res as usize);
+            if ro.kind == ir::OP_COPY || ro.kind == ir::OP_MOVE {
+                rl = self.body.places.at(ro.data as usize).base;
+            }
+        }
+        let mark = self.scope_locals.len();
+        for l in self.chk_lbase..self.body.locals.len() as u32 {
+            let mut ld = *self.body.locals.at(l as usize);
+            if l == rl || ld.storage != ir::LS_TEMP || ld.decl != NODE_NONE || ld.ty == TYPE_NONE {
+                continue;
+            }
+            let k = self.f.ty(ld.ty).kind;
+            if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE {
+                continue;
+            }
+            // Registered for this ladder only: the normal path still consumes the value.
+            ld.decl = self.body.owner.node;
+            self.body.locals.set(l as usize, ld);
+            self.scope_locals.push(l);
+        }
+        self.cancel_ladder(cont_b, sp);
+        self.scope_locals.truncate(mark);
+    }
+
+    // The check after a call in a clean position (see `maybe_cancel_check`).
+    fn cancel_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, ty: TypeId, sp: tok::Span) {
+        if !self.chk_callee(target, is_fn_value) {
+            return;
+        }
+        let pk = unsafe &*self.pkg;
         let probe = pk.sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
         let it = Ast::builtin(BuiltinType::BT_I32);
         let ut = Ast::builtin(BuiltinType::BT_VOID);
@@ -4968,6 +5093,8 @@ extend Lowerer {
     fn chk_open(self: &mut Self, root: NodeId, stmt: bool) usize {
         let base = self.chk_base;
         self.chk_base = self.chk_nodes.len();
+        self.chk_lbases.push(self.chk_lbase);
+        self.chk_lbase = self.body.locals.len() as u32;
         // A body that takes no cancellation checks (`chk_enabled`) needs no clean nodes: every
         // reader of them checks that first.
         if root == NODE_NONE || self.chk_mask != 0 || !self.chk_enabled() {
@@ -5032,6 +5159,7 @@ extend Lowerer {
     fn chk_close(self: &mut Self, base: usize) {
         self.chk_nodes.truncate(self.chk_base);
         self.chk_base = base;
+        self.chk_lbase = self.chk_lbases.pop().unwrap();
     }
 
     // The local of assignment target `left` when it names an immutable split-init `let` (its one
@@ -5239,13 +5367,7 @@ extend Lowerer {
             let rv = if kind == ir::SI_BINARY {
                 ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty);
             } else {
-                ir::rv(
-                    pick(kind == ir::SI_UNARY, ir::RV_UNARY, ir::RV_CAST),
-                    ops[0],
-                    pick(kind == ir::SI_UNARY, c, ir::CAST_NUMERIC),
-                    0,
-                    ty,
-                );
+                ir::rv(pick(kind == ir::SI_UNARY, ir::RV_UNARY, ir::RV_CAST), ops[0], c, 0, ty);
             };
             return self.copy_op(self.rv_temp(rv, sp));
         }
@@ -6834,6 +6956,78 @@ extend Lowerer {
         return self.bounds_check_len(iop, lop, pick(vec, ir::CHECK_LANES, NODE_NONE), sp);
     }
 
+    // `obj[lo..hi]` through an `Index` conformance: `m` (`index_range`, or `index_range_mut` for a
+    // mutated sub-view) called on `obj` and the bounds packed into the range node's `Range<usize>`. A
+    // missing start is 0; a missing end is the `len` method the checker recorded on the range node.
+    fn lower_index_range_call(self: &mut Self, id: NodeId, m: u64) ir::PlaceId {
+        let d = self.f.node(id).as_data.index;
+        let sp = self.f.node(id).span;
+        let md = DefId { module: (m >> 32) as ModuleId, node: (m & 0xFFFFFFFFu64) as NodeId };
+        let lop = self.lower_expr(d.object);
+        if lop == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let recv = self.op_recv(md, lop, sp);
+        let rd = self.f.node(d.index).as_data.pattern_range;
+        let ut = Ast::builtin(BuiltinType::BT_USIZE);
+        let mut sop = ir::IR_NONE;
+        if rd.start != NODE_NONE {
+            sop = self.lower_expr(rd.start);
+        } else {
+            sop = self.kop(ir::CK_INT, ut, 0, sp);
+        }
+        if sop == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let mut eop = ir::IR_NONE;
+        if rd.end != NODE_NONE {
+            eop = self.lower_expr(rd.end);
+        } else {
+            let lm = self.f.op_method(d.index).unwrap();
+            let mut lv = self.avget();
+            lv.push(recv);
+            let start = self.pool_ops(&lv);
+            self.avput(lv);
+            let ts = self.body.targ_pool.len() as u32;
+            let tn = self.copy_targs(d.index);
+            eop = self.emit_call(
+                DefId { module: (lm >> 32) as ModuleId, node: (lm & 0xFFFFFFFFu64) as NodeId },
+                ir::IR_NONE,
+                start,
+                1,
+                ts,
+                tn,
+                TYPE_NONE,
+                TYPE_NONE,
+                ut,
+                sp,
+            );
+        }
+        if eop == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let mut argv = self.avget();
+        argv.push(sop);
+        argv.push(eop);
+        argv.push(self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), rd.inclusive as i64, sp));
+        let rop = self.finish_aggregate(
+            ir::AGG_STRUCT,
+            DefId { module: 0, node: NODE_NONE },
+            &argv,
+            self.nty(d.index),
+            sp,
+        );
+        self.avput(argv);
+        if rop == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let res = self.lower_op_call_ops(id, md.module, md.node, recv, rop, self.nty(id));
+        if res == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        return self.spill(res, sp);
+    }
+
     // Does a statement from index `from` on store to a place other than a fresh temporary?
     fn writes_since(self: &Self, from: usize) bool {
         for i in from..self.body.statements.len() {
@@ -6875,6 +7069,9 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         switch self.f.op_method(id) {
             Some(m) => {
+                if self.f.node(d.index).kind == NodeKind::NODE_RANGE {
+                    return self.lower_index_range_call(id, m);
+                }
                 // Index conformance: place = *method(&obj, idx) -- the call yields the element ref.
                 let lop = self.lower_expr(d.object);
                 if lop == ir::IR_NONE {

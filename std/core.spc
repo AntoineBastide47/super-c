@@ -2719,6 +2719,11 @@ extend f32 {
     pub const fn to_radians(self: f32) f32 {
         return self * 0.017453292519943295;
     }
+    /// `self` truncated toward zero to the integer type `I`, as one conversion instruction: `as`
+    /// without its saturation checks. `self` must not be NaN and its truncation must fit `I`; any
+    /// other value is undefined behavior, and an error in a constant.
+    @intrinsic("float.to_int_unchecked")
+    pub unsafe const fn to_int_unchecked<I: SimdInt>(self: f32) I;
 }
 
 extend f64 {
@@ -2927,6 +2932,11 @@ extend f64 {
     pub const fn to_radians(self: f64) f64 {
         return self * 0.017453292519943295;
     }
+    /// `self` truncated toward zero to the integer type `I`, as one conversion instruction: `as`
+    /// without its saturation checks. `self` must not be NaN and its truncation must fit `I`; any
+    /// other value is undefined behavior, and an error in a constant.
+    @intrinsic("float.to_int_unchecked")
+    pub unsafe const fn to_int_unchecked<I: SimdInt>(self: f64) I;
 }
 
 /// Move the value out of `slot`, installing `value` in its place: the ownership-safe way to take

@@ -1,6 +1,6 @@
 // The Core IR inliner over generic code: in vector code, a call of an interface method through a type
-// parameter inlines in each instance (the instance's bound variant) and in a concrete caller the
-// generic callee inlines into, a callee reading module constants inlines, its `switch` on a
+// parameter inlines in each instance (the instance's bound variant; in scalar code, a call whose result
+// the instance fixes) and in a concrete caller the generic callee inlines into, a callee reading module constants inlines, its `switch` on a
 // const-generic parameter keeping the one arm its binding takes; and a callee whose count is the
 // caller's own const-generic parameter inlines into the caller's shared body. Each program runs the
 // same without inlining.
@@ -153,6 +153,71 @@ fn main() i32 {
 @test
 fn a_slice_offset_names_the_element_definition() {
     h::expect_exit("a slice at an offset", OFFSET, 6);
+}
+
+// Scalar code binds per instance the interface calls whose result the instance fixes: `G::len()` of a
+// generic conformance is the instance's constant (`V<3>`: 3, the loop's trip count), through a plain
+// interface and through a generic one (`Gen<T>`, the conformance with the bound's arguments); `at`, which
+// reads its argument, stays a call there.
+const SCALAR_BOUND: str = M"(interface Sized: Copy {
+    fn len() usize;
+    fn at(self: &Self, i: usize) f32;
+}
+interface Gen<T>: Copy {
+    fn glen() usize;
+    fn get(self: &Self, i: usize) T;
+}
+struct V<const N: usize> {
+    pub e: [f32; N],
+}
+extend<const N: usize> V<N> as Sized {
+    pub fn len() usize {
+        return N;
+    }
+    pub fn at(self: &V<N>, i: usize) f32 {
+        return unsafe self.e[i];
+    }
+}
+extend<const N: usize> V<N> as Gen<f32> {
+    pub fn glen() usize {
+        return N;
+    }
+    pub fn get(self: &V<N>, i: usize) f32 {
+        return unsafe self.e[i];
+    }
+}
+@c.noinline
+fn sum<G: Sized>(v: G) f32 {
+    let mut s: f32 = 0.0;
+    for i in 0..G::len() {
+        s += v.at(i);
+    }
+    return s;
+}
+@c.noinline
+fn gsum<T: Copy, G: Gen<T>>(v: G, f: fn(T) f32) f32 {
+    let mut s: f32 = 0.0;
+    for i in 0..G::glen() {
+        s += f(v.get(i));
+    }
+    return s;
+}
+fn id(x: f32) f32 {
+    return x;
+}
+fn main() i32 {
+    let v = V::<3> { e: [1.0, 2.0, 3.0] };
+    return (sum(v) + gsum(v, id)) as i32 - 12;
+}
+)";
+
+@test
+fn scalar_instances_bind_their_interface_calls() {
+    h::expect_c_absent("`G::len()` is a constant of the instance", SCALAR_BOUND, "__len()");
+    h::expect_c("`at` stays a call", SCALAR_BOUND, "__at(");
+    h::expect_c_absent("through a generic interface too", SCALAR_BOUND, "__glen()");
+    h::expect_exit("bound calls in scalar instances", SCALAR_BOUND, 0);
+    h::expect_same_output("inlined and called", SCALAR_BOUND, ["SC_INLINE=0"], []);
 }
 
 // Scalar code keeps the narrower reach: a callee reading a module constant stays a call there.

@@ -83,11 +83,13 @@ width, and a signed value counts its two's complement pattern.
 |------------|--------|
 | integer to integer `as` | wraps to the target width (sign-extends a signed source, zero-extends an unsigned one, then truncates) |
 | float to integer `as` | defined: truncates toward zero and saturates; a value past either end is that end; NaN is 0 (`1e20 as i32` is 2147483647) |
+| `x.to_int_unchecked::<I>()` (`f32`, `f64`; `I` an `i8` to `i64` or `u8` to `u64`; `unsafe`) | truncates toward zero in one C cast, without the saturation of `as`; NaN or a truncation outside `I` is undefined, and an error in a constant |
 | integer to float `as` | defined: round to nearest, ties to even |
 | float to float `as` | defined: round to nearest, ties to even |
 | `char` | 1 byte, unsigned (0 to 255) on every target |
 | an enum or tagged-union value whose discriminant is not declared | undefined |
 | a `bool` whose byte is not 0 or 1 | undefined |
+| a union member read through another member of the same size, both integer or float scalars | defined: the bits reinterpreted (`f32_bits`), NaN payloads included; a constant evaluates it bit for bit |
 
 ## Floating point
 
@@ -97,6 +99,7 @@ width, and a signed value counts its two's complement pattern.
 | rounding | round to nearest, ties to even |
 | literal | rounds once from its decimal or hex text to its type (the context's type, `f32` without one); never through the other width |
 | contraction | none: `a * b + c` rounds twice; every C compile passes `-ffp-contract=off`; only an explicit `fma` fuses |
+| libm calls | run as written: every C compile passes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`), so the C compiler never folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) them: every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins |
 | `%` | the C `fmod` remainder: the sign of the dividend (`-7.5 % 2.0` is -1.5) |
 | NaN payload of an arithmetic result | not specified |
 | `==`, `<` operators | IEEE: NaN is unordered, `-0.0 == 0.0` |

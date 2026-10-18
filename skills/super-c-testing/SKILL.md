@@ -201,7 +201,9 @@ super-c test --test-no-fork            # in-process (for debuggers; shows passin
 ### How the suite is built
 
 `super-c test` first builds the compiler under test with the selected profile (`dev` by
-default: `-O1` + ASan/UBSan) and exports it as `$SUPERC` for the CLI tests. The test
+default: `-O1` + ASan/UBSan) and exports it as `$SUPERC` for the CLI tests; when the project
+holds `std/core.spc` and `SC_STD_DIR` is unset, it also sets `SC_STD_DIR` to the project's
+`std/`, because `--out-dir` may place that compiler away from the tree it must load. The test
 runner itself is a separate engine build of the generated test root under the built-in
 `test` profile (`-O1`, no sanitizers): parallel per-TU compiles with the object cache and
 emit stamp, linked to `build/test/__tests`, emitted C under `build/test/raw/`. An
@@ -316,8 +318,9 @@ directory of a guest command or runs a shell line returns early under `cli::on_w
 The guest has no stable working directory (wasmtime ignores the test's `chdir`) and no
 subprocesses, so guest command lines use absolute paths. The wrapper passes
 `--argv0` with the module's absolute path, and the compiler finds `std/` and `ffi/` beside
-argv0: the module must sit beside them (the repo root by default, else `SC_WASM_MODULE`),
-or every compile fails with "cannot find type 'str'". The wrapper forwards every `SC_*`
+argv0, or where the forwarded `SC_STD_DIR` names `std/`: the module must sit beside them (the
+repo root by default, else `SC_WASM_MODULE`) when that variable is unset, or every compile fails
+with "cannot find type 'str'". The wrapper forwards every `SC_*`
 variable into the guest except its own plumbing (`SC_WASM_MODULE`, `SC_WASM_NATIVE`,
 `SC_TEST_SUPERC`); a new plumbing variable for the wrapper must join that exclusion. Run
 one test locally with `SC_TEST_SUPERC=$PWD/ci/wasm-superc.sh ./super-c test --quiet
@@ -382,7 +385,10 @@ environment variable of the build (`SC_BCE=0` keeps every bounds check). The pro
 times: it compiles in about half the dev profile's time, and ASan's start-up makes each run several
 times slower. On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
-compiler under wasmtime; the C compile and the program stay native.
+compiler under wasmtime; the C compile and the program stay native, except under
+`const_runtime_parity`: there the program builds `--target=wasm` (wasi-sdk) and runs under wasmtime,
+so the folded constants and their run-time twins call one C library, wasi-libc (a libm call folds
+through the compiler's own C library).
 
 - `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
   command-line arguments of one run) and returns the first difference, empty when none. The trap

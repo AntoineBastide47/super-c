@@ -250,8 +250,8 @@ Three stages run on it (`src/driver/emit.spc`):
   lowered bodies (a private keep per job, absorbed into the package keep under the engine
   lock; the serial path lowers into the package keep directly) and each closure's own
   capture facts. A job leases an oracle and pipeline slot from a bounded pool; at its end
-  the module's items are IrReady, its emission dependencies recorded and its body syntax
-  released. A per-body split of a module was built and measured (jobs of 2,048 estimated
+  the module's items are IrReady; its body syntax stays live until `cemit_package`. A
+  per-body split of a module was built and measured (jobs of 2,048 estimated
   nodes, a checker pool per module, the last-use table shared per module): the bodies of
   one module intern into one type pool under one lock, and the concurrent jobs of a module
   spent forty times the lowering CPU on it (the `lower` probe region 262 ms to 10,366 ms

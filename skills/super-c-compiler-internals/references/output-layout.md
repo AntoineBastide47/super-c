@@ -14,8 +14,10 @@ members, locals, parameters, captures and root-module items; an enum tag that jo
 such a macro is escaped too. An unprefixed file-scope symbol (a single-module root item, a
 prelude item) that equals a name the included headers declare (`C_LIB_NAMES`, and the
 `c_lib_family` prefixes such as `pthread_` and `int*_t`) gets the same `_` (`lib_escape`,
-applied in `qualified()`, free-function symbols and enum tags). Extern names keep their
-exact C spelling (`c_ident` escapes keywords only).
+applied in `qualified()`, free-function symbols and enum tags). A name that is such a name
+followed by underscores gets one more `_` (`escaped_stem`), so the escape stays injective: `sqrt`
+spells `sqrt_` and a name `sqrt_` spells `sqrt__`. Extern names keep their exact C spelling
+(`c_ident` escapes keywords only).
 
 ## Files
 

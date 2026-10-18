@@ -711,6 +711,18 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool) Strin
     return out;
 }
 
+/// The LTO mode a build without a manifest compiles built-in profile `name` with (`profile_flags`):
+/// its mode, a ThinLTO request as `auto`; LTO_NONE for an unknown name.
+pub fn profile_lto(name: str) i32 {
+    let m = mf::builtins_only();
+    let pi = m.profile_index(name);
+    if pi < 0 {
+        return mf::LTO_NONE;
+    }
+    let l = m.profiles.at(pi as usize).lto;
+    return pick(l == mf::LTO_THIN, mf::LTO_AUTO, l);
+}
+
 /// The linker cache namespace schema, also part of the probe record's key: bump when the emitted C
 /// changes shape in a way that must not share a namespace with, or reuse the verdict of, an older
 /// compiler.
@@ -1201,6 +1213,10 @@ extend CcStream {
             self.cc_tail.push_byte(b' ');
             self.cc_tail.push_str(lf);
             push_arg(&mut self.lto_ld, lf);
+        }
+        let mut nv = String::new();
+        if push_novec(&mut self.probes, self.lto, &mut nv) {
+            self.cc_tail.push_string(&nv);
         }
         // The link takes it too: under LTO it generates the code.
         let mut uvm = String::new();
@@ -1863,6 +1879,7 @@ fn stamp_opt_line(
     lint: bool,
     ccount: u64,
     root_dir: str,
+    std_dir: str,
 ) {
     out.push_str("opt\t");
     out.push_u64(target as u64);
@@ -1876,6 +1893,9 @@ fn stamp_opt_line(
     out.push_u64(ccount);
     out.push_str("\t");
     out.push_str(root_dir);
+    // The std tree (`SC_STD_DIR` can move it): its files are inputs recorded by path below.
+    out.push_str("\t");
+    out.push_str(std_dir);
     // Emission-mode switches change the emitted C: a stamp written under one mode must not
     // satisfy a build under another.
     out.push_str("\t");
@@ -1924,6 +1944,7 @@ fn stamp_write(
         lint,
         stamp_gen_c_count(gen),
         root_dir,
+        std_dir,
     );
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
@@ -1967,6 +1988,7 @@ fn stamp_write(
 fn stamp_fresh(
     path: str,
     root_dir: str,
+    std_dir: str,
     target: i32,
     arch: i32,
     feats: cf::CpuFeatureSet,
@@ -2027,7 +2049,7 @@ fn stamp_fresh(
             // Every field but the unit count must match this build's options.
             ccount = stamp_u64(line, 6);
             let mut want = String::new();
-            stamp_opt_line(&mut want, target, arch, feats, width, disp, bootstrap, lint, ccount, root_dir);
+            stamp_opt_line(&mut want, target, arch, feats, width, disp, bootstrap, lint, ccount, root_dir, std_dir);
             if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
@@ -2454,6 +2476,7 @@ pub fn transpile_step(
     let skipped = cache_on && stamp_fresh(
         stamp_path.as_str(),
         root_dir,
+        cx.std_dir,
         cx.target,
         m.arch,
         features_for(m, prof_name, cx.target_features),
@@ -2517,19 +2540,22 @@ fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32,
     return bad == 0;
 }
 
-/// `features_pass` for a build without a manifest: C compiler `cc` (words) with compile flags `flags`,
-/// the probe record in `pdir`. Appends to `more` the flags the build adds (`push_uvm`).
+/// `features_pass` for a build without a manifest: C compiler `cc` (words) with compile flags `flags`
+/// and LTO mode `lto`, the probe record in `pdir`. Appends to `more` the flags the build adds
+/// (`push_uvm`), and to `late` the ones that must follow the profile's `-O` flag (`push_novec`).
 pub fn features_accepted(
     pdir: str,
     cc: str,
     flags: str,
+    lto: i32,
     target: i32,
     arch: i32,
     all: cf::CpuFeatureSet,
     more: &mut String,
+    late: &mut String,
 ) bool {
     let feats = cf::beyond_baseline(all, target);
-    let need = feature_probes(feats) | uvm_need(target, arch);
+    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto);
     if need == 0 {
         return true;
     }
@@ -2547,9 +2573,31 @@ pub fn features_accepted(
     let ver = cc_version_argv(&mut va, pdir);
     probes.settle(&ver);
     let ok = features_pass(&mut probes, feats, target, cc);
+    let _ = push_novec(&mut probes, lto, late);
     let _ = push_uvm(&mut probes, more);
     probes.save();
     return ok;
+}
+
+// The no-prelink-vectorize probe's bit for an LTO mode that can compile as full LTO (`full`, `auto`,
+// and a ThinLTO request, which falls back to `auto`), else 0.
+fn novec_need(lto: i32) u64 {
+    return pick(lto == mf::LTO_FULL || lto == mf::LTO_AUTO || lto == mf::LTO_THIN, 1u64 << pr::NOVEC as u64, 0);
+}
+
+// Append the compile flags that leave vectorization to the link under full LTO (`full` or `auto`) when
+// the compiler accepts them (the probe result joins the command fingerprint); whether it did. The link
+// vectorizes after it inlines across units, as a single unit does: a function vectorized alone in its
+// unit no longer vectorizes in the loop it is inlined into. They follow the `-O` flag, which would
+// enable the vectorizers again.
+fn push_novec(probes: &mut pr::Probes, lto: i32, out: &mut String) bool {
+    if lto != mf::LTO_FULL && lto != mf::LTO_AUTO || probes.res.at(pr::NOVEC).as_str() != "accepted" {
+        return false;
+    }
+    probes.mark_used(pr::NOVEC);
+    out.push_byte(b' ');
+    out.push_str(pr::table()[pr::NOVEC].flags);
+    return true;
 }
 
 // The unaligned-vector-move probe's bit where it applies (Windows x86_64), else 0: elsewhere a build
@@ -2603,6 +2651,13 @@ pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mu
 // compile and link flags, and the background probes (ccache, the compiler version, and the toolchain
 // probes of `need` the record does not hold), started before the transpile. `pending` is the link
 // record's pending marker; `cache` the object cache namespace (empty: none).
+/// Every C compile: each transcendental libm call std makes runs as written. As builtins, the C
+/// compiler may fold them with the host's libm, merge `sin(x)` and `cos(x)` into one `sincos` call or
+/// rewrite `pow(2, x)` to `exp2(x)`, whose bits differ with the optimization level (operations.md:
+/// compile-time evaluation and the program give one value). The exact ones (`sqrt`, `fabs`, `floor`,
+/// `fma`, ..) stay builtins, single instructions.
+pub const LIBM_AS_WRITTEN: str<'static> = " -fno-builtin-sin -fno-builtin-cos -fno-builtin-tan -fno-builtin-asin -fno-builtin-acos -fno-builtin-atan -fno-builtin-atan2 -fno-builtin-sinh -fno-builtin-cosh -fno-builtin-tanh -fno-builtin-asinh -fno-builtin-acosh -fno-builtin-atanh -fno-builtin-exp -fno-builtin-exp2 -fno-builtin-expm1 -fno-builtin-log -fno-builtin-log2 -fno-builtin-log10 -fno-builtin-log1p -fno-builtin-pow -fno-builtin-cbrt -fno-builtin-hypot -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-tanf -fno-builtin-asinf -fno-builtin-acosf -fno-builtin-atanf -fno-builtin-atan2f -fno-builtin-sinhf -fno-builtin-coshf -fno-builtin-tanhf -fno-builtin-asinhf -fno-builtin-acoshf -fno-builtin-atanhf -fno-builtin-expf -fno-builtin-exp2f -fno-builtin-expm1f -fno-builtin-logf -fno-builtin-log2f -fno-builtin-log10f -fno-builtin-log1pf -fno-builtin-powf -fno-builtin-cbrtf -fno-builtin-hypotf";
+
 fn cc_stream(
     m: &mf::Manifest,
     prof: &mf::Profile,
@@ -2620,6 +2675,7 @@ fn cc_stream(
     flags.push_string(&m.cstd);
     // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
     flags.push_str(" -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types");
+    flags.push_str(LIBM_AS_WRITTEN);
     if m.lib_shared && cx.target != 0 {
         // Shared-library objects need it; harmless for the exe targets.
         flags.push_str(" -fPIC");
@@ -2643,7 +2699,7 @@ fn cc_stream(
     // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
     let mut ldbase = String::new();
     push_sdk_flags(&mut ldbase, m.target, m.sdk, m.arch, feats);
-    push_sdk_libs(&mut ldbase, m.sdk);
+    push_sdk_libs(&mut ldbase, m.target, m.sdk);
     if prof.strip && strips_at_link(m) {
         ldbase.push_str(" -Wl,--strip-all");
     }
@@ -2688,7 +2744,7 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch),
+        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(lto_req),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};
@@ -3759,6 +3815,12 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         binb.push_string(&binp);
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
+    // That compiler looks for std/ beside its binary, which `--out-dir` may place outside the project:
+    // a project that holds a std tree names it (`SC_STD_DIR`, read by main.spc's `exe_std_dir`).
+    if real_path("std/core.spc").len() != 0 && stdlib::get_env("SC_STD_DIR").is_none() {
+        let mut sd = real_path("std");
+        unsafe shim::sc_setenv("SC_STD_DIR".ptr() as *const char, sd.cstr());
+    }
     // The fixture builds of one suite run share one object cache (SC_TEST_CACHE_DIR, read by the
     // harness): the runtime and std units they emit identically compile once (through its script
     // namespace), and the cache stays out of the user's global one. Absolute: tests change directory.

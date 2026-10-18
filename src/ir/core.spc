@@ -578,11 +578,14 @@ pub const fn simd_writes(c: u8) bool {
 /// What `@intrinsic("simd.<name>")` lowers to (`simd_intrinsic`).
 pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
 pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
-pub const SI_CAST: u32 = 3; // RV_CAST CAST_NUMERIC
+pub const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
 pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
 pub fn simd_intrinsic(name: str) u32 {
+    if name == "float.to_int_unchecked" {
+        return SI_CAST << 8 | CAST_UNCHECKED as u32;
+    }
     if !name.starts_with("simd.") {
         return 0;
     }
@@ -609,7 +612,7 @@ pub fn simd_intrinsic(name: str) u32 {
         return SI_UNARY << 8 | pick(n == "neg", tt::TokenType::Minus, tt::TokenType::Tilde) as u32;
     }
     if n == "cast" {
-        return SI_CAST << 8;
+        return SI_CAST << 8 | CAST_NUMERIC as u32;
     }
     let t: []SimdOp = SIMD_OPS;
     for c in 0..t.len() {
@@ -742,6 +745,7 @@ pub const CAST_NUMERIC: u8 = 0;
 pub const CAST_COERCE_FROM: u8 = 1; // library `from` conversion; item = selected method
 pub const CAST_SIMD_ARRAY: u8 = 2; // `[T; N]` to `Simd<T, N>` or back: the same lanes (std only)
 pub const CAST_MASK_BITS: u8 = 3; // `Mask<N>` to `u64` or back: lane `i` is bit `i` (std only)
+pub const CAST_UNCHECKED: u8 = 4; // float to integer by truncation, no saturation: the value is not NaN and fits (std's `to_int_unchecked`)
 
 /// Aggregate kinds (RV_AGGREGATE.c).
 pub const AGG_STRUCT: u8 = 0;

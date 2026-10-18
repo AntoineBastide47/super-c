@@ -16,6 +16,19 @@ fn same_output_agrees_across_profiles() {
     h::expect_same_output("a division trap and a wrapping add", src.as_str(), ["--profile=dev"], ["--profile=release"]);
 }
 
+// Each libm call runs as written under every profile: release's optimizer neither merges `sin(x)` and
+// `cos(x)` into one `sincos` nor folds or rewrites a transcendental call, so both profiles print one
+// count (and its f32 twin).
+@test
+fn libm_calls_agree_across_profiles() {
+    h::expect_same_output(
+        "sin and cos of one value, f64 and f32",
+        "fn main() i32 {\n    let mut count = 0;\n    let mut x: f64 = 0.001;\n    let mut y: f32 = 0.001;\n    for _ in 0..200000 {\n        let s = x.sin();\n        let c = x.cos();\n        if s * s + c * c != 1.0 { count += 1; }\n        let sf = y.sin();\n        let cf = y.cos();\n        if sf * sf + cf * cf != 1.0 { count += 1; }\n        if 2.0f64.powf(x) != x.exp2() { count += 1; }\n        x = x * 1.0001 + 0.0001;\n        y = y * 1.0001 + 0.0001;\n    }\n    println(\"{}\", count);\n    return 0;\n}\n",
+        ["--profile=dev"],
+        ["--profile=release"],
+    );
+}
+
 @test
 fn same_output_reports_profile_dependent_overflow() {
     let mut src = String::from_str(OPR);
@@ -79,6 +92,71 @@ fn parity_float_literals() {
             "opq::<f64>(A[0]) + A[1]",
         ],
         ["f32", "f32", "f64", "f64", "f32", "f32", "f64", "f32", "f32", "f64"],
+        [],
+    );
+    assert(d.len() == 0, d.as_str());
+}
+
+// An f32 libm method folds through the f32 function the program calls: each input's f64 result
+// narrowed to f32 is one step off the f32 function's on the macOS libm.
+@test
+fn parity_f32_libm() {
+    let d = h::const_runtime_parity(
+        "",
+        [
+            "opq::<f32>(-1.0).acos()",
+            "opq::<f32>(0.00177229999).acos()",
+            "opq::<f32>(0.100591898).asin()",
+            "opq::<f32>(0.00680430001).atan()",
+            "opq::<f32>(0.0300069991).sin()",
+            "opq::<f32>(0.0587967001).cos()",
+            "opq::<f32>(0.0403188989).tan()",
+            "opq::<f32>(0.0912678987).sinh()",
+            "opq::<f32>(0.448358595).cosh()",
+            "opq::<f32>(0.00680430001).tanh()",
+            "opq::<f32>(0.0504420996).asinh()",
+            "opq::<f32>(1.03554964).acosh()",
+            "opq::<f32>(0.0360416993).atanh()",
+            "opq::<f32>(0.000654899981).exp()",
+            "opq::<f32>(0.00103229994).exp2()",
+            "opq::<f32>(0.0023236).exp_m1()",
+            "opq::<f32>(0.170695797).ln()",
+            "opq::<f32>(0.985698521).log2()",
+            "opq::<f32>(0.0288637001).log10()",
+            "opq::<f32>(0.000636400015).ln_1p()",
+            "opq::<f32>(2.0).cbrt()",
+            "opq::<f32>(1.00061619).powf(opq::<f32>(0.503365397))",
+            "opq::<f32>(1.00003386).atan2(opq::<f32>(0.500184596))",
+            "opq::<f32>(3.0).hypot(opq::<f32>(4.5))",
+            "opq::<f32>(1.1).mul_add(opq::<f32>(1.3), opq::<f32>(-1.43))",
+        ],
+        [
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+            "f32",
+        ],
         [],
     );
     assert(d.len() == 0, d.as_str());

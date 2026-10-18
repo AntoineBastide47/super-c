@@ -222,6 +222,30 @@ fn lint_reports_cross_module_duplicate_conformance() {
     assert(r.exit != 0, "the lint fails");
 }
 
+// In a project with `src/`, a file outside the project's module tree (src, tests, bench, std, ffi)
+// is a standalone program: its imports resolve beside it, as `super-c build <file>` resolves them,
+// whether the file is listed or found under a listed directory.
+@test
+fn lint_resolves_a_standalone_program_beside_itself() {
+    if cli::on_wasm() {
+        return; // the project layout is read from the working directory, which the guest lacks
+    }
+    let p = cli::proj_new();
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile("tools/t/lib.spc", "pub fn one() i32 {\n    return 1;\n}\n");
+    p.mkfile("tools/t/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::one() - 1;\n}\n");
+    let root = p.dir();
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/tools/t/main.spc\"");
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", args.as_str());
+    assert(!r.out_shows("cannot open module"), "the listed file resolves `lib` beside it");
+    assert_eq(r.exit, 0);
+    let rd = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(!rd.out_shows("cannot open module"), "the collected file resolves `lib` beside it");
+    assert_eq(rd.exit, 0);
+}
+
 // Char-range patterns compare decoded code points: two ranges of different non-ASCII chars that
 // share a UTF-8 lead byte are disjoint, so neither arm is reported unreachable.
 @test

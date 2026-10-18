@@ -183,6 +183,45 @@ const fn make_payload() Payload {
     return Payload { n: 5 };
 }
 
+fn take_sum(p: Payload, x: i64) i64 {
+    return p.n + x;
+}
+
+// Cancel a task parked in a helper called as an argument after an owning one: the helper returns
+// through its ladder, so its result is poison. The caller unwinds right after the call instead of
+// reading it, freeing the pending argument once and running nothing after.
+@test
+fn edge_in_an_argument_never_reads_poison(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let rx = ch.receiver();
+    let _tx_keep = ch.sender();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        defer finish(&w);
+        let _ = ktx.send(rt::current_key());
+        let r = take_sum(make_payload(), edge_helper(&rx));
+        after_mark();
+        let _ = r;
+    };
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the task parks");
+    assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
+    assert_eq(unsafe atomic::load_i64(&mut unsafe G_HELPER_DEFERS, 1), 1);
+    // The helper local and the pending argument, once each.
+    assert_eq(frees(), 2);
+}
+
 // Cancel a task parked in a method called on a call-result receiver, as a plain-let initializer or
 // as an expression statement: the edge after the call frees the receiver temporary exactly once.
 fn receiver_edge(fx: &mut Base, as_let: bool) {

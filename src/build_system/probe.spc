@@ -37,7 +37,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 19] = [
+const PROBES: [Probe; 20] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -227,6 +227,20 @@ const PROBES: [Probe; 19] = [
         archs: "x86_64",
         targets: "windows",
     },
+    // Clang's full-LTO compile runs the vectorizers on each unit before the link inlines across units:
+    // a function vectorized alone no longer vectorizes in the loop it is inlined into. Under full LTO
+    // the build keeps them for the link (`CcStream::ensure_cc`). GCC rejects the flags: its LTO
+    // compile does not vectorize.
+    Probe {
+        id: "no-prelink-vectorize",
+        step: "compile",
+        kind: "accept",
+        flags: "-fno-vectorize -fno-slp-vectorize",
+        forms: "",
+        src: "int f(int x) {\n    return x + 1;\n}\n",
+        archs: "",
+        targets: "",
+    },
 ];
 
 /// The probe table.
@@ -250,8 +264,11 @@ pub const LTO: usize = 16;
 /// The unaligned-vector-move probe's index.
 pub const UVM: usize = 18;
 
+/// The no-prelink-vectorize probe's index.
+pub const NOVEC: usize = 19;
+
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 19) - 1;
+pub const ALL: u64 = (1u64 << 20) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 fn nth(s: str, sep: u8, idx: usize) str {

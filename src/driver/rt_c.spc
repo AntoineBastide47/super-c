@@ -172,6 +172,16 @@ static _Noreturn __attribute__((unused, cold)) void __sc_panic_str(const uint8_t
   fflush(NULL);
   abort();
 }
+/* The failure path of `assert`: cold and out of line, so a function that asserts stays small enough
+   for the C compiler to inline. */
+static _Noreturn __attribute__((unused, cold, noinline, format(printf, 1, 2))) void __sc_assert_fail(const char *__f, ...) {
+  va_list __a;
+  va_start(__a, __f);
+  vfprintf(stderr, __f, __a);
+  va_end(__a);
+  fflush(NULL);
+  abort();
+}
 static _Noreturn __attribute__((unused)) void __sc_trap_order(void) {
   __sc_panic("invalid memory order");
 }

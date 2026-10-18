@@ -31,8 +31,7 @@
 // caller's own parameter reads as that parameter. A switch whose scrutinee is then a constant takes
 // its one edge (`CFlow` lays out no other), and a block no edge reaches inlines nothing. Never into a
 // body holding IN_REFLECT binder placeholders. The emitter's bound variants (`ground_body`) turn a
-// generic instance that holds a vector concrete, so a call through an interface the instance resolves
-// inlines too.
+// generic instance concrete, so a call through an interface the instance resolves inlines too.
 //
 // Spliced constants keep their raw spans and mark the callee module in `item` (the emitter's
 // foreign-source convention for CK_STR, extended to CK_FLOAT and CK_INT); IR_NONE sentinels are
@@ -100,7 +99,7 @@ pub fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
 }
 
 /// Whether a local of `b` (package `pkg`) is a vector: vector code, where the inliner reaches further
-/// (`CalleeInfo.vec_only`, the emitter's bound variants).
+/// (`CalleeInfo.vec_only`).
 pub fn holds_vector(b: &ir::CoreBody, pkg: *const loader::Package) bool {
     let a = unsafe &*(&*pkg).module_ast_const(b.module);
     for i in 0..b.locals.len() {
@@ -187,6 +186,9 @@ pub struct InlineStore {
 /// scratch. Decisions depend only on body and AST content, never on cache state.
 pub struct InlineCtx {
     pub off: bool,
+    /// Splice only the callees whose result the caller's instance fixes (`fixed_result`): a bound
+    /// variant of scalar code (`driver::emit::bind_calls`).
+    pub only_fixed: bool,
     pub stats_on: bool,
     pub store: *const InlineStore,
     /// Type-translation cache: one entry per distinct (callee slot, caller module, binds) call
@@ -496,6 +498,7 @@ extend InlineCtx {
         let off = stdlib::env_is("SC_INLINE", "0");
         return InlineCtx {
             off: off,
+            only_fixed: false,
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,
             store: store,
             xm_ix: Map::<u64, u64>::new(),
@@ -574,6 +577,31 @@ extend InlineCtx {
     /// Whether the shared store keeps callee `d` as a candidate.
     pub fn kept(self: &Self, d: DefId) bool {
         return self.callee_slot(d) < REJ_BASE;
+    }
+
+    /// Whether kept callee `d` (package `pkg`) computes its result from the instance's arguments
+    /// alone: no parameter, no call, and no static it reads but its const-generic parameters
+    /// (`V<N>::len()`, `return N;`), so its splice is a constant of the caller's instance.
+    pub fn fixed_result(self: &Self, pkg: *const loader::Package, d: DefId) bool {
+        let slot = self.callee_slot(d);
+        if slot >= REJ_BASE {
+            return false;
+        }
+        let k = &(unsafe &*self.store).kept.at(slot as usize).body;
+        if k.args != 0 {
+            return false;
+        }
+        for i in 0..k.blocks.len() {
+            if k.blocks.at(i).term.kind == ir::TM_CALL {
+                return false;
+            }
+        }
+        for i in 0..k.locals.len() {
+            if k.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(unsafe &*pkg, k.locals.at(i).item) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// The shared store's verdict for callee `d`: the kept slot, or REJ_BASE|reason (a body the
@@ -1078,10 +1106,10 @@ extend InlineStore {
                     called.insert(callee_key(t.callee), 1);
                 }
             }
-            // A conformance's method: a call through its interface reaches it once an instance that
-            // holds a vector names the receiver (the emitter's bound variants).
+            // A conformance's method: a call through its interface reaches it once an instance names
+            // the receiver (the emitter's bound variants).
             let d = b.owner;
-            if vec_prog && !Ast::in_body(d.node) && unsafe (&*pkg).modules.at(d.module as usize).has_ast {
+            if !Ast::in_body(d.node) && unsafe (&*pkg).modules.at(d.module as usize).has_ast {
                 let a = unsafe &*(&*pkg).module_ast_const(d.module);
                 let ext = extend_of(a, d.node);
                 if ext != NODE_NONE && a.at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
@@ -1318,6 +1346,10 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             continue;
         }
         st.considered += 1;
+        if cx.only_fixed && !cx.fixed_result(pkg, t.callee) {
+            st.reasons[IJ_SHAPE as usize] = st.reasons[IJ_SHAPE as usize] + 1;
+            continue;
+        }
         if t.is_variadic {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
             continue;
@@ -1396,6 +1428,13 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 let dpl = lw.body.dest_pool[(t.dests_start + r) as usize];
                 unify(pkg, km, k0.locals.at(r as usize).ty, cm, lw.body.places.at(dpl as usize).ty, &mut binds, 0);
             }
+        }
+        // A function of a generic extend called through its receiver type (`V::<3>::len()`, a bound
+        // call made direct) binds the extend's parameters from that type, `Terminator.recv`.
+        let ka = unsafe &*(&*pkg).module_ast_const(km);
+        if t.recv != TYPE_NONE && ka.extend_arity(t.callee.node) > 0 {
+            let xt = ka.at_const(ka.container_of(t.callee.node)).as_data.extend_def.target_type;
+            unify(pkg, km, ka.type_of(xt), cm, t.recv, &mut binds, 0);
         }
         if t.targs_len as usize == ki0.gp.len() && ki0.gp.len() != 0 {
             for i in 0..ki0.gp.len() {

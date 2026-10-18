@@ -3053,6 +3053,10 @@ pub struct Ast {
     pub lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
     pub member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
     pub where_bounds: Vector<WhereBound>,
+    /// The functions with type parameters (their own or their extend's) whose bodies hold a
+    /// static_assert (the resolver records them): each is evaluated per instance, for a concrete
+    /// call (`Interp::defer_inst_assert`) and for every instance the instance graph finds.
+    pub assert_fns: Vector<NodeId>,
     /// The calls of a function that needs CPU features (`FN_FEATURES`), checked against the build's
     /// features once every module is typed.
     pub feature_calls: Vector<FeatureCall>,
@@ -3161,6 +3165,7 @@ extend Ast as Free {
         self.attr_vals.free();
         self.member_of.free();
         self.where_bounds.free();
+        self.assert_fns.free();
         self.feature_calls.free();
         self.lane_callers.free();
         self.unsafe_lints.free();

@@ -40,24 +40,27 @@ borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, vi
   |                          analysis, then elaborates each kept body's drops over the same
   |                          facts (the keep holds elaborated bodies); one independent job
   |                          per module on the same runner (a body split contends on the
-  |                          module's type-pool lock, item-index.md); a module's body syntax
-  |                          is freed when its job ends (syntax-ownership.md)
+  |                          module's type-pool lock, item-index.md); body syntax stays
+  |                          until cemit_package releases it (syntax-ownership.md)
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
 lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build;
   |                          one job per linted module, a private engine per worker), then
-  |                          cir.flush_asserts / flush_consts (deferred static_asserts and
-  |                          consts a check could not fold); the interpreter reads kept
-  |                          bodies through a read-only Keep view here (see Core IR)
+  |                          cir.flush_asserts, flush_inst_asserts, cir.flush_consts
+  |                          (deferred static_asserts, the per-instance asserts of generic
+  |                          functions, consts a check could not fold); the interpreter reads
+  |                          kept bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
   |
 emission planning         -- compute_emit_live (module-arena resolutions + item index edges);
-  |                          Package::emit_order (Kahn over the recorded dependency rows);
+  |                          Package::emit_order (Kahn over dependency rows read from syntax);
   |                          every constant evaluated once more with the kept bodies it
   |                          touches copied into the evaluator, then the keep view closes
   |
 cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
-  |                          emits (dead prelude modules seed nothing), then per-module
+  |                          emits (dead prelude modules seed nothing), graph_inst_asserts
+  |                          (the static_asserts of every demanded generic instance), then
+  |                          Package::release_bodies frees the body syntax; then per-module
   |                          TU emission (emit/tu.spc); per body: drop elaboration only for
   |                          a body emission lowered itself, the inliner, bounds-check
   |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs
@@ -95,9 +98,9 @@ declarations, signatures, constant initializers, pinned bodies). Module-local. E
 item, expression, type annotation, and pattern is a node. The accessors dispatch on the bit;
 a scan enumerates both arenas through `nnodes()` / `nth_id()`, and a per-node scratch table
 is indexed by `dense(id)`. Module-arena id 0 is the reserved empty sentinel, but body-arena id
-0 is a real node, so a per-arena scan starts at 0. The driver frees the body arenas after emission planning, before
-the C is planned and rendered; the driver frees each module's body arena when its borrow
-pass ends; the language server frees a closed document's after every round and parses it
+0 is a real node, so a per-arena scan starts at 0. A batch build frees every body arena once,
+in `cemit_package` after the instance graph and its per-instance `static_assert` check,
+before the C is planned and rendered; the language server frees a closed document's after every round and parses it
 back on demand (`BodyArena.released`, `Interp.body_missing`); the model, the release contract
 and the owned records the later passes read instead are in
 [syntax-ownership.md](references/syntax-ownership.md).
@@ -626,7 +629,20 @@ and range bounds, must behave exactly as under the backend's own lowering); lowe
 folds a call outside a constant context; `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
 (a callee outside the item's visibility) at the end, and a top-level `static_assert`
 that still does not fold then is an error; `report_fold_errs` surfaces
-emission-time fold failures. During the type check the engine answers as the item under
+emission-time fold failures. A `static_assert` in a generic function's body holds per
+instance. The resolver records each function whose body holds one and that has its own
+generic parameters or sits in an extend with parameters (`Ast.assert_fns`); a checked call
+with concrete arguments queues the instance (`tc_defer_inst_asserts`,
+`Interp::defer_inst_assert` into `Interp.inst_asserts`), and the driver's
+`flush_inst_asserts`, after `flush_asserts`, evaluates the queue through
+`cemit_inst_asserts` while the kept bodies are readable. After `InstGraph::collect`,
+`graph_inst_asserts` runs `cemit_inst_asserts` for every non-speculative `IG_FN` and
+`IG_METHOD` record whose declaration is in `Ast.assert_fns` (`InstGraph::assert_binds`
+gives the bindings), so an instance reached only through another generic body is checked
+too, while the body syntax is still live. Emission runs `cemit_inst_asserts` again for every
+instance it demands, once per instance; after a failure in the graph's check
+(`Interp.inst_asserts_failed`) it reports nothing more, so each failure is reported once.
+`SC_CEMIT_STATS` prints `cemit-stage inst-asserts: <ms> ms, <n> instances`. During the type check the engine answers as the item under
 check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
 (`graph::items::visible`) is a refusal, whatever a worker has done with it.
 
@@ -672,11 +688,14 @@ Full monomorphization is the only generic backend.
   the final TypeId of every argument), so records from different modules compare by id.
   Only an aggregate record with a concrete pool anchor enters the planned definition headers;
   every other aggregate a body names is defined by the late replay of the mangler's
-  spellings, so the closure's breadth decides placement, not existence. The demand cross
-  product pairs each declaration with its target's new instances only (`pair_cur`), and
-  the collect line of `SC_CEMIT_STATS` reports records by kind, bodies walked, rounds
-  and a budget stop; the census of per-instance re-lowerings, the decision against a
-  symbolic generic IR and the measured closure blowup on width-generic code are in
+  spellings, so the closure's breadth decides an aggregate's placement, not its existence. The
+  demand cross product pairs each declaration with its target's new instances only (`pair_cur`).
+  A speculative walk (signature propagation, the demand cross product and the expansion of a
+  record they created) creates no aggregate record through a computed const argument
+  (`folds_const`: `{N + 1}`, `{BITS * 2}`; an identity `{N}` does not count), and the collect line
+  of `SC_CEMIT_STATS` reports records by kind, bodies walked, rounds and a budget stop; the
+  census of per-instance re-lowerings, the decision against a symbolic generic IR and the
+  closure's bound on width-generic code are in
   [instance-specialization.md](references/instance-specialization.md).
 - **Bounds:** a record whose arguments nest more than 256 levels is not expanded, and a
   body whose instantiation nests deeper than 256 levels is refused with a located error ("a
@@ -687,6 +706,10 @@ Full monomorphization is the only generic backend.
   and ZST queries under substitution read each binding's argument under its own env
   (`LayoutEnv.penv`, built per `MSub` by `Mangler::layout_sub`), so a generic body and its
   concrete caller agree on sizes.
+- **Path calls:** an associated function of a generic extend called through its type
+  (`W::<u8>::f()`, with or without the function's own turbofish) has no receiver value; the
+  lowering puts the qualifying instance in `Terminator.recv`, and the instance graph's
+  `note_method_of` binds the extend from it (a method's receiver is its first argument).
 - **Generic interface methods:** a call terminator whose callee is an interface method with its own
   generic parameters carries them as its trailing type arguments. `InstGraph::note_iface_call`
   resolves the receiver's conformance under the frame and records the implementation's method
@@ -704,12 +727,26 @@ Full monomorphization is the only generic backend.
   scoring and conformance matching solve the free parameters (`tc_solve_open`). The instance graph
   binds a keyed extend's keys by position (`ExtShape.keyed`) and pairs no target instance with
   it; the emitter spells `keyed_sym` and each argument (`[mod]<Interface>__<method>__<args>` for a
-  generic extend) and, through a bound or `dyn`, finds the conformance by target or among the
-  generic ones and binds it (`bind_keyed`, `unify_bind`); the evaluator (`conf_by_args`,
-  `keyed_conf`, `iunify`) and `Package::assoc_norm` (`lunify`) do the same. Every unifier
-  binds a const parameter from an array length too (`[f32; N]` against `[f32; 4]`). The instance
-  graph reaches the generic conformances a bound call (`note_iface_call`: `blanks`, `conf_bind`,
-  `gunify`) and a `dyn` erasure (`note_dyn`, `WalkCache.dyns`) demand, so their length faults are
+  generic extend; another keyed extend spells its target's method symbol with each generic
+  parameter as `_P<name>` and each const form as `_E..`, never through the substitution stack, so a
+  call and the instance body spell one stem) and, through a bound or `dyn`, finds the conformance
+  by target or among the generic ones and binds it (`bind_keyed`, `unify_bind`); the evaluator
+  (`conf_by_args`, `keyed_conf`, `iunify`) and `Package::assoc_norm` (`lunify`) do the same.
+  Several conformances whose interface arguments all fit (`i32 as Count<T>` with `T: Num` and
+  `i32 as Count<W<T>>`) are told apart by the bounds of their parameters: the checker tries
+  every argument-matching conformance (`tc_conform_ext_args`' `skip`) for the one whose bounds
+  hold, and the backend decides the same with `Package::conf_holds` and `ext_bounds_concrete`
+  (`src/module/loader.spc`; true for the marker interfaces, a type parameter and a nesting past
+  its depth bound), in `assoc_norm` (by-target conformances before generic ones), the emitter's
+  keyed choice (`keyed_bounds_hold`), `Mangler::conform_ext`, the instance graph's `conf_bind`
+  (`frame_bounds_hold`) and the evaluator's `keyed_conf` and `conf_by_args`
+  (`isub_bounds_hold`). The overlap check (`tc_check_blanket_overlap`) applies the bounds of the
+  parameters the interface arguments solve. On an instance receiver a conformance method whose
+  name several methods of its target share spells its interface and the interface's arguments as
+  patterns after `__<method>` (`Mangler::inst_method`), so `Vec as Mul` and `Vec as Mul<T>` give
+  two symbols. Every unifier binds a const parameter from an array length too (`[f32; N]`
+  against `[f32; 4]`). The instance graph reaches the generic conformances a bound call
+  (`note_iface_call`: `blanks`, `conf_bind`, `gunify`) and a `dyn` erasure (`note_dyn`, `WalkCache.dyns`) demand, so their length faults are
   located errors at the interface call (`iface_demand_site`). `type_info::<T>().methods` appends
   the methods of each generic conformance whose bounds `T` satisfies (`rt_blanket_confs`,
   `rt_satisfies`: conformances, `Copy`/`Send`/`Sync` structurally, `Free` through ownership facts).

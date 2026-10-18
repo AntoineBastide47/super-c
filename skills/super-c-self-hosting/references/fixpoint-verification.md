@@ -35,8 +35,13 @@ export SC_NO_TU_CACHE=1
 "$fix_dir/bootstrap-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/gen1-bin"
 mv "$fix_dir/src/build" "$fix_dir/gen1"
 
-# Compile gen-1's emitted C directly.
-cc -O1 -std=gnu11 -funsigned-char -ffp-contract=off -Wall -Wextra -Werror \
+# Compile gen-1's emitted C directly, with the engine's libm flags (LIBM_AS_WRITTEN in
+# src/build_system/build.spc; ci/contract.sh builds the same list).
+libm=""
+for f in sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp exp2 expm1 log log2 log10 log1p pow cbrt hypot; do
+    libm="$libm -fno-builtin-$f -fno-builtin-${f}f"
+done
+cc -O1 -std=gnu11 -funsigned-char -ffp-contract=off $libm -Wall -Wextra -Werror \
    $(find "$fix_dir/gen1/dev/raw" -name '*.c') \
    $(cat "$fix_dir/gen1/dev/raw/__ldflags") -o "$fix_dir/gen2-bin"
 

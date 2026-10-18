@@ -649,13 +649,17 @@ pub struct DiffRun {
 pub fn diff_build(src: str, opts: []str) DiffBuild {
     let exe = cli::superc_path(); // resolved before the chdir below
     let p = cli::proj_new();
+    let mut wasm = simd_lane();
+    for o in opts {
+        wasm = wasm || o == "--target=wasm";
+    }
     // wasm32 has no UndefinedBehaviorSanitizer runtime, and a large unoptimized function can pass
     // the engines' limit of locals: the lane's `ubsan` profile optimizes lightly. On aarch64, whose
     // builds call the Neon entries, it optimizes as lightly too: the C compiler's folds are part of
     // what an entry must survive (an arithmetic step that quiets a signaling NaN folds away).
     p.mkfile(
         "build.toml",
-        if simd_lane() {
+        if wasm {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\n";
         } else if unsafe shim::sc_host_arch() == 1 {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
@@ -668,8 +672,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
     let mut env = cli::fixture_cache_env(root.as_str());
-    let mut wasm = simd_lane();
-    if wasm {
+    if simd_lane() {
         cmd.push_str(" --target=wasm --target-feature=+simd128");
     }
     // `SC_SIMD_FEATURES`: more CPU features for every differential build (a conformance run with
@@ -684,7 +687,6 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
         cmd.format_into(" --simd-width={}", unsafe str::from_cstr(width));
     }
     for o in opts {
-        wasm = wasm || o == "--target=wasm";
         if o.starts_with("-") {
             cmd.format_into(" \"{}\"", o);
         } else {
@@ -1017,8 +1019,18 @@ fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
 /// (`runtime_trap_class`). Inputs are written `opq::<T>(v)`: the constant calls the identity
 /// `const fn opq`, the run-time copy calls `@c.noinline fn opr`, which the compiler cannot see
 /// through. The program defines `opq`, `opr` and names starting with `parity_`, `Parity` and `PARITY_`.
-pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts: []str) String {
+pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_in: []str) String {
     assert(exprs.len() == tys.len());
+    // On the wasm lane the guest compiler folds the constants, on wasi-libc: the run-time twin is a
+    // wasm32 module (run under wasmtime) on the same C library.
+    let mut ov = Vector::<str>::new();
+    for o in opts_in {
+        ov.push(o);
+    }
+    if cli::on_wasm() && !simd_lane() {
+        ov.push("--target=wasm");
+    }
+    let opts = ov[0..ov.len()];
     let n = exprs.len();
     let mut ct = Vector::<String>::new();
     let mut omit = Vector::<bool>::new();

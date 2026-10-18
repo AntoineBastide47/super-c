@@ -692,7 +692,10 @@ values of a switch or `if` in such a position, the first call of a receiver chai
 side of an assignment to a call-free place, and a `for` loop's `next`. Implicit calls follow
 the same rule: an operator method at such a node (a compound assignment checks once the place
 holds its result) and a user `Deref` hop. A call after an
-evaluated argument or a left operand carries none; the next edge delivers the request. An
+evaluated argument or a left operand (and every call in `std::parallel` but that root) leaves an
+accepted request to the next edge, but when its callee returned through its own ladder (probe 1)
+it unwinds at once: that result is poison, and nothing reads it. Its ladder also frees the
+pending owned temporaries of the expression (the ones still initialized). An
 edge after a call that returned a real value frees it first (a `Some(guard)` unlocks). A
 call to a fn value carries the edge when some fn value of the package can accept (a closure
 written as a spawn entry is not one); a bound or `dyn` call, when some conformance method of
@@ -704,7 +707,9 @@ it reports through its result so the primitive finishes removing its registratio
 back the value it waited with, and the edge fires after the primitive, at its caller. A probe
 placed right after it unwound the primitive mid-cleanup and leaked a channel's unsent payload.
 Whether a body is task-reachable comes from the whole-package analysis above; targets differ
-here, so a probe that is absent on one target may be present on another.
+here, so a probe that is absent on one target may be present on another. Constant evaluation
+runs the same bodies: no task exists at compile time, so the evaluator folds the probe to 0
+(no cancellation), as it folds the combined safepoint.
 
 Known gap: in a generic body an unbounded `T` is not an owning type, so a `T` value a
 path does not consume is never dropped in an instance with an owning argument (a

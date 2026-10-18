@@ -3074,7 +3074,8 @@ extend CEmit {
         // left alone (return-slot forwarding owns it).
         if b.returns > 1 {
             for l in 0..b.returns as usize {
-                if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 0 {
+                // An array slot is copied into its carrier member, never spelled as an initializer.
+                if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 0 || self.arr_n(b, b.locals.at(l).ty) >= 0 {
                     continue;
                 }
                 let bd = *def_blk.at(l);
@@ -9997,6 +9998,7 @@ extend CEmit {
                             let mut symb = self.sget();
                             symb.push_str(dst.as_str().slice(d0, dst.len()));
                             let mut sd = String::from_str("extern ");
+                            self.stat_align(item, b.module, b.locals.at(base as usize).ty, &mut sd);
                             if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
                                 sd.push_str(";\n");
                                 self.stat_decls.push_string(&sd);
@@ -11083,20 +11085,47 @@ extend CEmit {
         }
         self.stat_seen.insert(h);
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        if idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern {
-            return true;
+        if !(idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern) {
+            let mut sd = String::from_str("extern ");
+            self.stat_align(item, em, ty, &mut sd);
+            if !self.ty_c(em, ty, sym, &mut sd) {
+                return false;
+            }
+            sd.push_str(";\n");
+            self.stat_decls.push_string(&sd);
+            self.stat_end.push(self.stat_decls.len() as u32);
+            self.stat_items.push(
+                StatRef { em: em, def: item, sym: String::from_str(sym), ty: ty, args: mbe::subs_copy(args) },
+            );
         }
-        let mut sd = String::from_str("extern ");
-        if !self.ty_c(em, ty, sym, &mut sd) {
-            return false;
+        // A seed shard's demand reaches the master through its capture (`cemit_seed_merge_range`).
+        if self.sh_on {
+            self.sh_stat_k.push(h);
+            self.sh_stat_v.push(self.stat_items.len() as u32);
         }
-        sd.push_str(";\n");
-        self.stat_decls.push_string(&sd);
-        self.stat_end.push(self.stat_decls.len() as u32);
-        self.stat_items.push(
-            StatRef { em: em, def: item, sym: String::from_str(sym), ty: ty, args: mbe::subs_copy(args) },
-        );
         return true;
+    }
+
+    /// The alignment specifier of static `item` (its C object of type `ty`, pool `em`) into `out`:
+    /// `_Alignas(N) ` for `@c.align(N)` above the type's own alignment, else nothing, as C rejects a
+    /// weaker specifier. The definition and every declaration spell the same specifier.
+    pub fn stat_align(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
+        let a = self.p().module_ast_const(item.module);
+        let at = unsafe (*a).attr_of(item.node, AttrKind::ATTR_ALIGN);
+        if at == null {
+            return;
+        }
+        let mut v = (unsafe (*at).arg) as u64;
+        if unsafe (*at).expr {
+            let av = unsafe (*a).attr_value(item.node, AttrKind::ATTR_ALIGN);
+            assert(av.ok, "the checker folds every '@c.align' argument of an emitted static");
+            v = av.v;
+        }
+        let l = self.mg.layout_sub(em, ty);
+        assert(l.ok, "a static's type lays out");
+        if v > l.align {
+            out.format_into("_Alignas({}) ", v);
+        }
     }
 
     // A generic extend's constant `c` spells `<module prefix><InstName>__<NAME>`, a generic function's
@@ -11422,13 +11451,13 @@ extend CEmit {
     // `want` (pool `wm`, null when unknown) is the interface instance the call goes through: it
     // solves a keyed conformance's parameters its target does not name.
     /// The method call `t` of `b`, of an interface method through a type parameter, dispatches to
-    /// under the active env when the receiver's conformance by target defines it, its receiver
-    /// grounded into `b`'s pool in `recv`; node NONE for any other call, a generic interface's, a
-    /// keyed or blanket conformance's, or a default body. The bound variant of an instance calls
-    /// it directly (`ir::inline::run` splices it).
+    /// under the active env when the receiver's conformance by target defines it (of a generic
+    /// interface, the conformance with the bound's arguments, `conf_for_args`), its receiver grounded
+    /// into `b`'s pool in `recv`; node NONE for any other call, a keyed or blanket conformance's, or a
+    /// default body. The bound variant of an instance calls it directly (`ir::inline::run` splices it).
     pub fn bound_target(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, recv: &mut TypeId) DefId {
         let none = DefId { module: 0, node: NODE_NONE };
-        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || t.iface != TYPE_NONE {
+        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
             return none;
         }
         let inode = self.mg.in_interface(t.callee.module, t.callee.node);
@@ -11452,7 +11481,16 @@ extend CEmit {
             g = y.as_data.elem;
         }
         let mut em: ModuleId = 0;
-        let ext = self.mg.conform_ext(b.module, g, DefId { module: t.callee.module, node: inode }, &mut em);
+        let mut ext = NODE_NONE;
+        if t.iface != TYPE_NONE {
+            let iit = *unsafe (*ba).instance(unsafe (*ba).type_at(t.iface).as_data.inst);
+            let conf = self.conf_for_args(b.module, g, b.module, &iit);
+            em = conf.module;
+            ext = conf.node;
+        }
+        if ext == NODE_NONE {
+            ext = self.mg.conform_ext(b.module, g, DefId { module: t.callee.module, node: inode }, &mut em);
+        }
         let ea = self.p().module_ast_const(em);
         if ext == NODE_NONE || ext_keyed(unsafe &*ea, ext) {
             return none;
@@ -11499,6 +11537,31 @@ extend CEmit {
     }
 
     // The binding of generic parameter `(pm, pnode)` in `snap` from `from` on (the latest), or -1.
+    // Whether the bounds of keyed conformance `ext`'s (module `em`) parameters hold for the values
+    // `snap` binds from `from` on (`Package::ext_bounds_concrete`, in pool `wm`): of conformances whose
+    // interface arguments fit, the call takes the one whose bounds hold, as the checker does.
+    fn keyed_bounds_hold(self: &mut Self, snap: &Vector<mbe::MSub>, from: u32, em: ModuleId, ext: NodeId, wm: ModuleId) bool {
+        let ea = self.p().module_ast_const(em);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        if gens.len > 8 {
+            return true;
+        }
+        let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+        let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+        for g in 0..gens.len {
+            let gid = unsafe (*ea).list(gens)[g as usize];
+            unsafe lp[g as usize] = DefId { module: em, node: gid };
+            let k = CEmit::snap_find(snap, from, em, gid);
+            if k >= 0 {
+                let mut gt = TYPE_NONE;
+                if self.mg.ground(snap.at(k as usize).am, snap.at(k as usize).at, wm, &mut gt) {
+                    unsafe la[g as usize] = gt;
+                }
+            }
+        }
+        return self.p().ext_bounds_concrete(em, ext, &lp[0], &la[0], gens.len, wm, 0);
+    }
+
     const fn snap_find(snap: &Vector<mbe::MSub>, from: u32, pm: ModuleId, pnode: NodeId) i64 {
         let mut i = snap.len();
         while i > from as usize {
@@ -11715,7 +11778,13 @@ extend CEmit {
                     ce8 = NODE_NONE;
                 }
             }
-            if keyed8 && !self.bind_keyed(&mut ksnap, cm8, ce8, rm6, rt6, wm, want) {
+            if keyed8 && !(self.bind_keyed(&mut ksnap, cm8, ce8, rm6, rt6, wm, want) && self.keyed_bounds_hold(
+                &ksnap,
+                k0,
+                cm8,
+                ce8,
+                wm,
+            )) {
                 // Another keyed conformance of the receiver, its parameters bound by the interface
                 // instance the call goes through.
                 let mut kc = Vector::<DefId>::new();
@@ -11723,7 +11792,13 @@ extend CEmit {
                 ce8 = NODE_NONE;
                 for i in 0..kc.len() {
                     ksnap.truncate(k0 as usize);
-                    if self.bind_keyed(&mut ksnap, kc[i].module, kc[i].node, rm6, rt6, wm, want) {
+                    if self.bind_keyed(&mut ksnap, kc[i].module, kc[i].node, rm6, rt6, wm, want) && self.keyed_bounds_hold(
+                        &ksnap,
+                        k0,
+                        kc[i].module,
+                        kc[i].node,
+                        wm,
+                    ) {
                         cm8 = kc[i].module;
                         ce8 = kc[i].node;
                         break;
@@ -11740,7 +11815,13 @@ extend CEmit {
                 self.mg.blanket_confs(ifd8, &mut bl);
                 for i in 0..bl.len() {
                     ksnap.truncate(k0 as usize);
-                    if self.bind_keyed(&mut ksnap, bl[i].module, bl[i].node, rm6, rt6, wm, want) {
+                    if self.bind_keyed(&mut ksnap, bl[i].module, bl[i].node, rm6, rt6, wm, want) && self.keyed_bounds_hold(
+                        &ksnap,
+                        k0,
+                        bl[i].module,
+                        bl[i].node,
+                        wm,
+                    ) {
                         cm8 = bl[i].module;
                         ce8 = bl[i].node;
                         keyed8 = true;
@@ -13848,27 +13929,7 @@ extend CEmit {
 
     // Whether interface member `f`'s first parameter has type `Self`, behind references or pointers.
     fn self_param0(self: &Self, f: DefId) bool {
-        let ca0 = self.p().module_ast_const(f.module);
-        let ps0 = unsafe (*ca0).at_const(f.node).as_data.function.params;
-        if ps0.len == 0 {
-            return false;
-        }
-        let p0 = unsafe (*ca0).at_const(unsafe (*ca0).list(ps0)[0]);
-        if p0.kind != NodeKind::NODE_PARAMETER || p0.as_data.parameter.ty == NODE_NONE {
-            return false;
-        }
-        let mut t = unsafe (*ca0).type_of(p0.as_data.parameter.ty);
-        for _ in 0..8 {
-            if t == TYPE_NONE {
-                return false;
-            }
-            let y = *unsafe (*ca0).type_at(t);
-            if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
-                return y.kind == TypeKind::TYPE_GENERIC && unsafe (*ca0).at_const(y.as_data.decl).kind == NodeKind::NODE_INTERFACE;
-            }
-            t = y.as_data.elem;
-        }
-        return false;
+        return self.p().self_typed_param0(f);
     }
 
     // Whether function `f`'s first parameter is `self` (a method, not an associated function).
@@ -14154,14 +14215,8 @@ extend CEmit {
             }
             // The instance body's prototype lives in the method's declaring module.
             self.mg.mark_used(callee.module);
-            if ok {
-                sym.push_str("__");
-                let ca = self.p().module_ast_const(callee.module);
-                self.mg.ident(
-                    callee.module,
-                    unsafe (*ca).at_const(unsafe (*ca).at_const(callee.node).as_data.function.name).as_data.name.text,
-                    sym,
-                );
+            if ok && !self.mg.inst_method(callee, sym) {
+                ok = self.fail("callee-inst");
             }
         } else if keyed {
             if !self.mg.keyed_sym(callee.module, callee.node, sym) {
@@ -14465,15 +14520,18 @@ extend CEmit {
                 }
                 return ok;
             }
-            if rv.b != ir::CAST_NUMERIC && rv.b != ir::CAST_MASK_BITS {
+            if rv.b != ir::CAST_NUMERIC && rv.b != ir::CAST_MASK_BITS && rv.b != ir::CAST_UNCHECKED {
                 // A vector and its array convert by `memcpy` at their store (`emit_vec_cast_store`).
                 return self.fail("cast");
             }
             // A float converts to an integer saturating (`__sc_f2i_*`); C leaves an out-of-range value
-            // undefined.
+            // undefined, which `to_int_unchecked` (CAST_UNCHECKED, a plain C cast) requires its caller to
+            // exclude.
             let fb = self.int_builtin(b, b.operands.at(rv.a as usize).ty);
             let tb = self.int_builtin(b, rv.target);
-            if (fb == BuiltinType::BT_F32 || fb == BuiltinType::BT_F64) && (int_signed(tb) || bt_is_unsigned(tb) || tb == BuiltinType::BT_CHAR) {
+            if rv.b != ir::CAST_UNCHECKED && (fb == BuiltinType::BT_F32 || fb == BuiltinType::BT_F64) && (int_signed(tb) || bt_is_unsigned(
+                tb,
+            ) || tb == BuiltinType::BT_CHAR) {
                 dst.push_str("__sc_f2i_");
                 dst.push_str(bt_name(tb));
                 dst.push_str("(");
@@ -14958,7 +15016,9 @@ extend CEmit {
                 return true;
             }
             if k == ir::IN_BOUNDS as u32 {
-                // A lane check's helper comes with the vector's definition (`Mangler::vec_pack`).
+                if rv.item.node == ir::CHECK_LANES {
+                    self.mg.lane_check_use();
+                }
                 return self.emit_intrinsic_call(
                     b,
                     mbe::if_s(rv.item.node == ir::CHECK_LANES, "__sc_lane(", "__sc_bounds("),
@@ -14972,7 +15032,10 @@ extend CEmit {
                 return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
             }
             if k == ir::IN_BOUNDS_GROUP as u32 {
-                // A vector access's check names its start, lanes and length (`Mangler::vec_pack`).
+                // A vector access's check names its start, lanes and length.
+                if rv.item.node == ir::CHECK_VEC {
+                    self.mg.lane_check_use();
+                }
                 return self.emit_intrinsic_call(
                     b,
                     mbe::if_s(rv.item.node == ir::CHECK_VEC, "__sc_bounds_vec(", "__sc_bounds_group("),
@@ -16355,6 +16418,49 @@ extend CEmit {
                     o.push_str("  return;\n");
                     return true;
                 }
+                let mut has_arr = false;
+                for r in 0..b.returns {
+                    has_arr = has_arr || !self.erased(b, b.locals.at(r as usize).ty) && self.arr_n(
+                        b,
+                        b.locals.at(r as usize).ty,
+                    ) >= 0;
+                }
+                if has_arr {
+                    // C initializes no array member from an array: the carrier is filled member by
+                    // member, an array member by copy.
+                    o.push_str("  { ");
+                    o.push_string(&self.mret);
+                    o.push_str(" __ar;");
+                    for r in 0..b.returns {
+                        if self.erased(b, b.locals.at(r as usize).ty) {
+                            continue;
+                        }
+                        if self.arr_n(b, b.locals.at(r as usize).ty) >= 0 {
+                            o.push_str(" memcpy(__ar._");
+                            o.push_u64(r);
+                            o.push_str(", _");
+                            o.push_u64(r);
+                            o.push_str(", sizeof(__ar._");
+                            o.push_u64(r);
+                            o.push_str("));");
+                            continue;
+                        }
+                        o.push_str(" __ar._");
+                        o.push_u64(r);
+                        o.push_str(" = ");
+                        if *self.sx_inline.at(r as usize) != ir::IR_NONE {
+                            if !self.emit_rvalue(b, *self.sx_inline.at(r as usize), o) {
+                                return false;
+                            }
+                        } else {
+                            o.push_str("_");
+                            o.push_u64(r);
+                        }
+                        o.push_str(";");
+                    }
+                    o.push_str(" return __ar; }\n");
+                    return true;
+                }
                 o.push_str("  return (");
                 o.push_string(&self.mret);
                 o.push_str("){ ");
@@ -16438,19 +16544,25 @@ extend CEmit {
                 if !ok {
                     return false;
                 }
-            } else if t.args_len == 1 {
-                self.mg.need_name("str".hash(), true);
-                o.push_str("const str __scm = ");
-                if !self.emit_operand(b, b.oper_pool[t.args_start as usize], o) {
-                    return false;
-                }
-                o.push_str("; fprintf(stderr, \"assertion failed: `");
-                push_assert_src(src.slice(t.span.start as usize, t.span.end as usize), true, o);
-                o.push_str("`: %.*s\\n\", (int)__scm.len, (const char *)__scm.ptr); ");
             } else {
-                o.push_str("fprintf(stderr, \"assertion failed: `");
+                // One call of the runtime's cold failure path: the caller keeps no printing code.
+                let msg = t.args_len == 1;
+                if msg {
+                    self.mg.need_name("str".hash(), true);
+                    o.push_str("const str __scm = ");
+                    if !self.emit_operand(b, b.oper_pool[t.args_start as usize], o) {
+                        return false;
+                    }
+                    o.push_str("; ");
+                }
+                o.push_str("__sc_assert_fail(\"assertion failed: `");
                 push_assert_src(src.slice(t.span.start as usize, t.span.end as usize), true, o);
-                o.push_str("`\\n\"); ");
+                o.push_str(mbe::if_s(msg, "`: %.*s\\n  at ", "`\\n  at "));
+                push_fmt_escaped(file, o);
+                o.push_str(":");
+                o.push_u64(line);
+                o.push_str(mbe::if_s(msg, "\\n\", (int)__scm.len, (const char *)__scm.ptr); }\n", "\\n\"); }\n"));
+                return true;
             }
             o.push_str("fprintf(stderr, \"  at ");
             push_fmt_escaped(file, o);

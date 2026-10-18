@@ -1852,7 +1852,7 @@ fn cemit_inst_asserts(
     ia_built: &mut Vector<bool>,
 ) {
     let hit = seen.contains_key(&dk);
-    if hit || p.cir == null || subs.len() == 0 {
+    if hit || p.cir == null || subs.len() == 0 || unsafe (*(p.cir as *mut iri::Interp)).inst_asserts_failed {
         return;
     }
     let a = unsafe &*p.module_ast_const(d_def.module);
@@ -1928,6 +1928,84 @@ fn cemit_inst_asserts(
     if decided {
         seen.insert(dk, 1);
     }
+}
+
+// The static_asserts of the generic-function instances the checker's concrete calls queued
+// (`Interp::inst_asserts`), evaluated while the kept bodies are readable: a false one fails the
+// build, naming the instance. Instances only emission discovers are checked there.
+fn flush_inst_asserts(p: &mut loader::Package) {
+    let cev = p.cir as *mut iri::Interp;
+    if cev == null || unsafe (*cev).inst_asserts.len() == 0 {
+        return;
+    }
+    let recs = replace(unsafe &mut (*cev).inst_asserts, Vector::<iri::InstAssert>::new());
+    let mut seen = Map::<u64, u64>::new();
+    let mut ia = Vector::<Vector<NodeId>>::new();
+    let mut ia_built = Vector::<bool>::new();
+    ia.resize_default(p.modules.len());
+    ia_built.resize_default(p.modules.len());
+    let mut subs = Vector::<mbe::MSub>::new();
+    for i in 0..recs.len() {
+        let r = recs.at(i);
+        subs.clear();
+        let mut dk = skey_mix(0, r.f.module as u64 << 32 | r.f.node as u64);
+        for k in 0..r.np {
+            let at = unsafe r.ats[k as usize];
+            subs.push(
+                mbe::MSub {
+                    pnode: unsafe r.prm[k as usize],
+                    at: at,
+                    lim: 0,
+                    pm: r.f.module,
+                    am: unsafe r.ams[k as usize],
+                },
+            );
+            dk = skey_mix(dk, (unsafe r.ams[k as usize]) as u64 << 32 | at as u64);
+        }
+        cemit_inst_asserts(p, r.f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+    }
+}
+
+// The static_asserts of every demanded instance of a generic function or method the instance graph
+// found, evaluated while the body syntax is live: the checker queues only its concrete calls
+// (`flush_inst_asserts`), not the instances other generic bodies reach. A failure stops the
+// emission-time check (`cemit_inst_asserts`) from reporting it again.
+// Returns the number of instances checked.
+fn graph_inst_asserts(p: &mut loader::Package, g: &mut ig::InstGraph) u64 {
+    let cev = p.cir as *mut iri::Interp;
+    if cev == null {
+        return 0;
+    }
+    let mut n: u64 = 0;
+    let ok0 = p.ok;
+    p.ok = true;
+    let mut seen = Map::<u64, u64>::new();
+    let mut ia = Vector::<Vector<NodeId>>::new();
+    let mut ia_built = Vector::<bool>::new();
+    ia.resize_default(p.modules.len());
+    ia_built.resize_default(p.modules.len());
+    let mut subs = Vector::<mbe::MSub>::new();
+    let mut prm = Vector::<NodeId>::new();
+    let mut tys = Vector::<TypeId>::new();
+    for id in 0..g.recs.len() {
+        prm.clear();
+        tys.clear();
+        if !g.assert_binds(id as u32, &mut prm, &mut tys) {
+            continue;
+        }
+        let f = g.recs.at(id).def;
+        subs.clear();
+        let mut dk = skey_mix(0, f.module as u64 << 32 | f.node as u64);
+        for k in 0..prm.len() {
+            subs.push(mbe::MSub { pnode: prm[k], at: tys[k], lim: 0, pm: f.module, am: f.module });
+            dk = skey_mix(dk, tys[k]);
+        }
+        cemit_inst_asserts(p, f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+        n += 1;
+    }
+    unsafe (*cev).inst_asserts_failed = !p.ok;
+    p.ok = ok0 && p.ok;
+    return n;
 }
 
 // The FNV of every `struct <name> {` spelling in `text`: layout asserts probe once per aggregate
@@ -2476,7 +2554,7 @@ fn cemit_seed_module(
         }
         dow.apply_drops(&mut lw);
         if !dow.inl.off && inl::holds_vector(&lw.body, p) {
-            // Vector code: a call a splice brought through an interface binds and inlines too.
+            // A call a splice brought through an interface binds and inlines too.
             let mut sites = Vector::<BoundSite>::new();
             bind_calls(cem, dow, &mut lw, &mut sites);
         }
@@ -2890,16 +2968,16 @@ fn relower(lw: &mut irl::Lowerer, node: NodeId, subs: &Vector<mbe::MSub>, dow: &
     return ok;
 }
 
-// The bound variant of instance body `base` under `subs`, a body that holds a vector (the inliner's
-// reach for vector code, `inl::holds_vector`): when a call of an interface method through a type
-// parameter dispatches, for this instance, to a conformance method the inliner keeps
+// The bound variant of instance body `base` under `subs`: when a call of an interface method through a
+// type parameter dispatches, for this instance, to a conformance method the inliner keeps
 // (`CEmit::bound_target`), the body grounded for the instance (`inl::ground_body`) calls that method
-// directly and inlines it, for up to `inl::MAX_DEPTH` rounds of the calls the splices bring. None when
-// no call qualifies or the body does not ground.
+// directly and inlines it, for up to `inl::MAX_DEPTH` rounds of the calls the splices bring (`bind_calls`;
+// in scalar code only the methods whose result the instance fixes, `G::len()` of `Vec<T, 3>`: a
+// constant of the instance). None when no call qualifies or the body does not ground.
 fn bound_variant(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer, subs: &Vector<mbe::MSub>) Option<
     irl::Lowerer
 > {
-    if dow.inl.off || !inl::holds_vector(&base.body, base.pkg) {
+    if dow.inl.off {
         return Option::<irl::Lowerer>::None;
     }
     cem.mg.clear_subs();
@@ -2915,7 +2993,9 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
     irl::Lowerer
 > {
     let mut sites = Vector::<BoundSite>::new();
+    dow.inl.only_fixed = !inl::holds_vector(&base.body, base.pkg);
     bound_calls(cem, dow, base.pkg, &base.body, &mut sites);
+    dow.inl.only_fixed = false;
     if sites.len() == 0 {
         return Option::<irl::Lowerer>::None;
     }
@@ -2944,8 +3024,17 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
 // The calls of concrete body `lw` that dispatch through an interface to a method the inliner keeps
 // (`bound_calls`, scratch `sites`) call it directly and inline, for up to `inl::MAX_DEPTH` rounds of
 // the calls the splices bring: a round inlines to `inl::MAX_DEPTH` levels, the next goes on from
-// where its depth stopped. Nothing changes when no call binds at first.
+// where its depth stopped. Nothing changes when no call binds at first. In a body without vectors
+// only the methods whose result the instance fixes bind and inline (`inl::InlineCtx::fixed_result`):
+// the C compiler inlines the rest after the link, where splicing them earlier made some loops slower.
 fn bind_calls(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, sites: &mut Vector<BoundSite>) {
+    let fixed = !inl::holds_vector(&lw.body, lw.pkg);
+    dow.inl.only_fixed = fixed;
+    bind_rounds(cem, dow, lw, sites);
+    dow.inl.only_fixed = false;
+}
+
+fn bind_rounds(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, sites: &mut Vector<BoundSite>) {
     for r in 0..inl::MAX_DEPTH {
         bound_calls(cem, dow, lw.pkg, &lw.body, sites);
         if r == 0 && sites.len() == 0 {
@@ -2990,7 +3079,7 @@ fn bound_calls(
         let t = b.blocks.at(i).term;
         let mut rv = TYPE_NONE;
         let md = cem.bound_target(b, &t, &mut rv);
-        if md.node == NODE_NONE || !dow.inl.kept(md) {
+        if md.node == NODE_NONE || !dow.inl.kept(md) || dow.inl.only_fixed && !dow.inl.fixed_result(pkg, md) {
             continue;
         }
         let own = (unsafe &*(&*pkg).module_ast_const(md.module)).at_const(md.node).as_data.function.generics.len;
@@ -4157,6 +4246,16 @@ pub fn cemit_package(
         );
         tt0 = t9;
     }
+    let ian = graph_inst_asserts(p, &mut g);
+    if verbose {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage inst-asserts: {} ms, {} instances\n", t9 - tt0, ian);
+        tt0 = t9;
+    }
+    // Every body is lowered and kept, every constant and static_assert is evaluated, and the live
+    // set and the emit order have read their last reference: the body syntax has no reader left.
+    p.release_bodies();
+    syntax_stats_report(p, "release");
     let mut em = tbe::TuEmit::new(p);
     em.mg.agg_on = true;
     let mut items = Vector::<tbe::AggItem>::new();
@@ -5034,6 +5133,9 @@ pub fn cemit_package(
                 continue;
             }
             let cty = cem.stat_items.at(si).ty;
+            // `@c.align` of a static: the specifier its declarations spell too.
+            let mut al9 = String::new();
+            cem.stat_align(cdef, em2, cty, &mut al9);
             // A generic extend's constant evaluates for the instance its reference named.
             let cargs = &cem.stat_items.at(si).args;
             let mut cpm: [ModuleId; 8] = [[0] = 0];
@@ -5092,7 +5194,7 @@ pub fn cemit_package(
             if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
                 let vn0 = cda.at_const(cdn.as_data.const_def.value);
                 if vn0.kind == NodeKind::NODE_STRUCT_INITIALIZER && vn0.as_data.struct_initializer.fields.len == 0 {
-                    let mut line3 = String::new();
+                    let mut line3 = al9.clone();
                     if cem.mg.ctype(em2, cty, csym.as_str(), &mut line3) {
                         line3.push_str(" = {0};\n");
                         cdefs.txt.push_string(&line3);
@@ -5125,6 +5227,7 @@ pub fn cemit_package(
                         // `[]`: no data array (C has no empty initializer or zero-length object). A
                         // view points at the aligned sentinel; a zero-length array spells as a
                         // pointer nothing reads.
+                        line2.push_string(&al9);
                         ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
                         if ok2 && is_slice2 {
                             line2.push_str(" = { ");
@@ -5143,6 +5246,7 @@ pub fn cemit_package(
                             line2.push_str("__data[] = { ");
                         }
                     } else {
+                        line2.push_string(&al9);
                         ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
                         if ok2 {
                             line2.push_str(mbe::if_s(vec2, " = { { ", " = { "));
@@ -5163,7 +5267,7 @@ pub fn cemit_package(
                         }
                         line2.push_str(mbe::if_s(vec2, " } };\n", " };\n"));
                         if is_slice2 {
-                            let mut view2 = String::new();
+                            let mut view2 = al9.clone();
                             if cem.mg.ctype(em2, cty, csym.as_str(), &mut view2) {
                                 line2.push_string(&view2);
                                 line2.push_str(" = { ");
@@ -5215,7 +5319,7 @@ pub fn cemit_package(
                     &cdit,
                     csym.as_str(),
                     root3 as u32,
-                    "",
+                    al9.as_str(),
                     &mut cdefs.txt,
                     &mut rootd3,
                 ) {
@@ -5223,7 +5327,7 @@ pub fn cemit_package(
                     continue;
                 }
             }
-            let mut line = String::new();
+            let mut line = al9.clone();
             // A NULL pointer constant is scalar data (`= 0`).
             let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR || v.kind == iri::IV_PTR && v.i == 0;
             if okc {
@@ -5234,7 +5338,7 @@ pub fn cemit_package(
                 if v.kind == iri::IV_PTR {
                     line.push_str("0");
                 } else if v.kind == iri::IV_INT {
-                    let usig = line.len() != 0 && line.as_str().byte_at(0) == b'u';
+                    let usig = line.len() > al9.len() && line.as_str().byte_at(al9.len()) == b'u';
                     push_c_i64(&mut line, v.i, usig);
                 } else if v.kind == iri::IV_BOOL {
                     line.push_str(
@@ -8788,7 +8892,7 @@ fn proto_of(body: &String, out: &mut String) {
 // lowering CPU waiting on it (the phase took twice as long at fourteen workers). The pass
 // writes its diagnostics (per item), its lowered bodies (a private keep per job, absorbed into
 // the package keep under the engine lock) and each closure's own capture facts. A module
-// closes (Core IR ready, emission dependencies, body syntax released) when its job ends.
+// closes (Core IR ready) when its job ends; its body syntax stays until the instance graph.
 
 /// One job: the items at by_node positions `[lo, hi)` (source order) of module `m`.
 struct BcJob {
@@ -8893,21 +8997,9 @@ fn bc_job(ctx: *mut void, j: u32) {
         }
     }
     bc_slot_give(unsafe &*st.slots, slot);
-    // The module's Core IR is ready. Record what its emission depends on and free the syntax
-    // the analyses are done with (a deferred static_assert in a body keeps it for the flush).
+    // The module's Core IR is ready. Its body syntax stays until the instance graph has evaluated
+    // the per-instance static_asserts (`graph_inst_asserts`).
     p.set_module_states(m, loader::IS_IR_READY);
-    if p.free_bodies {
-        p.record_emit_deps(m);
-        let mut free = true;
-        if ce != null {
-            unsafe (*ce).eng_lock();
-            free = !unsafe (*ce).pending_in_bodies(m as ModuleId);
-            unsafe (*ce).eng_unlock();
-        }
-        if free {
-            p.modules[m].ast.release_bodies();
-        }
-    }
     // The shared last-use table served the type check and this pass.
     let _ = replace(&mut p.modules[m].ast.last_use, Vector::<NodeId>::new());
 }
@@ -8930,8 +9022,8 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     publish_checkpoint(p, keep);
     let n = p.modules.len();
     // The keep holds every body from here on, and the evaluator views it while the stage runs
-    // so a fold reaches the bodies of a module that has already released its syntax; the
-    // reserve keeps every slot in place under that view.
+    // so a fold executes the kept bodies in place; the reserve keeps every slot in place under
+    // that view.
     if keep != null {
         unsafe (&mut *keep).reserve_bodies(p);
         let cirk = p.cir as *mut iri::Interp;
@@ -8939,10 +9031,7 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
             unsafe (*cirk).keep_view_set(keep);
         }
     }
-    if p.free_bodies {
-        p.emit_deps_reserve();
-    }
-    // The borrow jobs release body arenas while other jobs query module references.
+    // The borrow jobs query module references concurrently.
     p.build_mod_refs();
     // Package-wide lazy state the jobs would otherwise race to build.
     if p.co_state == 0 {
@@ -10561,10 +10650,6 @@ pub fn run_package(
         }
     }
     let mut irkeep = irl::Keep::new();
-    // Each module's body syntax is freed after its borrow pass: the passes that follow read the
-    // kept bodies, the item index and the module arenas. The measurement's final graph reads the
-    // bodies, so that mode keeps them until emission planning.
-    p.free_bodies = !istats;
     p.ok = borrowck_all(p, &mut irkeep) && p.ok;
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after
     // this, and a forked child inherits the pool's state but none of its worker threads. (Also
@@ -10623,6 +10708,7 @@ pub fn run_package(
             );
         }
         unsafe (*cirf).flush_asserts(flush_assert_err, pv);
+        flush_inst_asserts(p);
         unsafe (*cirf).flush_consts(flush_const_err, pv);
     }
     if !p.ok {
@@ -10694,13 +10780,9 @@ pub fn run_package(
             unsafe (*cirp).keep_view_clear();
         }
     }
-    // Every body is lowered and kept, every deferred constant is flushed, and the live set and the
-    // emit order have read their last reference: the releasable body syntax has no reader left.
     if istats {
         gitems::finalize(p); // the measurement's final graph reads body syntax
     }
-    p.release_bodies();
-    syntax_stats_report(p, "release");
     bst::mark(bst::B_PREPARE);
     ts_phase("prepare");
     // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module

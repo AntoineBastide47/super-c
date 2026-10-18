@@ -141,7 +141,7 @@ Per function (`bc_fn`, extending `TypeChecker`):
 5. Each spent Lowerer's body and closures are kept as a `KeptBody` in the shared `irl::Keep`
    cache: one elaborated lowering per body, reused by emission (a parallel job keeps its own and absorbs it under the
    engine lock). Every job leases an oracle + context slot from a bounded pool; a module
-   closes (Core IR ready, emission dependencies, body syntax released) when its job ends.
+   is Core IR ready when its job ends; its body syntax stays live until `cemit_package`.
    Diagnostics publish per item in declaration order.
 
 Declaration-level lifetime analyses (return-type elision, aggregate lifetime naming, the
@@ -168,7 +168,11 @@ modular return-lifetime check) run alongside.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
   re-evaluate now that every module is fully typed; failures carry the CTFE stack. A
   top-level `static_assert` that still does not fold is an error (asserts inside bodies may
-  depend on generics and stay deferred).
+  depend on generics and stay deferred). Between the two, `flush_inst_asserts` evaluates the
+  static_asserts of the generic-function instances the checker's concrete calls queued
+  (`Interp.inst_asserts`; the per-instance asserts of the CTFE section of the skill). The
+  instances that only other generic bodies reach are checked after the instance graph
+  (section 10).
 - Test plan construction (`--test` builds).
 
 ## 8. Runtime + External C (`write_super_rt`, `ext_c_collect`)
@@ -205,7 +209,7 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 - `compute_emit_live`: reference scan for live modules.
 - `Package::emit_order`: dependency-first module order: if module `a` re-homes a
   concrete instance of a generic owned by `b`, `b` emits first. Kahn topo-sort with a
-  lowest-id tiebreak.
+  lowest-id tiebreak. Each module's row (`emit_dep_row`) reads its live body syntax.
 
 ## 10. TU Emission (`cemit_package`, `src/emit/`)
 
@@ -217,6 +221,10 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   `has_reflect` or `has_zst_cond` re-lower per instance instead of sharing; the census
   and the decision that keeps it so are in
   [instance-specialization.md](instance-specialization.md).
+- `graph_inst_asserts`: the static_asserts of every demanded instance of a generic function
+  or method the graph found (`InstGraph::assert_binds`). Then `Package::release_bodies`
+  frees every module's body arena: the one release point of a batch build
+  ([syntax-ownership.md](syntax-ownership.md)).
 - `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (one
   geometrically grown `tus[t]` per module, a chunk table with the shard each chunk landed
   in, `inst_c` for every owner module's instance shards), a parallel frontier under

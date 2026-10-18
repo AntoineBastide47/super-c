@@ -558,12 +558,16 @@ fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
     }
 }
 
-/// Flags and libraries a cross target needs at LINK time only. wasi keeps signals and the process clock
+/// Flags and libraries a target needs at LINK time only. wasi keeps signals and the process clock
 /// behind opt-in emulation libraries; the runtime's panic path installs a signal handler and `time::clock`
-/// reads the process clock (emulated by the wall clock), so the build asks for both. wasm-ld's default
-/// stack is 64 KiB: a wasm program gets the 8 MiB main-thread stack of the native hosts instead, placed
-/// first so an overflow traps rather than overwriting static data.
-pub fn push_sdk_libs(cmd: &mut String, sdk: i32) {
+/// reads the process clock (emulated by the wall clock), so the build asks for both. The main thread
+/// gets the 8 MiB stack of Linux and macOS on every target, so a program that runs on one runs on all:
+/// wasm-ld's default stack is 64 KiB (placed first, so an overflow traps rather than overwriting static
+/// data), a Windows executable reserves 1 MiB unless its header says otherwise.
+pub fn push_sdk_libs(cmd: &mut String, target: i32, sdk: i32) {
+    if target == 0 && sdk == 0 {
+        cmd.push_str(" -Wl,--stack,8388608");
+    }
     if sdk == 3 {
         cmd.push_str(" -Wl,-z,stack-size=8388608 -Wl,--stack-first");
         let sdkp = stdlib::getenv("WASI_SDK_PATH");

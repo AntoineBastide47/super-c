@@ -159,8 +159,13 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     return true;
 }
 
-// The std/ directory next to the running binary ("<exe dir>/std"), so the prelude is found regardless of cwd.
+// The std/ directory next to the running binary ("<exe dir>/std"), so the prelude is found regardless of cwd;
+// `SC_STD_DIR` names it instead (`super-c test` sets it for the compiler under test, see build.spc).
 fn exe_std_dir(argv0: *const char) String {
+    let ov = stdlib::get_env("SC_STD_DIR").unwrap_or(String::new());
+    if ov.len() != 0 {
+        return ov;
+    }
     let mut buf = PathBuf {};
     let mut path = argv0;
     if unsafe shim::sc_exe_path(&mut buf[0], 4096) == 0 {
@@ -325,8 +330,64 @@ fn lint_project(
             let man = mo.unwrap();
             lpub = man.lib_name.len() == 0;
         }
-        if files.len() != 0 && lint_batch(&files, ".", std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc, lpub) != 0 {
+        // A file whose imports a load rooted at the project does not find is a standalone program
+        // (`tools/x/main.spc` importing its sibling `util`): its imports resolve beside it, as
+        // `super-c build <file>` resolves them, so its directory, the siblings it imports included,
+        // lints as its own batch.
+        let mut alone_dirs = Vector::<String>::new();
+        for k in 0..files.len() {
+            let f = files.at(k).as_str();
+            let d = String::from_str(loader::dirname_of(f));
+            if !loader::imports_resolve(f, ".", lint_alt(), std_dir) && !alone_dirs.contains(&d) {
+                alone_dirs.push(d);
+            }
+        }
+        let mut rooted = Vector::<String>::new();
+        let mut alone = Vector::<Vector<String>>::new();
+        alone.resize_default(alone_dirs.len());
+        for k in 0..files.len() {
+            let f = files.at(k).as_str();
+            let mut g = alone_dirs.len();
+            for j in 0..alone_dirs.len() {
+                if alone_dirs.at(j).as_str() == loader::dirname_of(f) {
+                    g = j;
+                }
+            }
+            if g == alone_dirs.len() {
+                rooted.push(String::from_str(f));
+            } else {
+                alone.index_mut(g).push(String::from_str(f));
+            }
+        }
+        if rooted.len() != 0 && lint_batch(
+            &rooted,
+            ".",
+            lint_alt(),
+            std_dir,
+            co.ce_steps,
+            co.ce_mem,
+            co.target,
+            fix,
+            sc,
+            lpub,
+        ) != 0 {
             rc = 1;
+        }
+        for g in 0..alone_dirs.len() {
+            if lint_batch(
+                alone.at(g),
+                alone_dirs.at(g).as_str(),
+                "",
+                std_dir,
+                co.ce_steps,
+                co.ce_mem,
+                co.target,
+                fix,
+                sc,
+                lpub,
+            ) != 0 {
+                rc = 1;
+            }
         }
         // A nested project (its own build.toml) lints as from its own directory: its manifest, its
         // imports.
@@ -635,6 +696,7 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
 fn lint_batch(
     files: &Vector<String>,
     root: str,
+    alt: str,
     std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
@@ -643,7 +705,6 @@ fn lint_batch(
     sc: bool,
     lint_pub: bool,
 ) i32 {
-    let alt = lint_alt();
     let mut pass = 0;
     loop {
         let mut p = lint_load_batch(files, root, alt, std_dir, target);
@@ -661,7 +722,7 @@ fn lint_batch(
         pass = pass + 1;
     }
     // A final plain pass prints what remains and sets the exit code.
-    return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
+    return lint_batch(files, root, alt, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
 // `super-c lint <path>`: a file loads as its own root (its import closure + prelude) and is linted
@@ -677,7 +738,7 @@ fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fi
         };
         let mut files = Vector::<String>::new();
         let crc = spc_collect(path, "lint", &mut files);
-        let brc = lint_batch(&files, droot, std_dir, ce_steps, ce_mem, target, fix, sc, false);
+        let brc = lint_batch(&files, droot, lint_alt(), std_dir, ce_steps, ce_mem, target, fix, sc, false);
         return (crc != 0 || brc != 0) as i32;
     }
     let froot = if lint_alt().len() != 0 {

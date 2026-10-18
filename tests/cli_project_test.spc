@@ -1,7 +1,9 @@
 // `super-c fmt` and `super-c lint` with no path argument: the whole-project sweep. project_paths reads
 // build.toml, skips the out-dir, and hands every top-level directory and .spc file to the formatter or
 // linter. Also covers `lint <dir>` recursion, `build <dir>`, `--bin` with `-o`, the strip of a
-// cross-linked release, and the probe record's key. Driven from inside a scratch project.
+// cross-linked release, the probe record's key, and the std tree `SC_STD_DIR` names. Driven from inside
+// a scratch project.
+import stdlib;
 import tests::cli_harness as cli;
 
 const CLEAN_A: str = "pub fn helper(x: i32) i32 {\n    return x + 1;\n}\n";
@@ -192,4 +194,26 @@ fn the_probe_record_keys_on_the_compiler_command() {
     b.format_into("build --target=linux --arch=x86_64 --target-feature=avx2 \"--cc={}/cc.sh --ok\"", root);
     let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", b.as_str());
     assert(r2.ok() && !r2.out_has("rejects"), "another command probes again");
+}
+
+// `SC_STD_DIR` names the std tree in place of the one beside the compiler: `super-c test` sets it for
+// the compiler under test, which `--out-dir` may place outside the project.
+@test
+fn std_dir_env_names_the_std_tree() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile(
+        "main.spc",
+        "import std::simd::math as sm;\n\nfn main() i32 {\n    return sm::sin(Simd::<f32, 4>::splat(0.0))[0] as i32;\n}\n",
+    );
+    let root = p.dir();
+    let std_dir = stdlib::get_env("SC_STD_DIR");
+    assert(std_dir.is_some(), "the test runner names the project's std tree");
+    let ok = cli::superc_env_in(root, "SC_STD_DIR", std_dir.unwrap().as_str(), "build");
+    assert(ok.ok(), "the named tree builds the program");
+    let mut missing = String::new();
+    missing.format_into("{}/missing", root);
+    // The emit stamp records the tree: the same out-dir does not reuse the first build.
+    let bad = cli::superc_env_in(root, "SC_STD_DIR", missing.as_str(), "build");
+    assert(!bad.ok() && bad.out_has("cannot open module 'std::simd::math'"), "a tree without the module fails");
 }

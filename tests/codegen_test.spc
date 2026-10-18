@@ -338,6 +338,49 @@ fn align_constant_expression_matches_literal() {
     assert(unsafe str::from_cstr(lit.code) == unsafe str::from_cstr(ex.code), "the expression form emits the same C");
 }
 
+// `@c.align(N)` on a `static mut` aligns its C object: the definition and the `extern` declaration
+// spell `_Alignas(N)` in every definition path (an array literal, a repeat and a struct through the
+// static graph, a scalar, an empty struct); a value at most the type's own alignment spells nothing,
+// as C rejects a weaker specifier.
+@test
+fn aligned_statics() {
+    let src = M"(struct P { pub a: i32, pub b: f32 }
+const W: u32 = 128;
+@c.align(64)
+static mut A: [f32; 16] = [0.0; 16];
+@c.align(32)
+static mut B: [i32; 3] = [1, 2, 3];
+@c.align(W)
+static mut S: P = P { a: 1, b: 2.0 };
+@c.align(256)
+static mut X: u8 = 7;
+@c.align(2)
+static mut Y: u64 = 9;
+@c.align(64)
+static mut Z: P = P {};
+fn main() i32 {
+    unsafe {
+        A[1] = 1.0;
+        B[0] = 4;
+        S.a = 3;
+        Y = 2;
+        let bad = (&A as *const [f32; 16] as usize) % 64 + (&B as *const [i32; 3] as usize) % 32 + (&S as *const P as usize) % 128 + (&X as *const u8 as usize) % 256 + (&Z as *const P as usize) % 64;
+        return bad as i32 + (Y as i32 - 2) + (X as i32 - 7);
+    }
+}
+)";
+    let c = h::compile_c(src);
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("_Alignas(64) float A[16] = {"), "a repeat");
+    assert(c.code_has("extern _Alignas(64) float A[16];"), "the declaration");
+    assert(c.code_has("_Alignas(32) int32_t B[3] = {"), "an array literal");
+    assert(c.code_has("_Alignas(128) P S = {"), "a struct, its alignment a constant expression");
+    assert(c.code_has("_Alignas(256) uint8_t X = 7;"), "a scalar");
+    assert(c.code_has("_Alignas(64) P Z = {0};"), "an empty struct");
+    assert(!c.code_has("_Alignas(2)"), "a weaker alignment spells nothing");
+    h::expect_exit("aligned statics", src, 0);
+}
+
 @test
 fn attributes() {
     h::expect_c("noreturn", "@c.noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");

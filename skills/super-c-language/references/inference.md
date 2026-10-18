@@ -44,7 +44,8 @@ Never inferred (the signature barrier):
   Integer and float literals never mix: an integer literal never takes a float type (`1 + 2.0`,
   `let f: f32 = 1;` are errors). types.md, "Numeric Literals", has the errors.
 - A suffix (`5u64`, `1.5f64`) pins the literal type; context cannot change it. A base
-  prefix (`0xFF`) or a minus sign does not pin it.
+  prefix (`0xFF`) or a minus sign does not pin it. In a range an unsuffixed integer bound takes
+  the other bound's type: `0u8..15` is a `Range<u8>`.
 - A typed context adapts an unsuffixed literal before the default applies: typed
   operands win over defaults, and the default applies only after all other
   information is exhausted. A value `if`, `switch` or block beside a typed numeric operand of a
@@ -119,11 +120,19 @@ Evidence binds a generic parameter in this order, and all evidence must agree:
    bounds are its conformances) whose arguments fit what the other evidence already fixed. When
    several fit and differ where a parameter is still open after every other obligation, the call is
    "cannot infer 'A': 'P' conforms to 'I' with several arguments"; later evidence (a literal
-   default) may still decide it first.
+   default) may still decide it first. The conformances of a type parameter `T` include the
+   generic conformances its bounds admit (`extend<T: Num> T as Get<T>` for `U: Num`). A
+   conformance whose parameter only its interface arguments name (`extend<T, U> T as Re<U, U>`)
+   takes that parameter from the bound's arguments the call already fixes; while those arguments
+   are still open, it fits anything and the bound gives no evidence yet.
 6. Declared defaults, then literal defaults, only after everything above reaches a
-   fixed point. An unsuffixed literal argument, also under `&` or `&mut`, is not
-   evidence: it adopts the type the other evidence gives its parameter (`h(&4, 5u16)`
-   with `h<T>(x: &T, y: T)` binds `T = u16`).
+   fixed point. An unsuffixed literal argument, also under `&` or `&mut`, and literal-only
+   arithmetic (`640.0 / 480.0`) are not evidence: they adopt the type the other evidence gives
+   their parameter (`h(&4, 5u16)` with `h<T>(x: &T, y: T)` binds `T = u16`). A literal default
+   is the literal's default type when it satisfies the parameter's bounds whose arguments the
+   call fixes, else the one other type of its class that does (`2.0` for a parameter
+   `X: Get<f64>` under `extend<T: Scalar> T as Get<T>` is an `f64`); with none or several such
+   types it stays the default.
 
 A repeated generic parameter must unify with every use: an existing binding that
 disagrees with a later use is a conflict error, never silently kept. Acceptance
@@ -197,7 +206,11 @@ extends define and the interface defaults its conformances inherit, each default
 conformance's arguments. Through a generic type written without arguments (`W::f(..)`) they are the
 methods of every extend of the type, each extend's parameters inferred with the candidate's own. A
 call's turbofish binds each candidate's leading parameters first; a candidate with fewer parameters
-than the turbofish names is not viable:
+than the turbofish names is not viable. A candidate with one parameter more than the call has
+arguments is viable only when that parameter is `self`, the receiver the call does not list: an
+associated function takes exactly the call's arguments (`V::new(1, 2)` never weighs
+`new(x, y, z)`). A candidate whose extend's bounds the receiver's instance does not satisfy
+(`extend<T: Int, const N: usize> V<T, N>` for `V<bool, 2>`) is not viable:
 
 1. Fewer safe conversions (by the rank list above).
 2. Fewer reference adjustments or dereferences.
@@ -218,8 +231,10 @@ never taken by, an argument of another kind (`Add<T>` is not viable for a vector
 is not viable either.
 
 Two candidates with equal best scores are an ambiguity error; its notes name each candidate (or the
-conformances, or the bounds of a type parameter) at its source location. Source order and
-declaration order never break a tie. An error type never makes a candidate viable and never
+conformances, or the bounds of a type parameter) at its source location. On a concrete receiver
+the expected result decides such a tie first, then the only candidate a plain extend (no
+interface) defines wins over conformance methods, as an inherent method does in Rust. Source
+order and declaration order never break a tie. An error type never makes a candidate viable and never
 selects an overload.
 
 ## Error types
@@ -235,8 +250,8 @@ condition, a pattern, a loop, a format argument, or a constant evaluation that n
 ## Limits
 
 - A generic item declares at most 8 type parameters (a declaration error beyond).
-- Candidate search (8 candidates) and constraint counts have fixed compiler limits;
-  exceeding one reports the limit and the source expression. The solver worklist needs no
+- Candidate search (32 candidates, `TC_MAX_CANDIDATES`) and constraint counts have fixed
+  compiler limits; exceeding one reports the limit and the source expression. The solver worklist needs no
   budget: every round binds a new slot, so it ends after at most one round per slot.
 
 ## Current engine deviations
@@ -258,6 +273,7 @@ regression case in `tests/infer_test.spc`:
   associated calls) are checked then, once, and the candidates are scored again; a
   tie that remains is an ambiguity error, and an argument that failed its check
   suppresses it. The expected result type decides a remaining tie first (the one
-  candidate whose result it is), also for a call without arguments.
+  candidate whose result it is), also for a call without arguments, then the only
+  candidate of a plain extend.
 - A generic item still declares at most 8 type parameters; there is no spill
   storage above eight generic arguments.

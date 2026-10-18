@@ -806,6 +806,36 @@ fn attribute_constant_expression_errors() {
     );
 }
 
+// `@c.align` applies where it changes a layout or a C object: a struct or a union (an extern one
+// too: the layout service mirrors its C header) and a `static mut` defined in Super-C. `@c.packed`
+// applies to a struct or a union. On any other owner each is an error, never ignored.
+@test
+fn layout_attribute_owners() {
+    let msg = "'@c.align' may only be applied to a struct, a union or a 'static mut' outside an 'extern \"C\"' block";
+    h::expect_err_msg(
+        "align on a function",
+        "@c.align(16)\nfn f() i32 { return 1; }\nfn main() i32 { return f(); }\n",
+        msg,
+    );
+    h::expect_err_msg("align on a const", "@c.align(16)\nconst C: i32 = 3;\nfn main() i32 { return C; }\n", msg);
+    h::expect_err_msg("align on an enum", "@c.align(16)\nenum E { A, B }\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("align on a type alias", "@c.align(16)\ntype T = i32;\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg(
+        "align on an extern static",
+        "extern \"C\" {\n    @c.align(64)\n    static mut errno_x: i32;\n}\nfn main() i32 { return 0; }\n",
+        msg,
+    );
+    h::expect_err_msg(
+        "packed on a function",
+        "@c.packed\nfn g() i32 { return 2; }\nfn main() i32 { return g(); }\n",
+        "'@c.packed' may only be applied to a struct or a union",
+    );
+    h::expect_ok(
+        "align on a union, an extern struct and a static",
+        "@c.align(16)\nunion U { a: i32, b: f32 }\nextern \"C\" {\n    @c.align(16)\n    struct X { pub a: i32 }\n}\n@c.align(16)\nstatic mut S: i32 = 0;\nfn main() i32 { return (alignof(U) + alignof(X)) as i32 - 32; }\n",
+    );
+}
+
 // An attribute appears at most once on one declaration, whatever its arguments: two `@c.align` gave
 // the layout service and the C emitter different answers. Several values go in one occurrence.
 @test
@@ -973,9 +1003,9 @@ fn bug_regressions() {
     {
         // More attributes than the first reservation (16), each once: every one is kept.
         let c = h::parse_ast(
-            "@c.inline @c.always_inline @c.noinline @c.cold @c.noreturn @c.packed @c.used @c.unused @c.align(8)\n@c.export(\"x\") @c.import(\"y\") @c.section(\"s\") @platform(linux) @arch(x86_64) @fmt.skip @blocking\n@test @test_init @test_free @bench\nfn f() {}\n",
+            "@c.inline @c.always_inline @c.noinline @c.cold @c.noreturn @c.used @c.unused\n@c.export(\"x\") @c.import(\"y\") @c.section(\"s\") @platform(linux) @arch(x86_64) @fmt.skip @blocking\n@test @test_init @test_free @bench\nfn f() {}\n",
         );
-        assert_eq(c.ast.attrs.len(), 20);
+        assert_eq(c.ast.attrs.len(), 18);
     }
 }
 

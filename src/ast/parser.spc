@@ -4546,6 +4546,25 @@ extend Parser {
                     "",
                     "may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function",
                 );
+            } else if attr.kind == AttrKind::ATTR_ALIGN as u8 {
+                // The layout of a struct (its C definition, or the C header's for an extern one) and
+                // the C object of a static read it; on any other owner it would change nothing.
+                let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
+                    owner,
+                ).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
+                    owner,
+                ).as_data.const_def.is_extern);
+                pick(
+                    ok,
+                    "",
+                    "may only be applied to a struct, a union or a 'static mut' outside an 'extern \"C\"' block",
+                );
+            } else if attr.kind == AttrKind::ATTR_PACKED as u8 {
+                pick(
+                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT,
+                    "",
+                    "may only be applied to a struct or a union",
+                );
             } else {
                 "";
             };

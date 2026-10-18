@@ -73,6 +73,10 @@ type when omitted. The main function signature is `fn main() i32` or
 A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
 tuple, name it through an alias: `type P = (A, B); fn f() P`.
 
+`return pair();` forwards the results of a multi-value call as the return list. The call must
+give as many results as the function returns, each of its return slot's type exactly (no
+widening: "result 2 of the forwarded call is 'i64', the function returns 'i32' there").
+
 ## Structs and Methods
 
 ```superc
@@ -427,6 +431,13 @@ import geom as g;            // alias
 Imports are public and C-style transitive, so there is no `pub import`. Cycles are legal. Prelude types (`String`,
 `Option`, `Vector`, `Box`, `Result`, `Map`, `Set`, `str`) resolve unqualified.
 
+An unqualified name the module does not declare is looked up in its glob imports first, then in
+the prelude: a glob-imported `String` or `dot` shadows the prelude's, as a declaration does. A
+glob import without an alias (`import m::qq as *;`) also makes its last segment a module
+qualifier, but a type in scope of that name (declared, imported or glob-imported) wins: when
+module `m::qq` declares `pub type qq = Q;`, `qq::one()` calls `Q::one`. An explicit `as` alias
+always names the module.
+
 ## Visibility
 
 Private by default. `pub` on structs, enums, functions, fields, constants, type aliases.
@@ -504,6 +515,13 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
   whose signature names one, or that fails on every path (it constructs one), is an error at
   its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
   on some paths (a branch, a loop, recursion) is accepted.
+- A `static_assert` in the body of a generic function (one with its own generic parameters,
+  or a method of an extend with parameters) holds per instance:
+  `static_assert(T::is_signed(), "only signed types")` fails the build at
+  `only_signed(3u32)`, with a note that names the bindings. The check runs for each concrete
+  call the type check records, once every module is typed, and for every other instance the
+  build uses, also one reached only through another generic body. Each failure is reported
+  once.
 
 ## Build Constants and Platform Gating
 
@@ -651,7 +669,7 @@ source text, values, and file:line on failure.
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
-| `@intrinsic("simd.<name>")` | `std` only: a function without a body whose call is the operation the name gives (references/simd.md) |
+| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), or `float.to_int_unchecked` (references/operations.md) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 
 A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names

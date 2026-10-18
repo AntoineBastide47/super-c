@@ -1660,7 +1660,11 @@ pub fn test_build_and_run(
     } else {
         "test build";
     };
-    let base = "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types";
+    let mut basev = String::from_str(
+        "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types",
+    );
+    basev.push_str(bsys::LIBM_AS_WRITTEN);
+    let base = basev.as_str();
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();
     push_sdk_flags(&mut fl, target, sdk, p.arch, p.features);
@@ -1668,14 +1672,17 @@ pub fn test_build_and_run(
     pfl.push_str(fl.as_str());
     pfl.push_byte(b' ');
     pfl.push_str(ccflags);
+    let mut late = String::new();
     if !bsys::features_accepted(
         loader::dirname_of(root),
         ccs.as_str(),
         pfl.as_str(),
+        bsys::profile_lto(p.profile.as_str()),
         target,
         p.arch,
         p.features,
         &mut fl,
+        &mut late,
     ) {
         return 1;
     }
@@ -1690,6 +1697,7 @@ pub fn test_build_and_run(
         split_args(&mut cfv, base);
         split_args(&mut cfv, fl.as_str());
         split_args(&mut cfv, ccflags);
+        split_args(&mut cfv, late.as_str());
         let mut units = Vector::<String>::new();
         for i in 0..keep.len() {
             let cf = keep[i].as_str();
@@ -1707,9 +1715,10 @@ pub fn test_build_and_run(
     split_args(&mut args, base);
     split_args(&mut args, fl.as_str());
     split_args(&mut args, cflags);
+    split_args(&mut args, late.as_str());
     // The link-only SDK libs ride along on the command that links.
     let mut ll = String::new();
-    push_sdk_libs(&mut ll, sdk);
+    push_sdk_libs(&mut ll, target, sdk);
     split_args(&mut args, ll.as_str());
     args.push(String::from_str("-o"));
     let mut outp = String::new();

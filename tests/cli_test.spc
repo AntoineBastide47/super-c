@@ -6460,6 +6460,57 @@ fn main() i32 {
     assert_eq(p.run_bin(), 140);
 }
 
+// A glob-imported name shadows a prelude name, as a declaration does: `dot` (a std::simd function) and
+// `String` (a prelude type) come from the imported module.
+@test
+fn glob_import_shadows_prelude() {
+    let p = cli::proj_new();
+    p.mkfile("geom.spc", "pub struct String { pub n: i32 }\npub fn dot(a: i32, b: i32) i32 { return a * b; }\n");
+    p.mkfile(
+        "main.spc",
+        M"(import geom as *;
+extern "C" { fn exit(code: i32) void; }
+fn main() i32 {
+  let s = String { n: 2 };
+  unsafe exit(dot(3, 4) + s.n);
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 14);
+}
+
+// A type in scope wins over a module qualifier the import did not name: `import m::qq as *;` brings the
+// alias `qq`, so `qq::one()` calls the aliased type's function, not an item of module `qq`; an explicit
+// `as` alias still names the module.
+@test
+fn glob_imported_type_wins_over_module_qualifier() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "m/qq.spc",
+        "pub struct Q { pub w: i32 }\npub type qq = Q;\nextend Q { pub fn one() Q { return Q { w: 1 }; } }\npub fn two() i32 { return 2; }\n",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import m::qq as *;
+import m::qq as mq;
+extern "C" { fn exit(code: i32) void; }
+fn main() i32 {
+  let q = qq::one();
+  unsafe exit(q.w + mq::two() * 10);
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 21);
+}
+
 // External C code imports: a backing header auto-discovers its same-stem .c sibling; @c.source pulls a
 // differently-named impl; @c.link lands in build/__ldflags; removing the code prunes the wrappers + flags;
 // a missing @c.source is a hard error.

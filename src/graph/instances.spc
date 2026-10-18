@@ -1344,16 +1344,8 @@ extend InstGraph {
     fn const_expr_bound(self: &Self, a: &Ast, y: &Ty, frame: &Vector<Subst>) ArgKey {
         let none = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
         let l = a.const_lin_at(y.as_data.inst);
-        // Identity: one coefficient-1 param, no constant, no divisor, no retyping.
-        let mut nact: u32 = 0;
-        let mut hit: i64 = -1;
-        for i in 0..l.n {
-            if !unsafe l.c[i as usize].is_zero() {
-                nact += 1;
-                hit = i;
-            }
-        }
-        if l.k.is_zero() && l.div_of() == i128::one() && nact == 1 && unsafe l.c[hit as usize] == i128::one() && l.ty == l.to {
+        let hit = lin_identity(l);
+        if hit >= 0 {
             let pd = unsafe l.p[hit as usize];
             for i in 0..frame.len() {
                 if frame.at(i).pmod == pd.module && frame.at(i).pdecl == pd.node {
@@ -1572,6 +1564,14 @@ extend InstGraph {
         if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
             return;
         }
+        // A speculative walk creates no record through a computed const argument: the record would
+        // propagate its own signatures and fold the next width (`Vec<T, {N + 1}>` from `append`), a
+        // chain only the walk budget ends. A demanded body that names the width still creates it.
+        for i in 0..it.n {
+            if self.in_spec && folds_const(a, unsafe it.args[i], 0) {
+                return;
+            }
+        }
         self.argbuf.truncate(0);
         for i in 0..it.n {
             if !self.concrete_subst(a, unsafe it.args[i], frame, depth + 1) {
@@ -1617,7 +1617,7 @@ extend InstGraph {
             if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
                 continue;
             }
-            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 {
+            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 && !self.recv_binds(&t) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             self.note_method(a, &t, b, frame);
@@ -1723,19 +1723,30 @@ extend InstGraph {
     // instance binds the extend's params; the method body walks under that frame. No extend search:
     // the checker already selected the method.
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
-        // Only a method of a generic extend whose receiver binds it: a keyed extend's call names all
-        // of its arguments (`note_call`).
-        let x = self.enclosing_row(t.callee);
-        if t.args_len != 0 && x != IG_NONE && !self.shapes.at(x as usize).keyed {
+        if self.recv_binds(t) {
             self.note_method_of(a, t, b, frame);
         }
     }
 
+    // Whether call `t` is of a member of a generic extend whose receiver binds the extend: its type
+    // arguments are the member's own (`note_method`), not the extend's ones first, as a keyed extend's
+    // call names them (`note_call`).
+    fn recv_binds(self: &Self, t: &ir::Terminator) bool {
+        let x = self.enclosing_row(t.callee);
+        return (t.args_len != 0 || t.recv != TYPE_NONE) && x != IG_NONE && !self.shapes.at(x as usize).keyed;
+    }
+
     // `note_method` for a call `t` with a receiver of a generic extend's method.
     fn note_method_of(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
-        // Peel the receiver to its instance.
-        let recv_op = b.oper_pool[t.args_start as usize];
-        let mut rt = b.operands.at(recv_op as usize).ty;
+        // Peel the receiver to its instance: an associated function's is the qualifying instance
+        // (`Terminator.recv`), a method's its first argument.
+        let mut rt = t.recv;
+        if rt == TYPE_NONE || unsafe (&*self.pkg).self_first(t.callee) {
+            if t.args_len == 0 {
+                return;
+            }
+            rt = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+        }
         let mut guard = 0;
         while guard < 4 {
             let y = *a.type_at(rt);
@@ -2612,7 +2623,7 @@ extend InstGraph {
                 return false;
             }
             let _ = self.bind_ext_keys(x, keys, 0, keys.len() as u32, frame);
-            return true;
+            return self.frame_bounds_hold(x, frame);
         }
         let bp = ext_blanket(ea, ea.type_of(ed.target_type), ea, row.emod, row.enode);
         if bp >= 0 {
@@ -2634,7 +2645,31 @@ extend InstGraph {
                 return false;
             }
         }
-        return true;
+        return self.frame_bounds_hold(x, frame);
+    }
+
+    // Whether the bounds of `exts` row `x`'s parameters hold for their values in `frame`
+    // (`Package::ext_bounds_concrete`): of conformances whose arguments fit, the one whose bounds hold
+    // is the instance's, as the checker and the emitter decide.
+    fn frame_bounds_hold(self: &Self, x: u32, frame: &Vector<Subst>) bool {
+        let row = *self.exts.at(x as usize);
+        let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
+        let gens = ea.at_const(row.enode).as_data.extend_def.generics;
+        if gens.len > 8 {
+            return true;
+        }
+        let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+        let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+        for g in 0..gens.len {
+            let gid = unsafe ea.list(gens)[g as usize];
+            unsafe lp[g as usize] = DefId { module: row.emod, node: gid };
+            for i in 0..frame.len() {
+                if frame.at(i).pmod == row.emod && frame.at(i).pdecl == gid && !frame.at(i).key.has_val {
+                    unsafe la[g as usize] = frame.at(i).key.ty;
+                }
+            }
+        }
+        return (unsafe &*self.pkg).ext_bounds_concrete(row.emod, row.enode, &lp[0], &la[0], gens.len, row.emod, 0);
     }
 
     // Bind the parameters `gens` (module `em`) that pattern type `pt` (of `ea`) names so that it is
@@ -2927,7 +2962,7 @@ extend InstGraph {
                 let t = b.blocks.at(i).term;
                 if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
                     self.wcache[ki as usize].calls.push(i as u32);
-                    let meth = t.args_len != 0 && self.enclosing_row(t.callee) != IG_NONE;
+                    let meth = (t.args_len != 0 || t.recv != TYPE_NONE) && self.enclosing_row(t.callee) != IG_NONE;
                     self.wcache[ki as usize].meths.push(meth);
                 }
             }
@@ -2974,7 +3009,7 @@ extend InstGraph {
         }
         for i in 0..(unsafe &*wp).calls.len() {
             let t = b.blocks.at((*(unsafe &*wp).calls.at(i)) as usize).term;
-            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 {
+            if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 && !self.recv_binds(&t) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
             if *(unsafe &*wp).meths.at(i) {
@@ -3014,6 +3049,32 @@ extend InstGraph {
                 work.push((unsafe &*bp).closures[c2]);
             }
         }
+    }
+
+    /// Whether record `id` is a demanded instance of a generic function or method whose body holds a
+    /// static_assert (`Ast.assert_fns`); `prm` and `tys` then receive its parameter bindings.
+    pub fn assert_binds(self: &mut Self, id: u32, prm: &mut Vector<NodeId>, tys: &mut Vector<TypeId>) bool {
+        let r = *self.recs.at(id as usize);
+        if r.kind != IG_FN && r.kind != IG_METHOD || (self.flags[id as usize] & RF_SPEC) != 0 {
+            return false;
+        }
+        let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
+        if !a.assert_fns.contains(&r.def.node) {
+            return false;
+        }
+        let mut frame = self.take_frame();
+        let x = self.enclosing_row(r.def);
+        let mut pos: u32 = 0;
+        if x != IG_NONE {
+            pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
+        }
+        self.bind_generics(a, a.at_const(r.def.node).as_data.function.generics, &r, pos, &mut frame);
+        for i in 0..frame.len() {
+            prm.push(frame.at(i).pdecl);
+            tys.push(frame.at(i).key.ty);
+        }
+        self.give_frame(frame);
+        return true;
     }
 
     /// Seed every concrete body of every emitted module (functions, methods, constant initializers)
@@ -3191,6 +3252,52 @@ fn ty_names(a: &Ast, t: TypeId, d: DefId, depth: i32) bool {
             let mut hit = it.module == d.module && it.decl == d.node;
             for i in 0..it.n {
                 hit = hit || ty_names(a, unsafe it.args[i as usize], d, depth + 1);
+            }
+            hit;
+        },
+        _ => false,
+    };
+}
+
+// The parameter index of identity form `l` (one coefficient-1 parameter, no constant, no divisor,
+// no retyping), else -1.
+fn lin_identity(l: &ConstLin) i64 {
+    let mut nact: u32 = 0;
+    let mut hit: i64 = -1;
+    for i in 0..l.n {
+        if !unsafe l.c[i as usize].is_zero() {
+            nact += 1;
+            hit = i;
+        }
+    }
+    if l.k.is_zero() && l.div_of() == i128::one() && nact == 1 && unsafe l.c[hit as usize] == i128::one() && l.ty == l.to {
+        return hit;
+    }
+    return -1;
+}
+
+// Whether `t` spells a computed const argument (`{N + 1}`, `{BITS * 2}`) anywhere.
+fn folds_const(a: &Ast, t: TypeId, depth: i32) bool {
+    if t == TYPE_NONE || depth > 8 {
+        return false;
+    }
+    let y = *a.type_at(t);
+    return switch y.kind {
+        TYPE_CONST_EXPR => lin_identity(a.const_lin_at(y.as_data.inst)) < 0,
+        TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => folds_const(a, y.as_data.elem, depth + 1),
+        TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => folds_const(a, y.as_data.arr.elem, depth + 1) || y.arr_sym() && folds_const(
+            a,
+            y.as_data.arr.len,
+            depth + 1,
+        ),
+        TYPE_INSTANCE | TYPE_DYN | TYPE_FUNCTION | TYPE_ASSOC => {
+            let r = y.rec();
+            let mut hit = false;
+            if r != NO_REC {
+                let it = a.instance(r);
+                for i in 0..it.n {
+                    hit = hit || folds_const(a, unsafe it.args[i], depth + 1);
+                }
             }
             hit;
         },

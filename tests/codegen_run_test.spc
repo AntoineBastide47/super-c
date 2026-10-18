@@ -45,6 +45,146 @@ fn operator_overload_lowering() {
 }
 
 @test
+fn user_index_on_concrete_structs() {
+    // A struct's own `index`/`index_mut` (a plain extend or a generic conformance) is called for a
+    // read, a store, a compound store and `&mut v[i]`, at run time and in a constant.
+    run_exit(
+        "user index and index_mut",
+        "struct W { pub e: [i32; 3] }\nextend W {\n    pub fn index(self: &W, i: usize) &i32 { return &unsafe self.e[i]; }\n    pub fn index_mut(self: &mut W, i: usize) &mut i32 { return &mut unsafe self.e[i]; }\n}\nstruct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy, const N: usize> V<T, N> as Index<T, []T> {\n    pub fn index(self: &V<T, N>, i: usize) &T { if i >= N { panic(\"oob\"); } return &unsafe self.e[i]; }\n    pub fn index_range(self: &V<T, N>, r: Range<usize>) []T { return unsafe Slice::<T> { ptr: (&self.e[0] as *const T) + r.start, len: r.end - r.start }; }\n}\nextend<T: Copy, const N: usize> V<T, N> as IndexMut<T, []mut T> {\n    pub fn index_mut(self: &mut V<T, N>, i: usize) &mut T { if i >= N { panic(\"oob\"); } return &mut unsafe self.e[i]; }\n    pub fn index_range_mut(self: &mut V<T, N>, r: Range<usize>) []mut T { return unsafe SliceMut::<T> { ptr: (&mut self.e[0] as *mut T) + r.start, len: r.end - r.start }; }\n}\nfn k() i32 {\n    let mut v = V::<i32, 2> { e: [1, 2] };\n    v[1] = 7;\n    return v[1];\n}\nconst K: i32 = k();\nfn main() i32 {\n    let mut w = W { e: [1, 2, 3] };\n    w[1] = 9;\n    w[0] += 4;\n    let r = &mut w[2];\n    *r = 10;\n    let mut v = V::<i32, 3> { e: [1, 2, 3] };\n    v[2] = w[0] + w[1];\n    v[0] *= 3;\n    unsafe exit(w[0] + w[1] + w[2] + v[0] + v[2] + K);\n}\n",
+        48,
+    );
+}
+
+@test
+fn user_index_range_on_concrete_structs() {
+    // `v[lo..hi]` on a struct calls its `index_range` with the bounds in a `Range<usize>` (a missing
+    // start is 0, a missing end its `len()`), `&mut v[lo..hi]` its `index_range_mut`, in a generic
+    // body, at run time and in a constant.
+    run_exit(
+        "user index_range and index_range_mut",
+        "struct V<const N: usize> { pub e: [i32; N] }\nextend<const N: usize> V<N> { pub fn len(self: &V<N>) usize { return N; } }\nextend<const N: usize> V<N> as Index<i32, []i32> {\n    pub fn index(self: &V<N>, i: usize) &i32 { return &unsafe self.e[i]; }\n    pub fn index_range(self: &V<N>, r: Range<usize>) []i32 {\n        let hi = r.end + (r.inclusive as usize);\n        if r.start > hi || hi > N { panic(\"oob\"); }\n        return unsafe Slice::<i32> { ptr: (&self.e[0] as *const i32) + r.start, len: hi - r.start };\n    }\n}\nextend<const N: usize> V<N> as IndexMut<i32, []mut i32> {\n    pub fn index_mut(self: &mut V<N>, i: usize) &mut i32 { return &mut unsafe self.e[i]; }\n    pub fn index_range_mut(self: &mut V<N>, r: Range<usize>) []mut i32 {\n        let hi = r.end + (r.inclusive as usize);\n        if r.start > hi || hi > N { panic(\"oob\"); }\n        return unsafe SliceMut::<i32> { ptr: (&mut self.e[0] as *mut i32) + r.start, len: hi - r.start };\n    }\n}\nfn sum(s: []i32) i32 { let mut t = 0; for x in s { t += x; } return t; }\nfn tail<const N: usize>(v: &V<N>, k: usize) []i32 { return v[k..]; }\nfn ts() i32 { let v = V::<4> { e: [1, 2, 3, 4] }; return sum(v[1..]); }\nconst TS: i32 = ts();\nfn main() i32 {\n    let mut v = V::<4> { e: [1, 2, 3, 4] };\n    let w = &mut v[2..];\n    w[0] = 7;\n    unsafe exit(sum(v[1..3]) + sum(v[..=1]) * 10 + sum(tail(&v, 3)) + TS);\n}\n",
+        52,
+    );
+}
+
+// Of two conformances to one operator interface, the one whose extend bounds the operand's instance
+// does not satisfy (`V<T: Int, N>` for `V<bool, 2>`) is no candidate.
+@test
+fn operator_candidates_respect_extend_bounds() {
+    h::expect_exit(
+        "bounded and concrete BitAnd",
+        M"(interface Int: Copy {}
+extend i32 as Int {}
+struct V<T, const N: usize> { pub e: [T; N] }
+extend<const N: usize> V<bool, N> as BitAnd {
+    type Output = V<bool, N>;
+    pub fn bit_and(self: &V<bool, N>, o: &V<bool, N>) V<bool, N> {
+        let mut r = *self;
+        for i in 0..N { unsafe { r.e[i] = self.e[i] && o.e[i]; } }
+        return r;
+    }
+}
+extend<T: Int, const N: usize> V<T, N> as BitAnd {
+    type Output = V<T, N>;
+    pub fn bit_and(self: &V<T, N>, o: &V<T, N>) V<T, N> { return *self; }
+}
+fn main() i32 {
+    let c = V::<bool, 2> { e: [true, false] } & V::<bool, 2> { e: [true, true] };
+    let d = V::<i32, 2> { e: [3, 4] } & V::<i32, 2> { e: [1, 1] };
+    return c.e[0] as i32 + c.e[1] as i32 * 2 + d.e[1];
+}
+)",
+        5,
+    );
+}
+
+// Two generic conformances of one type to one interface whose arguments both fit (`i32 as Count<T>`
+// with `T: Num`, `i32 as Count<W<T>>`): the bound check, the dispatch at run time and in a constant
+// all take the one whose bounds hold; and two generic conformances whose interface-solved parameters
+// have disjoint bounds (`T as Mix<U>` with `U: Fl`, `T as Mix<bool>`) do not conflict.
+@test
+fn conformance_chosen_by_bounds() {
+    h::expect_exit(
+        "Count<f32> and Count<W<f32>> on i32",
+        M"(interface Num: Copy {}
+extend f32 as Num {}
+struct W<T: Num> { pub v: T }
+interface Count<G>: Copy { fn count(self: Self) i32; }
+extend<T: Num> i32 as Count<T> { pub fn count(self: i32) i32 { return self; } }
+extend<T: Num> i32 as Count<W<T>> { pub fn count(self: i32) i32 { return self + 1; } }
+fn steps<G, U: Count<G>>(x: G, n: U) i32 { let _ = x; return n.count(); }
+const A: i32 = steps(1.0f32, 3);
+const B: i32 = steps(W::<f32> { v: 1.0 }, 3);
+fn main() i32 { let n: i32 = 3; return steps(1.0f32, n) + steps(W::<f32> { v: 1.0 }, n) * 10 + A + B * 2; }
+)",
+        54,
+    );
+    h::expect_exit(
+        "Mix<U: Fl> and Mix<bool>",
+        M"(interface Fl: Copy { fn lerp(a: Self, b: Self, t: Self) Self; }
+extend f32 as Fl { pub fn lerp(a: f32, b: f32, t: f32) f32 { return a + (b - a) * t; } }
+interface Mix<A>: Copy { fn mix(self: Self, y: Self, a: A) Self; }
+extend<U: Fl> f32 as Mix<U> { pub fn mix(self: f32, y: f32, a: U) f32 { let _ = a; return self + y; } }
+extend f32 as Mix<bool> { pub fn mix(self: f32, y: f32, a: bool) f32 { return if a { y; } else { self; }; } }
+fn mix<G: Mix<A>, A>(x: G, y: G, a: A) G { return x.mix(y, a); }
+fn gen<T: Fl>(x: f32, t: T) f32 { return mix(x, 2.0, t); }
+fn main() i32 { return (mix(1.0f32, 6.0f32, true) + gen(1.0, 0.5f32)) as i32; }
+)",
+        9,
+    );
+}
+
+// Through a generic type named without arguments (`V::new(..)`), the argument count picks among
+// associated functions of disjoint extends, and the instance follows from the chosen one.
+@test
+fn argument_count_picks_an_associated_function() {
+    h::expect_exit(
+        "V::new with 2 and 3 arguments",
+        "struct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy> V<T, 2> { pub fn new(x: T, y: T) V<T, 2> { return V::<T, 2> { e: [x, y] }; } }\nextend<T: Copy> V<T, 3> { pub fn new(x: T, y: T, z: T) V<T, 3> { return V::<T, 3> { e: [x, y, z] }; } }\nfn main() i32 { let a = V::new(1, 2); let b = V::new(1, 2, 3); return a.e[1] + b.e[2] * 10; }\n",
+        32,
+    );
+}
+
+@test
+fn operators_of_generic_shapes() {
+    // An overloaded operator from an extend whose parameter only the interface solves (`K`), a
+    // scalar-on-the-left operator through a type parameter's generic conformance, and more than eight
+    // same-named operator methods on one type.
+    run_exit(
+        "keyed operators and a generic conformance through a type parameter",
+        "struct M<const C: usize, const R: usize> { pub v: [[i32; R]; C] }\nextend<const C: usize, const R: usize, const K: usize> M<C, R> as Mul<M<K, C>> {\n    type Output = M<K, R>;\n    pub fn mul(self: &M<C, R>, b: &M<K, C>) M<K, R> {\n        let mut m = M::<K, R> { v: [[0; R]; K] };\n        for k in 0..K { for r in 0..R { for i in 0..C { unsafe { m.v[k][r] = m.v[k][r] + self.v[i][r] * b.v[k][i]; } } } }\n        return m;\n    }\n}\nextend<const C: usize, const R: usize> M<C, R> as Mul<i32> {\n    type Output = M<C, R>;\n    pub fn mul(self: &M<C, R>, s: &i32) M<C, R> {\n        let mut m = *self;\n        for k in 0..C { for r in 0..R { unsafe { m.v[k][r] = self.v[k][r] * *s; } } }\n        return m;\n    }\n}\nextend<const C: usize, const R: usize> M<C, R> as Mul<bool> {\n    type Output = M<C, R>;\n    pub fn mul(self: &M<C, R>, s: &bool) M<C, R> { return *self; }\n}\nstruct D { pub x: i32 }\nextend D as Div<i8> { type Output = i32; pub fn div(self: &D, o: &i8) i32 { return 1; } }\nextend D as Div<i16> { type Output = i32; pub fn div(self: &D, o: &i16) i32 { return 2; } }\nextend D as Div<i32> { type Output = i32; pub fn div(self: &D, o: &i32) i32 { return self.x / *o; } }\nextend D as Div<i64> { type Output = i32; pub fn div(self: &D, o: &i64) i32 { return 4; } }\nextend D as Div<u8> { type Output = i32; pub fn div(self: &D, o: &u8) i32 { return 5; } }\nextend D as Div<u16> { type Output = i32; pub fn div(self: &D, o: &u16) i32 { return 6; } }\nextend D as Div<u32> { type Output = i32; pub fn div(self: &D, o: &u32) i32 { return 7; } }\nextend D as Div<u64> { type Output = i32; pub fn div(self: &D, o: &u64) i32 { return 8; } }\nextend D as Div<f32> { type Output = i32; pub fn div(self: &D, o: &f32) i32 { return 9; } }\nextend D as Div<f64> { type Output = i32; pub fn div(self: &D, o: &f64) i32 { return 10; } }\ninterface Sc: Copy { fn sub(self: &Self, o: &Self) Self; }\nextend i32 as Sc { pub fn sub(self: &i32, o: &i32) i32 { return *self - *o; } }\nstruct V { pub x: i32 }\nextend<T: Sc> T as Sub<V> { type Output = V; pub fn sub(self: &T, v: &V) V { return V { x: 100 - v.x }; } }\nfn lhs<T: Sc>(t: T, v: V) V { return t - v; }\nfn main() i32 {\n    let a = M::<2, 3> { v: [[1, 2, 3], [4, 5, 6]] };\n    let b = M::<3, 2> { v: [[1, 0], [0, 1], [1, 1]] };\n    let p = a * b * 2;\n    let d = D { x: 12 } / 4;\n    unsafe exit(p.v[2][2] + d + lhs(7, V { x: 90 }).x);\n}\n",
+        31,
+    );
+    // In a generic body, a fixed argument of the right operand's type (`3` in `V<T, 3>`) chooses the
+    // conformance whose parameter has it.
+    run_exit(
+        "a right operand over a type parameter",
+        "struct V<T, const N: usize> { pub e: [T; N] }\nstruct G<T> { pub k: T }\nextend<T: Copy> G<T> as Mul<V<T, 3>> {\n    type Output = i32;\n    pub fn mul(self: &G<T>, v: &V<T, 3>) i32 { return 30; }\n}\nextend<T: Copy> G<T> as Mul<V<T, 4>> {\n    type Output = i32;\n    pub fn mul(self: &G<T>, v: &V<T, 4>) i32 { return 40; }\n}\nfn g<T: Copy>(x: G<T>, t: T) i32 {\n    return x * V::<T, 3> { e: [t, t, t] } + x * V::<T, 4> { e: [t, t, t, t] };\n}\nfn main() i32 {\n    unsafe exit(g(G::<i32> { k: 1 }, 2));\n}\n",
+        70,
+    );
+    // A compound assignment chooses its overload as the plain operator does: `v += 1` takes
+    // `Add<i32>`, a by-value shift count stays by value, and an unsuffixed literal takes the
+    // conformance's type (`w * 3` with `Mul<u8>`).
+    run_exit(
+        "compound assignments and literal right operands",
+        "struct V { pub x: i32 }\nextend V as Add { type Output = V; pub fn add(self: &V, o: &V) V { return V { x: self.x + o.x }; } }\nextend V as Add<i32> { type Output = V; pub fn add(self: &V, s: &i32) V { return V { x: self.x + *s }; } }\nextend V as Shl<V> { type Output = V; pub fn shl(self: &V, n: V) V { return V { x: self.x << n.x }; } }\nstruct W { pub x: u8 }\nextend W as Mul { type Output = W; pub fn mul(self: &W, o: &W) W { return W { x: self.x * o.x }; } }\nextend W as Mul<u8> { type Output = W; pub fn mul(self: &W, s: &u8) W { return W { x: self.x * *s }; } }\nfn main() i32 {\n    let mut v = V { x: 1 };\n    v += 1;\n    v += V { x: 1 };\n    v <<= V { x: 2 };\n    let w = W { x: 2 } * 3;\n    let mut u = W { x: 1 };\n    u *= 5;\n    unsafe exit(v.x + w.x as i32 + u.x as i32);\n}\n",
+        23,
+    );
+}
+
+@test
+fn escaped_names_stay_distinct() {
+    // An escaped name gains a `_` (`sqrt` is a <tgmath.h> macro, `int` a keyword, `printf` a library
+    // symbol), so a name that already ends in `_` after such a stem gains one too: each pair below
+    // links as two symbols.
+    run_exit(
+        "escaped and underscored names",
+        "fn sqrt(x: i32) i32 { return x + 1; }\nfn sqrt_(x: i32) i32 { return x + 2; }\nfn printf(x: i32) i32 { return x + 3; }\nfn printf_(x: i32) i32 { return x + 4; }\nstruct S { pub v: i32 }\nextend S {\n    pub fn int(self: &S) i32 { return self.v; }\n    pub fn int_(self: &S) i32 { return self.v * 2; }\n}\ninterface Root { fn sqrt_(self: Self) Self; }\nextend f32 as Root { pub fn sqrt_(self: f32) f32 { return self + 1.0; } }\nfn main() i32 {\n    let s = S { v: 5 };\n    unsafe exit(sqrt(0) + sqrt_(0) + printf(0) + printf_(0) + s.int() + s.int_() + (4.0f32.sqrt() + 4.0f32.sqrt_()) as i32);\n}\n",
+        32,
+    );
+}
+
+@test
 fn matchertext() {
     // Plain literals decode verbatim (embedded quotes, no escape processing); interpolation
     // desugars through the sugar_fmt_* path; format() accepts a matchertext template with `{}`
@@ -2428,6 +2568,627 @@ static_assert(cls::<{-3}>() == 1 && cls::<3>() == 0);
 fn main() i32 { return 0; }
 )",
         0,
+    );
+}
+
+// A constant built by a callee whose result instance is a const expression (`V<{N + M}>`) keeps the
+// expression's value as its instance argument, so it is static data of its declared type.
+@test
+fn constant_of_a_const_expression_instance() {
+    h::expect_exit(
+        "a V<{N + M}> constant",
+        M"(struct V<const N: usize> { pub e: [i32; N] }
+extend<const N: usize> V<N> {
+    pub fn concat<const M: usize>(self: V<N>, b: V<M>) V<{N + M}> {
+        let mut r = V::<{N + M}> { e: [0; N + M] };
+        for i in 0..N { unsafe { r.e[i] = self.e[i]; } }
+        for i in 0..M { unsafe { r.e[N + i] = b.e[i]; } }
+        return r;
+    }
+}
+const X: V<4> = V::<2> { e: [1, 2] }.concat(V::<2> { e: [3, 4] });
+fn main() i32 { return X.e[0] + X.e[3] * 10; }
+)",
+        41,
+    );
+}
+
+// A constant folds an operator whose extend has a parameter only its interface solves (`K`): the
+// evaluator binds the extend's arguments the operator node names.
+@test
+fn constant_of_a_keyed_operator() {
+    h::expect_exit(
+        "a keyed Mul in a constant",
+        M"(struct M<const C: usize> { pub e: [i32; C] }
+extend<const C: usize, const K: usize> M<C> as Mul<M<K>> {
+    type Output = M<K>;
+    pub fn mul(self: &M<C>, b: &M<K>) M<K> {
+        let mut r = M::<K> { e: [0; K] };
+        for k in 0..K { unsafe { r.e[k] = self.e[0] * b.e[k]; } }
+        return r;
+    }
+}
+const P: M<2> = M::<3> { e: [2, 0, 0] } * M::<2> { e: [3, 4] };
+static_assert(P.e[1] == 8);
+fn main() i32 { return P.e[0] + P.e[1] * 10; }
+)",
+        86,
+    );
+}
+
+// A union member read through another scalar member of the same size reinterprets the bits in a
+// constant as at run time: `f32_bits`, `f64_bits` and their inverses fold.
+@test
+fn constant_union_puns() {
+    h::expect_exit(
+        "float bit puns in constants",
+        M"(union P { pub u: u32, pub i: i32 }
+const A: u32 = f32_bits(1.0f32);
+const B: u64 = f64_bits(-0.0f64);
+const C: f64 = f64_from_bits(0x3FF8000000000000);
+const D: u32 = f32_bits(f32_from_bits(0x7F800001));
+const E: i32 = P { u: 0xFFFFFFFF }.i;
+static_assert(A == 0x3F800000 && B == 0x8000000000000000 && C == 1.5 && D == 0x7F800001 && E == -1);
+fn main() i32 {
+    let ok = A == f32_bits(1.0f32) && B == f64_bits(-0.0f64) && D == f32_bits(f32_from_bits(0x7F800001));
+    return ok as i32 + (C * 2.0) as i32 + E;
+}
+)",
+        3,
+    );
+}
+
+// A static_assert of a generic function whose condition calls a function evaluates for each
+// instance a concrete call makes, whatever else evaluated that function.
+@test
+fn instance_static_assert_calls_a_function() {
+    const SRC: str = "interface Num: Copy { fn is_signed() bool; }\nextend u32 as Num { pub fn is_signed() bool { return false; } }\nextend i32 as Num { pub fn is_signed() bool { return true; } }\nfn only_signed<T: Num>(x: T) T { static_assert(T::is_signed(), \"only signed types\"); return x; }\n";
+    h::expect_exit("a signed instance", format("{}fn main() i32 {{ return only_signed(3i32); }}\n", SRC).as_str(), 3);
+    h::expect_build_err(
+        "an unsigned instance",
+        format("{}fn main() i32 {{ return only_signed(3u32) as i32; }}\n", SRC).as_str(),
+        "static assertion failed: only signed types",
+    );
+    // std::math's `sign` takes signed inputs only (its static_assert).
+    h::expect_build_err(
+        "std::math sign of an unsigned value",
+        "import std::math::common as *;\nfn main() i32 { return sign(3u32) as i32; }\n",
+        "static assertion failed: 'sign' only accepts signed inputs",
+    );
+    // An instance only another generic body reaches is checked too (the instance graph's check).
+    const NESTED: str = "fn outer<T: Num>(x: T) T { return only_signed(x); }\n";
+    h::expect_exit(
+        "a signed nested instance",
+        format("{}{}fn main() i32 {{ return outer(3i32); }}\n", SRC, NESTED).as_str(),
+        3,
+    );
+    h::expect_build_err(
+        "an unsigned nested instance",
+        format("{}{}fn main() i32 {{ return outer(3u32) as i32; }}\n", SRC, NESTED).as_str(),
+        "static assertion failed: only signed types",
+    );
+    // A method of a generic extend with no parameters of its own.
+    h::expect_build_err(
+        "a method of a generic extend",
+        format(
+            "{}struct W<T> {{ pub v: T }}\nextend<T: Num> W<T> {{ fn get(self: W<T>) T {{ static_assert(T::is_signed(), \"signed W\"); return self.v; }} }}\nfn main() i32 {{ let w = W::<u32> {{ v: 3 }}; return w.get() as i32; }}\n",
+            SRC,
+        ).as_str(),
+        "static assertion failed: signed W",
+    );
+}
+
+// A method of a generic extend with const parameters of its own binds the extend's parameters from its
+// receiver and its own from the call's: `pick::<2, 1, 2>()` on `W<i32, 3>` is I = 2, J = 1, K = 2
+// under N = 3, never the call's arguments read as the extend's (T = 2, N = 1, I = 2).
+@test
+fn instance_static_assert_of_a_method_with_its_own_parameters() {
+    const SRC: str = "struct W<T: Copy, const N: usize> { pub e: [T; N] }\nextend<T: Copy, const N: usize> W<T, N> { pub fn pick<const I: usize, const J: usize, const K: usize>(self: W<T, N>) T { static_assert(I < N && J < N && K < N, \"index past the end\"); return unsafe self.e[I]; } }\n";
+    h::expect_exit(
+        "indexes inside the instance",
+        format("{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<2, 1, 2>() - 3; }}\n", SRC).as_str(),
+        0,
+    );
+    h::expect_build_err(
+        "an index past the end",
+        format("{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<0, 3, 1>(); }}\n", SRC).as_str(),
+        "static assertion failed: index past the end",
+    );
+}
+
+// An interface-qualified call in a generic conformance (`Num::twice(self)`, `Num::make(2)`) folds in
+// a constant: a `Self` argument names the implementor, else the `Self` result.
+@test
+fn constant_of_an_interface_qualified_call() {
+    h::expect_exit(
+        "Num::twice(self) and Num::make(2) in constants",
+        M"(interface Num: Copy { fn twice(self: Self) Self; fn make(v: i32) Self; }
+extend i64 as Num { pub fn twice(self: i64) i64 { return self * 2; } pub fn make(v: i32) i64 { return v; } }
+interface Q: Copy { fn q(self: Self) Self; fn m() Self; }
+extend<T: Num> T as Q { pub fn q(self: T) T { return Num::twice(self); } pub fn m() T { return Num::make(5); } }
+const A: i64 = 21i64.q();
+const B: i64 = i64::m();
+static_assert(A == 42 && B == 5);
+fn main() i32 { let b = i64::m(); return (A + B + b) as i32; }
+)",
+        52,
+    );
+    // In a generic conformance, `Twice::twice(x)` on a `T` takes that conformance, as `x.twice()` does.
+    h::expect_exit(
+        "an interface-qualified call through the enclosing generic conformance",
+        "interface Lane: Copy {}\nextend i32 as Lane {}\ninterface Twice: Copy { fn twice(self: Self) Self; fn four(self: Self) Self; }\nextend<T: Lane> T as Twice {\n    pub fn twice(self: T) T { return self; }\n    pub fn four(self: T) T { let x = self; return Twice::twice(x); }\n}\nfn main() i32 { return 3.four(); }\n",
+        3,
+    );
+}
+
+// `return pair();` forwards a multi-value call's results as the return list: owned results move
+// through without a leak, in a generic function and in a constant evaluation.
+@test
+fn multi_value_call_forwarded_by_return() {
+    run_leak_free(
+        "return pair();",
+        M"(fn pair(n: i32) (String, i32) { let mut s = String::new(); s.push_str("abc"); return s, n; }
+fn forward(n: i32) (String, i32) { if n > 10 { return pair(1); } return pair(n); }
+fn gen<T: Copy>(t: T) (T, T) { return t, t; }
+fn gfwd<T: Copy>(t: T) (T, T) { return gen(t); }
+const fn cp() (i32, i32) { return 3, 4; }
+const fn cf() (i32, i32) { return cp(); }
+const fn sum() i32 { let (a, b) = cf(); return a + b; }
+const S: i32 = sum();
+fn main() i32 {
+    let (s, n) = forward(2);
+    let (x, y) = gfwd(5i64);
+    return s.len() as i32 + n + (x + y) as i32 + S;
+}
+)",
+        22,
+    );
+    // Array results fill the carrier by copy, also when forwarded.
+    run_leak_free(
+        "array results",
+        M"(fn pair(k: u32) ([u32; 2], i64, [String; 1]) { let v: [u32; 2] = [1, k]; return v, 7, [String::from_str("xy")]; }
+fn fwd() ([u32; 2], i64, [String; 1]) { return pair(4); }
+fn main() i32 {
+    let (v, n, s) = fwd();
+    return (v[0] + v[1]) as i32 + n as i32 + s[0].len() as i32;
+}
+)",
+        14,
+    );
+    h::expect_err_msg(
+        "a forwarded result of another type",
+        "fn pair() (i32, i64) { return 1, 2; }\nfn forward() (i32, i32) { return pair(); }\nfn main() i32 { let (a, b) = forward(); return a + b; }\n",
+        "result 2 of the forwarded call is 'i64', the function returns 'i32' there",
+    );
+}
+
+// A by-value builtin method called through a reference receiver (`x.wrapping_sub(1)`, `x: &u32`)
+// folds in a constant, reading the referent.
+@test
+fn constant_of_a_builtin_method_through_a_reference() {
+    h::expect_exit(
+        "x.wrapping_sub(1) with x: &u32",
+        "fn via_ref(x: &u32) u32 { return x.wrapping_sub(1); }\nconst A: u32 = via_ref(&17);\nstatic_assert(A == 16);\nfn main() i32 { let v: u32 = 5; return (A + via_ref(&v)) as i32; }\n",
+        20,
+    );
+}
+
+// A generic extend's constant a parallel seed task references is defined: the shard's demand reaches
+// the master (the fresh build of a program over std::math seeds in parallel).
+@test
+fn generic_extend_constant_from_a_parallel_seed() {
+    h::expect_exit(
+        "Quat::<f32>::LEN through std::math::all",
+        "import std::math::all as *;\nfn main() i32 { return Quat::<f32>::LEN as i32 + vec3::LEN as i32; }\n",
+        7,
+    );
+}
+
+// An array argument for a generic `[]T` parameter binds T from its elements, as the array coerces to
+// the slice; also through a nested generic element type.
+@test
+fn array_argument_infers_a_slice_element() {
+    h::expect_exit(
+        "first(a) with a: [i32; 2] and first_w(b) with b: [W<i32>; 2]",
+        M"(struct W<T> { pub x: T }
+fn first<T: Copy>(v: []T) T { return v[0]; }
+fn first_w<T: Copy>(v: []W<T>) T { return v[1].x; }
+fn main() i32 {
+    let a = [1, 2];
+    let b = [W::<i32> { x: 3 }, W::<i32> { x: 4 }];
+    return first(a) + first_w(b) - 5;
+}
+)",
+        0,
+    );
+}
+
+// A call through a bound in a constant runs the conformance of the receiver's own instance when
+// extends differ only in const arguments (`extend M<2>` declared before `extend M<3>`), as at run
+// time; for a plain and for a generic interface.
+@test
+fn constant_through_a_bound_picks_the_instance_extend() {
+    h::expect_exit(
+        "M<2> and M<3> conformances",
+        M"(struct M<const N: usize> { pub x: i32 }
+interface Tag: Copy { fn tag(self: Self) i32; }
+interface GTag<X>: Copy { fn gtag(self: Self) i32; }
+fn tag<G: Tag>(g: G) i32 { return g.tag(); }
+fn gtag<X, G: GTag<X>>(g: G) i32 { return g.gtag(); }
+extend M<2> as Tag { pub fn tag(self: M<2>) i32 { return 2; } }
+extend M<3> as Tag { pub fn tag(self: M<3>) i32 { return 3; } }
+extend M<2> as GTag<i32> { pub fn gtag(self: M<2>) i32 { return 20; } }
+extend M<3> as GTag<i32> { pub fn gtag(self: M<3>) i32 { return 30; } }
+const A: i32 = tag(M::<3> { x: 0 });
+const B: i32 = tag(M::<2> { x: 0 });
+const C: i32 = gtag(M::<3> { x: 0 });
+static_assert(A == 3 && B == 2 && C == 30);
+@c.noinline
+fn run(m: M<3>) i32 { return tag(m) + gtag(m); }
+fn main() i32 { return A + B + C + run(M::<3> { x: 0 }) - 68; }
+)",
+        0,
+    );
+}
+
+// A constant evaluates a task-reachable body whose bound operator call carries a cancellation check
+// (`W`'s `mul` can accept a cancellation, which marks every interface `mul`): no task exists at
+// compile time, so the probe reports none.
+@test
+fn constant_through_a_cancellation_check() {
+    h::expect_exit(
+        "quad<V> under a cancellation probe",
+        M"(import std::parallel::runtime as rt;
+struct V { pub v: i32 }
+struct W { pub v: i32 }
+extend V as Mul { type Output = V; pub fn mul(self: &V, o: &V) V { return V { v: self.v * o.v }; } }
+extend W as Mul {
+    type Output = W;
+    pub fn mul(self: &W, o: &W) W { rt::sleep_ns(1); return W { v: self.v * o.v }; }
+}
+fn quad<T: Mul<Output = T> + Copy>(x: T) T { let y = x * x; return y * y; }
+fn checked<T>() { static_assert(quad(V { v: sizeof(T) as i32 }).v == 256); }
+const S: V = quad(V { v: 2 });
+fn main() i32 {
+    launch || { checked::<i32>(); let _ = quad(W { v: 2 }); let _ = quad(V { v: 2 }); };
+    rt::shutdown();
+    return S.v - 16;
+}
+)",
+        0,
+    );
+}
+
+// A generic function passing an instance over its own parameters (`W<T, 2>`) to a bound-generic
+// function folds in a constant: the argument grounds through the caller's frame.
+@test
+fn constant_through_nested_generic_calls() {
+    h::expect_exit(
+        "outer<T>(W<T, 2>) calling twice<G: Dbl>",
+        M"(interface Dbl: Copy { fn dbl(self: Self) Self; }
+extend f32 as Dbl { pub fn dbl(self: f32) f32 { return self * 2.0; } }
+struct W<T: Dbl, const N: usize> { pub e: [T; N] }
+extend<T: Dbl, const N: usize> W<T, N> as Dbl {
+    pub fn dbl(self: W<T, N>) W<T, N> {
+        let mut r = self;
+        for i in 0..N { unsafe { r.e[i] = self.e[i].dbl(); } }
+        return r;
+    }
+}
+fn twice<G: Dbl>(x: G) G { return x.dbl(); }
+fn outer<T: Dbl>(x: W<T, 2>) W<T, 2> { return twice(x); }
+const A: W<f32, 2> = outer(W::<f32, 2> { e: [1.0, 2.0] });
+static_assert(A.e[1] == 4.0);
+fn main() i32 { return A.e[1] as i32; }
+)",
+        4,
+    );
+}
+
+// An f32 converts to every integer width saturating (`__sc_f2i_*`): NaN is 0, a value
+// past either end is that end, the powers of two at the ends are exact; the run agrees with constants.
+@test
+fn f32_to_integer_saturates_at_every_width() {
+    h::expect_exit(
+        "f32 as i8 .. u64",
+        M"(@c.noinline
+fn id(x: f32) f32 { return x; }
+const NAN: f32 = 0.0f32 / 0.0f32;
+static_assert(NAN as i32 == 0 && 3.0e9f32 as i32 == 2147483647 && -3.0e9f32 as i32 == -2147483648);
+static_assert(300.0f32 as u8 == 255 && -1.0f32 as u8 == 0 && 255.9f32 as u8 == 255 && 2147483648.0f32 as i32 == 2147483647);
+static_assert(4294967296.0f32 as u32 == 4294967295 && 1.0e20f32 as u64 == 18446744073709551615 && -129.0f32 as i8 == -128);
+fn main() i32 {
+    let n = id(NAN);
+    let mut bad = 0;
+    if n as i32 != 0 || n as u8 != 0 || n as i64 != 0 || n as u64 != 0 { bad |= 1; }
+    if id(3.0e9) as i32 != 2147483647 || id(-3.0e9) as i32 != -2147483648 || id(2147483648.0) as i32 != 2147483647 { bad |= 2; }
+    if id(300.0) as u8 != 255 || id(-1.0) as u8 != 0 || id(255.9) as u8 != 255 || id(-0.9) as u8 != 0 { bad |= 4; }
+    if id(4294967296.0) as u32 != 4294967295 || id(4294967040.0) as u32 != 4294967040 || id(1.0e20) as u64 != 18446744073709551615 { bad |= 8; }
+    if id(-129.0) as i8 != -128 || id(127.5) as i8 != 127 || id(-32769.0) as i16 != -32768 || id(65535.5) as u16 != 65535 { bad |= 16; }
+    if id(-4611686018427387904.0) as i64 != -4611686018427387904 || id(1.0e19) as i64 != 9223372036854775807 { bad |= 32; }
+    return bad;
+}
+)",
+        0,
+    );
+}
+
+// `to_int_unchecked` truncates as `as` does for every value that fits, as one C cast; it needs
+// `unsafe`, and in a constant NaN or a value that does not fit is an error.
+@test
+fn float_to_int_unchecked() {
+    h::expect_exit(
+        "in-range values at run time and in constants",
+        M"(@c.noinline
+fn id(x: f32) f32 { return x; }
+@c.noinline
+fn idd(x: f64) f64 { return x; }
+const C: u8 = unsafe 200.9f32.to_int_unchecked::<u8>();
+const D: i64 = unsafe (-3.7f64).to_int_unchecked::<i64>();
+static_assert(C == 200 && D == -3);
+fn main() i32 {
+    let mut bad = 0;
+    if unsafe id(255.5).to_int_unchecked::<u8>() != 255 || unsafe id(-128.9).to_int_unchecked::<i8>() != -128 { bad |= 1; }
+    if unsafe id(4294967040.0).to_int_unchecked::<u32>() != 4294967040 || unsafe id(-0.9).to_int_unchecked::<u16>() != 0 { bad |= 2; }
+    if unsafe idd(-9.2e18).to_int_unchecked::<i64>() != -9200000000000000000 || unsafe idd(1.8e19).to_int_unchecked::<u64>() != 18000000000000000000 { bad |= 4; }
+    return bad;
+}
+)",
+        0,
+    );
+    h::expect_build_err(
+        "a call outside unsafe",
+        "fn main() i32 { let x: f32 = 3.5; return x.to_int_unchecked::<i32>(); }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    h::expect_build_err(
+        "a constant out of range",
+        "const E: u8 = unsafe 256.0f32.to_int_unchecked::<u8>();\nfn main() i32 { return E as i32; }\n",
+        "`to_int_unchecked` of NaN or of a value outside the integer type",
+    );
+    h::expect_build_err(
+        "a NaN constant",
+        "const F: i32 = unsafe (0.0f64 / 0.0).to_int_unchecked::<i32>();\nfn main() i32 { return F; }\n",
+        "`to_int_unchecked` of NaN or of a value outside the integer type",
+    );
+}
+
+// A default method a generic conformance inherits folds in a constant, its `Self` the instance.
+@test
+fn constant_of_an_inherited_default_on_an_instance() {
+    h::expect_exit(
+        "an inherited default on W<i32> in a constant",
+        M"(interface Len: Copy { fn len2(self: Self) f64; fn len(self: Self) f64 { return self.len2() + 1.0; } }
+struct W<T> { pub x: f64, pub t: T }
+extend<T: Copy> W<T> as Len { pub fn len2(self: W<T>) f64 { return self.x; } }
+const B: f64 = W::<i32> { x: 4.0, t: 0 }.len();
+static_assert(B == 5.0);
+fn main() i32 { return B as i32; }
+)",
+        5,
+    );
+}
+
+// The same default called on `W<N>` inside a generic function folds in a constant: `Self` binds to
+// the receiver grounded through the caller's frame (`W<3>`), not to `W<N>`, whose `N` the callee's
+// frame does not bind.
+@test
+fn constant_of_an_inherited_default_in_a_generic_function() {
+    h::expect_exit(
+        "an inherited default on W<N> in a generic function, in a constant",
+        M"(interface Measure: Copy { fn base(self: Self) f64; fn twice(self: Self) f64 { return self.base() * 2.0; } }
+struct W<const N: usize> { pub v: f64 }
+extend<const N: usize> W<N> as Measure { pub fn base(self: W<N>) f64 { return self.v + N as f64; } }
+fn twice_generic<const N: usize>(w: W<N>) f64 { return w.twice(); }
+const G: f64 = twice_generic(W::<3> { v: 1.5 });
+static_assert(G == 9.0);
+fn main() i32 { return G as i32 + twice_generic(W::<2> { v: 0.5 }) as i32; }
+)",
+        14,
+    );
+}
+
+// `assert` fails through one call of the runtime's cold, out-of-line `__sc_assert_fail`: the caller
+// keeps no printing code, so a helper that asserts inlines as one that panics does, and the report
+// keeps its form (the expression, the message, the location).
+@test
+fn assert_fails_out_of_line() {
+    let src = M"(fn check(a: f32, m: bool) {
+    if m {
+        assert(a >= 0.0, "below 0");
+    } else {
+        assert(a <= 1.0);
+    }
+}
+fn main(args: Vector<str>) i32 {
+    let m = args.len() > 1 && args[1] == "m";
+    let a: f32 = if m { -1.0; } else if args.len() > 1 { 2.0; } else { 0.5; };
+    check(a, m);
+    return 0;
+}
+)";
+    let c = h::compile_c(src);
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("__sc_assert_fail(\"assertion failed: `a >= 0.0`: %.*s\\n  at "), "the message form");
+    assert(c.code_has("__sc_assert_fail(\"assertion failed: `a <= 1.0`\\n  at "), "the plain form");
+    assert(!c.code_has("fprintf(stderr, \"assertion failed"), "no printing code in the caller");
+    let b = h::diff_build(src, []);
+    assert(b.built, b.diag.as_str());
+    assert_eq(h::diff_run(&b, "").exit, 0);
+    let rm = h::diff_run(&b, "m");
+    assert(
+        rm.exit != 0 && rm.err.contains("assertion failed: `a >= 0.0`: below 0\n  at ") && rm.err.contains(
+            "main.spc:3\n",
+        ),
+        rm.err.as_str(),
+    );
+    let rp = h::diff_run(&b, "p");
+    assert(
+        rp.exit != 0 && rp.err.contains("assertion failed: `a <= 1.0`\n  at ") && rp.err.contains("main.spc:5\n"),
+        rp.err.as_str(),
+    );
+}
+
+// `*b` on a `mut` Box binding is a place through `deref_mut`: assignable, indexable for a write, and a
+// `&mut` source, also nested (`(*m)[i][j]` of a boxed std::math matrix). On an immutable binding each
+// stays an error.
+@test
+fn box_deref_place_writes() {
+    h::expect_exit(
+        "writes through *b",
+        M"(import std::math::scalar as *;
+import std::math::vec as *;
+import std::math::mat as *;
+fn main() i32 {
+    let mut b = Box::new([1, 2, 3, 4]);
+    let r = &mut *b;
+    r[1] = 7;
+    (*b)[3] = 9;
+    let ok1 = (*b)[1] == 7 && (*b)[3] == 9;
+    *b = [5, 6, 7, 8];
+    let mut m = Box::new(Mat::<f64, 256, 256>::zero());
+    for i in 0usize..256 {
+        (*m)[i][i] = 1.0;
+    }
+    (*m)[3][7] = 2.5;
+    let ok2 = (*m)[3][7] == 2.5 && (*m)[255][255] == 1.0 && (*m)[1][0] == 0.0;
+    return if ok1 && ok2 && (*b)[2] == 7 { 0; } else { 1; };
+}
+)",
+        0,
+    );
+    h::expect_build_err(
+        "an immutable binding",
+        "fn main() i32 { let b = Box::new([1, 2]); *b = [3, 4]; return (*b)[0]; }\n",
+        "cannot assign to this expression",
+    );
+    h::expect_build_err(
+        "&mut of an immutable binding",
+        "fn main() i32 { let b = Box::new([1, 2]); let r = &mut *b; r[0] = 5; return (*b)[0]; }\n",
+        "cannot take '&mut' of an immutable binding",
+    );
+}
+
+// Constant evaluation reclaims a call's objects (its frame, argument copies and cells) when nothing older
+// holds one: a 32x32 product makes about 65 000 scalar calls through `Scalar` and stays within the
+// memory budget; a callee that grows a vector its caller holds keeps what it stores.
+@test
+fn constant_evaluation_reclaims_dead_call_objects() {
+    h::expect_exit(
+        "a 32x32 product and 20 000 pushes through a callee in constants",
+        M"(import std::math::scalar as *;
+import std::math::vec as *;
+import std::math::mat as *;
+struct H {
+    pub v: Vector<i64>,
+}
+fn put(h: &mut H, n: i64) i64 {
+    h.v.push(n);
+    return n;
+}
+fn pushes() i64 {
+    let mut h = H { v: Vector::<i64>::new() };
+    let mut s: i64 = 0;
+    for i in 0..20000i64 {
+        s += put(&mut h, i);
+    }
+    let mut t: i64 = 0;
+    for i in 0..h.v.len() {
+        t += h.v[i];
+    }
+    return s - t + h.v.len() as i64;
+}
+const P: Mat<f32, 32, 32> = Mat::<f32, 32, 32>::identity() * Mat::<f32, 32, 32>::identity();
+const N: i64 = pushes();
+static_assert(N == 20000);
+fn main() i32 {
+    return P[31][31] as i32 + P[0][1] as i32 + (N - 20000) as i32 - 1;
+}
+)",
+        0,
+    );
+}
+
+// Two conformances apply to `W<bool>` structurally (`W<T: Num>` and `W<bool>`) and only the bounds tell
+// them apart: the bound check, the method call, a bound call, `dyn`, an inherited default and the
+// constant evaluator take `W<bool>`'s in either declaration order.
+@test
+fn conformance_choice_ignores_declaration_order() {
+    let head = "interface Num: Copy { fn val(self: Self) u64; }\nextend i32 as Num { pub fn val(self: i32) u64 { return self as u64; } }\ninterface Key { fn key(self: &Self) u64; fn twice(self: &Self) u64 { return self.key() * 2; } }\nstruct W<T: Copy> { pub e: T }\n";
+    let generic = "extend<T: Num> W<T> as Key { pub fn key(self: &W<T>) u64 { return self.e.val(); } }\n";
+    let concrete = "extend W<bool> as Key { pub fn key(self: &W<bool>) u64 { return self.e as u64 + 10; } }\n";
+    let tail = M"(fn through<K: Key>(k: &K) u64 { return k.key(); }
+const A: u64 = through(&W::<bool> { e: true });
+const B: u64 = W::<bool> { e: true }.key();
+const C: u64 = W::<bool> { e: true }.twice();
+static_assert(A == 11 && B == 11 && C == 22);
+fn main() i32 {
+    let a = W::<i32> { e: 7 };
+    let b = W::<bool> { e: true };
+    let d: &dyn Key = &b;
+    let ok = through(&a) == 7 && through(&b) == 11 && b.key() == 11 && d.key() == 11 && b.twice() == 22 && a.twice() == 14;
+    return if ok { 0; } else { 1; };
+}
+)";
+    h::expect_exit("the generic conformance first", format("{}{}{}{}", head, generic, concrete, tail).as_str(), 0);
+    h::expect_exit("the concrete conformance first", format("{}{}{}{}", head, concrete, generic, tail).as_str(), 0);
+}
+
+// `M::<4>::from(m)`: the qualifying instance, not the first argument, binds the extend of an
+// associated function with its own const parameter, in a constant and at run time, whatever its
+// result type.
+@test
+fn qualified_associated_calls_of_generic_extends() {
+    h::expect_exit(
+        "M::<4>::from(M::<2>) and M::<4>::cnt(M::<2>)",
+        M"(struct M<const N: usize> { pub e: [i32; N] }
+extend<const N: usize> M<N> {
+    pub fn from<const N2: usize>(m: M<N2>) M<N> {
+        let mut r = M::<N> { e: [7; N] };
+        for i in 0..N { if i < N2 { unsafe { r.e[i] = m.e[i]; } } }
+        return r;
+    }
+    pub fn cnt<const N2: usize>(m: M<N2>) usize { return N * 10 + N2 + (m.e[0] as usize) * 0; }
+}
+const X: M<4> = M::<4>::from(M::<2> { e: [1, 2] });
+const C: usize = M::<4>::cnt(M::<2> { e: [1, 2] });
+static_assert(X.e[1] == 2 && X.e[3] == 7 && C == 42);
+fn main() i32 {
+    let y = M::<3>::from(M::<2> { e: [1, 2] });
+    return X.e[3] + y.e[2] * 10 + (M::<4>::cnt(M::<2> { e: [1, 2] }) - C) as i32;
+}
+)",
+        77,
+    );
+}
+
+// An associated type read through a bound (`G::B`) takes the type's own conformance over a generic
+// one declared first (`extend<T: Num> T as I<T>`), which applies only where no own one does.
+@test
+fn projection_prefers_the_own_conformance() {
+    h::expect_exit(
+        "G::B with a blanket conformance declared first",
+        M"(interface Num: Copy {}
+extend i32 as Num {}
+struct W { pub v: i64 }
+interface I<E>: Copy { type B; fn get(self: Self, e: E) Self::B; }
+extend<T: Num> T as I<T> { type B = bool; pub fn get(self: T, e: T) bool { return true; } }
+extend W as I<W> { type B = i64; pub fn get(self: W, e: W) i64 { return self.v + e.v; } }
+fn pick<E, G: I<E>>(x: G, e: E) G::B { return x.get(e); }
+fn main() i32 {
+    let w = W { v: 20 };
+    let r: i64 = pick(w, w);
+    return r as i32 + pick(1, 2) as i32;
+}
+)",
+        41,
+    );
+    // A generic conformance's method matches a signature naming `&mut Self::Out` through its own
+    // `type Out`.
+    h::expect_exit(
+        "&mut Self::Out in a generic conformance",
+        "interface Shape { type Out; fn set(o: &mut Self::Out, v: i32); }\ninterface Num: Copy {}\nextend i64 as Num {}\nextend<T: Num> T as Shape { type Out = i32; pub fn set(o: &mut i32, v: i32) { *o = v; } }\nfn put<S: Shape>(o: &mut S::Out, v: i32) { S::set(o, v); }\nfn main() i32 { let mut x: i32 = 1; put::<i64>(&mut x, 5); return x; }\n",
+        5,
     );
 }
 

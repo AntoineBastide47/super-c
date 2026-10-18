@@ -210,7 +210,11 @@ cannot be implemented for every type that satisfies a bound"). A type conforms t
 given arguments once: two generic conformances of one interface whose arguments meet for a type,
 and a conformance of a type that also satisfies a generic one's bounds with arguments that meet, are
 "conflicting conformances to 'Twice': a generic conformance also applies to this type", with a note
-at the generic one.
+at the generic one. Arguments meet only where the bounds of the parameters they solve hold:
+`extend<U: Fl> f32 as Mix<U>` and `extend f32 as Mix<bool>` do not conflict when `bool` is not
+`Fl`. Of several conformances whose interface arguments all fit (`extend<T: Num> i32 as Count<T>`
+and `extend<T: Num> i32 as Count<W<T>>` for `Count<W<f32>>`), a bound, a call and an associated
+type take the one whose parameters' bounds hold, at run time and at compile time alike.
 
 An extend's target arguments solve its parameters as follows.
 A bare parameter takes the instance's argument; a const form of one parameter without a division
@@ -221,7 +225,7 @@ solve: `F<{N + 3}>` gives `F<10>` its methods with `N = 7`, and `F<2>` has none 
 method 'get' on 'F<2>'"), nor its conformances. An argument that is itself a form or a parameter
 solves when every value it takes does (`F<{M + 3}>` in a generic of `M`, not `F<M>`). A target
 argument that places a parameter inside another type (`W<Vector<T>>`), a form of several parameters
-or with a division and a parameter written in two arguments are errors at the extend. Only the arguments the target writes constrain it (an alias constrains all
+or with a division and a parameter written in two arguments (`extend<T, const N: usize> M<T, N, N>`) are errors at the extend. Only the arguments the target writes constrain it (an alias constrains all
 of its instance's); `Free` is implemented for every instance, so its extend writes its parameters
 in order.
 
@@ -269,6 +273,23 @@ with the bound's arguments in every instance and at compile time, and its signat
 interface's parameters as those arguments, also through a superinterface (`T: J<bool>` with
 `J<B>: I<B>` calls `I<bool>`'s methods).
 
+An operator on an aggregate calls the method of its prelude interface (`std/interfaces.spc`; a
+method of that name is enough, the conformance documents it): `a + b` is `a.add(&b)`, and so
+`-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>` (`sub` .. `shr`), unary `-a` (`Neg`, `a.neg()`) and
+unary `~a` (`a.bit_not()`). Among several conformances (`V as Add`, `V as Add<i32>`) the right
+operand chooses, an unsuffixed literal taking the type of the one conformance its class fits
+(`w * 3` with `W as Mul<u8>`). A compound assignment `x op= r` on a struct or a generic instance
+that defines the method is `x = x op r` through the same choice (`v += 1` takes `Add<i32>`), and
+the method's result must be the left operand's type ("mismatched types: the operator's result 'P'
+is not 'V'"). Indexing an aggregate calls its `Index`/`IndexMut` methods (the prelude views `str`,
+`Slice`, `SliceMut`, `String`, `Vector` and `Array` index structurally): `obj[i]` reads through
+`index`, a written element (`obj[i] = v`, `obj[i] += v`, `&mut obj[i]`) goes through `index_mut`.
+`obj[lo..hi]`, in every range form, calls `index_range` with the bounds checked as `usize` and
+packed into a `Range<usize>` (`r.inclusive` set by `..=`); a missing start is 0 and a missing end
+is the value's `len()`, which must return `usize` ("an open-ended range index needs a 'len' method
+returning 'usize' on 'V<4>' to supply the end"). `&mut obj[lo..hi]` calls `index_range_mut`
+instead and has type `&mut S` for its result `S`.
+
 An operator whose left operand has a builtin type and whose right operand has a struct, enum or
 vector type calls the conformance of the builtin type that accepts the right operand
 (`extend f32 as Mul<V>` makes `s * v` and `2.0 * v` legal). An unsuffixed literal or literal-only
@@ -279,18 +300,20 @@ are "the literal's type is ambiguous: 2 types provide 'mul' for this right opera
 An operator on a type parameter dispatches through its bound the same way: `t + 5` for
 `T: Add<i32>` calls the `Add<i32>` conformance's `add` (with several bounds on the interface, the
 one whose parameter takes the right operand), and so do the other operator interfaces (`-`, `*`,
-`/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `~`), their compound forms and indexing (`t[i]` through
-`Index`, a written element through `IndexMut`). An associated type is read through the bound that
-declares it: `T::Output` (also through a superinterface) is the conformance's `type Output = ..`
-in each instance, and `Self::Output` in an interface signature or default body is the
-implementor's. A bound may fix it: `T: Add<i32, Output = T>` (the binding follows the arguments;
+`/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `-` and `~`), their compound forms and indexing (`t[i]`
+through `Index`, a written element through `IndexMut`). An associated type is read through the
+bound that declares it: `T::Output` (also through a superinterface) is the conformance's
+`type Output = ..` in each instance, and `Self::Output` in an interface signature or default body
+is the implementor's. A bound may fix it: `T: Add<i32, Output = T>` (the binding follows the arguments;
 only a generic parameter's or `where` predicate's bound may carry one), and a type argument must
 then have that `Output` ("type 'M' does not satisfy bound 'Add<i32, Output = T>': its 'Output' is
 'i64'"). A compound assignment through a bound needs the result to be `T` ("mismatched types: the
 operator's result 'T::Output' is not 'T'" without the binding). `T::Output` names nothing no bound
 declares ("no type 'Foo' in 'T'"), and two bounds declaring it differently are "ambiguous associated
 type 'Output': several bounds of 'T' declare it". A value of an unbound `T::Output` owns and moves
-as an unbounded `T` does.
+as an unbounded `T` does. `Self::Name` in an interface also names an associated type one of its
+superinterfaces declares (`interface J: I { fn get2(self: Self) Self::B; }`); one none declares is
+"no associated type by this name in scope".
 
 An interface's associated function called through a type parameter (`T::count()` for
 `T: I<bool>`) runs the conformance the parameter names, whatever its result or first argument, in
@@ -300,8 +323,10 @@ an extend of the receiver defines and every default a conformance without its ow
 bound to its conformance, by the overload score of [inference.md](inference.md): with
 `extend K as Make<i32>` overriding `sum` and `extend K as Make<bool>` inheriting it,
 `k.sum(true, false)` runs the default under `Make<bool>` and `k.sum(3, 4)` the override. The chosen
-body runs directly, through a bound, through dyn and at compile time alike. Candidates that fit
-equally are an error: "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that
+body runs directly, through a bound, through dyn and at compile time alike. Among candidates that
+fit equally and that the expected result does not tell apart, the only one a plain extend (no
+interface) defines wins, as an inherent method does in Rust. Other candidates that fit equally are
+an error: "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that
 fit" when they are one default under several conformances (`k.make2(1, 2)` with `Mk<i64>` and
 `Mk<u64>`), else "ambiguous call: two candidates for 'sum' fit equally well"; an unsuffixed literal
 prefers its default type (`Mk<i32>` over `Mk<i64>`). Without arguments, only the expected result

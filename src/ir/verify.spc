@@ -393,7 +393,7 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             if r.a as usize >= b.operands.len() {
                 return "rvalue-operand-out-of-range";
             }
-            if r.kind == ir::RV_CAST && r.b > ir::CAST_MASK_BITS {
+            if r.kind == ir::RV_CAST && r.b > ir::CAST_UNCHECKED {
                 return "cast-kind";
             }
         } else if r.kind == ir::RV_BINARY || r.kind == ir::RV_REPEAT {

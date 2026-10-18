@@ -36,10 +36,10 @@ Use `super-c build <file.spc> -o <name>` to link a named binary, then run it you
 emit plain C names; multi-module programs mangle symbols by module path.
 
 The binary finds `std/` in its own directory or in one of its two parent directories
-(`exe_std_dir` in `src/main.spc`: the real executable path, else argv[0]); `ffi/` resolves
-beside that `std/`. A copy of the binary with no `std/` near it loses the prelude ("cannot
-find type 'Vector'"): run test binaries from the repository root, or put `std/` and `ffi/`
-beside the copy. There is no prebuilt `libstd.a`: std compiles from
+(`exe_std_dir` in `src/main.spc`: the real executable path, else argv[0]), or where a non-empty
+`SC_STD_DIR` names it; `ffi/` resolves beside that `std/`. A copy of the binary with no `std/`
+near it loses the prelude ("cannot find type 'Vector'"): run test binaries from the repository
+root, set `SC_STD_DIR`, or put `std/` and `ffi/` beside the copy. There is no prebuilt `libstd.a`: std compiles from
 source into each binary, because monomorphization needs its generic source.
 
 On macOS, a `cp` over a running Mach-O gets the binary killed (SIGKILL) by code signing:
@@ -64,7 +64,8 @@ entire transpile when no input changed (~25 ms no-op); it records the content ha
 that emitted the tree (a different compiler at the same path with the same mtime transpiles again,
 as does the per-TU cache, keyed on the same hash; a WASI guest hashes the module file its absolute
 argv[0] names, as `wasmtime run --dir=/ --argv0 <abs path>` gives it, and keeps neither stamp nor
-cache when argv[0] is relative), the loaded module files and
+cache when argv[0] is relative), the std directory (a build under another std tree transpiles
+again, `stamp_opt_line`), the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
 import also makes the stamp stale. The stamp lives in the target's profile directory, so it
 is per profile. A build that transpiles deletes the stamp first; the emission writes its record to
@@ -389,8 +390,12 @@ gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.c` fail
 without the flag. It also gets `-ffp-contract=off`, so the C compiler never fuses a float
 multiply and add (only an explicit `fma` fuses) and run-time float results equal the constant
 evaluator's on every target, and `-Werror=incompatible-pointer-types`, so clang rejects the
-incompatible pointer arguments gcc 14 already rejects (`@c.source` files included). The `cstd`
-key and `--cstd` replace only the standard and feature-macro flags, never these three.
+incompatible pointer arguments gcc 14 already rejects (`@c.source` files included). It also gets
+`-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental libm functions
+(`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin` to `hypot`), so the C compiler calls
+them as written instead of folding, merging or rewriting them, and their results do not depend on
+the optimization level; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins.
+The `cstd` key and `--cstd` replace only the standard and feature-macro flags, never these.
 
 ### Link-time optimization
 
@@ -702,7 +707,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above) |
 | `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above) |
-| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time |
+| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time; `windows` links with `-Wl,--stack,8388608`, so every target's main thread has the 8 MiB stack of Linux and macOS (`push_sdk_libs`) |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
@@ -723,6 +728,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_TIMINGS` | Print a one-line per-phase timing summary |
 | `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, the instance re-lowering counts by reason (`"relower"`), peak RSS at five boundaries (`src/driver/stats.spc`) |
 | `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
+| `SC_STD_DIR` | The std directory, in place of the `std/` found beside the compiler binary (`exe_std_dir` in `src/main.spc`). `super-c test` sets it for the compiler under test, which `--out-dir` may place outside the project, when the project holds `std/core.spc` and the variable is unset (`src/build_system/build.spc`) |
 | `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
@@ -746,7 +752,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_TYPE_COLLIDE` | Every type and instance hashes to one bucket: the type tables run on full comparisons alone, so a hash-order dependence shows as different output |
 | `SC_TASK_DELAY` | A seed: a deterministic per-job delay (100 to 400 us, a hash of the job and the seed) at the start of every parallel item job (type check, borrow check, always-panics), so the worker-identity gates run under schedules the machine would not produce by itself, a different one per seed |
 | `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core under each delay seed |
-| `SC_CEMIT_STATS` | Per-phase wall times (the unused-item lint as its own phase), the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes; printed after borrow checking and after the always-panics check) and the instance graph's collect line (records by kind, bodies walked, rounds, a budget stop), the re-lowering census (one line per template: instances, re-lowerings, identical re-lowerings, retained KiB) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, the instance discovery total, re-lowering templates and instances by reason, bodies taken from the keep or lowered, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
+| `SC_CEMIT_STATS` | Per-phase wall times (the unused-item lint as its own phase), the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes; printed after borrow checking and after the always-panics check), the instance graph's collect line (records by kind, bodies walked, rounds, a budget stop) and its per-instance `static_assert` line (`cemit-stage inst-asserts`: ms, instances checked), the re-lowering census (one line per template: instances, re-lowerings, identical re-lowerings, retained KiB) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, the instance discovery total, re-lowering templates and instances by reason, bodies taken from the keep or lowered, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters (`BceStats`): checks and range checks seen and removed, coalesced, folded, signature crossings, and the kept checks per reason (six reason columns, `BR_WIDENED` the last) |
 | `SC_BCE` | `0` turns bounds-check elimination off: every check stays (the generator's BCE differential oracle) |
@@ -846,4 +852,5 @@ hand their jobserver slots back. The parallel C compile is unaffected.
 
 Includes are relative: `cc -funsigned-char -ffp-contract=off build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)`
 builds the whole tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`;
-add `-DSC_ARITH_WRAP` for wrapping integer overflow).
+add `-DSC_ARITH_WRAP` for wrapping integer overflow, and the `LIBM_AS_WRITTEN` flags for the
+engine's libm results).

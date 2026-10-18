@@ -364,6 +364,11 @@ extend Solver {
         return -1;
     }
 
+    /// The active session's slot count.
+    pub const fn slot_count(self: &Self) u32 {
+        return (self.s_pd.len() - self.sess.pd as usize) as u32;
+    }
+
     /// The generic parameter declaration session slot `slot` maps.
     pub const fn slot_def(self: &Self, slot: u32) DefId {
         return self.s_pd[(self.sess.pd + slot) as usize];

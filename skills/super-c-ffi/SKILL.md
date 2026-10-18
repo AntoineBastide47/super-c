@@ -434,7 +434,9 @@ still folds to the one instruction at `-O1` and above.
 ## Platform C Pitfalls
 
 The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L` (the `cstd` value), plus
-`-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` on every compile.
+`-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` and the libm
+`-fno-builtin-<f>` set (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin(x)` in a
+`@c.source` file is a libm call too, never a constant fold or a `sincos`) on every compile.
 
 - macOS: strict `_POSIX_C_SOURCE` breaks `<sys/sysctl.h>` and hides `ru_maxrss`.
   src/driver_shim.c declares `sysctlbyname` locally and defines `_DARWIN_C_SOURCE` before

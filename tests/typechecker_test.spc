@@ -1141,6 +1141,22 @@ fn bug_regressions() {
         "fn m<T>(a: T, b: T) T { return a ^ b; }\nfn main() i32 { let n: i32 = m::<i32>(1, 2); return n; }\n",
         "no 'bit_xor' method for this operator",
     );
+    // Unary `-` dispatches to `neg` the same way, on an aggregate and through a bound.
+    h::expect_err_msg(
+        "unary '-' without method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let c = -a; return 0; }\n",
+        "type 'P' has no 'neg' method for this operator",
+    );
+    h::expect_err_msg(
+        "unbounded generic unary '-'",
+        "fn m<T>(a: T) T { return -a; }\nfn main() i32 { return 0; }\n",
+        "type parameter 'T' has no 'neg' method for this operator (add a bound that provides it)",
+    );
+    h::expect_exit(
+        "unary '-' through a method, a conformance and a bound",
+        "struct P { pub x: i32 }\nextend P as Neg {\n    type Output = P;\n    pub fn neg(self: &P) P { return P { x: -self.x }; }\n}\ninterface Signed: Copy { fn neg(self: &Self) Self; }\nextend i32 as Signed { pub fn neg(self: &i32) i32 { return 0 - *self; } }\nfn flip<T: Signed>(t: T) T { return -t; }\nfn flip_all<T: Neg<Output = T>>(t: T) T { return -t; }\nfn main() i32 {\n    let a = P { x: 3 };\n    return (-a).x + flip(5) + flip_all(P { x: 4 }).x + 12;\n}\n",
+        0,
+    );
     // Neither side of an operator is pinned to Self: `Output` is associated and `Rhs` defaults to Self,
     // so one type may multiply another into a third and still declare the conformance.
     h::expect_exit(
@@ -3379,6 +3395,30 @@ fn view_types_pin_their_container() {
         "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let mut it = v.iter();\n    for i in 0..5000 {\n        v.push(i);\n    }\n    return switch it.next() {\n        Some(x) => *x,\n        None => -1,\n    };\n}\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
+    // A struct's `index_range` view borrows the struct as its call does; its bounds are `usize`, and an
+    // open end needs a `len` method.
+    let iv = "struct V { pub e: [i32; 3] }\nextend V as Index<i32, []i32> {\n    pub fn index(self: &V, i: usize) &i32 { return &unsafe self.e[i]; }\n    pub fn index_range(self: &V, r: Range<usize>) []i32 { return unsafe Slice::<i32> { ptr: (&self.e[0] as *const i32) + r.start, len: r.end - r.start }; }\n}\n";
+    h::expect_err_msg(
+        "a struct's index_range view held across a mutation is rejected",
+        format(
+            "{}fn main() i32 {{\n    let mut v = V {{ e: [1, 2, 3] }};\n    let s = v[0..2];\n    v.e = [4, 5, 6];\n    return s[0];\n}}\n",
+            iv,
+        ).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a struct's range index bound is a usize",
+        format(
+            "{}fn main() i32 {{\n    let v = V {{ e: [1, 2, 3] }};\n    let i: i32 = 1;\n    return v[i..2][0];\n}}\n",
+            iv,
+        ).as_str(),
+        "mismatched types: expected 'usize', found 'i32'",
+    );
+    h::expect_err_msg(
+        "an open-ended range index needs len",
+        format("{}fn main() i32 {{\n    let v = V {{ e: [1, 2, 3] }};\n    return v[1..][0];\n}}\n", iv).as_str(),
+        "an open-ended range index needs a 'len' method returning 'usize' on 'V'",
+    );
     // Controls: a view used and finished before any mutation is fine (the borrow has ended).
     h::expect_ok(
         "using a slice, then mutating, is fine",
@@ -4552,6 +4592,17 @@ fn struct_outlives_bounds() {
         "a later store into a member of a 'a: 'static struct",
         "struct Q<'a: 'static>(Option<&'a String>);\nfn main() i32 {\n    let l = String::from_str(\"abc\");\n    let mut q = Q(Option::<&String>::None);\n    q.0 = Option::<&String>::Some(&l);\n    return 0;\n}\n",
         "this value must satisfy 'static",
+    );
+    // A member that nests a parameter (`[T; N]`, `[V<T, R>; C]`) takes the instance's argument: with a
+    // Copy argument the aggregate is Copy in a generic body too.
+    h::expect_ok(
+        "an aggregate whose members nest a Copy argument is Copy in a generic body",
+        "struct V<T, const N: usize> { pub v: [T; N] }\nstruct M<T, const C: usize, const R: usize> { pub c: [V<T, R>; C] }\nfn f<T: Copy, const N: usize>(t: T) [V<T, N>; 2] {\n    return [V::<T, N> { v: [t; N] }; 2];\n}\nfn g<T: Copy>(m: M<T, 2, 3>) [M<T, 2, 3>; 2] {\n    let k = m;\n    return [m, k];\n}\nfn main() i32 {\n    return f::<i32, 3>(1)[1].v[2] - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "an aggregate whose member nests an owning argument still owns",
+        "struct V<T, const N: usize> { pub v: [T; N] }\nfn f<T, const N: usize>(t: V<T, N>) [V<T, N>; 2] {\n    return [t; 2];\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "an array repeat needs a value that can be copied; this one owns resources",
     );
     h::expect_err_msg(
         "a local borrow in a 'static field",
@@ -6563,6 +6614,39 @@ fn inference_from_bounds_needs_one_conformance() {
         "a bound of a type parameter is its conformance",
         format("{}fn g<U: I<bool>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
     );
+    h::expect_ok(
+        "a generic conformance infers the argument for a builtin and an aggregate",
+        "interface K: Copy {}\nextend f32 as K {}\ninterface G<A>: Copy { fn get(self: &Self) A; }\nextend<T: K> T as G<T> { pub fn get(self: &T) T { return *self; } }\nstruct W<T> { pub v: T }\nextend<T: K> W<T> as G<T> { pub fn get(self: &W<T>) T { return self.v; } }\nfn f<A: K, T: G<A>>(t: T) A { return t.get(); }\nfn main() i32 { let a: f32 = f(1.0f32) + f(W::<f32> { v: 2.0 }); return 0; }\n",
+    );
+    h::expect_ok(
+        "a generic conformance infers the argument for a type parameter its bounds admit",
+        "interface K: Copy {}\nextend f32 as K {}\ninterface G<A>: Copy { fn get(self: &Self) A; }\nextend<T: K> T as G<T> { pub fn get(self: &T) T { return *self; } }\nfn first<A: K, T: G<A>>(t: T) T { return t; }\nfn twice<U: K>(u: U) U { let v = first(u); return v; }\nfn main() i32 { let a: f32 = twice(1.0f32); return 0; }\n",
+    );
+    // A conformance whose interface arguments are its own parameters (`T as Re<U, U>`) solves them from
+    // the arguments the call fixes: `G: Re<i32, R>` gives `R = i32`.
+    h::expect_exit(
+        "a conformance parameter only its interface arguments name",
+        "interface L: Copy {}\nextend f32 as L {}\nextend i32 as L {}\ninterface Re<U, R>: Copy {}\nextend<T: L, U: L> T as Re<U, U> {}\nfn shape<G: Re<i32, R>, R: L + Default>(x: G) R { return R::default(); }\nfn main() i32 { let r = shape(1.0f32); return r + 4; }\n",
+        4,
+    );
+    h::expect_exit(
+        "a conformance generic in one argument solves the other",
+        "interface Two<O, U> { fn mk(v: U) O; }\nstruct W {}\nstruct P<U> { pub v: U }\nextend<U: Copy> W as Two<P<U>, U> { pub fn mk(v: U) P<U> { return P::<U> { v: v }; } }\nfn make<G: Two<O, bool>, O>(g: &G) O { let _ = g; return G::mk(true); }\nfn main() i32 { let w = W {}; let p = make(&w); return p.v as i32 + 2; }\n",
+        3,
+    );
+    // An unsuffixed literal takes the one type of its class that satisfies a bound whose arguments the
+    // other evidence fixed (`X: G<f64>` makes `3.0` an f64), also inside `print` and `format`.
+    h::expect_exit(
+        "a literal argument typed by a bound",
+        "interface K: Copy {}\nextend f32 as K {}\nextend f64 as K {}\ninterface G<A>: Copy { fn get(self: Self) A; }\nextend<T: K> T as G<T> { pub fn get(self: T) T { return self; } }\nfn first<A: K, X: G<A>>(x: X) A { return x.get(); }\nfn main() i32 {\n    let y: f64 = first(3.0);\n    let s = format(\"{} {}\", first(2.0), first(1.5));\n    return y as i32 + s.len() as i32;\n}\n",
+        8,
+    );
+    // The same conformance names an associated type of the type parameter: `G::B` with `G = U` is bool.
+    h::expect_exit(
+        "a generic conformance normalizes a type parameter's projection",
+        "interface K: Copy {}\nextend f32 as K {}\ninterface S<E>: Copy { type B; fn small(self: Self, e: E) Self::B; }\nextend<T: K> T as S<T> { type B = bool; pub fn small(self: T, e: T) bool { return true; } }\nfn small<E, G: S<E>>(x: G, e: E) G::B { return x.small(e); }\nfn is_small<U: K>(x: U, e: U) bool { let b: bool = small(x, e); return b; }\nfn main() i32 { return is_small(1.0f32, 2.0f32) as i32 + 6; }\n",
+        7,
+    );
     h::expect_err_msg(
         "several conformances and no other evidence",
         format("{}fn main() i32 {{ let z = f(P {{ v: 3 }}); return 0; }}\n", I).as_str(),
@@ -6577,6 +6661,18 @@ fn inference_from_bounds_needs_one_conformance() {
         "several bounds of a type parameter",
         format("{}fn g<U: I<bool> + I<u8>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
         "cannot infer 'A': 'U' conforms to 'I' with several arguments",
+    );
+}
+
+// A method of the type itself wins over an equal conformance method of the same name, as an inherent
+// method does in Rust: the conformance's own body and a concrete call reach the plain one, a call
+// through a bound the conformance's.
+@test
+fn plain_method_wins_a_tie_with_a_conformance() {
+    h::expect_exit(
+        "plain method over conformance method",
+        "interface Fl: Copy { fn twice(self: Self) Self; fn sqrt(self: Self) Self; }\nextend f32 as Fl {\n    pub fn twice(self: f32) f32 { return self * 2.0; }\n    pub fn sqrt(self: f32) f32 { return self.sqrt() + 1.0; }\n}\nfn g<T: Fl>(x: T) T { return x.sqrt(); }\nfn main() i32 {\n    let f = f32::sqrt;\n    return (16.0f32.sqrt() + g(4.0f32) + f(9.0)) as i32 - 10;\n}\n",
+        0,
     );
 }
 

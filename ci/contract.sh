@@ -5,7 +5,7 @@
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=29
+CONTRACT_VERSION=30
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -45,10 +45,16 @@ CONTRACT_DELAY_SEEDS="1 2 3"
 
 # ---- C compilation --------------------------------------------------------------------------------------
 # The manifest's base C flags (build.toml `cstd` default) and the strict set the warnings gate adds when it
-# compiles every emitted translation unit with `-fsyntax-only` (with -funsigned-char and -ffp-contract=off,
-# which the build engine passes to every compile: the language's char is unsigned, floats never fuse).
+# compiles every emitted translation unit with `-fsyntax-only` (with -funsigned-char, -ffp-contract=off and
+# the -fno-builtin list of each transcendental libm call, which the build engine passes to every compile:
+# the language's char is unsigned, floats never fuse, a libm call runs as written; LIBM_AS_WRITTEN in
+# src/build_system/build.spc).
 CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L"
-CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off"
+CONTRACT_LIBM_CFLAGS=""
+for f in sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp exp2 expm1 log log2 log10 log1p pow cbrt hypot; do
+    CONTRACT_LIBM_CFLAGS="$CONTRACT_LIBM_CFLAGS -fno-builtin-$f -fno-builtin-${f}f"
+done
+CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off$CONTRACT_LIBM_CFLAGS"
 
 # ---- readability of the emitted C tree (build/dev/raw) --------------------------------------------------
 # Checked by the gate on the gen1 tree:
@@ -118,6 +124,29 @@ tests/lsp_text_test.spc
 tests/lsp_transport_test.spc
 tests/lsp_v2_test.spc
 tests/map_test.spc
+tests/math_color_test.spc
+tests/math_common_test.spc
+tests/math_compare_test.spc
+tests/math_dual_quat_test.spc
+tests/math_easing_test.spc
+tests/math_elementary_test.spc
+tests/math_euler_test.spc
+tests/math_extra_test.spc
+tests/math_format_test.spc
+tests/math_fused_test.spc
+tests/math_geometric_test.spc
+tests/math_integer_test.spc
+tests/math_intersect_test.spc
+tests/math_mat_test.spc
+tests/math_noise_test.spc
+tests/math_packing_test.spc
+tests/math_projection_test.spc
+tests/math_quat_test.spc
+tests/math_query_test.spc
+tests/math_random_test.spc
+tests/math_spline_test.spc
+tests/math_transform_test.spc
+tests/math_vec_test.spc
 tests/multiversion_test.spc
 tests/mutex_test.spc
 tests/parallel_harness.spc

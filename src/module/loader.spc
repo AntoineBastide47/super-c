@@ -201,9 +201,6 @@ pub struct Package {
     /// entry's, every function named as a value outside std::parallel. `cancel_compute` reads them
     /// for `cancel_fnv`.
     pub co_fnv: Vector<u64>,
-    /// Per module: the modules that emit before it (`emit_dep_row`), recorded before its body
-    /// syntax is released; empty when the rows are computed at emission planning.
-    pub emit_deps: Vector<Vector<ModuleId>>,
     /// Cancellation-edge reachability: 0 = uncomputed (no cancellation checks anywhere), 1 =
     /// computed. cancel_marks[m] holds start<<32|end DECL spans of the functions and closures whose
     /// bodies can reach `runtime::cancel_accept`; a call to one of these from a task-reachable
@@ -303,9 +300,6 @@ pub struct Package {
     /// `ctfe_edges` (caller key, callee key) pairs for every body the engine lowered from
     /// syntax while `cur_item` was checking.
     pub icost_on: bool,
-    /// Release each module's body syntax right after its borrow pass (batch builds; the lint driver
-    /// and the measurement mode keep it until emission planning).
-    pub free_bodies: bool,
     pub icost_tc: Vector<u64>,
     pub icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
     pub icost_bc: Vector<u64>,
@@ -1134,6 +1128,42 @@ fn resolve_import_file(
         return ffi_rel;
     }
     return root_rel;
+}
+
+/// Whether every import of the module in file `path` names a file a load rooted at `root_dir` (alt
+/// root `alt_root`, std/ in `std_dir`) finds, as `resolve_import_file` searches; true when the file
+/// does not read, lex or parse (the load reports it).
+pub fn imports_resolve(path: str, root_dir: str, alt_root: str, std_dir: str) bool {
+    let r = read_file(path);
+    if r.is_none() {
+        return true;
+    }
+    let mut src = r.unwrap();
+    let pr = parse_source_q(&mut src, path, false, Vector::<tok::Token>::new(), true);
+    if !pr.ok {
+        return true;
+    }
+    let a = &pr.ast;
+    let mut dc = DirCache {};
+    let items = a.at_const(a.root).as_data.program.items;
+    for i in 0..items.len {
+        let n = a.at_const(unsafe a.list(items)[i as usize]);
+        if n.kind == NodeKind::NODE_IMPORT {
+            let f = resolve_import_file(
+                &mut dc,
+                root_dir,
+                alt_root,
+                dirname_of(std_dir),
+                a,
+                src.as_str(),
+                n.as_data.import_decl.path,
+            );
+            if !dc.exists(f.as_str()) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
@@ -3891,6 +3921,43 @@ extend Package {
         return &self.modules[mid as usize].ast;
     }
 
+    /// Whether interface method `f`'s first parameter is of type `Self` (behind references or
+    /// pointers): its argument then names the implementor.
+    pub const fn self_typed_param0(self: &Self, f: DefId) bool {
+        let a = unsafe &*self.module_ast_const(f.module);
+        let ps = a.at_const(f.node).as_data.function.params;
+        if ps.len == 0 {
+            return false;
+        }
+        let p0 = a.at_const(unsafe a.list(ps)[0]);
+        if p0.kind != NodeKind::NODE_PARAMETER || p0.as_data.parameter.ty == NODE_NONE {
+            return false;
+        }
+        let mut t = a.type_of(p0.as_data.parameter.ty);
+        for _ in 0..8 {
+            if t == TYPE_NONE {
+                return false;
+            }
+            let y = *a.type_at(t);
+            if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
+                return y.kind == TypeKind::TYPE_GENERIC && a.at_const(y.as_data.decl).kind == NodeKind::NODE_INTERFACE;
+            }
+            t = y.as_data.elem;
+        }
+        return false;
+    }
+
+    /// Whether function `f`'s first parameter is `self` (a method, not an associated function).
+    pub const fn self_first(self: &Self, f: DefId) bool {
+        let a = unsafe &*self.module_ast_const(f.module);
+        let ps = a.at_const(f.node).as_data.function.params;
+        if ps.len == 0 {
+            return false;
+        }
+        let nm = a.at_const(a.at_const(unsafe a.list(ps)[0]).as_data.parameter.name).as_data.name.text;
+        return self.modules[f.module as usize].source.as_str().slice(nm.start as usize, nm.end as usize) == "self";
+    }
+
     /// Approximate owned bytes across the package's retained analyses (the LSP budget's accounting
     /// unit): per-module sources + arenas.
     pub const fn retained_bytes(self: &Self) usize {
@@ -4015,7 +4082,7 @@ extend Package {
     }
 
     /// Free every module's body arena: the checked release point of releasable body syntax, once
-    /// the last consumer of it (the constant flush) has run. Every retained record a later stage
+    /// the last consumer of it (the instance graph's static_assert check) has run. Every retained record a later stage
     /// reads (kept Core IR, closure and asm facts) was copied out before.
     pub fn release_bodies(self: &mut Self) {
         for i in 0..self.modules.len() {
@@ -4530,6 +4597,156 @@ extend Package {
         return -1;
     }
 
+    /// Whether concrete type `t` (pool `dm`) conforms to interface `iface` with arguments `wa[0..wn]`
+    /// (pool `dm`), as the backend tells apart conformances whose interface arguments all fit (`i32 as
+    /// Count<T>` with `T: Num` against `i32 as Count<W<T>>`): a conformance by target, then a generic
+    /// one, whose arguments match and whose parameters' bounds hold (`ext_bounds_concrete`). The
+    /// marker interfaces (`Copy`, `Send`, `Sync`, `Free`, `FnPtr`), a type parameter and a nesting past
+    /// the bound answer true: the checker proved the program's bounds, this only chooses.
+    pub fn conf_holds(self: &Self, dm: ModuleId, t: TypeId, iface: DefId, wa: *const TypeId, wn: u32, depth: u32) bool {
+        if depth > 8 || t == TYPE_NONE || iface.node == NODE_NONE {
+            return true;
+        }
+        let ia = self.module_ast_const(iface.module);
+        let inn = unsafe (*ia).at_const(iface.node);
+        if inn.kind != NodeKind::NODE_INTERFACE {
+            return true;
+        }
+        let ins = unsafe (*ia).at_const(inn.as_data.interface_def.name).as_data.name.text;
+        let iname = self.modules.at(iface.module as usize).source.as_str().slice(ins.start as usize, ins.end as usize);
+        if self.modules.at(iface.module as usize).prelude && (iname == "Copy" || iname == "Send" || iname == "Sync" || iname == "Free" || iname == "FnPtr") {
+            return true;
+        }
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let y = *unsafe (*da).type_at(t);
+        let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            it.decl = y.as_data.decl;
+        } else if unsafe (*da).targs_of(t, &mut it) {} else if y.kind == TypeKind::TYPE_BUILTIN {
+            it.module = self.core_module;
+            it.decl = self.builtin_decl(y.as_data.builtin);
+        }
+        if it.decl == NODE_NONE {
+            // A type parameter, `dyn`, a reference, a pointer, an array: conformances the checker
+            // derives beyond the written ones.
+            return true;
+        }
+        let want = unsafe (*da).intern_dyn(iface.module, iface.node, wa, wn as u8, TypeQualifier::TYPE_QUAL_NONE as u8);
+        for pass in 0..2 {
+            for xm in 0..self.modules.len() {
+                if !self.modules.at(xm).has_ast {
+                    continue;
+                }
+                let em = xm as ModuleId;
+                let ea = self.module_ast_const(em);
+                let items = unsafe (*ea).at_const((*ea).root).as_data.program.items;
+                for i in 0..items.len {
+                    let ext = unsafe (*ea).list(items)[i as usize];
+                    if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
+                        continue;
+                    }
+                    let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                    if ed.interface_type == NODE_NONE || ed.generics.len > 8 {
+                        continue;
+                    }
+                    let ir = unsafe (*ea).resolution_def(ed.interface_type);
+                    if ir.module != iface.module || ir.node != iface.node {
+                        continue;
+                    }
+                    let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
+                    if bp >= 0 != (pass == 1) {
+                        continue;
+                    }
+                    let tg = unsafe (*ea).resolution_def(ed.target_type);
+                    let dt = unsafe (*ea).type_of(ed.interface_type);
+                    if bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE {
+                        continue;
+                    }
+                    let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+                    let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+                    let mut ln: u32 = 0;
+                    if bp >= 0 {
+                        ln = ed.generics.len;
+                        for g in 0..ln {
+                            unsafe lp[g as usize] = DefId {
+                                module: em,
+                                node: unsafe (*ea).list(ed.generics)[g as usize],
+                            };
+                        }
+                        unsafe la[bp as usize] = t;
+                    } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                        continue;
+                    }
+                    let mut open = false;
+                    for g in 0..ln {
+                        open = open || unsafe la[g as usize] == TYPE_NONE;
+                    }
+                    if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
+                        continue;
+                    }
+                    let mut g = TYPE_NONE;
+                    if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
+                        continue;
+                    }
+                    if self.ext_bounds_concrete(em, ext, &lp[0], &la[0], ln, dm, depth + 1) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Whether the bounds of extend `ext`'s parameters (module `em`) hold for their values `la[0..ln]`
+    /// (pool `dm`; TYPE_NONE: unbound, not checked), as `conf_holds` decides a bound.
+    pub fn ext_bounds_concrete(
+        self: &Self,
+        em: ModuleId,
+        ext: NodeId,
+        lp: *const DefId,
+        la: *const TypeId,
+        ln: u32,
+        dm: ModuleId,
+        depth: u32,
+    ) bool {
+        let ea = self.module_ast_const(em);
+        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let da = self.module_ast_const(dm) as *mut Ast;
+        let mut g: u32 = 0;
+        while g < gens.len && g < ln {
+            let v = unsafe la[g as usize];
+            let gp = unsafe (*ea).at_const(unsafe (*ea).list(gens)[g as usize]);
+            g += 1;
+            if v == TYPE_NONE || gp.as_data.generic_param.is_const {
+                continue;
+            }
+            let bs = gp.as_data.generic_param.bounds;
+            for b in 0..bs.len {
+                let bid = unsafe (*ea).list(bs)[b as usize];
+                let bi = unsafe (*ea).resolution_def(bid);
+                if bi.node == NODE_NONE {
+                    continue;
+                }
+                // The bound's interface arguments under the extend's values (its recorded `dyn I<..>`).
+                let mut wa = TyInstance {};
+                let bt = unsafe (*ea).type_of(bid);
+                if bt != TYPE_NONE && unsafe (*ea).type_at(bt).kind == TypeKind::TYPE_DYN {
+                    let mut gb = TYPE_NONE;
+                    if !self.ground_local(em, bt, dm, lp, la, ln, &mut gb, depth + 1) || unsafe (*da).type_at(gb).kind != TypeKind::TYPE_DYN {
+                        continue;
+                    }
+                    wa = *unsafe (*da).instance(unsafe (*da).type_at(gb).rec());
+                } else if unsafe (*ea).at_const(bid).kind != NodeKind::NODE_TYPE_PATH || unsafe (*ea).at_const(bid).as_data.type_path.args.len != 0 {
+                    continue;
+                }
+                if !self.conf_holds(dm, v, bi, &wa.args[0], wa.n, depth + 1) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     /// The type associated type `ai` (an interface's `type Name;`, arguments concrete types of pool
     /// `dm`: the projected type, then the interface's arguments) names: the `type Name = ..` of the
     /// conformance of `ai.args[0]` whose interface arguments are these (as the checker recorded them
@@ -4563,68 +4780,82 @@ extend Package {
         );
         let an = unsafe (*ia).at_const(unsafe (*ia).at_const(ai.decl).as_data.type_alias.name).as_data.name.text;
         let aname = self.modules.at(ai.module as usize).source.as_str().slice(an.start as usize, an.end as usize);
-        for xm in 0..self.modules.len() {
-            if !self.modules.at(xm).has_ast {
-                continue;
-            }
-            let em = xm as ModuleId;
-            let ea = self.module_ast_const(em);
-            let items = unsafe (*ea).at_const((*ea).root).as_data.program.items;
-            for i in 0..items.len {
-                let ext = unsafe (*ea).list(items)[i as usize];
-                if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
+        // The conformances by target first, then the generic ones (`T as I`), as every other
+        // conformance lookup orders them: a generic one applies only where no own one does.
+        for pass in 0..2 {
+            for xm in 0..self.modules.len() {
+                if !self.modules.at(xm).has_ast {
                     continue;
                 }
-                let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
-                if ed.interface_type == NODE_NONE {
-                    continue;
-                }
-                let ir = unsafe (*ea).resolution_def(ed.interface_type);
-                let tg = unsafe (*ea).resolution_def(ed.target_type);
-                let dt = unsafe (*ea).type_of(ed.interface_type);
-                let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
-                if ir.module != ai.module || ir.node != iface || bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE || ed.generics.len > 8 {
-                    continue;
-                }
-                let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
-                let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
-                let mut ln: u32 = 0;
-                if bp >= 0 {
-                    // A generic extend: its target parameter is the type itself.
-                    ln = ed.generics.len;
+                let em = xm as ModuleId;
+                let ea = self.module_ast_const(em);
+                let items = unsafe (*ea).at_const((*ea).root).as_data.program.items;
+                for i in 0..items.len {
+                    let ext = unsafe (*ea).list(items)[i as usize];
+                    if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
+                        continue;
+                    }
+                    let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                    if ed.interface_type == NODE_NONE {
+                        continue;
+                    }
+                    let ir = unsafe (*ea).resolution_def(ed.interface_type);
+                    let tg = unsafe (*ea).resolution_def(ed.target_type);
+                    let dt = unsafe (*ea).type_of(ed.interface_type);
+                    let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
+                    if bp >= 0 != (pass == 1) {
+                        continue;
+                    }
+                    if ir.module != ai.module || ir.node != iface || bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE || ed.generics.len > 8 {
+                        continue;
+                    }
+                    let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+                    let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+                    let mut ln: u32 = 0;
+                    if bp >= 0 {
+                        // A generic extend: its target parameter is the type itself.
+                        ln = ed.generics.len;
+                        for g in 0..ln {
+                            unsafe lp[g as usize] = DefId {
+                                module: em,
+                                node: unsafe (*ea).list(ed.generics)[g as usize],
+                            };
+                        }
+                        unsafe la[bp as usize] = ai.args[0];
+                    } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                        continue;
+                    }
+                    // The parameters the target does not name: the bound's interface arguments solve them.
+                    let mut open = false;
                     for g in 0..ln {
-                        unsafe lp[g as usize] = DefId { module: em, node: unsafe (*ea).list(ed.generics)[g as usize] };
+                        open = open || unsafe la[g as usize] == TYPE_NONE;
                     }
-                    unsafe la[bp as usize] = ai.args[0];
-                } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
-                    continue;
-                }
-                // The parameters the target does not name: the bound's interface arguments solve them.
-                let mut open = false;
-                for g in 0..ln {
-                    open = open || unsafe la[g as usize] == TYPE_NONE;
-                }
-                if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
-                    continue;
-                }
-                let mut g = TYPE_NONE;
-                if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
-                    continue;
-                }
-                for j in 0..ed.items.len {
-                    let hid = unsafe (*ea).list(ed.items)[j as usize];
-                    let hn = unsafe (*ea).at_const(hid);
-                    if hn.kind != NodeKind::NODE_TYPE_ALIAS || hn.as_data.type_alias.ty == NODE_NONE {
+                    if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
                         continue;
                     }
-                    let hs = unsafe (*ea).at_const(hn.as_data.type_alias.name).as_data.name.text;
-                    if self.modules.at(xm).source.as_str().slice(hs.start as usize, hs.end as usize) != aname {
+                    let mut g = TYPE_NONE;
+                    if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
                         continue;
                     }
-                    let at = unsafe (*ea).type_of(hn.as_data.type_alias.ty);
-                    return at != TYPE_NONE && self.ground_local(em, at, dm, &lp[0], &la[0], ln, out, depth + 1);
+                    // Of conformances whose arguments fit, the one whose bounds hold.
+                    if !self.ext_bounds_concrete(em, ext, &lp[0], &la[0], ln, dm, depth + 1) {
+                        continue;
+                    }
+                    for j in 0..ed.items.len {
+                        let hid = unsafe (*ea).list(ed.items)[j as usize];
+                        let hn = unsafe (*ea).at_const(hid);
+                        if hn.kind != NodeKind::NODE_TYPE_ALIAS || hn.as_data.type_alias.ty == NODE_NONE {
+                            continue;
+                        }
+                        let hs = unsafe (*ea).at_const(hn.as_data.type_alias.name).as_data.name.text;
+                        if self.modules.at(xm).source.as_str().slice(hs.start as usize, hs.end as usize) != aname {
+                            continue;
+                        }
+                        let at = unsafe (*ea).type_of(hn.as_data.type_alias.ty);
+                        return at != TYPE_NONE && self.ground_local(em, at, dm, &lp[0], &la[0], ln, out, depth + 1);
+                    }
+                    return false;
                 }
-                return false;
             }
         }
         return false;
@@ -4633,7 +4864,7 @@ extend Package {
     // The values extend `ext` (module `em`) gives its parameters for instance `it` of its target
     // (arguments concrete types of pool `dm`), as the bindings `lp[i]` -> `la[i]` (pool `dm`), `ln` of
     // them. False when the extend does not apply to the instance.
-    fn ext_solve(
+    pub fn ext_solve(
         self: &Self,
         em: ModuleId,
         ext: NodeId,
@@ -5536,7 +5767,7 @@ extend Package {
     /// instance on a foreign generic, and a generic call into a foreign function. Reads `a`'s
     /// instance, method-instance and generic-call tables and the callees' declarations; the
     /// generic-call table names body nodes, so the row is computed while `a`'s body syntax is
-    /// live (`record_emit_deps`) when the driver releases it early.
+    /// live.
     pub fn emit_dep_row(self: &Self, a: usize, out: &mut Vector<ModuleId>) {
         let n = self.modules.len();
         out.truncate(0);
@@ -5600,19 +5831,6 @@ extend Package {
         }
     }
 
-    /// Size `emit_deps` for every module (before a parallel borrow frontier records rows).
-    pub fn emit_deps_reserve(self: &mut Self) {
-        self.emit_deps.truncate(0);
-        self.emit_deps.resize_default(self.modules.len());
-    }
-
-    /// Record module `a`'s emission dependency row while its body syntax is live.
-    pub fn record_emit_deps(self: &mut Self, a: usize) {
-        let mut row = replace(self.emit_deps.index_mut(a), Vector::<ModuleId>::new());
-        self.emit_dep_row(a, &mut row);
-        *self.emit_deps.index_mut(a) = row;
-    }
-
     /// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
     /// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
     /// `order` is filled with `modules.len()` entries.
@@ -5623,19 +5841,11 @@ extend Package {
         }
         // Reverse edges in CSR form (`users[user_off[b]..user_off[b + 1]]` are the modules that emit
         // after `b`) and a min-heap of the ready modules: O(E + M log M).
-        let recorded = self.emit_deps.len() == n;
-        let mut rows = Vector::<Vector<ModuleId>>::new();
-        if !recorded {
-            rows.resize_default(n);
-            for a in 0..n {
-                self.emit_dep_row(a, rows.index_mut(a));
-            }
+        let mut deps = Vector::<Vector<ModuleId>>::new();
+        deps.resize_default(n);
+        for a in 0..n {
+            self.emit_dep_row(a, deps.index_mut(a));
         }
-        let deps = if recorded {
-            &self.emit_deps;
-        } else {
-            &rows;
-        };
         let mut indeg = Vector::<u32>::new();
         indeg.resize_default(n);
         let mut user_off = Vector::<u32>::new();

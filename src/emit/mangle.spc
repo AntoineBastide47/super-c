@@ -106,6 +106,29 @@ pub const fn c_keyword(s: str) bool {
     return false;
 }
 
+// `v` as its low and high limbs, `x` between: the spelling of a const form's coefficient.
+fn push_i128_limbs(out: &mut String, v: &i128) {
+    out.push_u64(v.limb(0));
+    out.push_str("x");
+    out.push_u64(v.limb(1));
+}
+
+/// Whether `s`, or `s` without some of its trailing underscores, satisfies the escape rule `rule`. A
+/// symbol suffixed with `_` when this holds keeps the suffix injective: `sqrt` is `sqrt_`, so a name
+/// `sqrt_` is `sqrt__`.
+pub fn escaped_stem<F: fn(str) bool>(s: str, rule: F) bool {
+    for k in 0..s.len() + 1 {
+        let n = s.len() - k;
+        if rule(s.slice(0, n)) {
+            return true;
+        }
+        if n == 0 || s.byte_at(n - 1) != b'_' {
+            return false;
+        }
+    }
+    return false;
+}
+
 // Whether byte `k` of `s` is an uppercase letter, or a digit when `digit` is set.
 const fn upper_at(s: str, k: usize, digit: bool) bool {
     if k >= s.len() {
@@ -387,6 +410,10 @@ pub struct Mangler {
     /// `@emit_macro` template mode: an UNRESOLVED generic param spells as its own name in C types
     /// and as `<paste>_SCM_<name>` in mangles (byte 1 marks a `##` for the template rewriter).
     pub macro_on: bool,
+    /// A keyed method's stem (`keyed_sym`): every generic param and const form spells as its pattern
+    /// (`_P<name>`), never through the substitution stack, so a call and the instance body spell the
+    /// same stem whatever their environments bind; the instance's arguments follow the stem.
+    pat_params: bool,
     /// Cross-TU spelling edges as two bit matrices (modpfx marks one per spelling, far too hot
     /// for a hashed set): one row per context (modules, the package-level row, then one per
     /// owner module's instance shard), one bit per owner module. `used_types` when the context
@@ -632,6 +659,7 @@ extend Mangler {
             pack_seen: Set::<u64>::new(),
             hidden: Vector::<MSub>::new(),
             macro_on: false,
+            pat_params: false,
             um_slot: Vector::<u32>::new(),
             used_types: Vector::<u64>::new(),
             used_syms: Vector::<u64>::new(),
@@ -1646,12 +1674,12 @@ extend Mangler {
     }
 
     /// The identifier at `s` in module `m`'s source, suffixed with one `_` when it is a C keyword or
-    /// a standard-header macro name.
+    /// a standard-header macro name, or one of them followed by underscores (`escaped_stem`).
     pub fn ident(self: &mut Self, m: ModuleId, s: tok::Span, out: &mut String) {
         let src = self.p().modules.at(m as usize).source.as_str();
         let txt = src.slice(s.start as usize, s.end as usize);
         out.push_str(txt);
-        if c_keyword(txt) || c_std_macro(txt) {
+        if escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) {
             out.push_str("_");
         }
     }
@@ -1683,7 +1711,7 @@ extend Mangler {
     // includes declares that name: the symbol would redeclare it.
     fn lib_escape(self: &Self, out: &mut String, st: usize) {
         let sym = out.as_str().slice(st, out.len());
-        if c_lib_family(sym) || self.lib_names.contains(&sym) {
+        if escaped_stem(sym, |w: str| c_lib_family(w) || self.lib_names.contains(&w)) {
             out.push_str("_");
         }
     }
@@ -1851,6 +1879,32 @@ extend Mangler {
                 out.push_str("dynb_");
             }
             return self.dyn_stem(pm, &y, out);
+        }
+        if self.pat_params && y.kind == TypeKind::TYPE_GENERIC {
+            out.push_str("_P");
+            self.generic_param_name(&y, out);
+            return true;
+        }
+        if self.pat_params && y.kind == TypeKind::TYPE_CONST_EXPR {
+            // `_E<k>`, then `_<c>_P<name>` per term, then `_D<div>`; each i128 as its two limbs.
+            let l = *unsafe (*a).const_lin_at(y.as_data.inst);
+            out.push_str("_E");
+            push_i128_limbs(out, &l.k);
+            for i in 0..l.n {
+                out.push_str("_");
+                push_i128_limbs(out, &unsafe l.c[i as usize]);
+                out.push_str("_P");
+                let pa = self.p().module_ast_const(unsafe l.p[i as usize].module);
+                let pn = unsafe (*pa).at_const(unsafe l.p[i as usize].node);
+                self.ident(
+                    unsafe l.p[i as usize].module,
+                    unsafe (*pa).at_const(pn.as_data.generic_param.name).as_data.name.text,
+                    out,
+                );
+            }
+            out.push_str("_D");
+            push_i128_limbs(out, &l.div);
+            return true;
         }
         if y.kind == TypeKind::TYPE_GENERIC || y.kind == TypeKind::TYPE_ASSOC {
             // Const-bound params fold HERE: each frame's payload grounds strictly below its own
@@ -2410,7 +2464,11 @@ extend Mangler {
         let ed = unsafe (*a).at_const(ext).as_data.extend_def;
         let pat = unsafe (*a).type_of(ed.target_type);
         if ext_blanket(unsafe &*a, pat, unsafe &*a, m, ext) < 0 {
-            return self.fn_sym(m, fnode, self.method_target(m, fnode), out);
+            let outer = self.pat_params;
+            self.pat_params = true;
+            let ok = self.fn_sym(m, fnode, self.method_target(m, fnode), out);
+            self.pat_params = outer;
+            return ok;
         }
         let tr = unsafe (*a).resolution_def(ed.interface_type);
         if tr.node == NODE_NONE {
@@ -2512,13 +2570,30 @@ extend Mangler {
             if !self.inst_name(rm, &it, out) {
                 return false;
             }
-            out.push_str("__");
-            out.push_str(mname);
             // The instance body's prototype lives in the method's module.
             self.mark_used(md.module);
-            return true;
+            return self.inst_method(md, out);
         }
         return self.fn_sym(md.module, md.node, tg, out);
+    }
+
+    /// `__<method>` of method `md` on an instance receiver, then, for a conformance method whose name
+    /// several methods of its target share, the conformance's interface with its arguments as
+    /// patterns (`iface_suffix` under `pat_params`): two conformances of one instance (`Vec as Mul`,
+    /// `Vec as Mul<T>`) spell two symbols, and a call and the instance body spell the same one.
+    pub fn inst_method(self: &mut Self, md: DefId, out: &mut String) bool {
+        out.push_str("__");
+        let a = self.p().module_ast_const(md.module);
+        self.ident(
+            md.module,
+            unsafe (*a).at_const(unsafe (*a).at_const(md.node).as_data.function.name).as_data.name.text,
+            out,
+        );
+        let outer = self.pat_params;
+        self.pat_params = true;
+        let ok = self.iface_suffix(md.module, md.node, out);
+        self.pat_params = outer;
+        return ok;
     }
 
     /// `method_by_name` restricted to the methods extend `ext` of module `em` itself defines: the
@@ -2561,10 +2636,8 @@ extend Mangler {
             if !self.inst_name(rm, &it, out) {
                 return false;
             }
-            out.push_str("__");
-            out.push_str(mname);
             self.mark_used(md.module);
-            return true;
+            return self.inst_method(md, out);
         }
         let tg = self.ext_target(em, ext);
         return self.fn_sym(md.module, md.node, tg, out);
@@ -2741,10 +2814,33 @@ extend Mangler {
                     continue;
                 }
                 let pat = unsafe (*da).type_of(ed.target_type);
-                if ext_is_identity(unsafe &*da, pat, unsafe &*da, xm as ModuleId, iid) {
-                    self.conf_memo.insert(key, xm as u64 << 32 | iid as u64);
-                } else if it.n == 0 || !self.ext_applies_inst(xm as ModuleId, iid, rm, &it) {
+                let identity = ext_is_identity(unsafe &*da, pat, unsafe &*da, xm as ModuleId, iid);
+                if !identity && (it.n == 0 || !self.ext_applies_inst(xm as ModuleId, iid, rm, &it)) {
                     continue;
+                }
+                // Of conformances that apply to the instance, the one whose bounds hold
+                // (`V<T: Int, N>` is not `V<bool, 2>`'s); only a bound-free one answers every instance.
+                let mut bounded = false;
+                for g in 0..ed.generics.len {
+                    bounded = bounded || unsafe (*da).at_const(unsafe (*da).list(ed.generics)[g as usize]).as_data.generic_param.bounds.len != 0;
+                }
+                if bounded {
+                    let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+                    let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+                    let mut ln: u32 = 0;
+                    if it.n != 0 && ed.generics.len <= 8 && self.p().ext_solve(
+                        xm as ModuleId,
+                        iid,
+                        rm,
+                        &it,
+                        &mut lp[0],
+                        &mut la[0],
+                        &mut ln,
+                    ) && !self.p().ext_bounds_concrete(xm as ModuleId, iid, &lp[0], &la[0], ln, rm, 0) {
+                        continue;
+                    }
+                } else if identity {
+                    self.conf_memo.insert(key, xm as u64 << 32 | iid as u64);
                 }
                 *em = xm as ModuleId;
                 return iid;
@@ -2929,7 +3025,7 @@ extend Mangler {
         out.push_str(src.slice(es.start as usize, es.end as usize));
         out.push_str("_");
         out.push_str(src.slice(vs.start as usize, vs.end as usize));
-        if c_std_macro(out.as_str().slice(start, out.len())) {
+        if escaped_stem(out.as_str().slice(start, out.len()), c_std_macro) {
             out.push_str("_");
         }
         self.lib_escape(out, start);
@@ -3469,6 +3565,19 @@ extend Mangler {
         }
         self.pack_use(h);
         return true;
+    }
+
+    /// The lane-check helpers (`LANE_CHECK_C`) as a definition of their own: a check emitted where no
+    /// vector type is spelled needs them too (a vector load or store whose lanes a target without vector
+    /// registers copies one by one, `__sc_bounds_vec`).
+    pub fn lane_check_use(self: &mut Self) {
+        let nm = "__sc_lane_check";
+        let h = nm.hash();
+        if !self.pack_seen.contains(&h) {
+            self.pack_seen.insert(h);
+            self.pack_reqs.push(WrapReq { h: h, elem: String::from_str(nm), body: String::from_str(LANE_CHECK_C) });
+        }
+        self.pack_use(h);
     }
 
     /// Whether a vector of `size` bytes aligned to `align` names its 16-byte chunks (`c[k]`, `vec_def`).

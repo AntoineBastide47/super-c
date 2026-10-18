@@ -66,14 +66,20 @@ fn wasi_sysroot_is_one_unquoted_argument() {
     assert(fl.as_str().contains("-target wasm32-wasip1 "), "the wasi triple is the current wasip1 one");
 }
 
-// wasm-ld's default 64 KiB stack is far below a native main thread's: every wasm link asks for 8 MiB,
-// placed first so an overflow traps.
+// wasm-ld's default 64 KiB stack and a Windows executable's 1 MiB reserve are far below the main thread
+// of Linux and macOS: every wasm and Windows link asks for 8 MiB, wasm's placed first so an overflow traps.
 @test
-fn wasm_links_with_the_native_stack_size() {
+fn links_with_the_native_stack_size() {
     let mut ld = String::new();
-    util::push_sdk_libs(&mut ld, 3);
-    assert(ld.as_str().contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB stack");
+    util::push_sdk_libs(&mut ld, 3, 3);
+    assert(ld.as_str().contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB wasm stack");
     assert(ld.as_str().contains(" -Wl,--stack-first"), "the stack below static data");
+    let mut lw = String::new();
+    util::push_sdk_libs(&mut lw, 0, 0);
+    assert(lw.as_str() == " -Wl,--stack,8388608", "an 8 MiB Windows reserve");
+    let mut ll = String::new();
+    util::push_sdk_libs(&mut ll, 2, 0);
+    assert(ll.len() == 0, "Linux keeps its own 8 MiB default");
 }
 
 @test

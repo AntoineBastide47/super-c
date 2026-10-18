@@ -89,6 +89,11 @@ pub interface Rem<Rhs = Self> {
     type Output;
     fn rem(self: &Self, other: &Rhs) Self::Output;
 }
+/// `-a` dispatches to `a.neg()`.
+pub interface Neg {
+    type Output;
+    fn neg(self: &Self) Self::Output;
+}
 
 /// Bitwise operator overloading, on the same rule as the arithmetic ones: `a & b` dispatches to
 /// `a.bit_and(&b)`, `|`/`^` to bit_or/bit_xor, and unary `~a` to `a.bit_not()`.
@@ -343,8 +348,9 @@ pub interface Index<T, S> {
 
 /// The writable counterpart. `obj[i] = v` stores through the `&mut T` that `index_mut` returns (a
 /// compound `obj[i] += v` reads and writes through it; a plain `=` over a `Free` element frees the
-/// replaced value first, like a binding reassignment). `S` is the writable sub-view (`[]mut T`);
-/// `index_range_mut` is called explicitly: `obj[lo..hi]` always takes the read-only `index_range`.
+/// replaced value first, like a binding reassignment). `S` is the writable sub-view (`[]mut T`):
+/// `&mut obj[lo..hi]` takes `index_range_mut`'s view (a `&mut S`), every other `obj[lo..hi]` the
+/// read-only `index_range`.
 pub interface IndexMut<T, S> {
     fn index_mut(self: &mut Self, i: usize) &mut T;
     fn index_range_mut(self: &mut Self, r: Range<usize>) S;

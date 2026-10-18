@@ -103,6 +103,11 @@ fn literal_contexts_and_signed_minimum() {
         0,
     );
     h::expect_exit(
+        "a suffixed range bound types the range",
+        "fn main() i32 {\n    let mut t: u8 = 0;\n    for x in 0u8..15 { let y: u8 = x; t += y; }\n    for x in 1..3i64 { let z: i64 = x; t += z as u8; }\n    return t as i32 - 108;\n}\n",
+        0,
+    );
+    h::expect_exit(
         "a u64 constant shifts past 32 bits",
         "const S: u64 = 1 << 40;\nfn main() i32 { return (S >> 40) as i32 - 1; }\n",
         0,
@@ -177,6 +182,12 @@ fn literal_adopts_generic_sibling() {
         "negated literal adopts a typed sibling",
         "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i64 = 5; let n = pick(false, x, -1); static_assert(sizeof(n) == 8, \"i64\"); return (n + 2) as i32; }\n",
         1,
+    );
+    // Literal-only arithmetic adapts as one literal: the expected result `W<f64>` types `640.0 / 480.0`.
+    h::expect_exit(
+        "literal arithmetic adopts the expected result",
+        "struct W<T> { pub v: T }\nfn pick<T: Copy>(a: T, b: T) W<T> { let _ = b; return W::<T> { v: a }; }\nfn main() i32 {\n    let y: W<f64> = pick(640.0 / 480.0, 0.8);\n    let z = pick(2 * 3, 7i64);\n    let ok = f64_bits(y.v) == 0x3FF5555555555555;\n    return ok as i32 + z.v as i32;\n}\n",
+        7,
     );
     h::expect_err_msg(
         "adopted literal is range-checked",
@@ -312,6 +323,12 @@ fn expected_result_flow() {
         h::STAGE_TYPECHECK,
     );
     assert(c.errors == 1 && c.msg_has("cannot infer the generic argument 'N'"), "one error for an open argument");
+    // A literal or a scalar beside such a call's error type picks no operator conformance either.
+    let c2 = h::compile(
+        "fn shape<G, R>(x: G) i32 { return 1; }\nfn main() i32 { let s = shape(1.0f32); let r: i32 = 3; return 2 + s + r + s; }\n",
+        h::STAGE_TYPECHECK,
+    );
+    assert(c2.errors == 1 && c2.msg_has("cannot infer the generic argument 'R'"), "one error beside operators");
     // Argument, expected-result, and bound evidence together infer one call's parameters
     // at once.
     h::expect_exit(
@@ -444,11 +461,14 @@ fn candidate_selection() {
         "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
         0,
     );
-    h::expect_err_msg(
-        "candidate budget stops adversarial overload sets",
-        "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\ninterface C8 { fn m(self: &Self, x: bool) i32; }\nextend V as C8 { pub fn m(self: &V, x: bool) i32 { return 8; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
-        "candidate limit",
-    );
+    // Past the candidate limit (TC_MAX_CANDIDATES, 32): 33 conformances defining one `m`.
+    let mut adv = String::from_str("struct V {}\n");
+    for i in 0..33 {
+        adv.format_into("struct A{} {{}}\ninterface C{} {{ fn m(self: &Self, x: A{}) i32; }}\n", i, i, i);
+        adv.format_into("extend V as C{} {{ pub fn m(self: &V, x: A{}) i32 {{ return {}; }} }}\n", i, i, i);
+    }
+    adv.push_str("fn main() i32 { let v = V {}; return v.m(A3 {}) - 3; }\n");
+    h::expect_err_msg("candidate budget stops adversarial overload sets", adv.as_str(), "candidate limit");
 }
 
 @test

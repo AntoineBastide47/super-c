@@ -178,8 +178,8 @@ pub struct FactsWatermark {
 
 const WM_N: usize = 22;
 // The first WM_BODY entries are module tables; the next four are body-arena tables, checked only
-// while the arena is live (the driver releases it after the constant flush; see
-// `Ast::release_bodies`).
+// while the arena is live (the driver releases it after the instance graph; see
+// `Package::release_bodies`).
 const WM_BODY: usize = 4;
 const WM_NAMES: [str<'static>; WM_N] = [
     "nodes",
