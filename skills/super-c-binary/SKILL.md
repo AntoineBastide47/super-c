@@ -306,6 +306,7 @@ root = "src/main.spc"        # entry point
 target-features = []         # CPU features (see CPU features below)
 target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on another instruction set)
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
+simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static)
@@ -667,10 +668,23 @@ super-c build --target-feature=x86-64-v2,+avx2               # -march=x86-64-v2 
 
 On AVX-512 the vector planner prefers 256-bit entries: `--simd-width=512` or the build.toml key
 `simd-width = 512` lets it use 512-bit ones (the width is part of the emit stamp). A function's
-`@target_feature` adds its features to the build's set for that function alone: its C definition
-carries `__attribute__((target("...")))` of the features beyond the build's (aarch64: clang's
-`+ext` form, GCC's `arch=armv8.N-a+ext` form), and the planner serves its vector operations from
-the entries that set holds.
+`@target_feature` adds its features to the build's set for that function and the functions with
+vector code it calls: its C definition carries `__attribute__((target("...")))` of the features
+beyond the build's (aarch64: clang's `+ext` form, GCC's `arch=armv8.N-a+ext` form), the planner
+serves its vector operations from the entries that set holds, and, when the set holds entries the
+build's does not, a call of a function with vector code that states no features runs a copy of it
+compiled with the same set (`<symbol>__fs<hex>`,
+in the callee module's instance file), whose calls do the same.
+
+On x86_64 each function with vector code and no features of its own also gets a copy per level of
+`--simd-dispatch=L` (build.toml `simd-dispatch`; a comma list of `x86-64-v2` .. `x86-64-v4`, default
+`x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `dev`: the copies make
+the C compile of vector code 1.4 to 1.7 times longer) and in a script build without `--profile`;
+levels the build's set holds skipped; `off` for none), and opens with a check: when the CPU has a
+level's features, it calls that level's copy, the highest first (`__sc_simd_lvl()`: the
+detector's answer, read once per TU). A copy calls copies, so one check runs where code without the
+features enters vector code; a build at a level above the list makes none. The level list is part
+of the emit stamp. `SC_SIMD_LEVEL=<k>` (a test switch) sets the level the checks read.
 
 `std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.c`), with
 the build's set included: a program can choose code at run time, never a result.
@@ -693,6 +707,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
 | `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
+| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`; replaces build.toml's `simd-dispatch` |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; accept unknown attributes, and a std `@intrinsic` this compiler does not know (its declaration and the std bodies that call it go unchecked; emitting such a body fails); a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
@@ -736,6 +751,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters (`BceStats`): checks and range checks seen and removed, coalesced, folded, signature crossings, and the kept checks per reason (six reason columns, `BR_WIDENED` the last) |
 | `SC_BCE` | `0` turns bounds-check elimination off: every check stays (the generator's BCE differential oracle) |
 | `SC_BCE_DISABLE` | A list of BCE rules to turn off, matched by substring: `fold` (folded panic guards), `sig` (signature facts), `int` (the interval facts of `ir/facts.spc`) |
+| `SC_SIMD_LEVEL` | Test switch: the run-time copy level `k` (0 the bodies without the copies' features) the dispatch checks of an x86_64 program read instead of the CPU's (an emulator that hides features it runs) |
 | `SC_SIMD_SCALAR` | `1`: the vector planner uses no `@simd_impl` entry; every vector operation keeps its lane loop (the entry differential oracle) |
 | `SC_SIMD_TRACE` | Print each vector operation for which `simd_plan` finds no single entry (`simd: no native entry for <Op> on <T>xN: chunks` or `the lane loop`) |
 | `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module-level schedule the type check ran before, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs). Keeps every body arena until emission planning (its final graph reads the bodies) |

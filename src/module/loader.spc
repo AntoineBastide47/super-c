@@ -141,6 +141,13 @@ pub struct Package {
     pub features: cf::CpuFeatureSet,
     /// The vector width in bits the planner prefers where AVX-512 is enabled: 256 (the default) or 512.
     pub simd_width: u32,
+    /// `--simd-dispatch` / `simd-dispatch`: `off`, or the x86-64 levels (comma-separated) each function
+    /// with vector code gets a copy for, chosen at run time; empty: `x86-64-v3` (`build::dispatch_for`
+    /// sets `off` for a profile at opt-level 0 or 1).
+    pub simd_dispatch: String,
+    /// The copies' feature sets: `simd_dispatch`'s levels beyond the build's, closed, by size (the
+    /// load computes them). Empty off x86_64 and with `off`.
+    pub simd_levels: Vector<cf::CpuFeatureSet>,
     /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
     /// some function of the program may plan with beyond `features`.
     pub fn_union: cf::CpuFeatureSet,
@@ -5704,7 +5711,48 @@ extend Package {
         return false;
     }
 
+    // The copies' feature sets (`simd_levels`) of `simd_dispatch` over the build's features.
+    fn simd_levels_compute(self: &mut Self) {
+        self.simd_levels.clear();
+        if self.arch != 0 || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+            return;
+        }
+        let spec = if self.simd_dispatch.len() == 0 {
+            "x86-64-v3";
+        } else {
+            self.simd_dispatch.as_str();
+        };
+        let build = cf::close(self.features);
+        let mut at: usize = 0;
+        while at <= spec.len() {
+            let mut end = at;
+            while end < spec.len() && spec[end] != b',' {
+                end += 1;
+            }
+            let mut s = self.features;
+            let mut err = String::new();
+            if cf::level(spec.slice(at, end), 0, true, &mut s, &mut err) {
+                s = cf::close(s);
+                let mut dup = cf::contains(build, s);
+                for i in 0..self.simd_levels.len() {
+                    dup = dup || cf::contains(self.simd_levels[i], s) && cf::contains(s, self.simd_levels[i]);
+                }
+                if !dup {
+                    let mut k = self.simd_levels.len();
+                    self.simd_levels.push(s);
+                    while k > 0 && cf::count(self.simd_levels[k - 1]) > cf::count(s) {
+                        self.simd_levels.set(k, self.simd_levels[k - 1]);
+                        k -= 1;
+                    }
+                    self.simd_levels.set(k, s);
+                }
+            }
+            at = end + 1;
+        }
+    }
+
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
+        self.simd_levels_compute();
         if std_dir.len() == 0 {
             return;
         }
@@ -5791,6 +5839,13 @@ extend Package {
                 );
                 if id >= 0 {
                     self.modules[id as usize].backend = true;
+                }
+            }
+            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
+            if self.simd_levels.len() != 0 {
+                let mut cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
+                if unsafe shim::sc_mtime(cf9.cstr()) != 0 {
+                    let _ = self.load_module("sc_cpu", cf9.as_str(), self.bootstrap, target);
                 }
             }
         }

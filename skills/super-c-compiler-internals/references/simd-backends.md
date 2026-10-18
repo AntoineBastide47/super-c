@@ -55,7 +55,32 @@ call, and sets `fn_union`; `lint_feature_unsafe` reports a deferred marker no us
 needs (a build's lints and `lint`), with the `(cpu::Feature, f)` tuple rows of feature functions
 (`Ast.feature_rows`, a `detect::dispatch` table) whose feature does not imply the function's. `tc_feature_bound_args` rejects a feature function as the
 value of a closure bound. The Core IR inliner never splices a callee whose features its caller's
-set lacks (`inline.spc`, reason `IJ_NOT_FN`). The interpreter traps on a call of such a function ("`f` has no compile-time
+set lacks (`inline.spc`, reason `IJ_NOT_FN`).
+
+Feature clones: `InlineStore::build` copies every kept function body that holds a vector and no
+closure (`vec_ix`, `vec_bodies`, `vec_body`). While a body emits under a set that holds a backend
+entry the build's closure does not (`CEmit.fs`: a `@target_feature` function's, or a clone's; SME
+alone holds none), `CEmit::clone_set` gives a call of such a function that states no features that
+set: `callee_sym_i` spells `<symbol>__fs<32 hex
+digits of the features beyond the build's>` (`clone_sfx`, also the clone's closure suffix) and
+records a `Demand` with `fs` set, journaled in the event's `xs` (four words). The drains emit it
+under `demand_set` (its `fs`, else the function's set), the target attribute from that set
+(`cemit_fn_attrs`), and `cemit_take_body` lowers it from the store's copy when its own emission
+took the kept body. The clone lands in the callee module's instance file. One emitter renders bodies
+for several TUs (the serial drain after the seeds), so its local-declaration memo (`decl_memo`) is
+keyed by the spelling context too: the first render in a TU records the type's definition edge.
+
+Run-time copies (`--simd-dispatch`): the load computes `Package.simd_levels` (`simd_levels_compute`:
+the levels of `simd_dispatch` over the build's features, closed, by size; x86_64 only; `build::dispatch_for` turns an unset level list into `off` at opt-level 0
+or 1 and for a script without a profile) and, for a
+program with vectors, loads the detector binding `sc_cpu` so `ffi/sc_cpu.c` links.
+`CEmit::dispatch_prologue` opens every function `vec_body` keeps that states no features and emits
+under the build's set with `if (__sc_simd_lvl() >= k) return <name>__fs<hex>(<its parameters>);`,
+the highest level first (the `__r` split body forwards to the copy's `__r`), and demands each copy
+(its function, symbol, substitutions and closure suffix plus the level's suffix, `fs` the level's
+set). `simd_level_fn` writes `__sc_simd_lvl()` into the forward header (a relaxed per-TU cache over
+`sc_cpu_words` and `SC_SIMD_LEVEL`). The levels join the emit stamp's `opt` line and the TU cache
+header. The interpreter traps on a call of such a function ("`f` has no compile-time
 value"). `ir::facts::call_access` reads the memory annotations (`MA_READ`, `MA_WRITE`, `MA_LANES`);
 `term_effect` gives an annotated read `EF_NONE` and a write `EF_PTR` through its argument.
 

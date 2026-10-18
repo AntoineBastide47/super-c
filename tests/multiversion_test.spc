@@ -6,6 +6,7 @@
 // register values.
 import tests::harness as h;
 import tests::cli_harness as cli;
+import build_system::build as bsys;
 import driver_shim as shim;
 import std::cpu;
 import sc_cpu;
@@ -131,6 +132,94 @@ fn feature_functions_keep_their_calls() {
         a.contains("SC_TGT_A64(\"+rdm+i8mm+crc+lse\", \"arch=armv8.2-a+i8mm\")))) int32_t mm("),
         "the aarch64 target",
     );
+}
+
+// A feature function's call of a function with vector code runs a copy of it compiled with the caller's
+// features (`<name>__fs<features>`, in the module's instance file): 256-bit FMA there, the 128-bit
+// original elsewhere. A function without vector code keeps its one copy.
+@test
+fn feature_functions_compile_their_vector_callees_with_their_features() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::cpu;\nimport std::simd;\n\n@c.noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n// 128-bit lanes: the copy declares the original's vector type.\n@c.noinline\nfn kern4(c: []mut f32, a: []f32) {\n    simd::store(c, 0, simd::load::<f32, 4>(a, 0) + simd::load::<f32, 4>(c, 0));\n}\n\n@c.noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\n@arch(x86_64)\n@target_feature([cpu::Feature::Fma])\nfn fast(c: []mut f32, a: []f32, x: i32) i32 {\n    kern(c, a);\n    kern4(c, a);\n    return plain(x);\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    kern4(c, a);\n    return unsafe fast(c, a, args.len() as i32) + plain(0) - 3;\n}\n",
+    );
+    let root = p.dir();
+    let _ = p.run_raw(
+        format(
+            "build \"{}/main.spc\" -o \"{}/app\" --profile=release --arch=x86_64 --target=linux --jobs=1",
+            root,
+            root,
+        ).as_str(),
+    );
+    let c = cli::read_text(format("{}/build/release/raw/main.c", root).as_str());
+    let i = cli::read_text(format("{}/build/release/raw/main__inst.c", root).as_str());
+    // One emitter renders both files (`--jobs=1`): the copies' file includes the vector type the
+    // original declared first.
+    assert(i.contains("__sc_v4_f32 _") && i.contains("#include \"__sc_t/__sc_v4_f32.h\""), "the copies' type headers");
+    let at = i.as_str().find(
+        "__attribute__((noinline, target(\"sse3,ssse3,sse4.1,sse4.2,popcnt,avx,fma\"))) void main__kern__fs",
+    );
+    assert(at >= 0, "the copy carries the caller's target");
+    assert(i.as_str().slice(at as usize, i.len()).contains("__sc_si_x86_64__fma_f32x8("), "the copy's vectors");
+    assert(
+        c.contains("main__kern__fs") && c.contains("__sc_si_x86_64__load_f32x4(") && !c.contains("f32x8"),
+        "the original's vectors",
+    );
+    assert(!c.contains("plain__fs") && !i.contains("plain__fs"), "no copy without vector code");
+}
+
+// The run-time choice: an x86_64 function with vector code opens with a call of its copy at each
+// `--simd-dispatch` level the CPU has (`__sc_simd_lvl()`, the forward header), the highest first; a
+// function without vector code has none, and `off`, another instruction set, or a `dev` build or a
+// script without `--profile` (no level set) none at all.
+@test
+fn vector_functions_choose_their_copy_at_run_time() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\n\n@c.noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n@c.noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    return plain(args.len() as i32) - 3;\n}\n",
+    );
+    let root = p.dir();
+    let mut texts = Vector::<String>::new();
+    // The profile directory, then the flags (a script without `--profile` builds into `dev`).
+    let profs: [str; 7] = ["release", "release", "release", "release", "dev", "dev", "dev"];
+    let flags: [str; 7] = [
+        "--profile=release --arch=x86_64 --target=linux",
+        "--profile=release --arch=x86_64 --target=linux --simd-dispatch=x86-64-v3,x86-64-v4",
+        "--profile=release --arch=x86_64 --target=linux --simd-dispatch=off",
+        "--profile=release --arch=aarch64 --target=linux",
+        "--profile=dev --arch=x86_64 --target=linux",
+        "--profile=dev --arch=x86_64 --target=linux --simd-dispatch=x86-64-v3",
+        "--arch=x86_64 --target=linux",
+    ];
+    for i in 0..7 {
+        bsys::rm_rf(format("{}/build", root).as_str());
+        let _ = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, unsafe flags[i]).as_str());
+        let raw = format("{}/build/{}/raw", root, unsafe profs[i]);
+        let mut t = cli::read_text(format("{}/main.c", raw).as_str());
+        t.push_str(cli::read_text(format("{}/main__inst.c", raw).as_str()).as_str());
+        t.push_str(cli::read_text(format("{}/__sc_fwd.h", raw).as_str()).as_str());
+        texts.push(t);
+    }
+    let v3 = "__attribute__((noinline, target(\"sse3,ssse3,sse4.1,sse4.2,popcnt,cx16,sahf,avx,avx2,fma,bmi,bmi2,f16c,lzcnt,movbe\"))) void main__kern__fs";
+    let d = texts[0].as_str();
+    assert(d.contains("  if (__sc_simd_lvl() >= 1) { main__kern__fs") && !d.contains(">= 2"), "the default level");
+    assert(d.contains(v3) && d.contains("__sc_simd_lvl_init(void)"), "the copy and the level");
+    assert(d.find("int32_t main__plain(") > 0 && !d.contains("main__plain__fs"), "no copy without vector code");
+    let two = texts[1].as_str();
+    assert(
+        two.find("__sc_simd_lvl() >= 2") > 0 && two.find("__sc_simd_lvl() >= 2") < two.find("__sc_simd_lvl() >= 1"),
+        "the highest first",
+    );
+    assert(!texts[2].contains("__sc_simd_lvl") && !texts[3].contains("__sc_simd_lvl"), "off, and aarch64");
+    assert(!texts[4].contains("__sc_simd_lvl") && texts[5].contains(v3), "dev: off unless set");
+    assert(texts[6].contains("main__kern(") && !texts[6].contains("__sc_simd_lvl"), "no profile: off");
+    let bad = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" --simd-dispatch=x86-64-v9", root, root).as_str());
+    assert(!bad.ok() && bad.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad level");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\nsimd-dispatch = \"x86-64-v9\"\n");
+    let man = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    assert(!man.ok() && man.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad manifest level");
 }
 
 // A function's address casts to `usize`, and back inside `unsafe`; a generic cast to a type that is no

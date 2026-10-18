@@ -1,5 +1,6 @@
 // Matrix products over row-major slices: on the SME tiles where the CPU has them (ffi/sc_sme.c, one outer
-// product per tile per step of the inner dimension), over `Simd` lanes elsewhere. Every kernel gives the
+// product per tile per step of the inner dimension), over `Simd` lanes elsewhere (on x86_64, the build's
+// run-time copies of the lanes kernels: `--simd-dispatch`). Every kernel gives the
 // same bits: element (i, j) is the fused multiply-add chain over p in order from +0.0, NaN payloads
 // aside; `f16` and `bf16` inputs widen exactly to `f32` first.
 import std::cpu;
@@ -199,7 +200,8 @@ fn mul_bf16_sme(c: []mut f32, a: []bf16, b: []bf16, m: usize, k: usize, n: usize
     }
 }
 
-// The portable 16-bit product: both matrices widened to f32 (exact), then the f32 lanes.
+// The portable 16-bit product: both matrices widened to f32 (exact), then the f32 product (its kernel
+// by the machine).
 fn mul_widened<const E: usize, const F: usize>(
     c: []mut f32,
     a: []Float<E, F>,
@@ -215,7 +217,7 @@ fn mul_widened<const E: usize, const F: usize>(
     for x in b {
         w.push(x.to_f32());
     }
-    mul_f32_lanes(c, w[0..m * k], w[m * k..m * k + k * n], m, k, n);
+    mul_f32_on(c, w[0..m * k], w[m * k..m * k + k * n], m, k, n);
 }
 
 // The portable kernel: each row of `c` from +0.0, then for each p the row of `b` times `a[i][p]` added

@@ -1649,7 +1649,7 @@ extend CemitOut {
 // The C attribute prefix of fn `nid` (`inline __attribute__((always_inline)) ` etc.), mirroring
 // the established emitter: inline/always_inline/noinline, cold (+noinline unless spelled),
 // used/unused, section("name").
-fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut String) {
+fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, fs: cf::CpuFeatureSet, out: &mut String) {
     let a = unsafe &*p.module_ast_const(m);
     let mut always = false;
     let mut inl = false;
@@ -1726,7 +1726,7 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut Strin
     }
     // The features the function states beyond the build's: the C compiler's `target` attribute.
     let mut ta = String::new();
-    cf::push_target_attr(p.fn_set(m, nid), p.features, p.build_target, &mut ta);
+    cf::push_target_attr(fs, p.features, p.build_target, &mut ta);
     if ta.len() != 0 {
         if g.len() != 0 {
             g.push_str(", ");
@@ -2249,6 +2249,49 @@ fn cemit_relower_census(
 // walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
 // removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
 // `closure` selects a closure body (`nid` is the closure node) over a function body.
+// `__sc_simd_lvl()`, which the dispatch prologues read (`CEmit::dispatch_prologue`): the highest level
+// k (1-based) of `simd_levels` whose features the CPU detector reports (`sc_cpu_words`, which
+// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code: the loader
+// links the detector for it.
+fn simd_level_fn(p: &loader::Package, out: &mut String) {
+    if p.simd_levels.len() == 0 || !p.names_vectors() {
+        return;
+    }
+    out.push_str("void sc_cpu_words(uint64_t __out[2]);\n");
+    // `SC_SIMD_LEVEL=<k>` (a test switch) sets the level: a host whose detector hides features it
+    // runs (an emulator) runs the copies, and any host the bodies without them.
+    out.format_into(
+        "static __attribute__((noinline, cold, unused)) unsigned __sc_simd_lvl_init(void) {{\n  const char *__e = getenv(\"SC_SIMD_LEVEL\");\n  if (__e != 0 && *__e >= '0' && *__e <= '9') {{\n    unsigned __k = (unsigned)(*__e - '0');\n    return __k < {} ? __k : {};\n  }}\n  uint64_t __w[2];\n  sc_cpu_words(__w);\n",
+        p.simd_levels.len(),
+        p.simd_levels.len(),
+    );
+    let mut k = p.simd_levels.len();
+    while k > 0 {
+        let w = p.simd_levels[k - 1].w;
+        out.format_into(
+            "  if ((__w[0] & {}ULL) == {}ULL && (__w[1] & {}ULL) == {}ULL) return {};\n",
+            w[0],
+            w[0],
+            w[1],
+            w[1],
+            k,
+        );
+        k -= 1;
+    }
+    out.push_str("  return 0;\n}\n");
+    out.push_str(
+        "static inline __attribute__((unused)) unsigned __sc_simd_lvl(void) {\n  static unsigned char __lv = 0xFF;\n  unsigned __v = __atomic_load_n(&__lv, __ATOMIC_RELAXED);\n  if (__builtin_expect(__v == 0xFF, 0)) {\n    __v = __sc_simd_lvl_init();\n    __atomic_store_n(&__lv, (unsigned char)__v, __ATOMIC_RELAXED);\n  }\n  return __v;\n}\n",
+    );
+}
+
+// The features demand `d`'s body emits under: a feature clone's set, else its function's.
+fn demand_set(p: &loader::Package, d: &cbe::Demand) cf::CpuFeatureSet {
+    if !cf::is_empty(d.fs) {
+        return d.fs;
+    }
+    return p.fn_set(d.def.module, d.def.node);
+}
+
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
@@ -2270,6 +2313,16 @@ fn cemit_take_body(
         pr.count(prb::C_TAKEN, 1);
         pr.stop(prb::P_ACQUIRE, am);
         return true;
+    }
+    // A feature clone's body, its kept lowering taken by its own emission: the inline store's copy.
+    if !closure && unsafe (&*p).inl_store != null {
+        let vb = unsafe (*((&*p).inl_store as *const inl::InlineStore)).vec_body(DefId { module: m, node: nid });
+        if vb != null {
+            lw_out.body = irc::CoreBody::compact_from(unsafe &*vb);
+            pr.count(prb::C_TAKEN, 1);
+            pr.stop(prb::P_ACQUIRE, am);
+            return true;
+        }
     }
     let ok = if closure {
         lw_out.lower_closure_body(nid);
@@ -2454,8 +2507,8 @@ fn cemit_seed_module(
         }
         cem.noret = a.attr_of(nid, AttrKind::ATTR_NORETURN) != null;
         cem.fn_attrs.truncate(0);
-        cemit_fn_attrs(p, m as ModuleId, nid, &mut cem.fn_attrs);
         cem.fs = p.fn_set(m as ModuleId, nid);
+        cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
         if cem.emit_fn(&lw.body, sym.as_str()) {
             acc.seeds += 1;
             if is_main {
@@ -3109,8 +3162,8 @@ fn cemit_drain_demand(
     }
     cem.out.clear();
     cem.fn_attrs.truncate(0);
-    cemit_fn_attrs(p, d_def.module, d_def.node, &mut cem.fn_attrs);
-    cem.fs = p.fn_set(d_def.module, d_def.node);
+    cem.fs = demand_set(p, cem.demand.at(di));
+    cemit_fn_attrs(p, d_def.module, d_def.node, cem.fs, &mut cem.fn_attrs);
     // The instance lands in its generic's module instance shard: spell under that context.
     cem.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
     let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
@@ -3355,8 +3408,8 @@ fn cemit_drain_slice_one(
     sh.cf_ext = cfp;
     sh.out.clear();
     sh.fn_attrs.truncate(0);
-    cemit_fn_attrs(p, d_def.module, d_def.node, &mut sh.fn_attrs);
-    sh.fs = p.fn_set(d_def.module, d_def.node);
+    sh.fs = demand_set(p, dem.at(di));
+    cemit_fn_attrs(p, d_def.module, d_def.node, sh.fs, &mut sh.fn_attrs);
     let em_ok9 = sh.emit_fn(&blw.body, d_sym);
     sh.cf_ext = null;
     if !em_ok9 {
@@ -4880,8 +4933,8 @@ pub fn cemit_package(
                         );
                         cem.out.clear();
                         cem.fn_attrs.truncate(0);
-                        cemit_fn_attrs(p, m9 as ModuleId, mid9, &mut cem.fn_attrs);
                         cem.fs = p.fn_set(m9 as ModuleId, mid9);
+                        cemit_fn_attrs(p, m9 as ModuleId, mid9, cem.fs, &mut cem.fn_attrs);
                         if cem.emit_fn(&mlw.body, msym.as_str()) {
                             proto_of(&cem.out, &mut mb_dec);
                             mb_def.push_string(&cem.out);
@@ -7169,6 +7222,7 @@ fn cemit_assemble(
             "#ifndef SC_CEMIT_FWD_H\n#define SC_CEMIT_FWD_H\n#include \"super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\nstatic inline void *__sc_wrap(const void *p) { return (void *)p; }\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n#pragma GCC diagnostic ignored \"-Wunused-parameter\"\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n",
         );
         fh.push_string(ext_incs);
+        simd_level_fn(p, &mut fh);
         fd.copy(rest.as_str(), NO_HOME, &incd, &mut fh);
         fh.push_string(&rest);
         fh.push_str("#endif\n");

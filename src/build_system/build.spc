@@ -1858,6 +1858,7 @@ fn stamp_opt_line(
     arch: i32,
     feats: cf::CpuFeatureSet,
     width: u32,
+    disp: str,
     bootstrap: bool,
     lint: bool,
     ccount: u64,
@@ -1867,7 +1868,7 @@ fn stamp_opt_line(
     out.push_u64(target as u64);
     out.push_str("\t");
     out.push_u64(arch as u64 & 0xFF);
-    out.format_into("\t{}.{}.{}\t", feats.w[0], feats.w[1], width);
+    out.format_into("\t{}.{}.{}.{}\t", feats.w[0], feats.w[1], width, disp);
     out.push_u64(bootstrap as u64);
     out.push_str("\t");
     out.push_u64(lint as u64);
@@ -1912,7 +1913,18 @@ fn stamp_write(
     }
     let mut out = String::from_str("sc-emit-stamp v3\n");
     stamp_exe_line(&mut out, cid);
-    stamp_opt_line(&mut out, target, arch, p.features, p.simd_width, bootstrap, lint, stamp_gen_c_count(gen), root_dir);
+    stamp_opt_line(
+        &mut out,
+        target,
+        arch,
+        p.features,
+        p.simd_width,
+        p.simd_dispatch.as_str(),
+        bootstrap,
+        lint,
+        stamp_gen_c_count(gen),
+        root_dir,
+    );
     {
         // The manifest is loaded from the working directory (main.spc): its shard policy and
         // flags shape the emitted tree.
@@ -1959,6 +1971,7 @@ fn stamp_fresh(
     arch: i32,
     feats: cf::CpuFeatureSet,
     width: u32,
+    disp: str,
     bootstrap: bool,
     lint: bool,
     gen: str,
@@ -2014,7 +2027,7 @@ fn stamp_fresh(
             // Every field but the unit count must match this build's options.
             ccount = stamp_u64(line, 6);
             let mut want = String::new();
-            stamp_opt_line(&mut want, target, arch, feats, width, bootstrap, lint, ccount, root_dir);
+            stamp_opt_line(&mut want, target, arch, feats, width, disp, bootstrap, lint, ccount, root_dir);
             if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
@@ -2099,11 +2112,36 @@ pub struct BuildCtx<'a> {
     pub target_features: str<'a>,
     /// `--simd-width`: 256 or 512; 0 = the manifest's `simd-width`.
     pub simd_width: u32,
+    /// `--simd-dispatch`: `off` or x86-64 levels; empty = the manifest's `simd-dispatch`.
+    pub simd_dispatch: str<'a>,
 }
 
 /// The vector width the build's planner prefers on AVX-512: `--simd-width`, else `simd-width`, else 256.
 pub const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
     return pick(cx.simd_width != 0, cx.simd_width, pick(m.simd_width != 0, m.simd_width, 256));
+}
+
+/// The run-time copies' levels (`loader::Package.simd_dispatch`): `--simd-dispatch`, else
+/// `simd-dispatch`; empty for the default.
+pub fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
+    return if cx.simd_dispatch.len() != 0 {
+        cx.simd_dispatch;
+    } else {
+        m.simd_dispatch.as_str();
+    };
+}
+
+/// The levels a build at profile `prof` copies for: `spec` when set; else `off` in a profile at
+/// opt-level 0 or 1 (`debug`, `dev`: the copies make the C compile of vector code 1.4 to 1.7 times
+/// longer and add little speed there) and in a script build without a profile (no `-O` flag), the
+/// default elsewhere.
+pub fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
+    let pi = m.profile_index(prof);
+    let slow = prof.len() == 0 || pi >= 0 && m.profiles.at(pi as usize).opt >= 0 && m.profiles.at(pi as usize).opt <= 1;
+    if spec.len() == 0 && slow {
+        return "off";
+    }
+    return spec;
 }
 
 /// Check the `target-features` lists of `m` (the build's and every profile's: a feature of another
@@ -2197,6 +2235,7 @@ fn emit_closure(
     p.arch = m.arch;
     p.features = features_for(m, prof_name, cx.target_features);
     p.simd_width = simd_width(m, cx);
+    p.simd_dispatch = String::from_str(dispatch_for(m, prof_name, simd_dispatch(m, cx)));
     let pi = m.profile_index(prof_name);
     if pi >= 0 {
         let mut fl = String::new();
@@ -2304,6 +2343,9 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     }
     if simd_width(m, cx) == 512 {
         push_arg(&mut args, "--simd-width=512");
+    }
+    if simd_dispatch(m, cx).len() != 0 {
+        args.push(format("--simd-dispatch={}", simd_dispatch(m, cx)));
     }
     if cx.bootstrap_tags {
         push_arg(&mut args, "--bootstrap-tags");
@@ -2416,6 +2458,7 @@ pub fn transpile_step(
         m.arch,
         features_for(m, prof_name, cx.target_features),
         simd_width(m, cx),
+        dispatch_for(m, prof_name, simd_dispatch(m, cx)),
         cx.bootstrap_tags,
         cx.lint,
         gen.as_str(),

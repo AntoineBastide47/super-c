@@ -175,6 +175,12 @@ extend InlineStats {
 pub struct InlineStore {
     pub keep_ix: Map<u64, u64>, // callee key -> kept slot, or REJ_BASE | reason
     pub kept: Vector<CalleeInfo>,
+    /// The kept functions whose bodies hold a vector and no closure: callee key -> `vec_bodies` slot.
+    /// A call of one from a function with features beyond the build's runs a copy compiled with
+    /// that function's features (the emitter's feature clones), lowered from this copy: the kept
+    /// body itself moves to its own emission.
+    pub vec_ix: Map<u64, u64>,
+    pub vec_bodies: Vector<ir::CoreBody>,
 }
 
 /// Per-DropCtx state: the type-translation caches over the shared store's slots, and the splice
@@ -1034,7 +1040,20 @@ fn assert_spans(a: &Ast, out: &mut Vector<u64>) {
 
 extend InlineStore {
     pub fn new() InlineStore {
-        return InlineStore { keep_ix: Map::<u64, u64>::new(), kept: Vector::<CalleeInfo>::new() };
+        return InlineStore {
+            keep_ix: Map::<u64, u64>::new(),
+            kept: Vector::<CalleeInfo>::new(),
+            vec_ix: Map::<u64, u64>::new(),
+            vec_bodies: Vector::<ir::CoreBody>::new(),
+        };
+    }
+
+    /// The copy of kept function `d`'s body when it holds a vector and no closure (`vec_ix`), else null.
+    pub fn vec_body(self: &Self, d: DefId) *const ir::CoreBody {
+        return switch self.vec_ix.get(&callee_key(d)) {
+            Some(v) => self.vec_bodies.at((*v) as usize),
+            None => null,
+        };
     }
 
     /// Vet every kept env-free function lowering of `keep` (the borrow checker's product, the same
@@ -1078,6 +1097,10 @@ extend InlineStore {
                 continue;
             }
             let key = callee_key(d);
+            if vec_prog && lw.closures.len() == 0 && !self.vec_ix.contains_key(&key) && holds_vector(&lw.body, pkg) {
+                self.vec_ix.insert(key, self.vec_bodies.len() as u64);
+                self.vec_bodies.push(ir::CoreBody::compact_from(&lw.body));
+            }
             if self.keep_ix.contains_key(&key) || !called.contains_key(&key) {
                 continue;
             }

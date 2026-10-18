@@ -477,7 +477,7 @@ pub fn compile_units(
             miss.push(i as u32);
         }
     } else {
-        cache_keys(&mut vpid, vf.as_str(), flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
+        cache_keys(&mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
         for i in 0..units.len() {
             let cobj = cobjs.at(i);
             if cobj.len() != 0 && copy_file(cobj.as_str(), opaths.at(i).as_str()) {
@@ -494,7 +494,7 @@ pub fn compile_units(
         return rc;
     }
     if fresh {
-        cache_keys(&mut vpid, vf.as_str(), flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
+        cache_keys(&mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
     }
     let mut installed = false;
     for i in 0..miss.len() {
@@ -524,11 +524,13 @@ pub fn compile_units(
 
 // Wait for the version probe `vpid` (spawned into file `vf`; -1 = not started or already waited for)
 // and fill `cobjs` with every unit's cache entry under namespace `ns`: the key of the version line,
-// the compile `flags`, the tree path `aroot` when the flags record it, and the unit's hash pair in
-// `hs`; empty for a unit whose `ok` is false.
+// the compiler command `cc` (its own arguments, `-arch x86_64` say, change the output and not the
+// version line), the compile `flags`, the tree path `aroot` when the flags record it, and the unit's
+// hash pair in `hs`; empty for a unit whose `ok` is false.
 fn cache_keys(
     vpid: &mut i64,
     vf: str,
+    cc: &Vector<String>,
     flags: &Vector<String>,
     aroot: str,
     ns: str,
@@ -545,6 +547,11 @@ fn cache_keys(
     let mut b1 = FNV_BASIS;
     let mut b2: u64 = 0x9e3779b97f4a7c15;
     ch_mix_bytes(&mut b1, &mut b2, ccver.as_str().ptr(), ccver.len());
+    for i in 0..cc.len() {
+        let w = cc.at(i).as_str();
+        ch_mix_bytes(&mut b1, &mut b2, w.ptr(), w.len());
+        ch_mix_bytes(&mut b1, &mut b2, "\n".ptr(), 1);
+    }
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
         ch_mix_bytes(&mut b1, &mut b2, f.ptr(), f.len());

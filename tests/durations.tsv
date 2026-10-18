@@ -426,6 +426,7 @@
 8.77	tests::cli_test::test_timeout_dumps_child_processes
 19.68	tests::cli_test::test_timeouts
 1.23	tests::cli_test::test_zero_sized_fixtures
+0.96	tests::cli_test::the_object_cache_keys_on_the_compiler_command
 0.16	tests::cli_test::thread_send_rejects_raw_pointer
 1.54	tests::cli_test::threads_and_atomics
 1.83	tests::cli_test::timed_wait_deadline_races
@@ -1006,10 +1007,12 @@
 11.54	tests::multiversion_test::dispatch_chooses_once_in_table_order
 0.64	tests::multiversion_test::dispatch_needs_no_fence
 0.39	tests::multiversion_test::dispatch_rows_cover_their_functions
+1.42	tests::multiversion_test::feature_functions_compile_their_vector_callees_with_their_features
 1.71	tests::multiversion_test::feature_functions_keep_their_calls
 2.24	tests::multiversion_test::function_addresses_cast_to_usize_and_back
 0.39	tests::multiversion_test::target_cpu_is_a_level
 1.66	tests::multiversion_test::uses_beyond_the_callers_features_need_unsafe
+3.12	tests::multiversion_test::vector_functions_choose_their_copy_at_run_time
 0.00	tests::multiversion_test::x86_decision_needs_the_register_state
 0.00	tests::multiversion_test::x86_detection_reports_the_machine
 0.00	tests::mutex_test::a_cancel_after_a_condvar_notify_keeps_the_notify

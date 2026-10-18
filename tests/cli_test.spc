@@ -8259,6 +8259,31 @@ fn global_object_cache_round_trip() {
     bdir.free();
 }
 
+// The object cache key holds the C compiler's whole command too: its arguments (`-arch x86_64` say)
+// change the objects and not the version line. Script builds share one namespace: `cc -DSC_KEY=1`
+// installs its own entries, and `cc` again reuses its first ones.
+@test
+fn the_object_cache_keys_on_the_compiler_command() {
+    if cli::on_wasm() || cli::on_windows() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let cache = format("{}/ocache", root);
+    let bdir = format("{}/build", root);
+    let ns = format("{}/o/script", cache.as_str());
+    let mut counts = Vector::<i32>::new();
+    for cc in ["--cc=cc", "\"--cc=cc -DSC_KEY=1\"", "--cc=cc"] {
+        bsys::rm_rf(bdir.as_str());
+        let args = format("build main.spc -o app {}", cc);
+        assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), args.as_str()).ok(), args.as_str());
+        counts.push(cli::dir_count_suffix(ns.as_str(), ".o"));
+    }
+    assert(counts[0] > 0 && counts[1] > counts[0], "another command installs its own objects");
+    assert(counts[2] == counts[1], "the first command's objects serve it again");
+}
+
 // The entry names of `dir`, without `.`-prefixed names.
 fn dir_names(dir: str) Vector<String> {
     let mut out = Vector::<String>::new();

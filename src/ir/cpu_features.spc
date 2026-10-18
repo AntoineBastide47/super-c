@@ -714,6 +714,32 @@ pub fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mu
     return false;
 }
 
+/// Whether `spec` is a `--simd-dispatch` / `simd-dispatch` value: `off`, or x86-64 level names
+/// separated by commas; else the diagnostic goes to `err`.
+pub fn dispatch_ok(spec: str, err: &mut String) bool {
+    if spec == "off" {
+        return true;
+    }
+    let mut at: usize = 0;
+    while at <= spec.len() {
+        let mut end = at;
+        while end < spec.len() && spec[end] != b',' {
+            end += 1;
+        }
+        let mut s = CpuFeatureSet { w: [0, 0] };
+        if end == at || !level(spec.slice(at, end), 0, true, &mut s, err) {
+            if err.len() == 0 {
+                err.push_str("an empty level");
+            }
+            err.insert_str(0, "simd dispatch: ");
+            err.push_str(" (or `off`)");
+            return false;
+        }
+        at = end + 1;
+    }
+    return true;
+}
+
 const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
 const PLATFORM_NAMES: [str<'static>; 6] = ["windows", "macos", "linux", "wasm", "ios", "android"];
 

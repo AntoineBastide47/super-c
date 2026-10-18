@@ -15,6 +15,7 @@ import lexer::token_type as tt;
 import module::loader as loader;
 import emit::simd_plan as sp;
 import ir::cpu_features as cf;
+import ir::inline as inl;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -248,10 +249,11 @@ pub struct CEmit {
     // call forwarding): reallocating them for every body dominated the emitter's allocator traffic.
     u32_pool: Vector<Vector<u32>>,
     bool_pool: Vector<Vector<bool>>,
-    // Per-(module, TypeId) declaration-render memo: `decl_txt[i]` is ty_c's spelling with an empty
-    // name, `decl_mode[i]` how the name joins (0 = space, 1 = direct, 2 = not prefix-form: call
-    // ty_c). Validated per type by comparing against a real ty_c render, so hits are byte-exact.
-    // Edge/reserved-ident safety: setup_locals replays both for every local type before decls.
+    // Per-(spelling context, module, TypeId) declaration-render memo: `decl_txt[i]` is ty_c's spelling
+    // with an empty name, `decl_mode[i]` how the name joins (0 = space, 1 = direct, 2 = not
+    // prefix-form: call ty_c). Validated per type by comparing against a real ty_c render, so hits
+    // are byte-exact. The first render in each context (`mg.mark_ctx`: a TU) records the type's
+    // edge there; setup_locals reserves the spelling's identifiers.
     decl_memo: Map<u64, u64>,
     decl_txt: Vector<String>,
     // `is_destructible` verdicts (1 = needs a free call) of substitution-free types, keyed by the
@@ -371,6 +373,9 @@ pub struct Demand {
     /// The instantiation's closure suffix (receiver-args for methods, targs for fn specs);
     /// hoisted closures of the instance body append it to their symbols.
     pub sfx: String,
+    /// A feature clone's set (`clone_set`): the body emits under it instead of its own; empty for
+    /// every other demand.
+    pub fs: cf::CpuFeatureSet,
 }
 
 // Does the body carry any loop-back-edge safepoint marker? Decides whether the function needs
@@ -1613,6 +1618,8 @@ extend CEmit {
         let mut arrcp = Vector::<u32>::new();
         let mut views = Vector::<u32>::new();
         let mut np9: u32 = 0;
+        // The C parameter names, for the dispatch prologue's forwarding call.
+        let mut pnames = String::new();
         for i in 0..b.args {
             let l = (b.returns + i) as usize;
             if self.erased(b, b.locals.at(l).ty) {
@@ -1621,9 +1628,11 @@ extend CEmit {
             }
             if np9 != 0 {
                 self.out.push_str(", ");
+                pnames.push_str(", ");
             }
             np9 += 1;
             if split && self.is_view_mut(b, b.locals.at(l).ty) {
+                pnames.format_into("__sc_sp{}, __sc_sn{}", l, l);
                 views.push(l as u32);
                 let mut out = replace(&mut self.out, String::new());
                 let ok = self.split_view_param(b, b.locals.at(l).ty, l as u32, &mut out);
@@ -1649,6 +1658,7 @@ extend CEmit {
                     arrcp.push(l as u32);
                 }
             }
+            pnames.push_str(nm.as_str().slice(pick(nm.as_str().starts_with("restrict "), 9usize, 0), nm.len()));
             let mut out = replace(&mut self.out, String::new());
             let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut out);
             self.out = out;
@@ -1680,6 +1690,7 @@ extend CEmit {
             return false;
         }
         self.out.push_str(" {\n");
+        self.dispatch_prologue(b, name, split, ret_void, pnames.as_str());
         for k in 0..views.len() {
             // The body reads the view through its usual local.
             let l = views[k];
@@ -4469,7 +4480,7 @@ extend CEmit {
             if self.mg.subs.len() != 0 {
                 md = self.decl_class(b, b.locals.at(l).ty);
             } else {
-                let dk = skey_mix(0, b.module as u64 << 32 | b.locals.at(l).ty as u64);
+                let dk = skey_mix(self.mg.mark_ctx as u64, b.module as u64 << 32 | b.locals.at(l).ty as u64);
                 slot = (switch self.decl_memo.get(&dk) {
                     Some(v) => *v,
                     None => {
@@ -10911,6 +10922,12 @@ extend CEmit {
         ev.s1 = d9.sym.clone();
         ev.s2 = d9.sfx.clone();
         ev.subs = mbe::subs_copy(&d9.subs);
+        if !cf::is_empty(d9.fs) {
+            for w in d9.fs.w {
+                ev.xs.push(w as u32);
+                ev.xs.push((w >> 32) as u32);
+            }
+        }
         self.mg.rec.push(ev);
     }
 
@@ -10932,12 +10949,17 @@ extend CEmit {
                 self.glue_seen.insert(ev.h);
             }
             let snap = mbe::subs_copy(&ev.subs);
+            let mut fs = cf::CpuFeatureSet { w: [0, 0] };
+            if ev.xs.len() == 4 {
+                fs.w = [ev.xs[0] as u64 | ev.xs[1] as u64 << 32, ev.xs[2] as u64 | ev.xs[3] as u64 << 32];
+            }
             self.demand.push(
                 Demand {
                     def: DefId { module: ev.b as ModuleId, node: ev.c },
                     sym: ev.s1.clone(),
                     subs: snap,
                     sfx: ev.s2.clone(),
+                    fs: fs,
                 },
             );
             return;
@@ -13655,6 +13677,105 @@ extend CEmit {
         return r;
     }
 
+    // The set a call of `callee` from the body being emitted runs it under: that body's set when it
+    // holds a backend entry the build's features do not and `callee` is a function with a vector body
+    // that states no features itself (`inl::InlineStore::vec_body`); else empty, the callee's own
+    // symbol. The clone is the same body compiled with the caller's features (the planner's entries,
+    // the C target attribute): every `Simd` operation gives the same bits in either.
+    fn clone_set(self: &Self, callee: DefId) cf::CpuFeatureSet {
+        let none = cf::CpuFeatureSet { w: [0, 0] };
+        let p = self.p();
+        let build = cf::close(p.features);
+        if callee.node == NODE_NONE || p.inl_store == null || cf::contains(build, self.fs) {
+            return none;
+        }
+        if !cf::is_empty(p.fn_features(callee.module, callee.node)) || unsafe (*(p.inl_store as *const inl::InlineStore)).vec_body(
+            callee,
+        ) == null {
+            return none;
+        }
+        for i in 0..p.simd_table.len() {
+            let efs = p.simd_table.at(i).fs;
+            if cf::contains(self.fs, efs) && !cf::contains(build, efs) {
+                return self.fs;
+            }
+        }
+        return none;
+    }
+
+    // The run-time choice of body `b` (symbol `name`, `__r` when `split`): a function with vector code
+    // and no features of its own, emitted with the build's, opens with one forwarding call per level
+    // of `simd_levels` the CPU has, the highest first, to its copy compiled with that level's
+    // features (`<name>__fs<hex>`, demanded here). `__sc_simd_lvl()` (the forward header) reads the
+    // detector once. A copy calls copies (`clone_set`): the check runs where code without the
+    // features enters vector code.
+    fn dispatch_prologue(self: &mut Self, b: &ir::CoreBody, name: str, split: bool, ret_void: bool, args: str) {
+        let p = self.p();
+        let n = p.simd_levels.len();
+        if n == 0 || self.mg.macro_on || !cf::contains(cf::close(p.features), self.fs) || p.inl_store == null {
+            return;
+        }
+        let d = b.owner;
+        let fnn = unsafe (*p.module_ast_const(d.module)).at_const(d.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.is_extern() || fnn.as_data.function.is_variadic() {
+            return;
+        }
+        if !cf::is_empty(p.fn_features(d.module, d.node)) || unsafe (*(p.inl_store as *const inl::InlineStore)).vec_body(
+            d,
+        ) == null {
+            return;
+        }
+        let mut k = n;
+        while k > 0 {
+            k -= 1;
+            let fs = p.simd_levels[k];
+            let mut sfx = String::new();
+            clone_sfx_of(fs, cf::close(p.features), &mut sfx);
+            let mut sym = String::from_str(name);
+            sym.push_string(&sfx);
+            if self.collect_demand {
+                let dk = def_fp(d) ^ sym.as_str().hash();
+                let fresh = !self.demand_seen.contains(&dk);
+                if fresh || self.mg.rec_on {
+                    if fresh {
+                        self.demand_seen.insert(dk);
+                    }
+                    let mut csfx = self.mg.clos_sfx.clone();
+                    csfx.push_string(&sfx);
+                    let d9 = Demand {
+                        def: d,
+                        sym: sym.clone(),
+                        dk: dk,
+                        subs: mbe::subs_copy(&self.mg.subs),
+                        sfx: csfx,
+                        fs: fs,
+                    };
+                    self.rec_demand(&d9, dk, 1);
+                    if fresh {
+                        self.demand.push(d9);
+                    }
+                }
+            }
+            if split {
+                sym.push_str("__r");
+            }
+            self.out.format_into("  if (__sc_simd_lvl() >= {}) ", k + 1);
+            if self.noret {
+                self.out.format_into("{{ {}({}); __builtin_unreachable(); }}\n", sym.as_str(), args);
+            } else if ret_void {
+                self.out.format_into("{{ {}({}); return; }}\n", sym.as_str(), args);
+            } else {
+                self.out.format_into("return {}({});\n", sym.as_str(), args);
+            }
+        }
+    }
+
+    // A feature clone's symbol and closure suffix: `__fs` and the hex words of the features beyond the
+    // build's.
+    fn clone_sfx(self: &Self, dst: &mut String) {
+        clone_sfx_of(self.fs, cf::close(self.p().features), dst);
+    }
+
     // callee_sym for call terminator `t`: the receiver type is the first argument's, the destination
     // type the single destination's (when `with_dest`).
     fn term_callee_sym(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, with_dest: bool, dst: &mut String) bool {
@@ -13950,6 +14071,38 @@ extend CEmit {
             if rit.decl == NODE_NONE {
                 return self.fail("method-inst");
             }
+        } else if targs_len == 0 && !cf::is_empty(self.clone_set(callee)) {
+            // A feature clone of a concrete function: its symbol and a demand for its body.
+            let tgt0 = self.mg.method_target(callee.module, callee.node);
+            if !self.mg.fn_sym(callee.module, callee.node, tgt0, sym) {
+                return self.fail("callee-sym");
+            }
+            let mut sfx = String::new();
+            self.clone_sfx(&mut sfx);
+            sym.push_string(&sfx);
+            if self.collect_demand {
+                let dk = def_fp(callee) ^ sym.as_str().hash();
+                let fresh = !self.demand_seen.contains(&dk);
+                if fresh || self.mg.rec_on {
+                    if fresh {
+                        self.demand_seen.insert(dk);
+                    }
+                    let d9 = Demand {
+                        def: callee,
+                        sym: sym.clone(),
+                        dk: dk,
+                        subs: Vector::<mbe::MSub>::new(),
+                        sfx: sfx,
+                        fs: self.fs,
+                    };
+                    self.rec_demand(&d9, dk, 1);
+                    if fresh {
+                        self.demand.push(d9);
+                    }
+                }
+            }
+            dst.push_string(sym);
+            return true;
         } else if targs_len == 0 {
             // Plain concrete call: no targ suffix, no demand record; the symbol depends
             // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize.
@@ -13972,8 +14125,23 @@ extend CEmit {
         // edges; the journal mode replays every attempt, so it spells each time).
         let mut mk1: u64 = 0;
         let memo9 = !self.mg.rec_on && self.collect_demand;
+        // A feature clone of the instance (`clone_set`): its own symbol, set and closure suffix.
+        let cfs = self.clone_set(callee);
+        let mut csfx9 = String::new();
+        if !cf::is_empty(cfs) {
+            self.clone_sfx(&mut csfx9);
+        }
         if memo9 {
-            let dk0 = self.call_fp(def_fp(callee), b, rpm, &rit, is_minst, targs_start, targs_len, recv_targs);
+            let dk0 = self.call_fp(
+                def_fp(callee) ^ csfx9.as_str().hash(),
+                b,
+                rpm,
+                &rit,
+                is_minst,
+                targs_start,
+                targs_len,
+                recv_targs,
+            );
             self.sym_memo_ctx_check();
             mk1 = self.sym_mk(skey_mix(1, dk0));
             if self.sym_memo_get(mk1, dst) {
@@ -14016,6 +14184,7 @@ extend CEmit {
                 }
             }
         }
+        sym.push_string(&csfx9);
         if ok && memo9 {
             self.sym_memo_put(mk1, sym);
         }
@@ -14084,7 +14253,8 @@ extend CEmit {
                     }
                 }
                 if sok {
-                    let d9 = Demand { def: callee, sym: sym.clone(), dk: dk9, subs: snap, sfx: sfx };
+                    sfx.push_string(&csfx9);
+                    let d9 = Demand { def: callee, sym: sym.clone(), dk: dk9, subs: snap, sfx: sfx, fs: cfs };
                     self.rec_demand(&d9, dk9, 1);
                     if fresh9 {
                         self.demand.push(d9);
@@ -16929,6 +17099,18 @@ fn float_marked(t: str) bool {
 }
 
 // The FNV-1a step over definition `d`: the seed of a demand fingerprint.
+// A feature clone's suffix for set `fs` over build set `build`: `__fs` and the 32 hex digits of the
+// features beyond the build's.
+fn clone_sfx_of(fs: cf::CpuFeatureSet, build: cf::CpuFeatureSet, dst: &mut String) {
+    dst.push_str("__fs");
+    let ws: [u64; 2] = [fs.w[0] & ~build.w[0], fs.w[1] & ~build.w[1]];
+    for w in ws {
+        for k in 0..16 {
+            dst.push_byte("0123456789abcdef"[(w >> (60 - 4 * k) as u64 & 15) as usize]);
+        }
+    }
+}
+
 const fn def_fp(d: DefId) u64 {
     return (0xcbf29ce484222325u64 ^ (d.module as u64 << 32 | d.node as u64)).wrapping_mul(1099511628211u64);
 }

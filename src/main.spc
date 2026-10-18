@@ -35,6 +35,7 @@ fn run_file(
     arch: i32,
     features: cf::CpuFeatureSet,
     simd_width: u32,
+    simd_dispatch: str,
     bootstrap_tags: bool,
     lint: bool,
     cflags: str,
@@ -51,10 +52,11 @@ fn run_file(
     p.arch = arch;
     p.features = features;
     p.simd_width = pick(simd_width != 0, simd_width, 256);
+    let bi = bman::builtins_only();
+    p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
     p.mem_check = bsys::mem_checker(cflags);
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
-    let bi = bman::builtins_only();
     p.profiles = bsys::profile_names(&bi);
     p.load_root(path, std_dir, bootstrap_tags, target);
     if stdlib::getenv("SC_CEMIT_STATS") != null {
@@ -785,6 +787,7 @@ struct CommonOpts {
     pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
     pub target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
     pub simd_width: u32, // --simd-width=256|512 (0: the manifest's)
+    pub simd_dispatch: String, // --simd-dispatch=off|<x86-64 levels> (empty: the manifest's)
 }
 
 extend CommonOpts {
@@ -845,6 +848,13 @@ extend CommonOpts {
         } else if arg.starts_with("--simd-width=") {
             self.simd_width = pick(arg[13..] == "512", 512u32, pick(arg[13..] == "256", 256u32, 0));
             self.bad = self.bad || self.simd_width == 0;
+        } else if arg.starts_with("--simd-dispatch=") {
+            self.simd_dispatch = String::from_str(arg[16..]);
+            let mut e9 = String::new();
+            if !cf::dispatch_ok(arg[16..], &mut e9) {
+                eprintln("error: {}", e9.as_str());
+                self.bad = true;
+            }
         } else if arg == "--bootstrap-tags" {
             self.bootstrap_tags = true;
         } else if arg == "--no-lint" {
@@ -1340,6 +1350,8 @@ OPTIONS:
     --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
     --target-cpu=C         x86_64 level whose features come first: x86-64, x86-64-v2, x86-64-v3, x86-64-v4
     --simd-width=W         vector width the planner prefers on AVX-512: 256 (default) or 512
+    --simd-dispatch=L      x86_64: run-time copies of the functions with vector code for levels L
+                           (comma-separated x86-64-v2..v4; default x86-64-v3 at opt-level 2 or more), or off
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
@@ -1486,6 +1498,7 @@ OPTIONS:
             transpiler: "",
             target_features: co.target_features.as_str(),
             simd_width: co.simd_width,
+            simd_dispatch: co.simd_dispatch.as_str(),
         };
         return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
     }
@@ -1542,6 +1555,7 @@ OPTIONS:
                 transpiler: transpiler,
                 target_features: co.target_features.as_str(),
                 simd_width: co.simd_width,
+                simd_dispatch: co.simd_dispatch.as_str(),
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);
@@ -1606,6 +1620,7 @@ OPTIONS:
         co.arch,
         cf::close(feats),
         co.simd_width,
+        co.simd_dispatch.as_str(),
         co.bootstrap_tags,
         co.lint,
         pflags.as_str(),

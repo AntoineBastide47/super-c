@@ -6,6 +6,7 @@ import build_system::toml as toml;
 import module::loader as loader;
 import utils::errors as diag;
 import driver::util as dutil;
+import ir::cpu_features as cf;
 
 /// One [profile.NAME]: per-profile cflags/ldflags appended after the manifest-level ones; `strip`
 /// runs strip on the freshly linked binary; `opt` is the `opt-level` (OPT_FLAGS: the flag arrays say
@@ -166,6 +167,7 @@ pub struct Manifest<'a> {
     pub target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
     pub target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
     pub simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
+    pub simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -420,6 +422,12 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 set_u32(it, &mut errs, &mut m.simd_width);
                 if m.simd_width != 256 && m.simd_width != 512 {
                     errs.emit(it.at, key.len() as u32, format("'simd-width' expects 256 or 512"));
+                }
+            } else if key == "simd-dispatch" {
+                set_str(it, &mut errs, &mut m.simd_dispatch);
+                let mut e9 = String::new();
+                if !cf::dispatch_ok(m.simd_dispatch.as_str(), &mut e9) {
+                    errs.emit(it.at, key.len() as u32, e9);
                 }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown key '{}'", key));
@@ -696,6 +704,7 @@ extend Manifest {
             target_features: Vector::<String>::new(),
             target_cpu: String::new(),
             simd_width: 0,
+            simd_dispatch: String::new(),
         };
     }
 
