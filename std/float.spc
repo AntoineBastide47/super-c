@@ -1144,14 +1144,52 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// The nearest f64.
     pub fn to_f64(self: &Float<E, F, FAMILY>) f64 {
-        let b = self.to_scalar_bits(11, 52);
-        return f64_from_bits(b);
+        if Float::<E, F, FAMILY>::widens(11, 52) {
+            return f64_from_bits(self.widen_bits(11, 52));
+        }
+        return f64_from_bits(self.to_scalar_bits(11, 52));
     }
 
     /// The nearest f32.
     pub fn to_f32(self: &Float<E, F, FAMILY>) f32 {
-        let b = self.to_scalar_bits(8, 23);
-        return f32_from_bits(b as u32);
+        if Float::<E, F, FAMILY>::widens(8, 23) {
+            return f32_from_bits(self.widen_bits(8, 23) as u32);
+        }
+        return f32_from_bits(self.to_scalar_bits(8, 23) as u32);
+    }
+
+    // Whether every value is exact in the built-in format with `de` exponent and `df` fraction bits:
+    // an IEEE format no wider in either field (f16, bf16 and the f8 formats into f32).
+    const fn widens(de: usize, df: usize) bool {
+        return FAMILY == FloatFamily::FF_IEEE && E <= de && F <= df;
+    }
+
+    // The encoding in that built-in format when `widens(de, df)`: the fields move, NaNs become the
+    // canonical quiet NaN as in `to_scalar_bits`. A subnormal becomes a normal number when E < de,
+    // since the destination's bias then exceeds the source's by more than F (de is 8 or 11).
+    fn widen_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
+        let r = self.bits.to_u64();
+        let sbit = r >> (E + F) as u64 << (de + df) as u64;
+        let emax = Float::<E, F, FAMILY>::exp_field_max();
+        let ef = r >> F as u64 & emax;
+        let fr = r & (1u64 << F as u64) - 1;
+        let emax_dst = (1u64 << de as u64) - 1;
+        if ef == emax {
+            if fr != 0 {
+                return sbit | emax_dst << df as u64 | 1u64 << (df - 1) as u64;
+            }
+            return sbit | emax_dst << df as u64;
+        }
+        let rebias = (1i64 << (de - 1) as i64) - 1 - Float::<E, F, FAMILY>::bias();
+        if ef != 0 {
+            return sbit | (ef as i64 + rebias) as u64 << df as u64 | fr << (df - F) as u64;
+        }
+        if fr == 0 || E == de {
+            return sbit | fr << (df - F) as u64;
+        }
+        let top = 63 - fr.leading_zeros();
+        let eb = 1 - F as i64 + top as i64 + rebias;
+        return sbit | eb as u64 << df as u64 | (fr ^ 1u64 << top as u64) << (df - top) as u64;
     }
 
     // Round THIS value into a built-in format's fields, packed as its raw bits in a u64. The target
@@ -1993,6 +2031,8 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 /// The standard formats the built-ins do not cover. `Float<8, 23>` and `Float<11, 52>` ARE the built-in
 /// `f32`/`f64` formats and exist for generic code and tests; the aliases keep their built-in names.
 pub type f16 = Float<5, 10>;
+/// bfloat16: the exponent range of `f32` with 7 fraction bits (`f32`'s top 16 bits).
+pub type bf16 = Float<8, 7>;
 /// IEEE binary128.
 pub type f128 = Float<15, 112>;
 /// IEEE binary256.

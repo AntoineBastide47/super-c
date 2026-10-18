@@ -134,6 +134,56 @@ fn f16_known_encodings() {
     assert(f16::nan() == f16::nan());
 }
 
+// The value of the IEEE encoding `raw` with `e` exponent and `f` fraction bits, from its fields in f64
+// arithmetic, exact for the formats below.
+fn field_value(raw: u64, e: usize, f: usize) f64 {
+    let emask = (1u64 << e as u64) - 1;
+    let ef = raw >> f as u64 & emask;
+    let fr = raw & (1u64 << f as u64) - 1;
+    let mut v: f64 = 0.0;
+    if ef == emask {
+        v = if fr == 0 {
+            1.0 / 0.0;
+        } else {
+            0.0 / 0.0;
+        };
+    } else {
+        let sig = if ef == 0 {
+            fr;
+        } else {
+            fr | 1u64 << f as u64;
+        };
+        let x = ef.max(1) as i64 - ((1i64 << (e - 1) as i64) - 1) - f as i64;
+        v = sig as f64 * f64_from_bits((x + 1023) as u64 << 52);
+    }
+    if raw >> (e + f) as u64 != 0 {
+        return -v;
+    }
+    return v;
+}
+
+// A format no wider than f32 in either field converts exactly, every encoding of it: to_f32 and
+// to_f64 give its value, NaNs a NaN.
+@test
+fn narrow_formats_widen_exactly() {
+    for raw in 0u64..65536 {
+        let v = field_value(raw, 5, 10);
+        let h = f16::from_raw(UInt::<16>::from_u64(raw));
+        assert(same64(h.to_f64(), v) && same32(h.to_f32(), v as f32));
+        let w = field_value(raw, 8, 7);
+        let g = bf16::from_raw(UInt::<16>::from_u64(raw));
+        assert(same64(g.to_f64(), w) && same32(g.to_f32(), w as f32));
+    }
+    for raw in 0u64..256 {
+        let v = field_value(raw, 5, 2);
+        let q = f8e5m2::from_raw(UInt::<8>::from_u64(raw));
+        assert(same64(q.to_f64(), v) && same32(q.to_f32(), v as f32));
+        let u = field_value(raw, 4, 3);
+        let p = Float::<4, 3>::from_raw(UInt::<8>::from_u64(raw));
+        assert(same64(p.to_f64(), u) && same32(p.to_f32(), u as f32));
+    }
+}
+
 // The wide formats run the same generic code with multi-limb significands: identities that require
 // correct multi-limb rounding, and exact round-trips through f64 for representable values.
 @test

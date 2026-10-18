@@ -444,6 +444,12 @@ The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L` (the `cstd` value
   default to text mode: CRLF breaks `\`-continued macros and byte framing, so open with
   `"wb"` and set stdio binary. `tmpfile()` writes to the drive root: use `GetTempPathA`
   (`%TEMP%`) and `fopen(.., "wb")`. There is no `open_memstream`.
+- Arm SME keyword attributes (`__arm_new("za")`, `__arm_locally_streaming`) are C23 `[[arm::...]]`
+  attributes under GCC 14: put them before any `__attribute__((...))` of the declaration, which
+  otherwise makes GCC apply them to a type and reject them (ffi/sc_sme.c). Clang before 19 rejects
+  SVE types in a function with SME and no SVE. Off Darwin, Clang saves VG for the unwinder of a
+  function that changes streaming mode through `__arm_get_current_vg`, which libgcc lacks before
+  GCC 16; from Clang 22, `__attribute__((nouwtable))` removes the call, and Clang 19 to 21 always make it.
 
 ## Common Mistakes
 

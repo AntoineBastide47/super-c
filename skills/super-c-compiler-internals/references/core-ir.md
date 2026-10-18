@@ -160,7 +160,7 @@ The rearranging, reducing and masked memory codes (rules `SR_INDEX` and up):
 | `SIMD_COMPRESS`, `SIMD_EXPAND` | `(m, v, fill)` | the vector |
 | `SIMD_REDUCE_*`, `SIMD_ARG_*` | `(v)` | the element; `bool` for `SIMD_REDUCE_ADD_OVF`/`_MUL_OVF` (the exact result does not fit); `usize` for the `ARG` codes (`N` when every lane is NaN) |
 | `SIMD_DOT` | `(a, b)` | a scalar of the lanes' kind at least as wide |
-| `SIMD_LOAD_OR`, `SIMD_LOAD_MASKED`, `SIMD_GATHER` | `(slice, start or idx, [m,] fallback)` | the vector |
+| `SIMD_LOAD_OR`, `SIMD_LOAD_MASKED`, `SIMD_GATHER`, `SIMD_GATHER_UNCHECKED` | `(slice, start or idx, [m,] fallback)` | the vector |
 | `SIMD_STORE_MASKED`, `SIMD_SCATTER`, `SIMD_COMPRESS_STORE` | `(slice, start or idx, m, v)` | unit; `usize` count for `COMPRESS_STORE` |
 | `SIMD_GATHER_PTR`, `SIMD_SCATTER_PTR` | `([*const T; N] or [*mut T; N], m, fallback or v)` | the vector, unit |
 | `SIMD_LOAD_MASKED_PTR`, `SIMD_STORE_MASKED_PTR` | `(pointer, m, fallback or v)` | the vector, unit |

@@ -105,6 +105,12 @@ pub enum Feature {
     Avx101,
     /// AVX10.2 (x86_64; `avx10.2`).
     Avx102,
+    /// The Scalable Matrix Extension: ZA tiles, outer products, streaming SVE mode (aarch64; `sme`).
+    Sme,
+    /// SME2: multi-vector forms over ZA (aarch64; `sme2`; implies `sme`).
+    Sme2,
+    /// SME outer products of `f64` lanes (aarch64; `sme-f64f64`; implies `sme`).
+    SmeF64f64,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

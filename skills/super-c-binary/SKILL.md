@@ -606,6 +606,9 @@ by `std::cpu::Feature`:
 | `lse` | aarch64 | | `+lse` | `aarch64-features` | macOS |
 | `sve` | aarch64 | `fp16`, `rdm` | `+sve` | `aarch64-features` | off |
 | `sve2` | aarch64 | `sve` | `+sve2` | `aarch64-features` | off |
+| `sme` | aarch64 | `neon`, `rdm` | `+sme` | `aarch64-features` | off |
+| `sme2` | aarch64 | `sme` | `+sme2` | `aarch64-features` | off |
+| `sme-f64f64` | aarch64 | `sme` | `+sme-f64f64` | `aarch64-features` | off |
 
 The x86_64 baseline is `sse2` and, by platform, what the table's last column names (macOS and
 the iOS simulator: `core2`, which every C compiler for them assumes; Android: its ABI). The x86-64 psABI levels
@@ -623,7 +626,10 @@ The aarch64 baseline depends on the platform: macOS has every feature of Apple c
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
 the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` and `sve2` are
 detected only: no vector operation uses them, and no macOS or iOS build takes them (no Apple core
-has them). A feature whose flag raises the architecture implies the Armv8.1-A features that
+has them). `sme`, `sme2` and `sme-f64f64` are detected (Apple M4 and later, Armv9.2 cores) and
+select C kernels that enter streaming mode themselves; no vector operation uses them, and outside
+streaming mode an SME core may lack SVE (Apple M4 and M5), so a build that enables them must not
+let the C compiler use SVE (GCC's `+sme` implies `+sve2`). A feature whose flag raises the architecture implies the Armv8.1-A features that
 architecture brings (`rdm`, `crc`, `lse`), so the set names what the C compiler enables. The
 features beyond the baseline make one C flag:
 on macOS `-mcpu=apple-m1+<f>...`; elsewhere `-march=` the lowest architecture whose assembler

@@ -1281,7 +1281,8 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
 pub fn asm_match(code: str, function: str, contains: []str, absent: []str) String {
     let mut r = String::new();
     let names = asm_mnemonics(code, function);
-    // An entry that starts with `%` matches a register operand (`%ymm`), in AT&T syntax.
+    // An entry that starts with `%` matches a register operand (`%ymm`), in AT&T syntax; `a|b` is met by
+    // either (C compilers pick among equivalent instructions: `uminv`, or `mvn` then `umaxv`).
     let whole = asm_instructions(code, function, true);
     if names.len() == 0 {
         r.format_into("no instructions of '{}' in the assembly", function);
@@ -1295,7 +1296,9 @@ pub fn asm_match(code: str, function: str, contains: []str, absent: []str) Strin
             } else {
                 names.at(i);
             };
-            found = found || hay.contains(want);
+            for alt in want.split("|") {
+                found = found || hay.contains(alt);
+            }
         }
         if !found {
             r.format_into("no instruction of '{}' contains '{}'\n", function, want);

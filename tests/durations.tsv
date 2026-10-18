@@ -693,7 +693,7 @@
 0.01	tests::float_test::classification_and_comparison
 0.15	tests::float_test::decimal_text_matches_the_hardware_parse
 0.00	tests::float_test::decimal_text_round_trips
-0.10	tests::float_test::f128_operations_round_as_f256_does
+0.12	tests::float_test::f128_operations_round_as_f256_does
 0.01	tests::float_test::f16_known_encodings
 0.01	tests::float_test::finite_only_family_is_e4m3fn
 0.02	tests::float_test::finite_only_family_new_surface
@@ -701,13 +701,14 @@
 0.00	tests::float_test::from_str_zero_with_huge_exponent
 0.01	tests::float_test::matches_hardware_f32_bit_for_bit
 0.01	tests::float_test::matches_hardware_f64_bit_for_bit
+0.01	tests::float_test::narrow_formats_widen_exactly
 0.00	tests::float_test::neighbours_parts_and_scalbn
 0.00	tests::float_test::parse_f64_is_correctly_rounded
 0.00	tests::float_test::rem_and_rounding_match_libm
-0.00	tests::float_test::sqrt_fma_convert_match_libm
+0.01	tests::float_test::sqrt_fma_convert_match_libm
 0.03	tests::float_test::square_roots_are_correctly_rounded
-0.05	tests::float_test::square_roots_of_squares_are_exact
-0.02	tests::float_test::wide_decimal_text_round_trips
+0.06	tests::float_test::square_roots_of_squares_are_exact
+0.03	tests::float_test::wide_decimal_text_round_trips
 0.01	tests::float_test::wide_fmod_matches_the_integer_remainder
 0.01	tests::float_test::wide_formats_compute_exactly
 0.00	tests::float_test::wide_integer_conversions_are_single_rounded
@@ -1149,6 +1150,9 @@
 2.44	tests::simd_math_test::simd_math_specials_fast_f64
 3.02	tests::simd_math_test::simd_math_specials_precise_f32
 2.87	tests::simd_math_test::simd_math_specials_precise_f64
+2.99	tests::simd_matrix_test::a_slice_of_another_length_panics
+1.22	tests::simd_matrix_test::every_kernel_gives_the_fma_chain
+2.06	tests::simd_matrix_test::the_16_bit_products_are_the_f32_products_of_their_values
 3.16	tests::simd_ops_test::a_lane_scalar_operand_is_splat
 3.08	tests::simd_ops_test::a_store_reads_its_vector_first
 6.08	tests::simd_ops_test::casts_of_every_lane_type_pair_match

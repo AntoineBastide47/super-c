@@ -33,6 +33,9 @@ int sc_file_pending(void *f); /* 1 when a read on `f`'s descriptor returns at on
 int sc_host_platform(void);
 /* Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other. */
 int sc_host_arch(void);
+/* Raise this process's soft limit of open descriptors to `need`, within the hard limit: 0, or -1 when the
+   hard limit is lower or the call fails. 0 where no such limit exists (Windows, WASI). */
+int sc_raise_open_files(uint64_t need);
 
 int sc_chdir(const char *path);   /* chdir / _chdir; 0 on success */
 int sc_mkdir(const char *path);   /* mkdir(path, 0775); ignores EEXIST at the caller */

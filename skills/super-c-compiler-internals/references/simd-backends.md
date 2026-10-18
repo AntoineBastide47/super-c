@@ -111,7 +111,16 @@ load or store keeps its range checks (`range_bits`: one comparison for an access
 slice), then calls `LoadMasked`/`StoreMasked` (`emit_vec_mem_planned`; `load_or` is a plain
 `Load` when every lane is inside the slice, else it passes the lanes inside). A gather's or
 scatter's index check is `CmpGtLanes` against `len - 1`, folded by `|` and tested by
-`AnyLanes` (`index_check_planned`); only a failing test computes the lanes' bits.
+`AnyLanes` (`index_check_planned`); only a failing test computes the lanes' bits, and the lane loop
+then checks nothing again. `gather_unchecked` (`SIMD_GATHER_UNCHECKED`) has no check and takes the
+`Gather` entry. A gather whose index vector a slice load defined on its straight path (its block, then
+predecessors that alone reach it by a goto, a constant switch or an assertion; at most 32 statements;
+nothing between writes memory, a projection, an address-taken local or the load's operands, and no
+address-taken local's storage ends) reads its indexes in its lane loop from the slice,
+`s.ptr[start + i]` (`gather_loads`, `sx_gload`): Clang 18 keeps a loaded index vector in registers and
+widens and extracts each lane. With the slice read, the portable `gather_sum_f32` runs at the Neon
+kernel's speed on Neoverse N2 under Clang 18 (0.224 and 0.217 ns per element at 4 KiB, 0.275 and 0.275
+at 64 KiB; run 39072972330).
 `compress_store` over chunks of at most 8 lanes moves each chunk's active lanes to its front
 with `SwizzleOrZero` and a byte-index table emitted at the site, stores whole chunks at the next
 free element, and restores the elements after the last written one, read first
@@ -248,7 +257,10 @@ Decisions: no architecture beyond x86_64, aarch64 and wasm32 has been requested.
 fixed `VLEN` (`zvl128b`, `zvl256b`, RVV intrinsics), POWER VSX (`<altivec.h>`), LoongArch LSX/LASX
 and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 are
 detected only: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
-size) describes, so no fixed-width backend uses them.
+size) describes, so no fixed-width backend uses them. SME (`sme`, `sme2`, `sme-f64f64`) has no
+backend entries either: its outer products are matrix operations, which C kernels of std call
+(`ffi/sc_sme.c` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
+streaming mode itself.
 
 ## Tests
 

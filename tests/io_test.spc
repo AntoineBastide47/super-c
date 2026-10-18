@@ -19,6 +19,7 @@ import std::parallel::time as time;
 import tests::parallel_harness as ph;
 import tests::cli_harness as cli;
 import sc_io;
+import driver_shim as shim;
 
 // A connected pair: `a` is the client end, `b` the accepted end.
 struct Pair {
@@ -551,6 +552,8 @@ fn shutdown_settles_a_pending_wait() {
 // trips go is the reactor benchmark's question.
 @test
 fn idle_descriptors_leave_an_active_one_served() {
+    // A thousand descriptors and the suite's own: past macOS's default soft limit of 256.
+    assert(unsafe shim::sc_raise_open_files(2048) == 0, "the open-file limit allows 2048 descriptors");
     rt::set_worker_count(2);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let idle: i64 = 500; // pairs, so a thousand descriptors
@@ -615,6 +618,7 @@ fn idle_descriptors_leave_an_active_one_served() {
 // for all of them every command reaches the reactor and every wait is served exactly once.
 @test
 fn a_burst_of_waits_from_one_worker_is_all_served() {
+    assert(unsafe shim::sc_raise_open_files(2048) == 0, "the open-file limit allows 2048 descriptors");
     rt::set_worker_count(1);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let n: i64 = 300;

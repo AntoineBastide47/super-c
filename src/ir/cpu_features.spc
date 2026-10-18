@@ -26,7 +26,7 @@ pub struct CpuFeature {
     pub level: u8,
 }
 
-pub const FEATURE_COUNT: usize = 49;
+pub const FEATURE_COUNT: usize = 52;
 pub const F_SIMD128: usize = 0;
 pub const F_RELAXED_SIMD: usize = 1;
 pub const F_SSE2: usize = 2;
@@ -544,6 +544,39 @@ pub const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
         probe: "x86-features",
         base: 0,
         level: 0,
+    },
+    // The Scalable Matrix Extension: the ZA tiles, outer products and streaming SVE mode. Code that
+    // uses it enters streaming mode itself (a C kernel's `__arm_locally_streaming`); outside it, a core
+    // may have no SVE at all (Apple M4 and M5).
+    CpuFeature {
+        name: "sme",
+        variant: "Sme",
+        arch: 1,
+        implies: V82,
+        c_flag: "+sme",
+        probe: "aarch64-features",
+        base: 0,
+        level: L_NEED82,
+    },
+    CpuFeature {
+        name: "sme2",
+        variant: "Sme2",
+        arch: 1,
+        implies: CpuFeatureSet { w: [1u64 << 49, 0] },
+        c_flag: "+sme2",
+        probe: "aarch64-features",
+        base: 0,
+        level: L_NEED82,
+    },
+    CpuFeature {
+        name: "sme-f64f64",
+        variant: "SmeF64f64",
+        arch: 1,
+        implies: CpuFeatureSet { w: [1u64 << 49, 0] },
+        c_flag: "+sme-f64f64",
+        probe: "aarch64-features",
+        base: 0,
+        level: L_NEED82,
     },
 ];
 

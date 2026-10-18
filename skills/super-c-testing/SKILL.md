@@ -365,7 +365,7 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
 | `expect_run(label, src, arg, msg)` | Build `src` (dev profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
-| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
+| `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (a `contains` entry `a|b` is met by either, for equivalent instructions C compilers pick between (`uminv|umaxv`); an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
 
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
 filtering for the host and loads the vector backend for a snippet that names a vector, like a
