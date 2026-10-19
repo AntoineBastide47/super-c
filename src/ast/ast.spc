@@ -7,8 +7,10 @@ import string as cstring;
 import atomic;
 import sc_runtime;
 import std::parallel::sync as psy;
+import std::parallel::runtime as prt;
 import lexer::token as tok;
 import lexer::token_type as tt;
+import utils::persist as *;
 
 pub type NodeId = u32;
 pub const NODE_NONE: NodeId = 0;
@@ -1618,6 +1620,23 @@ pub fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) i32
     return -1;
 }
 
+/// `ext_blanket` from the syntax alone: the position of the generic parameter extend `ext` (module
+/// `m`) names as its whole target, read through the resolution (resolve-final), so a reader may ask
+/// before the extend is checked. -1 for any other target.
+pub const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
+    let ed = ea.at_const(ext).as_data.extend_def;
+    let r = ea.resolution_def(ed.target_type);
+    if r.module != m || r.node == NODE_NONE {
+        return -1;
+    }
+    for i in 0..ed.generics.len {
+        if unsafe ea.list(ed.generics)[i as usize] == r.node {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
 /// The generic parameters of extend `ext` (module `m`, syntax in `ea`) that its target type `pat`
 /// (read through `a`) does not name, as bits by position: the parameters a conformance's interface
 /// arguments solve (`N` of `extend<const N: usize> f32 as Mul<V<N>>`), and every parameter but the
@@ -2386,23 +2405,32 @@ pub struct SplitVec<T: Copy> {
     base: Vector<T>,
     split: usize, // usize MAX when unfrozen
     ovf: ChunkPool<T>,
+    // Frozen: the base's length, published to readers on other tasks (atomic); they never read the
+    // base vector's own length, which the writer's push updates.
+    blen: usize,
 }
 
 extend<T: Copy> SplitVec<T> {
     pub fn new() SplitVec<T> {
-        return SplitVec::<T> { base: Vector::<T>::new(), split: SV_UNFROZEN, ovf: ChunkPool::<T>::new() };
+        return SplitVec::<T> { base: Vector::<T>::new(), split: SV_UNFROZEN, ovf: ChunkPool::<T>::new(), blen: 0 };
     }
 
     pub fn len(self: &Self) usize {
         if self.split == SV_UNFROZEN {
             return self.base.len();
         }
-        return self.base.len() + self.ovf.len();
+        return unsafe atomic::load_usize(&self.blen, 1) + self.ovf.len();
     }
 
     pub const fn at(self: &Self, i: usize) &T {
-        if i < self.split {
+        if self.split == SV_UNFROZEN {
             return self.base.at(i);
+        }
+        if i < self.split {
+            if i >= unsafe atomic::load_usize(&self.blen, 1) {
+                panic("SplitVec::at: index out of bounds");
+            }
+            return unsafe &*(self.base.as_ptr() + i);
         }
         return self.ovf.at(i - self.split);
     }
@@ -2424,8 +2452,11 @@ extend<T: Copy> SplitVec<T> {
 
     @c.always_inline
     pub fn push(self: &mut Self, v: T) {
-        if self.split == SV_UNFROZEN || self.base.len() < self.split {
+        if self.split == SV_UNFROZEN {
             self.base.push(v);
+        } else if self.base.len() < self.split {
+            self.base.push(v);
+            unsafe atomic::store_usize(&mut self.blen, self.base.len(), 2);
         } else {
             self.ovf.push(v);
         }
@@ -2466,7 +2497,13 @@ extend<T: Copy> SplitVec<T> {
         while self.base.len() < self.split {
             self.base.push(v);
         }
+        unsafe atomic::store_usize(&mut self.blen, self.base.len(), 2);
         return self.split + self.ovf.run_start(need, v);
+    }
+
+    /// Whether the array is pinned (`freeze`).
+    pub const fn frozen(self: &Self) bool {
+        return self.split != SV_UNFROZEN;
     }
 
     /// Pin the base allocation at its CURRENT capacity and route later growth to stable chunks.
@@ -2479,6 +2516,7 @@ extend<T: Copy> SplitVec<T> {
             self.base.reserve(self.base.len() / 8 + 64); // headroom so small growth stays flat
         }
         self.split = self.base.capacity();
+        self.blen = self.base.len();
     }
 
     /// Fold the overflow back into the flat base (single-threaded; frontier pointers are dead).
@@ -2958,7 +2996,7 @@ extend TypePool {
 pub struct BodyArena {
     pub nodes: SplitVec<Node>,
     pub children: SplitVec<u32>,
-    pub types: Vector<u32>,
+    pub types: SplitVec<u32>,
     pub resolutions: SplitVec<DefId>,
     pub mono_at: Vector<u32>,
     pub dyn_at: Vector<u32>,
@@ -2985,14 +3023,18 @@ extend BodyArena {
         return BodyArena {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
+            types: SplitVec::<u32>::new(),
             resolutions: SplitVec::<DefId>::new(),
         };
     }
 
     pub const fn retained(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.types.capacity() * 4 + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
+        return self.nodes.retained() + self.children.retained() + self.types.retained() + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
     }
 }
+
+// The bound of a write-lock hand-over's wait for the engine to take the lock (`Ast::wl_yield`).
+const WL_SPIN: u32 = 4096;
 
 pub struct Ast {
     pub nodes: SplitVec<Node>,
@@ -3013,6 +3055,13 @@ pub struct Ast {
     pub ilock_sem: psy::Semaphore,
     pub ilock_owner: usize,
     pub ilock_depth: u32,
+    // The module's write lock in the parallel type check (not reentrant): the module's checker
+    // holds it while it checks an item, except inside the constant engine, and the engine takes it
+    // before it reads the module (`Package::module_ast_const`), so no read meets a table that grows.
+    // `wl_want` counts the engine's waits: the checker hands the lock over at its next statement.
+    pub wl_sem: psy::Semaphore,
+    pub wl_owner: usize,
+    pub wl_want: i32,
     // NOTE: a node/module parallel-array split (6 B/entry vs padded 8) was tried and reverted:
     // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
@@ -3021,19 +3070,23 @@ pub struct Ast {
     /// standalone checks), or only the provisional types not yet published to the package table.
     pub pool: TypePool,
     /// The package type table (`Package.tt`), null under module-local identity. See `intern_type_i`.
-    pub gt: *mut TypePool,
+    pub gt: PoolPtr,
     /// Package identity: every distinct type this module touched, in first-touch order, final ids
     /// once published (provisional TYPE_PROV ids until then); the instance records among them; and
     /// the membership bits of the final ids. What the pool enumeration meant before.
     pub used: Vector<TypeId>,
     pub used_inst: Vector<u32>,
     pub used_bits: Vector<u64>,
-    pub types: Vector<u32>,
+    pub types: SplitVec<u32>,
     pub mono: Vector<MonoUse>,
     // Deferred field-projection bound proofs recorded while this module's bodies were checked
     // (owner still symbolic); discharged by callers -- same-module inline, cross-module in the
     // driver's post-typecheck obligation pass.
     pub proj_obs: Vector<ProjOb>,
+    // Per call node of a same-module callee: the `proj_obs` length when the inline discharge ran
+    // the callee's obligations. A callee checked after its caller (one dependency cycle) records
+    // more later; the driver's pass runs those.
+    pub ob_seen: Map<u32, u32>,
     pub mono_at: Vector<u32>,
     pub method_refs: Vector<MethodRef>,
     pub wide_lits: Vector<WideLit>,
@@ -3138,6 +3191,7 @@ extend Ast as Free {
         self.b.free();
         self.scratch.free();
         self.ilock_sem.free();
+        self.wl_sem.free();
         self.resolutions.free();
         self.pool.free();
         self.used.free();
@@ -3211,7 +3265,9 @@ extend Ast {
             children: SplitVec::<u32>::new(),
             b: BodyArena::new(),
             ilock_sem: psy::Semaphore::new(1),
+            wl_sem: psy::Semaphore::new(1),
             resolutions: SplitVec::<DefId>::new(),
+            types: SplitVec::<u32>::new(),
             pool: TypePool::new(),
         };
         // nodes/tokens sits at ~0.78 across real corpora, with bodies holding about 87% of the
@@ -3319,10 +3375,14 @@ extend Ast {
     pub fn freeze_resolutions(self: &mut Self) {
         self.resolutions.freeze();
         self.b.resolutions.freeze();
+        self.types.freeze();
+        self.b.types.freeze();
     }
     pub fn thaw_resolutions(self: &mut Self) {
         self.resolutions.thaw();
         self.b.resolutions.thaw();
+        self.types.thaw();
+        self.b.types.thaw();
     }
 
     /// Free the body arena: the checked release point of body syntax. Every later read of a
@@ -3414,10 +3474,23 @@ extend Ast {
     }
 
     pub fn init_types(self: &mut Self) {
+        // A parallel stage pinned the arrays: they stay pinned, so the stage's later growth never
+        // moves them under a reader on another task.
+        let pinned = self.types.frozen();
         self.types.clear();
-        self.types.resize_default(self.nodes.len());
         self.b.types.clear();
-        self.b.types.resize_default(self.b.nodes.len());
+        self.types.reserve(self.nodes.len());
+        self.b.types.reserve(self.b.nodes.len());
+        while self.types.len() < self.nodes.len() {
+            self.types.push(TYPE_NONE);
+        }
+        while self.b.types.len() < self.b.nodes.len() {
+            self.b.types.push(TYPE_NONE);
+        }
+        if pinned {
+            self.types.freeze();
+            self.b.types.freeze();
+        }
         self.closure_facts.clear();
         self.cap_facts.clear();
         self.closure_at.clear();
@@ -3426,7 +3499,7 @@ extend Ast {
         self.used.clear();
         self.used_inst.clear();
         self.used_bits.clear();
-        if self.gt == null {
+        if self.gt.p == null {
             // Module-local identity: seeds go to the pool (the package table carries them otherwise).
             self.pool.seed();
         }
@@ -3457,7 +3530,7 @@ extend Ast {
     }
 
     // The task token for the reentrant intern lock: the running coroutine, or 1 on a plain thread.
-    fn itok() usize {
+    pub fn itok() usize {
         let c = (unsafe sc_runtime::sc_rt_tls_get()) as usize;
         if c == 0 {
             return 1;
@@ -3489,6 +3562,46 @@ extend Ast {
             unsafe atomic::store_usize(&mut self.ilock_owner, 0, 0);
             self.ilock_sem.release();
         }
+    }
+
+    /// Take the module's write lock (`wl_sem`) for the running task.
+    pub fn wl_enter(self: &mut Self) {
+        self.wl_sem.acquire_masked();
+        unsafe atomic::store_usize(&mut self.wl_owner, Ast::itok(), 0);
+    }
+
+    pub fn wl_leave(self: &mut Self) {
+        unsafe atomic::store_usize(&mut self.wl_owner, 0, 0);
+        self.wl_sem.release();
+    }
+
+    /// The engine's take of the write lock: the checker that holds it hands it over (`wl_yield`).
+    pub fn wl_wait(self: &mut Self) {
+        unsafe atomic::add_i32(&mut self.wl_want, 1, 3);
+        self.wl_enter();
+        unsafe atomic::sub_i32(&mut self.wl_want, 1, 3);
+    }
+
+    /// At a statement of the module's checker: when the engine waits for the write lock, let it take
+    /// the lock, then wait for it back. Without the pause the checker would take the lock back before
+    /// the woken waiter does.
+    pub fn wl_yield(self: &mut Self) {
+        if unsafe atomic::load_i32(&self.wl_want, 1) == 0 || !self.wl_held() {
+            return;
+        }
+        self.wl_leave();
+        for _ in 0..WL_SPIN {
+            if unsafe atomic::load_i32(&self.wl_want, 1) == 0 || unsafe atomic::load_usize(&self.wl_owner, 1) != 0 {
+                break;
+            }
+            prt::yield_now();
+        }
+        self.wl_enter();
+    }
+
+    /// Whether the running task holds the module's write lock.
+    pub fn wl_held(self: &Self) bool {
+        return unsafe atomic::load_usize(&self.wl_owner, 0) == Ast::itok();
     }
 
     /// Publish step `s` (the module's checker only; readers on other workers take the intern lock).
@@ -3562,7 +3675,7 @@ extend Ast {
         }
         self.used_bits[w] = self.used_bits[w] | bit;
         self.used.push(id);
-        let y = unsafe (&*self.gt).at(id as usize);
+        let y = unsafe (&*self.gt.p).at(id as usize);
         if y.kind == TypeKind::TYPE_INSTANCE {
             self.used_inst.push(y.as_data.inst);
         }
@@ -3588,10 +3701,10 @@ extend Ast {
         if unsafe TS_ON {
             ts_add(TS_INTERN, 1);
         }
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.insert_ty(nt);
         }
-        let g = unsafe &mut *self.gt;
+        let g = unsafe &mut *self.gt.p;
         let hit = g.find_ty(&nt);
         if hit >= 0 {
             self.mark_used(hit as TypeId);
@@ -3627,10 +3740,10 @@ extend Ast {
             return self.const_value(cval_bits(l.value()), l.to);
         }
         let mut ci: u32 = 0;
-        if self.gt == null {
+        if self.gt.p == null {
             ci = self.pool.insert_clin(l);
         } else {
-            let g = unsafe &mut *self.gt;
+            let g = unsafe &mut *self.gt.p;
             let hit = g.find_clin(l);
             if hit >= 0 {
                 ci = hit as u32;
@@ -3644,8 +3757,8 @@ extend Ast {
     }
 
     pub const fn const_lin_at(self: &Self, i: u32) &ConstLin {
-        if self.gt != null && (i & TYPE_PROV) == 0 {
-            return unsafe (&*self.gt).const_lin_at(i as usize);
+        if self.gt.p != null && (i & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt.p).const_lin_at(i as usize);
         }
         return self.pool.const_lin_at((i & TYPE_PROV_MASK) as usize);
     }
@@ -3672,8 +3785,8 @@ extend Ast {
         if rec_has_error(&it) {
             return TYPE_ERROR;
         }
-        if self.gt != null {
-            let v = unsafe (*self.gt).vec_of(module, decl, args);
+        if self.gt.p != null {
+            let v = unsafe (*self.gt.p).vec_of(module, decl, args);
             if v.kind != TypeKind::TYPE_ERROR {
                 return self.intern_type(v);
             }
@@ -3688,10 +3801,10 @@ extend Ast {
     // The index of instance-table record `it`: the package table's when it holds it (or is open),
     // else this module's provisional one.
     fn intern_rec(self: &mut Self, it: &TyInstance) u32 {
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.insert_inst(it);
         }
-        let g = unsafe &mut *self.gt;
+        let g = unsafe &mut *self.gt.p;
         let hit = g.find_inst(it);
         if hit >= 0 {
             return hit as u32;
@@ -3917,8 +4030,8 @@ extend Ast {
     }
 
     pub const fn instance(self: &Self, index: u32) &TyInstance {
-        if self.gt != null && (index & TYPE_PROV) == 0 {
-            return unsafe (&*self.gt).instance(index as usize);
+        if self.gt.p != null && (index & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt.p).instance(index as usize);
         }
         return self.pool.instance((index & TYPE_PROV_MASK) as usize);
     }
@@ -3928,10 +4041,10 @@ extend Ast {
     /// membership bits rebuilt, and the pool is cleared.
     pub fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>) {
         for i in 0..self.types.len() {
-            self.types[i] = pub_map1(map, self.types[i]);
+            self.types.set(i, pub_map1(map, *self.types.at(i)));
         }
         for i in 0..self.b.types.len() {
-            self.b.types[i] = pub_map1(map, self.b.types[i]);
+            self.b.types.set(i, pub_map1(map, *self.b.types.at(i)));
         }
         for i in 0..self.cap_facts.len() {
             let c = self.cap_facts.index_mut(i);
@@ -4003,12 +4116,12 @@ extend Ast {
     /// Does any table of this module still hold a provisional id? (Validation after a publication.)
     pub const fn has_provisional(self: &Self) bool {
         for i in 0..self.types.len() {
-            if (self.types[i] & TYPE_PROV) != 0 {
+            if (*self.types.at(i) & TYPE_PROV) != 0 {
                 return true;
             }
         }
         for i in 0..self.b.types.len() {
-            if (self.b.types[i] & TYPE_PROV) != 0 {
+            if (*self.b.types.at(i) & TYPE_PROV) != 0 {
                 return true;
             }
         }
@@ -4051,14 +4164,14 @@ extend Ast {
     /// The number of types this module can enumerate: its pool (module-local identity) or its
     /// `used` list (package identity); `used_type(i)` names the i-th.
     pub const fn ntypes(self: &Self) usize {
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.len();
         }
         return self.used.len();
     }
 
     pub const fn used_type(self: &Self, i: usize) TypeId {
-        if self.gt == null {
+        if self.gt.p == null {
             return i as TypeId;
         }
         return self.used[i];
@@ -4066,14 +4179,14 @@ extend Ast {
 
     /// The instance records this module can enumerate (same rule), by `used_instance(i)`.
     pub const fn ninstances(self: &Self) usize {
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.ninst();
         }
         return self.used_inst.len();
     }
 
     pub const fn used_instance(self: &Self, i: usize) &TyInstance {
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.instance(i);
         }
         return self.instance(self.used_inst[i]);
@@ -4081,32 +4194,32 @@ extend Ast {
 
     /// Is `t` an id this module can resolve (a foreign pool's id is not, under module-local identity)?
     pub const fn type_valid(self: &Self, t: TypeId) bool {
-        if self.gt == null {
+        if self.gt.p == null {
             return t as usize < self.pool.len();
         }
         if (t & TYPE_PROV) != 0 {
             return (t & TYPE_PROV_MASK) as usize < self.pool.len();
         }
-        return t as usize < unsafe (&*self.gt).len();
+        return t as usize < unsafe (&*self.gt.p).len();
     }
 
     /// The exclusive id bound the Core IR verifier checks against: the pool length under module-local
     /// identity; unbounded under package identity, where provisional ids carry the tag bit.
     pub const fn type_bound(self: &Self) usize {
-        if self.gt == null {
+        if self.gt.p == null {
             return self.pool.len();
         }
         return 0xFFFFFFFF;
     }
 
     pub const fn instance_valid(self: &Self, i: u32) bool {
-        if self.gt == null {
+        if self.gt.p == null {
             return i as usize < self.pool.ninst();
         }
         if (i & TYPE_PROV) != 0 {
             return (i & TYPE_PROV_MASK) as usize < self.pool.ninst();
         }
-        return i as usize < unsafe (&*self.gt).ninst();
+        return i as usize < unsafe (&*self.gt.p).ninst();
     }
 
     /// A const-generic argument value of integer type `bt` (two's complement `bits`), interned as a
@@ -4136,10 +4249,10 @@ extend Ast {
             return false;
         }
         let simd = y.kind == TypeKind::TYPE_SIMD;
-        let d = if self.gt == null {
+        let d = if self.gt.p == null {
             DefId {};
         } else {
-            pick(simd, unsafe (*self.gt).simd, unsafe (*self.gt).mask);
+            pick(simd, unsafe (*self.gt.p).simd, unsafe (*self.gt.p).mask);
         };
         *out = TyInstance { module: d.module, decl: d.node, n: pick(simd, 2, 1) as u8 };
         out.args[0] = pick(simd, y.as_data.arr.elem, y.as_data.arr.len);
@@ -4266,7 +4379,7 @@ extend Ast {
     /// recursively. A final (published) id names one package-wide record and passes through;
     /// only a provisional id of another module needs the rebuild.
     pub fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
-        if t == TYPE_NONE || self.gt != null && (t & TYPE_PROV) == 0 {
+        if t == TYPE_NONE || self.gt.p != null && (t & TYPE_PROV) == 0 {
             return t; // a published id is the same id in every module
         }
         let mut t0: u64 = 0;
@@ -4574,6 +4687,8 @@ extend Ast {
         ref_caps: u64,
         entries: Vector<CapFact>,
     ) {
+        // Under the intern lock: a layout on another task reads the facts (`closure_env`).
+        self.ilock_enter();
         let start = self.cap_facts.len() as u32;
         let n = entries.len() as u32 - nparams - nrets;
         for i in 0..entries.len() {
@@ -4599,6 +4714,39 @@ extend Ast {
                 self.closure_facts.push(f);
             },
         };
+        self.ilock_leave();
+    }
+
+    /// Set closure `node`'s recorded by-`&mut` and by-reference capture bits (the intern lock, as
+    /// `record_closure`); false when it records no facts.
+    pub fn set_closure_caps(self: &mut Self, node: NodeId, mut_caps: u64, ref_caps: u64) bool {
+        self.ilock_enter();
+        let cf = self.closure_fact_mut(node);
+        if cf != null {
+            unsafe (*cf).mut_caps = mut_caps;
+            unsafe (*cf).ref_caps = ref_caps;
+        }
+        self.ilock_leave();
+        return cf != null;
+    }
+
+    /// The capture types of closure `node` into `tys`, and the captures held by reference (`&mut`
+    /// or `&`) as bits in `by_ref`, copied under the intern lock: the reader may run on another
+    /// task than the module's checker. False when the closure records no capture.
+    pub fn closure_env(self: &Self, node: NodeId, tys: &mut Vector<TypeId>, by_ref: &mut u64) bool {
+        let me = (self as *const Ast) as *mut Ast;
+        unsafe (*me).ilock_enter();
+        let cf = self.closure_fact(node);
+        let ok = cf != null && unsafe (&*cf).ncaps != 0;
+        if ok {
+            let caps = self.caps_of(cf);
+            for k in 0..unsafe (&*cf).ncaps {
+                tys.push(unsafe caps[k as usize].ty);
+            }
+            *by_ref = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+        }
+        unsafe (*me).ilock_leave();
+        return ok;
     }
 
     /// Record that `free` method `fnid`'s body resolves to module declaration `decl` (once).
@@ -4848,7 +4996,7 @@ extend Ast {
         } else {
             &mut self.types;
         };
-        tv[(n & NODE_BODY_MASK) as usize] = t;
+        tv.set((n & NODE_BODY_MASK) as usize, t);
     }
     @c.always_inline
     pub const fn type_of(self: &Self, n: NodeId) TypeId {
@@ -4864,11 +5012,11 @@ extend Ast {
         if k >= tv.len() {
             return TYPE_NONE;
         }
-        return tv[k];
+        return *tv.at(k);
     }
     pub const fn type_at(self: &Self, t: TypeId) &Ty {
-        if self.gt != null && (t & TYPE_PROV) == 0 {
-            return unsafe (&*self.gt).at(t as usize);
+        if self.gt.p != null && (t & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt.p).at(t as usize);
         }
         return self.pool.at((t & TYPE_PROV_MASK) as usize);
     }
@@ -4876,7 +5024,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
@@ -4886,7 +5034,7 @@ extend Ast {
         let nodes_cap = self.nodes.retained() + self.b.nodes.retained();
         let children_cap = self.children.retained() + self.b.children.retained();
         let resolutions = self.resolutions.retained() + self.b.resolutions.retained();
-        let types = (self.types.capacity() + self.b.types.capacity()) * 4;
+        let types = self.types.retained() + self.b.types.retained();
         out.nodes += self.nnodes();
         out.body_nodes += self.b.nodes.len();
         out.nodes_cap += nodes_cap;
@@ -5168,3 +5316,461 @@ pub fn bc_decimal(src: str, raw: tok::Span) i64 {
     }
     return v;
 }
+
+// ---- Persist (the checked prelude image, `utils::persist`) ------------------------------------------
+
+/// The package type table an `Ast` reads through (`Ast.gt`). The prelude image does not save the
+/// pointer: the loader binds it again (`Package::bind_types`).
+pub struct PoolPtr {
+    pub p: *mut TypePool,
+}
+
+extend PoolPtr as Persist {
+    fn save(self: &PoolPtr, w: &mut Writer) {}
+
+    fn load(self: &mut PoolPtr, r: &mut Reader) {
+        self.p = null;
+    }
+}
+
+// The syntax lock is held by nobody outside a stage: a loaded module gets a fresh one. The value
+// it replaces is all-zero bytes (`load_new`), which a semaphore cannot release.
+extend psy::Semaphore as Persist {
+    fn save(self: &psy::Semaphore, w: &mut Writer) {}
+
+    fn load(self: &mut psy::Semaphore, r: &mut Reader) {
+        forget(replace(self, psy::Semaphore::new(1)));
+    }
+}
+
+extend<T: Copy + Persist> ChunkPool<T> as Persist {
+    fn save(self: &ChunkPool<T>, w: &mut Writer) {
+        w.u64(self.len() as u64);
+        for i in 0..self.len() {
+            self.at(i).save(w);
+        }
+    }
+
+    fn load(self: &mut ChunkPool<T>, r: &mut Reader) {
+        let n = r.u64() as usize;
+        if n > r.left() {
+            r.ok = false;
+            return;
+        }
+        *self = ChunkPool::<T>::new();
+        for _ in 0..n {
+            self.push(load_new::<T>(r));
+        }
+    }
+}
+
+extend<T: Copy + Persist> SplitVec<T> as Persist {
+    fn save(self: &SplitVec<T>, w: &mut Writer) {
+        let n = self.len();
+        w.u64(n as u64);
+        if T::plain() && self.base_len() == n {
+            w.align();
+            w.bytes(self.base_ptr() as *const u8, n * sizeof(T));
+            return;
+        }
+        for i in 0..n {
+            self.at(i).save(w);
+        }
+    }
+
+    fn load(self: &mut SplitVec<T>, r: &mut Reader) {
+        let mut v = Vector::<T>::new();
+        v.load(r);
+        *self = SplitVec::<T>::new();
+        self.reserve(v.len());
+        for i in 0..v.len() {
+            self.push(*v.at(i));
+        }
+    }
+}
+
+extend NodeList as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &NodeList, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut NodeList, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend Node as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Node, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Node, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend DefId as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &DefId, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut DefId, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend MonoUse as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &MonoUse, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut MonoUse, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend ProjOb as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ProjOb, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ProjOb, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend MethodRef as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &MethodRef, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut MethodRef, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend WideLit as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &WideLit, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut WideLit, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend CoerceUse as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &CoerceUse, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut CoerceUse, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend BoundCall as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &BoundCall, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut BoundCall, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend DynUse as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &DynUse, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut DynUse, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend DerefUse as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &DerefUse, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut DerefUse, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend Attr as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Attr, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Attr, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend AttrVal as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &AttrVal, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut AttrVal, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend MetaAttr as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &MetaAttr, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut MetaAttr, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend LifetimeDecl as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &LifetimeDecl, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut LifetimeDecl, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend WhereBound as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &WhereBound, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut WhereBound, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend FeatureCall as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &FeatureCall, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut FeatureCall, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend FeatureRow as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &FeatureRow, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut FeatureRow, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend UnsafeLint as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &UnsafeLint, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut UnsafeLint, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend Seed as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Seed, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Seed, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend ClosureFact as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ClosureFact, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ClosureFact, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend CapFact as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &CapFact, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut CapFact, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend BcCut as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &BcCut, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut BcCut, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend ConstStep as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ConstStep, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ConstStep, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend Ty as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Ty, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Ty, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend TyInstance as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &TyInstance, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut TyInstance, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend ConstLin as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ConstLin, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ConstLin, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend BcErr as Persist {}
+
+extend TypePool as Persist {}
+
+extend BodyArena as Persist {}
+
+extend Ast as Persist {}

@@ -19,7 +19,9 @@ The gate's form (`ci/gate.sh`, `ci/contract.sh`):
 
 1. Copy `src`, `std`, `ffi` and `build.toml` into a clean tree, and the compiler beside
    them, so `std`/`ffi` resolve inside the copy.
-2. Gen-1: `./super-c build` in the tree; keep `build/debug/raw` and `build/debug/super-c`.
+2. Gen-1: `./super-c build --profile=test` in the tree; keep `build/test/raw` and
+   `build/test/super-c`. The emitted C does not depend on the profile; the test profile only makes
+   the generations, and every build they run, faster.
 3. Remove `build/`. Gen-2: the gen-1 binary, copied into the tree root, builds again.
 4. `diff -r` the two `raw` trees, excluding only `CONTRACT_NONDET_FILES` (`.tu_cache`).
 
@@ -31,18 +33,15 @@ difference is a semantic regression unless the contract itself is intentionally 
 
 ## Absolute Paths in the Emitted Tree
 
-Emission spells absolute paths: the include paths in `__sc_fwd.h` and the `@c.source`
-wrappers (`__ext<N>_<stem>.c`), the content hash of `__sc_fwd.h` in `__sc_manifest`, and
-the source location of every assertion in a `std` module (std paths resolve beside the
-compiler binary, for example `__std/int__inst.c`).
+The include paths in `__sc_fwd.h` and the `@c.source` wrappers (`__ext<N>_<stem>.c`) are
+relative when the included file and the tree lie below the working directory, and absolute
+otherwise (`include_name`); the content hash of `__sc_fwd.h` in `__sc_manifest` follows them.
 
-- **Gen-1 vs gen-2, or an A/B of two compilers, in one tree:** both builds see the same
-  paths when each compiler sits at the same place beside the same `std`/`ffi`. Diff
-  everything (minus `.tu_cache` when the TU cache is on). The out-dir does not change the
-  emitted tree.
-- **Two different tree copies:** the paths differ by construction, in the files above and
-  in every std TU that spells an assertion location. Do not compare across copies. Run
-  both compilers in one tree instead.
+- **Gen-1 vs gen-2, or an A/B of two compilers, in one tree:** diff everything (minus
+  `.tu_cache` when the TU cache is on). The out-dir does not change the emitted tree.
+- **Two copies of the repository:** `std`/`ffi` lie inside each copy, so the trees are equal. A
+  `std`/`ffi` outside the working directory is named by its absolute path: compare such builds
+  only with the same `std`/`ffi` root.
 
 ## Common Fixpoint Breakages
 
@@ -54,7 +53,7 @@ compiler binary, for example `__std/int__inst.c`).
 | Different constant values | Compile-time evaluation order dependency |
 | Different line/column in emitted comments | Formatter or emitter position tracking changed |
 | Only `.tu_cache` differs | Per-TU cache on and not excluded |
-| Path-only diffs in `__sc_fwd.h`, `__ext*`, `__sc_manifest`, std TUs | Builds ran in different trees or with different `std`/`ffi` roots |
+| Path-only diffs in `__sc_fwd.h`, `__ext*`, `__sc_manifest` | Builds used different `std`/`ffi` roots outside the working directory |
 
 ## Prevention
 

@@ -323,7 +323,11 @@ an extend of the receiver defines and every default a conformance without its ow
 bound to its conformance, by the overload score of [inference.md](inference.md): with
 `extend K as Make<i32>` overriding `sum` and `extend K as Make<bool>` inheriting it,
 `k.sum(true, false)` runs the default under `Make<bool>` and `k.sum(3, 4)` the override. The chosen
-body runs directly, through a bound, through dyn and at compile time alike. Among candidates that
+body runs directly, through a bound, through dyn and at compile time alike. A candidate whose
+conformance's bounds the receiver does not meet drops out while another one's hold; when none
+holds, the call is "cannot call 'Vector<S, Global>::tag': unsatisfied interface bounds", for an
+inherited default too (`extend<T: Tag> Vector<T> as Tag` gives `Vector<S>` nothing when `S` does not
+conform to `Tag`). Among candidates that
 fit equally and that the expected result does not tell apart, the only one a plain extend (no
 interface) defines wins, as an inherent method does in Rust. Other candidates that fit equally are
 an error: "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that

@@ -57,7 +57,11 @@ fn run_file(
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
     p.profiles = bsys::profile_names(&bi);
-    p.load_root(path, std_dir, bootstrap_tags, target);
+    p.bootstrap = bootstrap_tags;
+    let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
+    if prelude_stage(&mut p, &mut cirv, std_dir, target, jobs, ce_steps, ce_mem) {
+        p.load_user(path, std_dir, target);
+    }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
     }
@@ -94,7 +98,6 @@ fn run_file(
             // A serial compile hands its slots back.
             unsafe shim::sc_jobserver_release_claim();
         }
-        let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
         p.cir = &mut cirv;
         // One process builds a tree at a time, as in a manifest build.
         default_gen_root(&mut p);

@@ -430,6 +430,9 @@ fn dispatch_chooses_once_in_table_order() {
 // x86-64 a plain load) and the indirect call, with no fence; the first call is an outlined direct call.
 @test
 fn dispatch_needs_no_fence() {
+    // Each unit alone, as a large program builds: in one unit the C compiler sees the target and may
+    // turn the indirect call into a compare and a branch.
+    let _unit = cli::set_env("SC_UNITY_MAX", "0");
     let a = unsafe shim::sc_host_arch();
     if cli::on_wasm() || h::simd_lane() || a > 1 {
         return;

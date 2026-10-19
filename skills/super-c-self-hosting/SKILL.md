@@ -43,18 +43,20 @@ diff protocol.
 ## The Bootstrap Sequence and the Rollback Boundary
 
 `sh ci/gate.sh` runs the production sequence: the latest release binary (the last
-verified bootstrap compiler) builds the current sources (`check.sh`), that result
-builds generation one, generation one emits generation two at the same path with the
-same options, the two trees are compared byte for byte, and generation two is compiled
+verified bootstrap compiler) builds the current sources (`check.sh`, under the test profile), that
+result builds generation one, generation one emits generation two at the same path with the
+same options (both under the test profile: optimized, overflow checks kept; the emitted C does not
+depend on the profile), the two trees are compared byte for byte, and generation two is compiled
 and run: it is the compiler that runs every later step of the gate (the one-worker and
-every-core builds under each task-delay seed, the targets, the profiles). Its
+every-core builds under each task-delay seed, the strict C warnings). Its
 one-worker tree must equal generation one's every-core tree, so the fixpoint holds
 across generations and worker counts at once. `check.sh` (the commit hook) ends with
-`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the input lists, the
+`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the
 fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
 a warm object cache). The release workflow runs `sh ci/gate.sh --core` and, in a job beside it,
 `sh ci/gate.sh --profiles` (every built-in profile but test, built by the compiler the `compile`
-job made: the gate's fixpoint proves the two generations emit the same C), on macOS, Linux and
+job made: the gate's fixpoint proves the two generations emit the same C; a local gate leaves the
+profiles to CI, the release and bench links being full LTO), on macOS, Linux and
 Windows; on Windows the strict warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX
 prototypes under `-std=c11`.
 

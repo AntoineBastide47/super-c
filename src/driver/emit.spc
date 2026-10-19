@@ -45,6 +45,7 @@ import utils::errors as diag;
 import driver::tuc as tuc;
 import driver::taskctl as tctl;
 import driver::sched as sch;
+import driver::prelude_image as pimg;
 import atomic;
 import driver::util as *;
 
@@ -413,7 +414,8 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     let pp = p as *mut loader::Package;
     let ob = outs.index_mut(0) as *mut RsOut;
     let wg = psync::WaitGroup::new();
-    for i in 0..n {
+    let from = p.root_module as usize; // the prelude stage resolved the modules before it
+    for i in from..n {
         wg.add(1);
         let t = RsTask { p: pp, outs: ob, m: i as u64, lint: lint, spans: &spans };
         let wgc = wg.clone();
@@ -426,8 +428,8 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     for i in 0..n {
         p.modules[i].ast.thaw_nodes(); // all four arrays: a body arena a lowering spilled into included
     }
-    let mut edges = Vector::<u64>::new();
-    for i in 0..n {
+    let mut edges = replace(&mut p.carry.rs_edges, Vector::<u64>::new());
+    for i in from..n {
         let o = outs.index_mut(i);
         if !o.ok || o.errors.has_warnings() {
             o.errors.log();
@@ -439,6 +441,9 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         }
     }
     gitems::build(p, &edges);
+    if p.carry.keep {
+        p.carry.rs_edges = edges;
+    }
 }
 
 // ---- The type check stage -------------------------------------------------------------------
@@ -497,9 +502,9 @@ fn tc_job(ctx: *mut void, j: u32) {
     let st = unsafe &*(ctx as *const TcStage);
     let p = unsafe &mut *st.p;
     if j as usize >= p.sched.ncomp as usize {
-        // The prelude gate: every prelude item is typed and no other item has started, so the
-        // prelude's types publish here (no reader, no writer: the gate's job alone runs). Every
-        // later checker then takes a prelude declaration's type from the owner's record (a final
+        // The prelude gate: every prelude item and every item they depend on is typed and no other
+        // item has started, so the prelude's types publish here (no reader, no writer: the gate's
+        // job alone runs). Every later checker then takes a prelude declaration's type from the owner's record (a final
         // id, the same in every module) instead of lowering its syntax again.
         let tg0 = unsafe shim::sc_ticks_ms();
         publish_checkpoint(p, null);
@@ -511,12 +516,16 @@ fn tc_job(ctx: *mut void, j: u32) {
     for k in p.sched.citem_off[j as usize] as usize..p.sched.citem_off[j as usize + 1] as usize {
         let it = p.sched.citem[k];
         let meta = *p.idx.items.at(it as usize);
-        if meta.owner != loader::ITEM_NONE {
+        // A member goes with its extend; the prelude stage checked the items before `root_module`.
+        if meta.owner != loader::ITEM_NONE || meta.module as u32 < p.root_module {
             continue;
         }
         if p.jobs != 1 {
             let _g = (unsafe &*(st.lease + meta.module as usize)).lock();
+            let a = (&mut p.modules[meta.module as usize].ast) as *mut Ast;
+            unsafe (*a).wl_enter();
             tc_item(st, it, meta);
+            unsafe (*a).wl_leave();
         } else {
             tc_item(st, it, meta);
         }
@@ -628,13 +637,38 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
     let s = &p.sched;
     let nc = s.ncomp as usize;
     let gate = nc as u64;
+    // The components the gate waits for: the prelude's, and every component they depend on (a module
+    // a prelude file imports), as `tc_order` places them before the gate.
+    let mut pre = Vector::<bool>::new();
+    pre.resize_default(nc);
+    let mut stack = Vector::<u32>::new();
+    for c in 0..nc {
+        let first = s.citem[s.citem_off[c] as usize];
+        if p.modules.at(p.idx.items.at(first as usize).module as usize).prelude {
+            pre.set(c, true);
+            stack.push(c as u32);
+        }
+    }
+    // Each component enters the stack once.
+    for _ in 0..nc {
+        if stack.len() == 0 {
+            break;
+        }
+        let c = stack.pop().unwrap() as usize;
+        for e in s.cdep_off[c] as usize..s.cdep_off[c + 1] as usize {
+            let d = s.cdep[e] as usize;
+            if !pre[d] {
+                pre.set(d, true);
+                stack.push(d as u32);
+            }
+        }
+    }
     let mut edges = Vector::<u64>::new();
     for c in 0..nc {
         for e in s.cdep_off[c] as usize..s.cdep_off[c + 1] as usize {
             edges.push(s.cdep[e] as u64 << 32 | c as u64);
         }
-        let first = s.citem[s.citem_off[c] as usize];
-        if p.modules.at(p.idx.items.at(first as usize).module as usize).prelude {
+        if pre[c] {
             edges.push(c as u64 << 32 | gate);
         } else {
             edges.push(gate << 32 | c as u64);
@@ -713,6 +747,7 @@ fn typecheck_stage(
     let par = p.jobs != 1 && n > 1;
     if par {
         set_stage_locks(p, true);
+        p.wl_on = true;
         for i in 0..n {
             // Pin the syntax arrays: a checker synthesizes nodes while other tasks read
             // pre-existing ones.
@@ -777,11 +812,12 @@ fn typecheck_stage(
             p.modules[i].ast.thaw_nodes();
             p.modules[i].ast.thaw_resolutions();
         }
+        p.wl_on = false;
         set_stage_locks(p, false);
     }
     // Publication, in module then item order.
     let mut ok = true;
-    let mut tedges = Vector::<u64>::new();
+    let mut tedges = replace(&mut p.carry.tc_edges, Vector::<u64>::new()); // the prelude stage's
     for m in 0..n {
         // The module's top-level nodes in declaration order: an item's output, or the next
         // non-item node's.
@@ -851,6 +887,9 @@ fn typecheck_stage(
         }
     }
     gitems::build_final(p, &tedges);
+    if p.carry.keep {
+        p.carry.tc_edges = tedges;
+    }
     if tstat {
         eprint("typecheck-stage publish: {} ms\n", unsafe shim::sc_ticks_ms() - tj0);
     }
@@ -863,18 +902,18 @@ fn typecheck_stage(
 // Every TYPE_ERROR is produced after its diagnostic, so a package the checker accepted holds none:
 // one left is a checker defect whose silent acceptance would reach the later passes.
 fn assert_no_error_type(p: &loader::Package) {
-    for i in 0..p.modules.len() {
+    for i in p.root_module as usize..p.modules.len() {
         let a = &p.modules[i].ast;
         if !p.modules[i].has_ast {
             continue;
         }
         for k in 0..a.types.len() {
-            if a.types[k] == TYPE_ERROR {
+            if *a.types.at(k) == TYPE_ERROR {
                 error_type_abort(p, i, k as NodeId);
             }
         }
         for k in 0..a.b.types.len() {
-            if a.b.types[k] == TYPE_ERROR {
+            if *a.b.types.at(k) == TYPE_ERROR {
                 error_type_abort(p, i, k as NodeId | NODE_BODY);
             }
         }
@@ -1045,7 +1084,7 @@ pub fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
         let nsp = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
         // `main`: the root module's top-level function of that name, no method.
         let mut outer = false;
-        if i == 0 && p.modules[i].source.as_str().slice(nsp.start as usize, nsp.end as usize) == "main" {
+        if i == p.root_module as usize && p.modules[i].source.as_str().slice(nsp.start as usize, nsp.end as usize) == "main" {
             let items = a.at_const(a.root).as_data.program.items;
             for j in 0..items.len {
                 outer = outer || unsafe a.list(items)[j as usize] == f;
@@ -6627,6 +6666,10 @@ fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
 // vector operation keeps its forward header.
 fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut String, backed: &mut Set<u64>) {
     let mut seen = Vector::<String>::new();
+    // The forward header sits at the tree's root, the definition headers in `__sc_t/`.
+    let gen_real = loader::real_path_of(p.gen_root.as_str());
+    let mut t_real = gen_real.clone();
+    t_real.push_str("/__sc_t");
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
             continue;
@@ -6657,6 +6700,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
             }
             let htxt = src.slice(s0, e0);
             let mut line = String::new();
+            let mut gline = String::new(); // the same, from `__sc_t/`
             let mut done = false;
             if p.modules[m].file.len() != 0 {
                 // Resolve next to the declaring module's file; realpath makes the tree
@@ -6676,9 +6720,9 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 let mut absb = PathBuf {};
                 let ra = unsafe shim::sc_realpath(rel.cstr(), &mut absb[0]);
                 if ra != null {
-                    line.push_str("#include \"");
-                    line.push_str(str::from_cbuf(absb.as_slice()));
-                    line.push_str("\"\n");
+                    let abs = str::from_cbuf(absb.as_slice());
+                    line.format_into("#include \"{}\"\n", include_name(abs, gen_real.as_str()).as_str());
+                    gline.format_into("#include \"{}\"\n", include_name(abs, t_real.as_str()).as_str());
                     done = true;
                 }
             }
@@ -6687,6 +6731,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 line.push_str(mbe::if_s(local, "#include \"", "#include <"));
                 line.push_str(htxt);
                 line.push_str(mbe::if_s(local, "\"\n", ">\n"));
+                gline.push_string(&line);
             }
             // Each register type's layout (`@c.value`) is the header's: the C compiler checks it. The
             // alignment is a lower bound: GCC aligns `__m256` to 16 bytes without AVX, to 32 with it.
@@ -6699,7 +6744,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 if av.ok {
                     let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
                     let nm = src.slice(tn.start as usize, tn.end as usize);
-                    line.format_into(
+                    let chk = format(
                         "_Static_assert(sizeof({}) == {} && _Alignof({}) >= {}, \"@c.value of {}\");\n",
                         nm,
                         av.v,
@@ -6707,6 +6752,8 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                         av.w[0],
                         nm,
                     );
+                    line.push_string(&chk);
+                    gline.push_string(&chk);
                 }
             }
             let mut dup = false;
@@ -6717,7 +6764,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 }
             }
             if dup {} else if extern_block_gated(p, m as ModuleId, eb.items, false) {
-                gated.push_string(&line);
+                gated.push_string(&gline);
                 if imported_beyond_backends(p, m as ModuleId) {
                     out.push_string(&line);
                 }
@@ -6738,6 +6785,10 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
 // inliner's type-translation caches warm once per pooled slot (about the worker count) instead of
 // once per task. Valid within one emission phase: every cached decision is a pure function of the
 // frozen package and its inline store. `cemit_package` resets it.
+/// A program whose module, instance and registry units hold at most this many bytes of C compiles them
+/// as one unit (`__sc_unity.c`).
+const UNITY_MAX: usize = 2 << 20;
+
 static mut G_DPOOL: *mut Vector<DropCtx> = null;
 static mut G_DPOOL_LOCK: i32 = 0;
 
@@ -9452,9 +9503,9 @@ const fn lint_reported(p: &loader::Package, m: usize, only_mod: i32) bool {
 }
 
 // Every batch-linted module is a lint root of its own (per-file parity: lint_one loads each file as
-// module 0), so its `main` keeps the entry-point exemption there too.
+// the root module), so its `main` keeps the entry-point exemption there too.
 const fn lint_root_mod(p: &loader::Package, m: usize) bool {
-    return m == 0 || p.lint_set.len() != 0 && p.lint_set[m];
+    return m == p.root_module as usize || p.lint_set.len() != 0 && p.lint_set[m];
 }
 
 fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) {
@@ -10578,6 +10629,131 @@ pub fn default_gen_root(p: &mut loader::Package) {
     }
 }
 
+// Resolve the modules from `root_module` on (the prelude stage resolved the ones before it) and build
+// the item schedule over every module.
+fn resolve_stage(p: &mut loader::Package, lint: bool) {
+    let n = p.modules.len();
+    if p.jobs != 1 && n > 1 {
+        resolve_all_par(p, lint);
+        return;
+    }
+    for i in p.root_module as usize..n {
+        let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
+        p.ok = ok && p.ok;
+    }
+    gitems::build_serial(p);
+}
+
+/// The prelude stage of a build: the std prelude of `p`'s settings loaded from `std_dir` and analyzed up
+/// to the prelude gate in a package of its own, whose image `p` then loads (`driver::prelude_image`); or
+/// the stored image of an earlier build with these settings and std files. `p` holds no module yet and
+/// `e` is its engine, which takes the prelude's deferred checks. `jobs` is the requested worker count,
+/// `steps` and `mem` the evaluation budgets of `e`. False, with the errors logged, when the prelude does
+/// not check.
+pub fn prelude_stage(
+    p: &mut loader::Package,
+    e: &mut iri::Interp,
+    std_dir: str,
+    target: i32,
+    jobs: u32,
+    steps: u32,
+    mem: u64,
+) bool {
+    let key = pimg::key(p, std_dir, target, steps, mem);
+    let cid = compiler_id(); // 0: unreadable, no image is kept
+    if cid != 0 {
+        let mut at: usize = 0;
+        switch pimg::read(key, cid, &mut at) {
+            Some(b) => {
+                // A stored image a reader rejects leaves a partial state: load into a copy.
+                let mut t = p.settings_copy();
+                if pimg::load(&mut t, e, b.as_str().slice(at, b.len())) {
+                    *p = t;
+                    p.bind_types();
+                    return true;
+                }
+                e.pending.clear();
+                e.pending_consts.clear();
+                e.pending_strict.clear();
+                e.inst_asserts.clear();
+            },
+            None => {},
+        };
+    }
+    let mut img = String::new();
+    {
+        let mut q = p.settings_copy();
+        // The prelude's imports resolve under the std root alone: the image does not depend on the
+        // project.
+        q.root_dir = q.std_root.clone();
+        q.alt_root = String::new();
+        q.load_prelude_stage(std_dir, q.bootstrap, target);
+        if !q.ok {
+            p.ok = false;
+            return false;
+        }
+        q.jobs = jobs;
+        let mut qe = iri::interp_master((&mut q) as *mut loader::Package, steps, mem);
+        q.cir = &mut qe;
+        if !check_prelude(&mut q, target) {
+            p.ok = false;
+            return false;
+        }
+        img = pimg::save(&q, &qe);
+        if cid != 0 && q.lint_warnings == 0 {
+            pimg::write(key, cid, &q, std_dir, &img);
+        }
+    }
+    let mut t = p.settings_copy();
+    let ok = pimg::load(&mut t, e, img.as_str());
+    if !ok {
+        panic("the prelude image did not load back");
+    }
+    *p = t;
+    p.bind_types();
+    return true;
+}
+
+// The prelude stage's analysis over `q`, which holds the prelude alone: resolution, then the type check
+// of every item, the prelude gate's publication among it (`typecheck_stage`). Its raw edges and its
+// items' schedule state go to `q.carry`.
+fn check_prelude(q: &mut loader::Package, target: i32) bool {
+    if q.modules.len() == 0 {
+        return true; // no std tree: nothing to check
+    }
+    q.carry.keep = true;
+    q.platform_filter(target);
+    resolve_stage(q, false);
+    if !q.ok {
+        return false;
+    }
+    let mut want = Vector::<bool>::new();
+    want.resize_default(q.modules.len());
+    q.ok = typecheck_stage(q, &want, null, null) && q.ok;
+    if !q.ok {
+        return false;
+    }
+    let c = &mut q.carry;
+    c.keep = false;
+    c.items = q.idx.items.len() as u32;
+    for i in 0..q.idx.items.len() {
+        c.state.push(q.sched.state[i]);
+        c.ret_attr.push(q.sched.ret_attr[i]);
+    }
+    let mut it = q.sched.dyn_edges.iter();
+    loop {
+        switch it.next() {
+            Some(d) => {
+                c.dyn_edges.insert(*d);
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    return true;
+}
+
 pub fn run_package(
     p: &mut loader::Package,
     topts: *const TestOpts,
@@ -10599,21 +10775,15 @@ pub fn run_package(
     let mut tp0 = unsafe shim::sc_ticks_ms();
     syntax_stats_report(p, "parse");
     p.platform_filter(target);
+    // The prelude stage's index holds its modules: append the rest, as filtered.
+    p.index_append();
     let n = p.modules.len();
     let mut co = CemitOut::new(n);
     // The per-item cost records are serial-only (the frontiers' tasks would race on them); the
     // report and its final graph print for any worker count (the digest gate reads them).
     let istats = stdlib::getenv("SC_ITEM_STATS") != null;
     p.icost_on = istats && p.jobs == 1;
-    if p.jobs != 1 && n > 1 {
-        resolve_all_par(p, lint);
-    } else {
-        for i in 0..n {
-            let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
-            p.ok = ok && p.ok;
-        }
-        gitems::build_serial(p);
-    }
+    resolve_stage(p, lint);
     if !p.ok {
         return 1;
     }
@@ -10940,6 +11110,7 @@ pub fn run_package(
     man.push_str("\t");
     man.push_str(cflags);
     man.push_str("\n");
+    let mut members = Vector::<String>::new(); // the units `__sc_unity.c` compiles
     {
         let fwdp = build_out_path(root, "__sc_fwd", ".h");
         let mut w = OutFile::open(fwdp.as_str());
@@ -10994,6 +11165,21 @@ pub fn run_package(
         }
         let mut sg = ShardGroups::new();
         let mut sbody = String::new();
+        // A small program compiles as one unit (`__sc_unity.c` includes its module, instance and registry
+        // units): one compiler process, the shared headers parsed once. Its members are no compile units
+        // of their own (`ck`).
+        let mut csize = co.registry_c.len() + co.inst_c.len();
+        for k in 0..lm.len() {
+            csize += co.tus.at(lm[k] as usize).len();
+        }
+        // SC_UNITY_MAX overrides the limit (0: every unit alone, as a large program builds).
+        let mut umax = UNITY_MAX as u64;
+        let ue = stdlib::get_env("SC_UNITY_MAX");
+        if ue.is_some() {
+            umax = ue.unwrap().as_str().parse_u64().unwrap_or(umax);
+        }
+        let unity = csize as u64 <= umax && lm.len() + iq.len() + (co.registry_c.len() != 0) as usize > 1;
+        let ck = pick(unity, 0, 1);
         for k in 0..lm.len() {
             let t = lm[k] as usize;
             let nsh = co.tu_heads.at(t).len();
@@ -11024,7 +11210,10 @@ pub fn run_package(
                     osink != null,
                     &mut sbody,
                 ) {
-                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), 1);
+                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), ck);
+                    if unity {
+                        members.push(cp.clone());
+                    }
                     keep.push(cp);
                 }
             }
@@ -11055,7 +11244,10 @@ pub fn run_package(
                     osink != null,
                     &mut sbody,
                 ) {
-                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), 1);
+                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), ck);
+                    if unity {
+                        members.push(cp.clone());
+                    }
                     keep.push(cp);
                 }
             }
@@ -11068,8 +11260,27 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "r", root, rp.as_str(), w.h, 0xFFFF, 0, co.registry_c.as_str(), co.reg_inputs.as_str());
-            sink_notify(osink, &mut co.pr, rp.as_str(), co.registry_c.as_str(), 1);
+            sink_notify(osink, &mut co.pr, rp.as_str(), co.registry_c.as_str(), ck);
+            if unity {
+                members.push(rp.clone());
+            }
             keep.push(rp);
+        }
+        if unity {
+            let up = build_out_path(root, "__sc_unity", ".c");
+            let mut ut = String::from_str("/* every unit of this program in one compile -- generated, do not edit */\n");
+            for i in 0..members.len() {
+                let m = members.at(i).as_str();
+                ut.format_into("#include \"{}\"\n", m.slice(root.len() + 1, m.len()));
+            }
+            let mut w = OutFile::open(up.as_str());
+            w.put(ut.as_str());
+            if !w.close() {
+                err = true;
+            }
+            man_line(&mut man, "u", root, up.as_str(), w.h, 0xFFFF, 0, ut.as_str(), "");
+            sink_notify(osink, &mut co.pr, up.as_str(), ut.as_str(), 1);
+            keep.push(up);
         }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
@@ -11107,10 +11318,23 @@ pub fn run_package(
         prune_orphans(&broot[0], &keep);
     }
     syntax_stats_report(p, "emit");
+    // The C files to compile: every one written, but the members of `__sc_unity.c`.
+    let mut cunits = Vector::<String>::new();
+    {
+        let mut ms = Set::<String>::new();
+        for i in 0..members.len() {
+            ms.insert(members.at(i).clone());
+        }
+        for i in 0..keep.len() {
+            if keep.at(i).as_str().ends_with(".c") && !ms.contains(keep.at(i)) {
+                cunits.push(keep.at(i).clone());
+            }
+        }
+    }
     let mut rc: i32 = err as i32;
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(p, null, &keep, out_bin, cflags, ccflags, target);
+            rc = test_build_and_run(p, null, &cunits, out_bin, cflags, ccflags, target);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -11120,9 +11344,10 @@ pub fn run_package(
             switch write_test_main(p, &plan) {
                 Some(runner) => {
                     sink_notify(sink, &mut co.pr, runner.as_str(), "", 1);
+                    cunits.push(runner.clone());
                     keep.push(runner);
                     if sink == null {
-                        rc = test_build_and_run(p, topts, &keep, "", cflags, ccflags, target);
+                        rc = test_build_and_run(p, topts, &cunits, "", cflags, ccflags, target);
                     }
                 },
                 None => {

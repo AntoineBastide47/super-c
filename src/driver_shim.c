@@ -956,6 +956,30 @@ int sc_chmod_exec(const char *path) {
 #endif
 }
 
+/* The number of names of the file `path` (its hard links), with its identity on its volume in `*id`
+   (POSIX inode, Win32 file index); -1 when it cannot be read. */
+int sc_file_links(const char *path, uint64_t *id) {
+#if defined(_WIN32)
+  BY_HANDLE_FILE_INFORMATION fi;
+  HANDLE h = CreateFileA(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (h == INVALID_HANDLE_VALUE)
+    return -1;
+  int ok = GetFileInformationByHandle(h, &fi);
+  CloseHandle(h);
+  if (!ok)
+    return -1;
+  *id = (uint64_t)fi.nFileIndexHigh << 32 | fi.nFileIndexLow;
+  return (int)fi.nNumberOfLinks;
+#else
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return -1;
+  *id = (uint64_t)st.st_ino;
+  return (int)st.st_nlink;
+#endif
+}
+
 /* A second name `to` for the file `from` (a hard link); 0 on success. */
 int sc_link(const char *from, const char *to) {
 #if defined(_WIN32)

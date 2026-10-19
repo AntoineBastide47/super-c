@@ -3,10 +3,25 @@
 // `CpuFeatureSet`). A feature selects instructions only: no language result depends on it.
 
 import ast::ast as ast;
+import utils::persist as *;
 
 /// A set of features: bit `i` is row `i` of `CPU_FEATURES`. 128 features at most.
 pub struct CpuFeatureSet {
     pub w: [u64; 2],
+}
+
+extend CpuFeatureSet as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &CpuFeatureSet, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut CpuFeatureSet, r: &mut Reader) {
+        load_bytes(self, r);
+    }
 }
 
 /// One feature: the spelling of `--target-feature` and `target-features`, the `cpu::Feature`

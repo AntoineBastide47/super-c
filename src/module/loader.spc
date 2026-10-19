@@ -17,6 +17,7 @@ import std::parallel::runtime as prt;
 import graph::items as gitems;
 import ir::layout as lay;
 import ir::cpu_features as cf;
+import utils::persist as *;
 
 /// The C `SEEK_END` whence value used to size a file before reading it.
 pub const SEEK_END: i32 = 2;
@@ -167,6 +168,9 @@ pub struct Package {
     /// target platform it spells.
     pub build_module: i32,
     pub build_target: i32,
+    /// The user's root module: 0 when the root loads first, the first module after the prelude in a
+    /// prelude-first build (`load_user`).
+    pub root_module: u32,
     /// The `--bootstrap-tags` flag the ASTs were loaded under: gating changes item sets while
     /// leaving sources identical, so build caches keyed on sources must include it.
     pub bootstrap: bool,
@@ -222,6 +226,12 @@ pub struct Package {
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
     /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
     pub cir: *mut void,
+    /// The parallel type check's module write locks are on (`Ast::wl_sem`): the engine lock's
+    /// holder (`wl_eng`, its task token) takes a module's lock in `module_ast_const`, and drops the
+    /// locks it took (`wl_got`) with the engine lock (`wl_eng_end`).
+    pub wl_on: bool,
+    pub wl_eng: usize,
+    pub wl_got: Vector<u32>,
     /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
     /// lifetime by `cemit_package`; null outside it.
     pub inl_store: *const void,
@@ -316,6 +326,73 @@ pub struct Package {
     /// reference scan read about a module whose bodies are released. Indexed by module; shorter
     /// than the module table means "unrecorded".
     pub def_refs: Vector<Vector<RefEdge>>,
+    /// What the checked prelude stage left for the second one (`driver::emit::check_prelude`).
+    pub carry: PreludeCarry,
+}
+
+/// The prelude stage's results the second stage's item schedule starts from: the prelude items'
+/// resolution edges and post-typecheck edges (`graph::items` raw edges), and their readiness
+/// states, result-attributability verdicts and dynamic evaluation edges. `items` 0: no prelude
+/// stage ran (the one-stage pipeline).
+pub struct PreludeCarry {
+    pub items: u32,
+    /// The package runs the prelude stage: its analysis keeps its raw edges here.
+    pub keep: bool,
+    pub rs_edges: Vector<u64>,
+    pub tc_edges: Vector<u64>,
+    pub state: Vector<u8>,
+    pub ret_attr: Vector<u8>,
+    pub dyn_edges: Set<u64>,
+}
+
+extend PreludeCarry as Persist {}
+
+extend Module as Persist {}
+
+extend SymTab as Persist {}
+
+extend PkgIndex as Persist {}
+
+extend ItemMeta as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ItemMeta, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ItemMeta, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend ItemSig as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &ItemSig, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut ItemSig, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend LookupHit as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &LookupHit, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut LookupHit, r: &mut Reader) {
+        load_bytes(self, r);
+    }
 }
 
 /// One recorded reference (`Package.def_refs`): the declaration named (`module << 32 | node`)
@@ -1016,26 +1093,7 @@ extend DirCache {
             i = self.next[i as usize];
         }
         let mut names = Vector::<String>::new();
-        let mut dok = false;
-        let mut db = RealBuf {};
-        let dl = dir.len();
-        if dl < 4096 {
-            unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
-            unsafe db.b[dl] = 0 as char;
-            let d = unsafe shim::sc_opendir(&db.b[0]);
-            if d != null {
-                dok = true;
-                loop {
-                    let e = unsafe shim::sc_readdir(d);
-                    if e == null {
-                        break;
-                    }
-                    names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
-                }
-                let _ = unsafe shim::sc_closedir(d);
-            }
-        }
-        names.sort();
+        let dok = dir_listing(dir, &mut names);
         self.heads.insert(h, self.dirs.len() as u32);
         self.next.push(head);
         self.dirs.push(String::from_str(dir));
@@ -1083,6 +1141,32 @@ extend DirCache {
         return path_exists(path);
     }
 }
+/// The entry names of `dir`, sorted, into `names`; false when the directory cannot be opened. What
+/// `DirCache` answers from, and what the prelude image checks its directories against.
+pub fn dir_listing(dir: str, names: &mut Vector<String>) bool {
+    let mut dok = false;
+    let mut db = RealBuf {};
+    let dl = dir.len();
+    if dl < 4096 {
+        unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
+        unsafe db.b[dl] = 0 as char;
+        let d = unsafe shim::sc_opendir(&db.b[0]);
+        if d != null {
+            dok = true;
+            loop {
+                let e = unsafe shim::sc_readdir(d);
+                if e == null {
+                    break;
+                }
+                names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
+            }
+            let _ = unsafe shim::sc_closedir(d);
+        }
+    }
+    names.sort();
+    return dok;
+}
+
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
 // finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
@@ -1967,9 +2051,66 @@ extend Package {
     /// It also prunes every module's build-constant sites.
     pub fn platform_filter(self: &mut Self, target: i32) {
         let n = self.modules.len();
-        for mi in 0..n {
+        // The prelude stage filtered its modules.
+        for mi in self.root_module as usize..n {
             self.platform_filter_module(mi, target);
         }
+    }
+
+    /// A package with this one's search roots and build settings and nothing loaded: the package the
+    /// prelude stage checks in (`driver::emit::prelude_stage`).
+    pub fn settings_copy(self: &Self) Package {
+        let mut q = Package::new();
+        q.root_dir = self.root_dir.clone();
+        q.alt_root = self.alt_root.clone();
+        q.std_root = self.std_root.clone();
+        q.arch = self.arch;
+        q.features = self.features;
+        q.simd_width = self.simd_width;
+        q.simd_dispatch = self.simd_dispatch.clone();
+        q.mem_check = self.mem_check;
+        q.test_build = self.test_build;
+        q.profile = self.profile.clone();
+        for i in 0..self.profiles.len() {
+            q.profiles.push(self.profiles.at(i).clone());
+        }
+        q.bootstrap = self.bootstrap;
+        return q;
+    }
+
+    /// The first stage of a driver build: the std prelude under `std_dir` and the build-constant
+    /// module, before any user module (`load_user` appends them), so the prelude's module and item
+    /// ids are the same in every build with these settings, and its analysis reads nothing else.
+    pub fn load_prelude_stage(self: &mut Self, std_dir: str, bootstrap_tags: bool, target: i32) {
+        self.bootstrap = bootstrap_tags;
+        self.simd_levels_compute();
+        if self.load_prelude_files(std_dir, target) {
+            self.add_build_module(target);
+        }
+        self.seed_core();
+        self.bind_types();
+    }
+
+    /// The second stage: append `root_file`'s module closure after the prelude, then the vector
+    /// backend when a module names a vector. Every module joins the package type table as it loads;
+    /// `index_append` indexes them once the platform filter has run.
+    pub fn load_user(self: &mut Self, root_file: str, std_dir: str, target: i32) {
+        self.root_module = self.modules.len() as u32;
+        let rp = stem_of(root_file);
+        let rf = String::from_str(root_file);
+        let m = self.find(rp.as_str());
+        if m >= 0 {
+            eprint(
+                "error: the root file '{}' names module '{}', which the std prelude loads from '{}': rename the root file\n",
+                root_file,
+                rp.as_str(),
+                self.modules.at(m as usize).file.as_str(),
+            );
+            self.ok = false;
+            return;
+        }
+        self.load_module(rp.as_str(), rf.as_str(), self.bootstrap, target);
+        self.load_backend(std_dir, target, false);
     }
 
     /// Load `root_file` and, transitively, every module it imports, then append the std prelude
@@ -2350,7 +2491,7 @@ extend Package {
         let gp = self.tt.deref_mut() as *mut TypePool;
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
-                self.modules[i].ast.gt = gp;
+                self.modules[i].ast.gt.p = gp;
                 if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "simd.spc" {
                     self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd", NodeKind::NODE_STRUCT);
                     self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask", NodeKind::NODE_STRUCT);
@@ -2450,7 +2591,7 @@ extend Package {
             let mut refs = Vector::<u64>::new(); // module << 32 | pool index
             for m in 0..n {
                 let mut cmap = Vector::<u32>::new();
-                if self.modules[m].has_ast && self.modules[m].ast.gt != null {
+                if self.modules[m].has_ast && self.modules[m].ast.gt.p != null {
                     let a = &self.modules[m].ast;
                     for pi in 0..a.pool.nclin() {
                         cmap.push(0xFFFFFFFFu32);
@@ -2483,7 +2624,7 @@ extend Package {
                 let mut map = Vector::<TypeId>::new();
                 let mut imap = Vector::<u32>::new();
                 let mut cmap = replace(cpre.index_mut(m), Vector::<u32>::new());
-                if self.modules[m].has_ast && self.modules[m].ast.gt != null {
+                if self.modules[m].has_ast && self.modules[m].ast.gt.p != null {
                     let a = &mut self.modules[m].ast;
                     let np = a.pool.len();
                     map.reserve(np);
@@ -2549,7 +2690,7 @@ extend Package {
                     continue;
                 }
                 let a = unsafe &*self.module_ast_const(it.module);
-                if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt == null {
+                if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt.p == null {
                     continue;
                 }
                 let fd = a.at_const(it.node).as_data.function;
@@ -3921,7 +4062,59 @@ extend Package {
     /// live IN PLACE in the module table for their whole life: a stage mutates its module's Ast through a
     /// raw pointer into this slot, never by moving it out, so this read is always the live tree.
     pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
+        if self.wl_on {
+            self.wl_take(mid);
+        }
         return &self.modules[mid as usize].ast;
+    }
+
+    /// Module `mid`'s syntax and resolutions without its write lock (`module_ast_const`): what a scan
+    /// over every module reads before it picks a candidate; both are frozen in a parallel stage.
+    pub const fn module_syntax(self: &Self, mid: ModuleId) *const Ast {
+        return &self.modules[mid as usize].ast;
+    }
+
+    // Take module `mid`'s write lock when the running task holds the engine lock and not yet the
+    // module's lock.
+    fn wl_take(self: &Self, mid: ModuleId) {
+        if unsafe atomic::load_usize(&self.wl_eng, 0) != Ast::itok() {
+            return;
+        }
+        let mp = (self as *const Package) as *mut Package;
+        let a = unsafe &mut (*mp).modules[mid as usize].ast;
+        if a.wl_held() {
+            return;
+        }
+        a.wl_wait();
+        unsafe (*mp).wl_got.push(mid);
+    }
+
+    /// Before the running task waits for the engine lock: release the module write lock it holds
+    /// as a checker, and return that module (-1 for none). A holder of a write lock never waits
+    /// for the engine lock, so the engine's wait for a write lock ends.
+    pub fn wl_eng_begin(self: &mut Self) i64 {
+        let tok = Ast::itok();
+        for m in 0..self.modules.len() {
+            if unsafe atomic::load_usize(&self.modules[m].ast.wl_owner, 0) == tok {
+                self.modules[m].ast.wl_leave();
+                return m as i64;
+            }
+        }
+        return -1;
+    }
+
+    /// The running task now holds the engine lock: the modules it reads from here on are locked.
+    pub fn wl_eng_hold(self: &mut Self) {
+        unsafe atomic::store_usize(&mut self.wl_eng, Ast::itok(), 0);
+    }
+
+    /// Before the engine lock's release: drop every write lock the engine took.
+    pub fn wl_eng_end(self: &mut Self) {
+        unsafe atomic::store_usize(&mut self.wl_eng, 0, 0);
+        for i in 0..self.wl_got.len() {
+            self.modules[self.wl_got[i] as usize].ast.wl_leave();
+        }
+        self.wl_got.clear();
     }
 
     /// Whether interface method `f`'s first parameter is of type `Self` (behind references or
@@ -4183,7 +4376,7 @@ extend Package {
         // A module loaded after `bind_types` (an import resolved on demand) joins the package
         // identity at once: every module of a bound package interns into the one table.
         if has_ast && self.tt.deref().len() != 0 {
-            self.modules[id as usize].ast.gt = self.tt.deref_mut();
+            self.modules[id as usize].ast.gt.p = self.tt.deref_mut();
         }
         return id;
     }
@@ -4215,6 +4408,37 @@ extend Package {
         return -1;
     }
 
+    // Whether a project file (under the root, then the alt root) names import path `parts` of `a` while
+    // the prelude stage loaded module `m` for that path from another file: the import would get the std
+    // module. Logs the error.
+    fn std_shadowed(self: &Self, dc: &mut DirCache, a: &Ast, src: str, parts: NodeList, m: usize) bool {
+        let mut f = module_file_path(self.root_dir.as_str(), a, src, parts);
+        if !dc.exists(f.as_str()) {
+            f = module_index_path(self.root_dir.as_str(), a, src, parts);
+            if !dc.exists(f.as_str()) {
+                if self.alt_root.is_empty() {
+                    return false;
+                }
+                f = module_file_path(self.alt_root.as_str(), a, src, parts);
+                if !dc.exists(f.as_str()) {
+                    return false;
+                }
+            }
+        }
+        let mut sf = self.modules.at(m).file.clone();
+        if unsafe shim::sc_same_file(f.cstr(), sf.cstr()) == 1 {
+            return false;
+        }
+        let path = self.modules.at(m).path.as_str();
+        eprint(
+            "error: '{}' names module '{}', which the std prelude loads from '{}': rename the project file\n",
+            f.as_str(),
+            path,
+            sf.as_str(),
+        );
+        return true;
+    }
+
     // Module `id`'s imports as a frame for the serial loader's stack. Collected before any import loads:
     // loading pushes to self.modules, which may realloc and move this module's by-value Ast.
     fn import_frame(self: &mut Self, id: i32, target: i32) LoadFrame {
@@ -4222,8 +4446,10 @@ extend Package {
         let mut f = LoadFrame { paths: Vector::<String>::new(), files: Vector::<String>::new(), next: 0 };
         let ap = (&self.modules.at(id as usize).ast) as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
-        self.collect_imports(unsafe &*ap, src, &mut dc, target, &mut f.paths, &mut f.files);
+        let mut bad = false;
+        self.collect_imports(unsafe &*ap, src, &mut dc, target, &mut f.paths, &mut f.files, &mut bad);
         self.dir_cache = dc;
+        self.ok = self.ok && !bad;
         return f;
     }
 
@@ -4244,6 +4470,7 @@ extend Package {
         target: i32,
         child_paths: &mut Vector<String>,
         child_files: &mut Vector<String>,
+        bad: &mut bool,
     ) {
         let root_dir = self.root_dir.as_str();
         let alt_root = self.alt_root.as_str();
@@ -4265,7 +4492,11 @@ extend Package {
                 }
                 let parts = n.as_data.import_decl.path;
                 let cp = join_parts(a, src, parts, "::");
-                if self.find(cp.as_str()) >= 0 {
+                let found = self.find(cp.as_str());
+                if found >= 0 {
+                    if found as u32 < self.root_module && self.std_shadowed(dc, a, src, parts, found as usize) {
+                        *bad = true;
+                    }
                     continue;
                 }
                 child_paths.push(cp);
@@ -4386,7 +4617,9 @@ extend Package {
                 let sp2 = units.at(k).source.as_str();
                 let mut all_paths = Vector::<String>::new();
                 let mut all_files = Vector::<String>::new();
-                self.collect_imports(unsafe &*ap, sp2, &mut dc, target, &mut all_paths, &mut all_files);
+                let mut bad = false;
+                self.collect_imports(unsafe &*ap, sp2, &mut dc, target, &mut all_paths, &mut all_files, &mut bad);
+                self.ok = self.ok && !bad;
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
                     if self.find_file(cp, all_files[c].as_str()) >= 0 {
@@ -5330,6 +5563,57 @@ extend Package {
         }
     }
 
+    /// Index the modules appended since the index was built (`load_user` after a checked prelude),
+    /// keeping every existing module's items, symbols and ids: the modules before them import none of
+    /// them. The import components, the sugar shims and the signature table are computed again.
+    pub fn index_append(self: &mut Self) {
+        let n = self.modules.len();
+        let from = self.idx.built_mods as usize;
+        if from == n {
+            return;
+        }
+        // Drop the end sentinels, append the new modules' rows, put the sentinels back.
+        let _ = self.idx.mod_items.pop();
+        let _ = self.idx.mod_imports.pop();
+        let _ = self.idx.mod_exts.pop();
+        let mut idx = replace(&mut self.idx, PkgIndex {});
+        for m in from..n {
+            idx.mod_items.push(idx.items.len() as u32);
+            idx.name_maps.push(Map::<u64, u32>::new());
+            idx.mod_imports.push(idx.imports.len() as u32);
+            idx.mod_exts.push(idx.exts.len() as u32);
+            if self.modules[m].has_ast {
+                self.index_module(&mut idx, m as ModuleId);
+            }
+        }
+        idx.mod_items.push(idx.items.len() as u32);
+        idx.mod_imports.push(idx.imports.len() as u32);
+        idx.mod_exts.push(idx.exts.len() as u32);
+        idx.built_mods = n as u32;
+        let mut tgt = Vector::<u32>::with_capacity(idx.imports.len());
+        for e in 0..idx.imports.len() {
+            tgt.push(idx.imports[e]);
+        }
+        idx.scc_of.clear();
+        let _ = gitems::condense(n, &idx.mod_imports, &tgt, &mut idx.scc_of);
+        idx.sugar_items.clear();
+        idx.sigs.clear();
+        idx.sig_types.clear();
+        idx.sig_of = Map::<u64, u32>::new();
+        idx.sigs_built = false;
+        self.idx = idx;
+        for si in 0..SI_COUNT_N {
+            let mods: []str = SI_MODULES;
+            let names: []str = SI_NAMES;
+            let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
+            let m = self.find(mods[si]);
+            if m >= 0 {
+                hit = self.glob_lookup(m as ModuleId, names[si], false);
+            }
+            self.idx.sugar_items.push(hit);
+        }
+    }
+
     /// The resolved decl behind a sugar-lowering shim (NODE_NONE DefId when its module is not loaded).
     pub const fn sugar_item(self: &Self, k: SugarItem) DefId {
         let h = self.idx.sugar_items.at(k as usize);
@@ -5988,13 +6272,23 @@ extend Package {
 
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
         self.simd_levels_compute();
-        if std_dir.len() == 0 {
+        if !self.load_prelude_files(std_dir, target) {
             return;
+        }
+        self.load_backend(std_dir, target, user_vectors);
+        self.add_build_module(target);
+    }
+
+    // Load every top-level std file under `std_dir` as a prelude module; false when there is no
+    // std directory to read.
+    fn load_prelude_files(self: &mut Self, std_dir: str, target: i32) bool {
+        if std_dir.len() == 0 {
+            return false;
         }
         let mut sd = String::from_str(std_dir);
         let dir = unsafe shim::sc_opendir(sd.cstr());
         if dir == null {
-            return;
+            return false;
         }
         let mut names = Vector::<String>::new();
         loop {
@@ -6057,10 +6351,17 @@ extend Package {
                 }
             }
         }
-        // The vector backend file of the instruction set, when std has one, the build has a feature
-        // and a module names a vector (`Ast.names_vectors`; std's own simd.spc aside): its
-        // `@simd_impl` entries are what the lowering planner calls. A program without vectors
-        // loads none, so it pays nothing for it.
+        return true;
+    }
+
+    /// The vector backend file of the instruction set, when std has one, the build has a feature and a
+    /// module names a vector (`Ast.names_vectors`, or `user_vectors`; std's own simd.spc aside): its
+    /// `@simd_impl` entries are what the lowering planner calls. A program without vectors loads none,
+    /// so it pays nothing for it.
+    fn load_backend(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
+        if std_dir.len() == 0 {
+            return;
+        }
         let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
         if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
             let bn = unsafe backends[self.arch as usize];
@@ -6084,6 +6385,5 @@ extend Package {
                 }
             }
         }
-        self.add_build_module(target);
     }
 }

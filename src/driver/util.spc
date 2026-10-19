@@ -5,6 +5,7 @@ import lexer::token as tok;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
 import ast::ast as *;
+import module::loader as loader;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
@@ -262,6 +263,55 @@ pub fn link_or_copy(srcp: str, dstp: str) bool {
     let mut d = String::from_str(dstp);
     let _ = unsafe shim::sc_unlink(d.cstr());
     return unsafe shim::sc_link(s.cstr(), d.cstr()) == 0 || copy_file(srcp, dstp);
+}
+
+/// The units of emitted tree `root` that its `__sc_unity.c` includes, as paths relative to `root`: they
+/// compile only through it (a small program's units, `driver::emit::UNITY_MAX`). Empty when the tree
+/// has no such file.
+pub fn unity_members(root: str, out: &mut Set<String>) {
+    let mut up = String::from_str(root);
+    up.push_str("/__sc_unity.c");
+    let body = loader::read_file(up.as_str());
+    if body.is_none() {
+        return;
+    }
+    let b = body.unwrap();
+    for line in b.as_str().lines() {
+        if line.starts_with("#include \"") && line.ends_with("\"") {
+            out.insert(String::from_str(line.slice(10, line.len() - 1)));
+        }
+    }
+}
+
+/// The name a generated file in directory `dir` includes file `abs` by (both real paths): relative when
+/// both lie below the working directory, so a tree that moves with its project (a copy, a worktree,
+/// the gate's tree) emits the same text and keeps its object cache keys; else `abs`, which compiles
+/// from any location.
+pub fn include_name(abs: str, dir: str) String {
+    let mut wd = PathBuf {};
+    let mut dot = String::from_str(".");
+    // A real path: `/...`, or `X:/...` on Windows (sc_realpath writes forward slashes there).
+    let rooted = abs.starts_with("/") || abs.len() > 2 && abs[1] == b':';
+    if !rooted || unsafe shim::sc_realpath(dot.cstr(), &mut wd[0]) == null {
+        return String::from_str(abs);
+    }
+    let c = str::from_cbuf(wd.as_slice());
+    if c.len() <= 1 || !below(abs, c) || dir != c && !below(dir, c) {
+        return String::from_str(abs);
+    }
+    let mut out = String::new();
+    for i in c.len()..dir.len() {
+        if dir[i] == b'/' {
+            out.push_str("../");
+        }
+    }
+    out.push_str(abs.slice(c.len() + 1, abs.len()));
+    return out;
+}
+
+// Whether path `p` lies below directory `d` (both without a trailing separator).
+const fn below(p: str, d: str) bool {
+    return p.len() > d.len() && p.starts_with(d) && p[d.len()] == b'/';
 }
 
 /// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`

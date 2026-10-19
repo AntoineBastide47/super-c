@@ -20,9 +20,13 @@ external `cc` compiles and links the C. Every stage operates on per-module data 
 shared `Package`. The production pipeline is `run_package` in `src/driver/emit.spc`:
 
 ```
-load                      -- module discovery, lex + parse per module (src/module/loader.spc)
+prelude_stage             -- the std prelude alone: load, filter, resolve, typecheck through the
+  |                          prelude gate (check_prelude), saved as an image and loaded back, or
+  |                          the cached image (driver::prelude_image; stages.md)
+load_user                 -- the root's module closure after the prelude (Package.root_module)
   |
-platform_filter           -- @platform/@arch gating: compact items by target mask
+platform_filter           -- @platform/@arch gating: compact items by target mask; then
+  |                          index_append indexes the new modules
   |
 resolve + HIR, per module -- resolver::resolve, then hir::lower_module immediately after
   |                          (parallel frontier under --jobs, serial below 256 KiB of user

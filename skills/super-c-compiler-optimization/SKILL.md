@@ -44,16 +44,11 @@ Before any optimization work, understand these non-negotiable constraints:
    round, and a wide spread means the box was not quiet. First run after a rebuild is
    a cold outlier. Ignore it. Run 3x interleaved A/B on a quiet machine. A run that
    reports a C compiler or linker failure exits nonzero and measures nothing.
-   `sh ci/perf_gate.sh` compares a run with the limits resolved from the accepted
-   constants in `ci/baseline.env` and the accepted-work ledger `ci/ledger.tsv` (every
-   percentage gate resolves to a number there); run the benchmark binary
-   directly (`build/bench-bin`), never as a child of a `--sanitizers` compiler, whose
+   Run the benchmark binary directly (`build/bench-bin`), never as a child of a `--sanitizers` compiler, whose
    injected sanitizer runtime changes the allocator and the peak RSS it reports. The
    lane's peak RSS is the process peak over all rounds: the macOS allocator keeps about
    12 MiB more after each round until it trims (no leak: flat under `SC_LEAK_CHECK=1`),
-   so it reads 630 to 730 MiB while one serial build peaks near 190 MiB. The gate and the
-   ledger read only records of the contract's schema (`CONTRACT_BENCH_V`); a schema change
-   needs a new `SC_PERF_RECORD=1` baseline and a ledger chain that starts at it.
+   so it reads 630 to 730 MiB while one serial build peaks near 190 MiB.
 
 ## Optimization Phases
 
@@ -371,9 +366,7 @@ plan, render, publish, sync, compile, link; their sum is `total`), the streamed 
 compile that overlapped emission (`cc`, never added to the total), and peak RSS at
 the frontend, borrowck, plan, publish and build boundaries. `SC_BUILD_MEM=1` adds the
 allocation tracker's counts, requested and live bytes, and the survivors of each
-phase (slower: only for memory questions). `sh ci/bench_matrix.sh` runs the clean /
-unchanged / body-edit / signature-edit / layout-edit / release-relink matrix with
-those records and writes `build/matrix/report.md`.
+phase (slower: only for memory questions).
 
 ### SIMD baselines
 

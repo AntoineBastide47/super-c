@@ -326,7 +326,7 @@ fn run_report(b: &mut bench::Bencher) bool {
     dir.push_str("/sc_bench_transpile");
     m.out_dir = dir.clone();
     let mut pdir = loader::join2(dir.as_str(), BUILD_PROFILE);
-    // The SERIAL perf gate: the parallel stages are measured by the real build below.
+    // Serial rounds: the parallel stages are measured by the real build below.
     let cx = bsys::BuildCtx {
         jobs: 1,
         std_dir: STD_DIR,

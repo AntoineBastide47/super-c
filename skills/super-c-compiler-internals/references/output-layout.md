@@ -38,10 +38,14 @@ and every tree comparison compares within one profile.
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point | the next build |
 | `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
-| `__sc_manifest` | one record per output: kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
+| `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). The runtime (`super_rt.c`), the `__ext*` wrappers and a test runner compile on their own | the build (the only C unit of its members) |
+| `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c`): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
 
 Every include line is relative (`../` per module directory level); the tree compiles
-with no `-I` flag. A unit includes definition headers in stem order, then prototype
+with no `-I` flag. An `extern "C" "<header>"` header and an external C source (the `__ext<k>_`
+wrappers) are named from the including file: relative when the file and the tree both lie below
+the working directory, else by absolute real path (`include_name`, `src/driver/util.spc`), so a
+tree that moves with its project emits the same text. A unit includes definition headers in stem order, then prototype
 headers in module path order.
 
 Definition header stems (`DefSet::stems`): the C name itself when it has at most 40 bytes,
@@ -281,6 +285,3 @@ is rewritten).
 - The stale-output pruning keeps exactly the files this build wrote (the `keep` list), so
   the definition header of a type that disappears is removed; the manifest records every
   definition header (kind `h`, owner module, the headers it includes).
-- `ci/fanout_report.py` reports both what the unit texts need and what the include
-  graph delivers; a widening gap between the two means a need record or a header put
-  a definition somewhere too broad.

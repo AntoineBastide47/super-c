@@ -13532,11 +13532,42 @@ extend CEmit {
         return ok;
     }
 
+    // The name of the `@blocking` wrapper of extern fn `d`: `__sc_blk_` and `blk_stem`.
+    fn blk_name(self: &mut Self, d: DefId, out: &mut String) {
+        out.push_str("__sc_blk_");
+        self.blk_stem(d, out);
+    }
+
+    // The declaring module's path (`::` as `__`), `__` and the fn's C name: two modules that bind one C
+    // function get a wrapper each.
+    fn blk_stem(self: &mut Self, d: DefId, out: &mut String) {
+        let path = self.p().modules.at(d.module as usize).path.as_str();
+        for i in 0..path.len() {
+            let c = path[i];
+            out.push_byte(
+                if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' {
+                    c;
+                } else {
+                    b'_';
+                },
+            );
+        }
+        out.push_str("__");
+        let a = self.p().module_ast_const(d.module);
+        self.mg.c_ident(
+            d.module,
+            unsafe (*a).at_const(unsafe (*a).at_const(d.node).as_data.function.name).as_data.name.text,
+            out,
+        );
+    }
+
     fn blk_wrapper_defs(self: &mut Self, d: DefId, key: u64) bool {
         let a = self.p().module_ast_const(d.module);
         let f = unsafe (*a).at_const(d.node).as_data.function;
         let mut nm = String::new();
         self.mg.c_ident(d.module, unsafe (*a).at_const(f.name).as_data.name.text, &mut nm);
+        let mut wn = String::new(); // the wrapper's name after `__sc_blk_`
+        self.blk_stem(d, &mut wn);
         let mut rt = TYPE_NONE;
         if f.returns.len == 1 {
             rt = unsafe (*a).type_of(unsafe (*a).list(f.returns)[0]);
@@ -13581,15 +13612,15 @@ extend CEmit {
             env.push_str("; ");
         }
         env.push_str("} __sc_blk_");
-        env.push_string(&nm);
+        env.push_string(&wn);
         env.push_str("_env;\n");
         self.blk_defs.push_string(&env);
         self.blk_defs.push_str("static void __sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("_run(void *__e) { __sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("_env *__v = (__sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("_env *)__e; ");
         // C declares the extern's pointers to arrays of aggregates as pointers to the arrays, the
         // wrapper's as wrapper pointers (`Mangler::ptr_wraps`): those values convert.
@@ -13616,7 +13647,7 @@ extend CEmit {
         let bm = self.blk_defs.len();
         self.blk_defs.push_string(&rty);
         self.blk_defs.push_str(" __sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("(");
         self.blk_defs.push_string(&wrap_params);
         self.blk_defs.push_str(")");
@@ -13627,7 +13658,7 @@ extend CEmit {
             return false;
         }
         self.blk_defs.push_str(" { __sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("_env __v; ");
         for k in 0..np {
             self.blk_defs.push_str("__v.a");
@@ -13637,7 +13668,7 @@ extend CEmit {
             self.blk_defs.push_str("; ");
         }
         self.blk_defs.push_str("__sc_blocking_run(__sc_blk_");
-        self.blk_defs.push_string(&nm);
+        self.blk_defs.push_string(&wn);
         self.blk_defs.push_str("_run, &__v); ");
         if !is_void {
             self.blk_defs.push_str("return __v.r; ");
@@ -13647,7 +13678,7 @@ extend CEmit {
         let pm = self.blk_protos.len();
         self.blk_protos.push_string(&rty);
         self.blk_protos.push_str(" __sc_blk_");
-        self.blk_protos.push_string(&nm);
+        self.blk_protos.push_string(&wn);
         self.blk_protos.push_str("(");
         self.blk_protos.push_string(&wrap_params);
         self.blk_protos.push_str(")");
@@ -13970,13 +14001,7 @@ extend CEmit {
             if !self.blk_wrapper(callee) {
                 return self.fail("blocking-wrap");
             }
-            let ba = self.p().module_ast_const(callee.module);
-            dst.push_str("__sc_blk_");
-            self.mg.c_ident(
-                callee.module,
-                unsafe (*ba).at_const(unsafe (*ba).at_const(callee.node).as_data.function.name).as_data.name.text,
-                dst,
-            );
+            self.blk_name(callee, dst);
             return true;
         }
         // An interface member with a DEFAULT body emits once per conforming type:

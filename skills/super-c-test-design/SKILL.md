@@ -63,11 +63,17 @@ Rules for the costly rungs:
 
 - The suite shares one object cache (`SC_CACHE_DIR`, set by `super-c test`). A new project
   whose std units another test already compiled compiles only its own unit.
+- A small program compiles as one unit (`__sc_unity.c`). A test that checks per-unit objects,
+  staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`).
 - `SC_NO_CACHE=1` makes every build of that test compile every unit, std included. Use it
   only where the assertion is about compiles: recompile counts, staleness, cache behavior.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.
-- The compiler records its C compiler's version line under the cache root (`ccver/`), so a
-  build does not start a `--version` probe.
+- The compiler records its C compiler's version line in the object cache (an entry of
+  `o/script`), so a build does not start a `--version` probe.
+- The checked std prelude is cached in the object cache too (an entry of `o/script`): a build
+  checks only the program. A test that must see the prelude checked (a std edit, a std tree of its own) sets
+  its own `SC_CACHE_DIR`, as `tests/prelude_image_test.spc` does; the first build in a new cache
+  root checks the prelude once.
 
 ## Sanitizers and profiles
 

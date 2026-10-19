@@ -5,16 +5,17 @@
 // deleted is compiled again. The engine's per-tree namespaces and their retention live in
 // build_system::build.
 import stdlib;
-import time;
 import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
 import driver::util as *;
+import build_system::lz as lz;
+import string as cstring;
 
 /// A temp file an interrupted install left behind is removed after this many seconds.
 pub const TMP_IDLE: i64 = 3600;
-/// The script namespace holds at most this many objects after a trim; above it, a build that installed
-/// an object deletes the least recently used ones down to SCRIPT_OBJ_KEEP. A `super-c test` run uses
+/// The script namespace holds at most this many objects after a sweep; above it, the sweep deletes the
+/// least recently used ones down to SCRIPT_OBJ_KEEP (`script_trim`). A `super-c test` run uses
 /// about 4.8k objects (its fixtures and the builds its harnesses run, 323 MiB): the bound holds three
 /// such runs of different sources (worktrees, branches), so a suite run evicts only older runs' objects.
 pub const SCRIPT_OBJ_MAX: usize = 16384;
@@ -54,8 +55,8 @@ pub fn real_path(p: str) String {
     return loader::real_path_of(p);
 }
 
-/// `name` starts with a cache key (32 lowercase hex digits) and a dot: `<key>.o`, `<key>.d`, or the
-/// temp file of an install.
+/// `name` starts with a cache key (32 lowercase hex digits) and a dot: `<key>.o`, `<key>.d`, a packed
+/// `<key>.z`, or the temp file of an install.
 pub const fn key_prefixed(name: str) bool {
     if name.len() < 34 || name[32] != b'.' {
         return false;
@@ -341,19 +342,22 @@ fn cc_identity(cc: str) String {
     return id;
 }
 
-// The record of compiler command `cc`'s version line under the cache root: `<root>/ccver/<hash>`,
-// holding the identity, then the line. Empty without a cache root.
+// The record of compiler command `cc`'s version line: an entry of the shared `script` namespace named by
+// the hash of the compiler's identity `id`, holding the identity, then the line. It follows the
+// namespace's rules (`script_trim`, `pack_cache`, `touch_entry`). Empty when the object cache is off.
 fn ccver_record_path(id: &String) String {
-    let root = cache_root();
+    let root = object_cache_dir();
     if root.len() == 0 {
         return root;
     }
-    let mut p = loader::join2(root.as_str(), "ccver/");
     let mut h1 = FNV_BASIS;
     let mut h2: u64 = 0x9e3779b97f4a7c15;
     ch_mix_bytes(&mut h1, &mut h2, id.as_str().ptr(), id.len());
-    hex64(h1, &mut p);
-    return p;
+    let mut name = String::new();
+    hex64(h1, &mut name);
+    hex64(h2, &mut name);
+    name.push_str(".o");
+    return script_entry(script_ns(root.as_str()).as_str(), name.as_str());
 }
 
 /// The version line recorded for compiler command `cc` (its words space-joined) while the
@@ -366,7 +370,7 @@ pub fn ccver_recorded(cc: str) Option<String> {
     if rp.len() == 0 {
         return Option::<String>::None;
     }
-    let body = loader::read_file(rp.as_str());
+    let body = read_entry(rp.as_str());
     if body.is_none() {
         return Option::<String>::None;
     }
@@ -381,6 +385,7 @@ pub fn ccver_recorded(cc: str) Option<String> {
     if e < 0 {
         return Option::<String>::None;
     }
+    touch_entry(rp.as_str());
     return Option::<String>::Some(String::from_str(rest.slice(0, e as usize)));
 }
 
@@ -399,6 +404,79 @@ pub fn ccver_record(cc: str, line: &String) {
     let mut body = id.clone();
     body.format_into("\n{}\n", line.as_str());
     let _ = write_file_atomic(rp.as_str(), body.as_str());
+}
+
+/// Compiler command `cc` for target `target` with the macOS xcrun stub it starts with (`/usr/bin/cc`,
+/// `clang` or `gcc`, about 5 ms of CPU per run) replaced by the compiler the stub runs, and the SDK
+/// the stub passes (as SDKROOT) given as `-isysroot`; for a macOS target on a macOS host only. The
+/// pair is recorded under the stub's identity (`cc_identity`) and SDKROOT, so `xcrun` runs once per
+/// toolchain. `cc` unchanged otherwise: the object cache off, a lookup that fails, or a path with a
+/// space (the command is split at spaces).
+pub fn direct_cc(cc: String, target: i32) String {
+    if target != 1 || unsafe shim::sc_host_platform() != 1 {
+        return cc;
+    }
+    let mut path = String::new();
+    let _ = which_path(cc.as_str(), &mut path);
+    let p = path.as_str();
+    if p != "/usr/bin/cc" && p != "/usr/bin/clang" && p != "/usr/bin/gcc" {
+        return cc;
+    }
+    let ci = cc_identity(cc.as_str());
+    let id = format("xcrun\t{}\t{}", stdlib::get_env("SDKROOT").unwrap_or(String::new()).as_str(), ci.as_str());
+    let rp = ccver_record_path(&id);
+    if rp.len() == 0 {
+        return cc;
+    }
+    let mut tool = String::new();
+    let mut sdk = String::new();
+    let body = read_entry(rp.as_str());
+    if body.is_some() {
+        let b = body.unwrap();
+        let s = b.as_str();
+        let n1 = s.find_byte(b'\n');
+        if n1 >= 0 && s.slice(0, n1 as usize) == id.as_str() {
+            let r1 = s.slice(n1 as usize + 1, s.len());
+            let n2 = r1.find_byte(b'\n');
+            let r2 = r1.slice(pick(n2 < 0, r1.len(), n2 as usize + 1), r1.len());
+            let n3 = r2.find_byte(b'\n');
+            if n2 >= 0 && n3 >= 0 {
+                tool.push_str(r1.slice(0, n2 as usize));
+                sdk.push_str(r2.slice(0, n3 as usize));
+                touch_entry(rp.as_str());
+            }
+        }
+    }
+    if tool.len() == 0 {
+        let dir = loader::dirname_of(rp.as_str());
+        mkdir_p(dir);
+        let mut out = format("{}.{}", rp.as_str(), unsafe shim::sc_getpid());
+        let mut fa = Vector::<String>::new();
+        fa.push(String::from_str("xcrun"));
+        fa.push(String::from_str("-f"));
+        fa.push(String::from_str(p.slice(9, p.len())));
+        let _ = exec_args(&mut fa, out.cstr());
+        tool = take_first_line(out.as_str()).unwrap_or(String::new());
+        let mut sa = Vector::<String>::new();
+        sa.push(String::from_str("xcrun"));
+        sa.push(String::from_str("--show-sdk-path"));
+        let _ = exec_args(&mut sa, out.cstr());
+        sdk = take_first_line(out.as_str()).unwrap_or(String::new());
+        if !tool.as_str().starts_with("/") || unsafe shim::sc_mtime(tool.cstr()) == 0 || !is_dir(sdk.as_str()) {
+            return cc;
+        }
+        let mut rec = id.clone();
+        rec.format_into("\n{}\n{}\n", tool.as_str(), sdk.as_str());
+        let _ = write_file_atomic(rp.as_str(), rec.as_str());
+    }
+    if tool.as_str().find_byte(b' ') >= 0 || sdk.as_str().find_byte(b' ') >= 0 {
+        return cc;
+    }
+    let mut e: usize = 0;
+    while e < cc.len() && cc.as_str()[e] != b' ' {
+        e += 1;
+    }
+    return format("{} -isysroot {}{}", tool.as_str(), sdk.as_str(), cc.as_str().slice(e, cc.len()));
 }
 
 /// `cc --version`'s first line for compiler command `cc`: the record when it matches, else the
@@ -454,6 +532,13 @@ pub fn script_ns(root: str) String {
 
 /// The directory name of the script namespace below `<root>/o`.
 pub const SCRIPT_NS: str<'static> = "script";
+
+/// The path of entry `name` (`<key>.o`, `<key>.d` or `<key>.z`) in a namespace `ns` of the script
+/// layout (`compile_units`, the engine's shared entries): below the subdirectory named by the key's first
+/// two hex digits, so no directory holds more than about a 256th of the namespace.
+pub fn script_entry(ns: str, name: str) String {
+    return loader::join2(loader::join2(ns, name.slice(0, 2)).as_str(), name);
+}
 
 /// Whether `flags` make an object depend on the directory it was compiled in or on the object's path:
 /// debug information (`-g` other than `-g0`, which records the compile directory) and coverage or
@@ -666,10 +751,8 @@ pub fn compile_units(
         cache_keys(&known, ccs.as_str(), &mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
         for i in 0..units.len() {
             let cobj = cobjs.at(i);
-            if cobj.len() != 0 && link_or_copy(cobj.as_str(), opaths.at(i).as_str()) {
-                // The mtime is the entry's last use: the trim deletes the least recently used.
-                let mut cp = cobj.clone();
-                let _ = unsafe shim::sc_touch(cp.cstr());
+            if cobj.len() != 0 && fetch_entry(cobj.as_str(), opaths.at(i).as_str()) {
+                touch_entry(cobj.as_str());
             } else {
                 miss.push(i as u32);
             }
@@ -688,7 +771,6 @@ pub fn compile_units(
     if fresh {
         cache_keys(&known, ccs.as_str(), &mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
     }
-    let mut installed = false;
     for i in 0..miss.len() {
         let u = miss[i] as usize;
         let cobj = cobjs.at(u);
@@ -697,19 +779,15 @@ pub fn compile_units(
         }
         // A temp of this process, then a rename: concurrent builds installing the same key each
         // move a whole object into place, and a reader opens either one.
+        mkdir_p(loader::dirname_of(cobj.as_str()));
         let mut tmp = format("{}.{}.tmp", cobj.as_str(), unsafe shim::sc_getpid());
         let mut dst = cobj.clone();
-        if link_or_copy(opaths.at(u).as_str(), tmp.as_str()) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
-            installed = true;
-        } else {
+        if !link_or_copy(opaths.at(u).as_str(), tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) != 0 {
             let _ = unsafe shim::sc_unlink(tmp.cstr());
         }
     }
     for i in 0..opaths.len() {
         objs.push(opaths.at(i).clone());
-    }
-    if installed {
-        script_trim(ns, time::now());
     }
     return 0;
 }
@@ -764,11 +842,11 @@ fn cache_keys(
         if ok[i] {
             let h1 = skey_mix(skey_mix(b1, hs[2 * i]), hs[2 * i + 1]);
             let h2 = skey_mix(skey_mix(b2, hs[2 * i + 1]), hs[2 * i]);
-            cobj = String::from_str(ns);
-            cobj.push_byte(b'/');
-            hex64(h1, &mut cobj);
-            hex64(h2, &mut cobj);
-            cobj.push_str(".o");
+            let mut name = String::new();
+            hex64(h1, &mut name);
+            hex64(h2, &mut name);
+            name.push_str(".o");
+            cobj = script_entry(ns, name.as_str());
         }
         cobjs.push(cobj);
     }
@@ -966,6 +1044,242 @@ fn run_jobs(
     return rc;
 }
 
+/// The packed form of a cache entry `<key>.o` is `<key>.z`: the magic, the object's length and its
+/// content hash (`pack_sum`), then its bytes compressed (`lz::compress`).
+const PACK_MAGIC: str<'static> = "SCZ1";
+const PACK_HEAD: usize = 20;
+/// A packed entry claiming a larger object is corrupt: no object the cache stores comes close.
+const PACK_MAX_RAW: usize = 1 << 30;
+/// The bytes of objects one sweep packs at most (about 3 s for a compiler built at opt-level 0): a
+/// larger backlog, such as the objects a compiler change makes stale, goes over several sweeps.
+const PACK_BUDGET: usize = 128 << 20;
+
+// The packed form of entry `cobj` (`<key>.o`): `<key>.z`.
+fn packed_path(cobj: str) String {
+    let mut z = String::from_str(cobj.slice(0, cobj.len() - 1));
+    z.push_byte(b'z');
+    return z;
+}
+
+// `v` as eight little-endian bytes.
+fn push_u64(out: &mut String, v: u64) {
+    for k in 0..8 {
+        out.push_byte((v >> (k * 8) as u64 & 255) as u8);
+    }
+}
+
+// The hash of the `n` bytes at `p` that a packed entry checks its object against: a word at a time,
+// so a hit pays little for it.
+fn pack_sum(p: *const u8, n: usize) u64 {
+    let mut h = FNV_BASIS;
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        h = (h ^ read_u64(p, i)).wrapping_mul(0x100000001b3u64);
+        i += 8;
+    }
+    while i < n {
+        h = (h ^ (unsafe p[i]) as u64).wrapping_mul(0x100000001b3u64);
+        i += 1;
+    }
+    return skey_mix(h, n as u64);
+}
+
+// The eight bytes at `p[i..i + 8]` as one word (every host the compiler runs on is little-endian).
+fn read_u64(p: *const u8, i: usize) u64 {
+    let mut v: u64 = 0;
+    unsafe cstring::memcpy((&mut v) as *mut u64, p + i, 8);
+    return v;
+}
+
+/// Put cache entry `cobj` (`<key>.o`) at `dst`: a link to it (`link_or_copy`), or the bytes of its
+/// packed form (`pack_cache`). False when neither exists or the packed form is corrupt (its length,
+/// layout or content hash does not check): the caller compiles.
+pub fn fetch_entry(cobj: str, dst: str) bool {
+    if link_or_copy(cobj, dst) {
+        return true;
+    }
+    let raw = read_packed(cobj);
+    return !raw.is_none() && write_file(dst, raw.unwrap().as_str());
+}
+
+/// The bytes of cache entry `cobj`, from its file or its packed form; None when neither reads and checks.
+pub fn read_entry(cobj: str) Option<String> {
+    let b = loader::read_file(cobj);
+    if !b.is_none() {
+        return b;
+    }
+    return read_packed(cobj);
+}
+
+// The bytes of the packed form of entry `cobj`; None when it is missing or its layout or hash does not
+// check.
+fn read_packed(cobj: str) Option<String> {
+    let zb = loader::read_file(packed_path(cobj).as_str());
+    if zb.is_none() {
+        return Option::<String>::None;
+    }
+    let z = zb.unwrap();
+    let zs = z.as_str();
+    if zs.len() < PACK_HEAD || zs.slice(0, 4) != PACK_MAGIC {
+        return Option::<String>::None;
+    }
+    let raw = read_u64(zs.ptr(), 4) as usize;
+    if raw > PACK_MAX_RAW {
+        return Option::<String>::None;
+    }
+    let mut buf = Vector::<u8>::new();
+    buf.resize_default(raw + 1);
+    let bp = buf.as_ptr() as *mut u8;
+    if !lz::decompress(unsafe (zs.ptr() + PACK_HEAD), zs.len() - PACK_HEAD, bp, raw) || pack_sum(bp, raw) != read_u64(
+        zs.ptr(),
+        12,
+    ) {
+        return Option::<String>::None;
+    }
+    return Option::<String>::Some(String::from_str(unsafe str::from_raw(bp, raw)));
+}
+
+/// Record a use of cache entry `cobj`, or of its packed form: the trim deletes the least recently used.
+pub fn touch_entry(cobj: str) {
+    let mut o = String::from_str(cobj);
+    if unsafe shim::sc_touch(o.cstr()) != 0 {
+        let mut z = packed_path(cobj);
+        let _ = unsafe shim::sc_touch(z.cstr());
+    }
+}
+
+// Write the packed form of entry `cobj` through a temp of this process and a rename; the object's
+// length, or None when the entry cannot be read or the packed form cannot be written.
+fn pack_entry(cobj: str) Option<usize> {
+    let ob = loader::read_file(cobj);
+    if ob.is_none() {
+        return Option::<usize>::None;
+    }
+    let o = ob.unwrap();
+    let os = o.as_str();
+    let mut out = String::with_capacity(os.len() / 2 + PACK_HEAD);
+    out.push_str(PACK_MAGIC);
+    push_u64(&mut out, os.len() as u64);
+    push_u64(&mut out, pack_sum(os.ptr(), os.len()));
+    lz::compress(os.ptr(), os.len(), &mut out);
+    let mut z = packed_path(cobj);
+    let mut tmp = format("{}.{}.tmp", z.as_str(), unsafe shim::sc_getpid());
+    if !write_file(tmp.as_str(), out.as_str()) || unsafe shim::sc_rename(tmp.cstr(), z.cstr()) != 0 {
+        let _ = unsafe shim::sc_unlink(tmp.cstr());
+        return Option::<usize>::None;
+    }
+    return Option::<usize>::Some(os.len());
+}
+
+/// Pack every entry of the object namespaces below `od` (`<root>/o`) whose file no build tree names:
+/// its link count equals the number of entries sharing it (the engine installs one file as its tree's
+/// entry and the shared one). The first such name is compressed (`pack_entry`), the others link to its
+/// packed form, and each `<key>.o` goes only once its `<key>.z` is in place, so a reader always finds
+/// one. An entry a tree names stays a link: packing it would store the object twice. A hit on a packed
+/// entry decompresses it into the tree (`fetch_entry`) and leaves it packed. The least recently used
+/// entries go first, at most PACK_BUDGET bytes of them per call.
+pub fn pack_cache(od: str) {
+    let mut paths = Vector::<String>::new();
+    let mut ids = Vector::<u64>::new();
+    let mut links = Vector::<i32>::new();
+    // The namespaces' directories; the script namespace's entries are in its subdirectories.
+    let mut dirs = Vector::<String>::new();
+    let nss = list_dir(od, false).unwrap_or(Vector::<String>::new());
+    for i in 0..nss.len() {
+        let nm = nss.at(i).as_str();
+        if nm.starts_with(".") {
+            continue;
+        }
+        let ns = loader::join2(od, nm);
+        if nm == SCRIPT_NS {
+            let subs = list_dir(ns.as_str(), false).unwrap_or(Vector::<String>::new());
+            for k in 0..subs.len() {
+                if subs.at(k).len() == 2 {
+                    dirs.push(loader::join2(ns.as_str(), subs.at(k).as_str()));
+                }
+            }
+        } else {
+            dirs.push(ns);
+        }
+    }
+    for i in 0..dirs.len() {
+        let ns = dirs.at(i).clone();
+        let names = list_dir(ns.as_str(), false).unwrap_or(Vector::<String>::new());
+        for k in 0..names.len() {
+            let n = names.at(k).as_str();
+            if n.len() == 34 && key_prefixed(n) && n.ends_with(".o") {
+                let mut p = loader::join2(ns.as_str(), n);
+                let mut id: u64 = 0;
+                let nl = unsafe shim::sc_file_links(p.cstr(), &mut id);
+                if nl > 0 {
+                    paths.push(p);
+                    ids.push(id);
+                    links.push(nl);
+                }
+            }
+        }
+    }
+    let mut names_of = Map::<u64, i32>::new();
+    for i in 0..ids.len() {
+        let c = switch names_of.get(&ids[i]) {
+            Some(v) => *v,
+            None => 0,
+        };
+        names_of.insert(ids[i], c + 1);
+    }
+    let mut order = Vector::<ObjUse>::new();
+    for i in 0..paths.len() {
+        if *names_of.get(&ids[i]).unwrap() == links[i] {
+            let mut p = paths.at(i).clone();
+            order.push(ObjUse { mt: unsafe shim::sc_mtime(p.cstr()), at: i });
+        }
+    }
+    order.sort_by(obj_use_older);
+    // id -> 1 + index of the name whose packed form the others link to; 0 = packing failed.
+    let mut packed = Map::<u64, usize>::new();
+    let mut spent: usize = 0;
+    for k in 0..order.len() {
+        let i = order[k].at;
+        let id = ids[i];
+        let p = paths.at(i).as_str();
+        let mut first = switch packed.get(&id) {
+            Some(v) => *v,
+            None => 0,
+        };
+        // This name's own packed form is written: no link to make.
+        let mut own = false;
+        if !packed.contains_key(&id) {
+            // Past the budget, only the other names of a file already packed still go.
+            if spent >= PACK_BUDGET {
+                continue;
+            }
+            let len = pack_entry(p);
+            first = if len.is_none() {
+                0;
+            } else {
+                i + 1;
+            };
+            spent += len.unwrap_or(0);
+            packed.insert(id, first);
+            own = true;
+        }
+        if first == 0 {
+            continue;
+        }
+        if !own {
+            let mut z = packed_path(p);
+            let mut tmp = format("{}.{}.tmp", z.as_str(), unsafe shim::sc_getpid());
+            let src = packed_path(paths.at(first - 1).as_str());
+            if !link_or_copy(src.as_str(), tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), z.cstr()) != 0 {
+                let _ = unsafe shim::sc_unlink(tmp.cstr());
+                continue;
+            }
+        }
+        let mut pc = paths.at(i).clone();
+        let _ = unsafe shim::sc_unlink(pc.cstr());
+    }
+}
+
 // One object of the script namespace: its last use and its name's index in the listing.
 struct ObjUse {
     pub mt: i64,
@@ -987,33 +1301,57 @@ pub fn script_trim(ns: str, now: i64) {
     script_trim_to(ns, now, SCRIPT_OBJ_MAX, SCRIPT_OBJ_KEEP);
 }
 
-/// Keep namespace `ns` within `max` objects: above it, delete the least recently used down to `keep`
-/// (below `max`), each with its dependency list; delete every dependency list whose object is gone
-/// (an engine build's hit reads the two together; a script build's object has none) and every temp
-/// file older than TMP_IDLE. Builds may trim at once: an entry one of them deletes is compiled again by
-/// the next build that needs it, never read torn.
+/// Keep namespace `ns` (the script layout, `script_entry`) within `max` objects: above it, delete the
+/// least recently used down to `keep` (below `max`), each with its dependency list; delete every
+/// dependency list whose object is gone (an engine build's hit reads the two together; a script build's
+/// object has none) and every temp file older than TMP_IDLE. An entry directly in `ns` (a compiler before
+/// the subdirectories) moves to its subdirectory. The sweep runs it (`sweep_cache`), so a build that
+/// installs objects never lists the namespace; an entry deleted under a build is compiled again by the
+/// next build that needs it, never read torn.
 pub fn script_trim_to(ns: str, now: i64, max: usize, keep: usize) {
-    let mut names = list_dir(ns, false).unwrap_or(Vector::<String>::new());
-    // Sorted, `<key>.d` comes right before `<key>.o`.
-    names.sort();
-    let mut objs = Vector::<ObjUse>::new();
-    for i in 0..names.len() {
-        let n = names.at(i).as_str();
+    let top = list_dir(ns, false).unwrap_or(Vector::<String>::new());
+    for i in 0..top.len() {
+        let n = top.at(i).as_str();
         let mut p = loader::join2(ns, n);
-        if n.ends_with(".tmp") {
-            if now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
-                let _ = unsafe shim::sc_unlink(p.cstr());
-            }
-        } else if n.len() == 34 && key_prefixed(n) && n.ends_with(".o") {
-            objs.push(ObjUse { mt: 0, at: i });
-        } else if n.len() == 34 && key_prefixed(n) && n.ends_with(".d") {
-            let next = if i + 1 < names.len() {
-                names.at(i + 1).as_str();
-            } else {
-                "";
-            };
-            if !(next.len() == 34 && next.starts_with(n.slice(0, 33)) && next.ends_with(".o")) {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+        if n.len() == 34 && key_prefixed(n) {
+            mkdir_p(loader::join2(ns, n.slice(0, 2)).as_str());
+            let mut to = script_entry(ns, n);
+            let _ = unsafe shim::sc_rename(p.cstr(), to.cstr());
+        } else if n.ends_with(".tmp") && now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
+            let _ = unsafe shim::sc_unlink(p.cstr());
+        }
+    }
+    let mut paths = Vector::<String>::new();
+    let mut objs = Vector::<ObjUse>::new();
+    let subs = list_dir(ns, false).unwrap_or(Vector::<String>::new());
+    for s in 0..subs.len() {
+        if subs.at(s).len() != 2 {
+            continue;
+        }
+        let sd = loader::join2(ns, subs.at(s).as_str());
+        let mut names = list_dir(sd.as_str(), false).unwrap_or(Vector::<String>::new());
+        // Sorted, `<key>.d` comes right before `<key>.o` or its packed form `<key>.z`.
+        names.sort();
+        for i in 0..names.len() {
+            let n = names.at(i).as_str();
+            let mut p = loader::join2(sd.as_str(), n);
+            if n.ends_with(".tmp") {
+                if now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
+                    let _ = unsafe shim::sc_unlink(p.cstr());
+                }
+            } else if n.len() == 34 && key_prefixed(n) && (n.ends_with(".o") || n.ends_with(".z")) {
+                paths.push(p);
+                objs.push(ObjUse { mt: 0, at: paths.len() - 1 });
+            } else if n.len() == 34 && key_prefixed(n) && n.ends_with(".d") {
+                let next = if i + 1 < names.len() {
+                    names.at(i + 1).as_str();
+                } else {
+                    "";
+                };
+                let obj = next.ends_with(".o") || next.ends_with(".z");
+                if !(next.len() == 34 && next.starts_with(n.slice(0, 33)) && obj) {
+                    let _ = unsafe shim::sc_unlink(p.cstr());
+                }
             }
         }
     }
@@ -1021,12 +1359,12 @@ pub fn script_trim_to(ns: str, now: i64, max: usize, keep: usize) {
         return;
     }
     for i in 0..objs.len() {
-        let mut p = loader::join2(ns, names.at(objs[i].at).as_str());
+        let mut p = paths.at(objs[i].at).clone();
         objs.index_mut(i).mt = unsafe shim::sc_mtime(p.cstr());
     }
     objs.sort_by(obj_use_older);
     for i in 0..objs.len() - keep {
-        let mut p = loader::join2(ns, names.at(objs[i].at).as_str());
+        let mut p = paths.at(objs[i].at).clone();
         let _ = unsafe shim::sc_unlink(p.cstr());
         p.truncate(p.len() - 1);
         p.push_str("d");

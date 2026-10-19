@@ -2,6 +2,7 @@
 // TokenType. No text is stored; a token's span indexes the source buffer. Invariants: a lexeme is
 // < 2^24 bytes long and TokenType fits in 8 bits.
 import lexer::token_type as *;
+import utils::persist as *;
 
 /// Half-open byte range [start, end) into a source buffer.
 pub struct Span {
@@ -11,6 +12,20 @@ pub struct Span {
 
 // Restated derived conformance for the bootstrap compiler (see ir::core `exact`).
 extend Span as Copy {}
+
+extend Span as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Span, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Span, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
 
 extend Span {
     /// The range [start, end); no ordering check.

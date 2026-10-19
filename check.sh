@@ -72,7 +72,9 @@ if ! ./super-c build --bootstrap-tags -o stage0-super-c; then
     printf 'check: FAILED -- the release binary cannot build the current source\n' >&2
     exit 1
 fi
-if ! SC_LEAK_CHECK=fatal ./stage0-super-c build; then
+# Under the test profile (optimized, overflow checks kept), in a tree of its own (the test runner's is
+# build/test): every later step runs this compiler.
+if ! SC_LEAK_CHECK=fatal ./stage0-super-c build --profile=test --out-dir=build/bootstrap; then
     rm -f stage0-super-c
     printf 'check: FAILED -- two-stage rebuild from the release bootstrap broke (see build output above)\n' >&2
     exit 1
@@ -80,7 +82,7 @@ fi
 rm -f stage0-super-c
 
 # 5) The correctness gate's own checks over the rebuilt compiler (ci/gate.sh --core, under a minute on a
-# warm object cache): the contract's input lists, the two-generation fixpoint under the validation
+# warm object cache): the two-generation fixpoint under the validation
 # switches, the one-worker and every-core identity under each task-delay seed (emitted C, type table,
 # item index digest, diagnostics), and the strict C warnings and readability of every unit. The full gate
 # runs them itself, so it skips this step.

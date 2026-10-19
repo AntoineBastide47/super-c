@@ -13,6 +13,34 @@ fn const_overflow_is_rejected() {
     );
 }
 
+// A fields binder whose subject type parameter is a type without fields (a builtin, a pointer, an
+// array) has zero copies, as over an enum: the instance emits.
+fn field_binder_over_a_type_without_fields_has_no_copies(b: &mut h::ExitBatch) {
+    b.add(
+        "fields over u32, a pointer and an array",
+        M"(fn count<T>(v: &T) i32 {
+    let mut n: i32 = 0;
+    inline for f in fields(v) {
+        n += f.size as i32;
+    }
+    return n;
+}
+struct P {
+    pub a: u32,
+    pub b: u64,
+}
+fn main(args: Vector<str>) i32 {
+    let k: u32 = args.len() as u32;
+    let p = &k as *const u32;
+    let arr: [u8; 3] = [1, 2, 3];
+    let q = P { a: k, b: 2 };
+    return count(&k) + count(&p) + count(&arr) + count(&q);
+}
+)",
+        12,
+    );
+}
+
 fn tuple_field_binder_names_each_element(b: &mut h::ExitBatch) {
     // fields(&tuple) binds each element; the element names come from the tuple's type_info ("_0", "_1",
     // .., std/reflect.spc).
@@ -145,12 +173,83 @@ fn a_repeat_constant_fills_every_element(b: &mut h::ExitBatch) {
     );
 }
 
+// A scalar's bytes through `*const u8` are not slots of their own: the evaluator neither reports the
+// copy as out of bounds nor reads a neighboring local as the next byte.
+fn byte_view_of_a_scalar_copies_its_bytes(b: &mut h::ExitBatch) {
+    b.add(
+        "a u64's bytes appended to a String",
+        M"(fn put(s: &mut String, v: u64) {
+    let w: u64 = 9;
+    s.push_str(unsafe str::from_raw((&v) as *const u64 as *const u8, 8));
+    s.push_byte(w as u8);
+}
+fn main() i32 {
+    let mut s = String::new();
+    put(&mut s, 0x0102);
+    return s.len() as i32 + s.as_str().byte_at(1) as i32 * 10;
+}
+)",
+        19,
+    );
+}
+
+@test
+fn byte_view_of_a_scalar_does_not_fold() {
+    // Folding would read the next local (`w`) as byte 1; the evaluator refuses instead.
+    h::expect_build_err(
+        "a byte view of a scalar has no compile-time value",
+        "const fn second(v: u64) u8 {\n    let w: u64 = 9;\n    let p = (&v) as *const u64 as *const u8;\n    return unsafe *(p + 1) + (w as u8) * 0;\n}\nconst A: u8 = second(0x0102);\nfn main() i32 { return A as i32; }\n",
+        "cannot be evaluated at compile time",
+    );
+}
+
+@test
+fn reflection_bound_of_a_default_reaches_its_conformances() {
+    // The default calls a fields loop declared after it (one dependency cycle with the interface): the
+    // loop's bound still reaches every conformance that inherits the default.
+    h::expect_build_err(
+        "a field without the bound",
+        M"(interface Sz {
+    fn sz(self: &Self) i32 {
+        return sum_fields(self);
+    }
+}
+fn sum_fields<T>(v: &T) i32 {
+    let mut n: i32 = 0;
+    inline for f in fields(v) {
+        n += one(&f.value);
+    }
+    return n;
+}
+fn one<V: Sz>(v: &V) i32 {
+    return v.sz();
+}
+extend i32 as Sz {
+    fn sz(self: &i32) i32 {
+        return 1;
+    }
+}
+struct S {
+    pub a: i32,
+    pub w: u32,
+}
+extend S as Sz {}
+fn main() i32 {
+    let s = S { a: 1, w: 7 };
+    return s.sz();
+}
+)",
+        "does not satisfy a bound required by the interface's default method 'sz'",
+    );
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
     tuple_field_binder_names_each_element(&mut b);
+    field_binder_over_a_type_without_fields_has_no_copies(&mut b);
     const_fn_memo_keeps_float_arguments_apart(&mut b);
     const_fn_repeat_array_fills_every_element(&mut b);
     const_fn_memcmp_reads_an_inline_string_buffer(&mut b);
@@ -160,5 +259,6 @@ fn exit_cases_00() {
     constants_keep_every_instance_argument(&mut b);
     a_constant_binds_a_static_method_from_its_path(&mut b);
     a_repeat_constant_fills_every_element(&mut b);
+    byte_view_of_a_scalar_copies_its_bytes(&mut b);
     b.run();
 }

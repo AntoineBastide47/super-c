@@ -19,6 +19,7 @@ import borrowck::flow_ir as bfi;
 import driver_shim as shim;
 import lsp::json as json;
 import tests::cli_harness as cli;
+import driver::util as dutil;
 
 import stdio;
 import stdlib;
@@ -1285,6 +1286,18 @@ pub fn parity_program(decls: str, exprs: []str, tys: []str) String {
 
 // True when C file `path` defines `function`: a line naming ` function(` that opens its body.
 fn c_defines(path: str, function: str) bool {
+    // A small program's `__sc_unity.c` defines what the units it includes define.
+    if path.ends_with("/__sc_unity.c") {
+        let dir = loader::dirname_of(path);
+        let mut ms = Set::<String>::new();
+        dutil::unity_members(dir, &mut ms);
+        for m in ms.iter() {
+            if c_defines(loader::join2(dir, m.as_str()).as_str(), function) {
+                return true;
+            }
+        }
+        return false;
+    }
     let text = cli::read_text(path);
     let mut head = String::from_str(" ");
     head.push_str(function);
@@ -1739,9 +1752,9 @@ fn snap_run(k: usize, src: str, stop: i32, as_std: bool, emit: bool, user_only: 
     return out;
 }
 
-@platform(windows)
+@platform(windows | wasm | ios | android)
 fn snap_run(_: usize, _: str, _: i32, _: bool, _: bool, _: bool) String {
-    panic("harness: no prelude snapshot on Windows");
+    panic("harness: no prelude snapshot without fork");
 }
 
 // The forked side of `snap_run`: the compile, its result written to `fd`, then the snapshot copy

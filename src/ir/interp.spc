@@ -19,6 +19,7 @@ import ir::layout as lay;
 import borrowck::facts as bcf;
 import lexer::token as tok;
 import lexer::token_type as *;
+import utils::persist as *;
 
 pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
 pub const IV_INT: u8 = 1;
@@ -243,7 +244,8 @@ extend Interp {
                 let v = o.slots.index_mut(s);
                 v.ty = rm_ty(p, v.tm, v.ty);
             }
-            for k in 0..OBJ_ARGS {
+            // Only the `nargs` live arguments: a reused object keeps stale ones past them.
+            for k in 0..o.nargs as usize {
                 unsafe o.at[k] = rm_ty(p, unsafe o.am[k], unsafe o.at[k]);
             }
             o.et = rm_ty(p, o.em, o.et);
@@ -256,7 +258,7 @@ extend Interp {
         }
         for i in 0..self.statics.len() {
             let so = self.statics.index_mut(i);
-            for k in 0..OBJ_ARGS {
+            for k in 0..so.nargs as usize {
                 unsafe so.at[k] = rm_ty(p, unsafe so.am[k], unsafe so.at[k]);
             }
             so.ety = rm_ty(p, so.etm, so.ety);
@@ -694,6 +696,20 @@ pub struct InstAssert {
     pub ats: [TypeId; 8],
 }
 
+extend InstAssert as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &InstAssert, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut InstAssert, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
 /// A recorded failed fold (deduped per node); the driver renders these after emission.
 pub struct IFoldErr {
     pub m: ModuleId,
@@ -868,6 +884,7 @@ pub struct Interp {
     pub elock_sem: psy::Semaphore,
     pub elock_owner: usize,
     pub elock_depth: u32,
+    pub wl_own: i64, // the module whose write lock the engine lock's holder released to wait (-1: none)
     pub lint_on: bool, // lint_body tracking: record the executing top-frame statement span
     pub top_span: tok::Span,
     pub trap_span: tok::Span, // top-frame span snapshotted at first trap
@@ -976,6 +993,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         elock_sem: psy::Semaphore::new(1),
         elock_owner: 0,
         elock_depth: 0,
+        wl_own: -1,
         lint_on: false,
         top_span: tok::Span { start: 0, end: 0 },
         trap_span: tok::Span { start: 0, end: 0 },
@@ -1049,10 +1067,10 @@ fn gen_index(a: &Ast, dn: NodeId, nargs: u8, p: NodeId) i32 {
     return -1;
 }
 
-// Whether `list` binds every generic parameter `gens` (listed through `xa`) of an extend of module `xm`.
-fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, ext: NodeId) bool {
+// Whether `list` binds every generic parameter `gens` (listed through `xa`) of an extend of module `xm`
+// whose target type is `pat`.
+fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, ext: NodeId, pat: TypeId) bool {
     let gens = xa.at_const(ext).as_data.extend_def.generics;
-    let pat = xa.type_of(xa.at_const(ext).as_data.extend_def.target_type);
     // The parameters only the interface's arguments name: the conformance search solves them.
     let free = pick(pat == TYPE_NONE, 0u64, ext_free_params(xa, pat, xa, xm, ext));
     let gids = xa.list(gens);
@@ -2039,7 +2057,7 @@ extend Interp {
             di = *ba.instance(ba.type_at(iface).as_data.inst);
         }
         for xm in 0..self.p().modules.len() {
-            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
             if xa.nodes.len() == 0 {
                 continue;
             }
@@ -2054,9 +2072,12 @@ extend Interp {
                     continue;
                 }
                 let ir0 = xa.resolution_def(ed.interface_type);
-                let bp = ext_blanket(xa, xa.type_of(ed.target_type), xa, xm as ModuleId, iid);
+                let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
                 if ir0.module != ifd.module || ir0.node != ifd.node || bp < 0 {
                     continue;
+                }
+                if !self.ext_readable(xm as ModuleId, iid) {
+                    return none;
                 }
                 let mut list = Vector::<ISub>::new();
                 if !self.subst_add(&mut list, xm as ModuleId, unsafe xa.list(ed.generics)[bp as usize], sm, st) {
@@ -2199,7 +2220,7 @@ extend Interp {
         let xa = unsafe &*self.p().module_ast_const(xm);
         let gens = xa.at_const(extnode).as_data.extend_def.generics;
         let target = xa.at_const(extnode).as_data.extend_def.target_type;
-        let pat = xa.type_of(target);
+        let pat = self.tof(xm, xa, target);
         if gens.len == 0 {
             // An extend of one instance (`extend M<3>`) applies to that instance only.
             let mut pi = TyInstance {};
@@ -2247,7 +2268,7 @@ extend Interp {
                 }
             }
         }
-        return ext_all_bound(list, xa, xm, extnode);
+        return ext_all_bound(list, xa, xm, extnode, pat);
     }
 
     // `bind_extend` for an extend whose target `pat` is not its parameters in order: each argument the
@@ -2310,7 +2331,7 @@ extend Interp {
                 return false;
             }
         }
-        return ext_all_bound(list, xa, xm, extnode);
+        return ext_all_bound(list, xa, xm, extnode, pat);
     }
 
     // The zero value of `(m, t)`: builtins, pointers/references/functions (null), arrays and
@@ -2710,6 +2731,19 @@ extend Interp {
         return gitems::visible(self.p(), self.cur_item, t, unsafe &mut *self.reach);
     }
 
+    // Whether the reader may read extend `ext` of module `m` as checked (then under the module's write
+    // lock); else a refusal, as
+    // `body_of`'s: the evaluation fails, and no answer stands on the extend's unchecked header.
+    fn ext_readable(self: &mut Self, m: ModuleId, ext: NodeId) bool {
+        if self.visible_node(m, ext) {
+            let _ = self.p().module_ast_const(m); // the module's write lock in a parallel type check
+            return true;
+        }
+        self.note_missing(m);
+        self.note_dyn_edge(m, ext);
+        return self.fail();
+    }
+
     // Record that module `m`'s body syntax was refused.
     fn note_missing(self: &mut Self, m: ModuleId) {
         while self.body_missing.len() <= m as usize {
@@ -2874,7 +2908,7 @@ extend Interp {
         }
         // Only an instance of the extended declaration binds its parameters.
         let xa = unsafe &*self.p().module_ast_const(fm);
-        let pat = xa.type_of(xa.at_const(ext).as_data.extend_def.target_type);
+        let pat = self.tof(fm, xa, xa.at_const(ext).as_data.extend_def.target_type);
         let mut pi = TyInstance {};
         if pat != TYPE_NONE && xa.targs_of(pat, &mut pi) && (pi.module != rdm || pi.decl != rdn) {
             return false;
@@ -2932,7 +2966,7 @@ extend Interp {
                 // `x: &u32`): the call reads the referent, as the emitted C does.
                 let pn0 = fa.at_const(unsafe fa.list(ps)[0]);
                 let pt0 = if pn0.kind == NodeKind::NODE_PARAMETER && pn0.as_data.parameter.ty != NODE_NONE {
-                    fa.type_of(pn0.as_data.parameter.ty);
+                    self.tof(fm, fa, pn0.as_data.parameter.ty);
                 } else {
                     TYPE_NONE;
                 };
@@ -2955,7 +2989,7 @@ extend Interp {
             if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
                 continue;
             }
-            let pty = fa.type_of(pn.as_data.parameter.ty);
+            let pty = self.tof(fm, fa, pn.as_data.parameter.ty);
             if pty == TYPE_NONE || fa.type_at(pty).kind != TypeKind::TYPE_REFERENCE {
                 continue;
             }
@@ -3148,6 +3182,9 @@ extend Interp {
                         &mut ext,
                         &mut kbinds,
                     ) {
+                        if self.failed {
+                            return false;
+                        }
                         kbinds.clear();
                         ext = self.keyed_conf(b, DefId { module: fm, node: container }, t.iface, sm2, st2, &mut kbinds);
                         if ext.node == NODE_NONE {
@@ -3191,7 +3228,7 @@ extend Interp {
                         fnode,
                         mnm,
                     );
-                    if m0.node == NODE_NONE {
+                    if m0.node == NODE_NONE && !self.failed {
                         // No conformance by target: a generic one's own method, or its default.
                         kext = self.keyed_conf(
                             b,
@@ -3201,6 +3238,9 @@ extend Interp {
                             st2,
                             &mut kbinds,
                         );
+                    }
+                    if self.failed {
+                        return false;
                     }
                     pick(kext.node != NODE_NONE, self.ext_own_method(kext, fm, mnm), m0);
                 };
@@ -7421,6 +7461,9 @@ extend Interp {
                 }
             }
         }
+        if unsafe (*blk).heap == 0 && !self.scalar_view(v, blk, em, et) {
+            return self.bail();
+        }
         if unsafe (*blk).heap != 0 && unsafe (*blk).et == TYPE_NONE && pv_off(v) == 0 {
             let l = self.lsvc.layout(em, et);
             if !l.ok || l.size == 0 {
@@ -7446,6 +7489,50 @@ extend Interp {
             return self.bail();
         }
         return out;
+    }
+
+    // Whether the slot pointer `v` addresses in non-heap block `blk` can be read as type (em, et): a
+    // slot holds one value of its own type, so a view as another scalar type (a `u64`'s bytes
+    // through `*const u8`) has no compile-time value, and stepping such a pointer would walk into
+    // the next slot. The slot's type is its value's, or for an unwritten slot the pointee type of
+    // `v`; an aggregate or an unknown type decides nothing here.
+    fn scalar_view(self: &Self, v: IVal, blk: *const IObj, em: ModuleId, et: TypeId) bool {
+        let off = pv_off(v) as usize;
+        let mut sm: ModuleId = 0;
+        let mut st = TYPE_NONE;
+        if off < unsafe (*blk).slots.len() {
+            let sv = unsafe (*blk).slots[off];
+            if sv.kind == IV_INT || sv.kind == IV_FLOAT || sv.kind == IV_BOOL {
+                sm = sv.tm;
+                st = sv.ty;
+            } else if sv.kind != IV_NONE {
+                return true;
+            }
+        }
+        if st == TYPE_NONE && v.ty != TYPE_NONE {
+            let mut pm: ModuleId = 0;
+            let mut pt = TYPE_NONE;
+            if !self.rty(v.tm, v.ty, &mut pm, &mut pt) {
+                return true;
+            }
+            let py = *(unsafe &*self.p().module_ast_const(pm)).type_at(pt);
+            if py.kind != TypeKind::TYPE_POINTER && py.kind != TypeKind::TYPE_REFERENCE || !self.rty(
+                pm,
+                py.as_data.elem,
+                &mut sm,
+                &mut st,
+            ) {
+                return true;
+            }
+        }
+        if st == TYPE_NONE {
+            return true;
+        }
+        let sy = *(unsafe &*self.p().module_ast_const(sm)).type_at(st);
+        if sy.kind != TypeKind::TYPE_BUILTIN || sy.as_data.builtin == BuiltinType::BT_VOID {
+            return true;
+        }
+        return self.teq(sm, st, em, et) || self.is_ubyte(sm, st) && self.is_ubyte(em, et);
     }
 
     // `u8` or `char`: the two unsigned byte types (C's `char` is unsigned here), which view each
@@ -7597,7 +7684,7 @@ extend Interp {
             }
         }
         for xm in 0..self.p().modules.len() {
-            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
             if xa.nodes.len() == 0 {
                 continue;
             }
@@ -7612,6 +7699,9 @@ extend Interp {
                 let tg = xa.resolution_def(ed.target_type);
                 if ir0.module != di.module || ir0.node != di.decl || tg.module != rdm || tg.node != rdn {
                     continue;
+                }
+                if !self.ext_readable(xm as ModuleId, iid) {
+                    return false;
                 }
                 let mut list = Vector::<ISub>::new();
                 if !self.bind_extend(&mut list, xm as ModuleId, iid, rn, ram, rat) {
@@ -7736,7 +7826,7 @@ extend Interp {
             }
         }
         for i in 0..tns.len() {
-            let ft = da.type_of(*tns.at(i));
+            let ft = self.tof(it.module, da, *tns.at(i));
             let mut g = TYPE_NONE;
             if ft == TYPE_NONE || !self.p().ground_local(it.module, ft, m, &gp[0], &it.args[0], gn, &mut g, 0) {
                 return false;
@@ -7946,7 +8036,7 @@ extend Interp {
         out: &mut Vector<DefId>,
     ) {
         for xm in 0..self.p().modules.len() {
-            let xa = unsafe &*self.p().module_ast_const(xm as ModuleId);
+            let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
             if xa.nodes.len() == 0 {
                 continue;
             }
@@ -7961,9 +8051,13 @@ extend Interp {
                     continue;
                 }
                 let ir0 = xa.resolution_def(ed.interface_type);
-                let bp = ext_blanket(xa, xa.type_of(ed.target_type), xa, xm as ModuleId, iid);
+                let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
                 if bp < 0 || iface.node != NODE_NONE && (ir0.module != iface.module || ir0.node != iface.node) {
                     continue;
+                }
+                if !self.ext_readable(xm as ModuleId, iid) {
+                    out.clear();
+                    return;
                 }
                 let mut list = Vector::<ISub>::new();
                 list.push(ISub { pmod: xm as ModuleId, pnode: unsafe xa.list(ed.generics)[bp as usize], am: m, at: t });
@@ -8019,6 +8113,10 @@ extend Interp {
         let mut hit = DefId { module: 0, node: NODE_NONE };
         for i in start..start + n {
             let c = *self.conf_pool.at(i);
+            if !self.ext_readable(c.module, c.node) {
+                hit = DefId { module: 0, node: NODE_NONE };
+                break;
+            }
             let mut list = Vector::<ISub>::new();
             if self.bind_extend(&mut list, c.module, c.node, rn, ram, rat) {
                 if hit.node == NODE_NONE {
@@ -8045,7 +8143,7 @@ extend Interp {
     fn conf_ext_scan(self: &Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId, out: &mut Vector<DefId>) {
         for mi in 0..self.p().modules.len() {
             let mm = mi as ModuleId;
-            let a = unsafe &*self.p().module_ast_const(mm);
+            let a = unsafe &*self.p().module_syntax(mm);
             if a.nodes.len() == 0 {
                 continue;
             }
@@ -9419,6 +9517,7 @@ extend Interp {
         if !self.visible_node(m, n) {
             return TYPE_NONE;
         }
+        let _ = self.p().module_ast_const(m); // the module's write lock in a parallel type check
         return a.type_of(n);
     }
 
@@ -9451,9 +9550,19 @@ extend Interp {
             self.elock_depth += 1;
             return;
         }
+        let pm = self.pkg as *mut loader::Package;
+        let own = if unsafe (*pm).wl_on {
+            unsafe (*pm).wl_eng_begin();
+        } else {
+            -1;
+        };
         self.elock_sem.acquire_masked();
         unsafe atomic::store_usize(&mut self.elock_owner, tok, 0);
         self.elock_depth = 1;
+        self.wl_own = own;
+        if unsafe (*pm).wl_on {
+            unsafe (*pm).wl_eng_hold();
+        }
     }
 
     fn eng_leave(self: &mut Self) {
@@ -9462,8 +9571,16 @@ extend Interp {
         }
         self.elock_depth -= 1;
         if self.elock_depth == 0 {
+            let pm = self.pkg as *mut loader::Package;
+            let own = self.wl_own;
+            if unsafe (*pm).wl_on {
+                unsafe (*pm).wl_eng_end();
+            }
             unsafe atomic::store_usize(&mut self.elock_owner, 0, 0);
             self.elock_sem.release();
+            if own >= 0 {
+                unsafe (*pm).modules[own as usize].ast.wl_enter();
+            }
         }
     }
 
@@ -10215,7 +10332,7 @@ extend Interp {
         }
         let mut rtag: i64 = 0;
         if fd.returns.len == 1 {
-            let r0 = fa2.type_of(unsafe fa2.list(fd.returns)[0]);
+            let r0 = self.tof(mm, fa2, unsafe fa2.list(fd.returns)[0]);
             if r0 != TYPE_NONE {
                 let t2 = self.ti_tag(mm, r0, cx.strm, cx.strn, cx.slm, cx.sln);
                 if t2 > 0 {
@@ -10366,7 +10483,7 @@ extend Interp {
                 continue;
             }
             let fnm = da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text;
-            let fty = da.type_of(da.at_const(fid).as_data.field.ty);
+            let fty = self.tof(tim, da, da.at_const(fid).as_data.field.ty);
             if self.span_is(tim, fnm, "name") {
                 sty = fty;
             } else if self.span_is(tim, fnm, "kind") {
@@ -10426,7 +10543,7 @@ extend Interp {
                             mma.at_const(mma.at_const(mfid).as_data.field.name).as_data.name.text,
                             "kind",
                         ) {
-                            mkty = mma.type_of(mma.at_const(mfid).as_data.field.ty);
+                            mkty = self.tof(mem0, mma, mma.at_const(mfid).as_data.field.ty);
                         }
                     }
                     let mlay = self.lsvc.layout_of(tim, mety, null, 0);
@@ -10529,7 +10646,7 @@ extend Interp {
                 if !is_tuple && da2.at_const(fid).kind != NodeKind::NODE_FIELD {
                     continue;
                 }
-                let ft = da2.type_of(da2.member_type_node(fid, is_tuple));
+                let ft = self.tof(dm2, da2, da2.member_type_node(fid, is_tuple));
                 let fl = self.lsvc.layout_of(dm2, ft, envp, 1);
                 if ft == TYPE_NONE || !fl.ok {
                     return none();
@@ -10659,7 +10776,7 @@ extend Interp {
                             let tg = qa.resolution_def(target);
                             match_recv = tg.module == dm3 && tg.node == dn3;
                         } else {
-                            let tt2 = qa.type_of(target);
+                            let tt2 = self.tof(qm, qa, target);
                             if tt2 != TYPE_NONE {
                                 let ty2 = qa.type_at(tt2);
                                 match_recv = ty2.kind == TypeKind::TYPE_BUILTIN && ty2.as_data.builtin == bb2;

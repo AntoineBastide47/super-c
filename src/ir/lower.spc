@@ -2758,7 +2758,10 @@ extend Lowerer {
         let owner = self.reintern_ty(orm, ort);
         let mut dm0: ModuleId = 0;
         if self.proj_owner_decl(owner, &mut dm0) == NODE_NONE {
-            return false;
+            // A concrete owner without a declaration (a builtin, a pointer, an array) has no fields
+            // or variants: zero copies, as an enum's fields loop has. An owner still symbolic keeps
+            // the placeholder for the per-instance re-lowering.
+            return concrete_kind(self.f.ty(owner).kind);
         }
         let mut sub0 = ir::IR_NONE;
         let mut sub1 = ir::IR_NONE;
@@ -8370,4 +8373,9 @@ fn parse_dec(src: str, sp: tok::Span) i64 {
         i += 1;
     }
     return v;
+}
+
+// Whether a type of kind `k` is concrete: no substitution can still change it.
+const fn concrete_kind(k: TypeKind) bool {
+    return k != TypeKind::TYPE_GENERIC && k != TypeKind::TYPE_ASSOC && k != TypeKind::TYPE_CONST_EXPR && k != TypeKind::TYPE_FIELD_PROJECTION && k != TypeKind::TYPE_CONST && k != TypeKind::TYPE_ERROR;
 }

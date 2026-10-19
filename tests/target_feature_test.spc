@@ -471,6 +471,10 @@ fn feature_sets_rebuild_and_probe() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
+    // An object cache of its own: the shared one may hold these units from an earlier run, which a
+    // first build then restores instead of compiling.
+    let cache = format("{}/ocache", root);
+    let _cache = cli::set_env("SC_CACHE_DIR", cache.as_str());
     let runs: [str; 4] = [
         "build --target=wasm",
         "build --target=wasm",

@@ -4046,11 +4046,7 @@ extend<'a> TypeChecker<'a> {
         let refs = cl.ref_caps | add & ~cl.own_mut;
         unsafe (*a).at(c).as_data.closure.mut_caps = muts;
         unsafe (*a).at(c).as_data.closure.ref_caps = refs;
-        let cf = unsafe (*a).closure_fact_mut(c);
-        if cf != null {
-            unsafe (*cf).mut_caps = muts;
-            unsafe (*cf).ref_caps = refs;
-        }
+        let _ = unsafe (*a).set_closure_caps(c, muts, refs);
     }
 
     /// Index of binding `decl` in closure `clos`'s capture list, or -1 when not captured.
@@ -9253,7 +9249,7 @@ extend<'a> TypeChecker<'a> {
             };
             // The owner's record: read only when its item is visible to the item under check (the
             // owner's writes happen before this job), never while the owner may still be writing it.
-            if unsafe (*self.mod_ast(m)).gt != null && self.node_visible(m, decl) {
+            if unsafe (*self.mod_ast(m)).gt.p != null && self.node_visible(m, decl) {
                 let known = unsafe (*self.mod_ast(m)).type_of(decl);
                 if known != TYPE_NONE && (known & TYPE_PROV) == 0 {
                     let dk0 = unsafe (*self.mod_ast(m)).at_const(decl).kind;
@@ -12768,6 +12764,13 @@ extend<'a> TypeChecker<'a> {
             *conf = TYPE_ERROR;
             return cm[0];
         }
+        // An inherited default runs under its conformance `cx[k]`, not under an extend of its own, so
+        // the call's bounds check cannot see that conformance: its failed bounds report here.
+        if nh == 0 && self.enclosing(cm[k].module, cm[k].node, NodeKind::NODE_INTERFACE) != NODE_NONE {
+            self.err_method_extend_bounds(name, rs, cm[k]);
+            *conf = TYPE_ERROR;
+            return cm[k];
+        }
         *conf = cc[k];
         if cc[k] == TYPE_NONE && self.enclosing(cm[k].module, cm[k].node, NodeKind::NODE_INTERFACE) == NODE_NONE {
             self.mark_recv = rs;
@@ -15094,9 +15097,10 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    /// Discharge foreign callees' projection obligations against this module's recorded
-    /// instantiations. Driven AFTER every module has typechecked, so a callee's obligations exist
-    /// regardless of module order. `starts[m]` = the obligation index already processed for callee
+    /// Discharge callees' projection obligations against this module's recorded instantiations:
+    /// a foreign callee's, and a same-module callee's that the inline discharge did not run (the
+    /// callee was checked after the call, `Ast.ob_seen`). Driven AFTER every module has
+    /// typechecked, so a callee's obligations exist regardless of module and check order. `starts[m]` = the obligation index already processed for callee
     /// module m in earlier passes; a still-symbolic owner re-defers into THIS module's list, and
     /// the driver iterates passes until no list grows: multi-hop chains resolve hop per pass.
     pub fn discharge_foreign_obligations(self: &mut Self, starts: *const u32) bool {
@@ -15120,7 +15124,7 @@ extend<'a> TypeChecker<'a> {
             if cd.node == NODE_NONE && unsafe (*a).at_const(callee).kind == NodeKind::NODE_MEMBER {
                 cd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
             }
-            if cd.node == NODE_NONE || cd.module == self.cur_module() || cd.module as usize >= self.pkg_count() {
+            if cd.node == NODE_NONE || cd.module as usize >= self.pkg_count() {
                 continue;
             }
             let fa = self.mod_ast(cd.module);
@@ -15141,7 +15145,16 @@ extend<'a> TypeChecker<'a> {
                 i2 = i2 + 1;
             }
             let nob = (unsafe (*fa).proj_obs).len();
-            let ostart = (unsafe starts[cd.module as usize]) as usize;
+            let mut ostart = (unsafe starts[cd.module as usize]) as usize;
+            if cd.module == self.cur_module() {
+                // The inline discharge ran the obligations the callee held when the call was checked.
+                switch (unsafe (*a).ob_seen).get(&mu.node) {
+                    Some(k) => {
+                        ostart = ostart.max((*k) as usize);
+                    },
+                    None => {},
+                };
+            }
             // An earlier pass already ran the obligations below `ostart` against this module.
             for oi in ostart..nob {
                 let ob = *(unsafe (*fa).proj_obs).at(oi);
@@ -24889,6 +24902,7 @@ extend TypeChecker {
         // symbolic, hand the obligation up to the current fn's own call sites.
         if fmod == self.cur_module() {
             let nobs = (unsafe (*self.cur_ast()).proj_obs).len();
+            (unsafe (*self.cur_ast()).ob_seen).insert(id, nobs as u32);
             let mut oi: usize = 0;
             while oi < nobs {
                 let ob = *(unsafe (*self.cur_ast()).proj_obs).at(oi);
@@ -29175,7 +29189,7 @@ extend TypeChecker {
     // machine has `feature` (`FeatureRow`, checked with the build's features by `check_feature_calls`).
     fn tc_feature_row(self: &mut Self, e0: NodeId, e1: NodeId, ft: TypeId, t1: TypeId) {
         let a = self.cur_ast();
-        let gt = unsafe (*a).gt;
+        let gt = unsafe (*a).gt.p;
         if gt == null || ft == TYPE_NONE || t1 == TYPE_NONE {
             return;
         }
@@ -29621,7 +29635,7 @@ extend TypeChecker {
             return self.errors.errors.len() == ne;
         }
         if ak == AA_FEATURES {
-            let gt = unsafe (*a).gt;
+            let gt = unsafe (*a).gt.p;
             let ne = self.errors.errors.len();
             let t = self.check_expr(e);
             if self.errors.errors.len() != ne || gt == null {
@@ -29660,7 +29674,7 @@ extend TypeChecker {
             return true;
         }
         let want = if ak == AA_OP {
-            let gt = unsafe (*a).gt;
+            let gt = unsafe (*a).gt.p;
             if gt == null {
                 return false;
             }
@@ -30586,6 +30600,7 @@ extend TypeChecker {
             return;
         }
         let a = self.cur_ast();
+        unsafe (*a).wl_yield();
         let nk = unsafe (*a).at_const(id).kind;
         switch nk {
             NODE_STATIC_ASSERT => {

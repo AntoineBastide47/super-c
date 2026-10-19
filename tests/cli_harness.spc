@@ -437,8 +437,18 @@ extend Proj {
                 cfv.push(String::from_str(w));
             }
         }
+        let mut all = Vector::<String>::new();
+        self.c_files(raw.as_str(), &mut all);
+        // The members of `__sc_unity.c` compile through it, not alone.
+        let mut members = Set::<String>::new();
+        dutil::unity_members(raw.as_str(), &mut members);
         let mut units = Vector::<String>::new();
-        self.c_files(raw.as_str(), &mut units);
+        for i in 0..all.len() {
+            let rel = String::from_str(all.at(i).as_str().slice(raw.len() + 1, all.at(i).len()));
+            if !members.contains(&rel) {
+                units.push(all.at(i).clone());
+            }
+        }
         // Without a cache root the namespace is the project's own: every unit compiles.
         let croot = ocache::cache_root();
         let ns = if croot.len() != 0 {

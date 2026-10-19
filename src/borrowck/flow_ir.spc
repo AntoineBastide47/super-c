@@ -1023,9 +1023,10 @@ extend tc::TypeChecker {
                     ) {
                         let old = (unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps) as u64;
                         unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
-                        let cf = unsafe (*self.cur_ast()).closure_fact_mut(c);
+                        let cf = unsafe (*self.cur_ast()).closure_fact(c);
                         assert(cf != null, "every checked closure has recorded facts");
-                        unsafe (*cf).mut_caps = old | 1u64 << idx as u64;
+                        let rc = unsafe (*cf).ref_caps;
+                        let _ = unsafe (*self.cur_ast()).set_closure_caps(c, old | 1u64 << idx as u64, rc);
                     }
                     let mut p = NODE_NONE;
                     for j in 0..cns.len() {

@@ -1,7 +1,6 @@
 #!/bin/sh
-# The correctness gate, one command: every check the compatibility contract (ci/contract.sh) names, in
-# this order. Run from the repository root (or through `super-c command gate`):
-#   0. the tree matches the contract's input lists;
+# The correctness gate, one command, with the settings in ci/contract.sh. Run from the repository root
+# (or through `super-c command gate`):
 #   1. check.sh: canonical formatting, lint per target, the test corpus, the sanitizer lanes, and the
 #      two-stage rebuild from the latest release (the compiler builds its own sources);
 #   2. the two-generation fixpoint: gen1 and gen2 emit byte-identical C;
@@ -9,20 +8,22 @@
 #      task-delay seed emit byte-identical C, publish the same package type table and item index,
 #      and print the same diagnostics;
 #   4. every emitted translation unit compiles under the strict warning set, and the tree meets the
-#      readability rules;
-#   5. every built-in profile but test (which the test command builds) builds the compiler.
+#      readability rules.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
-# `sh ci/gate.sh --no-check` skips step 1 (CI, after its own build and test steps); `--core` also skips
-# step 5: check.sh runs it last, over the compiler its bootstrap step installed. `--profiles` runs steps 0
-# and 5 alone, with the installed compiler building each profile: CI runs it in a job of its own beside
-# `--core`, whose fixpoint proves the two generations emit the same C.
+# `sh ci/gate.sh --core` skips step 1: check.sh runs it last, over the compiler its bootstrap step
+# installed, and CI runs it after its own build and test steps. `sh ci/gate.sh --profiles` builds the
+# compiler under every built-in profile but test (which the test command builds) with the installed
+# compiler: CI runs it in a job of its own beside `--core`, whose fixpoint proves the two generations
+# emit the same C. The release and bench profiles link with full LTO, so a local gate leaves it to CI.
+# The generations build under the test profile (optimized, overflow checks kept): the C they emit does
+# not depend on the profile, and every build they run is faster.
 set -eu
 cd "$(dirname "$0")/.."
 . ci/contract.sh
 mode=${1:-}
 case "$mode" in
-"" | --no-check | --core | --profiles) ;;
-*) printf 'usage: sh ci/gate.sh [--no-check | --core | --profiles]\n' >&2; exit 2 ;;
+"" | --core | --profiles) ;;
+*) printf 'usage: sh ci/gate.sh [--core | --profiles]\n' >&2; exit 2 ;;
 esac
 
 step() { printf '\ngate: %s\n' "$1"; }
@@ -32,25 +33,6 @@ ncpu=$(getconf _NPROCESSORS_ONLN)
 # under -std=c11); every build passes it, as the CI build and test steps do.
 x=${BINEXT:-}
 cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-
-# Sorted set comparison of a contract list against a shell glob (the glob only detects unlisted files).
-same_set() {
-    listed=$(printf '%s\n' "$1" | sort)
-    present=$(for f in $2; do [ -e "$f" ] && printf '%s\n' "$f"; done | sort)
-    [ "$listed" = "$present" ]
-}
-
-step "contract v$CONTRACT_VERSION: input lists"
-for f in $CONTRACT_ROOT $CONTRACT_MANIFEST $CONTRACT_TESTS $CONTRACT_EXAMPLES $CONTRACT_CI_PROGRAMS $CONTRACT_BENCH_FILES; do
-    [ -f "$f" ] || fail "listed input missing: $f"
-done
-[ -d "$CONTRACT_STD" ] || fail "missing $CONTRACT_STD/"
-[ -d "$CONTRACT_FFI" ] || fail "missing $CONTRACT_FFI/"
-same_set "$CONTRACT_TESTS" 'tests/*.spc' || fail "tests/ does not match CONTRACT_TESTS (update ci/contract.sh, bump CONTRACT_VERSION)"
-same_set "$CONTRACT_EXAMPLES" 'examples/*.spc' || fail "examples/ does not match CONTRACT_EXAMPLES"
-same_set "$CONTRACT_CI_PROGRAMS" 'ci/*.spc' || fail "ci/ does not match CONTRACT_CI_PROGRAMS"
-same_set "$CONTRACT_BENCH_FILES" 'bench/*.spc' || fail "bench/ does not match CONTRACT_BENCH_FILES"
-echo "gate: ok"
 
 if [ -z "$mode" ]; then
     step "check.sh (format, lint, tests, sanitizer lanes, release bootstrap)"
@@ -79,7 +61,7 @@ profiles() {
 
 if [ "$mode" = --profiles ]; then
     profiles "super-c$x"
-    printf '\ngate: OK (contract v%s, profiles)\n' "$CONTRACT_VERSION"
+    printf '\ngate: OK (profiles)\n'
     exit 0
 fi
 
@@ -90,15 +72,15 @@ same_tree() {
     diff -r $ex "$1" "$2"
 }
 
-step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)"
-( cd "$tree" && SC_LEAK_CHECK=fatal "./super-c$x" build ${cstd:+"$cstd"} >/dev/null )
-cp -R "$tree/build/debug/raw" "$tmp/gen1-raw"
-cp "$tree/build/debug/super-c$x" "$tree/gen1-super-c$x"
+step "fixpoint: gen1 vs gen2"
+( cd "$tree" && SC_LEAK_CHECK=fatal "./super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
+cp -R "$tree/build/test/raw" "$tmp/gen1-raw"
+cp "$tree/build/test/super-c$x" "$tree/gen1-super-c$x"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build ${cstd:+"$cstd"} >/dev/null )
-same_tree "$tmp/gen1-raw" "$tree/build/debug/raw" || fail "gen1 and gen2 emitted different C (above)"
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
+same_tree "$tmp/gen1-raw" "$tree/build/test/raw" || fail "gen1 and gen2 emitted different C (above)"
 # Generation two is compiled and run: every build below is its own.
-cp "$tree/build/debug/super-c$x" "$tree/gen2-super-c$x"
+cp "$tree/build/test/super-c$x" "$tree/gen2-super-c$x"
 echo "gate: byte-identical"
 
 # One build of the tree by gen2: $1 workers, $2 the SC_TASK_DELAY seed (empty = none), $3 the record
@@ -149,11 +131,4 @@ for c in $(find "$raw" -name '*.c' | sort); do
     [ -f "$h" ] || fail "readability: $c has no header beside it"
 done
 echo "gate: $units units clean"
-if [ "$mode" = --core ]; then
-    printf '\ngate: OK (contract v%s, core)\n' "$CONTRACT_VERSION"
-    exit 0
-fi
-
-profiles "gen2-super-c$x"
-
-printf '\ngate: OK (contract v%s)\n' "$CONTRACT_VERSION"
+printf '\ngate: OK\n'

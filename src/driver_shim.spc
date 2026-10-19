@@ -111,6 +111,9 @@ extern "C" "driver_shim.h" {
     /// Give the file `from` the second name `to` (a hard link): 0 on success, -1 when the file system
     /// or the platform refuses (another volume, a link count limit).
     pub fn sc_link(from: *const char, to: *const char) i32;
+    /// The number of names of the file `path` (its hard links), with its identity on its volume (POSIX
+    /// inode, Win32 file index) in `id`; -1 when it cannot be read.
+    pub fn sc_file_links(path: *const char, id: *mut u64) i32;
     /// Make `path` executable (0755); a no-op on Windows, which goes by extension.
     pub fn sc_chmod_exec(path: *const char) i32;
     /// Set `name`=`value` in this process's environment, overwriting any existing value.

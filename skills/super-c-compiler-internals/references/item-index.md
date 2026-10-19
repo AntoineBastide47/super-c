@@ -214,6 +214,28 @@ edge from the reader to the callee's item (`note_dyn_edge`, at most one record p
 engines record nothing). The two signature states exist for a signature-first scheduler and
 are not entered today.
 
+The engine reads another module's checked state only through the rule: a checked type through
+`tof`, a body through `body_of`. A conformance search (`keyed_conf`, `rt_blanket_confs`,
+`conf_by_args`, `conf_ext_of`) finds its candidates from the syntax (the interface's and the
+target's resolutions, `ext_blanket_syn`) and refuses the evaluation on a candidate the reader
+cannot see (`ext_readable`), so no answer stands on an unchecked header.
+
+Visibility makes the values deterministic; the module write lock (`Ast::wl_sem`) makes the reads
+safe while the module's checker grows the same tables for its later items (the type pool, the
+per-node fact tables and maps). In the parallel type check (`Package.wl_on`) a job holds its
+module's lock for each item it checks, and the engine lock's holder takes a module's lock the
+first time it asks for the module (`Package::module_ast_const`, through which the engine and the
+lowering reach every module) and drops them all with the engine lock. A checker releases its own
+lock before it waits for the engine lock and takes it back after (`Interp::eng_enter` /
+`eng_leave`), so a lock holder never waits for the engine, and the engine's wait for a lock ends.
+The engine's wait marks the module (`Ast::wl_want`), and its checker hands the lock over at its
+next statement (`Ast::wl_yield`), not at the end of the item. A scan over every module reads the
+syntax without the lock (`Package::module_syntax`) and takes it for a candidate it reads as checked.
+A checker's own reads of another module never take that module's write lock (two checkers would
+wait for each other): what they read is either frozen (the `SplitVec` arrays: nodes, children,
+resolutions, per-node types) or copied out under the owner's intern lock (`Ast::closure_env` for
+the closure facts the layout reads).
+
 ## The scheduler
 
 `driver::sched::Jobs` is a job graph: per job the count of dependencies still pending, the
@@ -229,7 +251,10 @@ item publishes its diagnostics and the stage's result stops the build after the 
 Three stages run on it (`src/driver/emit.spc`):
 
 - **Type check** (`typecheck_stage`): one job per component, edges from the component graph
-  plus a virtual gate job after every prelude component and before every other one. A job
+  plus a virtual gate job after every prelude component and every component they depend on (a
+  module a prelude file imports), and before every other one. In a build's second stage the
+  items of the modules before `Package.root_module` are skipped: the prelude stage checked them
+  (stages.md). A job
   checks its component's top-level items in index order; each item runs under its module's
   lease (a task-aware mutex: one job checks a module at a time, so the module's side tables
   have one writer), with the module's single checker, created at the module's first item

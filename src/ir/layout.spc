@@ -336,9 +336,10 @@ extend Svc {
             return Layout { ok: false };
         }
         if y.kind == TypeKind::TYPE_FUNCTION && self.has_ast(y.module) {
-            let cf = self.a(y.module).closure_fact(y.as_data.decl);
-            if cf != null && unsafe (&*cf).ncaps != 0 {
-                return self.env_layout(y.module, cf, depth);
+            let mut tys = Vector::<TypeId>::new();
+            let mut by_ref: u64 = 0;
+            if self.a(y.module).closure_env(y.as_data.decl, &mut tys, &mut by_ref) {
+                return self.env_layout(y.module, &tys, by_ref, depth);
             }
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION {
@@ -442,20 +443,19 @@ extend Svc {
     // A closure with captures is its env struct, by value (`Mangler::env_field`): a field per capture
     // of nonzero size, a pointer for one the body mutates or borrows; one byte when every capture is
     // zero-sized.
-    fn env_layout(self: &mut Self, m: ModuleId, cf: *const ClosureFact, depth: i32) Layout {
+    fn env_layout(self: &mut Self, m: ModuleId, tys: &Vector<TypeId>, by_ref: u64, depth: i32) Layout {
         let w = self.tgt().ptr;
-        let caps = self.a(m).caps_of(cf);
         let mut size: u64 = 0;
         let mut align: u64 = 1;
-        for k in 0..unsafe (&*cf).ncaps {
-            let mut fl = self.layout_of(m, unsafe caps[k as usize].ty, null, depth + 1);
+        for k in 0..tys.len() {
+            let mut fl = self.layout_of(m, tys[k], null, depth + 1);
             if !fl.ok {
                 return fl;
             }
             if fl.size == 0 {
                 continue;
             }
-            if ((unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps) >> k as u64 & 1u64) != 0 {
+            if (by_ref >> k as u64 & 1u64) != 0 {
                 fl = Layout { ok: true, size: w, align: w };
             }
             // Each capture is below isize::MAX, so only the running sum can pass u64.

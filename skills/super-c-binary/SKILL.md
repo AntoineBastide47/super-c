@@ -164,29 +164,17 @@ ms, Mcyc and wall ms over the rounds, heap requested per round and peak RSS; the
 one cold build of the compiler through the real build engine (debug profile, every core,
 object cache and emit stamp off) and reports the engine's phase record, sync,
 compile and link included. A C compiler or linker failure there fails the run and keeps
-the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`,
-`CONTRACT_BENCH_V` in `ci/contract.sh`).
+the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`).
 
 ### Gates
 
 ```sh
-super-c command gate         # ci/gate.sh: the full correctness gate (contract ci/contract.sh)
-super-c command perf         # ci/perf_gate.sh: the 100-round performance gate against the resolved limits
-super-c command matrix       # ci/bench_matrix.sh: the whole-build benchmark matrix (tens of minutes)
-sh ci/ledger.sh <base> <c>.. # the accepted-work ledger: one protocol over a chain of commits
+super-c command gate         # ci/gate.sh: the full correctness gate (settings in ci/contract.sh)
 ```
 
-`ci/contract.sh` is the versioned compatibility contract: every input file, option and
-command the gates use. `ci/baseline.env` holds the accepted baseline constants
-(`SC_PERF_RECORD=1 sh ci/perf_gate.sh` rewrites it). `ci/ledger.tsv` is the
-accepted-work ledger: every accepted change measured against its parent under one
-protocol (`ci/ledger.sh`: the released bootstrap compiler builds each commit's benchmark
-binary, which runs the 100-round lane), one row per metric with the improvement and the
-regression the change was accepted with. The perf gate resolves each constant's limit
-from them (the baseline less the accepted improvements plus the accepted regressions,
-applied to the constant as a ratio), holds the frontend cycles within 105 percent of the
-baseline, and allows `SC_PERF_TOL` percent of noise over a limit. `ci/cutover_report.md`
-records the resolved numbers of the last cutover.
+`ci/contract.sh` holds the gate's settings: the profiles, the worker count and task-delay
+seeds, the strict C flags, the readability rules and the files excluded from byte
+comparison.
 
 ### Formatting
 
@@ -442,19 +430,27 @@ leaves behind.
 The object cache lives under the same root at `o/<namespace>`, one namespace per local
 object tree (hash of the real path of the profile directory, such as `build/debug`); a
 unit's key hashes the compiler version line, the whole compile command, and the text of
-the unit and of every quoted include (the emitted headers name the runtime and extern-block
-headers by absolute path, so a unit that includes a tree's own header gets other keys in a
-tree at another path). The version line comes from `<cc> --version` once per compiler: the root's
-`ccver/` keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
+the unit and of every quoted include. The emitted tree names an extern-block header or an
+external C source by a path relative to the including file when both lie below the working
+directory (a project's own files, and std in a checkout or a copy of the repository), else by its
+absolute real path (an installed std). So a tree that moves with its project, such as a copy, a
+worktree or the gate's tree, keeps its keys, and under debug information (the working directory
+maps to `.`) its objects are the same bytes. The version line comes from `<cc> --version` once per compiler: an entry of the shared `script`
+namespace keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
 command, the program's path and mtime, and on macOS for an xcrun stub in `/usr/bin` the
 `DEVELOPER_DIR`, xcode-select link and `TOOLCHAINS` settings with each candidate clang's mtime),
-so a toolchain upgrade probes again and an unchanged compiler starts no probe process; the
-cache sweep removes a record after 7 days. Each unit's `.cmd` records its key. An object is stored once: the tree's
+so a toolchain upgrade probes again and an unchanged compiler starts no probe process; the entry
+follows the namespace's rules (below). Each unit's `.cmd` records its key. An object is stored once: the tree's
 object and its cache entries are hard links to one file (`link_or_copy`; a copy where the file system
 refuses a link, such as a cache root on another volume), so a compile removes the old object before
 it writes, and an object's time for the staleness check and the relink decision is the mtime of its
 `.cmd` record, which another tree's use of the shared file does not move. The engine runs the
-compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. Under `-g` the compile maps the
+compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. One exception, for a
+macOS target on a macOS host: a command that starts with the xcrun stub `/usr/bin/cc`, `clang` or `gcc`
+runs the compiler the stub runs, with `-isysroot` naming the SDK the stub passes (`direct_cc`): the stub
+costs a process per compile. `xcrun -f` and `xcrun --show-sdk-path` run once per compiler identity and
+`SDKROOT`, recorded as an entry of the `script` namespace; with the object cache off, or a path with a
+space, the stub runs. Under `-g` the compile maps the
 working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
 sources relative to the project directory: a debugger started elsewhere needs a source map.
 Without coverage or profile instrumentation, each compiled object whose bytes do not name the
@@ -467,20 +463,49 @@ three older), and deletes each object and dependency list that no kept generatio
 and that is older than the start of the build. A version inside that window rebuilds
 with no compile; an older one compiles again. An unchanged build reads one directory
 and one file. The namespace's `owner` file records its object tree (the profile directory).
-At most once every 30 minutes (`o/.sweep`), a successful build also removes the namespaces
+At most once every 30 minutes (`o/.sweep`), a successful engine or script build also removes the namespaces
 whose owner object tree is gone, whose `owner` names another directory (an older compiler
 recorded the source directory), that have no `owner` and did not change for an hour (a build
 that stopped before its first commit), or that did not change for 30 days (the shared `script`
 namespace only by this rule); the idle linker caches; and the flat `<key>.o`/`<key>.d` files
-that compilers before namespaces installed in the root. With the same period (`<out-dir>/.sweep`),
+that compilers before namespaces installed in the root. It then trims the `script` namespace (below)
+and packs the entries no build
+tree names (`pack_cache`: the file's link count equals its number of entries), least recently used
+first and at most 128 MiB of objects per sweep: `<key>.z` holds the object's length, a content hash
+and the bytes compressed by `build_system::lz` (LZ77 in the LZ4 block layout, about 2x on objects;
+packing runs at about 38 MB/s in a compiler built at opt-level 0, 300 MB/s at opt-level 3). A hit on
+a packed entry decompresses it into the tree and leaves it packed; one whose layout or hash does not
+check is a miss. An entry a tree names stays a link. With the same period (`<out-dir>/.sweep`),
 it sweeps the project (`sweep_project`): every out-dir entry with nothing written for 30 days (a
 build tree, a link record, a binary) goes unless a build holds the lock of a tree in it, as do the
 emitted trees below the root directory idle as long and the per-suite cache older compilers kept in
 `<out-dir>/test/fixture-cache`. `super-c clean` runs both sweeps at once; `super-c clean --full`
 removes the out-dir, the emitted trees and the whole cache root.
 
+The checked std prelude is cached as an entry of the shared `script` namespace
+(`src/driver/prelude_image.spc`). A build first loads the std prelude alone, resolves it and type
+checks it up to the prelude gate (`prelude_stage`), with imports looked up under the std root only,
+so the result does not depend on the project; the user's modules load after it (`load_user`). The
+entry's name hashes the std directory as given, the target, arch, CPU features, vector settings,
+memory checker, `--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
+budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`). The image records the
+content hash of every prelude file and the listing of every directory the std imports were looked up
+in; a build that finds both unchanged loads the image in place of parsing and checking std, and
+checks the prelude again on any difference. A build that checks the prelude writes the image (not
+when the prelude logged a warning) and loads it back, so both paths continue from the same state. The
+entry follows the namespace's rules: a read records a use (`touch_entry`), the sweep packs it and
+trims the least recently used entries with the objects, and `SC_NO_CACHE` turns it off. A project
+file or a root file whose module path names a module the prelude loaded from another file is an
+error.
+
+A program whose own C (module, instance and registry units) stays under 2 MiB is compiled as one
+unit: the emitted `__sc_unity.c` includes those units, and both the engine and a script build compile
+it in place of them. The runtime and the external C sources still compile on their own, so programs
+share their objects. A larger program, such as the compiler itself, compiles each unit alone.
+
 Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
-namespace, `o/script`, keyed per unit by the compiler version line, the compile flags, the
+namespace, `o/script` (each entry in the subdirectory of its key's first two hex digits,
+`script_entry`, so no directory holds more than about a 256th of it), keyed per unit by the compiler version line, the compile flags, the
 unit's path relative to its tree and the text of the unit and its quoted includes (the
 tree's path joins the key only under `-g`, coverage or profile instrumentation), so the
 runtime and std units that programs emit identically compile once. A hit links the object
@@ -489,8 +514,8 @@ commands as the process tree's free worker slots allow, all at once, each from a
 directory whose objects then move into place; a unit whose file name another one shares, or
 every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
 The version probe runs beside the compiles when the namespace is new. An install writes a
-temp file and renames it, so concurrent builds never read a torn object. A build that installed an object trims the namespace to 12288 objects, least
-recently used first, once it holds more than 16384 (a suite run uses about 4.8k), each with the dependency list an engine
+temp file and renames it, so concurrent builds never read a torn object. The sweep (not the build that installs objects, which never lists the namespace) trims it to 12288 objects, least
+recently used first, once it holds more than 16384 (a suite run uses about 4.8k; a packed entry counts as one), each with the dependency list an engine
 build stored beside it; every trim also deletes a list whose object is gone. `SC_NO_CACHE` restores the single
 compile-and-link command.
 
@@ -498,7 +523,7 @@ Gates set before the implementation for enabling ThinLTO by default: a body-edit
 under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
 runtime (`super-c bench`, self-transpile) within 3%, link memory no higher, the stripped
 binary within 5%. Measured on the compiler's own release build (Apple clang 21, 14
-cores, 151 units; `ci/bench_matrix.sh` protocol, object cache and ccache off):
+cores, 151 units; object cache and ccache off):
 
 | Case | full LTO (`-flto=auto`) | ThinLTO, no cache | ThinLTO, cache |
 |------|------------------------:|------------------:|---------------:|
@@ -517,7 +542,7 @@ ThinLTO import limit, `-import-instr-limit=300` and `1000`, changes neither by m
 than 0.5%), so the built-in profiles keep `auto` and ThinLTO is the validated opt-in:
 `SC_LTO=thin` for a session, or `lto = "thin"` under `[profile.release]` in a project
 whose binary is not the shipped compiler. The `bench` profile follows `release` so the benchmark measures
-the compiler users run, and `ci/perf_gate.sh` holds its runtime within 3%. Script mode
+the compiler users run. Script mode
 (`super-c release foo.spc`) links once with no link record to relink against, so a `thin`
 profile keeps `auto` there.
 
@@ -754,6 +779,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_STD_DIR` | The std directory, in place of the `std/` found beside the compiler binary (`exe_std_dir` in `src/main.spc`). `super-c test` sets it for the compiler under test, which `--out-dir` may place outside the project, when the project holds `std/core.spc` and the variable is unset (`src/build_system/build.spc`) |
 | `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
+| `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); `0` compiles every unit alone, as a large program does (tests of per-unit objects and staleness set it) |
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
@@ -762,7 +788,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, the publication census, and per publication the kept bodies remapped and the time it took (`type-identity.md` in the internals skill) |
 | `SC_SYNTAX_STATS` | Print one syntax accounting line per phase (parse, resolve, typecheck, borrowck, emit): node and child counts with the share inside bodies, the retained bytes of nodes, children, resolutions, types, module pools and the other side tables, the source text, and the module that retains the most (`syntax-ownership.md` in the internals skill) |
 
-### Verification (dev gates, each runs only when set)
+### Verification (validation switches, each runs only when set)
 
 | Variable | Effect |
 |----------|--------|

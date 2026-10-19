@@ -30,8 +30,23 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
   by the resolver).
 - Prelude: the std files, then the build-constant module `__std::build`, generated from
   the package's settings (`--target`, `arch`, `test_build`, `profile`; `add_build_module`).
-  A driver that sets them creates the package with `package_new` and loads with
-  `load_root`.
+- The two build drivers (`run_file`, `emit_closure`) load in two stages. `prelude_stage`
+  (`src/driver/emit.spc`) loads the prelude alone into a package with the same settings
+  (`Package::settings_copy`, `load_prelude_stage`; imports looked up under the std root only),
+  then `check_prelude` filters, resolves and type-checks it with the same functions the second
+  stage uses, through the prelude gate's publication. `driver::prelude_image` saves that package
+  (`utils::persist`: the modules with their ASTs and type pools, the index, the type table and
+  publication maps, the method marks) with the engine's deferred checks, and the build loads the
+  bytes back into its own package: a cached image (an object cache entry, see `super-c-binary`) is
+  the same bytes. `Package.carry` keeps what the second stage's item schedule starts from: the
+  prelude items' raw resolution and post-typecheck edges, readiness states, result verdicts and
+  dynamic edges. `load_user` then loads the root's closure after the prelude
+  (`Package.root_module` is its first module) and the vector backend when a module names a
+  vector. Every later stage skips the work the prelude stage did: the platform filter and the
+  resolution start at `root_module`, `index_append` extends the prelude's index, the item jobs
+  skip the prelude's items, and the edges of `carry` join the new ones. Module and item ids are
+  prelude-first. The batch lint, the LSP and the test harness still load with `load_root` or
+  `prelude_package_arch` and run every stage over every module.
 
 ## 2. Platform Filter (`platform_filter`)
 
@@ -105,8 +120,11 @@ generic argument of that type (`Lowerer::failed_on_error_type`), and the checker
 evaluation failure it causes (`Interp.err_refused`). A package the stage accepts holds no
 `TYPE_ERROR` (`assert_no_error_type`, fatal).
 
-Then `discharge_obligations`: cross-module reflection-bound obligations, once every
-module is typed.
+Then `discharge_obligations`: the reflection-bound obligations (a `fields` loop's bound on a
+still-generic owner) the call-time check could not run, once every module is typed: a foreign
+callee's, and a same-module callee's checked after its caller (one dependency cycle, such as an
+interface default calling a `fields` helper; `Ast.ob_seen` records what the call-time check ran).
+An obligation that reaches an interface default holds for every conformance that inherits it.
 
 **Freeze point:** at type-check completion every semantic decision table is final; only
 append-only interning (the module `pool` and the package type table) may grow later

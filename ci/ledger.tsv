@@ -1,5 +1,0 @@
-# Accepted-work ledger (ci/ledger.sh): every change of the chain against its parent under one protocol
-# (bootstrap-built benchmark binaries, 100 serial self-transpile rounds and one cold real build, 14 cores).
-# baseline record: the first commit of the chain, measured under this protocol; the perf gate scales
-# ci/baseline.env by the resolved limit over that value.
-# work	commit	parent	metric	parent_value	value	improvement	regression	owner

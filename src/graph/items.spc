@@ -475,6 +475,23 @@ pub fn open(p: &mut loader::Package) {
         sch.state.set(i, loader::IS_RESOLVED);
         sch.ret_attr.set(i, 2); // unrecorded: the borrow pass scans the body
     }
+    // The prelude stage's items keep the states, verdicts and dynamic edges it left.
+    let c = &p.carry;
+    for i in 0..c.items as usize {
+        sch.state.set(i, c.state[i]);
+        sch.ret_attr.set(i, c.ret_attr[i]);
+    }
+    let mut it = c.dyn_edges.iter();
+    loop {
+        switch it.next() {
+            Some(e) => {
+                sch.dyn_edges.insert(*e);
+            },
+            None => {
+                break;
+            },
+        };
+    }
     sch.sig_hash.resize_default(n);
     sch.fin_off.resize_default(n + 1);
     builtin_names(p, &mut sch);
@@ -835,8 +852,9 @@ pub fn build_serial(p: &mut loader::Package) {
     let t1 = plat::now_ns();
     let sps = spans_all(p);
     let t2 = plat::now_ns();
-    let mut edges = Vector::<u64>::new();
-    for m in 0..p.modules.len() {
+    // The prelude stage's modules: their edges as it scanned them.
+    let mut edges = replace(&mut p.carry.rs_edges, Vector::<u64>::new());
+    for m in p.root_module as usize..p.modules.len() {
         module_edges(p, m, &sps, &mut edges);
         builtin_edges(p, m, &sps, &mut edges);
     }
@@ -853,6 +871,9 @@ pub fn build_serial(p: &mut loader::Package) {
         );
     }
     p.sched.build_ns = plat::now_ns() - t0;
+    if p.carry.keep {
+        p.carry.rs_edges = edges;
+    }
 }
 
 /// Every module's declaration spans (the frontier builds them once, before its tasks).

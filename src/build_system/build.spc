@@ -325,12 +325,20 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, tree: str, now: i64) {
 /// its owner record names another directory (an older compiler recorded the source directory); it has
 /// no owner record and nothing in it changed for TMP_IDLE (a build that stopped before its first
 /// commit); or nothing in it (generations, owner record, objects) changed for OBJ_NS_IDLE. The
-/// script namespace has no owner and goes only when idle.
+/// script namespace has no owner and goes only when idle: nothing in any of its subdirectories changed.
 fn ns_dead(name: str, ns: str, now: i64) bool {
-    let idle = now - newest_mtime(ns);
     if name == SCRIPT_NS {
-        return idle >= OBJ_NS_IDLE;
+        let mut newest = newest_mtime(ns);
+        let subs = list_dir(ns, false).unwrap_or(Vector::<String>::new());
+        for i in 0..subs.len() {
+            let mt = newest_mtime(loader::join2(ns, subs.at(i).as_str()).as_str());
+            if mt > newest {
+                newest = mt;
+            }
+        }
+        return now - newest >= OBJ_NS_IDLE;
     }
+    let idle = now - newest_mtime(ns);
     let op = loader::join2(ns, "owner");
     let own = loader::read_file(op.as_str());
     if own.is_none() {
@@ -347,8 +355,8 @@ fn ns_dead(name: str, ns: str, now: i64) bool {
 }
 
 /// The cache sweep (`sweep_cache`) of cache root `root`, at most once per SWEEP_EVERY (the stamp
-/// `<root>/o/.sweep`).
-fn cache_sweep(root: str, now: i64) {
+/// `<root>/o/.sweep`): after every successful engine or script build.
+pub fn cache_sweep(root: str, now: i64) {
     let od = loader::join2(root, "o");
     if sweep_due(od.as_str(), now) {
         sweep_cache(root, now);
@@ -371,8 +379,9 @@ fn sweep_due(dir: str, now: i64) bool {
 
 /// Delete what no build reads again below cache root `root`: dead object namespaces (`ns_dead`), linker
 /// cache namespaces with no entry written or used for LTO_NS_IDLE (a toolchain upgrade leaves the old
-/// one behind), and the flat `<key>.o`/`<key>.d` files that compilers before namespaces installed
-/// directly in the root.
+/// one behind), the flat `<key>.o`/`<key>.d` files that compilers before namespaces installed
+/// directly in the root and the `ccver/` records of compilers before version records were entries; trim the script namespace (`script_trim`) and compress the entries no build
+/// tree names (`pack_cache`).
 pub fn sweep_cache(root: str, now: i64) {
     let od = loader::join2(root, "o");
     let nss = list_dir(od.as_str(), false).unwrap_or(Vector::<String>::new());
@@ -386,6 +395,8 @@ pub fn sweep_cache(root: str, now: i64) {
             rm_rf(ns.as_str());
         }
     }
+    script_trim(script_ns(root).as_str(), now);
+    pack_cache(od.as_str());
     let ld = loader::join2(root, "lto");
     let ltos = list_dir(ld.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..ltos.len() {
@@ -394,15 +405,8 @@ pub fn sweep_cache(root: str, now: i64) {
             rm_rf(lp.as_str());
         }
     }
-    // Compiler version records (`ccver_record`), by age: a build that needs a removed one probes again.
-    let vd = loader::join2(root, "ccver");
-    let vrs = list_dir(vd.as_str(), false).unwrap_or(Vector::<String>::new());
-    for i in 0..vrs.len() {
-        let vp = loader::join2(vd.as_str(), vrs.at(i).as_str());
-        if now - newest_mtime(vp.as_str()) >= LTO_NS_IDLE {
-            rm_rf(vp.as_str());
-        }
-    }
+    // Compiler version records of the layout before they joined the `script` namespace.
+    rm_rf(loader::join2(root, "ccver").as_str());
     let flat = list_dir(root, false).unwrap_or(Vector::<String>::new());
     for i in 0..flat.len() {
         if key_prefixed(flat.at(i).as_str()) {
@@ -1032,6 +1036,7 @@ fn cache_install(cobj: str, oout: str, dout: str, gen: str) {
     if cobj.len() == 0 {
         return;
     }
+    mkdir_p(loader::dirname_of(cobj));
     let pid = unsafe shim::sc_getpid();
     let mut tmp = format("{}.{}.tmp", cobj, pid);
     let mut oc = String::from_str(cobj);
@@ -1590,10 +1595,9 @@ extend CcStream {
                         return;
                     }
                     if self.shared.len() != 0 {
-                        sobj = loader::join2(self.shared.as_str(), keyname.as_str());
+                        sobj = script_entry(self.shared.as_str(), keyname.as_str());
                         if self.cache_restore(&sobj, opath.as_str(), dpath.as_str(), &fp) {
-                            // The mtime is the entry's last use: the trim deletes the least recently used.
-                            let _ = unsafe shim::sc_touch(sobj.cstr());
+                            touch_entry(sobj.as_str());
                             self.objs.push(opath.clone());
                             return;
                         }
@@ -1627,7 +1631,7 @@ extend CcStream {
         self.objs.push(opath.clone());
     }
 
-    // A cache hit: the object links into place (`link_or_copy`), its portable dependency list is
+    // A cache hit: the object links into place (`fetch_entry`), its portable dependency list is
     // written beside it, and the .cmd records the fingerprint so the next build's staleness check needs
     // no cache at all. An entry
     // without its dependency list is a miss: a restored object without a .d would never see a
@@ -1637,7 +1641,7 @@ extend CcStream {
         cd.truncate(cd.len() - 2);
         cd.push_str(".d");
         let dep = loader::read_file(cd.as_str());
-        if dep.is_none() || !link_or_copy(cobj.as_str(), opath) {
+        if dep.is_none() || !fetch_entry(cobj.as_str(), opath) {
             return false;
         }
         let d = dep.unwrap();
@@ -1649,6 +1653,10 @@ extend CcStream {
         cmdp.push_str(".cmd");
         let rec = format("{}\n0\n{}", fp.as_str(), cache_key(cobj.as_str()));
         let _ = write_file_atomic(cmdp.as_str(), rec.as_str());
+        // An earlier failed compile's log describes text the restored object replaces, as after a compile.
+        let mut lg = String::from_str(opath);
+        lg.push_str(".log");
+        let _ = unsafe shim::sc_unlink(lg.cstr());
         return true;
     }
 
@@ -2332,7 +2340,12 @@ fn emit_closure(
     p.test_build = topts != null && unsafe (*topts).enabled;
     p.profile = String::from_str(prof_name);
     p.profiles = profile_names(m);
-    p.load_root(root, cx.std_dir, cx.bootstrap_tags, cx.target);
+    p.bootstrap = cx.bootstrap_tags;
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
+    if prelude_stage(&mut p, &mut cirv, cx.std_dir, cx.target, jobs, cx.ce_steps, cx.ce_mem) {
+        p.load_user(root, cx.std_dir, cx.target);
+    }
     bst::mark(bst::B_LOAD);
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
@@ -2358,8 +2371,6 @@ fn emit_closure(
     if p.jobs == 1 && jobs != 1 {
         prt::shutdown(); // parallel loading may have started the pool
     }
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
     p.cir = &mut cirv;
     let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
     if rc == 0 && cid != 0 {
@@ -2723,7 +2734,7 @@ fn cc_stream(
     pending: String,
     cache: String,
 ) CcStream {
-    let cc_raw = resolve_cc(m.cc.as_str(), m.sdk);
+    let cc_raw = direct_cc(resolve_cc(m.cc.as_str(), m.sdk), m.target);
     let mut flags = String::new();
     flags.push_byte(b' ');
     flags.push_string(&m.cstd);
@@ -3018,6 +3029,9 @@ fn engine_build_i(
         for i in 0..stream.objs.len() {
             planned.insert(stream.objs.at(i).clone());
         }
+        // The members of `__sc_unity.c` compile through it, not alone.
+        let mut included = Set::<String>::new();
+        unity_members(gen.as_str(), &mut included);
         for i in 0..rels.len() {
             let rel = rels.at(i).as_str();
             if !rel.ends_with(".c") {
@@ -3025,7 +3039,7 @@ fn engine_build_i(
             }
             let mut opath = loader::join2(obj.as_str(), rel.slice(0, rel.len() - 2));
             opath.push_str(".o");
-            if !planned.contains(&opath) {
+            if !planned.contains(&opath) && !included.contains(rels.at(i)) {
                 stream.plan_c(rel);
             }
         }
@@ -3185,9 +3199,6 @@ fn engine_build_i(
             let now = time::now();
             if stream.cache.len() != 0 {
                 obj_cache_commit(stream.cache.as_str(), &mut stream.keys, pdir.as_str(), now);
-            }
-            if stream.shared.len() != 0 && stream.stale_n != 0 {
-                script_trim(stream.shared.as_str(), now);
             }
             let croot = cache_root();
             if croot.len() != 0 {

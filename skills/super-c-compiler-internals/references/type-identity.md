@@ -163,7 +163,9 @@ last checkpoint retains no pool at all.
 hold provisional records; every later checker then reads a prelude declaration's type
 from the owner's record instead of lowering its syntax), the start of `borrowck_all` (the
 whole package is typed) and the start of `cemit_package` (the whole package is
-borrow-checked). Each checkpoint:
+borrow-checked). A build's prelude stage runs the gate's publication over the prelude alone, and
+the image keeps the table and the maps it made; the second stage's gate then publishes before any
+of the program's items starts (stages.md). Each checkpoint:
 
 1. Collects one batch: every module's provisional records, in module order, children
    before parents (the pools are append-only, so a child's provisional index is smaller

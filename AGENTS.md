@@ -108,7 +108,7 @@ If natural and correct code fails because of a defect in a tool, compiler, or de
 - Never run `git push` unless the current user message explicitly asks for a push.
 - "Fix it" or "fix CI" is not permission to commit, push, dispatch a workflow, or cut a release. Every remote action needs an explicit ask.
 - Commit on `main`. Create a branch only to fix CI. Do not open a pull request unless asked.
-- The local commit-msg hook rejects `Co-authored-by:` lines and runs the full `check.sh`, which moves the release binary onto `./super-c`. Before any test, fixpoint, or commit claim, run `cmp super-c build/debug/super-c`.
+- The local commit-msg hook rejects `Co-authored-by:` lines and runs the full `check.sh`, which moves the release binary onto `./super-c` and ends with its own rebuild there (`build/bootstrap/test/super-c`). Before any test, fixpoint, or commit claim, run `cmp super-c build/debug/super-c` after a plain build, or `cmp super-c build/bootstrap/test/super-c` after `check.sh`.
 - Run `git status` before any `checkout`, `restore`, `reset`, or `clean`. Never revert paths you did not create.
 - After any git action, verify with `git status` or `git log` that it happened before reporting it.
 - Permission to commit or push applies only to the current user message. It does not carry to later messages.

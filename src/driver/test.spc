@@ -3,6 +3,7 @@
 // and compiles + runs the emitted build tree with $CC. test_build_and_run doubles as the `build`
 // subcommand's link step when `out_bin` is set.
 import stdio;
+import time;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
@@ -1626,7 +1627,7 @@ pub fn push_ldflags(args: &mut Vector<String>, path: str) {
     }
 }
 
-/// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
+/// Compile `units` (the emitted tree's C files to compile) with $CC. When `out_bin` is set (the `build` subcommand) the program is
 /// linked to that path and nothing runs; otherwise it links `<gen_root>/__tests` and runs it as the test
 /// runner, forwarding `topts`' options. With the object cache on, each unit compiles on its own with the
 /// compile side of the profile's flags (`ccflags`) through the script namespace
@@ -1636,7 +1637,7 @@ pub fn push_ldflags(args: &mut Vector<String>, path: str) {
 pub fn test_build_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
-    keep: &Vector<String>,
+    units: &Vector<String>,
     out_bin: str,
     cflags: str,
     ccflags: str,
@@ -1645,7 +1646,7 @@ pub fn test_build_and_run(
     // A cross target brings its own compiler: $CC on the host would build a host binary while the front end
     // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
-    let ccs = resolve_cc(p.cc.as_str(), sdk);
+    let ccs = ocache::direct_cc(resolve_cc(p.cc.as_str(), sdk), target);
     let root = p.gen_root.as_str();
     // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
     // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
@@ -1698,15 +1699,8 @@ pub fn test_build_and_run(
         split_args(&mut cfv, fl.as_str());
         split_args(&mut cfv, ccflags);
         split_args(&mut cfv, late.as_str());
-        let mut units = Vector::<String>::new();
-        for i in 0..keep.len() {
-            let cf = keep[i].as_str();
-            if cf.len() > 2 && cf.ends_with(".c") {
-                units.push(String::from_str(cf));
-            }
-        }
         let ns = ocache::script_ns(croot.as_str());
-        let crc = ocache::compile_units(&ccv, &cfv, root, &units, ns.as_str(), &mut objs);
+        let crc = ocache::compile_units(&ccv, &cfv, root, units, ns.as_str(), &mut objs);
         if crc != 0 {
             eprintln("super-c: {} failed ({})", what, ccs.as_str());
             return 1;
@@ -1735,11 +1729,8 @@ pub fn test_build_and_run(
             args.push(objs.at(i).clone());
         }
     } else {
-        for i in 0..keep.len() {
-            let cf = keep[i].as_str();
-            if cf.len() > 2 && cf.ends_with(".c") {
-                args.push(String::from_str(cf));
-            }
+        for i in 0..units.len() {
+            args.push(units.at(i).clone());
         }
     }
     let ldpath = build_out_path(root, "__ldflags", "");
@@ -1748,6 +1739,9 @@ pub fn test_build_and_run(
     if brc != 0 {
         eprintln("super-c: {} failed ({})", what, ccs.as_str());
         return 1;
+    }
+    if croot.len() != 0 {
+        bsys::cache_sweep(croot.as_str(), time::now());
     }
     // The `build` subcommand: the program is linked, nothing to run.
     if out_bin.len() != 0 {

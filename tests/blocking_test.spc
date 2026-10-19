@@ -688,6 +688,12 @@ fn shutdown_with_an_abandoned_call_is_bounded() {
     };
     let key = krx.recv().unwrap();
     assert(ph::wait_parked(key), "the caller parks in its call");
+    // The body is running, not queued, before the cancel and the shutdown below: a pool thread takes it
+    // after the caller parks, later on a loaded runner.
+    let deadline = platform::now_ns() + 5000000000;
+    while blocking::stats().running < 1 && platform::now_ns() < deadline {
+        time::sleep(time::Duration::from_millis(1));
+    }
     assert(rt::request_cancel(key, rt::CR_USER), "the parked caller is live");
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the caller leaves at once");
     assert_eq(afters(), 0i64);

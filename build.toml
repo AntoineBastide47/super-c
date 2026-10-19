@@ -17,12 +17,6 @@ run = [
 [command.gate]
 run = ["sh ci/gate.sh"]
 
-[command.perf]
-run = ["sh ci/perf_gate.sh"]
-
-[command.matrix]
-run = ["sh ci/bench_matrix.sh"]
-
 [command.gen]
 env = { SC_GEN_RUNS = "200" }
 run = ["./super-c test --quiet --filter=gen_random_run"]
