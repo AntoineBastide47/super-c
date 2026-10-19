@@ -57,6 +57,9 @@ its results: its annotation must name their types ("the annotation of a multi-va
 bindings must name its result types").
 
 An immutable binding forbids reassignment, `&mut self` method calls, and `&mut` borrows.
+The rule reaches through a user `Deref`: `*b` is an assignable place when `b`'s type defines
+`deref_mut` (`Box<T>`); `*b = v` and `&mut *b` call `deref_mut` and need `b` mutable. A type
+with `deref` only gives a read-only `*b`.
 Split initialization is legal: `let x: T; x = v;` (assign-once enforced, binding stays
 non-`mut`).
 
@@ -651,8 +654,8 @@ source text, values, and file:line on failure.
 | `@c.always_inline` | Force inlining |
 | `@c.noinline` | Prevent inlining |
 | `@c.noreturn` | Mark non-returning |
-| `@c.align(N)` | Set alignment: a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32` |
-| `@c.packed` | Pack struct. A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
+| `@c.align(N)` | Set alignment of a struct, a union or a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
+| `@c.packed` | Pack a struct or a union (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
 | `@c.export("sym")` | Pin exact C symbol |
 | `@c.import("sym")` | Import exact C symbol |
 | `@c.section("s")` | Place in section |

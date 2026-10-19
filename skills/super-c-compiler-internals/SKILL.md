@@ -597,13 +597,20 @@ emitted C keeps its size, and vector kernels inline their helpers. A generic cal
 emitter still demands so the assert runs. A multi-return call's member reads of its result temp
 (and of the temps copied from it) become reads of the return slots.
 
-A generic instance whose body holds a vector and calls an interface method through a type parameter
+A generic instance that calls an interface method through a type parameter
 has a bound variant (`driver::emit::bound_variant`, in the serial and the parallel drain alike): when, under the
-instance's bindings, the receiver's conformance by target defines the method and the store keeps it
-(`CEmit::bound_target`; not a generic interface, a keyed or blanket conformance, or a default
+instance's bindings, the receiver's conformance by target defines the method (of a generic interface,
+the conformance with the bound's arguments, `conf_for_args`) and the store keeps it
+(`CEmit::bound_target`; not a keyed or blanket conformance, or a default
 body), the shared lowering is copied, grounded for the instance (`inl::ground_body`: every type
 substituted, each const-parameter read a constant, its switches folded), the call made direct, and
-the inliner run again for up to `inl::MAX_DEPTH` rounds while it inlines (`bind_calls`). The variant
+the inliner run again for up to `inl::MAX_DEPTH` rounds while it inlines (`bind_calls`). In a body
+without vectors those rounds bind and splice only a callee whose result the instance fixes
+(`InlineCtx::fixed_result`, set by `only_fixed`: no parameter, no call, no static read but its
+const-generic parameters, so `G::len()` of `Vec<T, 3>` becomes a constant); the C compiler inlines
+the rest after the link, where an earlier splice made some loops slower. The inliner binds the
+parameters of a generic extend's function called through its receiver type (`V::<3>::len()`, a
+bound call made direct) from `Terminator.recv`. The variant
 serves that demand only. A concrete body that holds a vector runs the same rounds after its own
 inlining (`cemit_seed_module`): a generic callee spliced into it brings interface calls the splice
 already translated to concrete receivers. The record of the migration, the analysis boundary and the validation
@@ -692,7 +699,7 @@ Full monomorphization is the only generic backend.
   demand cross product pairs each declaration with its target's new instances only (`pair_cur`).
   A speculative walk (signature propagation, the demand cross product and the expansion of a
   record they created) creates no aggregate record through a computed const argument
-  (`folds_const`: `{N + 1}`, `{BITS * 2}`; an identity `{N}` does not count), and the collect line
+  (`folds_const`: `{N + 1}`, `{BITS * 2}`; an identity `{N}` in `N`'s own type does not count, `lin_identity`), and the collect line
   of `SC_CEMIT_STATS` reports records by kind, bodies walked, rounds and a budget stop; the
   census of per-instance re-lowerings, the decision against a symbolic generic IR and the
   closure's bound on width-generic code are in
@@ -710,6 +717,10 @@ Full monomorphization is the only generic backend.
   (`W::<u8>::f()`, with or without the function's own turbofish) has no receiver value; the
   lowering puts the qualifying instance in `Terminator.recv`, and the instance graph's
   `note_method_of` binds the extend from it (a method's receiver is its first argument).
+  `recv_binds` keeps such a call, and every method call of a non-keyed generic extend, out of
+  `note_call`: its record is an `IG_METHOD` (receiver arguments, then the member's own), never an
+  `IG_FN`. A keyed extend's member is an `IG_FN` record whose leading arguments are the extend's,
+  expanded through `expand_method`.
 - **Generic interface methods:** a call terminator whose callee is an interface method with its own
   generic parameters carries them as its trailing type arguments. `InstGraph::note_iface_call`
   resolves the receiver's conformance under the frame and records the implementation's method
@@ -740,7 +751,11 @@ Full monomorphization is the only generic backend.
   its depth bound), in `assoc_norm` (by-target conformances before generic ones), the emitter's
   keyed choice (`keyed_bounds_hold`), `Mangler::conform_ext`, the instance graph's `conf_bind`
   (`frame_bounds_hold`) and the evaluator's `keyed_conf` and `conf_by_args`
-  (`isub_bounds_hold`). The overlap check (`tc_check_blanket_overlap`) applies the bounds of the
+  (`isub_bounds_hold`). Several by-target conformances that apply to one instance
+  (`W<T: Num> as Key` and `W<bool> as Key` for `W<bool>`) are told apart the same way, never by
+  declaration order: the checker keeps the ones whose bounds hold when any does
+  (`tc_pick_conf_method`, `tc_assoc_norm`, `type_satisfies_in`), and the evaluator's `conf_ext_of`
+  takes the first whose parameter bounds hold, else the first that fits. The overlap check (`tc_check_blanket_overlap`) applies the bounds of the
   parameters the interface arguments solve. On an instance receiver a conformance method whose
   name several methods of its target share spells its interface and the interface's arguments as
   patterns after `__<method>` (`Mangler::inst_method`), so `Vec as Mul` and `Vec as Mul<T>` give

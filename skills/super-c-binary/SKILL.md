@@ -533,6 +533,7 @@ never version text.
 | `aarch64-features` | aarch64 | `<arm_neon.h>` compiles under the build's flags, whose one `-march`/`-mcpu` carries the optional features |
 | `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
 | `unaligned-vector-move` | Windows x86_64 | `-Wa,-muse-unaligned-vector-move` accepted (GNU as 2.38+; clang rejects it) |
+| `no-prelink-vectorize` | all | `-fno-vectorize -fno-slp-vectorize` accepted (clang; gcc rejects them, its LTO compile does not vectorize) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
 its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
@@ -546,7 +547,10 @@ before the transpile, one child per spelling, all at once. A build that measured
 leaves the record unchanged. The results a build used end every object and link
 fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
 "thin"`, on Windows x86_64 `unaligned-vector-move` (accepted: every compile and the link take
-the flag), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
+the flag), under full LTO (`lto = "full"` or `"auto"`, a ThinLTO request that falls back to `auto`
+included) `no-prelink-vectorize` (accepted: every compile takes the flags after the profile's `-O`
+flag, so clang vectorizes at the link, after it inlines across units: a function vectorized alone in
+its unit no longer vectorizes in the loop it is inlined into), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
 `wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
 compile, once per probe with the features it checks ("build: the C compiler 'cc' rejects
 '-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.

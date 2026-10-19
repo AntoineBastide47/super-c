@@ -195,9 +195,19 @@ and so do the `Float<E, F>` formats. The interpreter reads a union through the m
 or through another scalar member of its width (`f64_bits`: the bits retyped, `Interp::repun`); any
 other member is no compile-time value, so a `String` past its inline bytes (23 on a 64-bit target),
 whose union shares its length byte with the heap capacity, does not fold. Objects are reclaimed per
-constant, so a long computation (a wide float's text) can meet the memory budget. The
+constant and per call: the objects a call allocates (its frame, its by-value argument copies, its
+temporaries) die when it returns unless it stored a reference into an object older than the call
+(`note_wr`) or grew such an object (`note_grow`), both tracked as the lowest such object id since the
+call began (`Interp.wr_min`), or an item cache took one. So the budget bounds the live objects, and a long
+computation (a wide float's text) can meet it. Every store of a reference into an object must go
+through `note_wr`, the in-place `*r = v` copy of `write_place` included: a store it misses lets
+`call` reclaim an object still referenced. The
 interpreter also models std's `bits.h` helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
-wrapping `sc_w*64` and `sc_mulo_*64`). An integer loop step renders as `for (..; i++)` (or `i--`)
+wrapping `sc_w*64` and `sc_mulo_*64`), evaluates an f32 libm function as the f32 function the
+program links (`libm1f`, `libm2f`: `acosf` for an f32 `acos`, never the f64 result narrowed), so a
+constant equals the run-time call bit for bit where the compiler and the program use one libm, and folds the cancellation probe
+(`SI_CANCEL_PROBE`) to 0, as it folds `IN_SAFEPOINT_C` (no task exists at compile time; see the
+concurrency skill). An integer loop step renders as `for (..; i++)` (or `i--`)
 only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (`i > e` for `--`)
 with `e` of `i`'s type, and nothing else in the loop writes `i` or takes its address; every other
 step keeps its checked helper and renders as `while`. `@c.source` files and backing-header `.c`
