@@ -247,7 +247,10 @@ extend<T: Float> T as Gauss<T> {
     pub fn gauss(self: T, expected_value: T, standard_deviation: T) T {
         let d = self - expected_value;
         let exponent = -(d * d) / (T::from_i64(2) * standard_deviation * standard_deviation);
-        let two_pi = T::from_f64(6.28318530717958647692528676655900576);
+        let two_pi = T::from_decimal(
+            6.28318530717958647692528676655900576,
+            "6.2831853071795864769252867665590057683943387987502116419498891846156328125724180",
+        );
         return exponent.exp() / (standard_deviation * two_pi.sqrt());
     }
 }

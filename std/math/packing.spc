@@ -340,7 +340,10 @@ pub fn unpack_f3x9_e1x5(p: u32) Vec<f32, 3> {
 /// `rgb / 6` divided by alpha, and alpha: the largest of those components and 1e-6, clamped to [0, 1],
 /// rounded up to a multiple of 1 / 255.
 pub fn pack_rgbm<T: Float>(rgb: Vec<T, 3>) Vec<T, 4> {
-    let color = rgb * T::from_f64(1.0 / 6.0);
+    let color = rgb * T::from_decimal(
+        1.0 / 6.0,
+        "0.16666666666666666666666666666666666666666666666666666666666666666666666666666667",
+    );
     let mut alpha = clamp_f(
         max_f(max_f(color.e[0], color.e[1]), max_f(color.e[2], T::from_f64(1e-6))),
         T::zero(),

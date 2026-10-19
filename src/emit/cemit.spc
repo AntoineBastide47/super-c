@@ -11287,6 +11287,7 @@ extend CEmit {
             self.demand_seen.insert(k0);
         }
         let mut snap = mbe::subs_copy(&self.mg.subs);
+        let env = snap.len() as u32;
         let mut sfx = String::new();
         let mut rit = TyInstance {};
         if unsafe (*self.p().module_ast_const(rm6)).targs_of(rt6, &mut rit) && self.mg.in_generic_extend(
@@ -11301,7 +11302,7 @@ extend CEmit {
         } else if !self.push_targs(tg, &mut sfx) {
             return;
         }
-        self.bind_targs(&mut snap, idef.module, ifd.as_data.function.generics, tg);
+        self.bind_targs(&mut snap, idef.module, ifd.as_data.function.generics, tg, env);
         let d9 = Demand { def: idef, sym: sym.clone(), dk: 0, subs: snap, sfx: sfx };
         self.rec_demand(&d9, 0, 0);
         self.demand.push(d9);
@@ -11704,7 +11705,7 @@ extend CEmit {
             }
             self.demand_seen.insert(k0);
         }
-        self.bind_targs(&mut sn, md.module, fd.as_data.function.generics, tg);
+        self.bind_targs(&mut sn, md.module, fd.as_data.function.generics, tg, from);
         let sfx = String::from_str(sym.as_str().slice(st, sym.len()));
         let d9 = Demand { def: md, sym: sym.clone(), dk: 0, subs: sn, sfx: sfx };
         self.rec_demand(&d9, 0, 0);
@@ -11725,13 +11726,15 @@ extend CEmit {
     }
 
     // Bind generic parameters `gens` (module `fm`) to the call's arguments `tg` into `snap`, by
-    // position: an implementation's parameters stand where the interface method's do.
-    fn bind_targs(self: &Self, snap: &mut Vector<mbe::MSub>, fm: ModuleId, gens: NodeList, tg: IfTargs) {
-        let g0 = snap.len() as u32;
+    // position: an implementation's parameters stand where the interface method's do. The arguments
+    // name the caller's parameters: they resolve in the first `lim` bindings (the caller's env), never
+    // in the callee's extend bindings pushed after it, which can bind the same parameters (a method of
+    // `P<A, B>` calling another instance of `P`).
+    fn bind_targs(self: &Self, snap: &mut Vector<mbe::MSub>, fm: ModuleId, gens: NodeList, tg: IfTargs, lim: u32) {
         let fa = self.p().module_ast_const(fm);
         let mut k: u32 = 0;
         while k < gens.len && k < tg.n {
-            self.push_bind(snap, fm, unsafe (*fa).list(gens)[k as usize], tg.m, unsafe tg.at[k as usize], g0);
+            self.push_bind(snap, fm, unsafe (*fa).list(gens)[k as usize], tg.m, unsafe tg.at[k as usize], lim);
             k += 1;
         }
     }
@@ -11930,7 +11933,7 @@ extend CEmit {
                 let l7 = snap.len() as u32;
                 snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6, lim: l7 });
                 self.bind_conformance(&mut snap, rm6, rt6, DefId { module: callee.module, node: idecl }, conf);
-                self.bind_targs(&mut snap, callee.module, fd7.as_data.function.generics, tg);
+                self.bind_targs(&mut snap, callee.module, fd7.as_data.function.generics, tg, l7);
                 let d9 = Demand { def: callee, sym: sym.clone(), dk: 0, subs: snap, sfx: String::new() };
                 self.rec_demand(&d9, 0, 0);
                 self.demand.push(d9);

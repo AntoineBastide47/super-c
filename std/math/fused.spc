@@ -7,8 +7,10 @@
 // `cross(a, a) == 0`, `dot(v, perp(v)) == 0` or a zero determinant for two equal columns.
 //
 // `LargeVec` and `LargeMat` (below) are heap-backed and of run-time size, for sizes where `Vec` and `Mat`
-// stop scaling. Their products are fused by definition and run on SME tiles where the CPU has them;
-// `mul_fused` gives a `Mat` product the same definition.
+// stop scaling, of every element type. A float's products are fused by definition (f32 and f64 run on SME
+// tiles where the CPU has them); `mul_fused` gives a float `Mat` product the same definition.
+import std::float as sf;
+import std::int as si;
 import std::math::scalar as *;
 import std::math::vec as *;
 import std::math::mat as *;
@@ -50,25 +52,36 @@ pub fn normalize_fused<T: Float, const N: usize>(v: Vec<T, N>) Vec<T, N> {
 
 // ---- Large vectors and matrices ---------------------------------------------------------------------
 // Every product has one defined result on every machine and kernel:
-// - element (i, j) of `a * b` and element i of `a * x` are the fused chain over the inner index p, in order,
-//   from +0.0, as `std::simd::matrix` defines its products; they run on SME tiles where the CPU has them;
-// - `dot` is 16 partial sums, lane j holding elements j, j + 16, j + 32, .. added by fused multiply-add from
-//   +0.0, then summed by halves (`reduce_add_tree`).
-// Element-wise operations (`+`, `-`, scaling) round once per element, as on `Vec`.
+// - a float's element (i, j) of `a * b` and element i of `a * x` are the fused chain over the inner index p,
+//   in order, from +0.0, as `std::simd::matrix` defines its products (f32 and f64 run on SME tiles where the
+//   CPU has them); an integer's are `c + a * b` over p in order from 0, in the type's arithmetic;
+// - a float's `dot` is 16 partial sums, lane j holding elements j, j + 16, j + 32, .. added by fused
+//   multiply-add from +0.0, then summed by halves (`reduce_add_tree`); an integer's is the sum in index order.
+// Element-wise operations (`+`, `-`, scaling) are the element type's, as on `Vec`.
 
-/// An element type of `LargeVec` and `LargeMat`: `f32` or `f64`.
-pub interface LargeElem: Float + SimdFloat {
-    /// `c = a * b` for row-major `a` (m x k), `b` (k x n), `c` (m x n), as `std::simd::matrix` computes it.
+/// An element type of `LargeVec` and `LargeMat`: every `Scalar`. f32 and f64 run the SIMD and matrix kernels,
+/// the other types scalar loops of the same definitions.
+pub interface LargeElem: Scalar {
+    /// The dot product of equal-length slices.
+    fn dot_of(a: []Self, b: []Self) Self;
+    /// `c = a * b` for column-major a (m x k), b (k x n) and c (m x n).
+    fn product_of(c: []mut Self, a: []Self, b: []Self, m: usize, k: usize, n: usize);
+    /// `y[i] = a * x[i] + y[i]` for every i of equal-length slices, rounded once for a float.
+    fn axpy_of(y: []mut Self, a: Self, x: []Self);
+}
+
+// f32 and f64: the matrix kernel of `std::simd::matrix`, row-major `c = a * b`.
+interface MatKernel: Float + SimdFloat {
     fn mat_mul(c: []mut Self, a: []Self, b: []Self, m: usize, k: usize, n: usize);
 }
 
-extend f32 as LargeElem {
+extend f32 as MatKernel {
     pub fn mat_mul(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
         matrix::mul_f32(c, a, b, m, k, n);
     }
 }
 
-extend f64 as LargeElem {
+extend f64 as MatKernel {
     pub fn mat_mul(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
         matrix::mul_f64(c, a, b, m, k, n);
     }
@@ -76,7 +89,7 @@ extend f64 as LargeElem {
 
 // The 16-lane strided fused dot product of equal-length slices, as two 8-lane halves (lanes 0-7, 8-15):
 // adding the halves is the first step of the 16-lane sum by halves.
-fn dot_lanes<T: LargeElem>(a: []T, b: []T) T {
+fn dot_lanes<T: MatKernel>(a: []T, b: []T) T {
     let n = a.len();
     let nv = n - n % 16;
     let zero = Simd::<T, 8>::splat(T::zero());
@@ -96,11 +109,10 @@ fn dot_lanes<T: LargeElem>(a: []T, b: []T) T {
     return simd::reduce_add_tree(lo + hi);
 }
 
-// c = a * b for column-major a (m x k), b (k x n) and c (m x n): element (i, j) is the fused chain over p
-// in order from +0.0. The matrix kernel and the lanes compute the same bits. The lanes are faster for a
-// product of at most 1024 multiply-adds, and for a matrix times a vector below 64 rows or from 2^20
-// matrix elements on (measured on an M3 Max and on an M5 Pro); the kernel otherwise.
-fn product<T: LargeElem>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usize) {
+// The product by the matrix kernel or by lanes, the same bits. The lanes are faster for a product of at
+// most 1024 multiply-adds, and for a matrix times a vector below 64 rows or from 2^20 matrix elements on
+// (measured on an M3 Max and on an M5 Pro); the kernel otherwise.
+fn product_lanes<T: MatKernel>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usize) {
     let lanes = if n == 1 {
         m < 64 || m * k > 1048576;
     } else {
@@ -131,6 +143,249 @@ fn product<T: LargeElem>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usiz
                 i += 1;
             }
         }
+    }
+}
+
+fn axpy_lanes<T: MatKernel>(y: []mut T, a: T, x: []T) {
+    let n = y.len();
+    let nv = n - n % 8;
+    let av = Simd::<T, 8>::splat(a);
+    let mut i: usize = 0;
+    while i < nv {
+        simd::store(y, i, av.fma(simd::load::<T, 8>(x, i), simd::load::<T, 8>(y, i)));
+        i += 8;
+    }
+    while i < n {
+        y[i] = a.fma(x[i], y[i]);
+        i += 1;
+    }
+}
+
+extend f32 as LargeElem {
+    pub fn dot_of(a: []f32, b: []f32) f32 {
+        return dot_lanes(a, b);
+    }
+    pub fn product_of(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+        product_lanes(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut f32, a: f32, x: []f32) {
+        axpy_lanes(y, a, x);
+    }
+}
+
+extend f64 as LargeElem {
+    pub fn dot_of(a: []f64, b: []f64) f64 {
+        return dot_lanes(a, b);
+    }
+    pub fn product_of(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
+        product_lanes(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut f64, a: f64, x: []f64) {
+        axpy_lanes(y, a, x);
+    }
+}
+
+// The float formats: the definitions as scalar loops.
+fn dot_fused<T: Float>(a: []T, b: []T) T {
+    let mut acc: [T; 16] = [T::zero(); 16];
+    for i in 0..a.len() {
+        unsafe {
+            acc[i % 16] = a[i].fma(b[i], acc[i % 16]);
+        }
+    }
+    let mut w: usize = 8;
+    while w >= 1 {
+        for j in 0..w {
+            unsafe {
+                acc[j] = acc[j] + acc[j + w];
+            }
+        }
+        w /= 2;
+    }
+    return acc[0];
+}
+
+fn product_fused<T: Float>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usize) {
+    for j in 0..n {
+        for i in 0..m {
+            let mut s = T::zero();
+            for p in 0..k {
+                s = a[p * m + i].fma(b[j * k + p], s);
+            }
+            c[j * m + i] = s;
+        }
+    }
+}
+
+fn axpy_fused<T: Float>(y: []mut T, a: T, x: []T) {
+    for i in 0..y.len() {
+        y[i] = a.fma(x[i], y[i]);
+    }
+}
+
+extend<const E: usize, const F: usize, const FAM: sf::FloatFamily> sf::Float<E, F, FAM> as LargeElem {
+    pub fn dot_of(a: []sf::Float<E, F, FAM>, b: []sf::Float<E, F, FAM>) sf::Float<E, F, FAM> {
+        return dot_fused(a, b);
+    }
+    pub fn product_of(
+        c: []mut sf::Float<E, F, FAM>,
+        a: []sf::Float<E, F, FAM>,
+        b: []sf::Float<E, F, FAM>,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) {
+        product_fused(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut sf::Float<E, F, FAM>, a: sf::Float<E, F, FAM>, x: []sf::Float<E, F, FAM>) {
+        axpy_fused(y, a, x);
+    }
+}
+
+// The integers: the sums in order, in the type's arithmetic.
+fn dot_int<T: Scalar>(a: []T, b: []T) T {
+    let mut s = T::zero();
+    for i in 0..a.len() {
+        s = s + a[i] * b[i];
+    }
+    return s;
+}
+
+fn product_int<T: Scalar>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usize) {
+    for j in 0..n {
+        for i in 0..m {
+            let mut s = T::zero();
+            for p in 0..k {
+                s = s + a[p * m + i] * b[j * k + p];
+            }
+            c[j * m + i] = s;
+        }
+    }
+}
+
+fn axpy_int<T: Scalar>(y: []mut T, a: T, x: []T) {
+    for i in 0..y.len() {
+        y[i] = a * x[i] + y[i];
+    }
+}
+
+extend i8 as LargeElem {
+    pub fn dot_of(a: []i8, b: []i8) i8 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut i8, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut i8, a: i8, x: []i8) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend i16 as LargeElem {
+    pub fn dot_of(a: []i16, b: []i16) i16 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut i16, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut i16, a: i16, x: []i16) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend i32 as LargeElem {
+    pub fn dot_of(a: []i32, b: []i32) i32 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut i32, a: []i32, b: []i32, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut i32, a: i32, x: []i32) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend i64 as LargeElem {
+    pub fn dot_of(a: []i64, b: []i64) i64 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut i64, a: []i64, b: []i64, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut i64, a: i64, x: []i64) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend u8 as LargeElem {
+    pub fn dot_of(a: []u8, b: []u8) u8 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut u8, a: []u8, b: []u8, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut u8, a: u8, x: []u8) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend u16 as LargeElem {
+    pub fn dot_of(a: []u16, b: []u16) u16 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut u16, a: []u16, b: []u16, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut u16, a: u16, x: []u16) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend u32 as LargeElem {
+    pub fn dot_of(a: []u32, b: []u32) u32 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut u32, a: []u32, b: []u32, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut u32, a: u32, x: []u32) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend u64 as LargeElem {
+    pub fn dot_of(a: []u64, b: []u64) u64 {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut u64, a: []u64, b: []u64, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut u64, a: u64, x: []u64) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend<const B: usize> si::Int<B> as LargeElem {
+    pub fn dot_of(a: []si::Int<B>, b: []si::Int<B>) si::Int<B> {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut si::Int<B>, a: []si::Int<B>, b: []si::Int<B>, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut si::Int<B>, a: si::Int<B>, x: []si::Int<B>) {
+        axpy_int(y, a, x);
+    }
+}
+
+extend<const B: usize> si::UInt<B> as LargeElem {
+    pub fn dot_of(a: []si::UInt<B>, b: []si::UInt<B>) si::UInt<B> {
+        return dot_int(a, b);
+    }
+    pub fn product_of(c: []mut si::UInt<B>, a: []si::UInt<B>, b: []si::UInt<B>, m: usize, k: usize, n: usize) {
+        product_int(c, a, b, m, k, n);
+    }
+    pub fn axpy_of(y: []mut si::UInt<B>, a: si::UInt<B>, x: []si::UInt<B>) {
+        axpy_int(y, a, x);
     }
 }
 
@@ -184,53 +439,26 @@ extend<T: LargeElem> LargeVec<T> {
         return self.e.index_range_mut(0..n);
     }
 
-    /// The fused dot product (16 strided partial sums, then summed by halves). Panics: lengths differ.
+    /// The dot product (a float's: 16 strided fused partial sums, then summed by halves). Panics: lengths
+    /// differ.
     pub fn dot(self: &LargeVec<T>, b: &LargeVec<T>) T {
         if self.len() != b.len() {
             panic("LargeVec::dot: the lengths differ");
         }
-        return dot_lanes(self.as_slice(), b.as_slice());
+        return T::dot_of(self.as_slice(), b.as_slice());
     }
 
     /// `self.dot(self)`.
     pub fn length2(self: &LargeVec<T>) T {
-        return dot_lanes(self.as_slice(), self.as_slice());
+        return T::dot_of(self.as_slice(), self.as_slice());
     }
 
-    /// `sqrt(self.length2())`.
-    pub fn length(self: &LargeVec<T>) T {
-        return self.length2().sqrt();
-    }
-
-    /// `(b - self).length()`. Panics: lengths differ.
-    pub fn distance(self: &LargeVec<T>, b: &LargeVec<T>) T {
-        return (b - self).length();
-    }
-
-    /// `self` scaled to length 1 (a zero vector gives NaNs).
-    pub fn normalized(self: &LargeVec<T>) LargeVec<T> {
-        return self * (T::one() / self.length());
-    }
-
-    /// `self[i] = fma(a, x[i], self[i])` for every i. Panics: lengths differ.
+    /// `self[i] = a * x[i] + self[i]` for every i, rounded once for a float. Panics: lengths differ.
     pub fn axpy(self: &mut LargeVec<T>, a: T, x: &LargeVec<T>) {
         if self.len() != x.len() {
             panic("LargeVec::axpy: the lengths differ");
         }
-        let n = self.len();
-        let nv = n - n % 8;
-        let av = Simd::<T, 8>::splat(a);
-        let xs = x.as_slice();
-        let ys = self.as_mut_slice();
-        let mut i: usize = 0;
-        while i < nv {
-            simd::store(ys, i, av.fma(simd::load::<T, 8>(xs, i), simd::load::<T, 8>(ys, i)));
-            i += 8;
-        }
-        while i < n {
-            ys[i] = a.fma(xs[i], ys[i]);
-            i += 1;
-        }
+        T::axpy_of(self.as_mut_slice(), a, x.as_slice());
     }
 
     // Element-wise `self op b` (`b` subtracted when `sub`) of equal-length vectors; panics with `what`.
@@ -249,6 +477,23 @@ extend<T: LargeElem> LargeVec<T> {
             );
         }
         return LargeVec::<T> { e: e };
+    }
+}
+
+extend<T: LargeElem + Float> LargeVec<T> {
+    /// `sqrt(self.length2())`.
+    pub fn length(self: &LargeVec<T>) T {
+        return self.length2().sqrt();
+    }
+
+    /// `(b - self).length()`. Panics: lengths differ.
+    pub fn distance(self: &LargeVec<T>, b: &LargeVec<T>) T {
+        return (b - self).length();
+    }
+
+    /// `self` scaled to length 1 (a zero vector gives NaNs).
+    pub fn normalized(self: &LargeVec<T>) LargeVec<T> {
+        return self * (T::one() / self.length());
     }
 }
 
@@ -430,7 +675,7 @@ extend<T: LargeElem> LargeMat<T> as Mul<LargeMat<T>> {
         }
         let mut out = LargeMat::<T>::zeros(self.r, b.c);
         let n = out.e.len();
-        product(out.e.index_range_mut(0..n), self.as_slice(), b.as_slice(), self.r, self.c, b.c);
+        T::product_of(out.e.index_range_mut(0..n), self.as_slice(), b.as_slice(), self.r, self.c, b.c);
         return out;
     }
 }
@@ -443,7 +688,7 @@ extend<T: LargeElem> LargeMat<T> as Mul<LargeVec<T>> {
             panic("LargeMat * LargeVec: the column count is not the vector length");
         }
         let mut y = LargeVec::<T>::zeros(self.r);
-        product(y.as_mut_slice(), self.as_slice(), x.as_slice(), self.r, self.c, 1);
+        T::product_of(y.as_mut_slice(), self.as_slice(), x.as_slice(), self.r, self.c, 1);
         return y;
     }
 }
@@ -453,7 +698,7 @@ extend<T: LargeElem> LargeMat<T> as Mul<LargeVec<T>> {
 /// in registers, about as fast as `a * b`; from there on it runs the matrix kernel. Measured against
 /// `a * b`: with SME (M5 Pro) 1.4 times as fast at 32 x 32 and 34 times at 64 x 64; without (M3 Max)
 /// half as fast at 32 x 32 and 4.3 times as fast at 64 x 64.
-pub fn mul_fused<T: LargeElem, const C: usize, const R: usize, const K: usize>(a: Mat<T, C, R>, b: Mat<T, K, C>) Mat<
+pub fn mul_fused<T: LargeElem + Float, const C: usize, const R: usize, const K: usize>(a: Mat<T, C, R>, b: Mat<T, K, C>) Mat<
     T,
     K,
     R
@@ -475,6 +720,6 @@ pub fn mul_fused<T: LargeElem, const C: usize, const R: usize, const K: usize>(a
     let av = unsafe Slice::<T> { ptr: &a.c[0].e[0], len: C * R };
     let bv = unsafe Slice::<T> { ptr: &b.c[0].e[0], len: K * C };
     let ov = unsafe SliceMut::<T> { ptr: &mut out.c[0].e[0], len: K * R };
-    product(ov, av, bv, R, C, K);
+    T::product_of(ov, av, bv, R, C, K);
     return out;
 }

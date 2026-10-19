@@ -2859,6 +2859,57 @@ fn main() i32 {
     );
 }
 
+// An operator takes the method of its own interface's conformance when another interface of the type
+// has a method of the same name: `*self + *o` inside `Other::add` runs `Add::add`, `~*self` `BitNot`'s.
+@test
+fn operator_takes_its_interface_method() {
+    h::expect_exit(
+        "Add::add beside Other::add",
+        M"(struct W { pub v: i32 }
+interface Other {
+    fn add(self: &Self, o: &Self) Self;
+    fn bit_not(self: &Self) Self;
+}
+extend W as Add { type Output = W; pub fn add(self: &W, o: &W) W { return W { v: self.v + o.v }; } }
+extend W as BitNot { type Output = W; pub fn bit_not(self: &W) W { return W { v: ~self.v }; } }
+extend W as Other {
+    pub fn add(self: &W, o: &W) W { return *self + *o; }
+    pub fn bit_not(self: &W) W { return ~*self; }
+}
+fn via<T: Other>(x: T, y: T) T { return x.add(&y); }
+fn inv<T: Other>(x: T) T { return x.bit_not(); }
+fn main() i32 { return via(W { v: 2 }, W { v: 3 }).v + inv(W { v: 2 }).v - 2; }
+)",
+        0,
+    );
+}
+
+// A method of `P<A, B>` calling, through a bound, the generic method of another instance of `P` with
+// arguments over its own parameters: the arguments are the caller's (A = 3), not the callee's (A = 7).
+@test
+fn bound_call_arguments_resolve_in_the_caller() {
+    h::expect_exit(
+        "P<3, 4>::cast::<P<7, 8>> calling P<7, 8>::from_p::<3, 4>",
+        M"(struct P<const A: usize, const B: usize> { pub v: u64 }
+interface Conv {
+    fn from_p<const X: usize, const Y: usize>(p: P<X, Y>) Self;
+    fn cast<U: Conv>(self: Self) U;
+}
+extend<const A: usize, const B: usize> P<A, B> as Conv {
+    pub fn from_p<const A2: usize, const B2: usize>(p: P<A2, B2>) P<A, B> {
+        return P::<A, B> { v: p.v + A2 as u64 * 100 + B2 as u64 * 10000 + A as u64 * 1000000 };
+    }
+    pub fn cast<U: Conv>(self: P<A, B>) U { return U::from_p(self); }
+}
+fn main() i32 {
+    let y: P<7, 8> = P::<3, 4> { v: 5 }.cast::<P<7, 8>>();
+    return (y.v - 7040305) as i32;
+}
+)",
+        0,
+    );
+}
+
 // A generic function passing an instance over its own parameters (`W<T, 2>`) to a bound-generic
 // function folds in a constant: the argument grounds through the caller's frame.
 @test

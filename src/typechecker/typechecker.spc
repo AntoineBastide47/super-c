@@ -13270,6 +13270,66 @@ extend<'a> TypeChecker<'a> {
         return self.subst_type(t, &sp[0], &sv[0], k as i32);
     }
 
+    // The prelude interface whose method operator method `m` is (`Add` for `add`), or "".
+    const fn op_iface_name(m: str) str<'static> {
+        return switch m {
+            "add" => "Add",
+            "sub" => "Sub",
+            "mul" => "Mul",
+            "div" => "Div",
+            "rem" => "Rem",
+            "bit_and" => "BitAnd",
+            "bit_or" => "BitOr",
+            "bit_xor" => "BitXor",
+            "shl" => "Shl",
+            "shr" => "Shr",
+            "bit_not" => "BitNot",
+            "neg" => "Neg",
+            _ => "",
+        };
+    }
+
+    // Whether method `c` is a member of a conformance to the prelude interface of operator method `m`.
+    fn tc_op_conf(self: &Self, c: DefId, m: str) bool {
+        let ifn = TypeChecker::op_iface_name(m);
+        if ifn.len() == 0 {
+            return false;
+        }
+        let ext = self.enclosing(c.module, c.node, NodeKind::NODE_EXTEND);
+        if ext == NODE_NONE {
+            return false;
+        }
+        let it = unsafe (*self.mod_ast(c.module)).at_const(ext).as_data.extend_def.interface_type;
+        return it != NODE_NONE && self.is_prelude_iface(unsafe (*self.mod_ast(c.module)).resolution_def(it), ifn);
+    }
+
+    // Whether one of the `n` candidates of operator method `m` belongs to a conformance to the
+    // operator's interface: the operator then means only those (a type's `Scalar::add` beside its
+    // `Add::add` is no candidate of `+`).
+    fn tc_op_conf_among(self: &Self, cands: &Cands, n: i32, m: str) bool {
+        for i in 0..n {
+            if self.tc_op_conf(cands[i as usize], m) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The method of unary operator method `m` on declaration `decl` of module `m0`: of a conformance to
+    // the operator's interface when one provides it, else the first method of that name.
+    fn tc_op_method_cstr(self: &mut Self, m0: ModuleId, decl: NodeId, m: str) DefId {
+        let mut cands = Cands {};
+        let n = self.find_method_all(m0, decl, tok::Span::empty(), m, &mut cands);
+        if n as usize <= TC_MAX_CANDIDATES {
+            for i in 0..n {
+                if self.tc_op_conf(cands[i as usize], m) {
+                    return cands[i as usize];
+                }
+            }
+        }
+        return self.find_method_cstr(m0, decl, m);
+    }
+
     // Choose among same-named methods by what their PARAMETERS accept, under the documented
     // lexicographic score: viability first, then fewer reference adjustments,
     // then more exact parameter matches. A tie between distinct viable candidates sets `tie` and,
@@ -13302,8 +13362,12 @@ extend<'a> TypeChecker<'a> {
         let mut best2 = DefId { module: 0, node: NODE_NONE };
         let mut bs = CandScore {};
         let mut have = false;
+        let op_only = self.tc_op_conf_among(&cands, n, lit);
         for i in 0..n {
             let c = cands[i as usize];
+            if op_only && !self.tc_op_conf(c, lit) {
+                continue;
+            }
             // An extend whose bounds the receiver's instance does not satisfy (`Vec<T: Int, N>` for
             // `Vec<bool, 2>`) is no candidate.
             if !self.tc_method_applies(recv, c) || recv != TYPE_NONE && !self.method_extend_bounds_hold(
@@ -20843,7 +20907,7 @@ extend TypeChecker {
         let mut od = NODE_NONE;
         *out = os;
         if self.aggregate_decl(os, &mut om, &mut od) {
-            let md = self.find_method_cstr(om, od, name);
+            let md = self.tc_op_method_cstr(om, od, name);
             if md.node != NODE_NONE && !self.method_extend_bounds_hold(os, md) {
                 self.err_method_extend_bounds(sp, os, md);
                 *out = TYPE_NONE;

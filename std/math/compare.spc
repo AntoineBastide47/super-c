@@ -1,6 +1,8 @@
 // Comparisons and ULP steps: exact and ordered component tests, epsilon and ULP tests on scalars, vectors
 // and matrices, and float steps by ULPs. Floats compare IEEE. The epsilon tests come in two kinds:
 // `equal_eps` is `|x - y| <= eps`, `epsilon_equal` is `|x - y| < eps`.
+import std::float as sf;
+import std::int as si;
 import std::math::scalar as *;
 import std::math::vec as *;
 import std::math::mat as *;
@@ -185,9 +187,9 @@ pub fn prev_float_ulps<U, G: FloatUlps<U>>(x: G, ulps: U) G {
     return x.prev_float_ulps(ulps);
 }
 
-/// A value `float_distance` takes: an f32 or f64 scalar or vector.
+/// A value `float_distance` takes: an f32, f64 or `Float<E, F>` scalar or vector.
 pub interface FloatDistance: Copy {
-    /// `i32` for f32, `i64` for f64; a vector of those for a vector.
+    /// `i32` for f32, `i64` for f64, `Int<1 + E + F>` for `Float<E, F>`; a vector of those for a vector.
     type Distance;
     fn float_distance(self: Self, y: Self) Self::Distance;
 }
@@ -206,38 +208,18 @@ fn scalar_abs<T: Scalar>(x: T) T {
     return -x;
 }
 
-// The bits of `x` as a signed integer of its width, widened to i64.
-fn float_int<T: Float>(x: T) i64 {
-    let b = x.to_bits();
-    if sizeof(T) == 4 {
-        return (b as u32) as i32;
-    }
-    return b as i64;
-}
-
-// The scalar ULP test: false on different signs.
+// The scalar ULP test: false on different signs (`ulp_distance` is then past every count).
 fn scalar_equal_ulps<T: Float>(x: T, y: T, max_ulps: i32) bool {
-    let a = float_int(x);
-    let b = float_int(y);
-    if a < 0 != b < 0 {
-        return false;
-    }
-    return scalar_abs(a - b) <= max_ulps as i64;
+    return max_ulps >= 0 && x.ulp_distance(y) <= max_ulps as u64;
 }
 
 // The ULP test of one vector component: on different signs, equal mantissas and exponents.
 fn component_equal_ulps<T: Float>(x: T, y: T, max_ulps: i32) bool {
-    let a = float_int(x);
-    let b = float_int(y);
-    if a < 0 != b < 0 {
-        let magnitude: i64 = if sizeof(T) == 4 {
-            0x7FFFFFFF;
-        } else {
-            0x7FFFFFFFFFFFFFFF;
-        };
-        return ((a ^ b) & magnitude) == 0;
+    let d = x.ulp_distance(y);
+    if d == u64::MAX {
+        return x.abs().ulp_distance(y.abs()) == 0;
     }
-    return scalar_abs(a - b) <= max_ulps as i64;
+    return max_ulps >= 0 && d <= max_ulps as u64;
 }
 
 // `x` moved `n` times to its next value toward `toward`.
@@ -581,6 +563,14 @@ extend f64 as FloatDistance {
     }
 }
 
+// A `Float<E, F>`'s distance is its bits as an `Int<1 + E + F>`.
+extend<const E: usize, const F: usize, const FAM: sf::FloatFamily> sf::Float<E, F, FAM> as FloatDistance {
+    type Distance = si::Int<{1 + E + F}>;
+    pub fn float_distance(self: sf::Float<E, F, FAM>, y: sf::Float<E, F, FAM>) si::Int<{1 + E + F}> {
+        return scalar_abs(self.bits_int() - y.bits_int());
+    }
+}
+
 extend<const N: usize> Vec<f32, N> as FloatDistance {
     type Distance = Vec<i32, N>;
     pub fn float_distance(self: Vec<f32, N>, y: Vec<f32, N>) Vec<i32, N> {
@@ -598,6 +588,85 @@ extend<const N: usize> Vec<f64, N> as FloatDistance {
     type Distance = Vec<i64, N>;
     pub fn float_distance(self: Vec<f64, N>, y: Vec<f64, N>) Vec<i64, N> {
         let mut r = Vec::<i64, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+// The vectors of the std float aliases (a conformance cannot target `Vec<Float<E, F>, N>` for every format).
+extend<const N: usize> Vec<sf::f16, N> as FloatDistance {
+    type Distance = Vec<si::Int<16>, N>;
+    pub fn float_distance(self: Vec<sf::f16, N>, y: Vec<sf::f16, N>) Vec<si::Int<16>, N> {
+        let mut r = Vec::<si::Int<16>, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+extend<const N: usize> Vec<sf::bf16, N> as FloatDistance {
+    type Distance = Vec<si::Int<16>, N>;
+    pub fn float_distance(self: Vec<sf::bf16, N>, y: Vec<sf::bf16, N>) Vec<si::Int<16>, N> {
+        let mut r = Vec::<si::Int<16>, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+extend<const N: usize> Vec<sf::f128, N> as FloatDistance {
+    type Distance = Vec<si::Int<128>, N>;
+    pub fn float_distance(self: Vec<sf::f128, N>, y: Vec<sf::f128, N>) Vec<si::Int<128>, N> {
+        let mut r = Vec::<si::Int<128>, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+extend<const N: usize> Vec<sf::f256, N> as FloatDistance {
+    type Distance = Vec<si::Int<256>, N>;
+    pub fn float_distance(self: Vec<sf::f256, N>, y: Vec<sf::f256, N>) Vec<si::Int<256>, N> {
+        let mut r = Vec::<si::Int<256>, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+extend<const N: usize> Vec<sf::f8e5m2, N> as FloatDistance {
+    type Distance = Vec<si::Int<8>, N>;
+    pub fn float_distance(self: Vec<sf::f8e5m2, N>, y: Vec<sf::f8e5m2, N>) Vec<si::Int<8>, N> {
+        let mut r = Vec::<si::Int<8>, N>::zero();
+        for i in 0..N {
+            unsafe {
+                r.e[i] = self.e[i].float_distance(y.e[i]);
+            }
+        }
+        return r;
+    }
+}
+
+extend<const N: usize> Vec<sf::f8e4m3fn, N> as FloatDistance {
+    type Distance = Vec<si::Int<8>, N>;
+    pub fn float_distance(self: Vec<sf::f8e4m3fn, N>, y: Vec<sf::f8e4m3fn, N>) Vec<si::Int<8>, N> {
+        let mut r = Vec::<si::Int<8>, N>::zero();
         for i in 0..N {
             unsafe {
                 r.e[i] = self.e[i].float_distance(y.e[i]);

@@ -128,7 +128,10 @@ pub fn inversesqrt<T: Float, G: Gen<T>>(x: G) G {
 
 /// Each component times `T(0.01745329251994329576923690768489)`.
 pub fn radians<T: Float, G: Gen<T>>(degrees: G) G {
-    let k = T::from_f64(0.01745329251994329576923690768489);
+    let k = T::from_decimal(
+        0.01745329251994329576923690768489,
+        "0.017453292519943295769236907684886127134428718885417254560971914401710091146034494",
+    );
     let mut r = degrees;
     for i in 0..G::len() {
         r.put(i, degrees.at(i) * k);
@@ -138,7 +141,10 @@ pub fn radians<T: Float, G: Gen<T>>(degrees: G) G {
 
 /// Each component times `T(57.295779513082320876798154814105)`.
 pub fn degrees<T: Float, G: Gen<T>>(radians: G) G {
-    let k = T::from_f64(57.295779513082320876798154814105);
+    let k = T::from_decimal(
+        57.295779513082320876798154814105,
+        "57.295779513082320876798154814105170332405472466564321549160243861202847148321553",
+    );
     let mut r = radians;
     for i in 0..G::len() {
         r.put(i, radians.at(i) * k);
@@ -283,7 +289,10 @@ pub fn csc<T: Float, G: Gen<T>>(angle: G) G {
 
 /// `tan(T(pi / 2) - angle)`, component by component.
 pub fn cot<T: Float, G: Gen<T>>(angle: G) G {
-    let pi_over_2 = T::from_f64(3.1415926535897932384626433832795 / 2.0);
+    let pi_over_2 = T::from_decimal(
+        3.1415926535897932384626433832795 / 2.0,
+        "1.5707963267948966192313216916397514420985846996875529104874722961539082031431045",
+    );
     let mut r = angle;
     for i in 0..G::len() {
         r.put(i, (pi_over_2 - angle.at(i)).tan());
@@ -311,7 +320,10 @@ pub fn acsc<T: Float, G: Gen<T>>(x: G) G {
 
 /// `T(pi / 2) - atan(x)`, component by component.
 pub fn acot<T: Float, G: Gen<T>>(x: G) G {
-    let pi_over_2 = T::from_f64(3.1415926535897932384626433832795 / 2.0);
+    let pi_over_2 = T::from_decimal(
+        3.1415926535897932384626433832795 / 2.0,
+        "1.5707963267948966192313216916397514420985846996875529104874722961539082031431045",
+    );
     let mut r = x;
     for i in 0..G::len() {
         r.put(i, pi_over_2 - x.at(i).atan());

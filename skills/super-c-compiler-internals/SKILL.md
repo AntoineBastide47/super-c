@@ -727,7 +727,10 @@ Full monomorphization is the only generic backend.
   (`IG_FN`, or `IG_METHOD` with the receiver's arguments first) or walks the inherited default body
   with `Self`, the conformance's arguments and the method's bound; the emitter
   (`iface_target_sym`, `IfTargs`) spells the same instance (`C__conv__u8`) and demands it
-  (`demand_impl_targs`); the evaluator binds them in `call_in`.
+  (`demand_impl_targs`); the evaluator binds them in `call_in`. The demand's bindings of the method's
+  own parameters read the call's arguments under the caller's env (`bind_targs`' `lim`), below the
+  receiver's extend bindings: a method of `P<A, B>` calling another instance of `P` names the
+  caller's `A`, which the callee's extend binds too.
 - **Keyed extends:** a generic extend (`ext_blanket`: its target is its own parameter) and an
   extend with parameters only its interface's arguments name (`ext_free_params`) are keyed
   (`ext_keyed`): no receiver instance binds them, so the checker records every argument of the

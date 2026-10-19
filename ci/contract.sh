@@ -5,7 +5,7 @@
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=30
+CONTRACT_VERSION=31
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -147,6 +147,7 @@ tests/math_random_test.spc
 tests/math_spline_test.spc
 tests/math_transform_test.spc
 tests/math_vec_test.spc
+tests/math_wide_test.spc
 tests/multiversion_test.spc
 tests/mutex_test.spc
 tests/parallel_harness.spc

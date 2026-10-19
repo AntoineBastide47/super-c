@@ -228,7 +228,10 @@ generic body a parameter over type parameters scores against the argument's own 
 is an exact match (one reference adjustment through `&`), and a type parameter never takes, and is
 never taken by, an argument of another kind (`Add<T>` is not viable for a vector right operand, nor
 `Add<Self>` for a `T`); a parameter whose head differs from the argument's (`V<N>` against `W<4>`)
-is not viable either.
+is not viable either. An operator (`+`, `&`, `<<`, unary `-` and `~`, their compound assignments)
+takes only the methods of conformances to its prelude interface (`Add`, `BitAnd`, `Shl`, `Neg`,
+`BitNot`) when the receiver has one: another interface's same-named method (`Scalar::add` beside
+`Add::add`) is no candidate, so `*self + *other` inside that conformance runs `Add::add`.
 
 Two candidates with equal best scores are an ambiguity error; its notes name each candidate (or the
 conformances, or the bounds of a type parameter) at its source location. On a concrete receiver

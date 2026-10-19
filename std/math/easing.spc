@@ -255,17 +255,42 @@ pub fn back_ease_in_out<T: Float>(a: T) T {
 /// Four parabolic bounces of decreasing height, the last ending at 1.
 pub fn bounce_ease_out<T: Float>(a: T) T {
     assert_unit(a);
-    if a.less(T::from_f64(4.0 / 11.0)) {
+    if a.less(
+        T::from_decimal(
+            4.0 / 11.0,
+            "0.36363636363636363636363636363636363636363636363636363636363636363636363636363636",
+        ),
+    ) {
         return T::from_i64(121) * a * a / T::from_i64(16);
     }
-    if a.less(T::from_f64(8.0 / 11.0)) {
-        return T::from_f64(363.0 / 40.0) * a * a - T::from_f64(99.0 / 10.0) * a + T::from_f64(17.0 / 5.0);
+    if a.less(
+        T::from_decimal(
+            8.0 / 11.0,
+            "0.72727272727272727272727272727272727272727272727272727272727272727272727272727273",
+        ),
+    ) {
+        return T::from_decimal(363.0 / 40.0, "9.075") * a * a - T::from_decimal(99.0 / 10.0, "9.9") * a + T::from_decimal(
+            17.0 / 5.0,
+            "3.4",
+        );
     }
-    if a.less(T::from_f64(9.0 / 10.0)) {
-        let quadratic = T::from_f64(4356.0 / 361.0) * a * a;
-        return quadratic - T::from_f64(35442.0 / 1805.0) * a + T::from_f64(16061.0 / 1805.0);
+    if a.less(T::from_decimal(9.0 / 10.0, "0.9")) {
+        let quadratic = T::from_decimal(
+            4356.0 / 361.0,
+            "12.066481994459833795013850415512465373961218836565096952908587257617728531855956",
+        ) * a * a;
+        return quadratic - T::from_decimal(
+            35442.0 / 1805.0,
+            "19.635457063711911357340720221606648199445983379501385041551246537396121883656510",
+        ) * a + T::from_decimal(
+            16061.0 / 1805.0,
+            "8.8980609418282548476454293628808864265927977839335180055401662049861495844875346",
+        );
     }
-    return T::from_f64(54.0 / 5.0) * a * a - T::from_f64(513.0 / 25.0) * a + T::from_f64(268.0 / 25.0);
+    return T::from_decimal(54.0 / 5.0, "10.8") * a * a - T::from_decimal(513.0 / 25.0, "20.52") * a + T::from_decimal(
+        268.0 / 25.0,
+        "10.72",
+    );
 }
 
 /// `1 - bounce_ease_out(1 - a)`.

@@ -1,9 +1,12 @@
 // Text and hash of vectors, matrices, quaternions and dual quaternions. `to_string` and the `Format`
-// conformances give the type prefix (`d` for f64, `i` for i32, `u8`, ..), each float as C's `%f` of the
-// value as an f64, each integer as C's `%d` of its low 32 bits as a signed int (a `u32` above `i32::MAX`
-// or a large 64-bit value prints as that int), and cut the text at 4095 bytes. There are no precision,
-// width, delimiter or order options. The `Hash` conformances combine the component hashes (an integer's
-// value, a float's bits, 0 for both zeros), so values equal under `==` hash equally.
+// conformances give the type prefix (`d` for f64, `i` for i32, `u8`, `f128`, ..: `Scalar::push_name`), each
+// built-in float as C's `%f` of the value as an f64, each built-in integer as C's `%d` of its low 32 bits as
+// a signed int (a `u32` above `i32::MAX` or a large 64-bit value prints as that int), an `Int<N>` or
+// `UInt<N>` as its decimal value, a float format wider than f64 as its own `to_string`
+// (`Scalar::push_value`), and cut the text at 4095 bytes. There are no precision, width, delimiter or
+// order options. The `Hash` conformances combine
+// the component hashes (an integer's low 64 bits, an f32's or f64's bits, a float format's nearest f64's
+// bits, 0 for both zeros), so values equal under `==` hash equally.
 import std::math::scalar as *;
 import std::math::vec as *;
 import std::math::mat as *;
@@ -19,67 +22,25 @@ pub fn to_string<G: Format + Copy>(x: G) String {
     return x.fmt();
 }
 
-// The type letters of a vector, matrix or quaternion name.
-fn prefix<T: Scalar>() str<'static> {
-    if T::is_float() {
-        if sizeof(T) == 4 {
-            return "";
-        }
-        return "d";
-    }
-    let signed = T::is_signed();
-    return switch sizeof(T) {
-        1 => if signed {
-            "i8";
-        } else {
-            "u8";
-        },
-        2 => if signed {
-            "i16";
-        } else {
-            "u16";
-        },
-        4 => if signed {
-            "i";
-        } else {
-            "u";
-        },
-        _ => if signed {
-            "i64";
-        } else {
-            "u64";
-        },
-    };
-}
-
-// One component: `%f` of the value as an f64, or `%d` of the value as an `i32`.
-fn push_component<T: Scalar>(s: &mut String, v: T) {
-    if T::is_float() {
-        s.push_f64_prec(v.cast::<f64>(), 6);
-    } else {
-        s.push_i64(v.cast::<i32>());
-    }
-}
-
 // The components of `v` separated by ", ".
 fn push_components<T: Scalar, const N: usize>(s: &mut String, v: &Vec<T, N>) {
     for i in 0..N {
         if i > 0 {
             s.push_str(", ");
         }
-        push_component(s, unsafe v.e[i]);
+        T::push_value(s, unsafe v.e[i]);
     }
 }
 
 // A quaternion as `to_string` writes it inside the parentheses: `w, {x, y, z}`.
 fn push_quat_parts<T: Float>(s: &mut String, q: &Quat<T>) {
-    push_component(s, q.w);
+    T::push_value(s, q.w);
     s.push_str(", {");
-    push_component(s, q.x);
+    T::push_value(s, q.x);
     s.push_str(", ");
-    push_component(s, q.y);
+    T::push_value(s, q.y);
     s.push_str(", ");
-    push_component(s, q.z);
+    T::push_value(s, q.z);
     s.push_str("}");
 }
 
@@ -116,7 +77,7 @@ extend<T: Scalar, const N: usize> Vec<T, N> as Format {
     /// `<prefix>vecN(x, y, ..)`.
     pub fn fmt(self: &Vec<T, N>) String {
         let mut s = String::new();
-        s.push_str(prefix::<T>());
+        T::push_name(&mut s);
         s.push_str("vec");
         s.push_u64(N as u64);
         s.push_str("(");
@@ -184,7 +145,7 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Format {
     /// (`mat2x2`, not `mat2`).
     pub fn fmt(self: &Mat<T, C, R>) String {
         let mut s = String::new();
-        s.push_str(prefix::<T>());
+        T::push_name(&mut s);
         s.push_str("mat");
         s.push_u64(C as u64);
         s.push_str("x");
@@ -220,7 +181,7 @@ extend<T: Float> Quat<T> as Format {
     /// `<prefix>quat(w, {x, y, z})`.
     pub fn fmt(self: &Quat<T>) String {
         let mut s = String::new();
-        s.push_str(prefix::<T>());
+        T::push_name(&mut s);
         s.push_str("quat(");
         push_quat_parts(&mut s, self);
         s.push_str(")");
@@ -242,7 +203,7 @@ extend<T: Float> DualQuat<T> as Format {
     /// `<prefix>dualquat((w, {x, y, z}), (w, {x, y, z}))`, the real part first.
     pub fn fmt(self: &DualQuat<T>) String {
         let mut s = String::new();
-        s.push_str(prefix::<T>());
+        T::push_name(&mut s);
         s.push_str("dualquat((");
         push_quat_parts(&mut s, &self.real);
         s.push_str("), (");

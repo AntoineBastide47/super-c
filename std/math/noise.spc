@@ -192,12 +192,20 @@ fn grad3_layer<T: Float>(ixy: Vec<T, 4>, periodic: bool) (Vec<T, 4>, Vec<T, 4>, 
     let mut gx = if periodic {
         ixy / T::from_i64(7);
     } else {
-        ixy * T::from_f64(1.0 / 7.0);
+        ixy * T::from_decimal(
+            1.0 / 7.0,
+            "0.14285714285714285714285714285714285714285714285714285714285714285714285714285714",
+        );
     };
     let mut gy = if periodic {
         fract(floor(gx) / T::from_i64(7)) - T::from_f64(0.5);
     } else {
-        fract(floor(gx) * T::from_f64(1.0 / 7.0)) - T::from_f64(0.5);
+        fract(
+            floor(gx) * T::from_decimal(
+                1.0 / 7.0,
+                "0.14285714285714285714285714285714285714285714285714285714285714285714285714285714",
+            ),
+        ) - T::from_f64(0.5);
     };
     gx = fract(gx);
     let gz = Vec::<T, 4>::splat(T::from_f64(0.5)) - abs(gx) - abs(gy);
@@ -438,7 +446,10 @@ fn simplex2<T: Float>(v: Vec<T, 2>) T {
 }
 
 fn simplex3<T: Float>(v: Vec<T, 3>) T {
-    let c = Vec::<T, 2>::new(T::from_f64(1.0 / 6.0), T::from_f64(1.0 / 3.0));
+    let c = Vec::<T, 2>::new(
+        T::from_decimal(1.0 / 6.0, "0.16666666666666666666666666666666666666666666666666666666666666666666666666666667"),
+        T::from_decimal(1.0 / 3.0, "0.33333333333333333333333333333333333333333333333333333333333333333333333333333333"),
+    );
     let d = Vec::<T, 4>::new(T::from_f64(0.0), T::from_f64(0.5), T::from_f64(1.0), T::from_f64(2.0));
 
     let mut i = floor(v + dot(v, Vec::<T, 3>::splat(c.e[1])));

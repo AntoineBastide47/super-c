@@ -1,0 +1,2 @@
+bin = "wide-math-gen"
+root = "gen.spc"
