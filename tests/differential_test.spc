@@ -13,7 +13,12 @@ fn same_output_agrees_across_profiles() {
     src.push_str(
         "fn main() i32 {\n    let a = opr::<i32>(i32::MAX);\n    println(\"{}\", a.wrapping_add(opr::<i32>(1)));\n    println(\"{}\", a / opr::<i32>(0));\n    return 0;\n}\n",
     );
-    h::expect_same_output("a division trap and a wrapping add", src.as_str(), ["--profile=dev"], ["--profile=release"]);
+    h::expect_same_output(
+        "a division trap and a wrapping add",
+        src.as_str(),
+        ["--profile=debug"],
+        ["--profile=release"],
+    );
 }
 
 // Each libm call runs as written under every profile: release's optimizer neither merges `sin(x)` and
@@ -24,7 +29,7 @@ fn libm_calls_agree_across_profiles() {
     h::expect_same_output(
         "sin and cos of one value, f64 and f32",
         "fn main() i32 {\n    let mut count = 0;\n    let mut x: f64 = 0.001;\n    let mut y: f32 = 0.001;\n    for _ in 0..200000 {\n        let s = x.sin();\n        let c = x.cos();\n        if s * s + c * c != 1.0 { count += 1; }\n        let sf = y.sin();\n        let cf = y.cos();\n        if sf * sf + cf * cf != 1.0 { count += 1; }\n        if 2.0f64.powf(x) != x.exp2() { count += 1; }\n        x = x * 1.0001 + 0.0001;\n        y = y * 1.0001 + 0.0001;\n    }\n    println(\"{}\", count);\n    return 0;\n}\n",
-        ["--profile=dev"],
+        ["--profile=debug"],
         ["--profile=release"],
     );
 }
@@ -33,8 +38,8 @@ fn libm_calls_agree_across_profiles() {
 fn same_output_reports_profile_dependent_overflow() {
     let mut src = String::from_str(OPR);
     src.push_str("fn main() i32 {\n    println(\"{}\", opr::<i32>(i32::MAX) + opr::<i32>(1));\n    return 0;\n}\n");
-    let d = h::same_output(src.as_str(), ["--profile=dev"], ["--profile=release"], [""]);
-    assert(d.contains("differs"), "an overflow traps under dev and wraps under release");
+    let d = h::same_output(src.as_str(), ["--profile=debug"], ["--profile=release"], [""]);
+    assert(d.contains("differs"), "an overflow traps under debug and wraps under release");
     assert(d.contains("super-c: attempt to add with overflow"), "the trap text is part of the report");
     assert(d.contains("-2147483648"), "the release stdout is part of the report");
 }

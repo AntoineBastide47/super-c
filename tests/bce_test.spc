@@ -32,8 +32,7 @@ fn expect_panics(label: str, src: str, msg: str) {
     assert(ok, label);
 }
 
-@test
-fn safety_element_checks() {
+fn safety_element_checks(b: &mut h::ExitBatch) {
     // Element index equal to the length.
     expect_panics(
         "index == len panics",
@@ -47,15 +46,14 @@ fn safety_element_checks() {
         "index out of bounds",
     );
     // A valid dynamic access still works.
-    h::expect_exit(
+    b.add(
         "valid dynamic access",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 3] = [7, 8, 9];\n    let s: []i32 = a[0..3];\n    let i = argv.len() - 1; // == 0\n    return s[i] - 7;\n}\n",
         0,
     );
 }
 
-@test
-fn safety_range_checks() {
+fn safety_range_checks(b: &mut h::ExitBatch) {
     // Exclusive range with start > end.
     expect_panics(
         "start > end panics",
@@ -87,23 +85,22 @@ fn safety_range_checks() {
         "range out of bounds",
     );
     // Valid inclusive range still slices.
-    h::expect_exit(
+    b.add(
         "valid inclusive range",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 1; // == 2\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32 - 3;\n}\n",
         0,
     );
 }
 
-@test
-fn safety_mutation_and_zst() {
+fn safety_mutation_and_zst(b: &mut h::ExitBatch) {
     // A vector mutation between the proof and the access keeps the (passing) check honest.
-    h::expect_exit(
+    b.add(
         "mutation between proof and access",
         "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let n = v.len() - argv.len() + 1; // == 1\n    v.push(6);\n    return v[n] - 6;\n}\n",
         0,
     );
     // Zero-sized elements use logical lengths: in-range works, out-of-range panics.
-    h::expect_exit(
+    b.add(
         "zst logical length in range",
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    v.push(Z {});\n    let i = argv.len(); // == 1\n    let _ = v[i];\n    return v.len() as i32 - 2;\n}\n",
         0,
@@ -242,21 +239,19 @@ fn expect_c_user_present(label: str, src: str, needle: str) {
     assert(c.code_has(needle), label);
 }
 
-@test
-fn affine_guard_removes_check() {
+fn affine_guard_removes_check(b: &mut h::ExitBatch) {
     // the exact `k + 1` value proven by the dominating guard re-proves at the access.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let k = argv.len() + 20;\n    let mut s = 0;\n    if k + 1 < v.len() {\n        s += v[k + 1];\n    }\n    return s - 22;\n}\n";
     expect_c_user_absent("affine guard removes the body check", SRC, "__sc_bounds(");
-    h::expect_exit("affine guard behavior", SRC, 0);
+    b.add("affine guard behavior", SRC, 0);
 }
 
-@test
-fn coalescing_groups_adjacent_checks() {
+fn coalescing_groups_adjacent_checks(b: &mut h::ExitBatch) {
     // Three adjacent accesses collapse to ONE group check at the first site.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s - 126;\n}\n";
     expect_c_user_present("group check emitted", SRC, "__sc_bounds_group(");
     expect_c_user_absent("no per-element checks in the group", SRC, "__sc_bounds(");
-    h::expect_exit("group behavior", SRC, 0);
+    b.add("group behavior", SRC, 0);
 }
 
 @test
@@ -269,13 +264,12 @@ fn coalescing_panic_parity() {
     expect_panics("disabled pass panics identically", SRC, "index out of bounds");
 }
 
-@test
-fn coalescing_blocked_by_mutation() {
+fn coalescing_blocked_by_mutation(b: &mut h::ExitBatch) {
     // A growth call between the accesses invalidates the group: per-element checks stay.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let mut s = 0;\n    s += v[j];\n    v.push(64);\n    s += v[j + 1];\n    return s - 83;\n}\n";
     expect_c_user_absent("no group across a mutating call", SRC, "__sc_bounds_group(");
     expect_c_user_present("per-element checks retained", SRC, "__sc_bounds(");
-    h::expect_exit("blocked group behavior", SRC, 0);
+    b.add("blocked group behavior", SRC, 0);
 }
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
@@ -459,10 +453,9 @@ fn inline_panic_site_parity() {
     expect_panics("oob panics (both off)", BAD, "index out of bounds");
 }
 
-@test
-fn inline_omitted_aggregate_members() {
+fn inline_omitted_aggregate_members(b: &mut h::ExitBatch) {
     // Spelled-count array literals carry IR_NONE oper-pool entries: the splice must keep them.
-    h::expect_exit(
+    b.add(
         "inlined callee with omitted aggregate members",
         "fn mk(x: i32) [i32; 4] {\n    let a: [i32; 4] = [[0] = x];\n    return a;\n}\nfn main(argv: Vector<str>) i32 {\n    let a = mk(argv.len() as i32);\n    return a[0] + a[1] + a[2] + a[3] - 1;\n}\n",
         0,
@@ -585,30 +578,27 @@ fn loop_header_kills_lengths_the_loop_writes() {
     expect_panics("the stale bound panics", SRC, "index out of bounds");
 }
 
-@test
-fn interval_facts_remove_strided_checks() {
+fn interval_facts_remove_strided_checks(b: &mut h::ExitBatch) {
     // `n = len - len % 4` is a multiple of 4 below the length and `i` steps by 4 from 0, so
     // `i + 3 < n <= len` for every access of the unrolled body.
     let SRC: str = "fn sum4(s: []i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < n {\n        t += s[i] + s[i + 1] + s[i + 2] + s[i + 3];\n        i += 4;\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    return sum4(v[0..v.len()]) - 28;\n}\n";
     expect_c_user_absent("no element check", SRC, "__sc_bounds(");
     expect_c_user_absent("no group check", SRC, "__sc_bounds_group(");
-    h::expect_exit("strided sum", SRC, 0);
+    b.add("strided sum", SRC, 0);
 }
 
-@test
-fn interval_join_keeps_the_hull() {
+fn interval_join_keeps_the_hull(b: &mut h::ExitBatch) {
     // `k` is 2 or 5 after the join and the length is at least 8 past the guard.
     let SRC: str = "fn hull(s: []i32, c: bool) i32 {\n    if s.len() < 8 {\n        return 0;\n    }\n    let k: usize = if c {\n        2;\n    } else {\n        5;\n    };\n    return s[k];\n}\nfn masked(s: []i32, k: usize) i32 {\n    if s.len() >= 8 {\n        return s[k & 7] + s[k % 8];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..8 {\n        v.push(k);\n    }\n    let s: []i32 = v[0..8];\n    return hull(s, argv.len() == 1) + masked(s, argv.len() + 8) - 4;\n}\n";
     expect_c_user_absent("hull and mask bounds prove the accesses", SRC, "__sc_bounds(");
-    h::expect_exit("hull behavior", SRC, 0);
+    b.add("hull behavior", SRC, 0);
 }
 
-@test
-fn interval_widening_terminates_on_nested_loops() {
+fn interval_widening_terminates_on_nested_loops(b: &mut h::ExitBatch) {
     // Both headers widen; the branch bounds `j < i < 64` still prove the inner access.
     let SRC: str = "fn nested(s: []i32) i32 {\n    if s.len() < 64 {\n        return 0;\n    }\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < 64 {\n        let mut j: usize = 0;\n        while j < i {\n            t += s[j];\n            j += 1;\n        }\n        i += 1;\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for _k in 0..64 {\n        v.push(1);\n    }\n    return nested(v[0..64]) - 2016 + argv.len() as i32 - 1;\n}\n";
     expect_c_user_absent("the inner access is proven", SRC, "__sc_bounds(");
-    h::expect_exit("nested behavior", SRC, 0);
+    b.add("nested behavior", SRC, 0);
 }
 
 // Project program `src` (it imports std::simd) calls the vector range check in its C when `present`,
@@ -617,7 +607,7 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
     let b = h::diff_build(src, []);
     assert(b.built, label);
     let mut path = String::from_str(b.proj.dir());
-    path.push_str("/build/dev/gen/main.c");
+    path.push_str("/build/debug/gen/main.c");
     let c = cli::read_text(path.as_str());
     assert(c.len() != 0, label);
     assert(c.contains("__sc_bounds_vec(") == present, label);
@@ -744,4 +734,28 @@ fn main(argv: Vector<str>) i32 {
 )",
         "index out of bounds",
     );
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    safety_element_checks(&mut b);
+    safety_range_checks(&mut b);
+    safety_mutation_and_zst(&mut b);
+    affine_guard_removes_check(&mut b);
+    coalescing_groups_adjacent_checks(&mut b);
+    coalescing_blocked_by_mutation(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    inline_omitted_aggregate_members(&mut b);
+    interval_facts_remove_strided_checks(&mut b);
+    interval_join_keeps_the_hull(&mut b);
+    interval_widening_terminates_on_nested_loops(&mut b);
+    b.run();
 }

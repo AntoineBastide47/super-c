@@ -14,10 +14,11 @@ import driver::util as *;
 /// A temp file an interrupted install left behind is removed after this many seconds.
 pub const TMP_IDLE: i64 = 3600;
 /// The script namespace holds at most this many objects after a trim; above it, a build that installed
-/// an object deletes the least recently used ones down to SCRIPT_OBJ_KEEP. Sized above the working set
-/// of a `super-c test` run (about 2.5k distinct units), so a suite run evicts only older runs' objects.
-pub const SCRIPT_OBJ_MAX: usize = 4096;
-const SCRIPT_OBJ_KEEP: usize = 3072;
+/// an object deletes the least recently used ones down to SCRIPT_OBJ_KEEP. A `super-c test` run uses
+/// about 4.8k objects (its fixtures and the builds its harnesses run, 323 MiB): the bound holds three
+/// such runs of different sources (worktrees, branches), so a suite run evicts only older runs' objects.
+pub const SCRIPT_OBJ_MAX: usize = 16384;
+const SCRIPT_OBJ_KEEP: usize = 12288;
 static_assert(SCRIPT_OBJ_KEEP < SCRIPT_OBJ_MAX, "a trim frees room for later installs");
 
 /// The object cache root: the build cache root, or empty when caching is disabled (SC_NO_CACHE set,
@@ -243,6 +244,178 @@ pub fn hex64(v: u64, out: &mut String) {
     }
 }
 
+/// The executable the first word of `cmd` names: as given when it has a directory part, else the
+/// first PATH entry holding it (`.exe` too on a Windows host). Returns its mtime; 0 when unresolved
+/// (`out` then holds the bare word).
+pub fn which_path(cmd: str, out: &mut String) i64 {
+    let mut e: usize = 0;
+    while e < cmd.len() && cmd[e] != b' ' {
+        e += 1;
+    }
+    let name = cmd.slice(0, e);
+    let win = unsafe shim::sc_host_platform() == 0;
+    let mut cand = String::new();
+    let mut has_dir = false;
+    for i in 0..name.len() {
+        if name[i] == b'/' || name[i] == b'\\' {
+            has_dir = true;
+        }
+    }
+    if !has_dir {
+        let pe = stdlib::get_env("PATH");
+        if pe.is_some() {
+            let pv = pe.unwrap();
+            let path = pv.as_str();
+            let sep = if win {
+                b';';
+            } else {
+                b':';
+            };
+            let mut a: usize = 0;
+            for i in 0..path.len() + 1 {
+                if i == path.len() || path[i] == sep {
+                    if i > a {
+                        for x in 0..2 {
+                            cand.clear();
+                            cand.push_str(path.slice(a, i));
+                            cand.push_byte(b'/');
+                            cand.push_str(name);
+                            if x == 1 {
+                                cand.push_str(".exe");
+                            }
+                            let mt = unsafe shim::sc_mtime(cand.cstr());
+                            if mt != 0 {
+                                out.push_string(&cand);
+                                return mt;
+                            }
+                            if !win {
+                                break;
+                            }
+                        }
+                    }
+                    a = i + 1;
+                }
+            }
+        }
+    }
+    out.push_str(name);
+    cand.clear();
+    cand.push_str(name);
+    return unsafe shim::sc_mtime(cand.cstr());
+}
+
+/// The identity of compiler command `cc` that a recorded version line stands for: the command, and
+/// the path and modification time of the program it runs. On macOS a compiler in `/usr/bin` is an
+/// xcrun stub that runs a developer directory's toolchain: `DEVELOPER_DIR`, else the xcode-select
+/// link's target, else the Command Line Tools. The identity adds those settings (`TOOLCHAINS` too)
+/// and the modification time of each candidate's clang, so an upgrade or a switch of toolchains is
+/// a new identity.
+fn cc_identity(cc: str) String {
+    let mut path = String::new();
+    let mt = which_path(cc, &mut path);
+    let mut id = format("{}\t{}\t{}", cc, path.as_str(), mt);
+    if unsafe shim::sc_host_platform() == 1 && path.as_str().starts_with("/usr/bin/") {
+        let env = stdlib::get_env("DEVELOPER_DIR").unwrap_or(String::new());
+        let mut lb = PathBuf {};
+        let mut link = String::new();
+        if unsafe shim::sc_readlink("/var/db/xcode_select_link".ptr() as *const char, &mut lb[0], 4096) > 0 {
+            link.push_str(str::from_cbuf(lb.as_slice()));
+        }
+        id.format_into(
+            "\t{}\t{}\t{}",
+            env.as_str(),
+            link.as_str(),
+            stdlib::get_env("TOOLCHAINS").unwrap_or(String::new()).as_str(),
+        );
+        let devs: [str; 3] = [env.as_str(), link.as_str(), "/Library/Developer/CommandLineTools"];
+        let clangs: [str; 2] = ["usr/bin/clang", "Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"];
+        for d in devs {
+            for c in clangs {
+                if d.len() != 0 {
+                    let mut cp = loader::join2(d, c);
+                    id.format_into("\t{}", unsafe shim::sc_mtime(cp.cstr()));
+                }
+            }
+        }
+    }
+    return id;
+}
+
+// The record of compiler command `cc`'s version line under the cache root: `<root>/ccver/<hash>`,
+// holding the identity, then the line. Empty without a cache root.
+fn ccver_record_path(id: &String) String {
+    let root = cache_root();
+    if root.len() == 0 {
+        return root;
+    }
+    let mut p = loader::join2(root.as_str(), "ccver/");
+    let mut h1 = FNV_BASIS;
+    let mut h2: u64 = 0x9e3779b97f4a7c15;
+    ch_mix_bytes(&mut h1, &mut h2, id.as_str().ptr(), id.len());
+    hex64(h1, &mut p);
+    return p;
+}
+
+/// The version line recorded for compiler command `cc` (its words space-joined) while the
+/// compiler's identity (`cc_identity`) is unchanged; None when no record matches. A `--version`
+/// probe costs a process (about 10 ms of CPU through the xcrun stub), once per compiler instead
+/// of once per build.
+pub fn ccver_recorded(cc: str) Option<String> {
+    let id = cc_identity(cc);
+    let rp = ccver_record_path(&id);
+    if rp.len() == 0 {
+        return Option::<String>::None;
+    }
+    let body = loader::read_file(rp.as_str());
+    if body.is_none() {
+        return Option::<String>::None;
+    }
+    let b = body.unwrap();
+    let s = b.as_str();
+    let nl = s.find_byte(b'\n');
+    if nl < 0 || s.slice(0, nl as usize) != id.as_str() {
+        return Option::<String>::None;
+    }
+    let rest = s.slice(nl as usize + 1, s.len());
+    let e = rest.find_byte(b'\n');
+    if e < 0 {
+        return Option::<String>::None;
+    }
+    return Option::<String>::Some(String::from_str(rest.slice(0, e as usize)));
+}
+
+/// Record version line `line` of compiler command `cc` (`ccver_recorded` reads it); an empty line
+/// (the probe printed nothing) is not recorded. A failed write only makes the next build probe again.
+pub fn ccver_record(cc: str, line: &String) {
+    if line.len() == 0 {
+        return;
+    }
+    let id = cc_identity(cc);
+    let rp = ccver_record_path(&id);
+    if rp.len() == 0 {
+        return;
+    }
+    mkdir_p(loader::dirname_of(rp.as_str()));
+    let mut body = id.clone();
+    body.format_into("\n{}\n", line.as_str());
+    let _ = write_file_atomic(rp.as_str(), body.as_str());
+}
+
+/// `cc --version`'s first line for compiler command `cc`: the record when it matches, else the
+/// probe through `<dir>/.ccver`, then recorded.
+pub fn cc_version(cc: str, dir: str) String {
+    let rec = ccver_recorded(cc);
+    if rec.is_some() {
+        return rec.unwrap();
+    }
+    let mut va = Vector::<String>::new();
+    split_args(&mut va, cc);
+    va.push(String::from_str("--version"));
+    let line = cc_version_argv(&mut va, dir);
+    ccver_record(cc, &line);
+    return line;
+}
+
 /// The first line `args` (a `--version` invocation) prints, captured through `<dir>/.ccver`: part of
 /// every object key and command fingerprint, so a toolchain upgrade invalidates objects whose sources
 /// and flags did not change. Empty when the command prints nothing.
@@ -402,9 +575,10 @@ struct CJob {
 
 /// Compile the C units `units` (paths of the form `<root>/<rel>`) of a script build's tree `root` with
 /// the compiler argv `cc` and compile flags `flags`, through the object namespace `ns` (not empty): a
-/// unit whose key names an installed object copies it, the others compile and install their objects.
-/// Objects land in `<root>/../obj/<rel>.o`, appended to `objs` in unit order; the copy, not the cached
-/// entry, is what the link reads, so a concurrent trim cannot remove an input of the link.
+/// unit whose key names an installed object links it (`link_or_copy`), the others compile and install
+/// their objects the same way. Objects land in `<root>/../obj/<rel>.o`, appended to `objs` in unit
+/// order; the link reads the tree's name of each object, not the cache's, so a concurrent trim (which
+/// removes only the cache's name) cannot remove an input of the link.
 ///
 /// A compiler start costs about as much as a small unit, so the units to compile run as few commands
 /// as the process tree's free worker slots allow, all at once: `cc <flags> -c <units>` from a scratch
@@ -435,19 +609,31 @@ pub fn compile_units(
     let mut nsb = String::from_str(ns);
     let fresh = unsafe shim::sc_mtime(nsb.cstr()) == 0;
     mkdir_p(ns);
-    // The version probe, started first: its line joins every key.
-    let mut va = Vector::<String>::with_capacity(cc.len() + 1);
+    // The version line joins every key: the line recorded for this compiler, else the probe, started
+    // first.
+    let mut ccs = String::new();
     for i in 0..cc.len() {
-        va.push(cc.at(i).clone());
+        if i != 0 {
+            ccs.push_byte(b' ');
+        }
+        ccs.push_string(cc.at(i));
     }
-    va.push(String::from_str("--version"));
+    let known = ccver_recorded(ccs.as_str()).unwrap_or(String::new());
     let mut vf = loader::join2(objdir.as_str(), ".ccver");
-    let mut vptrs = Vector::<usize>::with_capacity(va.len() + 1);
-    for i in 0..va.len() {
-        vptrs.push(va[i].cstr() as usize);
+    let mut vpid: i64 = -1;
+    if known.len() == 0 {
+        let mut va = Vector::<String>::with_capacity(cc.len() + 1);
+        for i in 0..cc.len() {
+            va.push(cc.at(i).clone());
+        }
+        va.push(String::from_str("--version"));
+        let mut vptrs = Vector::<usize>::with_capacity(va.len() + 1);
+        for i in 0..va.len() {
+            vptrs.push(va[i].cstr() as usize);
+        }
+        vptrs.push(0);
+        vpid = unsafe shim::sc_spawn_argv(vptrs.as_ptr() as *const *const char, vf.cstr());
     }
-    vptrs.push(0);
-    let mut vpid = unsafe shim::sc_spawn_argv(vptrs.as_ptr() as *const *const char, vf.cstr());
     // Per unit: its object path and the hash of its relative name and its text with its includes
     // (`ok` false: something unreadable, not cacheable).
     let mut memo = Map::<u64, u64>::new();
@@ -477,10 +663,10 @@ pub fn compile_units(
             miss.push(i as u32);
         }
     } else {
-        cache_keys(&mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
+        cache_keys(&known, ccs.as_str(), &mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
         for i in 0..units.len() {
             let cobj = cobjs.at(i);
-            if cobj.len() != 0 && copy_file(cobj.as_str(), opaths.at(i).as_str()) {
+            if cobj.len() != 0 && link_or_copy(cobj.as_str(), opaths.at(i).as_str()) {
                 // The mtime is the entry's last use: the trim deletes the least recently used.
                 let mut cp = cobj.clone();
                 let _ = unsafe shim::sc_touch(cp.cstr());
@@ -489,12 +675,18 @@ pub fn compile_units(
             }
         }
     }
+    // An object of an earlier build may be a name of a cache entry: a compiler that writes its output
+    // in place would rewrite the entry.
+    for i in 0..miss.len() {
+        let mut op = opaths.at(miss[i] as usize).clone();
+        let _ = unsafe shim::sc_unlink(op.cstr());
+    }
     let rc = run_jobs(cc, flags, aroot.as_str(), units, root, objdir.as_str(), &opaths, &miss, &mut vpid);
     if rc != 0 {
         return rc;
     }
     if fresh {
-        cache_keys(&mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
+        cache_keys(&known, ccs.as_str(), &mut vpid, vf.as_str(), cc, flags, aroot.as_str(), ns, &hs, &ok, &mut cobjs);
     }
     let mut installed = false;
     for i in 0..miss.len() {
@@ -507,7 +699,7 @@ pub fn compile_units(
         // move a whole object into place, and a reader opens either one.
         let mut tmp = format("{}.{}.tmp", cobj.as_str(), unsafe shim::sc_getpid());
         let mut dst = cobj.clone();
-        if copy_file(opaths.at(u).as_str(), tmp.as_str()) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
+        if link_or_copy(opaths.at(u).as_str(), tmp.as_str()) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
             installed = true;
         } else {
             let _ = unsafe shim::sc_unlink(tmp.cstr());
@@ -522,12 +714,14 @@ pub fn compile_units(
     return 0;
 }
 
-// Wait for the version probe `vpid` (spawned into file `vf`; -1 = not started or already waited for)
-// and fill `cobjs` with every unit's cache entry under namespace `ns`: the key of the version line,
+// Take the version line: `known` (recorded for compiler command `ccs`), else the probe `vpid`'s
+// (spawned into file `vf`; -1 = not started or already waited for), then recorded. Fill `cobjs` with every unit's cache entry under namespace `ns`: the key of the version line,
 // the compiler command `cc` (its own arguments, `-arch x86_64` say, change the output and not the
 // version line), the compile `flags`, the tree path `aroot` when the flags record it, and the unit's
 // hash pair in `hs`; empty for a unit whose `ok` is false.
 fn cache_keys(
+    known: &String,
+    ccs: str,
     vpid: &mut i64,
     vf: str,
     cc: &Vector<String>,
@@ -538,12 +732,16 @@ fn cache_keys(
     ok: &Vector<bool>,
     cobjs: &mut Vector<String>,
 ) {
-    if *vpid >= 0 {
-        let mut code: i32 = 0;
-        let _ = unsafe shim::sc_waitpid(*vpid, &mut code);
-        *vpid = -1;
+    let mut ccver = known.clone();
+    if ccver.len() == 0 {
+        if *vpid >= 0 {
+            let mut code: i32 = 0;
+            let _ = unsafe shim::sc_waitpid(*vpid, &mut code);
+            *vpid = -1;
+        }
+        ccver = take_first_line(vf).unwrap_or(String::new());
+        ccver_record(ccs, &ccver);
     }
-    let ccver = take_first_line(vf).unwrap_or(String::new());
     let mut b1 = FNV_BASIS;
     let mut b2: u64 = 0x9e3779b97f4a7c15;
     ch_mix_bytes(&mut b1, &mut b2, ccver.as_str().ptr(), ccver.len());
@@ -784,12 +982,17 @@ const fn obj_use_older(a: &ObjUse, b: &ObjUse) i32 {
     return 0;
 }
 
-// Keep namespace `ns` within SCRIPT_OBJ_MAX objects: above it, delete the least recently used down to
-// SCRIPT_OBJ_KEEP, each with its dependency list; delete every dependency list whose object is gone
-// (an engine build's hit reads the two together; a script build's object has none) and every temp
-// file older than TMP_IDLE. Builds may trim at once: an
-// entry one of them deletes is compiled again by the next build that needs it, never read torn.
+// Keep namespace `ns` within SCRIPT_OBJ_MAX objects (`script_trim_to`).
 pub fn script_trim(ns: str, now: i64) {
+    script_trim_to(ns, now, SCRIPT_OBJ_MAX, SCRIPT_OBJ_KEEP);
+}
+
+/// Keep namespace `ns` within `max` objects: above it, delete the least recently used down to `keep`
+/// (below `max`), each with its dependency list; delete every dependency list whose object is gone
+/// (an engine build's hit reads the two together; a script build's object has none) and every temp
+/// file older than TMP_IDLE. Builds may trim at once: an entry one of them deletes is compiled again by
+/// the next build that needs it, never read torn.
+pub fn script_trim_to(ns: str, now: i64, max: usize, keep: usize) {
     let mut names = list_dir(ns, false).unwrap_or(Vector::<String>::new());
     // Sorted, `<key>.d` comes right before `<key>.o`.
     names.sort();
@@ -814,7 +1017,7 @@ pub fn script_trim(ns: str, now: i64) {
             }
         }
     }
-    if objs.len() <= SCRIPT_OBJ_MAX {
+    if objs.len() <= max {
         return;
     }
     for i in 0..objs.len() {
@@ -822,7 +1025,7 @@ pub fn script_trim(ns: str, now: i64) {
         objs.index_mut(i).mt = unsafe shim::sc_mtime(p.cstr());
     }
     objs.sort_by(obj_use_older);
-    for i in 0..objs.len() - SCRIPT_OBJ_KEEP {
+    for i in 0..objs.len() - keep {
         let mut p = loader::join2(ns, names.at(objs[i].at).as_str());
         let _ = unsafe shim::sc_unlink(p.cstr());
         p.truncate(p.len() - 1);

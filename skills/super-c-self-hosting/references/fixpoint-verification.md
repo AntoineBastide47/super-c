@@ -42,8 +42,8 @@ for f in sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp e
     libm="$libm -fno-builtin-$f -fno-builtin-${f}f"
 done
 cc -O1 -std=gnu11 -funsigned-char -ffp-contract=off $libm -Wall -Wextra -Werror \
-   $(find "$fix_dir/gen1/dev/raw" -name '*.c') \
-   $(cat "$fix_dir/gen1/dev/raw/__ldflags") -o "$fix_dir/gen2-bin"
+   $(find "$fix_dir/gen1/debug/raw" -name '*.c') \
+   $(cat "$fix_dir/gen1/debug/raw/__ldflags") -o "$fix_dir/gen2-bin"
 
 # Gen-2 uses the same inputs and output path, with no previous build tree.
 "$fix_dir/gen2-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"

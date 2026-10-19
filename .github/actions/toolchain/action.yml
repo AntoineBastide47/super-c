@@ -1,19 +1,20 @@
 name: Toolchain
 description: >
-  The C toolchain and ccache of one CI job: a ccache directory restored under `cache`, the platform's C
-  compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc on Windows), and for `target: wasm` the
-  wasi-sdk and wasmtime. Every cache is only restored here; a run on main saves the installation caches
-  after installing and the job's ccache in its last step (`./.github/actions/ccache-save`), so no other
-  branch adds to the repository's cache and evicts main's entries.
+  The C toolchain and object cache of one CI job: the global object cache (`~/.super-c/cache`) restored
+  under `cache`, the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc on
+  Windows), and for `target: wasm` the wasi-sdk and wasmtime. Every cache is only restored here; a run on
+  main saves the installation caches after installing and the job's object cache in its last step
+  (`./.github/actions/cache-save`), so no other branch adds to the repository's cache and evicts main's
+  entries.
 inputs:
   target:
     description: "linux, macos, windows or wasm"
     required: true
   cache:
-    description: "ccache key prefix of this job, e.g. ccache-linux-1 (the commit is appended)"
+    description: "object cache key prefix of this job, e.g. objcache-linux-1 (the commit is appended)"
     required: true
   sha:
-    description: "the commit under test, the last part of the ccache key"
+    description: "the commit under test, the last part of the object cache key"
     required: true
   cstd:
     description: "the C standard flags of the Windows leg (mingw hides POSIX prototypes under -std=c11)"
@@ -22,27 +23,17 @@ inputs:
 runs:
   using: composite
   steps:
-    # Each job keeps its own ccache so parallel jobs can save all their compiled inputs; a job without a
-    # cache of its own starts from its platform's newest one. CCACHE_DIR pins one workspace path on all OSes.
-    - name: Restore ccache
+    # Each job keeps its own object cache so parallel jobs can save all their compiled units; a job
+    # without a cache of its own starts from its platform's newest one.
+    - name: Restore object cache
       uses: actions/cache/restore@v6
       with:
-        path: .ccache
+        path: ~/.super-c/cache
         key: ${{ inputs.cache }}-${{ inputs.sha }}
         restore-keys: |
           ${{ inputs.cache }}-
-          ccache-${{ inputs.target }}-
-          ccache-linux-
-
-    - name: Configure ccache dir
-      shell: bash
-      run: |
-        echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-        # The saved caches reached 450-475 MB of the old 500M bound, so ccache evicted live entries.
-        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
-        # Debug builds in per-test scratch directories record their directory, which would key every
-        # such compile apart: without the directory in the hash they hit each other's entries.
-        echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
+          objcache-${{ inputs.target }}-
+          objcache-linux-
 
     - name: Restore Homebrew downloads (macOS)
       id: brew
@@ -55,16 +46,7 @@ runs:
         key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
         restore-keys: cc-brew-${{ runner.os }}-
 
-    - name: Restore apt archives (Linux)
-      id: apt
-      if: runner.os == 'Linux'
-      uses: actions/cache/restore@v6
-      with:
-        path: /var/cache/apt/archives
-        key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
-        restore-keys: cc-apt-${{ runner.os }}-
-
-    - name: Set up C compiler + ccache (macOS)
+    - name: Set up C compiler (macOS)
       if: runner.os == 'macOS'
       shell: bash
       run: |
@@ -73,7 +55,6 @@ runs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "CC=clang" >> "$GITHUB_ENV"
         fi
-        command -v ccache >/dev/null 2>&1 || brew install ccache
 
     - name: Save Homebrew downloads (macOS, main)
       if: runner.os == 'macOS' && github.ref == 'refs/heads/main' && steps.brew.outputs.cache-hit != 'true'
@@ -84,7 +65,9 @@ runs:
           ~/Library/Caches/Homebrew/downloads
         key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
 
-    - name: Set up C compiler + ccache (Linux)
+    # The hosted Linux images ship a C compiler. No apt cache: the archive directory is root-owned, so the
+    # cache action can neither read it to save nor write it to restore.
+    - name: Set up C compiler (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -92,17 +75,6 @@ runs:
           sudo apt-get update
           sudo apt-get install -y build-essential
         fi
-        if ! command -v ccache >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install -y ccache
-        fi
-
-    - name: Save apt archives (Linux, main)
-      if: runner.os == 'Linux' && github.ref == 'refs/heads/main' && steps.apt.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: /var/cache/apt/archives
-        key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
 
     - name: Restore mingw-w64 install (Windows)
       id: mingw
@@ -111,10 +83,9 @@ runs:
       with:
         path: |
           C:\ProgramData\chocolatey\lib\mingw
-          C:\ProgramData\chocolatey\lib\ccache
           C:\ProgramData\mingw64
           C:\tools\mingw64
-        key: mingw-w64-${{ runner.os }}-choco-v2
+        key: mingw-w64-${{ runner.os }}-choco-v3
         restore-keys: mingw-w64-${{ runner.os }}-
 
     # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
@@ -144,7 +115,6 @@ runs:
         echo "CC=gcc" >> "$GITHUB_ENV"
         echo "BINEXT=.exe" >> "$GITHUB_ENV"
         echo "SC_CSTD=$CSTD" >> "$GITHUB_ENV"
-        command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
 
     - name: Save mingw-w64 install (Windows, main)
       if: runner.os == 'Windows' && github.ref == 'refs/heads/main' && steps.mingw.outputs.cache-hit != 'true'
@@ -152,10 +122,9 @@ runs:
       with:
         path: |
           C:\ProgramData\chocolatey\lib\mingw
-          C:\ProgramData\chocolatey\lib\ccache
           C:\ProgramData\mingw64
           C:\tools\mingw64
-        key: mingw-w64-${{ runner.os }}-choco-v2
+        key: mingw-w64-${{ runner.os }}-choco-v3
 
     - name: Restore wasi toolchain
       id: wasi

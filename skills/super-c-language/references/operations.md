@@ -32,7 +32,7 @@ branch under `PROFILE` is.
 
 ## Profiles
 
-`dev`, `debug`, `test`, and `race` check overflow; `release`, `bench`, and `pgogen` wrap. A
+`debug`, `test`, and `race` check overflow; `release` and `bench` wrap. A
 custom profile checks at `opt-level` 0 or 1 (or no `opt-level`) and wraps at 2, 3, `"s"`, and
 `"z"`; `overflow-checks = true/false` overrides that (super-c-binary, "Built-in profiles").
 

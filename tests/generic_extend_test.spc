@@ -177,8 +177,7 @@ fn instances_through_bounds_and_dyn_are_checked() {
 
 // Reflection lists the methods of the generic conformances whose bounds the type satisfies, a
 // `Copy` bound included.
-@test
-fn reflection_lists_applying_generic_conformances() {
+fn reflection_lists_applying_generic_conformances(b: &mut h::ExitBatch) {
     let src = M"(interface Lane {}
 struct P { pub x: i32 }
 extend P as Lane {}
@@ -202,7 +201,7 @@ fn main() i32 {
     return 0;
 }
 )";
-    h::expect_exit("generic conformance methods", src, 0);
+    b.add("generic conformance methods", src, 0);
 }
 
 // An interface-qualified call takes its implementer from the receiver argument: a conformance's own
@@ -251,9 +250,8 @@ fn main() i32 {
 // names `Simd`, which must not make the prelude wait for the user module), an associated function of
 // a concrete extend called through its type (`String::mk()`: the qualifier's `Global` is no argument
 // of it), and a conformance written through an alias (`f128`), called through a bound.
-@test
-fn user_extends_of_std_types() {
-    h::expect_exit(
+fn user_extends_of_std_types(b: &mut h::ExitBatch) {
+    b.add(
         "user extends of std types",
         M"(import std::float as fl;
 interface Real {
@@ -291,9 +289,8 @@ fn main() i32 {
 // Interface dispatch over lane types: a scalar times a vector in a generic body that does not import
 // std::simd (the prelude's extensions are in scope), a turbofished `T::f::<..>()` (the call names the
 // implementor), a conformance on a vector alias, and fn pointers and `str` as `Send + Sync`.
-@test
-fn lane_interfaces_and_aliases() {
-    h::expect_exit(
+fn lane_interfaces_and_aliases(b: &mut h::ExitBatch) {
+    b.add(
         "lane interfaces and aliases",
         M"(interface Lane2: SimdFloat {
     fn times<const K: usize, const N: usize>(z: Simd<Self, N>) Simd<Self, N>;
@@ -329,4 +326,15 @@ fn main() i32 {
 )",
         0,
     );
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    reflection_lists_applying_generic_conformances(&mut b);
+    user_extends_of_std_types(&mut b);
+    lane_interfaces_and_aliases(&mut b);
+    b.run();
 }

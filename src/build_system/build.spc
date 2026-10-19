@@ -135,11 +135,12 @@ pub fn rm_rf(path: str) {
 // at another path. System headers (<...>) are outside the key; the compiler-version fingerprint
 // stands in for them, the same bet ccache's direct mode makes.
 //
-// Retention: each local object tree (a profile directory such as build/dev) owns the namespace
+// Retention: each local object tree (a profile directory such as build/debug) owns the namespace
 // `<root>/o/<hash of its real path>`. A successful build writes the key set of its units as a
 // generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
-// every object and dependency list no kept generation names (`obj_cache_commit`). A sweep every two hours
-// removes dead namespaces and idle linker caches (`cache_sweep`).
+// every object and dependency list no kept generation names (`obj_cache_commit`). A sweep every 30 minutes
+// removes dead namespaces and idle linker caches (`cache_sweep`), and one per project its idle build trees
+// (`project_sweep`).
 // A unit whose object records no path (no coverage or profile instrumentation, `instruments`; debug
 // information names the working directory `.`, `dmap`) also goes to the script namespace every tree
 // shares, and a miss in the tree's namespace reads it there: another tree that compiled the same text
@@ -157,7 +158,7 @@ const OBJ_NS_IDLE: i64 = 30 * 86400;
 /// A linker cache namespace is removed after this many seconds with no entry written or used.
 const LTO_NS_IDLE: i64 = 7 * 86400;
 /// The cache sweep (`cache_sweep`) runs at most once per this many seconds.
-const SWEEP_EVERY: i64 = 2 * 3600;
+const SWEEP_EVERY: i64 = 30 * 60;
 
 /// The object cache namespace of the local object tree `pdir` below cache root `root`:
 /// `<root>/o/<hash of pdir's real path>`. Empty when `root` is empty (caching disabled).
@@ -345,23 +346,35 @@ fn ns_dead(name: str, ns: str, now: i64) bool {
     return want.as_str() != name || idle >= OBJ_NS_IDLE;
 }
 
-/// At most once per SWEEP_EVERY (the mtime of `<root>/o/.sweep`), delete what no build reads again: dead object
-/// namespaces (`ns_dead`), linker cache namespaces with no entry written or used for LTO_NS_IDLE (a
-/// toolchain upgrade leaves the old one behind), and the flat `<key>.o`/`<key>.d` files that
-/// compilers before namespaces installed directly in the root.
+/// The cache sweep (`sweep_cache`) of cache root `root`, at most once per SWEEP_EVERY (the stamp
+/// `<root>/o/.sweep`).
 fn cache_sweep(root: str, now: i64) {
     let od = loader::join2(root, "o");
-    let mut stamp = loader::join2(od.as_str(), ".sweep");
+    if sweep_due(od.as_str(), now) {
+        sweep_cache(root, now);
+    }
+}
+
+// Whether the sweep whose stamp is `<dir>/.sweep` is due (no stamp, or one older than SWEEP_EVERY); a
+// due sweep restamps first, and one whose stamp cannot be written does not run: every build would sweep.
+fn sweep_due(dir: str, now: i64) bool {
+    let mut stamp = loader::join2(dir, ".sweep");
     let last = unsafe shim::sc_mtime(stamp.cstr());
     if last != 0 && now - last < SWEEP_EVERY {
-        return;
+        return false;
     }
-    mkdir_p(od.as_str());
+    mkdir_p(dir);
     let mut body = String::new();
     body.push_i64(now);
-    if !write_file_atomic(stamp.as_str(), body.as_str()) {
-        return;
-    }
+    return write_file_atomic(stamp.as_str(), body.as_str());
+}
+
+/// Delete what no build reads again below cache root `root`: dead object namespaces (`ns_dead`), linker
+/// cache namespaces with no entry written or used for LTO_NS_IDLE (a toolchain upgrade leaves the old
+/// one behind), and the flat `<key>.o`/`<key>.d` files that compilers before namespaces installed
+/// directly in the root.
+pub fn sweep_cache(root: str, now: i64) {
+    let od = loader::join2(root, "o");
     let nss = list_dir(od.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..nss.len() {
         let name = nss.at(i).as_str();
@@ -381,6 +394,15 @@ fn cache_sweep(root: str, now: i64) {
             rm_rf(lp.as_str());
         }
     }
+    // Compiler version records (`ccver_record`), by age: a build that needs a removed one probes again.
+    let vd = loader::join2(root, "ccver");
+    let vrs = list_dir(vd.as_str(), false).unwrap_or(Vector::<String>::new());
+    for i in 0..vrs.len() {
+        let vp = loader::join2(vd.as_str(), vrs.at(i).as_str());
+        if now - newest_mtime(vp.as_str()) >= LTO_NS_IDLE {
+            rm_rf(vp.as_str());
+        }
+    }
     let flat = list_dir(root, false).unwrap_or(Vector::<String>::new());
     for i in 0..flat.len() {
         if key_prefixed(flat.at(i).as_str()) {
@@ -388,6 +410,99 @@ fn cache_sweep(root: str, now: i64) {
             let _ = unsafe shim::sc_unlink(fp.cstr());
         }
     }
+}
+
+/// The project sweep (`sweep_project`) of manifest `m`, at most once per SWEEP_EVERY (the stamp
+/// `<out-dir>/.sweep`).
+fn project_sweep(m: &mf::Manifest, now: i64) {
+    if sweep_due(m.out_dir.as_str(), now) {
+        sweep_project(m, now);
+    }
+}
+
+/// Delete what no build of manifest `m` reads again: every entry of its out-dir with nothing written
+/// for OBJ_NS_IDLE (a build tree, a link record, a binary), except a tree whose lock a build holds; the
+/// per-suite object cache that compilers before the shared one kept in `<out-dir>/test/fixture-cache`;
+/// and the emitted trees below its root directory (`root_trees`) idle as long.
+pub fn sweep_project(m: &mf::Manifest, now: i64) {
+    let out = m.out_dir.as_str();
+    let names = list_dir(out, false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let p = loader::join2(out, names.at(i).as_str());
+        if names.at(i).as_str() != ".sweep" && now - newest_mtime(p.as_str()) >= OBJ_NS_IDLE {
+            rm_unlocked(p.as_str());
+        }
+    }
+    rm_rf(loader::join2(out, "test/fixture-cache").as_str());
+    let trees = root_trees(m);
+    for i in 0..trees.len() {
+        let raw = loader::join2(trees.at(i).as_str(), "raw");
+        if now - newest_mtime(raw.as_str()) >= OBJ_NS_IDLE {
+            rm_root_tree(trees.at(i).as_str());
+        }
+    }
+}
+
+// Remove out-dir entry `p` unless a build holds the lock of a tree in it: `<p>/.lock`, or
+// `<p>/<sub>/.lock` for a nested tree (`bench/<profile>`). The locks taken stay held while the entry
+// goes, and a second pass removes what an open lock file kept (Windows deletes no open file).
+fn rm_unlocked(p: str) {
+    let mut locks = Vector::<String>::new();
+    locks.push(loader::join2(p, ".lock"));
+    let subs = list_dir(p, false).unwrap_or(Vector::<String>::new());
+    for i in 0..subs.len() {
+        locks.push(loader::join2(loader::join2(p, subs.at(i).as_str()).as_str(), ".lock"));
+    }
+    let mut held = Vector::<i64>::new();
+    let mut busy = false;
+    for i in 0..locks.len() {
+        let mut lp = locks.at(i).clone();
+        if !busy && unsafe shim::sc_mtime(lp.cstr()) != 0 {
+            let h = unsafe shim::sc_tree_lock(lp.cstr(), 0);
+            if h < 0 {
+                busy = true;
+            } else {
+                held.push(h);
+            }
+        }
+    }
+    if !busy {
+        rm_rf(p);
+    }
+    for i in 0..held.len() {
+        unsafe shim::sc_tree_unlock(held[i]);
+    }
+    if !busy {
+        rm_rf(p);
+    }
+}
+
+// The emitted trees below the root directory of manifest `m` (`<root dir>/build/<profile>`, of bare
+// and script builds): only a directory whose `raw` holds the runtime header, so a user directory named
+// `build` is never one.
+fn root_trees(m: &mf::Manifest) Vector<String> {
+    let mut out = Vector::<String>::new();
+    let b = loader::join2(loader::dirname_of(m.root.as_str()), "build");
+    let names = list_dir(b.as_str(), false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let pd = loader::join2(b.as_str(), names.at(i).as_str());
+        let mut rt = loader::join2(pd.as_str(), "raw/super_rt.h");
+        if unsafe shim::sc_mtime(rt.cstr()) != 0 {
+            out.push(pd);
+        }
+    }
+    return out;
+}
+
+// Remove emitted tree `pd` (`root_trees`): its `raw` tree and the objects of its script builds, then
+// the directory and its `build` parent when nothing else is left in them.
+fn rm_root_tree(pd: str) {
+    rm_rf(loader::join2(pd, "raw").as_str());
+    rm_rf(loader::join2(pd, "obj").as_str());
+    let mut d = String::from_str(pd);
+    let _ = unsafe shim::sc_rmdir(d.cstr());
+    let mut b = String::from_str(loader::dirname_of(pd));
+    let _ = unsafe shim::sc_rmdir(b.cstr());
 }
 
 // The gen-tree prefix in a stored .d is replaced by `@/`, so a dependency list written in one project
@@ -426,12 +541,11 @@ fn dep_local(s: str, gen: str) String {
 // orphans in gen are deleted so removed modules do not linger in the link.
 // Streamed in fixed chunks: comparing never holds a second copy of the file in memory. The chunk
 // stays small because the emit stream's notifications can run on a coroutine stack.
-fn file_eq(a: str, b: &String) bool {
+fn file_eq(a: str, want: str) bool {
     let f = stdio::fopen(a, "rb");
     if f == null {
         return false;
     }
-    let want = b.as_str();
     let mut buf = Array::<u8, 16384>::new();
     let mut off: usize = 0;
     let mut same = true;
@@ -471,7 +585,7 @@ fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
             return 1;
         }
         let body = content.unwrap();
-        if !file_eq(dp.as_str(), &body) {
+        if !file_eq(dp.as_str(), body.as_str()) {
             // Ensure parent dirs, then write.
             mkdir_p(loader::dirname_of(dp.as_str()));
             if !write_file(dp.as_str(), body.as_str()) {
@@ -498,19 +612,23 @@ fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
 
 // Staleness: obj or its -MMD .d file missing, or any dependency in the .d file newer than the object.
 // Every compile writes a .d, so an object without one has unknown header dependencies.
-// Is the object older than its source or any recorded dependency? Mtimes have second granularity, so
-// a file the sync rewrote in this build counts as newer whatever its mtime says: an edit landing in the
-// same second its previous object was compiled would otherwise keep a stale object.
+// Is the object older than its source or any recorded dependency? The object's time is the mtime of its
+// `.cmd` record (`cmdpath`), which the tree's compile or cache restore writes once the object is in
+// place: the object itself is a name of a cache entry, whose mtime another tree's use refreshes.
+// Mtimes have second granularity, so a file the sync rewrote in this build counts as newer whatever its
+// mtime says: an edit landing in the same second its previous object was compiled would otherwise keep
+// a stale object.
 fn obj_stale(
     cpath: &mut String,
     opath: &mut String,
+    cmdpath: &mut String,
     dpath: str,
     rewritten: &Set<String>,
     gen: str,
     mtimes: &mut Map<String, i64>,
 ) bool {
-    let omt = unsafe shim::sc_mtime(opath.cstr());
-    if omt == 0 {
+    let omt = unsafe shim::sc_mtime(cmdpath.cstr());
+    if omt == 0 || unsafe shim::sc_mtime(opath.cstr()) == 0 {
         return true;
     }
     if rewritten_dep(cpath.as_str(), rewritten, gen) {
@@ -593,8 +711,6 @@ fn rewritten_dep(path: str, rewritten: &Set<String>, gen: str) bool {
 }
 
 // The build itself
-// The compiler named by manifest/$CC/default, WITHOUT the ccache decision (that probe costs a
-// shell round-trip, so the engine runs it in the background: see CcStream::ensure_cc).
 fn push_all(cmd: &mut String, flags: &Vector<String>) {
     for i in 0..flags.len() {
         cmd.push_byte(b' ');
@@ -628,8 +744,8 @@ fn render_cmd(args: &Vector<String>) String {
     return out;
 }
 
-// Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
-// dev/debug profiles' `-fsanitize*` would fail the link on Windows: there they are dropped instead
+// Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the
+// `--sanitizers` flags `-fsanitize*` would fail the link on Windows: there they are dropped instead
 // (SC_LEAK_CHECK, being self-hosted, still covers leaks, double frees and a realloc of a freed pointer
 // there; no other use after free).
 fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32) {
@@ -679,15 +795,17 @@ pub fn profile_names(m: &mf::Manifest) Vector<String> {
 /// with no manifest to read them from: `super-c release foo.spc`. `compile_only` keeps the compile side
 /// alone (cflags and the LTO mode), what each separate compile of a cached script build takes; the link
 /// takes the whole fragment. Empty for an unknown name, so an unrecognised `--profile=` degrades to the
-/// plain build rather than failing. `target` drops what that target cannot honour, exactly as a manifest
-/// build does.
-pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool) String {
+/// plain build rather than failing; `sanitizers` (`--sanitizers`) adds the sanitizer flags to any build,
+/// a build without a profile included. `target` drops what that target cannot honour, exactly as a
+/// manifest build does.
+pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanitizers: bool) String {
     let mut out = String::new();
-    if name.len() == 0 {
-        return out;
-    }
     let m = mf::builtins_only();
-    let pi = m.profile_index(name);
+    let pi = if name.len() == 0 {
+        (-1) as i64;
+    } else {
+        m.profile_index(name);
+    };
     if pi >= 0 {
         let prof = m.profiles.at(pi as usize);
         push_profile_side(&mut out, prof, &prof.cflags, false, target, sdk);
@@ -707,6 +825,15 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool) Strin
             out.push_byte(b' ');
             out.push_str(lf);
         }
+    }
+    // After the profile's flags, as a manifest build appends them to each profile's own.
+    if sanitizers {
+        let mut sf = Vector::<String>::new();
+        split_args(&mut sf, mf::SANITIZER_CFLAGS);
+        if !compile_only {
+            split_args(&mut sf, mf::SANITIZER_LDFLAGS);
+        }
+        push_profile(&mut out, &sf, target, sdk);
     }
     return out;
 }
@@ -745,66 +872,6 @@ fn field_of(s: str, sep: u8, idx: usize) str {
         return s.slice(a, s.len());
     }
     return s.slice(0, 0);
-}
-
-/// The executable the first word of `cmd` names: as given when it has a directory part, else the
-/// first PATH entry holding it (`.exe` too on a Windows host). Returns its mtime; 0 when unresolved
-/// (`out` then holds the bare word).
-fn which_path(cmd: str, out: &mut String) i64 {
-    let mut e: usize = 0;
-    while e < cmd.len() && cmd[e] != b' ' {
-        e += 1;
-    }
-    let name = cmd.slice(0, e);
-    let win = unsafe shim::sc_host_platform() == 0;
-    let mut cand = String::new();
-    let mut has_dir = false;
-    for i in 0..name.len() {
-        if name[i] == b'/' || name[i] == b'\\' {
-            has_dir = true;
-        }
-    }
-    if !has_dir {
-        let pe = stdlib::get_env("PATH");
-        if pe.is_some() {
-            let pv = pe.unwrap();
-            let path = pv.as_str();
-            let sep = if win {
-                b';';
-            } else {
-                b':';
-            };
-            let mut a: usize = 0;
-            for i in 0..path.len() + 1 {
-                if i == path.len() || path[i] == sep {
-                    if i > a {
-                        for x in 0..2 {
-                            cand.clear();
-                            cand.push_str(path.slice(a, i));
-                            cand.push_byte(b'/');
-                            cand.push_str(name);
-                            if x == 1 {
-                                cand.push_str(".exe");
-                            }
-                            let mt = unsafe shim::sc_mtime(cand.cstr());
-                            if mt != 0 {
-                                out.push_string(&cand);
-                                return mt;
-                            }
-                            if !win {
-                                break;
-                            }
-                        }
-                    }
-                    a = i + 1;
-                }
-            }
-        }
-    }
-    out.push_str(name);
-    cand.clear();
-    cand.push_str(name);
-    return unsafe shim::sc_mtime(cand.cstr());
 }
 
 /// The linker a `-v` link log names: the last child command line (a leading space, then the
@@ -958,9 +1025,9 @@ extend Job {
     }
 }
 
-// Install object `oout` and its dependency list `dout` (made portable: `gen` is the gen root) as cache
-// entry `cobj` (none when empty), each through a temp named by the key and the pid and a rename, so
-// concurrent builds never write the same temp file.
+// Install object `oout` (as a second name, `link_or_copy`) and its dependency list `dout` (made
+// portable: `gen` is the gen root) as cache entry `cobj` (none when empty), each through a temp named by
+// the key and the pid and a rename, so concurrent builds never write the same temp file.
 fn cache_install(cobj: str, oout: str, dout: str, gen: str) {
     if cobj.len() == 0 {
         return;
@@ -968,7 +1035,7 @@ fn cache_install(cobj: str, oout: str, dout: str, gen: str) {
     let pid = unsafe shim::sc_getpid();
     let mut tmp = format("{}.{}.tmp", cobj, pid);
     let mut oc = String::from_str(cobj);
-    if !copy_file(oout, tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), oc.cstr()) != 0 {
+    if !link_or_copy(oout, tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), oc.cstr()) != 0 {
         let _ = unsafe shim::sc_unlink(tmp.cstr());
     }
     let dep = loader::read_file(dout);
@@ -1048,7 +1115,7 @@ pub fn exe_name(base: str, target: i32) String {
 }
 
 // Where a profile keeps its own copy of the manifest's binary: <out-dir>/<profile>/<name>. Each profile
-// links its own, so a `dev` build can never end up standing in for the release artifact: the manifest's
+// links its own, so a `debug` build can never end up standing in for the release artifact: the manifest's
 // `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
 fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
     let dir = loader::join2(m.out_dir.as_str(), prof_name);
@@ -1069,7 +1136,7 @@ fn install_bin(from: str, to: str) i32 {
     let body = cur.unwrap();
     // Byte-compare first: an unchanged binary keeps its mtime (downstream tools get make-friendly
     // timestamps).
-    if file_eq(to, &body) {
+    if file_eq(to, body.as_str()) {
         return 0;
     }
     let mut tmp = String::from_str(to);
@@ -1106,7 +1173,7 @@ struct CcStream {
     pub gen: String,
     pub obj: String,
     pub pdir: String,
-    pub cc_raw: String, // compiler without the ccache decision (see ensure_cc)
+    pub cc_raw: String, // the compiler named by the manifest, $CC or the default
     pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c [-flto=..]" (also the object-cache key text)
     pub ldbase: String, // " <sdk flags and libs> <ldflags> <profile ldflags>": the fixed part of the link line
     pub target: i32,
@@ -1115,14 +1182,12 @@ struct CcStream {
     pub lto_cache: bool, // the link line names a ThinLTO cache directory
     pub lto_reason: String, // why ThinLTO or its cache was rejected; empty when both are in use
     pub lto_ld: Vector<String>, // the mode's link arguments: `-flto=..` and the linker cache options
-    pub probe_cc_pid: i64, // background `ccache -V` probe; -1 = resolve synchronously on demand
     pub probe_ver_pid: i64, // background `<cc> --version` probe; -1 = resolve synchronously
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
-    pub ccprobe_path: String, // <pdir>/.ccprobe, the ccache probe's discarded output
     pub probes: pr::Probes, // the toolchain probe record and the probes this build needs
     pub feats: cf::CpuFeatureSet, // the build's CPU features beyond the baseline: their flags' probes must accept them
     pub feat_bad: bool, // a feature's flag was rejected: nothing compiles
-    pub cc_args: Vector<String>, // resolved compiler argv ([ccache] + cc tokens); empty until ensure_cc
+    pub cc_args: Vector<String>, // resolved compiler argv (the cc tokens); empty until ensure_cc
     pub prefix_args: Vector<String>, // cc_args + cc_tail tokens; empty until ensure_cc
     pub ccver: String,
     pub cc_ready: bool,
@@ -1134,7 +1199,8 @@ struct CcStream {
     pub stale_n: usize,
     // `<link record>.pending`: written before the first object this build replaces (compiled or
     // restored from the object cache) and removed once a link succeeds, so a link that failed or never
-    // ran is redone even when the objects' mtimes fall in the second the binary was linked.
+    // ran is redone even when the objects' times (their `.cmd` records') fall in the second the binary
+    // was linked.
     pub pending: String,
     pub marked: bool, // this build wrote `pending`
     pub ret: i32,
@@ -1156,48 +1222,30 @@ struct CcStream {
 }
 
 extend CcStream {
-    /// Finish compiler resolution: collect the background probes (ccache presence by exit code,
-    /// `cc --version` first line: both overlap the transpile), or run either synchronously when its
-    /// spawn failed. No shell anywhere: the probes are argv children with captured output. Idempotent;
-    /// called before the first compile command is built and again before the link line.
+    /// Finish compiler resolution: collect the background probe (`cc --version` first line, which
+    /// overlaps the transpile), or run it synchronously when its spawn failed. No shell anywhere: the
+    /// probe is an argv child with captured output. Idempotent; called before the first compile command
+    /// is built and again before the link line.
     pub fn ensure_cc(self: &mut Self) {
         if self.cc_ready {
             return;
         }
         self.cc_ready = true;
-        let mut have_ccache = false;
-        if self.probe_cc_pid >= 0 {
-            let mut code: i32 = 0;
-            have_ccache = unsafe shim::sc_waitpid(self.probe_cc_pid, &mut code) == 0 && code == 0;
-        } else {
-            let mut pa = Vector::<String>::new();
-            push_arg(&mut pa, "ccache");
-            push_arg(&mut pa, "-V");
-            let mut pp = String::from_str(self.ccprobe_path.as_str());
-            have_ccache = exec_args(&mut pa, pp.cstr()) == 0;
-        }
-        let mut pp2 = String::from_str(self.ccprobe_path.as_str());
-        unsafe shim::sc_unlink(pp2.cstr());
-        if have_ccache {
-            push_arg(&mut self.cc_args, "ccache");
-        }
         split_args(&mut self.cc_args, self.cc_raw.as_str());
-        let mut have_ver = false;
-        if self.probe_ver_pid >= 0 {
+        let mut have_ver = self.ccver.len() != 0;
+        if !have_ver && self.probe_ver_pid >= 0 {
             let mut code2: i32 = 0;
             let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code2);
             let v = take_first_line(self.ccver_path.as_str());
             if !v.is_none() {
                 let line = v.unwrap();
+                ccver_record(self.cc_raw.as_str(), &line);
                 self.ccver.push_string(&line);
                 have_ver = true;
             }
         }
         if !have_ver {
-            let mut va = Vector::<String>::new();
-            split_args(&mut va, self.cc_raw.as_str());
-            push_arg(&mut va, "--version");
-            self.ccver = cc_version_argv(&mut va, self.pdir.as_str());
+            self.ccver = cc_version(self.cc_raw.as_str(), self.pdir.as_str());
         }
         self.probes.settle(&self.ccver);
         self.lto_resolve();
@@ -1402,24 +1450,33 @@ extend CcStream {
 
     /// Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
     /// its compile planned and the pool pumped.
-    pub fn on_file(self: &mut Self, path: str, kind: i32) {
+    pub fn on_file(self: &mut Self, path: str, text: str, kind: i32) {
         let rel = path.slice(self.src_len + 1, path.len());
-        let content = loader::read_file(path);
-        if content.is_none() {
-            eprintln("build: cannot read '{}'", path);
-            self.ret = 1;
-            return;
+        // The emitter hands over the text it wrote; a file it wrote by other means is read back.
+        let mut read = String::new();
+        if text.len() == 0 {
+            let content = loader::read_file(path);
+            if content.is_none() {
+                eprintln("build: cannot read '{}'", path);
+                self.ret = 1;
+                return;
+            }
+            read = content.unwrap();
         }
-        let body = content.unwrap();
+        let body = if text.len() != 0 {
+            text;
+        } else {
+            read.as_str();
+        };
         let dp = loader::join2(self.gen.as_str(), rel);
-        if !file_eq(dp.as_str(), &body) {
+        if !file_eq(dp.as_str(), body) {
             // One mkdir walk per directory per build, not one per file.
             let dir = String::from_str(loader::dirname_of(dp.as_str()));
             if !self.made_dirs.contains(&dir) {
                 mkdir_p(dir.as_str());
                 self.made_dirs.insert(dir);
             }
-            if !write_file(dp.as_str(), body.as_str()) {
+            if !write_file(dp.as_str(), body) {
                 eprintln("build: cannot write '{}'", dp.as_str());
                 self.ret = 1;
                 return;
@@ -1498,6 +1555,7 @@ extend CcStream {
         if !fp_ok || obj_stale(
             &mut cpath,
             &mut opath,
+            &mut cmdpath,
             dpath.as_str(),
             &self.rewritten,
             self.gen.as_str(),
@@ -1542,6 +1600,9 @@ extend CcStream {
                     }
                 }
             }
+            // The old object may be a name of a cache entry: a compiler that writes its output in
+            // place (GNU as) would rewrite the entry.
+            let _ = unsafe shim::sc_unlink(opath.cstr());
             let mut log = opath.clone();
             log.push_str(".log");
             self.pend_push(
@@ -1566,8 +1627,9 @@ extend CcStream {
         self.objs.push(opath.clone());
     }
 
-    // A cache hit: the object and its portable dependency list copy into place, and the .cmd
-    // records the fingerprint so the next build's staleness check needs no cache at all. An entry
+    // A cache hit: the object links into place (`link_or_copy`), its portable dependency list is
+    // written beside it, and the .cmd records the fingerprint so the next build's staleness check needs
+    // no cache at all. An entry
     // without its dependency list is a miss: a restored object without a .d would never see a
     // header change (a concurrent build can publish the object before its list).
     fn cache_restore(self: &mut Self, cobj: &String, opath: str, dpath: str, fp: &String) bool {
@@ -1575,7 +1637,7 @@ extend CcStream {
         cd.truncate(cd.len() - 2);
         cd.push_str(".d");
         let dep = loader::read_file(cd.as_str());
-        if dep.is_none() || !copy_file(cobj.as_str(), opath) {
+        if dep.is_none() || !link_or_copy(cobj.as_str(), opath) {
             return false;
         }
         let d = dep.unwrap();
@@ -1598,14 +1660,9 @@ extend CcStream {
         }
         self.cc_ready = true;
         let mut code: i32 = 0;
-        if self.probe_cc_pid >= 0 {
-            let _ = unsafe shim::sc_waitpid(self.probe_cc_pid, &mut code);
-        }
         if self.probe_ver_pid >= 0 {
             let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code);
         }
-        let mut pp = String::from_str(self.ccprobe_path.as_str());
-        unsafe shim::sc_unlink(pp.cstr());
         let mut vp = String::from_str(self.ccver_path.as_str());
         unsafe shim::sc_unlink(vp.cstr());
         self.probes.abandon();
@@ -1734,9 +1791,9 @@ const fn pend_before(a: &Pend, b: &Pend) bool {
     return a.prev_ms > b.prev_ms || a.prev_ms == b.prev_ms && a.seq < b.seq;
 }
 
-fn stream_notify(ctx: *mut void, path: str, kind: i32) {
+fn stream_notify(ctx: *mut void, path: str, text: str, kind: i32) {
     let s = ctx as *mut CcStream;
-    unsafe (*s).on_file(path, kind);
+    unsafe (*s).on_file(path, text, kind);
 }
 
 // Emit stamp: skip the whole transpile when no input changed since the last successful emission.
@@ -2154,7 +2211,7 @@ pub fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
 }
 
 /// The levels a build at profile `prof` copies for: `spec` when set; else `off` in a profile at
-/// opt-level 0 or 1 (`debug`, `dev`: the copies make the C compile of vector code 1.4 to 1.7 times
+/// opt-level 0 or 1 (`debug`, `test`: the copies make the C compile of vector code 1.4 to 1.7 times
 /// longer and add little speed there) and in a script build without a profile (no `-O` flag), the
 /// default elsewhere.
 pub fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
@@ -2567,10 +2624,7 @@ pub fn features_accepted(
     split_args(&mut pargv, flags);
     mkdir_p(pdir);
     let mut probes = pr::Probes::start(pdir, key.as_str(), pargv, "", target, arch, need);
-    let mut va = Vector::<String>::new();
-    split_args(&mut va, cc);
-    push_arg(&mut va, "--version");
-    let ver = cc_version_argv(&mut va, pdir);
+    let ver = cc_version(cc, pdir);
     probes.settle(&ver);
     let ok = features_pass(&mut probes, feats, target, cc);
     let _ = push_novec(&mut probes, lto, late);
@@ -2648,8 +2702,8 @@ pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mu
 }
 
 // The compile side of an engine build in profile directory `pdir` under `prof`: the C compiler, its
-// compile and link flags, and the background probes (ccache, the compiler version, and the toolchain
-// probes of `need` the record does not hold), started before the transpile. `pending` is the link
+// compile and link flags, and the background probes (the compiler version, and the toolchain probes of
+// `need` the record does not hold), started before the transpile. `pending` is the link
 // record's pending marker; `cache` the object cache namespace (empty: none).
 /// Every C compile: each transcendental libm call std makes runs as written. As builtins, the C
 /// compiler may fold them with the host's libm, merge `sin(x)` and `cos(x)` into one `sincos` call or
@@ -2685,15 +2739,6 @@ fn cc_stream(
     push_sdk_flags(&mut flags, m.target, m.sdk, m.arch, feats);
     push_all(&mut flags, &m.cflags);
     push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target, m.sdk);
-    if prof.pgo_use {
-        // Clang hard-errors on a missing profile file, so the flag appears only when the file exists.
-        let mut pgo = loader::join2(m.out_dir.as_str(), "pgo.profdata");
-        if unsafe shim::sc_mtime(pgo.cstr()) != 0 {
-            flags.push_str(" -fprofile-use=");
-            flags.push_string(&pgo);
-            flags.push_str(" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin");
-        }
-    }
     let mut tail = flags.clone();
     tail.push_str(" -MMD -c");
     // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
@@ -2705,19 +2750,18 @@ fn cc_stream(
     }
     push_all(&mut ldbase, &m.ldflags);
     push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
-    // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
-    // children (no shell, on every platform) resolve both while the transpile runs: ensure_cc
-    // collects the exit code and the captured version line at first use.
+    // `cc --version` costs a process round-trip: the line recorded for this compiler serves when its
+    // identity is unchanged (`ccver_recorded`); else a background argv child (no shell, on
+    // every platform) resolves it while the transpile runs, and ensure_cc collects it at first use.
     let mut ccver_path = loader::join2(pdir.as_str(), ".ccver");
-    let mut ccprobe_path = loader::join2(pdir.as_str(), ".ccprobe");
-    let mut pa = Vector::<String>::new();
-    push_arg(&mut pa, "ccache");
-    push_arg(&mut pa, "-V");
-    let probe_cc_pid = spawn_args(&mut pa, ccprobe_path.cstr());
-    let mut va = Vector::<String>::new();
-    split_args(&mut va, cc_raw.as_str());
-    push_arg(&mut va, "--version");
-    let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
+    let ccver0 = ccver_recorded(cc_raw.as_str());
+    let mut probe_ver_pid: i64 = -1;
+    if ccver0.is_none() {
+        let mut va = Vector::<String>::new();
+        split_args(&mut va, cc_raw.as_str());
+        push_arg(&mut va, "--version");
+        probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
+    }
     // The toolchain probes of `need` the record does not hold start beside it. The record's key: the
     // schema, the compiler's path, mtime and command (its arguments select a target too), the target
     // and the flags; `settle` checks the version.
@@ -2769,14 +2813,12 @@ fn cc_stream(
         lto_cache: false,
         lto_reason: String::new(),
         lto_ld: Vector::<String>::new(),
-        probe_cc_pid: probe_cc_pid,
         probe_ver_pid: probe_ver_pid,
         ccver_path: ccver_path,
-        ccprobe_path: ccprobe_path,
         probes: probes,
         cc_args: Vector::<String>::new(),
         prefix_args: Vector::<String>::new(),
-        ccver: String::new(),
+        ccver: ccver0.unwrap_or(String::new()),
         cc_ready: false,
         jobs: jobs,
         objs: Vector::<String>::new(),
@@ -2903,7 +2945,7 @@ fn engine_build_i(
         }
     }
     // The link record: per-binary and profile-agnostic (out-dir root), since profiles share bin paths
-    // and a dev binary left behind by a release link must read as out of date.
+    // and a debug binary left behind by a release link must read as out of date.
     let mut fpname = String::from_str("__link-");
     for i in 0..bin.len() {
         fpname.push_byte(
@@ -3024,7 +3066,6 @@ fn engine_build_i(
         if stats != null {
             let g = unsafe &mut *stats;
             g.cc_version.push_string(&ccver);
-            g.ccache = stream.cc_args.len() != 0 && stream.cc_args.at(0).as_str() == "ccache";
             g.total_c = total_c;
             g.stale_n = stale_n;
             g.lto.push_str(mf::lto_name(stream.lto));
@@ -3085,9 +3126,14 @@ fn engine_build_i(
                 fp.push_str(" +strip");
             }
             let mut need = bmt == 0 || unsafe shim::sc_mtime(stream.pending.cstr()) != 0;
+            // An object's time is its `.cmd` record's (see `obj_stale`): another tree's use of a
+            // shared cache entry refreshes the object's own mtime.
             for i in 0..objs.len() {
-                if !need && unsafe shim::sc_mtime((&mut objs[i]).cstr()) > bmt {
-                    need = true;
+                if !need {
+                    let o = objs.at(i).as_str();
+                    let mut cp = String::from_str(o.slice(0, o.len() - 2));
+                    cp.push_str(".cmd");
+                    need = unsafe shim::sc_mtime(cp.cstr()) > bmt;
                 }
             }
             if !need {
@@ -3147,6 +3193,7 @@ fn engine_build_i(
             if croot.len() != 0 {
                 cache_sweep(croot.as_str(), now);
             }
+            project_sweep(m, now);
         }
     } else {
         // A failed sync or compile: reap the compiles still in flight and the probes.
@@ -3684,7 +3731,7 @@ fn scheme_len(s: str) usize {
 // Build the manifest's binary for `prof_name` into that profile's own directory; `out` receives its path.
 // Nothing is installed: the commands whose job is to PRODUCE the project binary (build, release) copy it
 // into place afterwards, and the ones that merely need to run it (test, run) use it where it lies: which
-// is what keeps a `test` run from quietly leaving a dev binary where a release one was.
+// is what keeps a `test` run from quietly leaving a debug binary where a release one was.
 fn build_into_profile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, out: &mut String) i32 {
     let path = profile_bin(m, prof_name, cx.target);
     let rc = root_build(m, prof_name, path.as_str(), cx);
@@ -3751,10 +3798,16 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         return 1;
     }
     // The profile's own binary, left where it was linked: `test` must not stand in for `build`, or a run of
-    // the suite would replace whatever the manifest's binary currently is (a release artifact, say).
-    let prof_name = resolve_profile(m, profile);
+    // the suite would replace whatever the manifest's binary currently is (a release artifact, say). With
+    // no `--profile`, the binary takes the `test` profile (no sanitizers), in a tree of its own beside the
+    // runner's <out-dir>/test.
     let mut binp = String::new();
-    let rc = build_into_profile(m, prof_name, &nolint, &mut binp);
+    let rc = if profile.len() == 0 {
+        let leaf = exe_name(loader::basename_of(m.bin.as_str()), cx.target);
+        target_build(m, "test", m.root.as_str(), "-bin", leaf.as_str(), 0, &nolint, &mut binp);
+    } else {
+        build_into_profile(m, profile, &nolint, &mut binp);
+    };
     if rc != 0 {
         return rc;
     }
@@ -3795,7 +3848,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     let rootp = loader::join2(m.out_dir.as_str(), "test_root.spc");
     // Rewrite the root only when its content changed: an unchanged root keeps its mtime, so the emit
     // stamp proves the suite unchanged without hashing every input.
-    if !file_eq(rootp.as_str(), &src) {
+    if !file_eq(rootp.as_str(), src.as_str()) {
         if !write_file(rootp.as_str(), src.as_str()) {
             eprintln("test: cannot write '{}'", rootp.as_str());
             return 1;
@@ -3821,13 +3874,15 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         let mut sd = real_path("std");
         unsafe shim::sc_setenv("SC_STD_DIR".ptr() as *const char, sd.cstr());
     }
-    // The fixture builds of one suite run share one object cache (SC_TEST_CACHE_DIR, read by the
-    // harness): the runtime and std units they emit identically compile once (through its script
-    // namespace), and the cache stays out of the user's global one. Absolute: tests change directory.
-    let mut fxc = real_path(m.out_dir.as_str());
-    if fxc.len() != 0 {
-        fxc.push_str("/test/fixture-cache");
-        unsafe shim::sc_setenv("SC_TEST_CACHE_DIR".ptr() as *const char, fxc.cstr());
+    // Every compiler a test runs shares the global object cache: a unit any earlier build, test or
+    // suite run compiled is not compiled again. Absolute: tests change directory.
+    let croot = cache_root();
+    if croot.len() != 0 {
+        mkdir_p(croot.as_str());
+        let mut ac = real_path(croot.as_str());
+        if ac.len() != 0 {
+            unsafe shim::sc_setenv("SC_CACHE_DIR".ptr() as *const char, ac.cstr());
+        }
     }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
     // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
@@ -4259,28 +4314,28 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
     return 0;
 }
 
-/// `super-c clean`: drop the manifest's outputs; out-dir (per-target raw/gen/obj) plus every
-/// `<root dir>/build/<profile>/raw` tree a bare `super-c <root.spc>` emits. A profile directory and
-/// the `build` directory go too only when nothing else is in them: they can be the user's own.
-pub fn manifest_clean(m: &mf::Manifest) i32 {
+/// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now: the global cache's
+/// (`sweep_cache`) and the project's (`sweep_project`). `full` (`--full`): remove the out-dir, every
+/// emitted tree below the root directory (`root_trees`) and the whole global cache root instead.
+pub fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
+    if !full {
+        let now = time::now();
+        let croot = cache_root();
+        if croot.len() != 0 {
+            sweep_cache(croot.as_str(), now);
+        }
+        sweep_project(m, now);
+        return 0;
+    }
     rm_rf(m.out_dir.as_str());
-    let b = loader::join2(loader::dirname_of(m.root.as_str()), "build");
-    switch list_dir(b.as_str(), false) {
-        Some(names) => {
-            for i in 0..names.len() {
-                // Only an emitted tree: it always holds the runtime header.
-                let mut pd = loader::join2(b.as_str(), names.at(i).as_str());
-                let raw = loader::join2(pd.as_str(), "raw");
-                let mut rt = loader::join2(raw.as_str(), "super_rt.h");
-                if unsafe shim::sc_mtime(rt.cstr()) != 0 {
-                    rm_rf(raw.as_str());
-                    let _ = unsafe shim::sc_rmdir(pd.cstr());
-                }
-            }
-        },
-        None => {},
-    };
-    let mut bc = b.clone();
-    let _ = unsafe shim::sc_rmdir(bc.cstr());
+    let trees = root_trees(m);
+    for i in 0..trees.len() {
+        rm_root_tree(trees.at(i).as_str());
+    }
+    let croot = cache_root();
+    if croot.len() != 0 {
+        rm_rf(croot.as_str());
+        println("removed {}", croot.as_str());
+    }
     return 0;
 }

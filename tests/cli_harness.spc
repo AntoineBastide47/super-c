@@ -4,6 +4,8 @@ import stdio;
 import stdlib;
 import string as cstring;
 import driver_shim as shim;
+import driver::util as dutil;
+import build_system::objcache as ocache;
 
 // A `realpath` result buffer: PATH_MAX on Linux, and the size `sc_realpath` gives `_fullpath` on Windows.
 type PathMax = Array<char, 4096>;
@@ -341,8 +343,7 @@ extend Proj {
         let root = self.dir();
         let mut base = format("\"{}\" {} \"{}/{}\"", superc_path(), flags, root, mainrel);
         let mut op = format("{}/.out", root);
-        let envb = cache_env(root, env);
-        return exec_env(base.cstr(), op.cstr(), envb.as_str());
+        return exec_env(base.cstr(), op.cstr(), env);
     }
 
     /// Run the compiler on `mainrel`, capturing output.
@@ -356,14 +357,11 @@ extend Proj {
         let root = self.dir();
         let mut base = format("\"{}\" {}", superc_path(), args);
         let mut op = format("{}/.out", root);
-        let envb = cache_env(root, "");
-        return exec_env(base.cstr(), op.cstr(), envb.as_str());
+        return exec_env(base.cstr(), op.cstr(), "");
     }
 
-    // Append every `*.c` under `dir` (recursively) to `out`, each double-quoted: the `find` a shell
-    // command would run. Doing it here keeps the command shell-free, and a shell-free command is
-    // the same command on Windows.
-    fn append_c_files(self: &Proj, dir: str, out: &mut String) {
+    // Every `*.c` under `dir` (recursively) into `out`: the `find` a shell command would run.
+    fn c_files(self: &Proj, dir: str, out: &mut Vector<String>) {
         let mut dirb = String::from_str(dir);
         let d = unsafe shim::sc_opendir(dirb.cstr());
         if d == null {
@@ -380,20 +378,20 @@ extend Proj {
             }
             let mut child = format("{}/{}", dir, nm);
             if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
-                self.append_c_files(child.as_str(), out);
+                self.c_files(child.as_str(), out);
                 continue;
             }
             if nm.ends_with(".c") {
-                out.format_into(" \"{}\"", child.as_str());
+                out.push(child);
             }
         }
         let _ = unsafe shim::sc_closedir(d);
     }
 
-    // The `@c.link` flags the emit wrote to build/dev/raw/__ldflags, space separated (empty when there are
+    // The `@c.link` flags the emit wrote to build/debug/raw/__ldflags, space separated (empty when there are
     // none): the `cat` a shell command would run.
     fn append_ldflags(self: &Proj, out: &mut String) {
-        let flags = read_text(format("{}/build/dev/raw/__ldflags", self.dir()).as_str());
+        let flags = read_text(format("{}/build/debug/raw/__ldflags", self.dir()).as_str());
         if flags.len() == 0 {
             return;
         }
@@ -410,27 +408,56 @@ extend Proj {
         }
     }
 
-    // Cc the whole emitted build/ tree -Werror (plus any `extra` flags and @c.link __ldflags) into
-    // <root>/bin. `strict` adds -Wall -Wextra -Werror; without it this is the plain build (the analog of
-    // cli_test's `cc -std=c11`, where a tree containing @test functions compiles as an ordinary program).
+    // Compile the whole emitted build/ tree (plus any `extra` flags; its `-l`, `-L` and `-Wl,` words join
+    // the link) and link <root>/bin with the @c.link __ldflags. `strict` adds -Wall -Wextra -Werror;
+    // without it this is the plain build (the analog of cli_test's `cc -std=c11`, where a tree
+    // containing @test functions compiles as an ordinary program). The units compile through the object
+    // cache's script namespace (`objcache::compile_units`): a unit reuses an object only when the same
+    // compiler and flags compiled the same text and includes before, so every check is a compile's own.
+    // The compiler's diagnostics go to the test's stderr.
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
         let root = self.dir();
-        let mut base = format(
-            "{} {} -funsigned-char -ffp-contract=off{}",
-            unsafe str::from_cstr(cc_name()),
-            unsafe str::from_cstr(cstd()),
-            if strict {
-                " -Wall -Wextra -Werror";
+        let raw = format("{}/build/debug/raw", root);
+        let mut ccv = Vector::<String>::new();
+        dutil::split_args(&mut ccv, unsafe str::from_cstr(cc_name()));
+        let mut cfv = Vector::<String>::new();
+        dutil::split_args(&mut cfv, unsafe str::from_cstr(cstd()));
+        dutil::split_args(&mut cfv, "-funsigned-char -ffp-contract=off");
+        if strict {
+            dutil::split_args(&mut cfv, "-Wall -Wextra -Werror");
+        }
+        let mut ex = Vector::<String>::new();
+        dutil::split_args(&mut ex, extra);
+        let mut link = String::from_str(unsafe str::from_cstr(cc_name()));
+        for i in 0..ex.len() {
+            let w = ex.at(i).as_str();
+            if w.starts_with("-l") || w.starts_with("-L") || w.starts_with("-Wl,") {
+                link.format_into(" {}", w);
             } else {
-                "";
-            },
-        );
-        self.append_c_files(format("{}/build/dev/raw", root).as_str(), &mut base);
-        base.format_into(" {}", extra);
-        self.append_ldflags(&mut base);
-        base.format_into(" -o \"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
+                cfv.push(String::from_str(w));
+            }
+        }
+        let mut units = Vector::<String>::new();
+        self.c_files(raw.as_str(), &mut units);
+        // Without a cache root the namespace is the project's own: every unit compiles.
+        let croot = ocache::cache_root();
+        let ns = if croot.len() != 0 {
+            ocache::script_ns(croot.as_str());
+        } else {
+            format("{}/.objcache", root);
+        };
+        let mut objs = Vector::<String>::new();
+        let rc = ocache::compile_units(&ccv, &cfv, raw.as_str(), &units, ns.as_str(), &mut objs);
+        if rc != 0 {
+            return CliResult { exit: rc, out: null };
+        }
+        for i in 0..objs.len() {
+            link.format_into(" \"{}\"", objs.at(i).as_str());
+        }
+        self.append_ldflags(&mut link);
+        link.format_into(" -o \"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
         let mut op = format("{}/.ccout", root);
-        return exec(base.cstr(), op.cstr());
+        return exec(link.cstr(), op.cstr());
     }
 
     /// Compile every generated C file with the harness flags and link `bin`; the C compiler's result.
@@ -459,13 +486,13 @@ extend Proj {
         return self.run_bin_env("").exit;
     }
 
-    // The path of generated file `rel` under <root>/build/dev/raw.
+    // The path of generated file `rel` under <root>/build/debug/raw.
     fn raw_path(self: &Proj, rel: str) String {
-        return format("{}/build/dev/raw/{}", self.dir(), rel);
+        return format("{}/build/debug/raw/{}", self.dir(), rel);
     }
 
     // True if the generated <root>/build/rel contains `needle` (the `grep -q` analog).
-    /// True when generated file `rel` (under build/dev/raw) contains `needle`.
+    /// True when generated file `rel` (under build/debug/raw) contains `needle`.
     pub fn gen_has(self: &Proj, rel: str, needle: str) bool {
         let mut path = self.raw_path(rel);
         let buf = slurp(path.cstr());
@@ -477,14 +504,14 @@ extend Proj {
         return found;
     }
 
-    /// True when the definition of C function `name` in generated file `rel` (under build/dev/raw)
+    /// True when the definition of C function `name` in generated file `rel` (under build/debug/raw)
     /// contains `needle`.
     pub fn gen_fn_has(self: &Proj, rel: str, name: str, needle: str) bool {
         return self.gen_fn_count(rel, name, needle) > 0;
     }
 
     /// How many times the definition of C function `name` in generated file `rel` (under
-    /// build/dev/raw) contains `needle`, or -1 without that definition: the text from the line that
+    /// build/debug/raw) contains `needle`, or -1 without that definition: the text from the line that
     /// defines it to its closing brace at column 0.
     pub fn gen_fn_count(self: &Proj, rel: str, name: str, needle: str) i32 {
         let mut path = self.raw_path(rel);
@@ -529,11 +556,11 @@ extend Proj {
         return n;
     }
 
-    // How many entries under <root>/build/dev/raw start with `prefix`: the `find ... | wc -l` analog, which
+    // How many entries under <root>/build/debug/raw start with `prefix`: the `find ... | wc -l` analog, which
     // asserts that generated wrapper TUs are pruned.
-    /// Number of entries under build/dev/raw whose name starts with `prefix`.
+    /// Number of entries under build/debug/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
-        let mut raw = format("{}/build/dev/raw", self.dir());
+        let mut raw = format("{}/build/debug/raw", self.dir());
         let d = unsafe shim::sc_opendir(raw.cstr());
         if d == null {
             return 0;
@@ -555,7 +582,7 @@ extend Proj {
     }
 
     // True if <root>/build/rel exists (the `access(.., F_OK)` analog).
-    /// True when `rel` exists under build/dev/raw.
+    /// True when `rel` exists under build/debug/raw.
     pub fn gen_exists(self: &Proj, rel: str) bool {
         let f = stdio::fopen(self.raw_path(rel).as_str(), "rb");
         if f == null {
@@ -619,34 +646,8 @@ extend EnvGuard as Free {
     }
 }
 
-/// `env` ("NAME=VALUE" pairs, space separated) with the build cache set under the scratch directory
-/// `root` unless `env` sets one: a compiler the harness runs never writes into the user's global
-/// cache, and the cache goes away with the scratch directory.
-pub fn cache_env(root: str, env: str) String {
-    let mut out = String::new();
-    if env.find("SC_CACHE_DIR=") < 0 {
-        out.format_into("SC_CACHE_DIR=\"{}/.sccache\"", root);
-        if env.len() != 0 {
-            out.push_byte(b' ');
-        }
-    }
-    out.push_str(env);
-    return out;
-}
-
-/// `cache_env` for a fixture build in scratch directory `root`: the suite's shared fixture cache when
-/// `super-c test` named one (SC_TEST_CACHE_DIR), so the runtime and std units fixtures emit identically
-/// compile once per suite run; else the cache under `root`.
-pub fn fixture_cache_env(root: str) String {
-    let fx = stdlib::getenv("SC_TEST_CACHE_DIR");
-    if fx != null && unsafe *fx != 0 as char {
-        return format("SC_CACHE_DIR=\"{}\"", unsafe str::from_cstr(fx));
-    }
-    return cache_env(root, "");
-}
-
-/// Run the compiler under test FROM `dir` with one environment variable set (and the build cache under
-/// `dir`, see `cache_env`): the shape the global object-cache tests need: the engine resolves build.toml from its working directory and the cache
+/// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
+/// object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,
 /// so the directory moves via chdir (the runner restores it after the test) and the
 /// variable rides sc_run's env parameter. superc_path() resolves before the chdir moves ".".
@@ -656,18 +657,28 @@ pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
 
 /// `superc_env_in` with the compiler binary `exe` (an absolute path) instead of the one under test.
 pub fn exe_env_in(exe: str, dir: str, key: str, val: str, args: str) CliResult {
-    let mut cmd = String::new();
-    cmd.format_into("\"{}\" {}", exe, args);
     let mut kv = String::new();
     kv.format_into("{}={}", key, val);
-    let env = cache_env(dir, kv.as_str());
+    return exe_in(exe, dir, kv.as_str(), args);
+}
+
+/// Run the compiler under test FROM `dir` with the suite's environment: its builds share the suite's
+/// object cache, so a unit any earlier build compiled is not compiled again.
+pub fn superc_in(dir: str, args: str) CliResult {
+    return exe_in(superc_path(), dir, "", args);
+}
+
+// Run `exe <args>` from `dir` with `env` ("NAME=VALUE" pairs, space separated) applied to it.
+fn exe_in(exe: str, dir: str, env: str, args: str) CliResult {
+    let mut cmd = String::new();
+    cmd.format_into("\"{}\" {}", exe, args);
     let mut op = String::new();
     op.format_into("{}/.envout", dir);
     let mut d = String::from_str(dir);
     if unsafe shim::sc_chdir(d.cstr()) != 0 {
         return CliResult { exit: -1, out: null };
     }
-    return exec_env(cmd.cstr(), op.cstr(), env.as_str());
+    return exec_env(cmd.cstr(), op.cstr(), env);
 }
 
 /// How many entries of `dir` end with `suffix`.

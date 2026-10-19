@@ -18,6 +18,9 @@ extern "C" "driver_shim.h" {
     /// Absolute path of `path` written into `resolved` ('\' normalized to '/' on Windows); null on failure.
     /// Safety: `resolved` must hold at least 4096 bytes.
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
+    /// The text of symbolic link `path` into `buf` (NUL-terminated, at most `size - 1` bytes): its length,
+    /// -1 when `path` is no link or on Windows and WASI. The link need not resolve.
+    pub fn sc_readlink(path: *const char, buf: *mut char, size: u32) i32;
     /// Running executable's path into `buf`: 0 on success, nonzero on failure or truncation.
     pub fn sc_exe_path(buf: *mut char, size: u32) i32;
     /// Record the process's argv[0], which must outlive every `sc_exe_path` call: under WASI, where
@@ -105,6 +108,9 @@ extern "C" "driver_shim.h" {
     /// rename() that also replaces an existing destination on Windows, including one that is a RUNNING
     /// executable, which Windows will not delete but will let us rename aside (parked as `<to>.old`).
     pub fn sc_rename(from: *const char, to: *const char) i32;
+    /// Give the file `from` the second name `to` (a hard link): 0 on success, -1 when the file system
+    /// or the platform refuses (another volume, a link count limit).
+    pub fn sc_link(from: *const char, to: *const char) i32;
     /// Make `path` executable (0755); a no-op on Windows, which goes by extension.
     pub fn sc_chmod_exec(path: *const char) i32;
     /// Set `name`=`value` in this process's environment, overwriting any existing value.

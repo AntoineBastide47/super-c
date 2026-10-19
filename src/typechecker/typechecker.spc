@@ -31294,6 +31294,17 @@ extend TypeChecker {
                 for i in 0..params.len {
                     self.decl_type(unsafe (*a).list(params)[i as usize]);
                 }
+                // The declared results too: a body that never returns (a panic, an exit) resolves no
+                // `return` against them, and its lowering reads their types.
+                let rets = unsafe (*a).at_const(id).as_data.function.returns;
+                for i in 0..rets.len {
+                    let rid = unsafe (*a).list(rets)[i as usize];
+                    if unsafe (*a).at_const(rid).kind == NodeKind::NODE_PARAMETER {
+                        self.decl_type(rid);
+                    } else {
+                        let _ = self.resolve_type(rid);
+                    }
+                }
                 let fnd = unsafe (*self.cur_ast()).at_const(id).as_data.function;
                 if fnd.is_intrinsic() {
                     self.tc_check_intrinsic(id);
@@ -31715,8 +31726,13 @@ extend TypeChecker {
         }
         // A raw pointer / reference never owns its pointee (`tc_type_is_free` peels them via
         // `strip`, so it would wrongly report `*mut FreeStruct` as owning): a `static mut` holding
-        // one is fine, which is how a heap-managed global singleton is expressed.
-        if cd.is_static_mut && dtk != TypeKind::TYPE_POINTER && dtk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(
+        // one, or an array of them, is fine, which is how a heap-managed global singleton is expressed.
+        let mut et = declared;
+        while self.type_at(et).kind == TypeKind::TYPE_ARRAY {
+            et = self.type_at(et).as_data.arr.elem;
+        }
+        let etk = self.type_at(et).kind;
+        if cd.is_static_mut && etk != TypeKind::TYPE_POINTER && etk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(
             declared,
         ) {
             let sp = unsafe (*self.cur_ast()).at_const(id).span;

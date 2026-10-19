@@ -10,7 +10,7 @@
 #      and print the same diagnostics;
 #   4. every emitted translation unit compiles under the strict warning set, and the tree meets the
 #      readability rules;
-#   5. every built-in profile other than dev (which every build above produced) builds the compiler.
+#   5. every built-in profile but test (which the test command builds) builds the compiler.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
 # `sh ci/gate.sh --no-check` skips step 1 (CI, after its own build and test steps); `--core` also skips
 # step 5: check.sh runs it last, over the compiler its bootstrap step installed. `--profiles` runs steps 0
@@ -68,7 +68,7 @@ cp -R src std ffi build.toml "$tree/"
 rm -rf "$tree/src/build"
 cp "$CONTRACT_BIN$x" "$tree/super-c$x"
 
-# Step 5: every built-in profile but dev builds the compiler, each with builder $1 (in the tree).
+# Step 5: every built-in profile but test builds the compiler, each with builder $1 (in the tree).
 profiles() {
     step "profiles ($CONTRACT_PROFILES)"
     for p in $CONTRACT_PROFILES; do
@@ -92,13 +92,13 @@ same_tree() {
 
 step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)"
 ( cd "$tree" && SC_LEAK_CHECK=fatal "./super-c$x" build ${cstd:+"$cstd"} >/dev/null )
-cp -R "$tree/build/dev/raw" "$tmp/gen1-raw"
-cp "$tree/build/dev/super-c$x" "$tree/gen1-super-c$x"
+cp -R "$tree/build/debug/raw" "$tmp/gen1-raw"
+cp "$tree/build/debug/super-c$x" "$tree/gen1-super-c$x"
 rm -rf "$tree/build"
 ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build ${cstd:+"$cstd"} >/dev/null )
-same_tree "$tmp/gen1-raw" "$tree/build/dev/raw" || fail "gen1 and gen2 emitted different C (above)"
+same_tree "$tmp/gen1-raw" "$tree/build/debug/raw" || fail "gen1 and gen2 emitted different C (above)"
 # Generation two is compiled and run: every build below is its own.
-cp "$tree/build/dev/super-c$x" "$tree/gen2-super-c$x"
+cp "$tree/build/debug/super-c$x" "$tree/gen2-super-c$x"
 echo "gate: byte-identical"
 
 # One build of the tree by gen2: $1 workers, $2 the SC_TASK_DELAY seed (empty = none), $3 the record
@@ -106,7 +106,7 @@ echo "gate: byte-identical"
 gen2_build() {
     rm -rf "$tree/build"
     ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} "./gen2-super-c$x" build --jobs="$1" ${cstd:+"$cstd"} >/dev/null 2>"$tmp/$3-err" ) || { cat "$tmp/$3-err" >&2; fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"; }
-    cp -R "$tree/build/dev/raw" "$tmp/$3-raw"
+    cp -R "$tree/build/debug/raw" "$tmp/$3-raw"
 }
 # The identity of two records: the emitted tree, the type table, the item index digest, the
 # diagnostics (stderr without the measurement lines).
@@ -131,7 +131,7 @@ done
 
 strict_cstd=${SC_CSTD:-$CONTRACT_CSTD}
 step "strict C warnings ($strict_cstd $CONTRACT_STRICT_CFLAGS) and readability"
-raw="$tree/build/dev/raw"
+raw="$tree/build/debug/raw"
 units=0
 for c in $(find "$raw" -name '*.c' | sort); do
     ${CC:-cc} $strict_cstd $CONTRACT_STRICT_CFLAGS -fsyntax-only "$c" || fail "strict warnings: $c"

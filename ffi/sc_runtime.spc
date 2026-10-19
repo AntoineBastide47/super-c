@@ -135,6 +135,9 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_stack_guard_install() void;
     /// Record the usable stack size for the overflow report.
     pub fn sc_rt_stack_note_size(bytes: usize) void;
+    /// 1 in a program built with AddressSanitizer (its frames carry redzones), else 0.
+    @unsafe(safe)
+    pub fn sc_rt_asan() i32;
 
     /// Stackful context switch. `alloc` makes an empty (root) context; `init` arms one to run `entry(arg)` on
     /// `stack`; `switch` saves the running context into `from` and resumes `to`.

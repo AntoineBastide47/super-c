@@ -127,27 +127,27 @@ fn manifest_validation_messages() {
     );
     manifest_err(
         "strip bool",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nstrip = 1\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\nstrip = 1\n",
         "'strip' expects true or false",
     );
     manifest_err(
         "opt-level",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nopt-level = 4\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\nopt-level = 4\n",
         "'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\"",
     );
     manifest_err(
         "overflow-checks bool",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\noverflow-checks = 1\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\noverflow-checks = 1\n",
         "'overflow-checks' expects true or false",
     );
     manifest_err(
         "link-args array",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nlink-args = \"-S\"\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\nlink-args = \"-S\"\n",
         "'link-args' expects an array of strings",
     );
     manifest_err(
         "lto mode",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nlto = \"fat\"\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\nlto = \"fat\"\n",
         "'lto' expects \"none\", \"full\", \"auto\" or \"thin\"",
     );
     manifest_err(
@@ -227,11 +227,11 @@ fn manifest_profile_lto_mode() {
     assert_eq(mm.profiles.at(mm.profile_index("fast") as usize).lto, manifest::LTO_FULL);
     assert_eq(mm.profiles.at(mm.profile_index("plain") as usize).lto, manifest::LTO_FLAGS);
     assert_eq(mm.profiles.at(mm.profile_index("release") as usize).lto, manifest::LTO_AUTO);
-    assert_eq(mm.profiles.at(mm.profile_index("dev") as usize).lto, manifest::LTO_FLAGS);
+    assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).lto, manifest::LTO_FLAGS);
     assert_eq(manifest::lto_parse("thin"), manifest::LTO_THIN);
     // A section naming a built-in overrides only the keys it sets: `release` keeps its flags and strip.
     let (m2, errs2) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nlto = \"thin\"\n[profile.dev]\ncflags = [\"-O1\"]\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nlto = \"thin\"\n[profile.debug]\ncflags = [\"-O1\"]\n",
         "",
         false,
     );
@@ -240,8 +240,8 @@ fn manifest_profile_lto_mode() {
     let rel = mm2.profiles.at(mm2.profile_index("release") as usize);
     assert_eq(rel.lto, manifest::LTO_THIN);
     assert(rel.strip && rel.cflags.len() > 1 && rel.link_args.len() == 1, "release keeps its built-in flags and strip");
-    let dev = mm2.profiles.at(mm2.profile_index("dev") as usize);
-    assert(dev.cflags.len() == 1 && dev.ldflags.len() == 2, "dev's cflags are replaced, its ldflags kept");
+    let dbg = mm2.profiles.at(mm2.profile_index("debug") as usize);
+    assert(dbg.cflags.len() == 1 && dbg.opt == 0, "debug's cflags are replaced, its opt-level kept");
     assert_eq(manifest::lto_parse("x"), -1);
     assert_eq(manifest::lto_flag(manifest::LTO_AUTO), "-flto=auto");
     assert_eq(manifest::lto_flag(manifest::LTO_NONE), "");
@@ -267,7 +267,6 @@ fn manifest_profile_opt_level_and_link_args() {
     assert(rel.strip && rel.cflags.len() > 1, "the rest of release stays");
     assert_eq(mm.profiles.at(mm.profile_index("small") as usize).opt, manifest::OPT_Z);
     assert_eq(mm.profiles.at(mm.profile_index("two") as usize).opt, 2);
-    assert_eq(mm.profiles.at(mm.profile_index("dev") as usize).opt, 1);
     assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).opt, 0);
     assert_eq(manifest::opt_flag(manifest::OPT_S), "-Os");
     assert_eq(manifest::opt_flag(manifest::OPT_FLAGS), "");
@@ -278,17 +277,17 @@ fn manifest_profile_opt_level_and_link_args() {
 @test
 fn manifest_profile_overflow_checks() {
     let (m, errs) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\noverflow-checks = true\n[profile.fast]\nopt-level = \"s\"\n[profile.plain]\ncflags = [\"-O3\"]\n[profile.dev]\nstrip = true\n[profile.lax]\nopt-level = 0\noverflow-checks = false\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\noverflow-checks = true\n[profile.fast]\nopt-level = \"s\"\n[profile.plain]\ncflags = [\"-O3\"]\n[profile.debug]\nstrip = true\n[profile.lax]\nopt-level = 0\noverflow-checks = false\n",
         "",
         false,
     );
     assert_eq(errs.errors.len(), 0);
     let mm = m.unwrap();
-    let wraps: [str; 4] = ["fast", "bench", "pgogen", "lax"];
+    let wraps: [str; 3] = ["fast", "bench", "lax"];
     for name in wraps {
         assert(mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
     }
-    let checks: [str; 6] = ["release", "plain", "dev", "debug", "test", "race"];
+    let checks: [str; 5] = ["release", "plain", "debug", "test", "race"];
     for name in checks {
         assert(!mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
     }
@@ -299,7 +298,7 @@ fn manifest_profile_overflow_checks() {
 @test
 fn manifest_bootstrap_skips_unknown() {
     let (m, errs) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n[foo]\nx = 1\n[profile.dev]\nnew-key = 1\n",
+        "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n[foo]\nx = 1\n[profile.debug]\nnew-key = 1\n",
         "",
         true,
     );

@@ -200,8 +200,9 @@ super-c test --test-no-fork            # in-process (for debuggers; shows passin
 
 ### How the suite is built
 
-`super-c test` first builds the compiler under test with the selected profile (`dev` by
-default: `-O1` + ASan/UBSan) and exports it as `$SUPERC` for the CLI tests; when the project
+`super-c test` first builds the compiler under test with the `test` profile (`-O1`, no
+sanitizers) into `<out-dir>/test-bin`, or with `--profile=P` into `<out-dir>/P`; `--sanitizers`
+adds ASan/UBSan to it and to the runner. It exports it as `$SUPERC` for the CLI tests; when the project
 holds `std/core.spc` and `SC_STD_DIR` is unset, it also sets `SC_STD_DIR` to the project's
 `std/`, because `--out-dir` may place that compiler away from the tree it must load. The test
 runner itself is a separate engine build of the generated test root under the built-in
@@ -215,12 +216,11 @@ tests of those files. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. Run directly, the runner takes `--filter=S`,
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. Every compiler the CLI harnesses
-(`tests/cli_harness.spc`, `tests/harness.spc`) run gets `SC_CACHE_DIR=<scratch dir>/.sccache`
-unless the test sets its own (`cli::cache_env`), so a test never writes into the user's
-global build cache. The fixture builds of `compile_and_run` (and `expect_exit`) instead share
-the suite's object cache, `build/test/fixture-cache`, which `super-c test` names in
-`SC_TEST_CACHE_DIR` (`cli::fixture_cache_env`): the runtime and std units every fixture emits
-compile once per cache, not once per fixture.
+(`tests/cli_harness.spc`, `tests/harness.spc`) run shares the global object cache: `super-c
+test` exports its absolute root as `SC_CACHE_DIR`, so a unit any earlier build, test or suite
+run compiled is not compiled again. A test that checks cache behavior sets its own
+`SC_CACHE_DIR` under its scratch directory, and so does every test that runs `clean --full`,
+which removes the cache root.
 
 ### Fork isolation
 
@@ -240,12 +240,15 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
 In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
 `wasm-compile`: an artifact) and runs its test shards in parallel on it (three on Windows, the
-slowest runner, two elsewhere); in the release workflow (macOS, Linux and Windows in one matrix)
+slowest runner, two elsewhere). Every CI suite runs `super-c test --sanitizers`: the compiler under
+test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
+without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), its profile builds (`gate-profiles`,
 `ci/gate.sh --profiles`) and the x86-64 levels run beside the shards, and the release binary is
 built after all of them pass. Only a run on main saves caches: the toolchain action restores every
-cache, saves its installation caches on main, and each job's last step (`.github/actions/ccache-save`)
-saves its ccache on main, so a probe branch cannot evict main's entries. The toolchain and bootstrap steps live in `.github/actions/`. An
+cache, saves its installation caches on main, and each job's last step (`.github/actions/cache-save`)
+saves its global object cache (`~/.super-c/cache`) on main, so a probe branch cannot evict main's
+entries. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
 
@@ -365,8 +368,9 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `compile_c_arch(src, arch)` | `compile_c` for instruction set `arch` (0 x86_64, 1 aarch64) with its baseline, on any host |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
+| `ExitBatch` (`new`, `add(label, src, code)`, `run`) | Exit-code cases built as one program: each case becomes module `c<k>` with its `fn main()` renamed `case_main` and public, the program builds once and runs once per case (`prog <k>`). A case whose `main` takes parameters, and every case of a batch that does not build, builds alone through `expect_exit`. A test file turns its exit-code tests into provider functions `fn name(b: &mut h::ExitBatch)` that tests `exit_cases_NN` run in groups of about 20 cases |
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
-| `expect_run(label, src, arg, msg)` | Build `src` (dev profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
+| `expect_run(label, src, arg, msg)` | Build `src` (debug profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
 | `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (a `contains` entry `a|b` is met by either, for equivalent instructions C compilers pick between (`uminv|umaxv`); an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
 
@@ -375,6 +379,18 @@ filtering for the host and loads the vector backend for a snippet that names a v
 real build, except the three differential oracles, which build
 through the compiler under test (below).
 
+`compile`, `compile_std` and the `compile_c` family do not load the prelude themselves on macOS
+and Linux. The suite's global fixture (`@test_init(global)` in `tests/harness.spc`, so no test
+file can declare another) loads, resolves and type-checks the host prelude once in the runner's
+parent, with and without the vector backend (`loader::prelude_package_arch`). Each compile forks
+from that snapshot, appends the snippet (`Package::add_source_module`), opens the item index
+again over every module, and runs the rest: the snippet's resolve and type check, then the
+type publication, the borrow check of every module and the emission. One publication keeps
+every type id what the full pipeline gives; a suite run that compared both paths on every
+compile found no difference. The result returns through a pipe. The forked compile reports its
+own leaks, and a panic, a signal or an exit code ends the test the same way. Another instruction
+set, `compile_std_bootstrap` and Windows run the full pipeline.
+
 ### Differential oracles
 
 `tests/harness.spc` builds each program as `main.spc` of a scratch manifest project
@@ -382,7 +398,7 @@ through the compiler under test (below).
 `--cc=cc -target x86_64-apple-macos11`, one argument even with spaces) or, as `NAME=VALUE`, an
 environment variable of the build (`SC_BCE=0` keeps every bounds check). The project defines
 `--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program run many
-times: it compiles in about half the dev profile's time, and ASan's start-up makes each run several
+times: UBSan checks its arithmetic without AddressSanitizer's start-up, which makes each run several
 times slower. On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
 compiler under wasmtime; the C compile and the program stay native, except under
@@ -409,7 +425,7 @@ through the compiler's own C library).
   `attempt to shift left/right with overflow`, "index out of bounds" for any message holding
   it; a vector lane trap keeps its text from `lane <digit>`, so the lane must match too). Floats
   compare by bits, any NaN as `nan`. It runs
-  under `dev` (overflow checks on); `decls` must not trap. `parity_program` prints the program.
+  under `debug` (overflow checks on); `decls` must not trap. `parity_program` prints the program.
 - `asm_check(src, opts, function, contains, absent)` builds, reads
   `build/<profile>/compile_commands.json`, finds the unit that defines `function`, reruns its
   command with `-S` (without `-c`, `-MMD` and `-flto*`, which would print IR), and matches
@@ -487,7 +503,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
 
 - `scalar.spc`: integer and float expressions over every builtin width with boundary-biased inputs,
   shift counts from -1 to the width + 1, and casts. Oracle 0 is `const_runtime_parity`; oracle 1
-  compares `dev` and `release` on a program that evaluates the plain operators under `release` and
+  compares `debug` and `release` on a program that evaluates the plain operators under `release` and
   the `wrapping_*` methods otherwise (`if PROFILE == "release"`), so both follow their profile's
   overflow rule and must agree. Inputs are typed by the turbofish (`opq::<f64>(0.1)`), never by a
   float suffix or a hex float: a constant that uses one does not fold ("the initializer does not
@@ -513,7 +529,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   input alone.
 
 `tests/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
-(`-DSC_ARITH_WRAP` through `--cstd` under `dev`: the runtime wraps, the constant traps), which the
+(`-DSC_ARITH_WRAP` through `--cstd` under `debug`: the runtime wraps, the constant traps), which the
 scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
 `SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops|vector|math] ./super-c test --quiet
@@ -576,6 +592,8 @@ run with `--jobs=1`: a test that starts a worker per CPU slows every test beside
 timeout. These tests take `@test(timeout = 300)`.
 
 ## Test Design Rules
+
+Choosing an oracle, batching cases and keeping a test's CPU and energy cost low: `super-c-test-design`.
 
 - **One assertion per concept.** Split independent checks into separate `assert` calls:
   a combined boolean hides which condition failed.

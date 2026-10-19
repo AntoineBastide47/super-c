@@ -1497,8 +1497,8 @@ fn lsp_build_constants_follow_the_target() {
     assert(response_of(o, "\"id\":5").contains(want.as_str()));
 }
 
-const BC_DOC: str = "fn main() i32 {\n    if PROFILE == \"dev\" {\n        return 0;\n    }\n    if TEST {\n        return missing;\n    }\n    return 1;\n}\n";
-const BC_EDIT: str = "fn main() i32 {\n    if PROFILE == \"dev\" {\n        return 0;\n    }\n    if PLATFORM == Platform::Macos {\n        return missing;\n    }\n    return 1;\n}\n";
+const BC_DOC: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if TEST {\n        return missing;\n    }\n    return 1;\n}\n";
+const BC_EDIT: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if PLATFORM == Platform::Macos {\n        return missing;\n    }\n    return 1;\n}\n";
 
 // Hover on a build constant shows its value; it has no definition site to go to; the branch the
 // platform filter removed is not analyzed; an edit re-decides the module's conditions.
@@ -1522,7 +1522,7 @@ fn lsp_build_constants() {
     // The removed branch's unknown name is never reported.
     assert(!o.contains("missing"));
     let r5 = response_of(o, "\"id\":5");
-    assert(r5.contains("PROFILE: str<'static> = \\\"dev\\\""));
+    assert(r5.contains("PROFILE: str<'static> = \\\"debug\\\""));
     assert(r5.contains("The build profile"));
     let r6 = response_of(o, "\"id\":6");
     assert(r6.contains("\"result\":null"));

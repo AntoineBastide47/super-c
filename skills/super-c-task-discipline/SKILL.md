@@ -120,13 +120,13 @@ measured twice, changes stranded in an unauthorized /tmp worktree, an amend that
 happened, edits not propagated to a paired directory.
 
 **Before claiming a fix is live:**
-- Know which binary the user runs (`./super-c` at repo root vs `build/dev/super-c`);
+- Know which binary the user runs (`./super-c` at repo root vs `build/debug/super-c`);
   rebuild before any measurement claim and say when the deployed binary is stale.
 - `check.sh` (also run by the local commit-msg hook) moves the release binary onto
   `./super-c`; a successful bootstrap installs the rebuilt compiler there again, a failed
   one leaves the release binary. Before any test, fixpoint, or commit claim, run
-  `cmp super-c build/dev/super-c`; if they differ, run `build/dev/super-c build`, which installs
-  `build/dev/super-c` onto `./super-c` by rename. A hook failure that repeats an emitter error you
+  `cmp super-c build/debug/super-c`; if they differ, run `build/debug/super-c build`, which installs
+  `build/debug/super-c` onto `./super-c` by rename. A hook failure that repeats an emitter error you
   already fixed means a stale `./super-c`, not a regression.
 - Work in the repo the user works in. Never move work to a worktree or temp clone
   unless asked.

@@ -22,7 +22,7 @@ import time;
 
 const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
-const BUILD_PROFILE: str = "dev";
+const BUILD_PROFILE: str = "debug";
 const ITERS: i32 = 100;
 
 // The phases of a round: the build's boundaries B_START..B_PUBLISH, phase k running from boundary k to
@@ -70,7 +70,7 @@ fn on_mark(ctx: *mut void, b: usize) {
 }
 
 // The warm-up round's sink: the bytes of every C file the emission writes, headers and sources.
-fn count_bytes(ctx: *mut void, path: str, _kind: i32) {
+fn count_bytes(ctx: *mut void, path: str, _text: str, _kind: i32) {
     let f = stdio::fopen(path, "rb");
     if f == null {
         return;
@@ -192,11 +192,10 @@ fn real_build(js: &mut String) bool {
     }
     let mut m = m0.unwrap();
     m.out_dir = dir.clone();
-    // Cold on every axis the engine caches on: no global object cache, no emit stamp, no ccache; the
-    // scratch out-dir starts without a per-TU cache.
+    // Cold on every axis the engine caches on: no global object cache, no emit stamp; the scratch
+    // out-dir starts without a per-TU cache.
     set_env("SC_NO_CACHE", "1");
     set_env("SC_NO_EMIT_CACHE", "1");
-    set_env("CCACHE_DISABLE", "1");
     let jobs = (unsafe dshim::sc_ncpu()) as u32;
     let mut bin = dir.clone();
     bin.push_str("/super-c");
@@ -222,7 +221,7 @@ fn real_build(js: &mut String) bool {
     bst::json(g, js);
     let overlap_ms = bst::cc_overlap_ns(g) as f64 / 1000000.0;
     unsafe stdio::printf(
-        "  build (dev, jobs=%u, cold): transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
+        "  build (debug, jobs=%u, cold): transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
         g.jobs,
         build_ms(g, bst::B_START, bst::B_PUBLISH),
         build_ms(g, bst::B_PUBLISH, bst::B_SYNC),
@@ -246,16 +245,11 @@ fn real_build(js: &mut String) bool {
     }
     unsafe stdio::printf(" ms\n".ptr() as *const char);
     unsafe stdio::printf(
-        "    %zu C units, %zu compiled, %.*s, ccache wrapper %s (CCACHE_DISABLE=1), object cache off, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
+        "    %zu C units, %zu compiled, %.*s, object cache off, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
         g.total_c,
         g.stale_n,
         g.cc_version.len() as i32,
         g.cc_version.as_str().ptr() as *const char,
-        if g.ccache {
-            "present".ptr() as *const char;
-        } else {
-            "absent".ptr() as *const char;
-        },
         g.rss[4] as f64 / 1048576.0,
     );
     bst::release();

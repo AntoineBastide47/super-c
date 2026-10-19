@@ -150,9 +150,8 @@ fn main() i32 {
 }
 )";
 
-@test
-fn a_slice_offset_names_the_element_definition() {
-    h::expect_exit("a slice at an offset", OFFSET, 6);
+fn a_slice_offset_names_the_element_definition(b: &mut h::ExitBatch) {
+    b.add("a slice at an offset", OFFSET, 6);
 }
 
 // Scalar code binds per instance the interface calls whose result the instance fixes: `G::len()` of a
@@ -304,4 +303,13 @@ fn main(args: Vector<str>) i32 {
 fn a_vector_caller_takes_a_larger_budget() {
     h::expect_c_absent("no call of `step` remains", BUDGET, "step(y)");
     h::expect_exit("a vector budget", BUDGET, 0);
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    a_slice_offset_names_the_element_definition(&mut b);
+    b.run();
 }

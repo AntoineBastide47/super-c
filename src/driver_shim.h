@@ -16,6 +16,7 @@ int sc_lstat_isdir(const char *path);
 int sc_dirent_isdir(void *entry);                    /* readdir d_type: 1 dir, 0 not, -1 unknown */
 int sc_same_file(const char *a, const char *b);      /* 1 same file (POSIX dev+ino / Win32 file id), 0 not, -1 on failure */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
+int sc_readlink(const char *path, char *buf, unsigned size); /* readlink(2), NUL-terminated: its length, -1 on failure */
 int sc_exe_path(char *buf, unsigned size);           /* absolute path of the running binary; 0 on success */
 void sc_set_argv0(const char *argv0);        /* record argv[0]: sc_exe_path answers it under WASI */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
@@ -70,6 +71,7 @@ int sc_chmod_exec(const char *path);
    RUNNING executable, which is how the compiler replaces itself. That case parks the old image as
    "<to>.old" (Windows cannot delete a live one) and the next call sweeps it. */
 int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
+int sc_link(const char *from, const char *to); /* link(2) / CreateHardLinkA: a second name for `from` */
 int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
 int sc_unsetenv(const char *name);                        /* unsetenv(3) / _putenv_s(name, "") */
 

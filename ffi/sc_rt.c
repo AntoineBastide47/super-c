@@ -174,6 +174,9 @@ void sc_lk_stats(uint64_t *out) { memset(out, 0, 18 * sizeof *out); }
 #if SC_RT_LK_STATS < 2
 void sc_lk_counts(uint64_t *out) { memset(out, 0, 2 * sizeof *out); }
 #endif
+#if SC_RT_LK_STATS < 3
+int sc_rt_asan(void) { return 0; }
+#endif
 
 /* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------
    A deadlock is reported the first time two locks are taken in OPPOSITE orders, not the first time the

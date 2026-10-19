@@ -15,52 +15,62 @@ fn run_exit(label: str, body: str, code: i32) {
     h::expect_exit(label, src.as_str(), code);
 }
 
-@test
-fn operator_overload_lowering() {
+// `run_exit` as a case of batch `b`.
+fn exit_case(b: &mut h::ExitBatch, label: str, body: str, code: i32) {
+    let mut src = String::from_str(PRE);
+    src.push_str(body);
+    b.add(label, src.as_str(), code);
+}
+
+fn operator_overload_lowering(b: &mut h::ExitBatch) {
     // Compound assignment on an operator-overloaded struct lowers through the method (C cannot += structs).
-    run_exit(
+    exit_case(
+        b,
         "struct compound assignment",
         "struct P { pub x: i32, }\nextend P { pub fn add(self: &P, o: &P) P { return P { x: self.x + o.x }; } pub fn mul(self: &P, o: &P) P { return P { x: self.x * o.x }; } }\nfn main() i32 { let mut a = P { x: 2 }; let b = P { x: 3 }; a += b; a *= b; unsafe exit(a.x); }\n",
         15,
     );
     // Bitwise and shift operators dispatch the same way. A shift's right operand is a COUNT, so it is
     // passed BY VALUE where `&` passes its operand by reference: the two are lowered differently.
-    run_exit(
+    exit_case(
+        b,
         "bitwise and shift overloads",
         "struct M { pub b: u32, }\nextend M { pub fn bit_and(self: &M, o: &M) M { return M { b: self.b & o.b }; } pub fn bit_or(self: &M, o: &M) M { return M { b: self.b | o.b }; } pub fn bit_xor(self: &M, o: &M) M { return M { b: self.b ^ o.b }; } pub fn bit_not(self: &M) M { return M { b: ~self.b }; } pub fn shl(self: &M, n: usize) M { return M { b: self.b << n as u32 }; } pub fn shr(self: &M, n: usize) M { return M { b: self.b >> n as u32 }; } }\nfn main() i32 {\n    let a = M { b: 0b1100 };\n    let b = M { b: 0b1010 };\n    let mut acc = a;\n    acc &= b;\n    acc |= M { b: 1 };\n    acc ^= M { b: 2 };\n    acc <<= 2;\n    acc >>= 1;\n    let n = (~a).b & 0xF;\n    unsafe exit(((a & b).b + (a | b).b + (a ^ b).b + (a << 1).b + (a >> 2).b + acc.b + n) as i32);\n}\n",
         80,
     );
     // String patterns in switch compare through str's eq, incl. inside an enum payload.
-    run_exit(
+    exit_case(
+        b,
         "string switch patterns",
         "fn pick(s: str) i32 { return switch s { \"build\" => 1, \"fmt\" => 2, _ => 3, }; }\nfn pay(o: Option<str>) i32 { return switch o { Some(\"x\") => 10, Some(_) => 20, None => 30, }; }\nfn main() i32 { unsafe exit(pick(\"build\") + pick(\"fmt\") * 2 + pick(\"?\") * 3 + pay(Option::<str>::Some(\"x\")) + pay(Option::<str>::Some(\"y\")) + pay(Option::<str>::None)); }\n",
         74,
     );
     // String range patterns test through str's cmp (lexicographic buckets).
-    run_exit(
+    exit_case(
+        b,
         "string range patterns",
         "fn bucket(s: str) i32 { return switch s { \"a\"..\"m\" => 1, \"m\"..\"z\" => 2, _ => 3, }; }\nfn main() i32 { unsafe exit(bucket(\"apple\") + bucket(\"pear\") * 2 + bucket(\"~t\") * 3); }\n",
         14,
     );
 }
 
-@test
-fn user_index_on_concrete_structs() {
+fn user_index_on_concrete_structs(b: &mut h::ExitBatch) {
     // A struct's own `index`/`index_mut` (a plain extend or a generic conformance) is called for a
     // read, a store, a compound store and `&mut v[i]`, at run time and in a constant.
-    run_exit(
+    exit_case(
+        b,
         "user index and index_mut",
         "struct W { pub e: [i32; 3] }\nextend W {\n    pub fn index(self: &W, i: usize) &i32 { return &unsafe self.e[i]; }\n    pub fn index_mut(self: &mut W, i: usize) &mut i32 { return &mut unsafe self.e[i]; }\n}\nstruct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy, const N: usize> V<T, N> as Index<T, []T> {\n    pub fn index(self: &V<T, N>, i: usize) &T { if i >= N { panic(\"oob\"); } return &unsafe self.e[i]; }\n    pub fn index_range(self: &V<T, N>, r: Range<usize>) []T { return unsafe Slice::<T> { ptr: (&self.e[0] as *const T) + r.start, len: r.end - r.start }; }\n}\nextend<T: Copy, const N: usize> V<T, N> as IndexMut<T, []mut T> {\n    pub fn index_mut(self: &mut V<T, N>, i: usize) &mut T { if i >= N { panic(\"oob\"); } return &mut unsafe self.e[i]; }\n    pub fn index_range_mut(self: &mut V<T, N>, r: Range<usize>) []mut T { return unsafe SliceMut::<T> { ptr: (&mut self.e[0] as *mut T) + r.start, len: r.end - r.start }; }\n}\nfn k() i32 {\n    let mut v = V::<i32, 2> { e: [1, 2] };\n    v[1] = 7;\n    return v[1];\n}\nconst K: i32 = k();\nfn main() i32 {\n    let mut w = W { e: [1, 2, 3] };\n    w[1] = 9;\n    w[0] += 4;\n    let r = &mut w[2];\n    *r = 10;\n    let mut v = V::<i32, 3> { e: [1, 2, 3] };\n    v[2] = w[0] + w[1];\n    v[0] *= 3;\n    unsafe exit(w[0] + w[1] + w[2] + v[0] + v[2] + K);\n}\n",
         48,
     );
 }
 
-@test
-fn user_index_range_on_concrete_structs() {
+fn user_index_range_on_concrete_structs(b: &mut h::ExitBatch) {
     // `v[lo..hi]` on a struct calls its `index_range` with the bounds in a `Range<usize>` (a missing
     // start is 0, a missing end its `len()`), `&mut v[lo..hi]` its `index_range_mut`, in a generic
     // body, at run time and in a constant.
-    run_exit(
+    exit_case(
+        b,
         "user index_range and index_range_mut",
         "struct V<const N: usize> { pub e: [i32; N] }\nextend<const N: usize> V<N> { pub fn len(self: &V<N>) usize { return N; } }\nextend<const N: usize> V<N> as Index<i32, []i32> {\n    pub fn index(self: &V<N>, i: usize) &i32 { return &unsafe self.e[i]; }\n    pub fn index_range(self: &V<N>, r: Range<usize>) []i32 {\n        let hi = r.end + (r.inclusive as usize);\n        if r.start > hi || hi > N { panic(\"oob\"); }\n        return unsafe Slice::<i32> { ptr: (&self.e[0] as *const i32) + r.start, len: hi - r.start };\n    }\n}\nextend<const N: usize> V<N> as IndexMut<i32, []mut i32> {\n    pub fn index_mut(self: &mut V<N>, i: usize) &mut i32 { return &mut unsafe self.e[i]; }\n    pub fn index_range_mut(self: &mut V<N>, r: Range<usize>) []mut i32 {\n        let hi = r.end + (r.inclusive as usize);\n        if r.start > hi || hi > N { panic(\"oob\"); }\n        return unsafe SliceMut::<i32> { ptr: (&mut self.e[0] as *mut i32) + r.start, len: hi - r.start };\n    }\n}\nfn sum(s: []i32) i32 { let mut t = 0; for x in s { t += x; } return t; }\nfn tail<const N: usize>(v: &V<N>, k: usize) []i32 { return v[k..]; }\nfn ts() i32 { let v = V::<4> { e: [1, 2, 3, 4] }; return sum(v[1..]); }\nconst TS: i32 = ts();\nfn main() i32 {\n    let mut v = V::<4> { e: [1, 2, 3, 4] };\n    let w = &mut v[2..];\n    w[0] = 7;\n    unsafe exit(sum(v[1..3]) + sum(v[..=1]) * 10 + sum(tail(&v, 3)) + TS);\n}\n",
         52,
@@ -69,9 +79,8 @@ fn user_index_range_on_concrete_structs() {
 
 // Of two conformances to one operator interface, the one whose extend bounds the operand's instance
 // does not satisfy (`V<T: Int, N>` for `V<bool, 2>`) is no candidate.
-@test
-fn operator_candidates_respect_extend_bounds() {
-    h::expect_exit(
+fn operator_candidates_respect_extend_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "bounded and concrete BitAnd",
         M"(interface Int: Copy {}
 extend i32 as Int {}
@@ -102,9 +111,8 @@ fn main() i32 {
 // with `T: Num`, `i32 as Count<W<T>>`): the bound check, the dispatch at run time and in a constant
 // all take the one whose bounds hold; and two generic conformances whose interface-solved parameters
 // have disjoint bounds (`T as Mix<U>` with `U: Fl`, `T as Mix<bool>`) do not conflict.
-@test
-fn conformance_chosen_by_bounds() {
-    h::expect_exit(
+fn conformance_chosen_by_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "Count<f32> and Count<W<f32>> on i32",
         M"(interface Num: Copy {}
 extend f32 as Num {}
@@ -119,7 +127,7 @@ fn main() i32 { let n: i32 = 3; return steps(1.0f32, n) + steps(W::<f32> { v: 1.
 )",
         54,
     );
-    h::expect_exit(
+    b.add(
         "Mix<U: Fl> and Mix<bool>",
         M"(interface Fl: Copy { fn lerp(a: Self, b: Self, t: Self) Self; }
 extend f32 as Fl { pub fn lerp(a: f32, b: f32, t: f32) f32 { return a + (b - a) * t; } }
@@ -136,28 +144,28 @@ fn main() i32 { return (mix(1.0f32, 6.0f32, true) + gen(1.0, 0.5f32)) as i32; }
 
 // Through a generic type named without arguments (`V::new(..)`), the argument count picks among
 // associated functions of disjoint extends, and the instance follows from the chosen one.
-@test
-fn argument_count_picks_an_associated_function() {
-    h::expect_exit(
+fn argument_count_picks_an_associated_function(b: &mut h::ExitBatch) {
+    b.add(
         "V::new with 2 and 3 arguments",
         "struct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy> V<T, 2> { pub fn new(x: T, y: T) V<T, 2> { return V::<T, 2> { e: [x, y] }; } }\nextend<T: Copy> V<T, 3> { pub fn new(x: T, y: T, z: T) V<T, 3> { return V::<T, 3> { e: [x, y, z] }; } }\nfn main() i32 { let a = V::new(1, 2); let b = V::new(1, 2, 3); return a.e[1] + b.e[2] * 10; }\n",
         32,
     );
 }
 
-@test
-fn operators_of_generic_shapes() {
+fn operators_of_generic_shapes(b: &mut h::ExitBatch) {
     // An overloaded operator from an extend whose parameter only the interface solves (`K`), a
     // scalar-on-the-left operator through a type parameter's generic conformance, and more than eight
     // same-named operator methods on one type.
-    run_exit(
+    exit_case(
+        b,
         "keyed operators and a generic conformance through a type parameter",
         "struct M<const C: usize, const R: usize> { pub v: [[i32; R]; C] }\nextend<const C: usize, const R: usize, const K: usize> M<C, R> as Mul<M<K, C>> {\n    type Output = M<K, R>;\n    pub fn mul(self: &M<C, R>, b: &M<K, C>) M<K, R> {\n        let mut m = M::<K, R> { v: [[0; R]; K] };\n        for k in 0..K { for r in 0..R { for i in 0..C { unsafe { m.v[k][r] = m.v[k][r] + self.v[i][r] * b.v[k][i]; } } } }\n        return m;\n    }\n}\nextend<const C: usize, const R: usize> M<C, R> as Mul<i32> {\n    type Output = M<C, R>;\n    pub fn mul(self: &M<C, R>, s: &i32) M<C, R> {\n        let mut m = *self;\n        for k in 0..C { for r in 0..R { unsafe { m.v[k][r] = self.v[k][r] * *s; } } }\n        return m;\n    }\n}\nextend<const C: usize, const R: usize> M<C, R> as Mul<bool> {\n    type Output = M<C, R>;\n    pub fn mul(self: &M<C, R>, s: &bool) M<C, R> { return *self; }\n}\nstruct D { pub x: i32 }\nextend D as Div<i8> { type Output = i32; pub fn div(self: &D, o: &i8) i32 { return 1; } }\nextend D as Div<i16> { type Output = i32; pub fn div(self: &D, o: &i16) i32 { return 2; } }\nextend D as Div<i32> { type Output = i32; pub fn div(self: &D, o: &i32) i32 { return self.x / *o; } }\nextend D as Div<i64> { type Output = i32; pub fn div(self: &D, o: &i64) i32 { return 4; } }\nextend D as Div<u8> { type Output = i32; pub fn div(self: &D, o: &u8) i32 { return 5; } }\nextend D as Div<u16> { type Output = i32; pub fn div(self: &D, o: &u16) i32 { return 6; } }\nextend D as Div<u32> { type Output = i32; pub fn div(self: &D, o: &u32) i32 { return 7; } }\nextend D as Div<u64> { type Output = i32; pub fn div(self: &D, o: &u64) i32 { return 8; } }\nextend D as Div<f32> { type Output = i32; pub fn div(self: &D, o: &f32) i32 { return 9; } }\nextend D as Div<f64> { type Output = i32; pub fn div(self: &D, o: &f64) i32 { return 10; } }\ninterface Sc: Copy { fn sub(self: &Self, o: &Self) Self; }\nextend i32 as Sc { pub fn sub(self: &i32, o: &i32) i32 { return *self - *o; } }\nstruct V { pub x: i32 }\nextend<T: Sc> T as Sub<V> { type Output = V; pub fn sub(self: &T, v: &V) V { return V { x: 100 - v.x }; } }\nfn lhs<T: Sc>(t: T, v: V) V { return t - v; }\nfn main() i32 {\n    let a = M::<2, 3> { v: [[1, 2, 3], [4, 5, 6]] };\n    let b = M::<3, 2> { v: [[1, 0], [0, 1], [1, 1]] };\n    let p = a * b * 2;\n    let d = D { x: 12 } / 4;\n    unsafe exit(p.v[2][2] + d + lhs(7, V { x: 90 }).x);\n}\n",
         31,
     );
     // In a generic body, a fixed argument of the right operand's type (`3` in `V<T, 3>`) chooses the
     // conformance whose parameter has it.
-    run_exit(
+    exit_case(
+        b,
         "a right operand over a type parameter",
         "struct V<T, const N: usize> { pub e: [T; N] }\nstruct G<T> { pub k: T }\nextend<T: Copy> G<T> as Mul<V<T, 3>> {\n    type Output = i32;\n    pub fn mul(self: &G<T>, v: &V<T, 3>) i32 { return 30; }\n}\nextend<T: Copy> G<T> as Mul<V<T, 4>> {\n    type Output = i32;\n    pub fn mul(self: &G<T>, v: &V<T, 4>) i32 { return 40; }\n}\nfn g<T: Copy>(x: G<T>, t: T) i32 {\n    return x * V::<T, 3> { e: [t, t, t] } + x * V::<T, 4> { e: [t, t, t, t] };\n}\nfn main() i32 {\n    unsafe exit(g(G::<i32> { k: 1 }, 2));\n}\n",
         70,
@@ -165,19 +173,20 @@ fn operators_of_generic_shapes() {
     // A compound assignment chooses its overload as the plain operator does: `v += 1` takes
     // `Add<i32>`, a by-value shift count stays by value, and an unsuffixed literal takes the
     // conformance's type (`w * 3` with `Mul<u8>`).
-    run_exit(
+    exit_case(
+        b,
         "compound assignments and literal right operands",
         "struct V { pub x: i32 }\nextend V as Add { type Output = V; pub fn add(self: &V, o: &V) V { return V { x: self.x + o.x }; } }\nextend V as Add<i32> { type Output = V; pub fn add(self: &V, s: &i32) V { return V { x: self.x + *s }; } }\nextend V as Shl<V> { type Output = V; pub fn shl(self: &V, n: V) V { return V { x: self.x << n.x }; } }\nstruct W { pub x: u8 }\nextend W as Mul { type Output = W; pub fn mul(self: &W, o: &W) W { return W { x: self.x * o.x }; } }\nextend W as Mul<u8> { type Output = W; pub fn mul(self: &W, s: &u8) W { return W { x: self.x * *s }; } }\nfn main() i32 {\n    let mut v = V { x: 1 };\n    v += 1;\n    v += V { x: 1 };\n    v <<= V { x: 2 };\n    let w = W { x: 2 } * 3;\n    let mut u = W { x: 1 };\n    u *= 5;\n    unsafe exit(v.x + w.x as i32 + u.x as i32);\n}\n",
         23,
     );
 }
 
-@test
-fn escaped_names_stay_distinct() {
+fn escaped_names_stay_distinct(b: &mut h::ExitBatch) {
     // An escaped name gains a `_` (`sqrt` is a <tgmath.h> macro, `int` a keyword, `printf` a library
     // symbol), so a name that already ends in `_` after such a stem gains one too: each pair below
     // links as two symbols.
-    run_exit(
+    exit_case(
+        b,
         "escaped and underscored names",
         "fn sqrt(x: i32) i32 { return x + 1; }\nfn sqrt_(x: i32) i32 { return x + 2; }\nfn printf(x: i32) i32 { return x + 3; }\nfn printf_(x: i32) i32 { return x + 4; }\nstruct S { pub v: i32 }\nextend S {\n    pub fn int(self: &S) i32 { return self.v; }\n    pub fn int_(self: &S) i32 { return self.v * 2; }\n}\ninterface Root { fn sqrt_(self: Self) Self; }\nextend f32 as Root { pub fn sqrt_(self: f32) f32 { return self + 1.0; } }\nfn main() i32 {\n    let s = S { v: 5 };\n    unsafe exit(sqrt(0) + sqrt_(0) + printf(0) + printf_(0) + s.int() + s.int_() + (4.0f32.sqrt() + 4.0f32.sqrt_()) as i32);\n}\n",
         32,
@@ -211,90 +220,97 @@ fn matchertext() {
     );
 }
 
-@test
-fn inlined_callee_keeps_its_guarded_drop() {
+fn inlined_callee_keeps_its_guarded_drop(b: &mut h::ExitBatch) {
     // `f` is small enough to inline into `main` and carries a flag-guarded drop: the splice must
     // rebase the flag local with the callee's locals, or the guard reads a caller local. Under the
     // leak gate a wrong guard is a leak or a double free, both nonzero exits.
-    run_exit(
+    exit_case(
+        b,
         "inlined guarded drop",
         "pub fn take(s: String) { s.free(); }\npub fn f(c: bool) i32 { let s = String::from_str(\"abc\"); if c { take(s); return 1; } return s.len() as i32; }\nfn main() i32 { unsafe exit(f(true) + f(false)); }\n",
         4,
     );
 }
 
-@test
-fn arithmetic() {
-    run_exit("precedence", "fn main() i32 { unsafe exit(1 + 2 * 3 - 4 / 2); }\n", 5);
-    run_exit("mixed precedence", "fn main() i32 { unsafe exit(17 % 5 + 100 / 7 + 6 & 3); }\n", 2);
-    run_exit(
+fn arithmetic(b: &mut h::ExitBatch) {
+    exit_case(b, "precedence", "fn main() i32 { unsafe exit(1 + 2 * 3 - 4 / 2); }\n", 5);
+    exit_case(b, "mixed precedence", "fn main() i32 { unsafe exit(17 % 5 + 100 / 7 + 6 & 3); }\n", 2);
+    exit_case(
+        b,
         "bitwise",
         "fn main() i32 { let a: i32 = 6 & 3; let b: i32 = 6 | 1; let c: i32 = 1 << 4; unsafe exit(a + b + c); }\n",
         25,
     );
-    run_exit("right shift", "fn main() i32 { let mut x: i32 = 32; x >>= 2; unsafe exit(x + (16 >> 2)); }\n", 12);
-    run_exit("unary neg", "fn main() i32 { let y: i32 = -5; unsafe exit(0 - y); }\n", 5);
-    run_exit("unary not", "fn main() i32 { unsafe exit(switch !false { true => 7, _ => 0, }); }\n", 7);
+    exit_case(b, "right shift", "fn main() i32 { let mut x: i32 = 32; x >>= 2; unsafe exit(x + (16 >> 2)); }\n", 12);
+    exit_case(b, "unary neg", "fn main() i32 { let y: i32 = -5; unsafe exit(0 - y); }\n", 5);
+    exit_case(b, "unary not", "fn main() i32 { unsafe exit(switch !false { true => 7, _ => 0, }); }\n", 7);
 }
 
-@test
-fn control_flow() {
-    run_exit(
+fn control_flow(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "while break",
         "fn main() i32 { let mut i: i32 = 0; while true { if i >= 5 { break; } i = i + 1; } unsafe exit(i); }\n",
         5,
     );
-    run_exit(
+    exit_case(
+        b,
         "for continue",
         "fn main() i32 { let mut t: i32 = 0; for i in 0..5 { if i == 2 { continue; } t = t + i; } unsafe exit(t); }\n",
         8,
     );
-    run_exit(
+    exit_case(
+        b,
         "nested for",
         "fn main() i32 { let mut t: i32 = 0; for i in 0..3 { for j in 0..3 { t = t + 1; } } unsafe exit(t); }\n",
         9,
     );
-    run_exit(
+    exit_case(
+        b,
         "do while",
         "fn main() i32 { let mut i: i32 = 0; let mut s: i32 = 0; do { s = s + i; i = i + 1; } while i < 5; unsafe exit(s); }\n",
         10,
     );
-    run_exit(
+    exit_case(
+        b,
         "do while runs once",
         "fn main() i32 { let mut n: i32 = 0; do { n = n + 7; } while false; unsafe exit(n); }\n",
         7,
     );
 }
 
-@test
-fn float_constants_exact() {
+fn float_constants_exact(b: &mut h::ExitBatch) {
     // Folded float consts and static float slots keep every bit: each is compared at run time with
     // the value libc parses (or computes) from the same text, and infinity and NaN stay valid C.
-    run_exit(
+    exit_case(
+        b,
         "exact float consts and statics",
         "extern \"C\" { fn strtod(s: *const char, e: *mut *mut char) f64; }\nstruct P { pub a: f64, pub b: f32 }\nconst PI: f64 = 3.14159265358979;\nconst TAU: f64 = PI * 2.0;\nconst F: f32 = 0.1;\nconst PINF: f64 = PI * 1e308;\nconst QNAN: f64 = PINF - PINF;\nstatic mut SP: P = P { a: PI / 7.0, b: 0.1 };\nfn rd(s: str) f64 { return unsafe strtod(s.ptr() as *const char, null); }\nfn main() i32 {\n    let pi = rd(\"3.14159265358979\");\n    let q = QNAN + pi;\n    let mut bad = 0;\n    if PI != pi { bad |= 1; }\n    if TAU != pi * 2.0 { bad |= 2; }\n    if F != rd(\"0.1\") as f32 { bad |= 4; }\n    if PINF <= pi * 1e300 || q == q { bad |= 8; }\n    if unsafe SP.a != pi / 7.0 || unsafe SP.b != rd(\"0.1\") as f32 { bad |= 16; }\n    unsafe exit(bad);\n}\n",
         0,
     );
 }
 
-@test
-fn switches() {
-    run_exit(
+fn switches(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "switch literal + name binding",
         "fn classify(c: i32) i32 { return switch c { 0 => 100, 7 => 7, n => n + 1, }; }\nfn main() i32 { unsafe exit(classify(41)); }\n",
         42,
     );
-    run_exit(
+    exit_case(
+        b,
         "switch ranges",
         "fn s(n: i32) i32 { return switch n { 0..10 => 1, 10..=20 => 2, _ => 3, }; }\nfn main() i32 { unsafe exit(s(15)); }\n",
         2,
     );
-    run_exit(
+    exit_case(
+        b,
         "switch char range",
         "fn d(c: char) i32 { return switch c { '0'..='9' => 1, _ => 0, }; }\nfn main() i32 { unsafe exit(d('7')); }\n",
         1,
     );
-    run_exit(
+    exit_case(
+        b,
         "switch or-pattern",
         "fn k(c: i32) i32 { return switch c { 1 | 2 | 3 => 10, 4..=9 | 20 => 20, _ => 0, }; }\nfn main() i32 { unsafe exit(k(2) + k(20) + k(99)); }\n",
         30,
@@ -304,9 +320,9 @@ fn switches() {
 // An explicit discriminant may name an earlier variant of its own enum, a variant of another enum,
 // or a constant: the value is the same in a constant, a static_assert, the emitted C enum, a cast and
 // a switch, and the next implicit discriminant follows it.
-@test
-fn enum_discriminant_references() {
-    run_exit(
+fn enum_discriminant_references(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "discriminants that reference variants and constants",
         M"(enum E { A = 1, D = E::A as i32 + 20, F }
 const K: i32 = 5;
@@ -337,9 +353,8 @@ fn main() i32 {
 
 // An empty string literal inside a constant aggregate that the engine evaluates (a field names a
 // constant) is static data: a pointer to a byte array and length 0.
-@test
-fn constant_aggregate_holds_empty_string() {
-    h::expect_exit(
+fn constant_aggregate_holds_empty_string(b: &mut h::ExitBatch) {
+    b.add(
         "empty string in an evaluated constant aggregate",
         "struct S { pub a: str<'static>, pub n: u32 }\nconst K: u32 = 0xFF;\nconst T: [S; 2] = [S { a: \"\", n: K }, S { a: \"z\", n: K + 1 }];\nfn main() i32 {\n  let t: []S = T;\n  if t[0].a.len() != 0 || t[0].n != 255 || t[1].a != \"z\" || t[1].n != 256 {\n    return 1;\n  }\n  return 0;\n}\n",
         0,
@@ -445,9 +460,9 @@ fn main() i32 {
 }
 
 // Constants local to different bodies may share a name: each has its own C symbol.
-@test
-fn local_constants_of_one_name() {
-    run_exit(
+fn local_constants_of_one_name(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "local constants of one name",
         "fn a() str<'static> { const S: str = \"first\"; return S; }\nfn b() str<'static> { const S: str = \"second!\"; return S; }\nfn c() i32 { const N: i32 = 1; return N; }\nfn d() i32 { const N: i32 = 2; return N; }\nfn main() i32 { unsafe exit((a().len() as i32) * 10 + (b().len() as i32) + c() * 20 + d() * 40); }\n",
         157,
@@ -1004,11 +1019,10 @@ fn box_reaches_a_generic_reference_param_unchanged() {
     assert_eq(r.exit, 40);
 }
 
-@test
-fn compile_time_layout_and_zero_sized_maps() {
+fn compile_time_layout_and_zero_sized_maps(b: &mut h::ExitBatch) {
     // Nested instances of one generic lay out at compile time (they are no by-value cycle), and a
     // map or box of zero-sized values folds: its storage is the dangling sentinel.
-    h::expect_exit(
+    b.add(
         "nested instances and zero-sized values at compile time",
         "struct W<T> { pub v: T }\nstruct Z {}\nstatic_assert(sizeof(W<W<W<i32>>>) == 4, \"nested instances lay out\");\nconst fn count() usize {\n    let mut m = Map::<u32, Z>::new();\n    for i in 0..40u32 {\n        m.insert(i % 20, Z {});\n    }\n    let mut b = Box::<Z>::new(Z {});\n    b.set(Z {});\n    return m.len();\n}\nstatic_assert(count() == 20, \"a map of zero-sized values folds\");\nfn main() i32 { let w = W::<W<i32>> { v: W::<i32> { v: 5 } }; return w.v.v - 5; }\n",
         0,
@@ -1019,17 +1033,18 @@ fn compile_time_layout_and_zero_sized_maps() {
 // instantiation, so its parameter, return and capture types follow the type arguments.
 @test
 fn closures_in_generic_fns() {
-    h::expect_exit(
+    let mut b = h::ExitBatch::new();
+    b.add(
         "a closure over the type parameter, at two instantiations",
         "fn twice<T>(v: T) T {\n    let f = fn(x: T) T { return x; };\n    return f(v);\n}\nfn main() i32 { return twice(3) - 3 + (twice(4i64) as i32) - 4; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a closure capturing a generic value",
         "fn hold<T: Copy>(v: T) T {\n    let f = fn() T { return v; };\n    return f();\n}\nfn main() i32 { return hold(7) - 7; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a closure that ignores the type parameter",
         "fn gen<T>(v: T) i32 {\n    let f = fn() i32 { return 1; };\n    return f();\n}\nfn main() i32 { return gen(9) - 1 + gen(true) - 1; }\n",
         0,
@@ -1041,34 +1056,34 @@ fn closures_in_generic_fns() {
         "fn apply<T, F: fn(T) T>(f: F, v: T) T { return f(v); }\nfn twice<T>(v: T) T { return apply(fn(x: T) T { return x; }, v); }\nfn main() i32 { return twice(3) - 3; }\n",
         "cannot be passed to another generic function",
     );
+    b.run();
 }
 
 // `From<[]T>` on the containers: an array literal coerces to the slice, so a list of elements builds a
 // container through `.into()` or the explicit `from`. The slice BORROWS, so elements are cloned in and
 // the source keeps its own: a Free element type must not end up with two owners.
-@test
-fn container_from_list() {
-    h::expect_exit(
+fn container_from_list(b: &mut h::ExitBatch) {
+    b.add(
         "a Vector comes from a list of elements",
         "fn main() i32 {\n    let v: Vector<i32> = [1, 2, 3, 4, 5].into();\n    let mut t = 0;\n    for i in 0..v.len() { t = t + *v.at(i); }\n    return t - 15;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "the explicit 'from' names the same conversion",
         "fn main() i32 {\n    let v = Vector::<i32>::from([1, 2, 3]);\n    return (v.len() as i32) - 3;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a Set collapses duplicates",
         "fn main() i32 {\n    let s: Set<i32> = [1, 2, 2, 3].into();\n    return (s.len() as i32) - 3;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a Map comes from a list of pairs",
         "fn main() i32 {\n    let m: Map<i32, i32> = [(1, 10), (2, 20)].into();\n    return (m.len() as i32) - 2 + *m.get(&2).unwrap() - 20;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a Free element type is cloned in, not shared",
         "fn main() i32 {\n    let v: Vector<String> = [String::from_str(\"ab\"), String::from_str(\"cde\")].into();\n    return (v.at(0).len() + v.at(1).len()) as i32 - 5;\n}\n",
         0,
@@ -1079,12 +1094,13 @@ fn container_from_list() {
 // and freed it; a field read did not, so the owner was dropped on the floor and its allocation leaked.
 @test
 fn free_temporary_field_read() {
-    h::expect_exit(
+    let mut b = h::ExitBatch::new();
+    b.add(
         "a field read from an owning temporary frees it",
         "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().v - 7; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a method call on one still does",
         "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().get() - 7; }\n",
         0,
@@ -1094,6 +1110,7 @@ fn free_temporary_field_read() {
         "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().v - 7; }\n",
         "R__free__d(&",
     );
+    b.run();
 }
 
 // Inline assembly is a pass-through to the C compiler's extended asm: the checker owns the SHAPE (string
@@ -1133,19 +1150,18 @@ fn inline_asm() {
 // is only that module's id when the decl is local. A call to any prelude function from inside a generic
 // body (`panic` is the one std itself needs) indexed this Ast with the prelude's node id and read past
 // the end of it. Any generic fn calling any imported fn is enough.
-@test
-fn prelude_call_inside_generic_body() {
-    h::expect_exit(
+fn prelude_call_inside_generic_body(b: &mut h::ExitBatch) {
+    b.add(
         "a prelude call in a generic body",
         "fn pick<T>(v: T, take: bool) T {\n    if !take { panic(\"no\"); }\n    return v;\n}\nfn main() i32 { return pick(0, true); }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "two instantiations of the same body",
         "fn pick<T>(v: T, take: bool) T {\n    if !take { panic(\"no\"); }\n    return v;\n}\nfn main() i32 { return pick(0, true) + pick(0i64, true) as i32; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a real const-generic parameter still resolves",
         "fn width<const N: usize>(a: &Array<i32, N>) usize {\n    if N == 0 { panic(\"empty\"); }\n    return N;\n}\nfn main() i32 {\n    let mut a = Array::<i32, 3>::new();\n    let r = width(&a) as i32 - 3;\n    a.free();\n    return r;\n}\n",
         0,
@@ -1157,9 +1173,8 @@ fn prelude_call_inside_generic_body() {
 // same size. Written out as 23 it was right on a 64-bit target and wrong on wasm32, where the byte fell
 // outside `cap` entirely and every heap string read back as inline: printing its own header. Checked
 // through the public API, so it holds at whatever width the suite runs on.
-@test
-fn sso_budget_follows_pointer_width() {
-    h::expect_exit(
+fn sso_budget_follows_pointer_width(b: &mut h::ExitBatch) {
+    b.add(
         "the inline budget is the heap layout minus its discriminant byte",
         "fn main() i32 {\n    let mut s = String::new();\n    let cap = s.capacity();\n    if cap != sizeof(usize) * 3 - 1 { return 1; }\n    for _i in 0..cap { s.push_byte(b'x'); }\n    if s.capacity() != cap || s.len() != cap { return 2; }\n    s.push_byte(b'y');\n    if s.capacity() <= cap || s.len() != cap + 1 { return 3; }\n    if !s.as_str().ends_with(\"xy\") { return 4; }\n    s.free();\n    return 0;\n}\n",
         0,
@@ -1171,24 +1186,23 @@ fn sso_budget_follows_pointer_width() {
 // parameter's type node, and from the argument literal's own element count, since that literal is typed
 // against this very parameter and would otherwise also be length 0. An inferred call must not emit `f__v` with a
 // bare `N` left in the C.
-@test
-fn const_generic_array_length_inferred() {
-    h::expect_exit(
+fn const_generic_array_length_inferred(b: &mut h::ExitBatch) {
+    b.add(
         "inferred from an array literal",
         "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return width([1, 2, 3]) as i32 - 3; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "inferred from a typed local",
         "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 {\n    let a: [i32; 2] = [1, 2];\n    return width(a) as i32 - 2;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "two lengths make two instances",
         "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return (width([1]) + width([1, 2, 3, 4])) as i32 - 5; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "an explicit argument still wins",
         "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return width::<3>([1, 2, 3]) as i32 - 3; }\n",
         0,
@@ -1197,32 +1211,29 @@ fn const_generic_array_length_inferred() {
 
 @test
 fn tuple_structs_byte_strings_and_slice_for() {
+    let mut b = h::ExitBatch::new();
     // Tuple-struct construction lowers to positional aggregate init; reads spell `._N` in C.
-    h::expect_exit(
+    b.add(
         "tuple struct positional fields",
         "struct Wrap(i32, bool);\nfn main() i32 { let w = Wrap(30, true); let mut r = w.0; if w.1 { r += 5; } return r - 35; }\n",
         0,
     );
     // Generic tuple struct: element types bind under the instance's generic args.
-    h::expect_exit(
+    b.add(
         "generic tuple struct",
         "struct Pair<A, B>(A, B);\nfn main() i32 { let p = Pair::<i32, i32>(9, 4); return p.0 - p.1 - 5; }\n",
         0,
     );
     // `for value in slice` reads the length through the slice's runtime `.len`, not a static count.
-    h::expect_exit(
+    b.add(
         "for value in slice",
         "fn main() i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let mut t = 0;\n    for v in s { t += v; }\n    return t - 10;\n}\n",
         0,
     );
     // Byte-string literal: the `b` prefix is stripped and the bytes re-emit as a valid C string view.
-    h::expect_exit(
-        "byte string literal",
-        "fn main() i32 { let b = b\"AB\"; return (b[0] as i32) + (b[1] as i32) - 131; }\n",
-        0,
-    );
+    b.add("byte string literal", "fn main() i32 { let b = b\"AB\"; return (b[0] as i32) + (b[1] as i32) - 131; }\n", 0);
     // Tuple index then method: `0.len` must lex as an index access, not a malformed float.
-    h::expect_exit(
+    b.add(
         "tuple index chained method",
         "struct Words<'a>([]'a i32);\nfn main() i32 { let a: [i32; 3] = [4, 5, 6]; let w = Words(a[0..3]); return w.0.len() as i32 - 3; }\n",
         0,
@@ -1230,38 +1241,39 @@ fn tuple_structs_byte_strings_and_slice_for() {
     // A tuple struct wrapping an owner gets an auto-derived destructor; the leak gate would fail if
     // the field were skipped. The string must be long enough to HEAP-allocate (past SSO), or a leak
     // of the field would be invisible.
-    h::expect_exit(
+    b.add(
         "tuple struct frees its owner",
         "struct Owned(String);\nfn main() i32 { let o = Owned(String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); return o.0.len() as i32 - 36; }\n",
         0,
     );
     // escape decoding: `\\xNN` is exactly two hex digits (C would read `\\x41B` greedily); `\\u{..}`
     // becomes UTF-8 bytes (C rejects the syntax outright).
-    h::expect_exit(
+    b.add(
         "byte-string escapes decode to bytes",
         "fn main() i32 { let b = b\"\\x41B\"; let u = b\"\\u{41}\"; return (b[0] as i32) + (b[1] as i32) + (u[0] as i32) - 196; }\n",
         0,
     );
     // A tuple-struct constructor folds at compile time (a `const`/`static_assert` requires it).
-    h::expect_exit(
+    b.add(
         "tuple struct const-evaluates",
         "struct Pt(i32, i32);\nconst C: Pt = Pt(20, 22);\nstatic_assert(C.0 + C.1 == 42, \"tuple const eval\");\nfn main() i32 { return C.0 + C.1 - 42; }\n",
         0,
     );
     // zeroed::<TupleStruct>() must allocate one slot per positional member (a field-count of 0 wrote
     // out of bounds and crashed the compiler).
-    h::expect_exit(
+    b.add(
         "zeroed tuple struct",
         "struct Zt(i32, i32);\nconst Z: Zt = unsafe zeroed::<Zt>();\nstatic_assert(Z.0 == 0 && Z.1 == 0, \"zeroed tuple\");\nfn main() i32 { return Z.0 + Z.1; }\n",
         0,
     );
     // A fixed-array tuple member: constructing it needs the array-store path, and coercing `w.0` to a
     // slice needs the positional array-length recovery (both were struct-only).
-    h::expect_exit(
+    b.add(
         "tuple struct fixed-array member coerces to slice",
         "struct Wrap([i32; 3]);\nfn sum(s: []i32) i32 { return s[0] + s[1] + s[2]; }\nfn main() i32 { let w = Wrap([1, 2, 3]); return sum(w.0) - 6; }\n",
         0,
     );
+    b.run();
 }
 
 @test
@@ -1287,25 +1299,24 @@ fn tuple_struct_reference_field_obeys_lifetimes() {
     );
 }
 
-@test
-fn names_that_are_standard_macros() {
+fn names_that_are_standard_macros(b: &mut h::ExitBatch) {
     // Fields, payload members, locals, parameters, functions, consts and enum tags spelled like macros
     // of the standard headers every TU includes (complex.h `I`, errno.h `errno` and `EPERM`, stdio.h
     // `EOF` and `stdin`, stddef.h `NULL`, stdlib.h `EXIT_FAILURE`, tgmath.h `log`) get escaped C
     // names; an extern keeps its C name (`sqrt`).
-    run_exit(
+    exit_case(
+        b,
         "standard macro names",
         "extern \"C\" { fn sqrt(x: f64) f64; }\nenum P { I(i32), errno(i32), EOF { log: i32, NULL: i32 } }\nenum EXIT { SUCCESS, FAILURE }\nstruct S { pub I: i32, pub errno: i32, pub stdin: i32, pub INFINITY: i32, pub log: fn(i32) i32 }\nfn twice(v: i32) i32 { return v * 2; }\nfn I(errno: i32) i32 { let EOF = errno + 1; let NULL = EOF; return NULL; }\nfn log(x: i32) i32 { return x + 1; }\nconst EPERM: i32 = 3;\nfn main() i32 {\n    let s = S { I: 1, errno: 2, stdin: 3, INFINITY: 4, log: twice };\n    let bool = s.I + s.errno + s.stdin + s.INFINITY;\n    let p = P::EOF { log: 4, NULL: 5 };\n    let q = switch p { I(v) => v, errno(v) => v, EOF { log, NULL } => log + NULL };\n    let z = switch EXIT::FAILURE { SUCCESS => 0, FAILURE => 1 };\n    let r = unsafe sqrt(16.0) as i32;\n    unsafe exit(bool + q + z + I(1) + (s.log)(3) + log(1) + EPERM + r);\n}\n",
         37,
     );
 }
 
-@test
-fn names_that_c_headers_declare() {
+fn names_that_c_headers_declare(b: &mut h::ExitBatch) {
     // Root-module items spelled like functions and types the included C headers declare (stdlib.h
     // `malloc`, `abs`, `exit` and `free`, stdio.h `printf` and `FILE`, time.h `tm`) get escaped C
     // names; an extern keeps its C name (`llabs`).
-    h::expect_exit(
+    b.add(
         "C library names",
         "extern \"C\" { fn llabs(x: i64) i64; }\nstruct FILE { pub fd: i32 }\nstruct tm { pub h: i32 }\nfn malloc(n: usize) usize { return n + 1; }\nfn abs(x: i32) i32 { if x < 0 { return 0 - x; } return x; }\nfn printf(x: i32) i32 { return x * 2; }\nfn exit(code: i32) i32 { return code + 3; }\nfn free(f: FILE) i32 { return f.fd; }\nfn time() tm { return tm { h: 7 }; }\nfn main() i32 {\n    let f = FILE { fd: 4 };\n    let l = unsafe llabs(-5) as i32;\n    return malloc(1) as i32 + abs(-3) + printf(5) + exit(1) + free(f) + time().h + l;\n}\n",
         35,
@@ -1314,9 +1325,8 @@ fn names_that_c_headers_declare() {
 
 // A use that reads an array constant as a slice types the use node as the slice, not the constant:
 // the constant keeps its array storage, so an index into it and a slice view of it both work.
-@test
-fn array_const_read_as_slice_keeps_array_storage() {
-    h::expect_exit(
+fn array_const_read_as_slice_keeps_array_storage(b: &mut h::ExitBatch) {
+    b.add(
         "a slice view and an index of one array constant",
         "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn main() i32 {\n    let n: []str = NAMES;\n    return (NAMES[2].len() + n.len()) as i32 - 6;\n}\n",
         0,
@@ -1324,9 +1334,8 @@ fn array_const_read_as_slice_keeps_array_storage() {
 }
 
 // A `[]'static str` result views a constant array: it outlives every caller.
-@test
-fn static_slice_result() {
-    h::expect_exit(
+fn static_slice_result(b: &mut h::ExitBatch) {
+    b.add(
         "a function returns a 'static slice of a constant",
         "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn names() []'static str<'static> { return NAMES; }\nfn main() i32 {\n    let n = names();\n    return (n.len() + n[1].len()) as i32 - 5;\n}\n",
         0,
@@ -1342,9 +1351,8 @@ fn run_leak_free(label: str, src: str, code: i32) {
 
 // `?` consumes its carrier: the payload moves out (a Free payload too), the error or None path
 // propagates, and every heap block is freed exactly once, including a converted error.
-@test
-fn question_moves_a_free_payload() {
-    run_leak_free(
+fn question_moves_a_free_payload(b: &mut h::ExitBatch) {
+    b.add(
         "? on Option and Result with String payloads",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1399,9 +1407,8 @@ fn main() i32 {
 // A `for` over an array literal lowers like one over a bound array. By value, the loop consumes the
 // array: each element moves into the binding and is freed at the end of its iteration, and `break`,
 // `return` and an outer `break` free the elements the loop did not reach.
-@test
-fn for_over_array_literal() {
-    run_leak_free(
+fn for_over_array_literal(b: &mut h::ExitBatch) {
+    b.add(
         "for over Copy and Free array literals",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1461,9 +1468,8 @@ fn main() i32 {
 
 // A generic body consumes an array of `T` when `T` owns: the instance over `String` frees the elements
 // a `break` skips, the one over `i32` frees nothing.
-@test
-fn for_over_generic_array_consumes_owning_elements() {
-    run_leak_free(
+fn for_over_generic_array_consumes_owning_elements(b: &mut h::ExitBatch) {
+    b.add(
         "for over [T; 3] with String and i32",
         M"(fn count<T>(xs: [T; 3], stop: usize) usize {
     let mut n: usize = 0;
@@ -1490,9 +1496,8 @@ fn main() i32 {
 }
 
 // An array of Free elements frees each element: as a local, a struct field and an enum payload.
-@test
-fn array_of_free_elements_drops_each() {
-    run_leak_free(
+fn array_of_free_elements_drops_each(b: &mut h::ExitBatch) {
+    b.add(
         "array drops in locals, fields and payloads",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1521,9 +1526,8 @@ fn main() i32 {
 // A closure that mutates a capture holds a pointer to the binding (an implicit `&mut`), also through
 // an `F: fn(..)` bound; an owning capture it only reads is borrowed when it meets a plain `fn(..)`
 // bound. The outer bindings see every change and still own (and free) their values.
-@test
-fn closures_mutate_and_borrow_captures_through_bounds() {
-    run_leak_free(
+fn closures_mutate_and_borrow_captures_through_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "mutated and borrowed captures through fn bounds",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1588,9 +1592,8 @@ fn main() i32 {
 // A nested array literal stores each inner array into its slot (C cannot initialize an array from
 // a variable), at any depth, with runtime and constant elements, with and without a type
 // annotation, and a designated inner literal zero-fills the rest of its slot.
-@test
-fn nested_array_literals_store_by_slot() {
-    run_leak_free(
+fn nested_array_literals_store_by_slot(b: &mut h::ExitBatch) {
+    b.add(
         "nested array literals",
         M"(fn mk(x: i32) [[i32; 1]; 2] {
     return [[x], [x + 1]];
@@ -1623,9 +1626,8 @@ fn main() i32 {
 // Every aggregate that stores a fixed-array value copies it: a variant payload (positional and
 // named), a tuple element, a struct field, a closure capture, an array element and a return value,
 // also when the source is a by-value array parameter (a pointer in C).
-@test
-fn array_values_copy_into_aggregates() {
-    run_leak_free(
+fn array_values_copy_into_aggregates(b: &mut h::ExitBatch) {
+    b.add(
         "array payloads, elements, captures and parameters",
         M"(enum E { A([i32; 3]), B { tag: i32, v: [i32; 2] }, C }
 struct W { pub a: [i32; 3], pub n: i32 }
@@ -1674,9 +1676,8 @@ fn main() i32 {
 // own memory; any other instance still frees its owning members through the derived destructor:
 // at scope exit, inside a container, through a generic `free` and through an explicit `.free()`.
 // The user `free` counts its calls: only the two covered instances reach it.
-@test
-fn uncovered_conditional_free_instances_derive() {
-    run_leak_free(
+fn uncovered_conditional_free_instances_derive(b: &mut h::ExitBatch) {
+    b.add(
         "conditional Free extends and uncovered instances",
         M"(static mut CALLS: i32 = 0;
 struct P<T> { pub a: T, pub s: String }
@@ -1735,9 +1736,8 @@ fn main() i32 {
 // A function whose result is a function pointer names it through a `<fn>_ret` typedef (C spells
 // such a result around the declarator), and `&&` in a type or an expression is two references:
 // a shared reference to a `&mut` spells its pointer const (`T *const *`), never its pointee.
-@test
-fn function_pointer_results_and_double_references() {
-    run_leak_free(
+fn function_pointer_results_and_double_references(b: &mut h::ExitBatch) {
+    b.add(
         "function-pointer results and double references",
         M"(fn one() i32 {
     return 1;
@@ -1775,9 +1775,8 @@ fn main() i32 {
 // scrutinee: at the end of the arm that ran, what the arm's bindings did not move out is freed. An
 // enum frees the members of the variant the arm matched; a guard that fails hands its bindings back
 // to the scrutinee, so a later arm sees the whole value.
-@test
-fn switch_frees_unbound_scrutinee_parts() {
-    run_leak_free(
+fn switch_frees_unbound_scrutinee_parts(b: &mut h::ExitBatch) {
+    b.add(
         "switch arms that bind part of an owned scrutinee",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1858,9 +1857,8 @@ fn main() i32 {
 
 // An array literal's expected element type reaches the elements that take their type from the
 // context: a generic variant without type arguments, a generic fn named as a value, a closure.
-@test
-fn array_literal_elements_take_the_expected_type() {
-    run_leak_free(
+fn array_literal_elements_take_the_expected_type(b: &mut h::ExitBatch) {
+    b.add(
         "generic variants in annotated array literals and array or slice arguments",
         M"(fn sum(xs: []Option<i32>) i32 {
     let mut s = 0;
@@ -1878,7 +1876,7 @@ fn main() i32 {
 )",
         0,
     );
-    run_leak_free(
+    b.add(
         "function values in an annotated array literal",
         M"(fn twice(x: i32) i32 { return x * 2; }
 fn id<T>(x: T) T { return x; }
@@ -1961,9 +1959,8 @@ fn main() i32 { return view().len() as i32; }
 // A body whose drops need a move flag gets its statement runs rewritten; the emitter reads the
 // statement pool as a whole, so the superseded runs must be gone: an array local copied into a
 // `for` loop keeps its one C name.
-@test
-fn flagged_drop_keeps_array_local_names() {
-    run_leak_free(
+fn flagged_drop_keeps_array_local_names(b: &mut h::ExitBatch) {
+    b.add(
         "for over an array local with a conditionally moved element",
         M"(fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -1984,9 +1981,8 @@ fn main() i32 {
 
 // A prototype with an array parameter needs its element type complete (C rejects an array of an
 // incomplete type), so the module's prototype header includes the element's definition header.
-@test
-fn array_parameter_element_is_complete_in_prototype_header() {
-    h::expect_exit(
+fn array_parameter_element_is_complete_in_prototype_header(b: &mut h::ExitBatch) {
+    b.add(
         "array of str parameter",
         M"(struct Pool<'a> { pub v: Vector<str<'a>> }
 fn f(p: &mut Pool, arr: [str; 1]) usize { let _ = p; return arr[0].len(); }
@@ -2003,9 +1999,8 @@ fn main() i32 {
 // a pointer to an array of aggregates is a pointer to the array's wrapper struct (`Node__a2`, defined
 // after `Node`), so reads, writes, indexing through it, pointer arithmetic, a function-pointer member
 // taking one and the layout check keep the array's type and layout.
-@test
-fn pointer_to_array_of_enclosing_aggregate() {
-    h::expect_exit(
+fn pointer_to_array_of_enclosing_aggregate(b: &mut h::ExitBatch) {
+    b.add(
         "self-referential tree",
         M"(struct Node { pub kids: *mut [Node; 2], pub v: i32 }
 fn sum(n: *const Node) i32 {
@@ -2037,7 +2032,7 @@ fn main() i32 {
 )",
         0,
     );
-    h::expect_exit(
+    b.add(
         "mutually recursive aggregates",
         M"(struct A { pub bs: *const [B; 2], pub x: i32 }
 struct B { pub a: *mut [A; 3], pub y: i32 }
@@ -2070,7 +2065,7 @@ fn main() i32 {
 )",
         0,
     );
-    h::expect_exit(
+    b.add(
         "function-pointer members taking a pointer to an array of the enclosing aggregate",
         M"(struct F { pub f: fn(*mut [F; 2]) i32, pub g: fn(&[F; 2]) i32, pub v: i32 }
 fn first(p: *mut [F; 2]) i32 { return unsafe (*p)[0].v; }
@@ -2086,7 +2081,7 @@ fn main() i32 {
     );
     // Container storage of arrays of aggregates holds wrapper pointers the same way: indexing and
     // slicing offset it as the array type.
-    run_leak_free(
+    b.add(
         "container storage",
         M"(struct P { pub x: i32, pub y: i32 }
 fn total(s: [][P; 2]) i32 {
@@ -2123,9 +2118,8 @@ fn main() i32 {
 // (a turbofished generic fn, a closure, a plain fn, a pointer read from another field), inference
 // takes the struct's arguments from it, and two spellings of one signature are one type (`Option`,
 // `Vector` and array element types included). `dyn fn` signatures substitute the same way.
-@test
-fn function_types_substitute_structurally() {
-    run_leak_free(
+fn function_types_substitute_structurally(b: &mut h::ExitBatch) {
+    b.add(
         "generic struct fields of function type",
         M"(struct W<T> { pub f: fn(T) T }
 struct G<T> { pub get: fn(&T) Option<T> }
@@ -2169,7 +2163,7 @@ fn main() i32 {
     );
     // Generic bodies instantiate their function-pointer types per instance; a signature of more than
     // eight slots continues in a second record; `fn(..) void` is `fn(..)`.
-    run_leak_free(
+    b.add(
         "function types under instantiation",
         M"(struct W<T> { pub f: fn(T) T }
 fn id<U>(x: U) U { return x; }
@@ -2204,9 +2198,8 @@ fn main() i32 {
 // A tuple holding a function item takes the fn-pointer type its context names (an array of them has
 // its written length), and a field whose type is a function item calls the stored value: nothing is
 // passed as a receiver. A function item casts to a function-pointer type of its signature.
-@test
-fn function_items_in_tuples_and_fields() {
-    h::expect_exit(
+fn function_items_in_tuples_and_fields(b: &mut h::ExitBatch) {
+    b.add(
         "function items in tuples, arrays and fields",
         M"(struct W<F> { pub f: F }
 fn one() i32 { return 1; }
@@ -2229,9 +2222,8 @@ fn main() i32 {
 // `Box::new(closure)` erases to `Box<dyn fn(..)>` as a boxed value erases to `Box<dyn I>`: the payload
 // pointer moves into the fat value and the table frees the captures once. A function item erases to
 // `dyn fn` too, owned or borrowed.
-@test
-fn boxed_closures_erase_to_dyn_fn() {
-    run_leak_free(
+fn boxed_closures_erase_to_dyn_fn(b: &mut h::ExitBatch) {
+    b.add(
         "Box::new(closure) as Box<dyn fn>",
         M"(fn apply(f: Box<dyn fn(i32) i32>, x: i32) i32 { return f(x); }
 fn one() i32 { return 1; }
@@ -2363,9 +2355,8 @@ fn main() i32 {
 
 // An operand the checker widens computes at the result's width: `i32 * i64` does not truncate the
 // i64 operand, and a const-generic expression with a constant past 32 bits keeps it.
-@test
-fn widened_operands_compute_at_the_result_width() {
-    h::expect_exit(
+fn widened_operands_compute_at_the_result_width(b: &mut h::ExitBatch) {
+    b.add(
         "mixed-width arithmetic",
         M"(struct B<const M: i64> { pub x: i32 }
 extend<const M: i64> B<M> { fn m(self: &Self) i64 { return M; } }
@@ -2551,9 +2542,8 @@ fn main() i32 {
 
 // Compile-time evaluation reads a const-generic parameter in its declared type: signed comparisons,
 // division and range patterns on i8, i64 arithmetic past 32 bits, and u64 values past i64::MAX.
-@test
-fn const_generic_values_in_constant_evaluation() {
-    h::expect_exit(
+fn const_generic_values_in_constant_evaluation(b: &mut h::ExitBatch) {
+    b.add(
         "typed const parameters at compile time",
         M"(const fn neg<const N: i8>() bool { return N < 0; }
 const fn half<const N: i8>() i8 { return N / 2; }
@@ -2573,9 +2563,8 @@ fn main() i32 { return 0; }
 
 // A constant built by a callee whose result instance is a const expression (`V<{N + M}>`) keeps the
 // expression's value as its instance argument, so it is static data of its declared type.
-@test
-fn constant_of_a_const_expression_instance() {
-    h::expect_exit(
+fn constant_of_a_const_expression_instance(b: &mut h::ExitBatch) {
+    b.add(
         "a V<{N + M}> constant",
         M"(struct V<const N: usize> { pub e: [i32; N] }
 extend<const N: usize> V<N> {
@@ -2595,9 +2584,8 @@ fn main() i32 { return X.e[0] + X.e[3] * 10; }
 
 // A constant folds an operator whose extend has a parameter only its interface solves (`K`): the
 // evaluator binds the extend's arguments the operator node names.
-@test
-fn constant_of_a_keyed_operator() {
-    h::expect_exit(
+fn constant_of_a_keyed_operator(b: &mut h::ExitBatch) {
+    b.add(
         "a keyed Mul in a constant",
         M"(struct M<const C: usize> { pub e: [i32; C] }
 extend<const C: usize, const K: usize> M<C> as Mul<M<K>> {
@@ -2618,9 +2606,8 @@ fn main() i32 { return P.e[0] + P.e[1] * 10; }
 
 // A union member read through another scalar member of the same size reinterprets the bits in a
 // constant as at run time: `f32_bits`, `f64_bits` and their inverses fold.
-@test
-fn constant_union_puns() {
-    h::expect_exit(
+fn constant_union_puns(b: &mut h::ExitBatch) {
+    b.add(
         "float bit puns in constants",
         M"(union P { pub u: u32, pub i: i32 }
 const A: u32 = f32_bits(1.0f32);
@@ -2642,8 +2629,9 @@ fn main() i32 {
 // instance a concrete call makes, whatever else evaluated that function.
 @test
 fn instance_static_assert_calls_a_function() {
+    let mut b = h::ExitBatch::new();
     const SRC: str = "interface Num: Copy { fn is_signed() bool; }\nextend u32 as Num { pub fn is_signed() bool { return false; } }\nextend i32 as Num { pub fn is_signed() bool { return true; } }\nfn only_signed<T: Num>(x: T) T { static_assert(T::is_signed(), \"only signed types\"); return x; }\n";
-    h::expect_exit("a signed instance", format("{}fn main() i32 {{ return only_signed(3i32); }}\n", SRC).as_str(), 3);
+    b.add("a signed instance", format("{}fn main() i32 {{ return only_signed(3i32); }}\n", SRC).as_str(), 3);
     h::expect_build_err(
         "an unsigned instance",
         format("{}fn main() i32 {{ return only_signed(3u32) as i32; }}\n", SRC).as_str(),
@@ -2657,11 +2645,7 @@ fn instance_static_assert_calls_a_function() {
     );
     // An instance only another generic body reaches is checked too (the instance graph's check).
     const NESTED: str = "fn outer<T: Num>(x: T) T { return only_signed(x); }\n";
-    h::expect_exit(
-        "a signed nested instance",
-        format("{}{}fn main() i32 {{ return outer(3i32); }}\n", SRC, NESTED).as_str(),
-        3,
-    );
+    b.add("a signed nested instance", format("{}{}fn main() i32 {{ return outer(3i32); }}\n", SRC, NESTED).as_str(), 3);
     h::expect_build_err(
         "an unsigned nested instance",
         format("{}{}fn main() i32 {{ return outer(3u32) as i32; }}\n", SRC, NESTED).as_str(),
@@ -2676,6 +2660,7 @@ fn instance_static_assert_calls_a_function() {
         ).as_str(),
         "static assertion failed: signed W",
     );
+    b.run();
 }
 
 // A method of a generic extend with const parameters of its own binds the extend's parameters from its
@@ -2698,9 +2683,8 @@ fn instance_static_assert_of_a_method_with_its_own_parameters() {
 
 // An interface-qualified call in a generic conformance (`Num::twice(self)`, `Num::make(2)`) folds in
 // a constant: a `Self` argument names the implementor, else the `Self` result.
-@test
-fn constant_of_an_interface_qualified_call() {
-    h::expect_exit(
+fn constant_of_an_interface_qualified_call(b: &mut h::ExitBatch) {
+    b.add(
         "Num::twice(self) and Num::make(2) in constants",
         M"(interface Num: Copy { fn twice(self: Self) Self; fn make(v: i32) Self; }
 extend i64 as Num { pub fn twice(self: i64) i64 { return self * 2; } pub fn make(v: i32) i64 { return v; } }
@@ -2714,7 +2698,7 @@ fn main() i32 { let b = i64::m(); return (A + B + b) as i32; }
         52,
     );
     // In a generic conformance, `Twice::twice(x)` on a `T` takes that conformance, as `x.twice()` does.
-    h::expect_exit(
+    b.add(
         "an interface-qualified call through the enclosing generic conformance",
         "interface Lane: Copy {}\nextend i32 as Lane {}\ninterface Twice: Copy { fn twice(self: Self) Self; fn four(self: Self) Self; }\nextend<T: Lane> T as Twice {\n    pub fn twice(self: T) T { return self; }\n    pub fn four(self: T) T { let x = self; return Twice::twice(x); }\n}\nfn main() i32 { return 3.four(); }\n",
         3,
@@ -2725,7 +2709,8 @@ fn main() i32 { let b = i64::m(); return (A + B + b) as i32; }
 // through without a leak, in a generic function and in a constant evaluation.
 @test
 fn multi_value_call_forwarded_by_return() {
-    run_leak_free(
+    let mut b = h::ExitBatch::new();
+    b.add(
         "return pair();",
         M"(fn pair(n: i32) (String, i32) { let mut s = String::new(); s.push_str("abc"); return s, n; }
 fn forward(n: i32) (String, i32) { if n > 10 { return pair(1); } return pair(n); }
@@ -2744,7 +2729,7 @@ fn main() i32 {
         22,
     );
     // Array results fill the carrier by copy, also when forwarded.
-    run_leak_free(
+    b.add(
         "array results",
         M"(fn pair(k: u32) ([u32; 2], i64, [String; 1]) { let v: [u32; 2] = [1, k]; return v, 7, [String::from_str("xy")]; }
 fn fwd() ([u32; 2], i64, [String; 1]) { return pair(4); }
@@ -2760,13 +2745,13 @@ fn main() i32 {
         "fn pair() (i32, i64) { return 1, 2; }\nfn forward() (i32, i32) { return pair(); }\nfn main() i32 { let (a, b) = forward(); return a + b; }\n",
         "result 2 of the forwarded call is 'i64', the function returns 'i32' there",
     );
+    b.run();
 }
 
 // A by-value builtin method called through a reference receiver (`x.wrapping_sub(1)`, `x: &u32`)
 // folds in a constant, reading the referent.
-@test
-fn constant_of_a_builtin_method_through_a_reference() {
-    h::expect_exit(
+fn constant_of_a_builtin_method_through_a_reference(b: &mut h::ExitBatch) {
+    b.add(
         "x.wrapping_sub(1) with x: &u32",
         "fn via_ref(x: &u32) u32 { return x.wrapping_sub(1); }\nconst A: u32 = via_ref(&17);\nstatic_assert(A == 16);\nfn main() i32 { let v: u32 = 5; return (A + via_ref(&v)) as i32; }\n",
         20,
@@ -2777,18 +2762,19 @@ fn constant_of_a_builtin_method_through_a_reference() {
 // the master (the fresh build of a program over std::math seeds in parallel).
 @test
 fn generic_extend_constant_from_a_parallel_seed() {
-    h::expect_exit(
+    let mut b = h::ExitBatch::new();
+    b.add(
         "Quat::<f32>::LEN through std::math::all",
         "import std::math::all as *;\nfn main() i32 { return Quat::<f32>::LEN as i32 + vec3::LEN as i32; }\n",
         7,
     );
+    b.run();
 }
 
 // An array argument for a generic `[]T` parameter binds T from its elements, as the array coerces to
 // the slice; also through a nested generic element type.
-@test
-fn array_argument_infers_a_slice_element() {
-    h::expect_exit(
+fn array_argument_infers_a_slice_element(b: &mut h::ExitBatch) {
+    b.add(
         "first(a) with a: [i32; 2] and first_w(b) with b: [W<i32>; 2]",
         M"(struct W<T> { pub x: T }
 fn first<T: Copy>(v: []T) T { return v[0]; }
@@ -2806,9 +2792,8 @@ fn main() i32 {
 // A call through a bound in a constant runs the conformance of the receiver's own instance when
 // extends differ only in const arguments (`extend M<2>` declared before `extend M<3>`), as at run
 // time; for a plain and for a generic interface.
-@test
-fn constant_through_a_bound_picks_the_instance_extend() {
-    h::expect_exit(
+fn constant_through_a_bound_picks_the_instance_extend(b: &mut h::ExitBatch) {
+    b.add(
         "M<2> and M<3> conformances",
         M"(struct M<const N: usize> { pub x: i32 }
 interface Tag: Copy { fn tag(self: Self) i32; }
@@ -2834,9 +2819,8 @@ fn main() i32 { return A + B + C + run(M::<3> { x: 0 }) - 68; }
 // A constant evaluates a task-reachable body whose bound operator call carries a cancellation check
 // (`W`'s `mul` can accept a cancellation, which marks every interface `mul`): no task exists at
 // compile time, so the probe reports none.
-@test
-fn constant_through_a_cancellation_check() {
-    h::expect_exit(
+fn constant_through_a_cancellation_check(b: &mut h::ExitBatch) {
+    b.add(
         "quad<V> under a cancellation probe",
         M"(import std::parallel::runtime as rt;
 struct V { pub v: i32 }
@@ -2861,9 +2845,8 @@ fn main() i32 {
 
 // An operator takes the method of its own interface's conformance when another interface of the type
 // has a method of the same name: `*self + *o` inside `Other::add` runs `Add::add`, `~*self` `BitNot`'s.
-@test
-fn operator_takes_its_interface_method() {
-    h::expect_exit(
+fn operator_takes_its_interface_method(b: &mut h::ExitBatch) {
+    b.add(
         "Add::add beside Other::add",
         M"(struct W { pub v: i32 }
 interface Other {
@@ -2886,9 +2869,8 @@ fn main() i32 { return via(W { v: 2 }, W { v: 3 }).v + inv(W { v: 2 }).v - 2; }
 
 // A method of `P<A, B>` calling, through a bound, the generic method of another instance of `P` with
 // arguments over its own parameters: the arguments are the caller's (A = 3), not the callee's (A = 7).
-@test
-fn bound_call_arguments_resolve_in_the_caller() {
-    h::expect_exit(
+fn bound_call_arguments_resolve_in_the_caller(b: &mut h::ExitBatch) {
+    b.add(
         "P<3, 4>::cast::<P<7, 8>> calling P<7, 8>::from_p::<3, 4>",
         M"(struct P<const A: usize, const B: usize> { pub v: u64 }
 interface Conv {
@@ -2912,9 +2894,8 @@ fn main() i32 {
 
 // A generic function passing an instance over its own parameters (`W<T, 2>`) to a bound-generic
 // function folds in a constant: the argument grounds through the caller's frame.
-@test
-fn constant_through_nested_generic_calls() {
-    h::expect_exit(
+fn constant_through_nested_generic_calls(b: &mut h::ExitBatch) {
+    b.add(
         "outer<T>(W<T, 2>) calling twice<G: Dbl>",
         M"(interface Dbl: Copy { fn dbl(self: Self) Self; }
 extend f32 as Dbl { pub fn dbl(self: f32) f32 { return self * 2.0; } }
@@ -2938,9 +2919,8 @@ fn main() i32 { return A.e[1] as i32; }
 
 // An f32 converts to every integer width saturating (`__sc_f2i_*`): NaN is 0, a value
 // past either end is that end, the powers of two at the ends are exact; the run agrees with constants.
-@test
-fn f32_to_integer_saturates_at_every_width() {
-    h::expect_exit(
+fn f32_to_integer_saturates_at_every_width(b: &mut h::ExitBatch) {
+    b.add(
         "f32 as i8 .. u64",
         M"(@c.noinline
 fn id(x: f32) f32 { return x; }
@@ -3005,9 +2985,8 @@ fn main() i32 {
 }
 
 // A default method a generic conformance inherits folds in a constant, its `Self` the instance.
-@test
-fn constant_of_an_inherited_default_on_an_instance() {
-    h::expect_exit(
+fn constant_of_an_inherited_default_on_an_instance(b: &mut h::ExitBatch) {
+    b.add(
         "an inherited default on W<i32> in a constant",
         M"(interface Len: Copy { fn len2(self: Self) f64; fn len(self: Self) f64 { return self.len2() + 1.0; } }
 struct W<T> { pub x: f64, pub t: T }
@@ -3023,9 +3002,8 @@ fn main() i32 { return B as i32; }
 // The same default called on `W<N>` inside a generic function folds in a constant: `Self` binds to
 // the receiver grounded through the caller's frame (`W<3>`), not to `W<N>`, whose `N` the callee's
 // frame does not bind.
-@test
-fn constant_of_an_inherited_default_in_a_generic_function() {
-    h::expect_exit(
+fn constant_of_an_inherited_default_in_a_generic_function(b: &mut h::ExitBatch) {
+    b.add(
         "an inherited default on W<N> in a generic function, in a constant",
         M"(interface Measure: Copy { fn base(self: Self) f64; fn twice(self: Self) f64 { return self.base() * 2.0; } }
 struct W<const N: usize> { pub v: f64 }
@@ -3125,13 +3103,15 @@ fn main() i32 {
 // memory budget; a callee that grows a vector its caller holds keeps what it stores.
 @test
 fn constant_evaluation_reclaims_dead_call_objects() {
-    h::expect_exit(
+    let mut b = h::ExitBatch::new();
+    b.add(
         "a 32x32 product and 20 000 pushes through a callee in constants",
         M"(import std::math::scalar as *;
 import std::math::vec as *;
 import std::math::mat as *;
 struct H {
     pub v: Vector<i64>,
+    b.run();
 }
 fn put(h: &mut H, n: i64) i64 {
     h.v.push(n);
@@ -3163,8 +3143,7 @@ fn main() i32 {
 // Two conformances apply to `W<bool>` structurally (`W<T: Num>` and `W<bool>`) and only the bounds tell
 // them apart: the bound check, the method call, a bound call, `dyn`, an inherited default and the
 // constant evaluator take `W<bool>`'s in either declaration order.
-@test
-fn conformance_choice_ignores_declaration_order() {
+fn conformance_choice_ignores_declaration_order(b: &mut h::ExitBatch) {
     let head = "interface Num: Copy { fn val(self: Self) u64; }\nextend i32 as Num { pub fn val(self: i32) u64 { return self as u64; } }\ninterface Key { fn key(self: &Self) u64; fn twice(self: &Self) u64 { return self.key() * 2; } }\nstruct W<T: Copy> { pub e: T }\n";
     let generic = "extend<T: Num> W<T> as Key { pub fn key(self: &W<T>) u64 { return self.e.val(); } }\n";
     let concrete = "extend W<bool> as Key { pub fn key(self: &W<bool>) u64 { return self.e as u64 + 10; } }\n";
@@ -3181,16 +3160,15 @@ fn main() i32 {
     return if ok { 0; } else { 1; };
 }
 )";
-    h::expect_exit("the generic conformance first", format("{}{}{}{}", head, generic, concrete, tail).as_str(), 0);
-    h::expect_exit("the concrete conformance first", format("{}{}{}{}", head, concrete, generic, tail).as_str(), 0);
+    b.add("the generic conformance first", format("{}{}{}{}", head, generic, concrete, tail).as_str(), 0);
+    b.add("the concrete conformance first", format("{}{}{}{}", head, concrete, generic, tail).as_str(), 0);
 }
 
 // `M::<4>::from(m)`: the qualifying instance, not the first argument, binds the extend of an
 // associated function with its own const parameter, in a constant and at run time, whatever its
 // result type.
-@test
-fn qualified_associated_calls_of_generic_extends() {
-    h::expect_exit(
+fn qualified_associated_calls_of_generic_extends(b: &mut h::ExitBatch) {
+    b.add(
         "M::<4>::from(M::<2>) and M::<4>::cnt(M::<2>)",
         M"(struct M<const N: usize> { pub e: [i32; N] }
 extend<const N: usize> M<N> {
@@ -3215,9 +3193,8 @@ fn main() i32 {
 
 // An associated type read through a bound (`G::B`) takes the type's own conformance over a generic
 // one declared first (`extend<T: Num> T as I<T>`), which applies only where no own one does.
-@test
-fn projection_prefers_the_own_conformance() {
-    h::expect_exit(
+fn projection_prefers_the_own_conformance(b: &mut h::ExitBatch) {
+    b.add(
         "G::B with a blanket conformance declared first",
         M"(interface Num: Copy {}
 extend i32 as Num {}
@@ -3236,7 +3213,7 @@ fn main() i32 {
     );
     // A generic conformance's method matches a signature naming `&mut Self::Out` through its own
     // `type Out`.
-    h::expect_exit(
+    b.add(
         "&mut Self::Out in a generic conformance",
         "interface Shape { type Out; fn set(o: &mut Self::Out, v: i32); }\ninterface Num: Copy {}\nextend i64 as Num {}\nextend<T: Num> T as Shape { type Out = i32; pub fn set(o: &mut i32, v: i32) { *o = v; } }\nfn put<S: Shape>(o: &mut S::Out, v: i32) { S::set(o, v); }\nfn main() i32 { let mut x: i32 = 1; put::<i64>(&mut x, 5); return x; }\n",
         5,
@@ -3244,9 +3221,8 @@ fn main() i32 {
 }
 
 // A range pattern whose bound is past i64 (a u64 value above i64::MAX) is no compiler crash.
-@test
-fn u64_range_pattern_bounds_past_i64() {
-    h::expect_exit(
+fn u64_range_pattern_bounds_past_i64(b: &mut h::ExitBatch) {
+    b.add(
         "u64 range bounds",
         M"(const fn hi(n: u64) i32 { return switch n { 9223372036854775808..=18446744073709551615 => 1, _ => 0 }; }
 static_assert(hi(18446744073709551615) == 1 && hi(5) == 0);
@@ -3258,9 +3234,8 @@ fn main() i32 { return 0; }
 
 // A call returning an array, viewed as a slice by its context, keeps its array result: the view
 // borrows the call's temporary, which lives (and frees its elements) to the end of the block.
-@test
-fn call_results_viewed_as_slices() {
-    run_leak_free(
+fn call_results_viewed_as_slices(b: &mut h::ExitBatch) {
+    b.add(
         "array call results as slices",
         M"(fn mk() [i32; 2] { return [3, 4]; }
 fn gen<T: Default + Copy>() [T; 2] { return [T::default(); 2]; }
@@ -3279,9 +3254,8 @@ fn main(args: Vector<str>) i32 {
 
 // A Box made with a non-Global allocator erases to Box<dyn I>: the table frees the payload through
 // that allocator, rebuilt by its Default, never through Global.
-@test
-fn boxed_dyn_frees_through_its_allocator() {
-    run_leak_free(
+fn boxed_dyn_frees_through_its_allocator(b: &mut h::ExitBatch) {
+    b.add(
         "Box<T, A> as Box<dyn I>",
         M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }
 static mut LIVE: i32 = 0;
@@ -3317,9 +3291,8 @@ fn main() i32 {
 // are the dyn type's (`&dyn`, `&mut dyn`, `Box<dyn>`, a parameter, a result, a struct field, container
 // elements, const arguments, a generic target, a coercion inside a generic function), including a
 // default method one conformance inherits while the other defines it.
-@test
-fn dyn_runs_the_conformance_with_its_arguments() {
-    run_leak_free(
+fn dyn_runs_the_conformance_with_its_arguments(b: &mut h::ExitBatch) {
+    b.add(
         "dyn over several conformances of one generic interface",
         M"(interface I<T> {
     fn put(self: &Self, x: T) i32;
@@ -3383,9 +3356,8 @@ fn main() i32 {
 
 // One source type erased both borrowed and owned to one interface: each erasure has its own table,
 // so the owned one frees its payload whichever erasure the emitter met first.
-@test
-fn borrowed_and_owned_erasures_of_one_pair() {
-    run_leak_free(
+fn borrowed_and_owned_erasures_of_one_pair(b: &mut h::ExitBatch) {
+    b.add(
         "&dyn then Box<dyn> of one type",
         M"(interface K { fn k(self: &Self) i32; }
 struct P { pub a: i32, pub s: String }
@@ -3403,9 +3375,9 @@ fn main() i32 {
 
 // Method calls on several conformances of one generic interface pick the candidate the argument's
 // type selects, also when that type is known only once the argument is checked.
-@test
-fn conformance_selected_by_checked_argument() {
-    run_exit(
+fn conformance_selected_by_checked_argument(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "an argument typed by checking it selects the conformance",
         M"(interface I<T> { fn put(self: &Self, x: T) i32; }
 struct P { pub a: i32, pub b: bool }
@@ -3429,9 +3401,9 @@ fn main() i32 {
 // result is the expected type: a method call, a path call, an associated function, through auto-deref,
 // on a builtin receiver, through a type parameter's bounds, through dyn, and a function value by its
 // expected function type.
-@test
-fn conformance_selected_by_expected_result() {
-    run_exit(
+fn conformance_selected_by_expected_result(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "the expected result selects among the receiver's own methods",
         M"(interface Conv<T> { fn conv(self: &Self) T; fn mk() T; }
 struct X { pub v: i32 }
@@ -3473,7 +3445,8 @@ fn main() i32 {
 )",
         0,
     );
-    run_exit(
+    exit_case(
+        b,
         "the arguments select among a type parameter's bounds",
         M"(interface Put<T> { fn put(self: &Self, x: T) i32; }
 struct P { pub a: i32 }
@@ -3496,9 +3469,8 @@ fn main() i32 {
 // every instance and at compile time: its own method or the default it inherits, through `where`
 // clauses, superinterfaces, extend parameters, an interface's own default bodies and associated
 // functions (`T::mk(true)`, `T::from(x)`).
-@test
-fn bound_calls_run_the_conformance_with_its_arguments() {
-    run_leak_free(
+fn bound_calls_run_the_conformance_with_its_arguments(b: &mut h::ExitBatch) {
+    b.add(
         "bound dispatch over several conformances of one generic interface",
         M"(interface I<A> {
     fn put(self: &Self, a: A) i32;
@@ -3561,9 +3533,8 @@ fn main() i32 {
 // Function pointers and `dyn fn` values with several results return the result pack the functions
 // with those results return: calls through them, fields and containers of them, results of functions
 // and closures (capturing ones through `dyn fn` and bounds) coerced to them, owning results included.
-@test
-fn several_result_fn_values() {
-    run_leak_free(
+fn several_result_fn_values(b: &mut h::ExitBatch) {
+    b.add(
         "fn pointers and dyn fn values with several results",
         M"(fn two(x: i32) (i32, i32) { return x, x + 1; }
 fn swap(x: i32) (i32, i32) { return x + 1, x; }
@@ -3648,9 +3619,8 @@ fn main() i32 {
 
 // A fixed array result returns in its carrier struct (C returns no array): function pointers, closures,
 // `dyn fn` values and dyn interface methods with one spell the carrier the functions return.
-@test
-fn array_result_fn_values() {
-    run_leak_free(
+fn array_result_fn_values(b: &mut h::ExitBatch) {
+    b.add(
         "fn values and dyn methods with a fixed array result",
         M"(fn arr(x: i32) [i32; 2] {
     return [x, x + 1];
@@ -3713,9 +3683,8 @@ fn main() i32 {
 // instance and at compile time: binary, compound, unary, shift and index forms; `T::Output` and
 // `Self::Output` resolve per instance (a generic extend's `Vector<T>`, a `String`, a fixed array
 // of them in a default body, through a superinterface), and a binding (`Output = T`) makes it `T`.
-@test
-fn operators_and_associated_types_through_bounds() {
-    run_leak_free(
+fn operators_and_associated_types_through_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "operators and associated types through bounds",
         M"(struct M { pub v: i32 }
 extend M as Add {
@@ -3847,9 +3816,8 @@ fn main() i32 {
 
 // A by-reference operator operand of a narrower numeric type (a literal, an `i32` local) is widened to
 // the parameter's element type before it is borrowed: the method reads a full `i64`.
-@test
-fn operator_operand_widens_before_its_borrow() {
-    run_leak_free(
+fn operator_operand_widens_before_its_borrow(b: &mut h::ExitBatch) {
+    b.add(
         "operator operand widens before its borrow",
         M"(struct G { pub v: i64 }
 extend G as Add<i64> {
@@ -3872,9 +3840,8 @@ fn main() i32 {
 // An interface's associated function called through a type parameter (`T::count()`) runs the
 // conformance the parameter names, whatever its result or first argument, also at compile time
 // and for a generic extend.
-@test
-fn associated_functions_through_bounds() {
-    run_leak_free(
+fn associated_functions_through_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "associated functions through bounds",
         M"(interface I<A> {
     fn count() usize;
@@ -3928,9 +3895,8 @@ fn main() i32 {
 // Interfaces whose methods return several results or a fixed array are dyn-compatible: `&dyn`,
 // `&mut dyn` and `Box<dyn>` calls destructure the slot's carrier, inherited defaults and overrides
 // both dispatch, a generic interface reads its dyn arguments, and owned results are freed once.
-@test
-fn dyn_methods_with_several_results() {
-    run_leak_free(
+fn dyn_methods_with_several_results(b: &mut h::ExitBatch) {
+    b.add(
         "dyn methods with several results",
         M"(interface Shape {
     fn dims(self: &Self) (i32, String);
@@ -4037,9 +4003,8 @@ fn main() i32 {
 }
 
 // A generic argument a bound alone decides: the one fitting conformance.
-@test
-fn inference_from_the_one_fitting_conformance() {
-    run_leak_free(
+fn inference_from_the_one_fitting_conformance(b: &mut h::ExitBatch) {
+    b.add(
         "bound inference",
         M"(interface I<A> { fn get(self: &Self) A; }
 struct P { pub v: i32 }
@@ -4066,9 +4031,8 @@ fn main() i32 {
 
 // An inherited default of a generic interface called on a concrete receiver runs under the
 // conformance the call's arguments select (`Self::Out` included), as a call through a bound does.
-@test
-fn inherited_default_of_a_generic_interface() {
-    run_leak_free(
+fn inherited_default_of_a_generic_interface(b: &mut h::ExitBatch) {
+    b.add(
         "inherited default on a concrete receiver",
         M"(interface Make<A> {
     type Out;
@@ -4115,9 +4079,8 @@ fn main() i32 {
 // A receiver that overrides a default in one conformance and inherits it in another: the call's
 // arguments choose among both, and the chosen conformance's body runs directly, through a path,
 // through auto-deref, through a bound, through dyn and at compile time.
-@test
-fn override_and_inherited_default_compete_by_arguments() {
-    run_leak_free(
+fn override_and_inherited_default_compete_by_arguments(b: &mut h::ExitBatch) {
+    b.add(
         "an override and an inherited default",
         M"(interface Make<A> {
     fn make(self: &Self, a: A) String;
@@ -4178,9 +4141,8 @@ fn main() i32 {
 // `Self::` in an expression names the implementing type as `TypeName::` does: associated functions,
 // constants, turbofish, struct literals, generic extends, builtin targets and interface defaults
 // (the implementor, also when the default runs through a path).
-@test
-fn self_path_names_the_implementing_type() {
-    run_leak_free(
+fn self_path_names_the_implementing_type(b: &mut h::ExitBatch) {
+    b.add(
         "Self paths",
         M"(interface Cnt {
     fn count() i32;
@@ -4233,9 +4195,8 @@ fn main() i32 {
 // A superinterface with arguments (`B: A<i32>`) erases through dyn: the vtable holds its methods for
 // those arguments, calls run the conformance with them (an override or a default), and a dyn value
 // upcasts to the superinterface, borrowed or owned.
-@test
-fn dyn_generic_superinterface() {
-    run_leak_free(
+fn dyn_generic_superinterface(b: &mut h::ExitBatch) {
+    b.add(
         "dyn with a generic superinterface",
         M"(interface A<T> {
     fn get(self: &Self) T;
@@ -4300,9 +4261,8 @@ fn main() i32 {
 // A generic interface method runs its implementation's instance for the call's arguments through a
 // bound (method and path form, inferred or turbofished), from a default body, on a generic
 // conformance, and at compile time; owning results are freed once.
-@test
-fn generic_interface_methods_run() {
-    run_leak_free(
+fn generic_interface_methods_run(b: &mut h::ExitBatch) {
+    b.add(
         "generic interface methods",
         M"(interface Num {
     fn of(v: i32) Self;
@@ -4356,9 +4316,8 @@ fn main() i32 {
 // A const-generic argument takes an associated constant of one of several disjoint extends when the
 // parameter's type chooses it or the instance is written (braced or bare), and a generic extend's
 // constant for the written instance.
-@test
-fn const_argument_selects_an_extend() {
-    run_leak_free(
+fn const_argument_selects_an_extend(b: &mut h::ExitBatch) {
+    b.add(
         "associated constants as const arguments",
         M"(struct W<T> { pub v: T }
 extend W<u8> { pub const K: u64 = 3; }
@@ -4383,9 +4342,8 @@ fn main() i32 {
 // The methods and constants of a user extend of a builtin type run at compile time: a receiver the
 // call borrows (a local, a temporary, a `&mut self` that writes it back), an interface default, a
 // bound call, and a qualified constant, from array lengths the type check folds and from constants.
-@test
-fn builtin_extend_methods_fold_at_compile_time() {
-    run_leak_free(
+fn builtin_extend_methods_fold_at_compile_time(b: &mut h::ExitBatch) {
+    b.add(
         "builtin extend methods in constant evaluation",
         M"(interface I {
     fn get(self: &Self) usize;
@@ -4420,9 +4378,8 @@ fn main() i32 {
 }
 
 // A method call on the result of a turbofished method call takes none of that call's arguments.
-@test
-fn method_on_a_turbofished_call() {
-    run_leak_free(
+fn method_on_a_turbofished_call(b: &mut h::ExitBatch) {
+    b.add(
         "a call on a turbofished call's result",
         "struct N { pub s: String }\nextend N { pub fn get(self: &Self) i64 { return self.s.len() as i64; } }\nstruct X { pub k: i32 }\nextend X { pub fn m<U>(self: &Self, u: U) N { return N { s: String::from_str(\"abc\") }; } }\nfn main() i32 { let x = X { k: 1 }; return x.m::<u8>(1).get() as i32 - 3; }\n",
         0,
@@ -4430,9 +4387,9 @@ fn method_on_a_turbofished_call() {
 }
 
 // An ordered comparison of raw pointers to two objects compiles and orders them; a bare `*T` takes `&T`.
-@test
-fn pointer_order_across_objects() {
-    run_exit(
+fn pointer_order_across_objects(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "pointer order across objects",
         "fn lt(p: *i32, q: *i32) bool { return p < q; }\nfn main() i32 { let x = 1; let y = 2; let a = [3, 4]; let mut r = 0; if lt(&a[0], &a[1]) { r += 1; } if lt(&x, &y) != lt(&y, &x) { r += 2; } unsafe exit(r); }\n",
         3,
@@ -4570,9 +4527,9 @@ fn atomic_memory_orders_are_checked() {
 }
 
 // `memmove` copies overlapping ranges in both directions as if through a temporary buffer.
-@test
-fn memmove_overlap_both_directions() {
-    run_exit(
+fn memmove_overlap_both_directions(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "memmove overlap",
         "extern \"C\" { fn memmove(d: *mut void, s: *const void, n: usize) *mut void; }\nfn main() i32 {\n    let mut a: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let p = &mut a[0] as *mut u8;\n    unsafe memmove(unsafe (p + 2), p, 5);\n    let mut b: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let q = &mut b[0] as *mut u8;\n    unsafe memmove(q, unsafe (q + 2), 5);\n    let wa: [u8; 8] = [1, 2, 1, 2, 3, 4, 5, 8];\n    let wb: [u8; 8] = [3, 4, 5, 6, 7, 6, 7, 8];\n    let mut r = 0;\n    for i in 0..8 {\n        unsafe {\n            if a[i] != wa[i] {\n                r |= 1;\n            }\n            if b[i] != wb[i] {\n                r |= 2;\n            }\n        }\n    }\n    unsafe exit(r);\n}\n",
         0,
@@ -4598,9 +4555,8 @@ fn a_foreign_generic_self_result_is_the_instance() {
 
 // A reference to an array parameter is the array's address: the C parameter is a pointer, so `&a`
 // would be the pointer's address.
-@test
-fn a_reference_to_an_array_parameter_reads_it() {
-    h::expect_exit(
+fn a_reference_to_an_array_parameter_reads_it(b: &mut h::ExitBatch) {
+    b.add(
         "array parameter reference",
         "fn first(a: [i32; 4]) i32 {\n    let r = &a;\n    return r[0] + r[3];\n}\nfn main() i32 {\n    return first([7, 0, 0, 2]) - 9;\n}\n",
         0,
@@ -4609,9 +4565,8 @@ fn a_reference_to_an_array_parameter_reads_it() {
 
 // A generic extend's method as a value (`W::<i64>::get`, `Simd::<f32, 4>::sqrt`): the qualifier's
 // instance binds the extend, so the value is that instance's function.
-@test
-fn a_generic_method_value_is_its_instance() {
-    h::expect_exit(
+fn a_generic_method_value_is_its_instance(b: &mut h::ExitBatch) {
+    b.add(
         "generic method values",
         "struct W<T> {\n    pub v: T,\n}\n\nextend<T: Copy> W<T> {\n    pub fn make(v: T) Self {\n        return W::<T> { v: v };\n    }\n\n    pub fn get(self: &Self) T {\n        return self.v;\n    }\n\n    pub fn pair(self: Self, o: Self) (T, T) {\n        return self.v, o.v;\n    }\n}\n\nfn main() i32 {\n    let mk = W::<i64>::make;\n    let g = W::<i64>::get;\n    let sq = Simd::<f32, 4>::sqrt;\n    let ad = Simd::<i8, 4>::abs_diff;\n    let w = mk(5);\n    let (x, y) = w.pair(mk(2));\n    let r = sq(Simd::<f32, 4>::splat(16.0));\n    let d = ad(Simd::<i8, 4>::splat(-100), Simd::<i8, 4>::splat(100));\n    return (g(&w) + x + y) as i32 + r[0] as i32 + d[0] as i32 - 216;\n}\n",
         0,
@@ -4620,9 +4575,9 @@ fn a_generic_method_value_is_its_instance() {
 
 // The checked views over program-owned bytes: `str::from_cbuf` stops at the first NUL or at the
 // buffer's end, `String::push_bytes` appends a `[]u8`, and the integer out-parameters take `&mut`.
-@test
-fn checked_byte_views() {
-    run_exit(
+fn checked_byte_views(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "from_cbuf, push_bytes and &mut out-parameters",
         M"(fn main() i32 {
     let a: [char; 6] = ['a', 'b', 0 as char, 'c', 'd', 'e'];
@@ -4648,9 +4603,8 @@ fn checked_byte_views() {
 
 // A generic tuple struct's constructor infers its type arguments from its elements, or takes the
 // expected instance, as a generic enum variant does.
-@test
-fn tuple_struct_constructor_inference() {
-    h::expect_exit(
+fn tuple_struct_constructor_inference(b: &mut h::ExitBatch) {
+    b.add(
         "generic tuple-struct constructors",
         M"(struct Q<T>(T);
 struct P<A, B>(A, B);
@@ -4673,9 +4627,8 @@ fn main() i32 {
 
 // A capturing closure stored in a generic struct's field embeds its environment there: a mutated
 // capture is a pointer, a moved one its value, and the layout model agrees with the C layout.
-@test
-fn closure_in_generic_struct_field() {
-    h::expect_exit(
+fn closure_in_generic_struct_field(b: &mut h::ExitBatch) {
+    b.add(
         "closures in struct fields",
         M"(struct Q<F: fn() i32> { pub v: i64, pub f: F }
 struct M<F: fn(i32)> { pub f: F }
@@ -4694,9 +4647,8 @@ fn main() i32 {
 }
 
 // `zeroed` of an array is a byte fill, and a generic aggregate zeroes at compile time too.
-@test
-fn zeroed_arrays_and_generic_aggregates() {
-    h::expect_exit(
+fn zeroed_arrays_and_generic_aggregates(b: &mut h::ExitBatch) {
+    b.add(
         "zeroed arrays",
         M"(fn mk() [u32; 5] {
     let a = unsafe zeroed::<[u32; 5]>();
@@ -4720,19 +4672,18 @@ fn main() i32 {
 // Programs the checker accepts compile: an `Option<Box<dyn fn>>` frees its payload through the
 // vtable's drop slot, a field reached through `&mut &mut H` dereferences twice, and an argument of
 // an associated type that is a reference passes the reference.
-@test
-fn dyn_drop_double_deref_and_assoc_arguments() {
-    run_leak_free(
+fn dyn_drop_double_deref_and_assoc_arguments(b: &mut h::ExitBatch) {
+    b.add(
         "an Option<Box<dyn fn>> drop",
         "fn mk(k: i32) Box<dyn fn() i32> {\n    return Box::new(move || k);\n}\nfn main() i32 {\n    let mut c: Option<Box<dyn fn() i32>> = Option::<Box<dyn fn() i32>>::None;\n    c = Option::<Box<dyn fn() i32>>::Some(mk(52));\n    let f = c.unwrap();\n    return f() - 52;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a field through &mut &mut",
         "struct H<'a> { pub r: &'a i32 }\nconst K: i32 = 7;\nconst Z: i32 = 0;\nfn main() i32 {\n    let mut h = H { r: &Z };\n    let mut m = &mut h;\n    let mm = &mut m;\n    mm.r = &K;\n    return *h.r - 7;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a reference argument of an associated type",
         "interface Producer { type Output; }\nstruct P {}\nextend P as Producer { type Output = &'static Box<i32>; }\nfn take<T: Producer>(x: T::Output) i32 { let _ = x; return 52; }\nfn main() i32 {\n    let v = Box::<i32>::new(52);\n    let r: &Box<i32> = &v;\n    return take::<P>(r) - 52;\n}\n",
         0,
@@ -4741,9 +4692,8 @@ fn dyn_drop_double_deref_and_assoc_arguments() {
 
 // `*b` on a Box is a mutable place through `deref_mut` when the binding is mutable: an assignment
 // and a `&mut *b` both write the boxed value.
-@test
-fn box_deref_mut_places() {
-    run_leak_free(
+fn box_deref_mut_places(b: &mut h::ExitBatch) {
+    b.add(
         "*b = v and &mut *b",
         "fn main() i32 {\n    let mut b = Box::<i32>::new(52);\n    *b = 1;\n    let x = &mut *b;\n    *x += 2;\n    return *b - 3;\n}\n",
         0,
@@ -4752,11 +4702,161 @@ fn box_deref_mut_places() {
 
 // A variadic argument arrives promoted (`float` as `double`, a narrow integer as `int`): `va_arg`
 // reads the promoted type and converts, directly and through a generic.
-@test
-fn va_arg_reads_promoted_types() {
-    h::expect_exit(
+fn va_arg_reads_promoted_types(b: &mut h::ExitBatch) {
+    b.add(
         "va_arg of f32 and u8",
         "fn take_f32(n: i32, ...) f32 {\n    let ap: va_list;\n    va_start(ap, n);\n    let v = unsafe va_arg(ap, f32);\n    va_end(ap);\n    return v;\n}\nfn take_g<T>(n: i32, ...) T {\n    let ap: va_list;\n    va_start(ap, n);\n    let v = unsafe va_arg(ap, T);\n    va_end(ap);\n    return v;\n}\nfn main() i32 {\n    let a = take_f32(1, 3.25f32);\n    let b = take_g::<f32>(1, 3.25f32);\n    let c = take_g::<u8>(1, 200u8);\n    if a != 3.25 || b != 3.25 || c != 200 {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    operator_overload_lowering(&mut b);
+    user_index_on_concrete_structs(&mut b);
+    user_index_range_on_concrete_structs(&mut b);
+    operator_candidates_respect_extend_bounds(&mut b);
+    conformance_chosen_by_bounds(&mut b);
+    argument_count_picks_an_associated_function(&mut b);
+    operators_of_generic_shapes(&mut b);
+    escaped_names_stay_distinct(&mut b);
+    inlined_callee_keeps_its_guarded_drop(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    arithmetic(&mut b);
+    control_flow(&mut b);
+    float_constants_exact(&mut b);
+    switches(&mut b);
+    enum_discriminant_references(&mut b);
+    constant_aggregate_holds_empty_string(&mut b);
+    local_constants_of_one_name(&mut b);
+    compile_time_layout_and_zero_sized_maps(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_02() {
+    let mut b = h::ExitBatch::new();
+    container_from_list(&mut b);
+    prelude_call_inside_generic_body(&mut b);
+    sso_budget_follows_pointer_width(&mut b);
+    const_generic_array_length_inferred(&mut b);
+    names_that_are_standard_macros(&mut b);
+    names_that_c_headers_declare(&mut b);
+    array_const_read_as_slice_keeps_array_storage(&mut b);
+    static_slice_result(&mut b);
+    question_moves_a_free_payload(&mut b);
+    for_over_array_literal(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_03() {
+    let mut b = h::ExitBatch::new();
+    for_over_generic_array_consumes_owning_elements(&mut b);
+    array_of_free_elements_drops_each(&mut b);
+    closures_mutate_and_borrow_captures_through_bounds(&mut b);
+    nested_array_literals_store_by_slot(&mut b);
+    array_values_copy_into_aggregates(&mut b);
+    uncovered_conditional_free_instances_derive(&mut b);
+    function_pointer_results_and_double_references(&mut b);
+    switch_frees_unbound_scrutinee_parts(&mut b);
+    array_literal_elements_take_the_expected_type(&mut b);
+    flagged_drop_keeps_array_local_names(&mut b);
+    array_parameter_element_is_complete_in_prototype_header(&mut b);
+    pointer_to_array_of_enclosing_aggregate(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_04() {
+    let mut b = h::ExitBatch::new();
+    function_types_substitute_structurally(&mut b);
+    function_items_in_tuples_and_fields(&mut b);
+    boxed_closures_erase_to_dyn_fn(&mut b);
+    widened_operands_compute_at_the_result_width(&mut b);
+    const_generic_values_in_constant_evaluation(&mut b);
+    constant_of_a_const_expression_instance(&mut b);
+    constant_of_a_keyed_operator(&mut b);
+    constant_union_puns(&mut b);
+    constant_of_an_interface_qualified_call(&mut b);
+    constant_of_a_builtin_method_through_a_reference(&mut b);
+    array_argument_infers_a_slice_element(&mut b);
+    constant_through_a_bound_picks_the_instance_extend(&mut b);
+    constant_through_a_cancellation_check(&mut b);
+    operator_takes_its_interface_method(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_05() {
+    let mut b = h::ExitBatch::new();
+    bound_call_arguments_resolve_in_the_caller(&mut b);
+    constant_through_nested_generic_calls(&mut b);
+    f32_to_integer_saturates_at_every_width(&mut b);
+    constant_of_an_inherited_default_on_an_instance(&mut b);
+    constant_of_an_inherited_default_in_a_generic_function(&mut b);
+    conformance_choice_ignores_declaration_order(&mut b);
+    qualified_associated_calls_of_generic_extends(&mut b);
+    projection_prefers_the_own_conformance(&mut b);
+    u64_range_pattern_bounds_past_i64(&mut b);
+    call_results_viewed_as_slices(&mut b);
+    boxed_dyn_frees_through_its_allocator(&mut b);
+    dyn_runs_the_conformance_with_its_arguments(&mut b);
+    borrowed_and_owned_erasures_of_one_pair(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_06() {
+    let mut b = h::ExitBatch::new();
+    conformance_selected_by_checked_argument(&mut b);
+    conformance_selected_by_expected_result(&mut b);
+    bound_calls_run_the_conformance_with_its_arguments(&mut b);
+    several_result_fn_values(&mut b);
+    array_result_fn_values(&mut b);
+    operators_and_associated_types_through_bounds(&mut b);
+    operator_operand_widens_before_its_borrow(&mut b);
+    associated_functions_through_bounds(&mut b);
+    dyn_methods_with_several_results(&mut b);
+    inference_from_the_one_fitting_conformance(&mut b);
+    inherited_default_of_a_generic_interface(&mut b);
+    override_and_inherited_default_compete_by_arguments(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_07() {
+    let mut b = h::ExitBatch::new();
+    self_path_names_the_implementing_type(&mut b);
+    dyn_generic_superinterface(&mut b);
+    generic_interface_methods_run(&mut b);
+    const_argument_selects_an_extend(&mut b);
+    builtin_extend_methods_fold_at_compile_time(&mut b);
+    method_on_a_turbofished_call(&mut b);
+    pointer_order_across_objects(&mut b);
+    memmove_overlap_both_directions(&mut b);
+    a_reference_to_an_array_parameter_reads_it(&mut b);
+    a_generic_method_value_is_its_instance(&mut b);
+    checked_byte_views(&mut b);
+    tuple_struct_constructor_inference(&mut b);
+    closure_in_generic_struct_field(&mut b);
+    zeroed_arrays_and_generic_aggregates(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_08() {
+    let mut b = h::ExitBatch::new();
+    dyn_drop_double_deref_and_assoc_arguments(&mut b);
+    box_deref_mut_places(&mut b);
+    va_arg_reads_promoted_types(&mut b);
+    b.run();
 }

@@ -8596,11 +8596,17 @@ fn ti_owner(cem: &mut cbe::CEmit, core: ModuleId, em: ModuleId, t: TypeId) Modul
 struct OutFile {
     pub f: *mut stdio::FILE,
     pub h: u64,
+    pub cap: bool, // keep a copy of the text in `body`: the sink reads it from memory, not from disk
+    pub body: String,
 }
 
 extend OutFile {
     fn open(path: str) OutFile {
-        return OutFile { f: open_out(path), h: FNV_BASIS };
+        return OutFile::open_cap(path, false);
+    }
+
+    fn open_cap(path: str, cap: bool) OutFile {
+        return OutFile { f: open_out(path), h: FNV_BASIS, cap: cap, body: String::new() };
     }
 
     fn put(self: &mut Self, s: str) {
@@ -8608,6 +8614,9 @@ extend OutFile {
             return;
         }
         let _ = unsafe stdio::fwrite(s.ptr(), 1, s.len(), self.f);
+        if self.cap {
+            self.body.push_str(s);
+        }
         // Eight bytes per step (a piece boundary is folded like a word boundary): one memcpy
         // per word, so the hash costs a load and a mix per eight bytes, not eight byte loads.
         let mut h = self.h;
@@ -8643,8 +8652,8 @@ extend OutFile {
 
 // Write shard `x` of module `t`'s TU (or of owner `t`'s instance shards, `inst`): the include
 // prefix, the shard head, its chunks (`sg.ord[sg.off[x]..sg.off[x + 1]]`, in emission order),
-// `tail`. A shard past the first with nothing in it writes no file. Returns whether a file was
-// written.
+// `tail`; `body` receives the written text when `cap`. A shard past the first with nothing in it
+// writes no file. Returns whether a file was written.
 fn write_shard(
     co: &CemitOut,
     root: str,
@@ -8656,6 +8665,8 @@ fn write_shard(
     sg: &ShardGroups,
     man: &mut String,
     err: &mut bool,
+    cap: bool,
+    body: &mut String,
 ) bool {
     let head = if inst {
         co.inst_heads.at(t).at(x as usize).as_str();
@@ -8677,7 +8688,7 @@ fn write_shard(
     if x != 0 && head.len() + tail.len() == 0 && lo == hi {
         return false;
     }
-    let mut w = OutFile::open(path);
+    let mut w = OutFile::open_cap(path, cap);
     w.put(inc);
     w.put(head);
     for k in lo..hi {
@@ -8689,6 +8700,7 @@ fn write_shard(
         *err = true;
     }
     man_line(man, mbe::if_s(inst, "i", "c"), root, path, w.h, t as u32, x, inc, "");
+    *body = replace(&mut w.body, String::new());
     return true;
 }
 
@@ -10523,14 +10535,15 @@ pub fn lint_package(
 /// under the package's gen_root. Notifications for one build arrive from a single thread.
 pub struct EmitSink {
     pub ctx: *mut void,
-    pub notify: fn(*mut void, str, i32) void,
+    /// (ctx, path, body, kind): `body` is the file's text, or empty when the sink reads the file.
+    pub notify: fn(*mut void, str, str, i32) void,
 }
 
-fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, kind: i32) {
+fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, body: str, kind: i32) {
     if sink != null {
         let m9 = pr.start();
         let f = unsafe (*sink).notify;
-        f(unsafe (*sink).ctx, path, kind);
+        f(unsafe (*sink).ctx, path, body, kind);
         pr.stop(prb::P_SYNC, m9);
     }
 }
@@ -10735,15 +10748,15 @@ pub fn run_package(
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
     keep.push(build_out_path(root, "super_rt", ".c"));
-    sink_notify(sink, &mut co.pr, keep.at(0).as_str(), 0);
+    sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0);
     // Self-contained: carries its own includes.
-    sink_notify(sink, &mut co.pr, keep.at(1).as_str(), 1);
+    sink_notify(sink, &mut co.pr, keep.at(1).as_str(), "", 1);
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     let pre_ext = keep.len();
     ext_c_collect(p, &mut keep, &mut err, target);
     for i in pre_ext..keep.len() {
         let s = keep.at(i).as_str();
-        sink_notify(sink, &mut co.pr, s, s.ends_with(".c") as i32);
+        sink_notify(sink, &mut co.pr, s, "", s.ends_with(".c") as i32);
     }
     stage_ms(tstat, &mut tp0, "phase rt+ext");
     let live = compute_emit_live(p);
@@ -10935,7 +10948,7 @@ pub fn run_package(
             err = true;
         }
         man_line(&mut man, "h", root, fwdp.as_str(), w.h, 0xFFFF, 0, co.fwd_h.as_str(), "");
-        sink_notify(osink, &mut co.pr, fwdp.as_str(), 0);
+        sink_notify(osink, &mut co.pr, fwdp.as_str(), co.fwd_h.as_str(), 0);
         keep.push(fwdp);
         if co.ext_h.len() != 0 {
             let extp = build_out_path(root, "__sc_ext", ".h");
@@ -10945,7 +10958,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, extp.as_str(), w.h, 0xFFFF, 0, co.ext_h.as_str(), "");
-            sink_notify(osink, &mut co.pr, extp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, extp.as_str(), co.ext_h.as_str(), 0);
             keep.push(extp);
         }
         for d in 0..co.defs_h.len() {
@@ -10962,7 +10975,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, hp.as_str(), w.h, co.defs_own[d], 0, co.defs_h.at(d).as_str(), "");
-            sink_notify(osink, &mut co.pr, hp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, hp.as_str(), co.defs_h.at(d).as_str(), 0);
             keep.push(hp);
         }
         for m in 0..n {
@@ -10976,10 +10989,11 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "h", root, hp.as_str(), w.h, m as u32, 0, co.protos_h.at(m).as_str(), "");
-            sink_notify(osink, &mut co.pr, hp.as_str(), 0);
+            sink_notify(osink, &mut co.pr, hp.as_str(), co.protos_h.at(m).as_str(), 0);
             keep.push(hp);
         }
         let mut sg = ShardGroups::new();
+        let mut sbody = String::new();
         for k in 0..lm.len() {
             let t = lm[k] as usize;
             let nsh = co.tu_heads.at(t).len();
@@ -10996,8 +11010,21 @@ pub fn run_package(
                 } else {
                     "";
                 };
-                if write_shard(&co, root, cp.as_str(), t, x as u8, false, tail, &sg, &mut man, &mut err) {
-                    sink_notify(osink, &mut co.pr, cp.as_str(), 1);
+                if write_shard(
+                    &co,
+                    root,
+                    cp.as_str(),
+                    t,
+                    x as u8,
+                    false,
+                    tail,
+                    &sg,
+                    &mut man,
+                    &mut err,
+                    osink != null,
+                    &mut sbody,
+                ) {
+                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), 1);
                     keep.push(cp);
                 }
             }
@@ -11014,8 +11041,21 @@ pub fn run_package(
                     stem.push_u64(x as u64);
                 }
                 let cp = build_out_path(root, stem.as_str(), ".c");
-                if write_shard(&co, root, cp.as_str(), q, x as u8, true, "", &sg, &mut man, &mut err) {
-                    sink_notify(osink, &mut co.pr, cp.as_str(), 1);
+                if write_shard(
+                    &co,
+                    root,
+                    cp.as_str(),
+                    q,
+                    x as u8,
+                    true,
+                    "",
+                    &sg,
+                    &mut man,
+                    &mut err,
+                    osink != null,
+                    &mut sbody,
+                ) {
+                    sink_notify(osink, &mut co.pr, cp.as_str(), sbody.as_str(), 1);
                     keep.push(cp);
                 }
             }
@@ -11028,7 +11068,7 @@ pub fn run_package(
                 err = true;
             }
             man_line(&mut man, "r", root, rp.as_str(), w.h, 0xFFFF, 0, co.registry_c.as_str(), co.reg_inputs.as_str());
-            sink_notify(osink, &mut co.pr, rp.as_str(), 1);
+            sink_notify(osink, &mut co.pr, rp.as_str(), co.registry_c.as_str(), 1);
             keep.push(rp);
         }
     }
@@ -11079,7 +11119,7 @@ pub fn run_package(
         } else {
             switch write_test_main(p, &plan) {
                 Some(runner) => {
-                    sink_notify(sink, &mut co.pr, runner.as_str(), 1);
+                    sink_notify(sink, &mut co.pr, runner.as_str(), "", 1);
                     keep.push(runner);
                     if sink == null {
                         rc = test_build_and_run(p, topts, &keep, "", cflags, ccflags, target);

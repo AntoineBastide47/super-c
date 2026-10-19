@@ -158,7 +158,7 @@ pub struct Package {
     /// the planner keeps the checked lane loop of every masked or gather access.
     pub mem_check: bool,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
-    /// build (TEST), the profile name (PROFILE; empty is `dev`), and the profile names a PROFILE
+    /// build (TEST), the profile name (PROFILE; empty is `debug`), and the profile names a PROFILE
     /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
     pub test_build: bool,
     pub profile: String,
@@ -1468,7 +1468,7 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 }
 
 /// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
-/// recursion. The source parses first, as a real build loads its root before the prelude, so whether it
+/// recursion. The source lexes first, as a real build loads its root before the prelude, so whether it
 /// names a vector decides the vector backend; the module is appended LAST, after the prelude: the user
 /// module is always `p.modules.len() - 1`. Used by tests.
 pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
@@ -1477,25 +1477,28 @@ pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
 
 /// `package_from_source` for instruction set `arch` (loader arch codes) with its baseline features.
 pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) Package {
+    let mut p = prelude_package_arch(std_dir, target, arch, source_names_vectors(src));
+    p.add_source_module(src, target);
+    return p;
+}
+
+/// Whether in-memory source `src` names a vector (`Ast.names_vectors`), which decides whether its
+/// prelude loads the vector backend; false when it does not lex.
+pub fn source_names_vectors(src: str) bool {
+    let mut source = String::from_str(src);
+    let mut lx = lexer::Lexer::new(&mut source, "<harness>");
+    lx.scan_tokens();
+    return !lx.has_errors() && lx.vectors;
+}
+
+/// The package `package_from_source_arch` builds before its source module joins: the std prelude for
+/// `target` and instruction set `arch`, with the vector backend when `vectors` (the source names a
+/// vector). `Package::add_source_module` appends the source.
+pub fn prelude_package_arch(std_dir: str, target: i32, arch: i32, vectors: bool) Package {
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.arch = arch;
     p.features = cf::baseline(target, arch);
-    let mut source = String::from_str(src);
-    let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
-    p.load_prelude(std_dir, target, parsed.ast.names_vectors);
-    let ok = parsed.ok;
-    let id = p.add_module(
-        String::from_str("main"),
-        String::from_str("<harness>"),
-        source,
-        replace(&mut parsed.ast, Ast::new(0)),
-        ok,
-    );
-    if ok {
-        p.modules[id as usize].ast.module = id as ModuleId;
-    } else {
-        p.ok = false;
-    }
+    p.load_prelude(std_dir, target, vectors);
     p.seed_core();
     p.bind_types();
     p.platform_filter(target);
@@ -2040,10 +2043,10 @@ extend Package {
         ) == "target.spc";
     }
 
-    /// The build profile's name: `profile`, `dev` when the driver named none.
+    /// The build profile's name: `profile`, `debug` when the driver named none.
     pub const fn profile_name<'a>(self: &'a Self) str<'a> {
         if self.profile.len() == 0 {
-            return "dev";
+            return "debug";
         }
         return self.profile.as_str();
     }
@@ -4141,6 +4144,28 @@ extend Package {
             }
         }
         return -1;
+    }
+
+    /// Append in-memory source `src` as module "main" (file "<harness>"), last, to a package from
+    /// `prelude_package_arch`, as `package_from_source_arch` appends it. A source that does not parse
+    /// clears `ok`.
+    pub fn add_source_module(self: &mut Self, src: str, target: i32) {
+        let mut source = String::from_str(src);
+        let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
+        let ok = parsed.ok;
+        let id = self.add_module(
+            String::from_str("main"),
+            String::from_str("<harness>"),
+            source,
+            replace(&mut parsed.ast, Ast::new(0)),
+            ok,
+        ) as usize;
+        if ok {
+            self.modules[id].ast.module = id as ModuleId;
+        } else {
+            self.ok = false;
+        }
+        self.platform_filter_module(id, target);
     }
 
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.

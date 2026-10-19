@@ -35,14 +35,14 @@ fn stats_switches_report_in_one_build() {
     assert(r.out_has("bce total"), "the bounds-check stats line is printed");
     assert(r.out_has("inline considered"), "the inliner stats line is printed");
     assert(r.out_has("cemit-stage write:"), "a cemit stage timing is printed");
-    assert(r.out_shows("{\"v\":1,\"ok\":true,\"profile\":\"dev\""), "the record opens with its version and outcome");
+    assert(r.out_shows("{\"v\":1,\"ok\":true,\"profile\":\"debug\""), "the record opens with its version and outcome");
     assert(r.out_has("\"ms\":{\"stamp\":"), "the phase partition starts at the stamp check");
     assert(r.out_has(",\"link\":"), "and ends at the link");
     assert(r.out_has(",\"total\":"), "the total is reported");
     assert(r.out_has("\"cc\":{\"jobs\":"), "the streamed C compile is reported apart from the partition");
     assert(r.out_has("\"mem\":{\"on\":false"), "memory tracking is off without SC_BUILD_MEM");
     assert(r.out_has("\"emit_cache\":true"), "the cache switches are recorded");
-    assert(r.out_has("\"lto\":\"flags\",\"lto_reason\":\"\""), "the dev profile leaves LTO to its flag arrays");
+    assert(r.out_has("\"lto\":\"flags\",\"lto_reason\":\"\""), "the debug profile leaves LTO to its flag arrays");
 }
 
 // SC_BUILD_MEM turns the runtime allocation tracker on for the build: the record then carries the

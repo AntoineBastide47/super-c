@@ -1,5 +1,5 @@
 // build.toml schema: maps parsed TOML items onto the Build manifest, applies defaults (built-in
-// debug/dev/release/bench profiles), and validates. Unknown sections/keys are hard errors so typos
+// debug/release/bench/test/race profiles), and validates. Unknown sections/keys are hard errors so typos
 // never silently no-op.
 import driver_shim as shim;
 import build_system::toml as toml;
@@ -21,8 +21,6 @@ pub struct Profile<'a> {
     pub strip: bool,
     pub opt: i32,
     pub lto: i32,
-    /// Compile with `-fprofile-use=<out-dir>/pgo.profdata` when that file exists (the engine checks).
-    pub pgo_use: bool,
     /// `overflow-checks`: 1 traps integer overflow, 0 wraps it (`-DSC_ARITH_WRAP`), -1 follows `opt`.
     pub overflow_checks: i32,
     /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
@@ -65,6 +63,12 @@ pub const LTO_NONE: i32 = 1;
 pub const LTO_FULL: i32 = 2;
 pub const LTO_AUTO: i32 = 3;
 pub const LTO_THIN: i32 = 4;
+
+/// The compile flags `--sanitizers` adds to every profile: AddressSanitizer and
+/// UndefinedBehaviorSanitizer, with frame pointers for their stack traces.
+pub const SANITIZER_CFLAGS: str = "-fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer";
+/// The link flags `--sanitizers` adds: the two sanitizer runtimes.
+pub const SANITIZER_LDFLAGS: str = "-fsanitize=address -fsanitize=undefined";
 
 /// The mode named `s`, or -1.
 pub const fn lto_parse(s: str) i32 {
@@ -207,7 +211,6 @@ extend Profile {
             strip: false,
             opt: OPT_FLAGS,
             lto: LTO_FLAGS,
-            pgo_use: false,
             overflow_checks: -1,
             target_features: Vector::<String>::new(),
             has_features: false,
@@ -329,7 +332,7 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
 }
 
 /// Load and validate <path>, applying defaults (out-dir "build", cstd c11+POSIX, default-profile
-/// "dev", built-in profiles). Prints its own diagnostics; None on any error. `bootstrap` (the
+/// "debug", built-in profiles). Prints its own diagnostics; None on any error. `bootstrap` (the
 /// --bootstrap-tags build) skips sections and keys this compiler does not know, so a previous release
 /// can build a source tree whose manifest already uses additions it predates; the compiler it produces
 /// reads the same manifest strictly.
@@ -623,7 +626,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
         m.cstd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L");
     }
     if m.default_profile.len() == 0 {
-        m.default_profile.push_str("dev");
+        m.default_profile.push_str("debug");
     }
     // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise.
     if saw_lib {
@@ -708,6 +711,14 @@ extend Manifest {
         };
     }
 
+    /// `--sanitizers`: add the sanitizer flags to every profile, after its own.
+    pub fn add_sanitizers(self: &mut Self) {
+        for i in 0..self.profiles.len() {
+            dutil::split_args(&mut self.profiles[i].cflags, SANITIZER_CFLAGS);
+            dutil::split_args(&mut self.profiles[i].ldflags, SANITIZER_LDFLAGS);
+        }
+    }
+
     /// Index of the profile named `name`, or -1 when absent.
     pub fn profile_index(self: &Self, name: str) i64 {
         for i in 0..self.profiles.len() {
@@ -731,16 +742,12 @@ extend Manifest {
     // The profiles available out of the box. A [profile.NAME] section with the same name starts from
     // these values: a key it sets replaces the built-in's (`cflags` the whole array), the rest stay.
     fn add_builtin_profiles(self: &mut Self) {
-        // `debug` and `dev` differ only in the optimization level: 0 and 1.
-        let sanitized: [str; 2] = ["debug", "dev"];
-        for name in sanitized {
-            let mut p = Profile::new(name);
-            dutil::split_args(
-                &mut p.cflags,
-                "-g -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
-            );
-            dutil::split_args(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
-            p.opt = (name == "dev") as i32;
+        // The default: unoptimized, with debug info and frame pointers. `--sanitizers` adds the
+        // memory checkers to any profile.
+        {
+            let mut p = Profile::new("debug");
+            dutil::split_args(&mut p.cflags, "-g -fno-omit-frame-pointer");
+            p.opt = 0;
             self.profiles.push(p);
         }
         {
@@ -765,28 +772,15 @@ extend Manifest {
             dutil::split_args(&mut p.cflags, "-DNDEBUG -g -fno-omit-frame-pointer");
             p.opt = 3;
             p.lto = LTO_AUTO;
-            // Profile-guided optimization when local training data exists (build with --profile=pgogen,
-            // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata).
-            p.pgo_use = true;
             self.profiles.push(p);
         }
         {
-            // The `super-c test` runner. The harness drives thousands of in-process compiles, and -O1 runs
-            // them two to four times cheaper than an unoptimized build with every assert kept. No
-            // sanitizers here: the compiler under test carries the selected profile's.
+            // The `super-c test` runner, and the compiler under test when no `--profile` is given. The
+            // harness drives thousands of compiles, and -O1 runs them two to four times cheaper than an
+            // unoptimized build with every assert kept. No sanitizers: ASan and UBSan cost about 12 times
+            // the instructions of a compile.
             let mut p = Profile::new("test");
             p.opt = 1;
-            self.profiles.push(p);
-        }
-        // PGO training build: instrument, run a representative workload (a self-transpile) under
-        // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into <out-dir>/pgo.profdata, and the
-        // bench profile above picks it up on its next build.
-        {
-            let mut p = Profile::new("pgogen");
-            dutil::split_args(&mut p.cflags, "-fprofile-generate");
-            dutil::split_args(&mut p.ldflags, "-fprofile-generate");
-            p.opt = 2;
-            p.lto = LTO_AUTO;
             self.profiles.push(p);
         }
         // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several

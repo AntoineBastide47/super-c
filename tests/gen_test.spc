@@ -56,7 +56,7 @@ fn gen_math_seed_3() {
     expect_seeds(&mut m, [3]);
 }
 
-// The runtime's overflow checks compiled out (SC_ARITH_WRAP under the checking `dev` profile): the
+// The runtime's overflow checks compiled out (SC_ARITH_WRAP under the checking `debug` profile): the
 // constants still trap, the run time wraps. The generator finds it, names the seed and reduces the
 // program to the one overflowing case.
 @test

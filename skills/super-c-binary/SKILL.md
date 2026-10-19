@@ -45,18 +45,20 @@ source into each binary, because monomorphization needs its generic source.
 On macOS, a `cp` over a running Mach-O gets the binary killed (SIGKILL) by code signing:
 `rm` the target before `cp`, or re-sign it (`codesign -f -s -`). The engine installs the
 manifest binary by rename, so `super-c build` is not affected. For a symbolized crash
-trace of the dev build, run it under `lldb -b -o run -k "bt 30" -k quit -- <cmd>` (`-b`: batch mode).
+trace of the debug build, run it under `lldb -b -o run -k "bt 30" -k quit -- <cmd>` (`-b`: batch mode).
 
 ### Build system (manifest-driven)
 
 ```sh
-super-c build                # build from build.toml (dev profile, incremental)
+super-c build                # build from build.toml (debug profile, incremental)
+super-c build --sanitizers   # the same with AddressSanitizer and UndefinedBehaviorSanitizer
 super-c build -o out         # override output binary name
 super-c build app -o out-app # build the project of directory app (its build.toml); -o stays the caller's path
 super-c build --bin=tool -o t # link the [bin.tool] target at t (an unknown name is an error; --lib with -o is one too)
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # remove the out-dir and every <root dir>/build/<profile>/raw (--cache also removes the global build cache); never a user directory
+super-c clean                # run the global cache and project sweeps now (see the object cache below)
+super-c clean --full         # remove the out-dir, every <root dir>/build/<profile> tree and the global cache root; never a user directory
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
@@ -159,8 +161,8 @@ stamp, parse (load, lex and parse), resolve, typecheck, borrowck, checks, prepar
 render and publish, plus a lexer-only pass reported as a share of parse. It prints
 per-phase averages (CPU ms, Mcyc, Kalloc, MiB), throughput, the min/median/p95/sd of CPU
 ms, Mcyc and wall ms over the rounds, heap requested per round and peak RSS; then it runs
-one cold build of the compiler through the real build engine (dev profile, every core,
-object cache, emit stamp and ccache off) and reports the engine's phase record, sync,
+one cold build of the compiler through the real build engine (debug profile, every core,
+object cache and emit stamp off) and reports the engine's phase record, sync,
 compile and link included. A C compiler or linker failure there fails the run and keeps
 the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`,
 `CONTRACT_BENCH_V` in `ci/contract.sh`).
@@ -364,23 +366,24 @@ edit never moves a chunk between shards.
 
 | Profile | Character | Use |
 |---------|-----------|-----|
-| `dev` | `opt-level = 1`, `-g` + full ASan/UBSan set, frame pointers | Development (**default** of a manifest build) |
-| `debug` | `opt-level = 0`, `-g` + sanitizers | Unoptimized debugging |
+| `debug` | `opt-level = 0`, `-g`, frame pointers | Development (**default** of a manifest build) |
 | `release` | `opt-level = 3`, `-DNDEBUG -fPIE` + section GC, `link-args = ["-O2"]`, strip, `lto = "auto"` | Shipping |
-| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` (+ PGO ingest of `<out-dir>/pgo.profdata` when that file exists) | Benchmarking/profiling |
-| `pgogen` | `opt-level = 2`, `-fprofile-generate`, `lto = "auto"` | PGO profile generation |
+| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` | Benchmarking/profiling |
 | `race` | `opt-level = 1`, `-g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
-| `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
+| `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner, and the compiler under test when `test` has no `--profile` (`<out-dir>/test-bin`) |
 
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
-character of each profile, not the verbatim flags. **Never profile the `dev` build**:
-sanitizer frames dominate the samples. An ASan program's runtime (`super_rt.c`,
+character of each profile, not the verbatim flags. `--sanitizers` adds the full ASan/UBSan set
+(`SANITIZER_CFLAGS`, `SANITIZER_LDFLAGS`) after the flags of every profile of the build, a script
+build without `--profile` included; targets without the runtimes (Windows, iOS, Android, wasm) drop
+them. **Never profile a `--sanitizers` build**: sanitizer frames dominate the samples. An ASan
+program's runtime (`super_rt.c`,
 `__asan_default_options`) turns ASan's use-after-return fake stack off: GCC 13.3 to 15 put an
 object aligned above 32 bytes 32 bytes off in its frames, and AVX-512 code faults there.
 `ASAN_OPTIONS=detect_stack_use_after_return=1` turns it back on.
 
-Integer overflow (signed and unsigned) traps under `dev`, `debug`, `test` and `race` and wraps under
-`release`, `bench` and `pgogen` (language skill, `operations.md`). The
+Integer overflow (signed and unsigned) traps under `debug`, `test` and `race` and wraps under
+`release` and `bench` (language skill, `operations.md`). The
 emitted C is the same under every profile: it calls the arithmetic helpers of `super_rt.h`
 (std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` from std's `int128.h`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
 (`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
@@ -437,11 +440,21 @@ namespace with no entry written or used for a week, such as the one a toolchain 
 leaves behind.
 
 The object cache lives under the same root at `o/<namespace>`, one namespace per local
-object tree (hash of the real path of the profile directory, such as `build/dev`); a
+object tree (hash of the real path of the profile directory, such as `build/debug`); a
 unit's key hashes the compiler version line, the whole compile command, and the text of
 the unit and of every quoted include (the emitted headers name the runtime and extern-block
 headers by absolute path, so a unit that includes a tree's own header gets other keys in a
-tree at another path). Each unit's `.cmd` records its key. Under `-g` the compile maps the
+tree at another path). The version line comes from `<cc> --version` once per compiler: the root's
+`ccver/` keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
+command, the program's path and mtime, and on macOS for an xcrun stub in `/usr/bin` the
+`DEVELOPER_DIR`, xcode-select link and `TOOLCHAINS` settings with each candidate clang's mtime),
+so a toolchain upgrade probes again and an unchanged compiler starts no probe process; the
+cache sweep removes a record after 7 days. Each unit's `.cmd` records its key. An object is stored once: the tree's
+object and its cache entries are hard links to one file (`link_or_copy`; a copy where the file system
+refuses a link, such as a cache root on another volume), so a compile removes the old object before
+it writes, and an object's time for the staleness check and the relink decision is the mtime of its
+`.cmd` record, which another tree's use of the shared file does not move. The engine runs the
+compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. Under `-g` the compile maps the
 working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
 sources relative to the project directory: a debugger started elsewhere needs a source map.
 Without coverage or profile instrumentation, each compiled object whose bytes do not name the
@@ -454,25 +467,30 @@ three older), and deletes each object and dependency list that no kept generatio
 and that is older than the start of the build. A version inside that window rebuilds
 with no compile; an older one compiles again. An unchanged build reads one directory
 and one file. The namespace's `owner` file records its object tree (the profile directory).
-At most once every two hours (`o/.sweep`), a successful build also removes the namespaces
+At most once every 30 minutes (`o/.sweep`), a successful build also removes the namespaces
 whose owner object tree is gone, whose `owner` names another directory (an older compiler
 recorded the source directory), that have no `owner` and did not change for an hour (a build
 that stopped before its first commit), or that did not change for 30 days (the shared `script`
 namespace only by this rule); the idle linker caches; and the flat `<key>.o`/`<key>.d` files
-that compilers before namespaces installed in the root. `super-c clean --cache` removes the whole root.
+that compilers before namespaces installed in the root. With the same period (`<out-dir>/.sweep`),
+it sweeps the project (`sweep_project`): every out-dir entry with nothing written for 30 days (a
+build tree, a link record, a binary) goes unless a build holds the lock of a tree in it, as do the
+emitted trees below the root directory idle as long and the per-suite cache older compilers kept in
+`<out-dir>/test/fixture-cache`. `super-c clean` runs both sweeps at once; `super-c clean --full`
+removes the out-dir, the emitted trees and the whole cache root.
 
 Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
 namespace, `o/script`, keyed per unit by the compiler version line, the compile flags, the
 unit's path relative to its tree and the text of the unit and its quoted includes (the
 tree's path joins the key only under `-g`, coverage or profile instrumentation), so the
-runtime and std units that programs emit identically compile once. A hit copies the object
+runtime and std units that programs emit identically compile once. A hit links the object
 into `<tree>/../obj`, which the link reads. The units to compile run as few `cc -c`
 commands as the process tree's free worker slots allow, all at once, each from a scratch
 directory whose objects then move into place; a unit whose file name another one shares, or
 every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
 The version probe runs beside the compiles when the namespace is new. An install writes a
-temp file and renames it, so concurrent builds never read a torn object. A build that installed an object trims the namespace to 3072 objects, least
-recently used first, once it holds more than 4096, each with the dependency list an engine
+temp file and renames it, so concurrent builds never read a torn object. A build that installed an object trims the namespace to 12288 objects, least
+recently used first, once it holds more than 16384 (a suite run uses about 4.8k), each with the dependency list an engine
 build stored beside it; every trim also deletes a list whose object is gone. `SC_NO_CACHE` restores the single
 compile-and-link command.
 
@@ -556,7 +574,7 @@ compile, once per probe with the features it checks ("build: the C compiler 'cc'
 '-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.
 
 ```sh
-super-c build --print-probes                    # the table for the dev profile and the host target
+super-c build --print-probes                    # the table for the debug profile and the host target
 super-c build --print-probes --profile=release  # under the release flags
 ```
 
@@ -687,7 +705,7 @@ in the callee module's instance file), whose calls do the same.
 
 On x86_64 each function with vector code and no features of its own also gets a copy per level of
 `--simd-dispatch=L` (build.toml `simd-dispatch`; a comma list of `x86-64-v2` .. `x86-64-v4`, default
-`x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `dev`: the copies make
+`x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `test`: the copies make
 the C compile of vector code 1.4 to 1.7 times longer) and in a script build without `--profile`;
 levels the build's set holds skipped; `off` for none), and opens with a check: when the CPU has a
 level's features, it calls that level's copy, the highest first (`__sc_simd_lvl()`: the
@@ -702,7 +720,8 @@ the build's set included: a program can choose code at run time, never a result.
 
 | Flag | Effect |
 |------|--------|
-| `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile flags (no sanitizers) while `PROFILE` still reads `dev`: pass `--profile=dev` for the sanitized build |
+| `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile flags while `PROFILE` still reads `debug`: pass `--profile=debug` for `-O0 -g` and frame pointers |
+| `--sanitizers` | Add AddressSanitizer and UndefinedBehaviorSanitizer to every C build of the command, after the profile's flags (`super-c test --sanitizers`: the compiler under test and the runner) |
 | `--jobs=N` | Worker count for parallel stages + cc (default: one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
 | `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
@@ -799,14 +818,14 @@ super-c command bootstrap
 ## Generated Output
 
 `super-c app.spc` (and `super-c build app.spc`) emits the C into `build/<profile>/raw/`
-(`build/dev/raw/` without `--profile`): `PROFILE` makes the emitted C depend on the profile,
+(`build/debug/raw/` without `--profile`): `PROFILE` makes the emitted C depend on the profile,
 so every profile has its own tree, per-TU cache, manifest and orphan pruning, and switching
 profiles never mixes trees. A program that does not read `PROFILE` emits the same C under
 every profile.
 
 ```
 build/
-  dev/raw/
+  debug/raw/
     super_rt.h        # shared runtime (includes, arithmetic helpers, allocation interposition)
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
@@ -854,7 +873,7 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative: `cc -funsigned-char -ffp-contract=off build/dev/raw/**/*.c $(cat build/dev/raw/__ldflags)`
+Includes are relative: `cc -funsigned-char -ffp-contract=off build/debug/raw/**/*.c $(cat build/debug/raw/__ldflags)`
 builds the whole tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`;
 add `-DSC_ARITH_WRAP` for wrapping integer overflow, and the `LIBM_AS_WRITTEN` flags for the
 engine's libm results).

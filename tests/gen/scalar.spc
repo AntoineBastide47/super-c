@@ -1,9 +1,9 @@
 // Scalar model: integer and float expressions over every builtin width, with inputs biased to the
 // boundaries (MIN, MIN + 1, -1, 0, 1, MAX - 1, MAX, NaN, infinities, subnormals, values next to the
 // conversion bounds), shift counts from -1 to the width + 1, and casts. Oracle 0 compares each case as
-// a constant and at run time; oracle 1 compares the `dev` and `release` profiles on a program whose
+// a constant and at run time; oracle 1 compares the `debug` and `release` profiles on a program whose
 // result is the same under both rules: the `release` side uses the plain operators, which wrap there,
-// and the `dev` side the `wrapping_*` methods.
+// and the `debug` side the `wrapping_*` methods.
 import tests::gen::driver as *;
 import tests::harness as h;
 
@@ -515,9 +515,9 @@ extend ScalarModel as Model {
         for i in 0..runs.len() {
             rv.push(runs.at(i).as_str());
         }
-        let dev = self.opts_with("--profile=dev");
+        let dbg = self.opts_with("--profile=debug");
         let rel = self.opts_with("--profile=release");
-        return h::same_output(src.as_str(), dev[0..dev.len()], rel[0..rel.len()], rv[0..rv.len()]);
+        return h::same_output(src.as_str(), dbg[0..dbg.len()], rel[0..rel.len()], rv[0..rv.len()]);
     }
 
     pub fn render(self: &Self, k: usize) String {

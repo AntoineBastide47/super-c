@@ -558,7 +558,7 @@ it, and the compile-time evaluator never reads it.
 
 On x86_64 the build itself chooses code at run time: each function with vector code and no
 features of its own gets a copy per level of `--simd-dispatch` (default `x86-64-v3` in `release`
-and other profiles at opt-level 2 or more, none in `debug`, `dev` and a script built without
+and other profiles at opt-level 2 or more, none in `debug`, `test` and a script built without
 `--profile`; `off` for none, levels the build's features hold skipped) and opens with one check per
 level, the highest first: when the CPU has the level's features it calls that copy. A copy calls copies, so the check runs
 once where code without the features enters vector code (a `detect::dispatch` call cost 0.3 ns more

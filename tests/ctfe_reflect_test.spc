@@ -13,53 +13,48 @@ fn const_overflow_is_rejected() {
     );
 }
 
-@test
-fn tuple_field_binder_names_each_element() {
+fn tuple_field_binder_names_each_element(b: &mut h::ExitBatch) {
     // fields(&tuple) binds each element; the element names come from the tuple's type_info ("_0", "_1",
     // .., std/reflect.spc).
-    h::expect_exit(
+    b.add(
         "each element is bound under its position's name",
         "fn main() i32 {\n    let t = (10, true, 'x');\n    let mut s = String::new();\n    inline for f in fields(&t) { s.push_str(f.name); }\n    return if s.as_str() == \"_0_1_2\" { 0; } else { 1; };\n}\n",
         0,
     );
 }
 
-@test
-fn const_fn_memo_keeps_float_arguments_apart() {
+fn const_fn_memo_keeps_float_arguments_apart(b: &mut h::ExitBatch) {
     // Two calls whose float arguments share an integer part each fold to their own result.
-    h::expect_exit(
+    b.add(
         "float arguments memo apart",
         "const fn twice(x: f64) f64 { return x * 2.0; }\nconst A: f64 = twice(1.25);\nconst B: f64 = twice(1.75);\nfn main() i32 {\n    if A != 2.5 { return 1; }\n    if B != 3.5 { return 2; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn const_fn_repeat_array_fills_every_element() {
+fn const_fn_repeat_array_fills_every_element(b: &mut h::ExitBatch) {
     // `[v; N]` in a const fn builds N copies of v, not one copy followed by zeros.
-    h::expect_exit(
+    b.add(
         "repeat array folds whole",
         "const fn mk(v: i32) [i32; 3] { return [v; 3]; }\nconst R: [i32; 3] = mk(7);\nfn main() i32 { return R[0] + R[1] + R[2] - 21; }\n",
         0,
     );
 }
 
-@test
-fn const_fn_memcmp_reads_an_inline_string_buffer() {
+fn const_fn_memcmp_reads_an_inline_string_buffer(b: &mut h::ExitBatch) {
     // A short String keeps its bytes in an inline array inside the struct, not in a heap block:
     // `memcmp` over it folds like over heap bytes (the lexer's keyword match does exactly this).
-    h::expect_exit(
+    b.add(
         "memcmp over an inline buffer",
         "import string as cstring;\nconst fn same(a: str, b: str) bool { let s = String::from_str(a); return s.len() == b.len() && unsafe cstring::memcmp(s.as_str().ptr(), b.ptr(), b.len()) == 0; }\nstatic_assert(same(\"@bench()\", \"@bench()\"), \"equal bytes\");\nstatic_assert(!same(\"@bench()\", \"@bench]\"), \"a differing byte\");\nfn main() i32 { return 0; }\n",
         0,
     );
 }
 
-@test
-fn runtime_call_of_a_const_fn_that_cannot_fold() {
+fn runtime_call_of_a_const_fn_that_cannot_fold(b: &mut h::ExitBatch) {
     // A value of a type with a user `Free` never folds; outside a constant context the call of a
     // `const fn` that builds one runs at run time.
-    h::expect_exit(
+    b.add(
         "a const fn over a const fn that cannot fold",
         "struct P { pub n: i32 }\nextend P as Free { fn free(self: &mut Self) {} }\nextend P { pub const fn new() P { return P { n: 0 }; } }\nconst fn make(x: i32) i32 { let p = P::new(); return p.n + x; }\nfn main() i32 { assert(make(1) == 1, \"one\"); return make(0); }\n",
         0,
@@ -76,30 +71,27 @@ fn const_chain(n: i32, tail: str) String {
     return s;
 }
 
-@test
-fn deep_constant_chain_evaluates_without_nesting() {
+fn deep_constant_chain_evaluates_without_nesting(b: &mut h::ExitBatch) {
     // Each constant reads the previous one: evaluating the last must not nest 20000 evaluations
     // on the native stack. C19999 = 19999 % 7 + 1 = 1.
     let src = const_chain(20000, "static_assert(C19999 == 1);\nfn main() i32 { return C19999; }\n");
-    h::expect_exit("a 20000-constant chain folds", src.as_str(), 1);
+    b.add("a 20000-constant chain folds", src.as_str(), 1);
 }
 
-@test
-fn deep_aggregate_constant_chain_evaluates_without_nesting() {
+fn deep_aggregate_constant_chain_evaluates_without_nesting(b: &mut h::ExitBatch) {
     // Aggregate values are never memoized: a 300-deep chain of them still evaluates dependency first.
     let mut s = String::from_str("struct P { pub x: i32, pub y: i32 }\nconst P0: P = P { x: 1, y: 2 };\n");
     for i in 1..300 {
         s.push_str(format("const P{}: P = P {{ x: P{}.y % 7 + 1, y: P{}.x }};\n", i, i - 1, i - 1).as_str());
     }
     s.push_str("fn main() i32 { return P299.x * 10 + P299.y; }\n");
-    h::expect_exit("a 300-aggregate chain folds", s.as_str(), 53);
+    b.add("a 300-aggregate chain folds", s.as_str(), 53);
 }
 
 // A constant of a generic aggregate keeps every instance argument, up to the language's limit of
 // eight: struct and enum constants, arrays of them and a `const fn` result all emit as static data.
-@test
-fn constants_keep_every_instance_argument() {
-    h::expect_exit(
+fn constants_keep_every_instance_argument(b: &mut h::ExitBatch) {
+    b.add(
         "five and eight instance arguments",
         M"(struct S5<A, B, C, D, E> { pub a: A, pub b: B, pub c: C, pub d: D, pub e: E }
 enum E5<A, B, C, D, E> { V(A, B, C, D, E), W }
@@ -121,9 +113,8 @@ fn main() i32 {
 
 // A constant calls a static method of a generic type whose result is not `Self`: the parameters bind
 // from the path, not from the result.
-@test
-fn a_constant_binds_a_static_method_from_its_path() {
-    h::expect_exit(
+fn a_constant_binds_a_static_method_from_its_path(b: &mut h::ExitBatch) {
+    b.add(
         "a static method returning Option<W<K>>",
         M"(struct W<const K: usize> {
     pub x: u64,
@@ -146,11 +137,28 @@ fn main() i32 {
 }
 
 // A repeat literal constant fills every element (`[v; N]` holds the value and the count).
-@test
-fn a_repeat_constant_fills_every_element() {
-    h::expect_exit(
+fn a_repeat_constant_fills_every_element(b: &mut h::ExitBatch) {
+    b.add(
         "repeat constants",
         "const Y: [f32; 4] = [2.0; 4];\nconst Z: [u64; 3] = [18446744073709551615; 3];\nfn main() i32 {\n    if Y[3] != 2.0 || Y[1] != 2.0 || Z[2] != 18446744073709551615 {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    tuple_field_binder_names_each_element(&mut b);
+    const_fn_memo_keeps_float_arguments_apart(&mut b);
+    const_fn_repeat_array_fills_every_element(&mut b);
+    const_fn_memcmp_reads_an_inline_string_buffer(&mut b);
+    runtime_call_of_a_const_fn_that_cannot_fold(&mut b);
+    deep_constant_chain_evaluates_without_nesting(&mut b);
+    deep_aggregate_constant_chain_evaluates_without_nesting(&mut b);
+    constants_keep_every_instance_argument(&mut b);
+    a_constant_binds_a_static_method_from_its_path(&mut b);
+    a_repeat_constant_fills_every_element(&mut b);
+    b.run();
 }

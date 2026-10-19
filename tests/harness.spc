@@ -12,6 +12,7 @@ import driver::emit as demit;
 import driver::test as dtest;
 import module::loader as loader;
 import ir::interp as iri;
+import graph::items as gitems;
 import ir::lower as irl;
 import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
@@ -22,6 +23,8 @@ import tests::cli_harness as cli;
 import stdio;
 import stdlib;
 import string as cstring;
+import errno;
+import unistd;
 
 // `tmpfile` (an anonymous, auto-removed temp stream) is declared in <stdio.h>, which super_rt always
 // includes, so a bare extern binding resolves without needing a header string.
@@ -105,6 +108,7 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
         }
         return r;
     }
+    let vectors = lx.vectors;
     let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
@@ -117,6 +121,12 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
         return r;
     }
     if stop == STAGE_PARSE {
+        return r;
+    }
+    let k = snap_index(vectors, arch, bootstrap);
+    if k >= 0 {
+        let out = snap_run(k as usize, src, stop, as_std, false, false);
+        unsafe cstring::memcpy((&mut r) as *mut Compiled, out.as_ptr(), sizeof(Compiled));
         return r;
     }
 
@@ -135,7 +145,14 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
+    check_from(&mut p, 0, stop, as_std, &mut r);
+    return r;
+}
 
+// The semantic stages of `compile` over a package whose last module is the snippet. The modules
+// before `from` are resolved and type-checked already (a snapshot's prelude); borrowck runs over
+// every module, after the one type publication.
+fn check_from(p: &mut loader::Package, from: usize, stop: i32, as_std: bool, r: &mut Compiled) {
     let n = p.modules.len();
     let uidx = n - 1; // the user module is loaded last, after the prelude
     if as_std {
@@ -143,22 +160,23 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
         p.modules[uidx].file = loader::join2(p.std_root.as_str(), "std/harness.spc");
     }
     // Resolve every module (prelude first, user last); snapshot the user module's diagnostics.
-    for i in 0..n {
-        h_resolve(&mut p, i, uidx, &mut r);
+    for i in from..n {
+        h_resolve(p, i, uidx, r);
     }
     if r.errors != 0 || stop == STAGE_RESOLVE {
         if r.errors != 0 {
             r.stage = STAGE_RESOLVE;
         }
-        return r;
+        return;
     }
     // Typecheck every module; snapshot the user module's diagnostics. Borrowck follows as its own
     // pass over the fully typed package, exactly like the driver.
-    for i in 0..n {
-        h_typecheck(&mut p, i, uidx, &mut r);
+    reopen_items(p, from);
+    for i in from..n {
+        h_typecheck(p, i, uidx, r);
     }
     if r.errors == 0 && as_std {
-        let te = demit::build_simd_table(&mut p, n);
+        let te = demit::build_simd_table(p, n);
         if te.len() != 0 {
             r.errors = 1;
             copy_msg(&mut r.first[0], &te);
@@ -166,16 +184,15 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
     }
     if r.errors != 0 {
         r.stage = STAGE_TYPECHECK;
-        return r;
+        return;
     }
-    demit::publish_checkpoint(&mut p, null);
+    demit::publish_checkpoint(p, null);
     for i in 0..n {
-        h_borrowck(&mut p, i, uidx, &mut r, null);
+        h_borrowck(p, i, uidx, r, null);
     }
     if r.errors != 0 {
         r.stage = STAGE_BORROWCK;
     }
-    return r;
 }
 
 // Lex + parse a source standalone (no package/prelude) and hand back the AST for shape inspection.
@@ -375,54 +392,76 @@ pub fn compile_c_arch(src: str, arch: i32) CompiledC {
 }
 fn compile_c_of(src: str, user_only: bool, arch: i32) CompiledC {
     let mut out = CompiledC { errors: 0, code: null };
-    let mut p = loader::package_from_source_arch(src, "std", unsafe shim::sc_host_platform(), arch);
-    if !p.ok {
+    let mut code = String::new();
+    let k = snap_index(loader::source_names_vectors(src), arch, false);
+    if k >= 0 {
+        let bytes = snap_run(k as usize, src, STAGE_BORROWCK, false, true, user_only);
+        let s = bytes.as_str();
+        unsafe cstring::memcpy((&mut out.errors) as *mut usize, s.ptr(), sizeof(usize));
+        code.push_str(s.slice(sizeof(usize), s.len()));
+    } else {
+        let mut p = loader::package_from_source_arch(src, "std", unsafe shim::sc_host_platform(), arch);
+        let pkg = (&mut p) as *mut loader::Package;
+        let mut cirv = iri::interp_new(pkg);
+        p.cir = &mut cirv;
+        out.errors = emit_from(&mut p, 0, user_only, &mut code);
+    }
+    if out.errors != 0 {
+        return out;
+    }
+    let buf = (unsafe stdlib::malloc(code.len() + 1)) as *mut char;
+    if buf == null {
         out.errors = 1;
         return out;
     }
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
+    unsafe cstring::memcpy(buf, code.as_ptr(), code.len());
+    unsafe buf[code.len()] = 0 as char;
+    out.code = buf;
+    return out;
+}
+
+// The stages of `compile_c` over a package whose last module is the snippet, as `check_from` runs
+// them, then the emission: the snippet's C into `code`. The error count; `code` is set only at 0.
+fn emit_from(p: &mut loader::Package, from: usize, user_only: bool, code: &mut String) usize {
+    if !p.ok {
+        return 1;
+    }
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
-    for i in 0..n {
-        h_resolve(&mut p, i, uidx, &mut rr);
+    for i in from..n {
+        h_resolve(p, i, uidx, &mut rr);
     }
     if rr.errors == 0 {
-        for i in 0..n {
-            h_typecheck(&mut p, i, uidx, &mut rr);
+        reopen_items(p, from);
+        for i in from..n {
+            h_typecheck(p, i, uidx, &mut rr);
         }
     }
     if rr.errors != 0 {
-        out.errors = rr.errors;
-        return out;
+        return rr.errors;
     }
     // The backend table, built after the type check as the driver builds it: the planner calls its entries.
-    demit::check_feature_calls(&mut p, n);
-    if demit::build_simd_table(&mut p, n).len() != 0 || !p.ok {
-        out.errors = 1;
-        return out;
+    demit::check_feature_calls(p, n);
+    if demit::build_simd_table(p, n).len() != 0 || !p.ok {
+        return 1;
     }
     let mut keep = irl::Keep::new();
-    demit::publish_checkpoint(&mut p, &mut keep);
+    demit::publish_checkpoint(p, &mut keep);
     for i in 0..n {
-        h_borrowck(&mut p, i, uidx, &mut rr, &mut keep);
+        h_borrowck(p, i, uidx, &mut rr, &mut keep);
     }
     if rr.errors != 0 {
-        out.errors = rr.errors;
-        return out;
+        return rr.errors;
     }
     // Whole-package emission through the production backend; the text keeps the shared headers (`str`,
     // monomorphized Slice/Box, ...) and the instance code.
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut keep);
+    demit::cemit_package(p, false, &tplan, null, -1, &mut o, &mut keep);
     if o.skips != 0 {
-        out.errors = o.skips as usize;
-        return out;
+        return o.skips as usize;
     }
-    let mut code = String::new();
     if !user_only {
         code.push_string(&o.fwd_h);
         code.push_string(&o.ext_h);
@@ -449,15 +488,7 @@ fn compile_c_of(src: str, user_only: bool, arch: i32) CompiledC {
         code.push_string(&o.inst_c);
         code.push_string(&o.registry_c);
     }
-    let buf = (unsafe stdlib::malloc(code.len() + 1)) as *mut char;
-    if buf == null {
-        out.errors = 1;
-        return out;
-    }
-    unsafe cstring::memcpy(buf, code.as_ptr(), code.len());
-    unsafe buf[code.len()] = 0 as char;
-    out.code = buf;
-    return out;
+    return 0;
 }
 
 static mut R_SEQ: u64 = 0;
@@ -504,40 +535,18 @@ pub fn compile_and_run(src: str) RunResult {
 /// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
-    // Process-local: one forked process per test, and the name carries the pid.
-    unsafe R_SEQ = unsafe R_SEQ + 1;
-    let mut dir = format(
-        "{}/scr_{}_{}_{}",
-        unsafe str::from_cstr(shim::sc_tmpdir()),
-        unsafe shim::sc_getpid(),
-        unsafe R_SEQ,
-        (unsafe shim::sc_ticks_ms()) as u64,
-    );
-    let dirp = dir.cstr();
-    rm_dir(dirp); // a directory an aborted test left under a reused pid
-    if unsafe shim::sc_mkdir_p(dirp) != 0 {
+    let mut dir = scratch_dir();
+    if dir.len() == 0 {
         return r;
     }
+    let dirp = dir.cstr();
     let d = dir.as_str();
-    let wf = stdio::fopen(format("{}/main.spc", d).as_str(), "wb"); // binary: no Windows CRLF in emitted .spc sources
-    if wf == null {
+    if !write_text(format("{}/main.spc", d).as_str(), src) {
         rm_dir(dirp);
         return r;
     }
-    if src.len() > 0 {
-        let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf);
-    }
-    unsafe stdio::fclose(wf);
     let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
-    let mut cmd = format(
-        "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
-        cli::superc_path(),
-        unsafe str::from_cstr(cli::cstd_flag()),
-        d,
-        bin.as_str(),
-    );
-    let benv = cli::fixture_cache_env(d);
-    if cli::run_with(cmd.cstr(), null, null, null, benv.as_str()) != 0 {
+    if !build_script(d, bin.as_str()) {
         rm_dir(dirp);
         return r;
     } // did not build
@@ -550,6 +559,51 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     return r;
 }
 
+// A fresh scratch directory under the system temp directory; empty when it cannot be made.
+// Process-local: one forked process per test, and the name carries the pid, the sequence and the clock.
+fn scratch_dir() String {
+    unsafe R_SEQ = unsafe R_SEQ + 1;
+    let mut dir = format(
+        "{}/scr_{}_{}_{}",
+        unsafe str::from_cstr(shim::sc_tmpdir()),
+        unsafe shim::sc_getpid(),
+        unsafe R_SEQ,
+        (unsafe shim::sc_ticks_ms()) as u64,
+    );
+    let dirp = dir.cstr();
+    rm_dir(dirp); // a directory an aborted test left under a reused pid
+    if unsafe shim::sc_mkdir_p(dirp) != 0 {
+        return String::new();
+    }
+    return dir;
+}
+
+// Write `text` to `path`, in binary mode: no Windows CRLF in emitted .spc sources. False when the file
+// cannot be opened.
+fn write_text(path: str, text: str) bool {
+    let wf = stdio::fopen(path, "wb");
+    if wf == null {
+        return false;
+    }
+    if text.len() > 0 {
+        let _ = unsafe stdio::fwrite(text.ptr(), 1, text.len(), wf);
+    }
+    unsafe stdio::fclose(wf);
+    return true;
+}
+
+// Build `<dir>/main.spc` as a script into `bin` with the compiler under test; whether it built.
+fn build_script(dir: str, bin: str) bool {
+    let mut cmd = format(
+        "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
+        cli::superc_path(),
+        unsafe str::from_cstr(cli::cstd_flag()),
+        dir,
+        bin,
+    );
+    return cli::run_with(cmd.cstr(), null, null, null, "") == 0;
+}
+
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
 // `sc_run_program(name, src, code, "")`: the program signals its result via `exit(code)`).
 /// Assert that `src` builds and exits with `code`, naming `label` on failure.
@@ -557,6 +611,110 @@ pub fn expect_exit(label: str, src: str, code: i32) {
     let r = compile_and_run(src);
     assert(r.built, label);
     assert_eq(r.exit, code);
+}
+
+/// Exit-code cases built as one program. `run` gives each case's source its own module `c<k>` of a
+/// scratch program, with its `fn main()` renamed `case_main` and made public, builds the program
+/// once, and runs it once per case with the argument `k`. A case whose `main` takes parameters, and
+/// every case of a program that does not build (two cases whose C declarations clash, a case that
+/// does not compile), builds alone through `expect_exit`, so a failure still names its case.
+pub struct ExitBatch {
+    labels: Vector<String>,
+    srcs: Vector<String>,
+    codes: Vector<i32>,
+}
+
+extend ExitBatch {
+    pub fn new() ExitBatch {
+        return ExitBatch { labels: Vector::<String>::new(), srcs: Vector::<String>::new(), codes: Vector::<i32>::new() };
+    }
+
+    /// Add the case `label`: `src` must build and exit with `code`.
+    pub fn add(self: &mut Self, label: str, src: str, code: i32) {
+        self.labels.push(String::from_str(label));
+        self.srcs.push(String::from_str(src));
+        self.codes.push(code);
+    }
+
+    /// Build the cases and check each one's exit code.
+    pub fn run(self: &Self) {
+        let mut root = String::new();
+        let mut batched = Vector::<usize>::new();
+        for k in 0..self.srcs.len() {
+            let s = self.srcs[k].as_str();
+            let at = s.find("fn main()");
+            if at < 0 || s.slice(at as usize + 9, s.len()).find("fn main()") >= 0 {
+                expect_exit(self.labels[k].as_str(), s, self.codes[k]);
+            } else {
+                batched.push(k);
+            }
+        }
+        if batched.len() <= 1 {
+            // One case gains nothing from a batch: it builds as its own program.
+            for i in 0..batched.len() {
+                let k = batched[i];
+                expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+            }
+            return;
+        }
+        let mut dir = scratch_dir();
+        assert(dir.len() != 0, "harness: no scratch directory for the batch");
+        let d = dir.as_str();
+        // The argument vector is gone before a case runs: a case may end the process with `exit`,
+        // and the leak check would count a vector still held.
+        let mut body = String::from_str(
+            "fn case_index(args: Vector<str>) i64 {\n    return args.at(1).parse_i64().unwrap();\n}\n\nfn main(args: Vector<str>) i32 {\n    let k = case_index(args);\n",
+        );
+        for i in 0..batched.len() {
+            let s = self.srcs[batched[i]].as_str();
+            let at = s.find("fn main()") as usize;
+            let mut m = String::from_str(s.slice(0, at));
+            if !m.as_str().ends_with("pub ") {
+                m.push_str("pub ");
+            }
+            m.push_str("fn case_main()");
+            let rest = s.slice(at + 9, s.len());
+            m.push_str(rest);
+            assert(write_text(format("{}/c{}.spc", d, i).as_str(), m.as_str()), "harness: cannot write a batch case");
+            root.format_into("import c{};\n", i);
+            // A `main` without a return type ends the process with 0 when it returns.
+            let mut e: usize = 0;
+            while e < rest.len() && rest.byte_at(e) == b' ' {
+                e += 1;
+            }
+            if e < rest.len() && rest.byte_at(e) == b'{' {
+                body.format_into("    if k == {} {{\n        c{}::case_main();\n        return 0;\n    }}\n", i, i);
+            } else {
+                body.format_into("    if k == {} {{\n        return c{}::case_main();\n    }}\n", i, i);
+            }
+        }
+        body.push_str("    return 255;\n}\n");
+        root.push_string(&body);
+        assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
+        let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
+        if !build_script(d, bin.as_str()) {
+            rm_dir(dir.cstr());
+            for i in 0..batched.len() {
+                let k = batched[i];
+                expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+            }
+            return;
+        }
+        let mut outp = format("{}/out", d);
+        let mut exits = Vector::<i32>::new();
+        for i in 0..batched.len() {
+            let mut run = format("\"{}\" {}", bin.as_str(), i);
+            exits.push(cli::run_with(run.cstr(), null, outp.cstr(), null, ""));
+        }
+        rm_dir(dir.cstr());
+        for i in 0..batched.len() {
+            let k = batched[i];
+            if exits[i] != self.codes[k] {
+                eprintln("{}: exit {}, expected {}", self.labels[k].as_str(), exits[i], self.codes[k]);
+            }
+            assert(exits[i] == self.codes[k], self.labels[k].as_str());
+        }
+    }
 }
 
 // Require the snippet to compile cleanly AND its generated C to contain `needle`.
@@ -644,7 +802,7 @@ pub struct DiffRun {
 /// Build `src` as main.spc of a scratch project. An option of the form NAME=VALUE sets that
 /// environment variable for the build (`SC_BCE=0`); any other option is one build flag. The project
 /// defines `--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program
-/// run many times: it compiles in about half the dev profile's time, and ASan's start-up makes each
+/// run many times: UBSan checks its arithmetic without AddressSanitizer's start-up, which makes each
 /// run several times slower.
 pub fn diff_build(src: str, opts: []str) DiffBuild {
     let exe = cli::superc_path(); // resolved before the chdir below
@@ -671,7 +829,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
     let mut root = String::from_str(p.dir());
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
-    let mut env = cli::fixture_cache_env(root.as_str());
+    let mut env = String::new();
     if simd_lane() {
         cmd.push_str(" --target=wasm --target-feature=+simd128");
     }
@@ -690,7 +848,9 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
         if o.starts_with("-") {
             cmd.format_into(" \"{}\"", o);
         } else {
-            env.push_byte(b' ');
+            if env.len() != 0 {
+                env.push_byte(b' ');
+            }
             env.push_str(o);
         }
     }
@@ -1214,7 +1374,7 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
 /// failure, empty on success. One unit's text serves every function it defines (`asm_match`).
 pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) String {
     let mut r = String::new();
-    let mut prof = "dev";
+    let mut prof = "debug";
     for o in opts {
         if o.starts_with("--profile=") {
             prof = o.slice(10, o.len());
@@ -1414,4 +1574,204 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
             unsafe copy_msg(&mut (*out).first[0], t.errors.rendered_errors.at(0));
         }
     }
+}
+
+// Prelude snapshots. Each in-process compile used to load, resolve and type-check the whole std
+// prelude before the snippet: the same work every time. The runner's parent does it once (the global
+// fixture below), and each compile forks from it and runs only the rest: the snippet's resolve and
+// type check, then the borrow check and the emission over every module after the one type
+// publication, so every type id stays what the full pipeline gives. Windows has no fork: there each
+// compile runs the full pipeline.
+
+/// A host prelude package, resolved and type-checked, and the constant engine bound to it. Each
+/// points at the other, so a snapshot stays where it was built.
+struct Snap {
+    pub p: loader::Package,
+    pub cir: iri::Interp,
+}
+
+/// The suite's global environment: the snapshots, by whether the snippet names a vector (index 1:
+/// the prelude with the vector backend).
+pub struct HarnessEnv {
+    pub snaps: Vector<Box<Snap>>,
+}
+
+/// The snapshots of the global environment, where a compile reaches them: null where none was built.
+static mut SNAPS: [*mut Snap; 2] = [null, null];
+
+@test_init(global)
+fn harness_env() HarnessEnv {
+    let mut env = HarnessEnv { snaps: Vector::<Box<Snap>>::new() };
+    if PLATFORM == Platform::Windows {
+        return env;
+    }
+    for k in 0..2 {
+        let mut b = Box::<Snap>::new(
+            Snap {
+                p: loader::prelude_package_arch(
+                    "std",
+                    unsafe shim::sc_host_platform(),
+                    unsafe shim::sc_host_arch(),
+                    k == 1,
+                ),
+                cir: iri::interp_new(null),
+            },
+        );
+        let s = b.deref_mut() as *mut Snap;
+        // The engine binds to the package where it now lives; the placeholder it replaces is dropped.
+        let _ = replace(unsafe &mut (*s).cir, iri::interp_new(unsafe &(*s).p));
+        unsafe {
+            (*s).p.cir = &mut (*s).cir;
+        }
+        let n = unsafe (*s).p.modules.len();
+        let mut rr = Compiled {};
+        for i in 0..n {
+            h_resolve(unsafe &mut (*s).p, i, n, &mut rr);
+        }
+        for i in 0..n {
+            h_typecheck(unsafe &mut (*s).p, i, n, &mut rr);
+        }
+        unsafe SNAPS[k] = s;
+        env.snaps.push(b);
+    }
+    return env;
+}
+
+// A snapshot's item index covers the prelude alone (its first type check opened it): open it again
+// over every module, the `from` prelude modules' items checked, as the language server reopens it
+// after a module joins. No-op on the full pipeline (`from` 0), whose first type check opens it.
+fn reopen_items(p: &mut loader::Package, from: usize) {
+    if from == 0 {
+        return;
+    }
+    gitems::open(p);
+    for m in 0..from {
+        p.set_module_states(m, loader::IS_CHECKED);
+    }
+}
+
+// The snapshot a compile can fork from, or -1: none was built (Windows), or the compile needs another
+// prelude (another instruction set, `--bootstrap-tags`).
+fn snap_index(vectors: bool, arch: i32, bootstrap: bool) i64 {
+    let k: usize = if vectors {
+        1;
+    } else {
+        0;
+    };
+    if bootstrap || arch >= 0 && arch != unsafe shim::sc_host_arch() || unsafe SNAPS[k] == null {
+        return -1;
+    }
+    return k as i64;
+}
+
+@platform(macos | linux)
+extern "C" "sys/wait.h" {
+    fn waitpid(pid: i32, status: *mut i32, options: i32) i32;
+}
+
+@platform(macos | linux)
+extern "C" "errno.h" {
+    const EINTR: i32;
+}
+
+// The leak tracker of the generated runtime: a forked compile forgets the allocations of the test that
+// forked it, and reports its own before it exits.
+extern "C" {
+    fn sc_lk_fork_child_reset();
+    fn sc_lk_report_now();
+}
+
+// Run one compile of `src` on snapshot `k` in a forked process: it adds the snippet to its copy of the
+// snapshot, runs the stages (`emit`: `emit_from`, else `check_from`), writes the result to a pipe and
+// exits, so the snapshot stays as built for the next compile. A compile that ends its process another
+// way (a panic, a signal, the leak report's exit code) ends this process the same way.
+@platform(macos | linux)
+fn snap_run(k: usize, src: str, stop: i32, as_std: bool, emit: bool, user_only: bool) String {
+    let mut fds: [i32; 2] = [0, 0];
+    if unsafe unistd::pipe(&mut fds[0]) != 0 {
+        panic("harness: pipe failed");
+    }
+    unsafe stdio::fflush(null); // the child must not write this process's buffered output again
+    let pid = unsafe unistd::fork();
+    if pid < 0 {
+        panic("harness: fork failed");
+    }
+    if pid == 0 {
+        unsafe sc_lk_fork_child_reset();
+        let _ = unsafe unistd::close(fds[0]);
+        snap_child(k, src, stop, as_std, emit, user_only, fds[1]);
+        unsafe stdio::fflush(null);
+        unsafe sc_lk_report_now();
+        unsafe stdlib::exit_now(0);
+    }
+    let _ = unsafe unistd::close(fds[1]);
+    let mut out = String::new();
+    let mut buf: [u8; 65536] = [0; 65536];
+    loop {
+        let got = unsafe unistd::read(fds[0], &mut buf[0], 65536);
+        if got > 0 {
+            out.push_str(unsafe str::from_raw(&buf[0], got as usize));
+        } else if got == 0 || errno::errno() != EINTR {
+            break;
+        }
+    }
+    let _ = unsafe unistd::close(fds[0]);
+    let mut st: i32 = 0;
+    while unsafe waitpid(pid, &mut st, 0) < 0 {
+        if errno::errno() != EINTR {
+            panic("harness: waitpid failed");
+        }
+    }
+    // The wait status as macOS and Linux both encode it: the terminating signal in the low 7 bits
+    // (0: the process exited), the exit code in the next 8.
+    let sig = st & 0x7f;
+    let code = st >> 8 & 0xff;
+    if sig == 6 {
+        stdlib::abort();
+    }
+    if sig != 0 {
+        eprintln("harness: the forked compile ended by signal {}", sig);
+        unsafe stdlib::exit_now(128 + sig);
+    }
+    if code != 0 {
+        unsafe stdlib::exit_now(code);
+    }
+    return out;
+}
+
+@platform(windows)
+fn snap_run(_: usize, _: str, _: i32, _: bool, _: bool, _: bool) String {
+    panic("harness: no prelude snapshot on Windows");
+}
+
+// The forked side of `snap_run`: the compile, its result written to `fd`, then the snapshot copy
+// freed, so the leak report that follows sees this compile's allocations alone.
+@platform(macos | linux)
+fn snap_child(k: usize, src: str, stop: i32, as_std: bool, emit: bool, user_only: bool, fd: i32) {
+    let s = unsafe SNAPS[k];
+    let from = unsafe (*s).p.modules.len();
+    unsafe (*s).p.add_source_module(src, unsafe shim::sc_host_platform());
+    let mut out = String::new();
+    if emit {
+        let mut code = String::new();
+        let errors = emit_from(unsafe &mut (*s).p, from, user_only, &mut code);
+        out.push_str(unsafe str::from_raw(((&errors) as *const usize) as *const u8, sizeof(usize)));
+        out.push_string(&code);
+    } else {
+        let mut r = Compiled {};
+        check_from(unsafe &mut (*s).p, from, stop, as_std, &mut r);
+        out.push_str(unsafe str::from_raw(((&r) as *const Compiled) as *const u8, sizeof(Compiled)));
+    }
+    let mut at: usize = 0;
+    while at < out.len() {
+        let put = unsafe unistd::write(fd, out.as_ptr() + at, out.len() - at);
+        if put < 0 && errno::errno() != EINTR {
+            panic("harness: write to the compile pipe failed");
+        }
+        if put > 0 {
+            at = at + put as usize;
+        }
+    }
+    let _ = unsafe unistd::close(fd);
+    let _snap = unsafe *s;
 }

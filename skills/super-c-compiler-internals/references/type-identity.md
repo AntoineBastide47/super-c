@@ -303,8 +303,7 @@ cheaper than before, and the rest spread in small shares over the hot emitters a
 analyses that read records through the package table (one more indirection per
 `type_at`). The declaration-type table then removed 130k foreign lowerings per
 transpile. Three costs were measured and removed on the way: memo arrays indexed by
-the raw id grew to `TYPE_PROV` per checker (a 77 s, 8.4 GB dev build against 4.5 s,
-643 MB), the module pools kept their 240 KB of chunks after publication (20.7 MB
+the raw id grew to `TYPE_PROV` per checker, the module pools kept their 240 KB of chunks after publication (20.7 MB
 retained, now released), and `init_types` ran twice per module.
 
 The 5%-of-cycles threshold is not met and was not expected to be: the design is kept

@@ -559,7 +559,7 @@ The prelude defines the build settings as constants usable in any expression:
 | `TEST` | `bool` | true in a `--test` build (`super-c test`, `super-c --test`) |
 | `POINTER_WIDTH` | `u32` | 64; 32 on `wasm32` |
 | `ENDIAN` | `Endian` (`Little`, `Big`) | `Little` on every supported target |
-| `PROFILE` | `str<'static>` | the build profile name (`dev` when none is named) |
+| `PROFILE` | `str<'static>` | the build profile name (`debug` when none is named) |
 
 The compiler generates their module (`__std::build`) from its flags; std declares only
 the enums (`std/target.spc`). The six names are reserved: an item or binding with one of

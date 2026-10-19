@@ -21,8 +21,8 @@ fn emitted(src: str, flags: str) String {
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
     let root = p.dir();
-    let mut t = cli::read_text(format("{}/build/dev/raw/__sc_manifest", root).as_str());
-    t.push_str(cli::read_text(format("{}/build/dev/raw/main.c", root).as_str()).as_str());
+    let mut t = cli::read_text(format("{}/build/debug/raw/__sc_manifest", root).as_str());
+    t.push_str(cli::read_text(format("{}/build/debug/raw/main.c", root).as_str()).as_str());
     return t;
 }
 

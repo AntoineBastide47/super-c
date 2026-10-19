@@ -31,9 +31,11 @@ extern "C" {
 
 // Per-coroutine stack. RESERVED, not consumed: the pages behind it are faulted in as the task uses them, so
 // a shallow task costs a handful of pages however large this is (measured: ~16 KiB per parked task at the
-// 256 KiB default). Raising it buys depth, not memory; see `set_stack_size`.
+// 256 KiB default). Raising it buys depth, not memory; see `set_stack_size`. A program built with
+// AddressSanitizer gets four times the default: its frames carry redzones, and a `--sanitizers` build must
+// reach the depth of a plain one. 0 until the pool starts means the default.
 const STACK_SIZE_DEFAULT: usize = 262144;
-static mut G_STACK_SIZE: usize = 262144;
+static mut G_STACK_SIZE: usize = 0;
 // The idle task-block cache, as a BYTE budget over every retained stack mapping (guard page included), the
 // shared pool and the per-worker stashes together: see the task-block pool and `set_pool_budget`.
 const POOL_BUDGET_DEFAULT: usize = 268435456;
@@ -2455,6 +2457,7 @@ pub fn ensure_started() *mut Scheduler {
             return G_SCHED;
         }
         if unsafe atomic::cas_i32(sp, 0, 1, false, 4, 0) {
+            G_STACK_SIZE = stack_size();
             reg_init();
             let s = build_scheduler();
             G_SCHED = s;
@@ -3322,11 +3325,23 @@ pub fn set_stack_size(bytes: usize) {
         return;
     }
     if bytes == 0 {
-        unsafe G_STACK_SIZE = STACK_SIZE_DEFAULT;
+        unsafe G_STACK_SIZE = 0;
         return;
     }
     let unit: usize = 65536;
     unsafe G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
+}
+
+/// The per-task stack size in bytes: the one `set_stack_size` set, else the default (four times larger in
+/// a program built with AddressSanitizer). The running pool's tasks use it.
+pub fn stack_size() usize {
+    if unsafe G_STACK_SIZE != 0 {
+        return unsafe G_STACK_SIZE;
+    }
+    if sc_runtime::sc_rt_asan() != 0 {
+        return 4 * STACK_SIZE_DEFAULT;
+    }
+    return STACK_SIZE_DEFAULT;
 }
 
 /// Fix the pool's worker-thread count. Must be called before the first `launch` (the pool is built on

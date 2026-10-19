@@ -78,7 +78,7 @@ fn command_runs_a_manifest_command() {
 }
 
 @test
-fn clean_removes_build_outputs() {
+fn clean_full_removes_build_outputs() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
     // dependent guest command, so it runs on native and Windows only.
     if cli::on_wasm() {
@@ -88,19 +88,21 @@ fn clean_removes_build_outputs() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
+    // A cache of the test's own: `--full` removes the cache root.
+    let env = format("1 SC_CACHE_DIR={}/ocache", root);
+    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "build first");
     let mut bdir = String::from_str(root);
     bdir.push_str("/build");
     assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the build wrote its out-dir");
-    // clean removes the out-dir; a rebuild afterwards still works.
-    assert(cli::superc_env_in(root, E, "1", "clean").ok(), "clean succeeds");
+    // clean --full removes the out-dir; a rebuild afterwards still works.
+    assert(cli::superc_env_in(root, E, env.as_str(), "clean --full").ok(), "clean succeeds");
     assert_eq(cli::dir_count_suffix(bdir.as_str(), ""), 0);
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "rebuild after clean works");
+    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "rebuild after clean works");
     assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the rebuild wrote its out-dir again");
 }
 
-// `clean` removes the out-dir and the tree a bare build emits beside the sources; a directory the user
-// named `build` that holds anything else stays.
+// `clean --full` removes the out-dir and the tree a bare build emits beside the sources; a directory the
+// user named `build` that holds anything else stays.
 @test
 fn clean_keeps_a_user_build_directory() {
     if cli::on_wasm() {
@@ -110,12 +112,13 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nout-dir = \"out\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     p.mkfile("build/keep.txt", "mine\n");
-    p.mkfile("src/build/dev/raw/super_rt.h", "stale\n");
+    p.mkfile("src/build/debug/raw/super_rt.h", "stale\n");
     p.mkfile("src/build/release/raw/main.c", "stale\n");
     p.mkfile("src/build/release/raw/super_rt.h", "stale\n");
     let root = p.dir();
-    assert(cli::superc_env_in(root, E, "1", "build").ok(), "build first");
-    assert(cli::superc_env_in(root, E, "1", "clean").ok(), "clean succeeds");
+    let env = format("1 SC_CACHE_DIR={}/ocache", root);
+    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "build first");
+    assert(cli::superc_env_in(root, E, env.as_str(), "clean --full").ok(), "clean succeeds");
     let mut keep = String::from_str(root);
     keep.push_str("/build");
     assert_eq(cli::dir_count_suffix(keep.as_str(), "keep.txt"), 1);
@@ -286,9 +289,9 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
     // The engine's own frontend emits the same tree, and it is another emitter for the stamp.
     assert(cli::superc_env_in(root, E, "1", "build --out-dir=int -o app").ok(), "the frontend build");
-    let own = cli::read_text(format("{}/int/dev/raw/lib.c", root).as_str());
+    let own = cli::read_text(format("{}/int/debug/raw/lib.c", root).as_str());
     assert(own.len() != 0, "the frontend wrote the tree");
-    assert(own.as_str() == cli::read_text(format("{}/ext/dev/raw/lib.c", root).as_str()).as_str(), "same tree");
+    assert(own.as_str() == cli::read_text(format("{}/ext/debug/raw/lib.c", root).as_str()).as_str(), "same tree");
     let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --out-dir=ext -o app");
     assert(back.ok() && back.out_has("phase load"), "the frontend does not reuse the transpiler's tree");
     let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());

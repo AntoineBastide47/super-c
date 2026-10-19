@@ -192,12 +192,12 @@ fn manifest_and_command_line_features() {
     let mut m = mo.unwrap();
     m.arch = 2;
     assert(bsys::check_features(&m, ""), "valid lists");
-    let simd = bsys::features_for(&m, "dev", "");
+    let simd = bsys::features_for(&m, "debug", "");
     assert(cf::has(simd, cf::F_SIMD128) && !cf::has(simd, cf::F_RELAXED_SIMD), "the build's list");
     assert(cf::is_empty(bsys::features_for(&m, "none", "")), "a profile's empty list replaces it");
     let rel = bsys::features_for(&m, "relaxed", "");
     assert(cf::has(rel, cf::F_SIMD128) && cf::has(rel, cf::F_RELAXED_SIMD), "a profile's own list, closed");
-    assert(cf::is_empty(bsys::features_for(&m, "dev", "-simd128")), "the command line applies last");
+    assert(cf::is_empty(bsys::features_for(&m, "debug", "-simd128")), "the command line applies last");
     assert(!bsys::check_features(&m, "+neon"), "the command line's names are checked");
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");

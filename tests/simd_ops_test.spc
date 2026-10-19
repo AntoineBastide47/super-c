@@ -365,7 +365,7 @@ fn main(args: Vector<str>) i32 {
 )",
     );
     assert(p.compile_flags("--target=wasm", "main.spc").ok(), "the program transpiles for wasm32");
-    let c = cli::read_text(format("{}/build/dev/raw/main.c", p.dir()).as_str());
+    let c = cli::read_text(format("{}/build/debug/raw/main.c", p.dir()).as_str());
     assert(c.contains("__sc_bounds_vec("), "the load's range check");
     assert(c.contains("#include \"__sc_t/__sc_lane_check.h\""), "the check's helper is included");
 }

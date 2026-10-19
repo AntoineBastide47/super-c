@@ -38,7 +38,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: ccache-${{ matrix.target }}-build
+          cache: objcache-${{ matrix.target }}-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -60,7 +60,7 @@ jobs:
           if [ "${{ matrix.target }}" = wasm ]; then
             sh bench/simd_baseline/record.sh --target=wasm
           else
-            "./super-c${BINEXT:-}" test --quiet --filter=simd_baseline ${cstd:+"$cstd"}
+            "./super-c${BINEXT:-}" test --sanitizers --quiet --filter=simd_baseline ${cstd:+"$cstd"}
             sh bench/simd_baseline/record.sh ${cstd:+"$cstd"}
             # x86_64: the portable kernels at AVX2 and, where the runner has it, AVX-512, each against
             # the hand-written kernels of its level (the arithmetic ones within 10%).
@@ -78,7 +78,7 @@ jobs:
           path: bench/simd_baseline/*.tsv
           if-no-files-found: error
 
-      - uses: ./.github/actions/ccache-save
+      - uses: ./.github/actions/cache-save
         with:
-          cache: ccache-${{ matrix.target }}-build
+          cache: objcache-${{ matrix.target }}-build
           sha: ${{ github.sha }}

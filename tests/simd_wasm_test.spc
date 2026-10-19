@@ -19,9 +19,9 @@ fn emitted(src: str, flags: str) String {
     assert(r.ok(), flags);
     let root = p.dir();
     let mut m = String::new();
-    m.format_into("{}/build/dev/raw/__sc_manifest", root);
+    m.format_into("{}/build/debug/raw/__sc_manifest", root);
     let mut c = String::new();
-    c.format_into("{}/build/dev/raw/main.c", root);
+    c.format_into("{}/build/debug/raw/main.c", root);
     let mut t = cli::read_text(m.as_str());
     t.push_str(cli::read_text(c.as_str()).as_str());
     return t;

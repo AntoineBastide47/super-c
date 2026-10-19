@@ -254,6 +254,16 @@ pub fn copy_file(srcp: str, dstp: str) bool {
     return ok;
 }
 
+/// Make `dstp` a second name of file `srcp` (a hard link: one copy on disk), or a copy where the file
+/// system refuses a link (another volume, a link count limit); `dstp` is replaced. The two names share
+/// one inode, so nothing may write either in place: a compile into `dstp` must remove it first.
+pub fn link_or_copy(srcp: str, dstp: str) bool {
+    let mut s = String::from_str(srcp);
+    let mut d = String::from_str(dstp);
+    let _ = unsafe shim::sc_unlink(d.cstr());
+    return unsafe shim::sc_link(s.cstr(), d.cstr()) == 0 || copy_file(srcp, dstp);
+}
+
 /// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`
 /// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
 /// failure: an old or missing record only makes the next build redo that work.

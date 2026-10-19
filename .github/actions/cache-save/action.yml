@@ -1,0 +1,21 @@
+name: Save object cache
+description: >
+  The last step of a CI job that keeps an object cache: saves the job's global object cache
+  (`~/.super-c/cache`) under the key the toolchain action restored (`<cache>-<sha>`), on main only. A run
+  on another branch saves nothing, so it cannot evict main's entries from the repository's cache.
+inputs:
+  cache:
+    description: "the object cache key prefix the job passed to the toolchain action"
+    required: true
+  sha:
+    description: "the commit under test, the last part of the object cache key"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Save object cache (main)
+      if: github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.super-c/cache
+        key: ${{ inputs.cache }}-${{ inputs.sha }}

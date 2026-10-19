@@ -1,18 +1,18 @@
-# Super-C compatibility contract, version 27.
+# Super-C compatibility contract, version 32.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=31
+CONTRACT_VERSION=32
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
 CONTRACT_MANIFEST=build.toml
 CONTRACT_STD=std
 CONTRACT_FFI=ffi
-# The installed binary every command below runs; `super-c build` installs the dev profile there,
+# The installed binary every command below runs; `super-c build` installs the debug profile there,
 # `super-c release` the release profile.
 CONTRACT_BIN=./super-c
 
@@ -20,9 +20,9 @@ CONTRACT_BIN=./super-c
 # The supported targets. Each native CI leg builds and tests its own target; the wasm job transpiles
 # and runs the compiler under wasmtime.
 CONTRACT_TARGETS="macos linux windows wasm"
-# Every built-in profile but dev must build the compiler on the host (`super-c build --profile=P`); dev is
-# the profile every other build step produces. The `test` profile builds only the test runner and is
-# exercised by CONTRACT_CMD_TEST.
+# Every built-in profile but test must build the compiler on the host (`super-c build --profile=P`).
+# The `test` profile builds the test runner and the compiler under test, and is exercised by
+# CONTRACT_CMD_TEST.
 CONTRACT_PROFILES="debug release bench race"
 # The commands, exactly as the gates run them (<T> is one of CONTRACT_TARGETS).
 CONTRACT_CMD_BUILD="./super-c build"
@@ -30,9 +30,9 @@ CONTRACT_CMD_FMT="SC_LEAK_CHECK=fatal ./super-c fmt src std ffi tests bench ci -
 CONTRACT_CMD_LINT="SC_LEAK_CHECK=fatal ./super-c lint src std ffi tests bench ci examples --target=<T>"
 CONTRACT_CMD_TEST="SC_LEAK_CHECK=fatal ./super-c test --quiet"
 # The two-generation self-hosting fixpoint, in a clean copy of src/, std/, ffi/ and build.toml:
-#   gen1: ./super-c build            (copied beside the tree, so std/ffi resolve inside the copy)
-#   gen2: build/dev/super-c build    (the gen1 binary, after removing build/)
-# and the two emitted build/dev/raw trees must be byte-identical except CONTRACT_NONDET_FILES.
+#   gen1: ./super-c build             (copied beside the tree, so std/ffi resolve inside the copy)
+#   gen2: build/debug/super-c build   (the gen1 binary, after removing build/)
+# and the two emitted build/debug/raw trees must be byte-identical except CONTRACT_NONDET_FILES.
 CONTRACT_FIXPOINT_GEN1="./super-c build"
 CONTRACT_FIXPOINT_GEN2="./gen1-super-c build"
 # and the gen2 binary is what runs every later step (generation two is compiled and run).
@@ -56,7 +56,7 @@ for f in sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp e
 done
 CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off$CONTRACT_LIBM_CFLAGS"
 
-# ---- readability of the emitted C tree (build/dev/raw) --------------------------------------------------
+# ---- readability of the emitted C tree (build/debug/raw) ------------------------------------------------
 # Checked by the gate on the gen1 tree:
 #   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
 #   module owning generic instances <module>__inst.c, one definition header per type __sc_t/<name>.h),

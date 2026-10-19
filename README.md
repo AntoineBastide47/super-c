@@ -53,7 +53,8 @@ super-c build path/to/app.spc -o app
 ## Building and testing
 
 ```sh
-super-c build                     # dev build (with ASan/UBSan)
+super-c build                     # debug build (-O0, debug info, frame pointers)
+super-c build --sanitizers        # debug build with ASan and UBSan
 super-c release                   # optimized build (-O3, link-time optimization)
 super-c run                       # build the project, then run it
 super-c test                      # run the tests (in tests/)
@@ -64,7 +65,8 @@ super-c clean                     # delete build outputs
 A project is described by a `build.toml` file. At minimum it names the binary (`bin`) and its entry
 file (`root`). From that, `super-c build` gives you:
 
-* build profiles: `debug`, `dev`, `release`, `bench`, and any you define;
+* build profiles: `debug` (the default), `release`, `bench`, `test`, `race`, and any you define;
+* `--sanitizers` on any build: AddressSanitizer and UndefinedBehaviorSanitizer;
 * incremental, parallel C compilation that only rebuilds what changed;
 * the `tests/` and `bench/` folder conventions.
 
@@ -788,11 +790,11 @@ The `std::parallel` modules provide a full concurrency toolkit on top of OS thre
 
 ## Generated output
 
-`super-c app.spc` writes a `build/dev/raw/` folder next to the source (`build/<profile>/raw/`
+`super-c app.spc` writes a `build/debug/raw/` folder next to the source (`build/<profile>/raw/`
 under `--profile`):
 
 ```text
-build/dev/raw/
+build/debug/raw/
   super_rt.h  super_rt.c   # small runtime: standard includes and the leak checker
   __sc_fwd.h               # forward declarations shared by all files
   app.h  app.c             # one .h/.c pair per module
@@ -800,7 +802,7 @@ build/dev/raw/
 ```
 
 Includes are relative, so the folder builds with no `-I` flags:
-`cc $(find build/dev/raw -name '*.c') $(cat build/dev/raw/__ldflags) -o app`. With a single module, the C names stay plain (no module prefix).
+`cc $(find build/debug/raw -name '*.c') $(cat build/debug/raw/__ldflags) -o app`. With a single module, the C names stay plain (no module prefix).
 
 ## Environment variables
 

@@ -174,9 +174,6 @@ the header of the type it collides with.
 
 ## Decision record
 
-Measured with `python3 ci/fanout_report.py <gen> <obj> std` on the compiler's own tree
-(147 units, 710 aggregates, 130 modules; a 14-core dev-profile build).
-
 Before: two shared headers (`__sc_types.h` 145 KiB, `__sc_protos.h` 410 KiB) included
 by every TU, and one shared instance TU (523 KiB, two parts, 58 owner modules): a
 signature edit recompiled 87 of 91 units, a layout edit 69 to 87, and any generic body
@@ -187,36 +184,13 @@ Rejected: nominally separate headers per module for the `std::core` /
 each other and invalidate the same units; the cycle gets one SCC header
 (`__std/core__types.h`).
 
-Accepted (the layout above). The type graph is a DAG of 710 aggregates (no type-level
-SCC), with one 3-module SCC at the module level. As the include graph delivers it:
-
-| Edit class | TUs invalidated (median / p90 / max of 147) |
-|-----------|----------------------------------------------|
-| private body | 1 / 1 / 6 (the module's shards) |
-| public signature | 1 / 19 / 85 |
-| by-value layout | 1 / 24 / 128 |
-
-The maxima are the prelude's `str`, `String` and `Vector` (spelled by nearly every
-unit) and `lexer::token` (`Span` is embedded by the AST, which every pass embeds): a
-layout edit there is a whole-program rebuild by construction. A module TU includes the
-type headers of a median 6 modules and the prototype headers of a median 6.
-
-Whole-build edits through the real engine (the `ci/bench_matrix.sh` edits, 14 cores,
-dev profile, warm caches): a private body edit rewrites 1 C file and recompiles 1 of 151
-objects (2.2 s end to end); the public signature edit in `module::loader` rewrites its
-prototype header and recompiles 40 objects (6.2 s, against 87 of 91 before); the layout
-edit in `lexer::token` rewrites 24 C files (their field initializers change) plus one
-type header and recompiles 92 objects (5.3 s, against 69 to 87 of 91 before). A cold
-build with every cache off, both layouts emitted from the same sources: the old layout
-compiles 92 units in 77 to 79 s of C compiler time over a 9.2 s span (10.0 s total), the
-new layout 151 units in 82 s over an 8.4 s span (9.2 s total): the 60 extra small units
-cost about 4% more compiler time, and writing the largest units first (the streaming
-compile starts each unit as its file lands) shortens the critical path. Header size does
-not move a unit's compile time (measured: one unit with its own include list against
-every generated header included, 5.0 s both). A generic body edit (`Vector::push` in `std/vector.spc`) rewrites the
-two `__std/vector__inst` shards and no header, recompiles 2 objects, and leaves the
-registry TU byte-identical; changing a `[shards]` count prints the migration notice and
-rewrites that module's shards only.
+Accepted (the layout above). The type graph is a DAG (no type-level SCC), with one
+3-module SCC at the module level. A layout edit of the prelude's `str`, `String` or
+`Vector` (spelled by nearly every unit) or of `lexer::token` (`Span` is embedded by the
+AST, which every pass embeds) is a whole-program rebuild by construction. A generic body
+edit (`Vector::push` in `std/vector.spc`) rewrites the two `__std/vector__inst` shards and
+no header, and leaves the registry TU byte-identical; changing a `[shards]` count prints
+the migration notice and rewrites that module's shards only.
 
 Targets set before the change and met: a body edit recompiles only the module's own
 shards; a signature or layout edit in a leaf module recompiles under 10% of the units;
@@ -228,50 +202,22 @@ fixpoint and `--jobs=1` versus `--jobs=N` output.
 Before: `__sc_fwd.h` held every aggregate typedef, closure env typedef and payload-less
 enum, and every unit includes it, so adding or renaming any type recompiled 164 of 167
 units. Now each declaration lives in its home type header and a header copies only the
-declarations it spells (see Ownership). Measured on the compiler's own tree (dev profile,
-14 cores, object cache off), adding one unused `pub struct`:
-
-| Module | Units recompiled before | after |
-|--------|-------------------------|-------|
-| `lexer::token` | 164 of 167 | 95 of 166 (its type header is in the include closure of 95 units through `ast`) |
-| `fmt::doc` | 164 of 167 | 8 of 166 |
-| `driver::stats` | 164 of 167 | 4 of 166 |
-
-The copies add 1.4% of emitted C (10150 to 10290 KiB, 79 KiB of typedef lines and
-47 KiB of enum definitions in headers). Self-transpile codegen, two alternating A/B
-runs: 215.4 / 214.1 ms before, 215.7 / 215.7 ms after (noise). Cold build (every cache
-off) 8.9 s and no-op build 0.12 s, both unchanged.
+declarations it spells (see Ownership).
 
 Edges follow the same rule. Before, a symbol segment recorded a type edge
 (`String__new__Global` gave its unit `__std/interfaces__types.h`, which holds only the
-zero-sized `Global`), and so did the identifier reservation of every local type. Measured
-on the compiler's own tree (dev profile, object cache off, 167 units), adding
-`pub struct Zst {}` to `std/interfaces.spc`: 93 units included that header and 93
-recompiled before; 3 include it and 3 recompile after (`main.c` casts to `Global *` in
-the fixed-text `main` wrapper, and the module's own two units). Include lines in the
-units drop from 2964 to 2736. Self-transpile codegen, two alternating A/B runs:
-217.0 / 216.6 ms before, 216.8 / 216.5 ms after (noise).
+zero-sized `Global`), and so did the identifier reservation of every local type.
 
 ### Definition headers per type
 
 Before: one type header per by-value module SCC (`<mod>__types.h`), included by every unit
 whose row spelled a type of the module, so any type edit rewrote that header and
 recompiled every unit including it. Now each type has its own definition header and each
-unit includes the headers of the types its text needs complete (see Ownership). Measured
-on the compiler's own tree (dev profile, 14 cores, object cache off, 167 units), units
-recompiled after each edit:
-
-| Edit | before | after |
-|------|--------|-------|
-| add a `pub struct` to `lexer::token` | 96 | 0 |
-| add a `pub struct` to `fmt::doc` | 7 | 0 |
-| add a `pub struct` to `driver::stats` | 4 | 0 |
-| swap the two fields of `tok::Span` | 96 | 66 |
-
-The 66 are exactly the units whose include closure holds `token__Span.h`, and each of
-them fails to compile against a typedef-only `Span` (checked by replacing the header), so
-each needs the definition. A new type recompiles no unit because its layout check lives
-in its own header, not in its module's first shard.
+unit includes the headers of the types its text needs complete (see Ownership). A field
+swap in `tok::Span` recompiles exactly the units whose include closure holds
+`token__Span.h`, and each of them fails to compile against a typedef-only `Span` (checked
+by replacing the header), so each needs the definition. A new type recompiles no unit
+because its layout check lives in its own header, not in its module's first shard.
 
 The tree grows from 162 to 927 headers (839 definition headers; include lines in units
 2736 to 7261, in headers 368 to 1807; headers 846 to 1003 KB, units 9804 to 9978 KB, of

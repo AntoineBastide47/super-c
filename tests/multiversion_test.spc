@@ -127,7 +127,7 @@ fn feature_functions_keep_their_calls() {
         "import std::cpu;\n@arch(aarch64)\n@target_feature([cpu::Feature::I8mm])\nfn mm(a: i32) i32 {\n    return a;\n}\nfn main() i32 {\n    return unsafe mm(0);\n}\n",
     );
     assert(p.compile_flags("--arch=aarch64 --target=linux", "main.spc").ok(), "aarch64");
-    let a = cli::read_text(format("{}/build/dev/raw/main.c", p.dir()).as_str());
+    let a = cli::read_text(format("{}/build/debug/raw/main.c", p.dir()).as_str());
     assert(
         a.contains("SC_TGT_A64(\"+rdm+i8mm+crc+lse\", \"arch=armv8.2-a+i8mm\")))) int32_t mm("),
         "the aarch64 target",
@@ -171,7 +171,7 @@ fn feature_functions_compile_their_vector_callees_with_their_features() {
 
 // The run-time choice: an x86_64 function with vector code opens with a call of its copy at each
 // `--simd-dispatch` level the CPU has (`__sc_simd_lvl()`, the forward header), the highest first; a
-// function without vector code has none, and `off`, another instruction set, or a `dev` build or a
+// function without vector code has none, and `off`, another instruction set, or a `debug` build or a
 // script without `--profile` (no level set) none at all.
 @test
 fn vector_functions_choose_their_copy_at_run_time() {
@@ -182,15 +182,15 @@ fn vector_functions_choose_their_copy_at_run_time() {
     );
     let root = p.dir();
     let mut texts = Vector::<String>::new();
-    // The profile directory, then the flags (a script without `--profile` builds into `dev`).
-    let profs: [str; 7] = ["release", "release", "release", "release", "dev", "dev", "dev"];
+    // The profile directory, then the flags (a script without `--profile` builds into `debug`).
+    let profs: [str; 7] = ["release", "release", "release", "release", "debug", "debug", "debug"];
     let flags: [str; 7] = [
         "--profile=release --arch=x86_64 --target=linux",
         "--profile=release --arch=x86_64 --target=linux --simd-dispatch=x86-64-v3,x86-64-v4",
         "--profile=release --arch=x86_64 --target=linux --simd-dispatch=off",
         "--profile=release --arch=aarch64 --target=linux",
-        "--profile=dev --arch=x86_64 --target=linux",
-        "--profile=dev --arch=x86_64 --target=linux --simd-dispatch=x86-64-v3",
+        "--profile=debug --arch=x86_64 --target=linux",
+        "--profile=debug --arch=x86_64 --target=linux --simd-dispatch=x86-64-v3",
         "--arch=x86_64 --target=linux",
     ];
     for i in 0..7 {
@@ -213,7 +213,7 @@ fn vector_functions_choose_their_copy_at_run_time() {
         "the highest first",
     );
     assert(!texts[2].contains("__sc_simd_lvl") && !texts[3].contains("__sc_simd_lvl"), "off, and aarch64");
-    assert(!texts[4].contains("__sc_simd_lvl") && texts[5].contains(v3), "dev: off unless set");
+    assert(!texts[4].contains("__sc_simd_lvl") && texts[5].contains(v3), "debug: off unless set");
     assert(texts[6].contains("main__kern(") && !texts[6].contains("__sc_simd_lvl"), "no profile: off");
     let bad = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" --simd-dispatch=x86-64-v9", root, root).as_str());
     assert(!bad.ok() && bad.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad level");

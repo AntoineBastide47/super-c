@@ -18,7 +18,6 @@ import driver::test as *;
 import driver::emit as *;
 import build_system::manifest as bman;
 import build_system::build as bsys;
-import build_system::objcache as ocache;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
 import driver::taskctl as tctl;
@@ -822,7 +821,7 @@ enum Mode {
     MODE_LINT, // `super-c lint [--fix] [--const] [<path>...]` (no path: the whole project)
     MODE_COMMAND, // `super-c command <name>`: run a build.toml [command.NAME]
     MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
-    MODE_CLEAN, // `super-c clean`: drop build.toml outputs
+    MODE_CLEAN, // `super-c clean [--full]`: sweep the global cache and build.toml outputs, or remove them
     MODE_TEST, // `super-c test`: tests/ by convention
     MODE_BENCH, // `super-c bench`: a generated runner over bench/'s `pub @bench` fns
     MODE_LSP, // `super-c lsp`: language server over stdio
@@ -927,7 +926,7 @@ extend CommonOpts {
     }
 }
 
-// build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir).
+// build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir and --full).
 struct BuildOpts<'a> {
     pub profile: str<'a>, // --profile=NAME (default: manifest default-profile)
     pub out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
@@ -936,6 +935,7 @@ struct BuildOpts<'a> {
     pub jobs: u32, // --jobs=N (0 = manifest / core count)
     pub bin_sel: str<'a>, // --bin=NAME: build/run only that binary target
     pub lib_sel: bool, // --lib: build only the [lib] target
+    pub sanitizers: bool, // --sanitizers: AddressSanitizer and UndefinedBehaviorSanitizer in every C build
 }
 
 extend<'a> BuildOpts<'a> {
@@ -952,6 +952,8 @@ extend<'a> BuildOpts<'a> {
             self.bin_sel = arg[6..];
         } else if arg == "--lib" {
             self.lib_sel = true;
+        } else if arg == "--sanitizers" {
+            self.sanitizers = true;
         } else if arg.starts_with("--jobs=") {
             let v = unsafe stdlib::atoi((&arg[7]) as *const char);
             if v < 1 {
@@ -1026,7 +1028,7 @@ fn main(argv: Vector<str>) i32 {
     let mut vendor_dir = "."; // vendor: --dir=, the project root vendored into
     let mut vendor_ref = ""; // vendor: --ref=, the branch, tag or commit pinned for a git source
     let mut vendor_force = false; // vendor: --force, replace an existing vendor/<name>
-    let mut clean_cache = false; // clean: --cache, also drop the machine-global object cache
+    let mut clean_full = false; // clean: --full, remove the out-dir and the global cache instead of sweeping
     let mut transpiler = ""; // build/release: --transpiler=CMD, the command that runs the transpile step
     let mut print_probes = false; // build/release: --print-probes, print the toolchain probe table
     let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
@@ -1065,7 +1067,16 @@ fn main(argv: Vector<str>) i32 {
         lint: true,
         bad: false,
     };
-    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", cc: "", jobs: 0, bin_sel: "", lib_sel: false };
+    let mut bo = BuildOpts {
+        profile: "",
+        out_dir: "",
+        cstd: "",
+        cc: "",
+        jobs: 0,
+        bin_sel: "",
+        lib_sel: false,
+        sanitizers: false,
+    };
 
     let mut i: usize = if mode == Mode::MODE_DEFAULT {
         1usize;
@@ -1208,8 +1219,8 @@ fn main(argv: Vector<str>) i32 {
             while i < argc {
                 if argv[i].starts_with("--out-dir=") {
                     bo.out_dir = argv[i][10..];
-                } else if argv[i] == "--cache" {
-                    clean_cache = true;
+                } else if argv[i] == "--full" {
+                    clean_full = true;
                 } else {
                     co.bad = true;
                 }
@@ -1381,7 +1392,7 @@ COMMANDS:
     test                   build and run the test suite (tests/ by convention)
     bench                  build and run the benchmarks (bench/ by convention)
     command <name>         run a [command.NAME] from build.toml
-    clean [--cache]        remove build outputs (--cache: the global object cache too)
+    clean [--full]         sweep the global cache and build/ (--full: delete both instead)
     fmt  [<path>...]       format source in place (or verify with --check)
     lint [<path>...]       report lint warnings (apply fixes with --fix)
     lsp                    run the language server over stdio
@@ -1392,7 +1403,8 @@ COMMANDS:
 
 OPTIONS:
     -o <path>              output binary path (build/release with a file)
-    --profile=P            build profile: debug|dev|release|bench|test, or a custom one
+    --profile=P            build profile: debug|release|bench|test|race, or a custom one
+    --sanitizers           add AddressSanitizer and UndefinedBehaviorSanitizer to every C build
     --out-dir=D            output directory (default: build)
     --jobs=N               parallel C compile jobs (default: one per core)
     --cstd=F               C standard passed to the C compiler
@@ -1537,6 +1549,9 @@ OPTIONS:
         }
         // The engine's toolchain: the profile flags, and so the memory checker, match its own.
         man.sdk = target_sdk(co.target);
+        if bo.sanitizers {
+            man.add_sanitizers();
+        }
         if bo.out_dir.len() != 0 {
             man.out_dir = String::from_str(bo.out_dir);
         }
@@ -1585,6 +1600,9 @@ OPTIONS:
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();
+            if bo.sanitizers {
+                man.add_sanitizers();
+            }
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
             man.target = co.target;
@@ -1628,14 +1646,7 @@ OPTIONS:
                 man.cc = String::from_str(bo.cc);
             }
             if mode == Mode::MODE_CLEAN {
-                rc = bsys::manifest_clean(&man);
-                if clean_cache {
-                    let cd = ocache::object_cache_dir();
-                    if cd.len() != 0 {
-                        bsys::rm_rf(cd.as_str());
-                        println("removed {}", cd.as_str());
-                    }
-                }
+                rc = bsys::manifest_clean(&man, clean_full);
             } else if mode == Mode::MODE_TEST {
                 topts.enabled = true;
                 rc = bsys::manifest_test(&man, bo.profile, &cx, &topts);
@@ -1668,8 +1679,8 @@ OPTIONS:
         eprintln("error: {}", ferr.as_str());
         return 1;
     }
-    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false);
-    let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true);
+    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false, bo.sanitizers);
+    let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true, bo.sanitizers);
     let rc = run_file(
         file,
         std_dir.as_str(),

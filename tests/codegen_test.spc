@@ -25,40 +25,41 @@ const STRUCT: str = "fn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\nfn g
 // reduction is measured separately.)
 @test
 fn structured_backend() {
+    let mut b = h::ExitBatch::new();
     h::expect_c("branches emit structured if", STRUCT, "if (");
     h::expect_c("loops emit a structured while", STRUCT, "while (i < n)");
     h::expect_c("an early return forwards its value", STRUCT, "return 1LL;");
-    h::expect_exit("structured straight-line + branch + loop behave", STRUCT, 0);
+    b.add("structured straight-line + branch + loop behave", STRUCT, 0);
 
     // sugar_fmt_str: one call, then a direct forwarded return of the owning value.
     let SUGAR: str = "struct S { pub n: i32 }\nextend S { fn bump(self: &mut S, v: i32) { self.n = self.n + v; } }\nfn sugar(s: S, v: i32) S { let mut r = s; r.bump(v); return r; }\nfn main() i32 { let a = sugar(S { n: 1 }, 2); return a.n - 3; }\n";
     h::expect_c("the owning parameter is coalesced and returned directly", SUGAR, "return s;");
-    h::expect_exit("owning-value forwarding behaves", SUGAR, 0);
+    b.add("owning-value forwarding behaves", SUGAR, 0);
 
     // A discriminant match lowers to a native C switch, not a goto chain.
     let ENUM: str = "enum C { Red, Green, Blue }\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn main() i32 { return f(C::Green) - 2; }\n";
     h::expect_c("discriminant match is a native switch", ENUM, "switch (");
     h::expect_c("switch case on the tag", ENUM, "case 1:");
-    h::expect_exit("native switch behaves", ENUM, 0);
+    b.add("native switch behaves", ENUM, 0);
 
     // An early return inside a loop stays fully structured (a while plus an inner if).
     let EARLY: str = "fn e(n: i32) i32 { let mut i: i32 = 0; while i < n { if i == 5 { return i; } i = i + 1; } return -1; }\nfn main() i32 { return e(10) - 5; }\n";
     h::expect_c("early-return-in-loop is structured", EARLY, "while (i < n)");
-    h::expect_exit("early-return-in-loop behaves", EARLY, 0);
+    b.add("early-return-in-loop behaves", EARLY, 0);
 
     // A parameter named after a type in scope must not hide the typedef: the whole TU stays legal
     // C and behaves (the emitter disambiguates the variable name).
     let COLLIDE: str = "struct Node { pub v: i32 }\nfn take(Node: i32, n: Node) i32 { return Node + n.v; }\nfn main() i32 { return take(2, Node { v: 3 }) - 5; }\n";
-    h::expect_exit("a variable named after a type stays legal C", COLLIDE, 0);
+    b.add("a variable named after a type stays legal C", COLLIDE, 0);
 
     // A parameter named after an enum constant the body constructs must not hide it: the emitted
     // `return C::Red` still reads the constant, not the parameter.
     let ECOLLIDE: str = "enum C { Red, Green }\nfn pick(C_Red: i32) C { return C::Red; }\nfn main() i32 { return pick(1) as i32; }\n";
-    h::expect_exit("a variable named after an enum constant stays correct", ECOLLIDE, 0);
+    b.add("a variable named after an enum constant stays correct", ECOLLIDE, 0);
 
     // A parameter named after the MANGLED symbol of a generic call (`id__i32`) must not hide it.
     let GCOLLIDE: str = "fn id<T>(x: T) T { return x; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32; }\nfn main() i32 { return collide(1) - 8; }\n";
-    h::expect_exit("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
+    b.add("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
 
     // A user item cannot spell a generated symbol (`id__i32_1` beside the instance `id__i32`): the
     // name is reserved, so no item collides with an instance.
@@ -69,13 +70,14 @@ fn structured_backend() {
     // that neither declaration nor assignment is emitted: is in cemit_test on an isolated
     // function, since the whole program includes the -Wunused pragma text.)
     let DEADL: str = "fn dead() i32 { let unused: i32 = 9; return 0; }\nfn main() i32 { return dead(); }\n";
-    h::expect_exit("dropping the dead store preserves behavior", DEADL, 0);
+    b.add("dropping the dead store preserves behavior", DEADL, 0);
 
     // A labeled multi-level break is not simple: the body uses the goto layout as its fallback, and
     // still runs correctly.
     let IRRED: str = "fn f(n: i32) i32 { let mut s: i32 = 0; 'outer: for i in 0..n { for j in 0..n { if i + j == 3 { break 'outer; } s = s + 1; } } return s; }\nfn main() i32 { return f(3) - 5; }\n";
     h::expect_c("labeled multi-level control uses the goto fallback", IRRED, "goto ");
-    h::expect_exit("the goto-fallback body still behaves", IRRED, 0);
+    b.add("the goto-fallback body still behaves", IRRED, 0);
+    b.run();
 }
 
 @test
@@ -112,20 +114,18 @@ fn ranges() {
     h::expect_exit("every range form iterates its extent", RANGES, 0);
 }
 
-@test
-fn switch_ranges() {
+fn switch_ranges(b: &mut h::ExitBatch) {
     // Each arm takes exactly its range: both ends of the exclusive and inclusive arms, the open ends.
     let mut run = String::from_str(SWITCH_RANGES);
     run.push_str(
         "fn main() i32 {\n  let ins = classify(10) == 1 && classify(19) == 1 && classify(20) == 2 && classify(30) == 2 && classify(4) == 3 && classify(99) == 4;\n  let outs = classify(9) == 0 && classify(31) == 0 && classify(5) == 0 && classify(98) == 0;\n  return if ins && outs { 0; } else { 1; };\n}\n",
     );
-    h::expect_exit("every arm covers its range and nothing else", run.as_str(), 0);
+    b.add("every arm covers its range and nothing else", run.as_str(), 0);
 }
 
-@test
-fn pointer_arith() {
+fn pointer_arith(b: &mut h::ExitBatch) {
     // A pointer offset and a pointer difference count elements, not bytes.
-    h::expect_exit(
+    b.add(
         "pointer offset and difference",
         "fn main() i32 {\n  let a: [i32; 4] = [1, 2, 3, 4];\n  let p: *const i32 = &a[0];\n  let q: *const i32 = &a[3];\n  let second = unsafe *(p + 1);\n  let gap = unsafe (q - p);\n  return second + gap as i32 - 5;\n}\n",
         0,
@@ -215,24 +215,21 @@ fn externs() {
     h::expect_c("c32 renders to float _Complex", "fn main() i32 { let w: c32 = 1.0; return 0; }\n", "float _Complex");
 }
 
-@test
-fn str() {
-    h::expect_exit("a str literal, a str parameter and len()", STR, 2);
+fn str(b: &mut h::ExitBatch) {
+    b.add("a str literal, a str parameter and len()", STR, 2);
 }
 
-@test
-fn alias_extend() {
+fn alias_extend(b: &mut h::ExitBatch) {
     // Methods on an alias of a builtin: an associated constructor, a `Self` receiver, a chained call.
-    h::expect_exit(
+    b.add(
         "alias methods",
         "pub type Token = u64;\nextend Token {\n  pub fn new(v: u32) Token { return v as u64; }\n  pub fn start(self: Self) u32 { return self as u32; }\n  pub fn next(self: Self) Token { return Token::new(self.start() + 1); }\n}\nfn main() i32 { let t = Token::new(3); let u = t.next(); return u.start() as i32 - 4; }\n",
         0,
     );
 }
 
-@test
-fn enums() {
-    h::expect_exit(
+fn enums(b: &mut h::ExitBatch) {
+    b.add(
         "plain and tagged enums: construction, matching, explicit discriminants",
         "enum Color { Red, Green, Blue, }\nenum Shape { Dot, Circle(i32), }\nenum Code { Ok = 0, Bad = 404, }\nfn col(c: Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn area(s: Shape) i32 { return switch s { Dot => 0, Circle(r) => r * r, }; }\nfn main() i32 {\n  let ok = col(Color::Green) == 2 && area(Shape::Circle(3)) == 9 && area(Shape::Dot) == 0 && Code::Bad as i32 == 404 && Code::Ok as i32 == 0;\n  return if ok { 0; } else { 1; };\n}\n",
         0,
@@ -268,10 +265,9 @@ fn array_literals() {
     );
 }
 
-@test
-fn multi_return() {
+fn multi_return(b: &mut h::ExitBatch) {
     // A multi-value return destructures in order, called and inlined.
-    h::expect_exit(
+    b.add(
         "multi-return",
         "@c.noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn di(a: i32, b: i32) (i32, i32) { return a * b, a / b; }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0; } else { 1; };\n}\n",
         0,
@@ -292,31 +288,29 @@ fn const_generic_callee_inlines() {
     assert(!r.built && r.diag.as_str().contains("two lanes"), "the static_assert of the inlined instance runs");
 }
 
-@test
-fn slices_and_arrays() {
+fn slices_and_arrays(b: &mut h::ExitBatch) {
     // A slice parameter reads and writes through its view, an array parameter keeps its extent, and an
     // array argument coerces to a view of its whole length.
-    h::expect_exit(
+    b.add(
         "slices and arrays",
         "fn first(s: []i32) i32 { return s[0]; }\nfn set0(s: []mut i32) { s[0] = 7; }\nfn g(a: [i32; 3]) i32 { return a[2]; }\nfn len(s: []i32) usize { return s.len(); }\nfn main() i32 {\n  let mut a: [i32; 3] = [4, 5, 6];\n  set0(a);\n  return if first(a) == 7 && g(a) == 6 && len(a) == 3 { 0; } else { 1; };\n}\n",
         0,
     );
 }
 
-@test
-fn errors() {
+fn errors(b: &mut h::ExitBatch) {
     // A defer runs at scope exit, after the body; a designated initializer fills its slots in order.
-    h::expect_exit(
+    b.add(
         "defer and designated initializers",
         "static mut G: i32 = 0;\nfn cleanup() { unsafe G = unsafe G * 10 + 2; }\nfn run() { defer cleanup(); unsafe G = unsafe G * 10 + 1; }\nfn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2] * 10 + t[3]; }\nfn main() i32 {\n  run();\n  return if unsafe G == 12 && m(5) == 95 { 0; } else { 1; };\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "local const reads fold or materialize",
         "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { const T: [i32; 2] = [1, 2]; return T[0]; }\nfn main() i32 { unsafe exit(m() - 1); }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "do/while runs the body first",
         "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { let mut i: i32 = 0; do { i = i + 1; } while i < 3; return i; }\nfn main() i32 { unsafe exit(m() - 3); }\n",
         0,
@@ -417,28 +411,25 @@ fn attributes() {
     );
 }
 
-@test
-fn generics() {
+fn generics(b: &mut h::ExitBatch) {
     // Two instances of one generic, a transitive chain whose leaf only the chain reaches, and a generic
     // enum used at two types: each instance exists once and behaves.
-    h::expect_exit(
+    b.add(
         "generic instances",
         "fn id<T>(x: T) T { return x; }\nfn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nenum Opt<T> { Some(T), None }\nfn main() i32 {\n  let a: i32 = id::<i32>(5);\n  let b: bool = id::<bool>(true);\n  let o: Opt<i32> = Opt::<i32>::Some(1);\n  let n: Opt<bool> = Opt::<bool>::None;\n  let s = switch o { Some(v) => v, None => 0, } + switch n { Some(_) => 1, None => 0, };\n  return if a == 5 && b && f(41) == 41 && s == 1 { 0; } else { 1; };\n}\n",
         0,
     );
 }
 
-@test
-fn literals() {
-    h::expect_exit(
+fn literals(b: &mut h::ExitBatch) {
+    b.add(
         "binary literals, digit separators, C-keyword identifiers",
         "fn main() i32 {\n  let a: i32 = 0b101;\n  let b: i32 = 1_000;\n  let register: i32 = 1;\n  return if a == 5 && b == 1000 && register == 1 { 0; } else { 1; };\n}\n",
         0,
     );
 }
 
-@test
-fn const_generics() {
+fn const_generics(b: &mut h::ExitBatch) {
     // Two instances of a const-generic type: each array has its own extent and each method sees its own N.
     let mut run = String::from_str(
         "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\n",
@@ -446,7 +437,7 @@ fn const_generics() {
     run.push_str(
         "fn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<u8, 2> { b: [1u8, 2u8] };\n  return if a.cap() == 4 && c.cap() == 2 && sizeof(Buff<i32, 4>) == 16 && sizeof(Buff<u8, 2>) == 2 && unsafe a.b[3] == 4 { 0; } else { 1; };\n}\n",
     );
-    h::expect_exit("const generics", run.as_str(), 0);
+    b.add("const generics", run.as_str(), 0);
 }
 
 // Lifetimes are ERASED before monomorphization: they are checked, then dropped. They must never
@@ -468,8 +459,27 @@ fn lifetimes_are_erased() {
 
 // Prelude `likely`/`unlikely`: value-semantic identity hints, const-evaluable; the inliner removes
 // the calls, so the emitted C carries no hint (std/core.spc).
-@test
-fn branch_hints() {
+fn branch_hints(b: &mut h::ExitBatch) {
     let SRC: str = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
-    h::expect_exit("branch hints keep value semantics", SRC, 0);
+    b.add("branch hints keep value semantics", SRC, 0);
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    switch_ranges(&mut b);
+    pointer_arith(&mut b);
+    str(&mut b);
+    alias_extend(&mut b);
+    enums(&mut b);
+    multi_return(&mut b);
+    slices_and_arrays(&mut b);
+    errors(&mut b);
+    generics(&mut b);
+    literals(&mut b);
+    const_generics(&mut b);
+    branch_hints(&mut b);
+    b.run();
 }

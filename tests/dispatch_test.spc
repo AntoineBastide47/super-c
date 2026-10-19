@@ -160,7 +160,8 @@ fn deep_recursion_fits_the_default_stack() {
     wg.add(1);
     let w = wg.clone();
     launch || {
-        // About 1500 frames of at least 80 bytes: past 100 KiB of a 256 KiB stack.
+        // About 1500 frames of at least 80 bytes: past 100 KiB of a 256 KiB stack (1 MiB under ASan,
+        // whose frames are larger).
         let v = deep(1500, 0);
         ran(v as i64);
         w.done();
@@ -212,7 +213,7 @@ fn cached_stacks_are_reused() {
         let mapped = platform::stack_bytes();
         if round > 0 {
             assert(
-                mapped <= 2usize * (n as usize + 32) * (262144 + platform::page_size()),
+                mapped <= 2usize * (n as usize + 32) * (rt::stack_size() + platform::page_size()),
                 "no unbounded growth of mappings",
             );
         }
@@ -245,7 +246,7 @@ fn small_pool_budget_is_honoured() {
     wg.wait();
     // Every block is back: the stashes and the shared pool hold at most the budget, the rest is released.
     assert(ph::wait_pool_within(budget), "the idle cache is within the budget");
-    let live_blocks = platform::stack_bytes() / (262144 + platform::page_size());
+    let live_blocks = platform::stack_bytes() / (rt::stack_size() + platform::page_size());
     assert(live_blocks <= 48usize, "released past the budget: at most the budget plus the stashes remain mapped");
     rt::shutdown();
 }

@@ -99,7 +99,7 @@ fn library_build(stat: bool, shared: bool) {
             shared;
         };
         let leaf = bsys::lib_file("mylib", kind == 1, host);
-        let rel = format("build/dev-lib/{}", leaf.as_str());
+        let rel = format("build/debug-lib/{}", leaf.as_str());
         assert(r.out_has(format("built {}", rel.as_str()).as_str()) == want, leaf.as_str());
         assert(cli::read_text(format("{}/{}", root, rel.as_str()).as_str()).len() != 0 == want, "the artifact exists");
     }
@@ -152,7 +152,7 @@ fn failed_c_compile_reports_status_and_keeps_the_log() {
     let ok = cli::superc_env_in(root, E, "1", "build");
     assert(ok.ok(), "the corrected unit builds");
     let mut obj = String::from_str(root);
-    obj.push_str("/build/dev/obj");
+    obj.push_str("/build/debug/obj");
     assert_eq(cli::dir_count_suffix(obj.as_str(), "_bad.o.log"), 0);
 }
 
@@ -216,7 +216,7 @@ fn shard_counts_follow_emitted_size() {
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.ok(), "the build succeeds");
     let mut gen = String::from_str(root);
-    gen.push_str("/build/dev/gen");
+    gen.push_str("/build/debug/gen");
     let parts = shard_parts(gen.as_str());
     assert(parts >= 2, "the large module has more than one shard");
     let again = cli::superc_env_in(root, E, "1", "build");

@@ -73,7 +73,7 @@ fn ext_c_wrap(
     }
     let wrote = unsafe stdio::fprintf(
         f,
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 2\n#include \"%s\"\n".ptr() as *const char,
+        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 3\n#include \"%s\"\n".ptr() as *const char,
         rsl,
     ) >= 0;
     if unsafe stdio::fclose(f) != 0 || !wrote {

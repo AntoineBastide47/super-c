@@ -89,11 +89,11 @@ else
 fi
 printf 'matrix: build %s, %s cores, %s reps per case, load %s\n' "$commit" "$ncpu" "$reps" "$load"
 
-# The global object cache and ccache stay off for every run: a warm case measures the project's own
+# The global object cache stays off for every run: a warm case measures the project's own
 # stamp and fingerprints, and a repeated edit must compile its unit again rather than fetch rep 1's object.
 # The linker's ThinLTO cache stays on under its own root, emptied here once: the release_thin reps
 # after the first find the edited state cached (the reuse benefit), the first is the cold cost.
-warm="SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_CACHE_DIR=$PWD/$m/cache"
+warm="SC_NO_CACHE=1 SC_CACHE_DIR=$PWD/$m/cache"
 rm -rf "$m/cache"
 i=0
 while [ "$i" -lt "$reps" ]; do
@@ -101,18 +101,18 @@ while [ "$i" -lt "$reps" ]; do
     printf 'matrix: rep %s/%s\n' "$i" "$reps"
     for jobs in 1 "$ncpu"; do
         rm -rf "$out"
-        build "$m/clean_j$jobs.jsonl" "$jobs" dev $warm
-        build "$m/unchanged_j$jobs.jsonl" "$jobs" dev $warm
+        build "$m/clean_j$jobs.jsonl" "$jobs" debug $warm
+        build "$m/unchanged_j$jobs.jsonl" "$jobs" debug $warm
         apply_edit body
-        build "$m/body_j$jobs.jsonl" "$jobs" dev $warm
+        build "$m/body_j$jobs.jsonl" "$jobs" debug $warm
         restore
-        build "$m/scratch.jsonl" "$jobs" dev $warm # back to the unedited tree, untimed
+        build "$m/scratch.jsonl" "$jobs" debug $warm # back to the unedited tree, untimed
         apply_edit signature
-        build "$m/signature_j$jobs.jsonl" "$jobs" dev $warm
+        build "$m/signature_j$jobs.jsonl" "$jobs" debug $warm
         restore
-        build "$m/scratch.jsonl" "$jobs" dev $warm
+        build "$m/scratch.jsonl" "$jobs" debug $warm
         apply_edit layout
-        build "$m/layout_j$jobs.jsonl" "$jobs" dev $warm
+        build "$m/layout_j$jobs.jsonl" "$jobs" debug $warm
         restore
         # Release relink: a warm release tree, then the body edit under the release profile: the
         # default (full LTO), ThinLTO with the linker cache, and ThinLTO without it.
@@ -131,23 +131,23 @@ while [ "$i" -lt "$reps" ]; do
     done
     # The per-TU emit cache, interleaved on/off on the body edit with every core.
     rm -rf "$out"
-    build "$m/scratch.jsonl" "$ncpu" dev $warm
+    build "$m/scratch.jsonl" "$ncpu" debug $warm
     apply_edit body
-    build "$m/tucache_on_j$ncpu.jsonl" "$ncpu" dev $warm
+    build "$m/tucache_on_j$ncpu.jsonl" "$ncpu" debug $warm
     restore
-    build "$m/scratch.jsonl" "$ncpu" dev $warm
+    build "$m/scratch.jsonl" "$ncpu" debug $warm
     apply_edit body
-    build "$m/tucache_off_j$ncpu.jsonl" "$ncpu" dev $warm SC_NO_TU_CACHE=1
+    build "$m/tucache_off_j$ncpu.jsonl" "$ncpu" debug $warm SC_NO_TU_CACHE=1
     restore
 done
 
 # One memory-tracked run per case with every core (the tracker inflates times, so these are separate).
 printf 'matrix: memory-tracked runs\n'
 rm -rf "$out"
-build "$m/clean_j${ncpu}_mem.jsonl" "$ncpu" dev $warm SC_BUILD_MEM=1
-build "$m/unchanged_j${ncpu}_mem.jsonl" "$ncpu" dev $warm SC_BUILD_MEM=1
+build "$m/clean_j${ncpu}_mem.jsonl" "$ncpu" debug $warm SC_BUILD_MEM=1
+build "$m/unchanged_j${ncpu}_mem.jsonl" "$ncpu" debug $warm SC_BUILD_MEM=1
 apply_edit body
-build "$m/body_j${ncpu}_mem.jsonl" "$ncpu" dev $warm SC_BUILD_MEM=1
+build "$m/body_j${ncpu}_mem.jsonl" "$ncpu" debug $warm SC_BUILD_MEM=1
 restore
 
 python3 - "$m" "$commit" "$ncpu" "$reps" "$load" <<'EOF'
@@ -157,7 +157,7 @@ transpile = ("stamp", "load", "resolve", "typecheck", "borrowck", "checks", "pre
 def med_p95(v):
     v = sorted(v)
     return statistics.median(v), v[(len(v) * 95 + 99) // 100 - 1]
-lines = ["# Build matrix report", "", "build %s, %s cores, %s reps per case, 1-minute load %s at start, dev profile unless noted; global object cache and ccache off throughout." % (commit, ncpu, reps, load), "",
+lines = ["# Build matrix report", "", "build %s, %s cores, %s reps per case, 1-minute load %s at start, debug profile unless noted; global object cache off throughout." % (commit, ncpu, reps, load), "",
          "| case | workers | runs | transpile ms med / p95 | compile ms med / p95 | link ms med / p95 | total ms med / p95 | units stale | cc span ms | cc overlap ms | lto |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
 consts = []
 for path in sorted(glob.glob(os.path.join(m, "*.jsonl"))):

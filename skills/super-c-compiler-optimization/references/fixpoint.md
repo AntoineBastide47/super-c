@@ -19,7 +19,7 @@ The gate's form (`ci/gate.sh`, `ci/contract.sh`):
 
 1. Copy `src`, `std`, `ffi` and `build.toml` into a clean tree, and the compiler beside
    them, so `std`/`ffi` resolve inside the copy.
-2. Gen-1: `./super-c build` in the tree; keep `build/dev/raw` and `build/dev/super-c`.
+2. Gen-1: `./super-c build` in the tree; keep `build/debug/raw` and `build/debug/super-c`.
 3. Remove `build/`. Gen-2: the gen-1 binary, copied into the tree root, builds again.
 4. `diff -r` the two `raw` trees, excluding only `CONTRACT_NONDET_FILES` (`.tu_cache`).
 

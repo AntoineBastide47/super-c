@@ -150,6 +150,23 @@ char *sc_realpath(const char *path, char *resolved) {
 #endif
 }
 
+int sc_readlink(const char *path, char *buf, unsigned size) {
+#if defined(_WIN32) || defined(__wasi__)
+  (void)path;
+  (void)buf;
+  (void)size;
+  return -1;
+#else
+  if (size == 0)
+    return -1;
+  const ssize_t n = readlink(path, buf, size - 1);
+  if (n < 0)
+    return -1;
+  buf[n] = '\0';
+  return (int)n;
+#endif
+}
+
 #if defined(__wasi__)
 static const char *sc_argv0; /* the host's argv[0]: WASI has no other name for the running module */
 void sc_set_argv0(const char *argv0) { sc_argv0 = argv0; }
@@ -936,6 +953,15 @@ int sc_chmod_exec(const char *path) {
   return 0;
 #else
   return chmod(path, 0755);
+#endif
+}
+
+/* A second name `to` for the file `from` (a hard link); 0 on success. */
+int sc_link(const char *from, const char *to) {
+#if defined(_WIN32)
+  return CreateHardLinkA(to, from, NULL) ? 0 : -1;
+#else
+  return link(from, to);
 #endif
 }
 

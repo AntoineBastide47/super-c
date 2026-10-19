@@ -373,6 +373,15 @@ __attribute__((constructor)) static void __sc_binary_stdio(void) {
 #if defined(SC_RT_ASAN)
 const char *__asan_default_options(void) { return "detect_stack_use_after_return=0"; }
 #endif
+/* Declared in ffi/sc_rt.h: ASan's redzones make frames larger, and the coroutine runtime sizes its default
+   task stack by this. */
+int sc_rt_asan(void) {
+#if defined(SC_RT_ASAN)
+  return 1;
+#else
+  return 0;
+#endif
+}
 
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */
 _Thread_local uint64_t __sc_task_id = 0;

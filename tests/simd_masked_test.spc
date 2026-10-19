@@ -149,7 +149,7 @@ fn pick3(ok: bool) i32 {
     let lane = h::simd_lane();
     if lane {
         let mut mc = String::from_str(b.proj.dir());
-        mc.push_str("/build/dev/raw/main.c");
+        mc.push_str("/build/debug/raw/main.c");
         let c = cli::read_text(mc.as_str());
         // The store's own range check is the statement just before it: the last check before the store
         // ends the only `;` between them (the scatter paths' checks sit earlier, statements away).

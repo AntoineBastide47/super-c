@@ -57,7 +57,6 @@ pub struct BuildStats {
     pub cc_busy_ns: u64,
     pub cc_jobs: u64,
     pub cc_version: String,
-    pub ccache: bool,
     pub lto: String, // the LTO mode the link used ("thin+cache", "thin", "auto", "full", "none", "flags")
     pub lto_reason: String, // why a ThinLTO request or its linker cache was rejected; empty otherwise
     pub skip_emit: bool,
@@ -136,7 +135,6 @@ pub fn begin() {
         cc_busy_ns: 0,
         cc_jobs: 0,
         cc_version: String::new(),
-        ccache: false,
         lto: String::new(),
         lto_reason: String::new(),
         skip_emit: false,
@@ -347,14 +345,10 @@ pub fn json(g: &BuildStats, out: &mut String) {
     push_bool(out, g.linked);
     out.push_str(",\"cc_version\":");
     ljson::dump_escaped(g.cc_version.as_str(), out);
-    out.push_str(",\"ccache\":");
-    push_bool(out, g.ccache);
     out.push_str(",\"lto\":");
     ljson::dump_escaped(g.lto.as_str(), out);
     out.push_str(",\"lto_reason\":");
     ljson::dump_escaped(g.lto_reason.as_str(), out);
-    out.push_str(",\"ccache_disabled\":");
-    push_bool(out, stdlib::getenv("CCACHE_DISABLE") != null);
     out.push_str(",\"emit_cache\":");
     push_bool(out, stdlib::getenv("SC_NO_EMIT_CACHE") == null);
     out.push_str(",\"object_cache\":");

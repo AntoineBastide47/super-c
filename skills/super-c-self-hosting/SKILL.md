@@ -53,7 +53,7 @@ across generations and worker counts at once. `check.sh` (the commit hook) ends 
 `sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the input lists, the
 fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
 a warm object cache). The release workflow runs `sh ci/gate.sh --core` and, in a job beside it,
-`sh ci/gate.sh --profiles` (every built-in profile but dev, built by the compiler the `compile`
+`sh ci/gate.sh --profiles` (every built-in profile but test, built by the compiler the `compile`
 job made: the gate's fixpoint proves the two generations emit the same C), on macOS, Linux and
 Windows; on Windows the strict warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX
 prototypes under `-std=c11`.
@@ -66,7 +66,7 @@ the native tree: instance homing follows hash orders that differ between 32- and
 
 The rollback boundary is the latest GitHub release: its binary and its tag are the
 named verified compiler and source revision, outside every build directory that
-`super-c clean` removes. A rollback downloads that binary (`check.sh` does, for the
+`super-c clean --full` removes. A rollback downloads that binary (`check.sh` does, for the
 bootstrap) and checks out the tag. No persistent semantic cache exists: the per-TU
 cache is keyed by the compiler binary and the emitted bytes, and the object cache by the
 C compiler version, the flags and the C text, so a rollback converts nothing.

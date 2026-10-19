@@ -6,83 +6,74 @@
 // construction, moves, drops: must run exactly once per logical value.
 import tests::harness as h;
 
-@test
-fn zst_sizes_and_layout() {
-    h::expect_exit(
+fn zst_sizes_and_layout(b: &mut h::ExitBatch) {
+    b.add(
         "zst sizes",
         "struct Z {}\nstruct P { pub a: u64, pub z: Z, pub b: u32 }\nstruct Only { pub z: Z }\nfn main() i32 {\n    if sizeof(Z) != 0 { return 1; }\n    if alignof(Z) != 1 { return 2; }\n    if sizeof(P) != 16 { return 3; }\n    if sizeof(Only) != 0 { return 4; }\n    if sizeof(Vector<u64>) != 3 * sizeof(usize) { return 5; }\n    if sizeof(Box<u64>) != sizeof(usize) { return 6; }\n    let p = P { a: 7, z: Z {}, b: 9 };\n    if p.a != 7 || p.b != 9 { return 7; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_vector_lifecycle() {
-    h::expect_exit(
+fn zst_vector_lifecycle(b: &mut h::ExitBatch) {
+    b.add(
         "vector of ZST",
         "static mut FREED: i64 = 0;\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let mut v = Vector::<Z>::new();\n        v.push(Z {});\n        v.push(Z {});\n        v.push(Z {});\n        if v.len() != 3 { return 1; }\n        let got = switch v.pop() { Some(z) => { 1; }, None => { 0; }, };\n        if got != 1 { return 2; }\n        if v.len() != 2 { return 3; }\n    }\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_vector_iteration_counts() {
-    h::expect_exit(
+fn zst_vector_iteration_counts(b: &mut h::ExitBatch) {
+    b.add(
         "ZST iteration is length-driven",
         "struct U {}\nfn main() i32 {\n    let mut v = Vector::<U>::new();\n    let mut i = 0;\n    while i < 100 {\n        v.push(U {});\n        i += 1;\n    }\n    let mut c = 0;\n    for _u in v.iter() {\n        c += 1;\n    }\n    if c != 100 { return 1; }\n    let _r = v.at(50);\n    v.free();\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_box_and_map_and_set() {
-    h::expect_exit(
+fn zst_box_and_map_and_set(b: &mut h::ExitBatch) {
+    b.add(
         "Box/Map/Set with ZSTs",
         "static mut FREED: i64 = 0;\n@derive(Hash, Eq)\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let b = Box::<Z>::new(Z {});\n        let _ = b.get();\n    }\n    if unsafe FREED != 1 { return 1; }\n    let mut m = Map::<u32, Z>::new();\n    m.insert(1, Z {});\n    m.insert(2, Z {});\n    if m.len() != 2 { return 2; }\n    let k: u32 = 1;\n    let got = switch m.get(&k) { Some(z) => { 1; }, None => { 0; }, };\n    if got != 1 { return 3; }\n    m.free();\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_arrays_construct_and_iterate() {
+fn zst_arrays_construct_and_iterate(b: &mut h::ExitBatch) {
     // NOTE: [T; N] locals with Free elements refuse emission for MATERIAL elements too (a
     // pre-existing drop gap): ZST arrays keep parity, so this covers trivially-droppable ones.
-    h::expect_exit(
+    b.add(
         "[ZST; N] constructs and iterates by count",
         "struct Z {}\nfn main() i32 {\n    let a: [Z; 4] = [Z {}, Z {}, Z {}, Z {}];\n    let mut c = 0;\n    for _z in a {\n        c += 1;\n    }\n    if c != 4 { return 1; }\n    let r = &a;\n    let _ = r;\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_references_and_pointer_rules() {
-    h::expect_exit(
+fn zst_references_and_pointer_rules(b: &mut h::ExitBatch) {
+    b.add(
         "ZST refs are non-null; pointer +- n is identity",
         "struct Z {}\nextend Z { fn ping(self: &Z) i32 { return 42; } }\nfn main() i32 {\n    let z = Z {};\n    let r = &z;\n    if r.ping() != 42 { return 1; }\n    let p = (&z) as *const Z;\n    if p == null { return 2; }\n    unsafe {\n        if p + 3 != p { return 3; }\n    }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_in_tuples_and_generics() {
-    h::expect_exit(
+fn zst_in_tuples_and_generics(b: &mut h::ExitBatch) {
+    b.add(
         "tuples and dual instantiation",
         "struct Z {}\nstruct H<T> { pub v: T, pub tag: u32 }\nfn pair() (Z, i32) {\n    return Z {}, 9;\n}\nfn main() i32 {\n    let (z0, n0) = pair();\n    let _ = &z0;\n    if n0 != 9 { return 1; }\n    let t = (Z {}, 7);\n    if t.1 != 7 { return 6; }\n    let hz = H::<Z> { v: Z {}, tag: 5 };\n    let hu = H::<u64> { v: 8, tag: 6 };\n    if sizeof(H<Z>) != 4 { return 2; }\n    if sizeof(H<u64>) != 16 { return 3; }\n    if hz.tag + hu.tag != 11 { return 4; }\n    if hu.v != 8 { return 5; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_enum_payloads() {
-    h::expect_exit(
+fn zst_enum_payloads(b: &mut h::ExitBatch) {
+    b.add(
         "enum with ZST payload variants",
         "struct Z {}\nenum E {\n    A(Z),\n    B(u32),\n}\nfn pick(e: &E) i32 {\n    return switch e {\n        A(z) => 1,\n        B(x) => *x as i32,\n    };\n}\nfn main() i32 {\n    let a = E::A(Z {});\n    let b = E::B(7);\n    if pick(&a) != 1 { return 1; }\n    if pick(&b) != 7 { return 2; }\n    return 0;\n}\n",
         0,
     );
 }
 
-@test
-fn zst_consts_and_dangling() {
-    h::expect_exit(
+fn zst_consts_and_dangling(b: &mut h::ExitBatch) {
+    b.add(
         "ZST consts and core::dangling",
         "struct Z {}\nconst CZ: Z = Z {};\nfn main() i32 {\n    let z = CZ;\n    let _ = &z;\n    let p = dangling::<u64>();\n    if p == null { return 1; }\n    if (p as usize) % alignof(u64) != 0 { return 2; }\n    return 0;\n}\n",
         0,
@@ -101,9 +92,8 @@ fn zst_ffi_by_value_rejected() {
 // An over-aligned zero-sized field (an empty struct with a larger @c.align than its non-ZST sibling)
 // is elided, but its alignment still shapes the enclosing struct: the emitter plans the padding so
 // the C layout matches the semantic one. Covers the ZST over-alignment padding planner.
-@test
-fn over_aligned_zst_field_pads_the_layout() {
-    h::expect_exit(
+fn over_aligned_zst_field_pads_the_layout(b: &mut h::ExitBatch) {
+    b.add(
         "over-aligned elided field keeps the sibling's value",
         "@c.align(16)\nstruct Marker {}\nstruct Holder { pub m: Marker, pub b: i32 }\nfn main() i32 {\n    let h = Holder { m: Marker {}, b: 9 };\n    return h.b - 9;\n}\n",
         0,
@@ -112,9 +102,8 @@ fn over_aligned_zst_field_pads_the_layout() {
 
 // An Array of a zero-sized element is itself zero-sized: its `[T; N]` member is read under the
 // instance's bindings, so no C definition over an incomplete element type is emitted.
-@test
-fn zst_element_array_elides() {
-    h::expect_exit(
+fn zst_element_array_elides(b: &mut h::ExitBatch) {
+    b.add(
         "Array<Z, 3> of an empty struct",
         "@derive(Default)\nstruct Z {}\nfn main() i32 {\n    let a = Array::<Z, 3>::new();\n    if a.len() != 3 { return 1; }\n    let mut n = 0;\n    for _z in a.iter() {\n        n += 1;\n    }\n    if n != 3 { return 2; }\n    if sizeof(Array<Z, 3>) != 0 { return 3; }\n    return 0;\n}\n",
         0,
@@ -123,9 +112,8 @@ fn zst_element_array_elides() {
 
 // A generic body names `Array<T, N>` and `[T; N]` through its own parameters; with T zero-sized
 // and over-aligned, it must classify, size and align them as the concrete caller does.
-@test
-fn zst_nested_generic_agrees_with_concrete() {
-    h::expect_exit(
+fn zst_nested_generic_agrees_with_concrete(b: &mut h::ExitBatch) {
+    b.add(
         "generic body and concrete caller agree on Array<T, N> with T zero-sized",
         "@derive(Default)\n@c.align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(raw: [T; N]) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: raw, b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>([M {}, M {}]));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
         0,
@@ -219,4 +207,24 @@ fn zero_length_arrays_are_zero_sized() {
     h::expect_c_absent("no zero-length local", ZERO_LEN, "int32_t e[0]");
     h::expect_c_absent("no zero-length member", ZERO_LEN, "uint32_t a[0]");
     h::expect_c("a pointer to a zero-length array is a data pointer", ZERO_LEN, "const void *ps = ");
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
+// a group builds once where each case built alone.
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    zst_sizes_and_layout(&mut b);
+    zst_vector_lifecycle(&mut b);
+    zst_vector_iteration_counts(&mut b);
+    zst_box_and_map_and_set(&mut b);
+    zst_arrays_construct_and_iterate(&mut b);
+    zst_references_and_pointer_rules(&mut b);
+    zst_in_tuples_and_generics(&mut b);
+    zst_enum_payloads(&mut b);
+    zst_consts_and_dangling(&mut b);
+    over_aligned_zst_field_pads_the_layout(&mut b);
+    zst_element_array_elides(&mut b);
+    zst_nested_generic_agrees_with_concrete(&mut b);
+    b.run();
 }

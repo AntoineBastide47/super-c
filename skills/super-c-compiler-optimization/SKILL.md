@@ -47,7 +47,7 @@ Before any optimization work, understand these non-negotiable constraints:
    `sh ci/perf_gate.sh` compares a run with the limits resolved from the accepted
    constants in `ci/baseline.env` and the accepted-work ledger `ci/ledger.tsv` (every
    percentage gate resolves to a number there); run the benchmark binary
-   directly (`build/bench-bin`), never as a child of the ASan dev compiler, whose
+   directly (`build/bench-bin`), never as a child of a `--sanitizers` compiler, whose
    injected sanitizer runtime changes the allocator and the peak RSS it reports. The
    lane's peak RSS is the process peak over all rounds: the macOS allocator keeps about
    12 MiB more after each round until it trims (no leak: flat under `SC_LEAK_CHECK=1`),
@@ -112,9 +112,9 @@ sorts below a hotspot that shows up everywhere.
 Two macOS gotchas, both verified:
 - samply cannot profile Apple-signed system binaries (it reports the DYLD restriction);
   the locally-built compiler profiles fine.
-- **Profile the bench binary, never the dev build.** The dev profile carries
-  ASan/UBSan, and sanitizer frames (`__asan_memcpy`, `StackDepotBase::Put`) dominate the
-  profile, burying the real hotspots.
+- **Profile the bench binary, never a debug or `--sanitizers` build.** The debug profile is
+  unoptimized, and in a `--sanitizers` build sanitizer frames (`__asan_memcpy`,
+  `StackDepotBase::Put`) dominate the profile, burying the real hotspots.
 - To profile a compiler run directly, build the compiler under the `bench` profile (the
   `release` profile strips symbols) and make it samply's root process: no `env` or `sh`
   wrapper between them.
@@ -320,8 +320,8 @@ Summary:
 ### Before starting
 
 ```sh
-# Clean build from scratch (cache can serve stale data)
-super-c clean
+# Clean build from scratch (cache can serve stale data): removes build/ and the global cache
+super-c clean --full
 super-c build
 ```
 
@@ -341,8 +341,8 @@ Rules for a valid A/B:
   (about 5%).
 - On macOS the cycle counts come from `proc_pid_rusage` (`std/testing/bench_sys.c`) and
   include kernel time of every thread.
-- For clean C-compile timings, set `SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_NO_EMIT_CACHE=1
-  SC_NO_TU_CACHE=1`; otherwise a cache makes the "clean" build fast.
+- For clean C-compile timings, set `SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1`;
+  otherwise a cache makes the "clean" build fast.
 - Never pipe a gate into another command (`./check.sh | tail`): the pipeline returns the
   status of the last command. Write the output to a file, then read it.
 

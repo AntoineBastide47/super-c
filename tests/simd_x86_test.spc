@@ -128,8 +128,8 @@ fn emitted(src: str, flags: str) String {
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
     let root = p.dir();
-    let mut t = cli::read_text(format("{}/build/dev/raw/__sc_manifest", root).as_str());
-    t.push_str(cli::read_text(format("{}/build/dev/raw/main.c", root).as_str()).as_str());
+    let mut t = cli::read_text(format("{}/build/debug/raw/__sc_manifest", root).as_str());
+    t.push_str(cli::read_text(format("{}/build/debug/raw/main.c", root).as_str()).as_str());
     return t;
 }
 
@@ -152,7 +152,7 @@ fn vector_def(src: str, flags: str, name: str) String {
     p.mkfile("main.spc", src);
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
-    return cli::read_text(format("{}/build/dev/raw/__sc_t/{}.h", p.dir(), name).as_str());
+    return cli::read_text(format("{}/build/debug/raw/__sc_t/{}.h", p.dir(), name).as_str());
 }
 
 // A build whose own features hold AVX (AVX-512F) keeps a 32-byte (64-byte) vector in one C vector,

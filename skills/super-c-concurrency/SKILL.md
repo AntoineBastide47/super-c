@@ -40,7 +40,9 @@ marker. The runtime module is loaded conditionally: programs without `launch` pa
 ## Coroutine Model
 
 Each task is a stackful coroutine on its own guard-paged stack (256 KiB via
-`mmap`+`mprotect` / `VirtualAlloc`). Context switching uses `ucontext` (POSIX) or fibers
+`mmap`+`mprotect` / `VirtualAlloc`; `runtime::set_stack_size` changes it before the pool starts,
+`runtime::stack_size` reads it). A program built with AddressSanitizer (`--sanitizers`) gets four
+times the default, since its frames carry redzones (`sc_rt_asan`). Context switching uses `ucontext` (POSIX) or fibers
 (Windows).
 
 Blocking **parks** the coroutine (saves context, returns worker to scheduler) instead of

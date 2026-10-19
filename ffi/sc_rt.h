@@ -100,6 +100,9 @@ size_t sc_rt_stack_bytes(void);
    still look like the crash it is. `install` is a no-op on other Windows builds and on wasm. */
 void sc_rt_stack_guard_install(void);
 void sc_rt_stack_note_size(size_t bytes);
+/* 1 in a program built with AddressSanitizer, whose frames carry redzones; defined by the generated
+   super_rt.c. */
+int sc_rt_asan(void);
 
 /* OS threads and the two locks the scheduler builds on. The Super-C side never names a `pthread_t` or a
    Windows HANDLE: every handle here is an opaque `void *` this layer allocates and releases, so one set of
