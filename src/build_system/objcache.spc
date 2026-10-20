@@ -126,18 +126,83 @@ pub fn norm_path(p: str, out: &mut String) {
     }
 }
 
+// `dir/name` into `out` (cleared first) as `norm_path` spells it, with no intermediate string: each
+// segment is appended, `.` dropped past the first, and `..` removes the last segment unless that is
+// `..` too.
+fn norm_join(dir: str, name: str, out: &mut String) {
+    out.clear();
+    let mut nseg: usize = 0;
+    for part in 0..2 {
+        let p = if part == 0 {
+            dir;
+        } else {
+            name;
+        };
+        let n = p.len();
+        let mut i: usize = 0;
+        while i <= n {
+            let mut e = i;
+            while e < n && p[e] != b'/' {
+                e = e + 1;
+            }
+            let seg = p.slice(i, e);
+            i = e + 1;
+            if seg == ".." && nseg != 0 {
+                // The last segment of `out`: everything past its last '/' (segments hold none).
+                let mut ls = out.len();
+                let mut up = false;
+                {
+                    let o = out.as_str();
+                    while ls > 0 && o[ls - 1] != b'/' {
+                        ls = ls - 1;
+                    }
+                    up = o.slice(ls, o.len()) == "..";
+                }
+                if !up {
+                    out.truncate(
+                        if nseg == 1 {
+                            0;
+                        } else {
+                            ls - 1;
+                        },
+                    );
+                    nseg = nseg - 1;
+                    continue;
+                }
+            }
+            if seg != "." || nseg == 0 {
+                if nseg != 0 {
+                    out.push_byte(b'/');
+                }
+                out.push_str(seg);
+                nseg = nseg + 1;
+            }
+        }
+    }
+}
+
 /// Mix the transitive content hash of one file into the key lanes: its bytes, then the hash of every
 /// file its `#include "..."` lines name (resolved the way the C compiler resolves them: relative to
-/// the INCLUDING file). Memoized per build in `memo` (path FNV -> two words), so a header shared by
-/// many units is read and hashed once; a file on the current include path counts once. False =
-/// something was unreadable, and the unit is not cacheable: a header outside the key would mean
-/// stale objects served as fresh.
-pub fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Map<u64, u64>, pool: &mut Vector<u64>) bool {
+/// the INCLUDING file). `text` is the file's content when the caller holds it (empty: `texts` by path,
+/// else read from disk); `texts` holds the files the build has in memory, by normalized path. Memoized
+/// per build in `memo` (path -> 1 + index of its two words in `pool`, 0 while the file is on the
+/// include path being hashed), so a header shared by many units is hashed once; a file on the
+/// current include path counts once. False = something was unreadable, and the unit is not cacheable:
+/// a header outside the key would mean stale objects served as fresh.
+pub fn ch_hash_file(
+    path: &String,
+    text: str,
+    h1: &mut u64,
+    h2: &mut u64,
+    depth: i32,
+    memo: &mut Map<String, u64>,
+    pool: &mut Vector<u64>,
+    texts: &Map<String, String>,
+) bool {
     if depth > 64 {
         return false;
     }
-    let pk = path.hash();
-    let hit = switch memo.get(&pk) {
+    let hit = switch memo.get(path) {
         Some(v) => *v,
         None => 0xFFFFFFFFFFFFFFFFu64,
     };
@@ -155,69 +220,96 @@ pub fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mu
         }
         return true;
     }
-    memo.insert(pk, 0);
-    let body = loader::read_file(path);
-    let mut ok = !body.is_none();
+    memo.insert(path.clone(), 0);
+    let held = text.len() != 0 || texts.contains_key(path);
+    let mut read = String::new();
+    let mut ok = held;
+    if !held {
+        switch loader::read_file(path.as_str()) {
+            Some(b) => {
+                read = b;
+                ok = true;
+            },
+            None => {},
+        };
+    }
     let mut a = FNV_BASIS;
     let mut b: u64 = 0x9e3779b97f4a7c15;
     if ok {
-        let bd = body.unwrap();
-        let s = bd.as_str();
+        let s = if text.len() != 0 {
+            text;
+        } else if held {
+            texts.get(path).unwrap().as_str();
+        } else {
+            read.as_str();
+        };
         ch_mix_bytes(&mut a, &mut b, s.ptr(), s.len());
-        let mut base = path.len();
-        while base > 0 && path[base - 1] != b'/' && path[base - 1] != b'\\' {
+        let ps = path.as_str();
+        let mut base = ps.len();
+        while base > 0 && ps[base - 1] != b'/' && ps[base - 1] != b'\\' {
             base = base - 1;
         }
-        let mut i: usize = 0;
+        let cut = if base > 0 {
+            base - 1;
+        } else {
+            0 as usize;
+        };
+        // The include path being hashed, reused for every include of this file.
+        let mut inc = String::new();
         let n = s.len();
+        let mut i: usize = 0;
         while i < n && ok {
-            // start of line: `#` [ws] `include` [ws] `"..."`.
-            let ls = i;
-            while i < n && s[i] != b'\n' {
-                i = i + 1;
+            // A `#` that starts a line after blanks: `#` [ws] `include` [ws] `"..."`.
+            let hp = unsafe cstring::memchr(s.ptr() + i, b'#', n - i);
+            if hp == null {
+                break;
             }
-            let mut j = ls;
-            while j < i && (s[j] == b' ' || s[j] == b'\t') {
+            let h = hp as usize - s.ptr() as usize;
+            let mut ls = h;
+            while ls > 0 && (s[ls - 1] == b' ' || s[ls - 1] == b'\t') {
+                ls = ls - 1;
+            }
+            i = h + 1;
+            if ls > 0 && s[ls - 1] != b'\n' {
+                continue;
+            }
+            let lp = unsafe cstring::memchr(s.ptr() + i, b'\n', n - i);
+            let le = if lp == null {
+                n;
+            } else {
+                lp as usize - s.ptr() as usize;
+            };
+            let mut j = i;
+            while j < le && (s[j] == b' ' || s[j] == b'\t') {
                 j = j + 1;
             }
-            if j < i && s[j] == b'#' {
-                j = j + 1;
-                while j < i && (s[j] == b' ' || s[j] == b'\t') {
+            if j + 7 <= le && s.slice(j, j + 7) == "include" {
+                j = j + 7;
+                while j < le && (s[j] == b' ' || s[j] == b'\t') {
                     j = j + 1;
                 }
-                if j + 7 <= i && s.slice(j, j + 7) == "include" {
-                    j = j + 7;
-                    while j < i && (s[j] == b' ' || s[j] == b'\t') {
+                if j < le && s[j] == b'"' {
+                    j = j + 1;
+                    let hs = j;
+                    while j < le && s[j] != b'"' {
                         j = j + 1;
                     }
-                    if j < i && s[j] == b'"' {
-                        j = j + 1;
-                        let hs = j;
-                        while j < i && s[j] != b'"' {
-                            j = j + 1;
+                    if j < le {
+                        let name = s.slice(hs, j);
+                        let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
+                        if abs {
+                            inc.clear();
+                            inc.push_str(name);
+                        } else {
+                            // One memo entry per file: `dir/../x.h` from every including
+                            // directory collapses to `x.h` (the generated tree has no links).
+                            norm_join(ps.slice(0, cut), name, &mut inc);
                         }
-                        if j < i {
-                            let name = s.slice(hs, j);
-                            let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
-                            let cut = if base > 0 {
-                                base - 1;
-                            } else {
-                                0 as usize;
-                            };
-                            let mut inc = String::new();
-                            if abs {
-                                inc.push_str(name);
-                            } else {
-                                // One memo entry per file: `dir/../x.h` from every including
-                                // directory collapses to `x.h` (the generated tree has no links).
-                                norm_path(loader::join2(path.slice(0, cut), name).as_str(), &mut inc);
-                            }
-                            ok = ch_hash_file(inc.as_str(), &mut a, &mut b, depth + 1, memo, pool);
-                        }
+                        ok = ch_hash_file(&inc, "", &mut a, &mut b, depth + 1, memo, pool, texts);
                     }
                 }
             }
-            i = i + 1;
+            i = le;
         }
     }
     if !ok {
@@ -226,7 +318,12 @@ pub fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mu
     }
     pool.push(a);
     pool.push(b);
-    memo.insert(pk, (pool.len() - 1) as u64);
+    switch memo.get_mut(path) {
+        Some(v) => {
+            *v = (pool.len() - 1) as u64;
+        },
+        None => {},
+    };
     if !ok {
         return false;
     }
@@ -410,9 +507,9 @@ pub fn ccver_record(cc: str, line: &String) {
 /// `clang` or `gcc`, about 5 ms of CPU per run) replaced by the compiler the stub runs, and the SDK
 /// the stub passes (as SDKROOT) given as `-isysroot`; for a macOS target on a macOS host only. The
 /// pair is recorded under the stub's identity (`cc_identity`) and SDKROOT, so `xcrun` runs once per
-/// toolchain. `cc` unchanged otherwise: the object cache off, a lookup that fails, or a path with a
-/// space (the command is split at spaces).
-pub fn direct_cc(cc: String, target: i32) String {
+/// toolchain; with the object cache off, once per call, its output captured in directory `dir`. `cc`
+/// unchanged otherwise: a lookup that fails, or a path with a space (the command is split at spaces).
+pub fn direct_cc(cc: String, target: i32, dir: str) String {
     if target != 1 || unsafe shim::sc_host_platform() != 1 {
         return cc;
     }
@@ -425,12 +522,13 @@ pub fn direct_cc(cc: String, target: i32) String {
     let ci = cc_identity(cc.as_str());
     let id = format("xcrun\t{}\t{}", stdlib::get_env("SDKROOT").unwrap_or(String::new()).as_str(), ci.as_str());
     let rp = ccver_record_path(&id);
-    if rp.len() == 0 {
-        return cc;
-    }
     let mut tool = String::new();
     let mut sdk = String::new();
-    let body = read_entry(rp.as_str());
+    let body = if rp.len() != 0 {
+        read_entry(rp.as_str());
+    } else {
+        Option::<String>::None;
+    };
     if body.is_some() {
         let b = body.unwrap();
         let s = b.as_str();
@@ -448,26 +546,45 @@ pub fn direct_cc(cc: String, target: i32) String {
         }
     }
     if tool.len() == 0 {
-        let dir = loader::dirname_of(rp.as_str());
-        mkdir_p(dir);
-        let mut out = format("{}.{}", rp.as_str(), unsafe shim::sc_getpid());
+        // The two lookups run at once, their output captured beside the record (in `dir` without one).
+        let base = if rp.len() != 0 {
+            mkdir_p(loader::dirname_of(rp.as_str()));
+            rp.clone();
+        } else {
+            loader::join2(dir, ".xcrun");
+        };
+        let pid = unsafe shim::sc_getpid();
+        let mut tout = format("{}.{}t", base.as_str(), pid);
+        let mut sout = format("{}.{}s", base.as_str(), pid);
         let mut fa = Vector::<String>::new();
         fa.push(String::from_str("xcrun"));
         fa.push(String::from_str("-f"));
         fa.push(String::from_str(p.slice(9, p.len())));
-        let _ = exec_args(&mut fa, out.cstr());
-        tool = take_first_line(out.as_str()).unwrap_or(String::new());
         let mut sa = Vector::<String>::new();
         sa.push(String::from_str("xcrun"));
         sa.push(String::from_str("--show-sdk-path"));
-        let _ = exec_args(&mut sa, out.cstr());
-        sdk = take_first_line(out.as_str()).unwrap_or(String::new());
+        let xcrun = "/usr/bin/xcrun".ptr() as *const char;
+        let tpid = spawn_at(xcrun, &mut fa, tout.cstr());
+        let spid = spawn_at(xcrun, &mut sa, sout.cstr());
+        let mut code: i32 = 0;
+        if tpid >= 0 {
+            let _ = unsafe shim::sc_waitpid(tpid, &mut code);
+        }
+        if spid >= 0 {
+            let _ = unsafe shim::sc_waitpid(spid, &mut code);
+        }
+        tool = take_first_line(tout.as_str()).unwrap_or(String::new());
+        sdk = take_first_line(sout.as_str()).unwrap_or(String::new());
+        let _ = unsafe shim::sc_unlink(tout.cstr());
+        let _ = unsafe shim::sc_unlink(sout.cstr());
         if !tool.as_str().starts_with("/") || unsafe shim::sc_mtime(tool.cstr()) == 0 || !is_dir(sdk.as_str()) {
             return cc;
         }
-        let mut rec = id.clone();
-        rec.format_into("\n{}\n{}\n", tool.as_str(), sdk.as_str());
-        let _ = write_file_atomic(rp.as_str(), rec.as_str());
+        if rp.len() != 0 {
+            let mut rec = id.clone();
+            rec.format_into("\n{}\n{}\n", tool.as_str(), sdk.as_str());
+            let _ = write_file_atomic(rp.as_str(), rec.as_str());
+        }
     }
     if tool.as_str().find_byte(b' ') >= 0 || sdk.as_str().find_byte(b' ') >= 0 {
         return cc;
@@ -717,12 +834,13 @@ pub fn compile_units(
             vptrs.push(va[i].cstr() as usize);
         }
         vptrs.push(0);
-        vpid = unsafe shim::sc_spawn_argv(vptrs.as_ptr() as *const *const char, vf.cstr());
+        vpid = unsafe shim::sc_spawn_argv(null, vptrs.as_ptr() as *const *const char, vf.cstr());
     }
     // Per unit: its object path and the hash of its relative name and its text with its includes
     // (`ok` false: something unreadable, not cacheable).
-    let mut memo = Map::<u64, u64>::new();
+    let mut memo = Map::<String, u64>::new();
     let mut pool = Vector::<u64>::new();
+    let texts = Map::<String, String>::new();
     let mut opaths = Vector::<String>::with_capacity(units.len());
     let mut hs = Vector::<u64>::with_capacity(units.len() * 2);
     let mut ok = Vector::<bool>::with_capacity(units.len());
@@ -736,7 +854,7 @@ pub fn compile_units(
         let mut h1 = FNV_BASIS;
         let mut h2: u64 = 0x9e3779b97f4a7c15;
         ch_mix_bytes(&mut h1, &mut h2, rel.ptr(), rel.len());
-        ok.push(ch_hash_file(unit, &mut h1, &mut h2, 0, &mut memo, &mut pool));
+        ok.push(ch_hash_file(units.at(i), "", &mut h1, &mut h2, 0, &mut memo, &mut pool, &texts));
         hs.push(h1);
         hs.push(h2);
         opaths.push(opath);

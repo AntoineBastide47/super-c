@@ -172,6 +172,11 @@ pub struct Manifest<'a> {
     pub target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
     pub simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
     pub simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
+    /// `str_id` of the text `load` read, and the file's mtime from the stat before the read (as
+    /// `loader::read_file_mt` gives them): the emit stamp's record of the manifest. Both 0 for a manifest
+    /// not read from a file.
+    pub src_id: u64,
+    pub mtime: i64,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -337,14 +342,21 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
 /// can build a source tree whose manifest already uses additions it predates; the compiler it produces
 /// reads the same manifest strictly.
 pub fn load(path: str, bootstrap: bool) Option<Manifest> {
-    let src_opt = loader::read_file(path);
+    let mut mt: i64 = 0;
+    let src_opt = loader::read_file_mt(path, &mut mt);
     if src_opt.is_none() {
         eprintln("build: cannot read '{}'", path);
         return Option::<Manifest>::None;
     }
     let src = src_opt.unwrap();
-    let (m, errs) = parse_check(src.as_str(), path, bootstrap);
-    return m;
+    let (mo, errs) = parse_check(src.as_str(), path, bootstrap);
+    if mo.is_none() {
+        return mo;
+    }
+    let mut m = mo.unwrap();
+    m.src_id = dutil::str_id(src.as_str());
+    m.mtime = mt;
+    return Option::<Manifest>::Some(m);
 }
 
 /// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
@@ -708,6 +720,8 @@ extend Manifest {
             target_cpu: String::new(),
             simd_width: 0,
             simd_dispatch: String::new(),
+            src_id: 0,
+            mtime: 0,
         };
     }
 
@@ -752,15 +766,15 @@ extend Manifest {
         }
         {
             let mut p = Profile::new("release");
-            dutil::split_args(
-                &mut p.cflags,
-                "-DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -fPIE",
-            );
+            // No section GC: LTO already drops what nothing references (`-dead_strip` takes 256 more
+            // bytes off the compiler's 5.79 MB on macOS), and the LTO code generation at the link does
+            // not take a compile's `-ffunction-sections -fdata-sections` (the binary is the same).
+            dutil::split_args(&mut p.cflags, "-DNDEBUG -finline-functions -fomit-frame-pointer -fPIE");
             dutil::split_args(&mut p.link_args, "-O2");
             p.strip = true;
             p.opt = 3;
-            // Full LTO: ThinLTO relinks in 1.3 s instead of 19 s here, but costs the compiler 3 to 5%
-            // runtime and 6.6% size, past the gates set for a default (binary skill, "Link-time
+            // Full LTO: ThinLTO relinks in 1.9 s instead of about 40 s here, but costs the compiler 3 to
+            // 5% runtime and 24% size, past the gates set for a default (binary skill, "Link-time
             // optimization"); `lto = "thin"` or SC_LTO=thin opts a build in.
             p.lto = LTO_AUTO;
             self.profiles.push(p);

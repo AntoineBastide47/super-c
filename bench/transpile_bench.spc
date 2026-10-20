@@ -2,8 +2,11 @@
 // Each round runs the transpile step a `super-c build` runs (`bsys::root_transpile`, the engine's own
 // function: emit-stamp check, load, resolve, typecheck, borrowck, checks, prepare, plan, render and
 // publish of src/main.spc's closure into a fresh scratch tree, serial) and samples CPU time, cycles and
-// allocations at the build's own phase boundaries through `bst::set_hook`, so the lane cannot drift from
-// what a build does. A lexer-only pass over the same sources follows each round, outside the total.
+// allocations at the build's own phase boundaries through `bst::set_hook`, so the lane times the build's
+// own phases. It runs the code a build runs only when built alone (`super-c bench --filter=self_transpile`):
+// the coroutine and cancellation reachability is package-wide, and a benchmark that cancels tasks puts
+// cancellation ticks and probes into the compiler code of the whole binary. A lexer-only pass over the
+// same sources follows each round, outside the total.
 // After the rounds, one cold build of the compiler runs through the real build engine (the same sources,
 // flags, streamed C compile and link a `super-c build` runs) and its phase record is reported; a C
 // compiler or linker failure there fails the benchmark.
@@ -25,11 +28,12 @@ const STD_DIR: str = "std";
 const BUILD_PROFILE: str = "debug";
 const ITERS: i32 = 100;
 
-// The phases of a round: the build's boundaries B_START..B_PUBLISH, phase k running from boundary k to
-// boundary k + 1. B_LOAD ends `parse` (load, lex and parse every module).
+// The phases of a round: the build's boundaries B_SETUP..B_PUBLISH (a round has no compile-side setup, so
+// it starts at B_SETUP), phase k running from boundary B_SETUP + k to B_SETUP + k + 1. B_LOAD ends `parse`
+// (load, lex and parse every module).
 const PH_N: usize = 10;
 const NB: usize = 11;
-static_assert(bst::B_PUBLISH == PH_N && NB == PH_N + 1, "one phase per boundary from B_STAMP to B_PUBLISH");
+static_assert(bst::B_PUBLISH - bst::B_SETUP == PH_N && NB == PH_N + 1, "one phase per boundary from B_STAMP to B_PUBLISH");
 const PH_NAMES: [str<'static>; 10] = [
     "stamp",
     "parse",
@@ -45,7 +49,8 @@ const PH_NAMES: [str<'static>; 10] = [
 // The emission's phases: plan, render, publish.
 const PH_EMIT: usize = 7;
 
-// The in-process counters at every boundary of one round; bit b of `seen` = boundary b was sampled.
+// The in-process counters at every boundary of one round, boundary B_SETUP + b at index b; bit b of
+// `seen` = that boundary was sampled.
 struct Marks {
     pub secs: Array<f64, NB>,
     pub cyc: Array<i64, NB>,
@@ -64,13 +69,13 @@ fn sample(mk: &mut Marks, b: usize) {
 
 // The phase hook: the build's boundaries past B_PUBLISH (sync, compile, link) never run in a round.
 fn on_mark(ctx: *mut void, b: usize) {
-    if b < NB {
-        sample(unsafe &mut *(ctx as *mut Marks), b);
+    if b > bst::B_SETUP && b <= bst::B_PUBLISH {
+        sample(unsafe &mut *(ctx as *mut Marks), b - bst::B_SETUP);
     }
 }
 
 // The warm-up round's sink: the bytes of every C file the emission writes, headers and sources.
-fn count_bytes(ctx: *mut void, path: str, _text: str, _kind: i32) {
+fn count_bytes(ctx: *mut void, path: str, _text: str, _kind: i32, _changed: bool) {
     let f = stdio::fopen(path, "rb");
     if f == null {
         return;
@@ -89,7 +94,7 @@ fn count_bytes(ctx: *mut void, path: str, _text: str, _kind: i32) {
 fn transpile_round(m: &mf::Manifest, cx: &bsys::BuildCtx, pdir: &mut String, sink: *mut demit::EmitSink, mk: &mut Marks) bool {
     let _ = unsafe dshim::sc_rm_rf(pdir.cstr());
     mk.seen = 0;
-    sample(mk, bst::B_START);
+    sample(mk, 0);
     let hook = bst::PhaseHook { ctx: mk as *mut Marks, at: on_mark };
     bst::set_hook(&hook);
     let rc = bsys::root_transpile(m, BUILD_PROFILE, cx, sink);
@@ -221,9 +226,10 @@ fn real_build(js: &mut String) bool {
     bst::json(g, js);
     let overlap_ms = bst::cc_overlap_ns(g) as f64 / 1000000.0;
     unsafe stdio::printf(
-        "  build (debug, jobs=%u, cold): transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
+        "  build (debug, jobs=%u, cold): setup %.1f ms | transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
         g.jobs,
-        build_ms(g, bst::B_START, bst::B_PUBLISH),
+        build_ms(g, bst::B_START, bst::B_SETUP),
+        build_ms(g, bst::B_SETUP, bst::B_PUBLISH),
         build_ms(g, bst::B_PUBLISH, bst::B_SYNC),
         build_ms(g, bst::B_SYNC, bst::B_COMPILE),
         (g.cc_last_ns - g.cc_first_ns) as f64 / 1000000.0,

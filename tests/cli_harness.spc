@@ -674,6 +674,37 @@ extend EnvGuard as Free {
     }
 }
 
+/// Copy the std tree `SC_STD_DIR` names and the ffi tree beside it to `<root>/sc/std` and `<root>/sc/ffi`:
+/// a std of the test's own, which `SC_STD_DIR=<root>/sc/std` selects.
+pub fn copy_std(root: str) {
+    let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
+    let mut d = String::new();
+    d.format_into("{}/sc/std", root);
+    copy_tree(std_dir.as_str(), d.as_str());
+    d.clear();
+    d.format_into("{}/sc/ffi", root);
+    let mut ffi = String::new();
+    ffi.format_into("{}/../ffi", std_dir.as_str());
+    copy_tree(ffi.as_str(), d.as_str());
+}
+
+// Copy the files and directories under `src` to `dst`.
+fn copy_tree(src: str, dst: str) {
+    dutil::mkdir_p(dst);
+    let names = dutil::list_dir(src, false).unwrap();
+    for i in 0..names.len() {
+        let mut s = String::new();
+        s.format_into("{}/{}", src, names.at(i).as_str());
+        let mut d = String::new();
+        d.format_into("{}/{}", dst, names.at(i).as_str());
+        if dutil::is_dir(s.as_str()) {
+            copy_tree(s.as_str(), d.as_str());
+        } else {
+            assert(dutil::copy_file(s.as_str(), d.as_str()), "the file copies");
+        }
+    }
+}
+
 /// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
 /// object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,

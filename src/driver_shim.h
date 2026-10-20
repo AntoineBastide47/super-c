@@ -47,6 +47,13 @@ void sc_trace_install(void);      /* print a stack on SIGABRT: every panic abort
 void *sc_opendir(const char *path);
 void *sc_readdir(void *dir);      /* the next struct dirent *, or NULL */
 int sc_closedir(void *dir);
+int sc_errno_absent(void); /* 1 when errno says a path does not exist (ENOENT, ENOTDIR) */
+/* Open `path` to read it whole: its descriptor, with the file's size in *size and its sc_mtime value in
+   *mtime, from one fstat; -1 when it does not open or is no regular file. */
+int sc_file_open(const char *path, int64_t *size, int64_t *mtime);
+/* Read up to `n` bytes of descriptor `fd` into `buf`, then close it: the count read (fewer when the file
+   ends first), or -1 on a read or close error. */
+int64_t sc_file_read_close(int fd, void *buf, size_t n);
 
 long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 long long sc_mtime_ns(const char *path); /* mtime nanoseconds (100 ns steps on Windows); 0 if missing */
@@ -58,9 +65,9 @@ int sc_jobserver_claim(int wanted);
 void sc_jobserver_release_claim(void);
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_peak_rss(void);          /* peak resident set size in bytes; 0 when unavailable */
-long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
-long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const char *cwd); /* sc_spawn_argv in directory cwd (NULL: ours); -1 where the libc cannot */
-int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1; a killing signal is named on stderr */
+long long sc_spawn_argv(const char *file, const char *const *argv, const char *out_path); /* argv spawn of program `file` (NULL: argv[0] PATH-searched), NO shell; out_path (may be NULL) captures stdout+stderr */
+long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const char *cwd); /* sc_spawn_argv of argv[0] in directory cwd (NULL: ours); -1 where the libc cannot */
+int sc_exec_argv(const char *file, const char *const *argv, const char *out_path); /* sc_spawn_argv + wait: exit code, or -1; a killing signal is named on stderr */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_try_wait(const int64_t *pids, int n, int *code); /* non-blocking sc_wait_any; -1 when none exited; never reaps outside `pids` */
 int sc_kill(long long pid); /* end child `pid` at once (SIGKILL, TerminateProcess); 0 when sent */
@@ -98,6 +105,7 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
 int sc_exec(const char *cmd);
 
 int sc_mkdir_p(const char *path); /* mkdir -p: creates every missing component; 0 on success */
+int sc_publish(const char *path, const void *p, size_t n); /* write a file unless it holds the bytes */
 int sc_rm_rf(const char *path);   /* rm -rf without following links: 0 if the path is gone afterwards */
 const char *sc_tmpdir(void);      /* the system temp directory, no trailing separator */
 

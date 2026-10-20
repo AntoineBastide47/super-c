@@ -69,10 +69,13 @@ argv[0] names, as `wasmtime run --dir=/ --argv0 <abs path>` gives it, and keeps 
 cache when argv[0] is relative), the std directory (a build under another std tree transpiles
 again, `stamp_opt_line`), the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
-import also makes the stamp stale. The stamp lives in the target's profile directory, so it
+import also makes the stamp stale. A module and `build.toml` are recorded as the build read them (the
+content hash of the text read, the mtime of the stat before the read), so an edit made during the
+build makes the next one transpile again; a directory whose listing changed during the build writes
+no stamp. The stamp lives in the target's profile directory, so it
 is per profile. A build that transpiles deletes the stamp first; the emission writes its record to
-`.emit_stamp.new`, and the engine moves it into place only after the whole tree is synced into
-`gen/`, so a build that stops part way leaves no stamp for a mixed tree. Parallel C compilation uses
+`.emit_stamp.new`, and the engine moves it into place only after the whole tree is written, so a
+build that stops part way leaves no stamp for a mixed tree. Parallel C compilation uses
 content-fingerprinted stale detection with longest-job-first scheduling.
 
 ### External transpiler
@@ -83,8 +86,8 @@ super-c build --target=wasm --profile=release -o gen2.wasm \
 ```
 
 `--transpiler=CMD` (`build` and `release` from build.toml only) runs CMD as the transpile step in
-place of the engine's own frontend; the engine then syncs, compiles and links that tree with all its
-own target and profile flags, object cache and link record. CMD is split on whitespace like every
+place of the engine's own frontend; the engine then compiles and links that tree with all its own
+target and profile flags, object cache and link record. CMD is split on whitespace like every
 command string of the engine and runs with no shell, so its words hold no space. The engine appends the
 transpile form, each argument one argv entry:
 
@@ -97,7 +100,9 @@ CMD <root> --emit-sub=<sub> --manifest-dir=<abs project dir> --out-dir=<out-dir>
 `super-c <root> --emit-sub=SUB ...` (`bsys::manifest_emit`) enters the project directory, reads its
 build.toml (shards, profiles, the root's directory), and writes `<out-dir>/SUB/raw` exactly as the
 engine's own frontend does, the same bytes for the same compiler; with `--emit-id` it writes the stamp
-record under that identity. The directory is absolute because a WASI guest starts in `/`. The stamp
+record under that identity. It also writes `<out-dir>/SUB/.emit_rewritten`, the tree-relative paths of
+the files it rewrote, one per line: the engine counts them as newer than their objects whatever their
+mtimes say (`obj_stale`), and counts every file as rewritten when a transpiler leaves no such record. The directory is absolute because a WASI guest starts in `/`. The stamp
 identity of an external transpiler (`transpiler_id`) hashes the words of CMD and the content of each
 word that names a file, the program found through PATH: a different transpiler, or new content at the
 same path (a rebuilt `.wasm`), transpiles again, and so does a switch back to the engine's own frontend.
@@ -146,7 +151,10 @@ collects the `pub @bench` functions that `@platform` and `@arch` keep for the ta
 (`@bench` applies to top-level functions only). `--filter=S` keeps in the generated runner
 only the benchmarks whose name (`<module>::<fn>` without the `bench::` prefix) contains S,
 so only their files build; `build/bench-bin --filter=S` selects among the built ones at
-run time. `tests/` and `bench/` sit beside `src/` at the project
+run time. The generated `main` calls each benchmark directly, never through a fn value
+(`std::testing::bench::Run`). The coroutine and cancellation reachability is package-wide:
+a benchmark that cancels tasks puts cancellation ticks and probes into the code of every
+other benchmark of the binary, so build a profiling or measuring binary with `--filter`. `tests/` and `bench/` sit beside `src/` at the project
 root. A bench file that imports the program's root module links a second `main`
 (duplicate `__sc_user_main`): put the code under benchmark in a module other than the
 root. The generated runner carries the checkout's identity
@@ -220,8 +228,9 @@ lints.
 
 `print`, `println`, `eprint` and `eprintln` are prelude functions (`std/string.spc`) the
 compiler lowers itself, so an `import stdio;` used only for printing is unused. The
-unused-`pub` lint runs only where no external caller can exist: `super-c lint` of a project
-with `src/` whose `build.toml` declares no `[lib]`, and a script build with no `build.toml`
+unused-`pub` lint runs only where no external caller can exist: `super-c lint` with no path of a
+project with `src/` whose `build.toml` declares no `[lib]` (listed files load without the modules
+that import them, so their `pub` items stay live), and a script build with no `build.toml`
 in the working directory (`src/main.spc`); it never applies to std or ffi
 modules (`lint_pub_applies` in `src/driver/emit.spc`). A `[lib]` build lints its closure
 once: in the static pass when `type` holds `static`, else in the shared pass. `--const` never suggests a
@@ -346,7 +355,7 @@ run = [
 
 [command.profile]           # a command's `env` entries are set in the process environment, never as a shell prefix
 run = [
-    "./super-c bench --no-run",
+    "./super-c bench --no-run --filter=self_transpile",
     "samply record --rate 1000 build/bench-bin --in-process",
 ]
 
@@ -355,9 +364,9 @@ opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": -O<level> on every com
 cflags = ["-DNDEBUG"]        # after the manifest-level cflags and the -O flag
 ldflags = ["-static"]        # after the manifest-level ldflags and the -O flag
 link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, after ldflags
-strip = true                 # the host `strip` after the link; a build for another platform's object format
-                             # (Linux or Windows from another host, the Android and wasm SDKs) strips at
-                             # link time (`-Wl,--strip-all`) instead
+strip = true                 # strip at link time (`-Wl,--strip-all`); a macOS or iOS binary (ld64 has no
+                             # full strip) runs the host `strip` on the linked temp before it is installed,
+                             # and a failed strip fails the build
 lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
 overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
 target-features = ["+simd128"] # replaces the build-level list for this profile
@@ -387,7 +396,7 @@ edit never moves a chunk between shards.
 | Profile | Character | Use |
 |---------|-----------|-----|
 | `debug` | `opt-level = 0`, `-g`, frame pointers | Development (**default** of a manifest build) |
-| `release` | `opt-level = 3`, `-DNDEBUG -fPIE` + section GC, `link-args = ["-O2"]`, strip, `lto = "auto"` | Shipping |
+| `release` | `opt-level = 3`, `-DNDEBUG -fPIE`, `link-args = ["-O2"]`, strip, `lto = "auto"`; no section GC: LTO drops unreferenced code (`-dead_strip` takes 256 more bytes off the compiler on macOS) | Shipping |
 | `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` | Benchmarking/profiling |
 | `race` | `opt-level = 1`, `-g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
 | `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner, and the compiler under test when `test` has no `--profile` (`<out-dir>/test-bin`) |
@@ -477,12 +486,16 @@ object and its cache entries are hard links to one file (`link_or_copy`; a copy 
 refuses a link, such as a cache root on another volume), so a compile removes the old object before
 it writes, and an object's time for the staleness check and the relink decision is the mtime of its
 `.cmd` record, which another tree's use of the shared file does not move. The engine runs the
-compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. One exception, for a
+compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. The compiles, the link
+and the version probe start the program the command's first word names in PATH by its path, found once
+(`cc_stream`): macOS `posix_spawnp` makes a whole spawn attempt per PATH entry, 0.4 to 0.9 ms per spawn.
+argv[0] keeps the word, so no fingerprint or key depends on the lookup; a match that does not start
+falls back to the search, and Windows keeps CreateProcess's own search. One exception, for a
 macOS target on a macOS host: a command that starts with the xcrun stub `/usr/bin/cc`, `clang` or `gcc`
 runs the compiler the stub runs, with `-isysroot` naming the SDK the stub passes (`direct_cc`): the stub
-costs a process per compile. `xcrun -f` and `xcrun --show-sdk-path` run once per compiler identity and
-`SDKROOT`, recorded as an entry of the `script` namespace; with the object cache off, or a path with a
-space, the stub runs. Under `-g` the compile maps the
+costs about 4 ms per compile and link. `xcrun -f` and `xcrun --show-sdk-path` run at once, once per
+compiler identity and `SDKROOT`, recorded as an entry of the `script` namespace; with the object cache
+off, once per build (about 5 ms); for a path with a space the stub runs. Under `-g` the compile maps the
 working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
 sources relative to the project directory: a debugger started elsewhere needs a source map.
 Without coverage or profile instrumentation, each compiled object whose bytes do not name the
@@ -521,8 +534,9 @@ so the result does not depend on the project; the user's modules load after it (
 entry's name hashes the std directory as given, the target, arch, CPU features, vector settings,
 memory checker, `--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
 budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`). The image records the
-content hash of every prelude file and the listing of every directory the std imports were looked up
-in; a build that finds both unchanged loads the image in place of parsing and checking std, and
+content hash of every prelude file as the check read it and the listing of every directory the std
+imports were looked up in, as the load listed it (the std directory's from before the load), so an
+edit made during the check makes the next build check again; a build that finds both unchanged loads the image in place of parsing and checking std, and
 checks the prelude again on any difference. A build that checks the prelude writes the image (not
 when the prelude logged a warning) and loads it back, so both paths continue from the same state. The
 entry follows the namespace's rules: a read records a use (`touch_entry`), the sweep packs it and
@@ -533,7 +547,40 @@ error.
 A program whose own C (module, instance and registry units) stays under 2 MiB is compiled as one
 unit: the emitted `__sc_unity.c` includes those units, and both the engine and a script build compile
 it in place of them. The runtime and the external C sources still compile on their own, so programs
-share their objects. A larger program, such as the compiler itself, compiles each unit alone.
+share their objects. A larger program, such as the compiler itself, compiles its units of one shard
+and less than 64 KiB of C in packs of about 256 KiB, `__sc_pack<k>.c`, each including its members
+(at least two such units; a header the members share is parsed once per pack). The pack count is a
+shard count of those units' bytes (`shard_policy`), which `__sc_shards` records (`packs<TAB>n`) and the
+next build keeps while every pack stays within half and one and a half times the target; a unit's pack
+is the hash of its file stem modulo the count, so an edit, or a unit that crosses the limit, compiles
+its own pack again and no other. The cost is the incremental build: on the compiler, an edit of
+`build_system::toml` compiles its pack in 171 ms of serial CPU, where its unit alone took 46 ms, while
+the packs take about 13 points off the cold compile's serial CPU (the packs and the precompiled header
+below together 35%; with each unit declaring only what it uses, `output-layout.md`, 42%).
+
+A program of separate units, from four units that include `__sc_fwd.h` on (each shard that compiles
+alone, each pack; `pch<TAB>1` in `__sc_shards`), compiles that header once, precompiled: the system
+headers, the runtime and the std C headers then cost one compile instead of one per unit (about 210 M
+compiler instructions per unit with clang). The engine starts the compile when the header lands,
+before any unit; the stub `obj/__sc_fwd.h` includes the header and compiles to `obj/__sc_fwd.h.gch`.
+Every unit but the runtime, the `__ext*` wrappers and the test runner waits for it and compiles with
+`-include obj/__sc_fwd.h`: gcc loads the `.gch` beside the stub (or reads the stub when it rejects the
+file), the clang driver turns the option into `-include-pch`. The header's `.cmd` record holds its
+command, the working directory (the file records its inputs' paths) and the content hash of the header
+and its quoted includes (` | pch <hash>`), which also ends every unit's fingerprint: a changed header
+text compiles the header and every unit again, whatever the mtimes (gcc checks no input, and its
+dependency list of a unit names none of the header's includes). Under clang the header takes `-Xclang
+-fno-pch-timestamp` (the `pch-no-timestamp` probe), so clang checks only the inputs' sizes and an input
+touched with unchanged content, an older mtime included, fails no compile; the header's dependency
+list compiles it again after a touch. A failed compile is recorded under its fingerprint, the units
+parse the header text, and a build tries again only once the fingerprint changed. A clang unit's
+dependency list names the header's inputs by the absolute paths the header recorded; the object cache
+stores them through `@/` like the emitted tree (`dep_portable`), so another tree that restores the object
+names its own files. `compile_commands.json` omits the `-include` pair (a tool of another compiler
+version cannot load the file; the unit includes the header first itself). Where the
+`integrated-cc1` probe accepts it (Apple clang), these units and the header compile with
+`-fintegrated-cc1`: the driver runs the compiler proper in its own process, one process less per unit
+(4% of the compile CPU). Both probes run when the first such tree of a profile directory needs them.
 
 Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
 namespace, `o/script` (each entry in the subdirectory of its key's first two hex digits,
@@ -554,20 +601,21 @@ compile-and-link command.
 Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
 under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
 runtime (`super-c bench`, self-transpile) within 3%, link memory no higher, the stripped
-binary within 5%. Measured on the compiler's own release build (Apple clang 21, 14
-cores, 151 units; object cache and ccache off):
+binary within 5%. Measured on the compiler's own release build (Apple clang 21, 206 units, a cold
+object cache, ccache off, `--jobs=2` on a loaded 14-core machine, so the wall times are upper bounds);
+the rows marked (151) are from the 151-unit build the gates were first checked on:
 
 | Case | full LTO (`-flto=auto`) | ThinLTO, no cache | ThinLTO, cache |
 |------|------------------------:|------------------:|---------------:|
-| clean build, wall / CPU | 22.2 s / 34.7 s | | 5.9 s / 49.7 s (cold cache) |
-| link of one private body edit | 18.5 to 19.0 s | 2.9 s | 1.3 s (new state; 100 edits: median 1.31 s, p95 1.37 s), 0.14 s (state linked before) |
-| linker peak RSS | 993 MiB | 420 MiB | 79 MiB (warm) |
-| link CPU | 18.5 s | 33.6 s | 0.2 s (warm) |
-| public signature edit (40 units), total | | | 2.0 s |
-| by-value layout edit (92 units), total | | | 5.0 s (cold), 2.4 s |
-| stripped binary | 3,163,592 B | | 3,371,912 B (+6.6%) |
+| clean build, wall / CPU | 68.5 s / 71.3 s | | 34.6 s / 95.3 s (cold cache) |
+| link of one body edit | 36.6 to 53.9 s | 14.4 s | 1.9 s (new state), 0.33 s (state linked before) |
+| linker peak RSS | 1,690 MiB | 584 MiB | 114 MiB (warm) |
+| link CPU | 38.6 s | 71.2 s | 0.4 s (warm) |
+| public signature edit (40 units), total (151) | | | 2.0 s |
+| by-value layout edit (92 units), total (151) | | | 5.0 s (cold), 2.4 s |
+| stripped binary | 5,794,648 B | | 7,186,296 B (+24.0%) |
 
-| compiler runtime (Mcyc: parse / typecheck / borrowck / codegen) | 118 / 191 / 423 / 892 | | 124 / 192 / 446 / 923 (+4.7 / +0.5 / +5.4 / +3.5%); end to end −3.1% |
+| compiler runtime (151; Mcyc: parse / typecheck / borrowck / codegen) | 118 / 191 / 423 / 892 | | 124 / 192 / 446 / 923 (+4.7 / +0.5 / +5.4 / +3.5%); end to end −3.1% |
 
 Relink, clean build and memory pass by a wide margin; runtime and size do not (a higher
 ThinLTO import limit, `-import-instr-limit=300` and `1000`, changes neither by more
@@ -609,6 +657,8 @@ never version text.
 | `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
 | `unaligned-vector-move` | Windows x86_64 | `-Wa,-muse-unaligned-vector-move` accepted (GNU as 2.38+; clang rejects it) |
 | `no-prelink-vectorize` | all | `-fno-vectorize -fno-slp-vectorize` accepted (clang; gcc rejects them, its LTO compile does not vectorize) |
+| `integrated-cc1` | all | `-fintegrated-cc1` accepted (clang; gcc rejects it) |
+| `pch-no-timestamp` | all | `-Xclang -fno-pch-timestamp` accepted (clang; gcc rejects it) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
 its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
@@ -618,14 +668,17 @@ other line is `<id>\t<result>` (the `thin-lto` line adds the linker path and mti
 record of another key holds nothing; one of another compiler version loses its results
 once the version probe answers. A probe runs only when a build needs its result and the
 record does not hold it: the needed probes start beside the compiler version probe,
-before the transpile, one child per spelling, all at once. A build that measured nothing
+before the transpile, one child per spelling, all at once; `integrated-cc1` and
+`pch-no-timestamp` run when the precompiled header is planned, and the build waits for them. A build that measured nothing
 leaves the record unchanged. The results a build used end every object and link
 fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
 "thin"`, on Windows x86_64 `unaligned-vector-move` (accepted: every compile and the link take
 the flag), under full LTO (`lto = "full"` or `"auto"`, a ThinLTO request that falls back to `auto`
 included) `no-prelink-vectorize` (accepted: every compile takes the flags after the profile's `-O`
 flag, so clang vectorizes at the link, after it inlines across units: a function vectorized alone in
-its unit no longer vectorizes in the loop it is inlined into), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
+its unit no longer vectorizes in the loop it is inlined into), for a tree compiled through the precompiled
+header `integrated-cc1` and `pch-no-timestamp` (accepted: the flags join those commands, which the
+fingerprints hold, not ` | probes`), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
 `wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
 compile, once per probe with the features it checks ("build: the C compiler 'cc' rejects
 '-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.
@@ -797,7 +850,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
 | `--const-eval-memory=SIZE` | Cap compile-time evaluation memory (~96 MiB default) |
-| `--lib` | Build as library instead of binary |
+| `--lib` | Build as library instead of binary. A static library is archived with `ar`, for another platform's objects with the cross compiler's archiver (`llvm-ar` beside a clang, as in the wasi-sdk and the NDK; `<triple>-ar` beside a `<triple>-gcc`; `archiver` in `src/build_system/build.spc`) |
 
 ## Environment Variables
 
@@ -812,7 +865,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
 | `SC_JOBSERVER` | The process-tree jobserver the first compiler of a tree makes, or a test runner started without one (`--jobs` slots), and every process it starts joins: `<slots>,<fd>` on POSIX (the inherited descriptor of an unlinked slot file), `<slots>,<path>` on Windows (a temporary file deleted with its last handle). A process holds a slot as a byte-range lock on one byte (`fcntl` record lock, `LockFileEx`), which the system drops when the process ends by any exit, abort or kill, so a killed process never takes slots with it. One more slot is implicit to each process |
-| `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); `0` compiles every unit alone, as a large program does (tests of per-unit objects and staleness set it) |
+| `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); a larger program compiles its small units in packs (`1`: a small program does too); `0` compiles every unit alone, with no pack (tests of per-unit objects and staleness set it). The emit stamp records it |
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
@@ -828,7 +881,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
 | `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
-| `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl, reach, drops), skip and elaboration tallies, sizes, the lowered product (Core IR KiB, type slots, replay-tape entries per event kind), the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
+| `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl, reach, drops, publish, keep, tail: their total is the build record's `borrowck` phase less a few ms of loop overhead; `reach` is the stage's per-module prologue, the module reference rows, body counts and reachability scans, and the solve), skip and elaboration tallies, sizes, the lowered product (Core IR KiB, type slots, replay-tape entries per event kind), the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
 | `SC_BC_VALIDATE` | Validation build: every borrow-check stage the feature predicate skipped runs anyway and must find nothing (zero loans, zero move events, no diagnostic); every loan issues at a borrow operation, every move path has a valid parent, the init rows match the path count, the liveness queue stays within its tight bound; every elaborated body passes the structural verifier and the ownership verifier (`ir::drops::verify_drops`: each value released once per path, guarded where paths disagree, nothing held at a return). A failure prints the body and its events, then aborts. Output is unchanged. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_VALIDATE` | After every type publication checkpoint, exit 1 if any module table still names a provisional type id. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_COLLIDE` | Every type and instance hashes to one bucket: the type tables run on full comparisons alone, so a hash-order dependence shows as different output |
@@ -906,12 +959,21 @@ build/
 A manifest build (`super-c build` with `build.toml`) works in one directory per target and
 profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAME` and
 `<out-dir>/<profile>-lib` for the other targets. The emitter writes `raw/` there (the
-per-TU cache and `__sc_manifest` with it), the emitted C is content-synced into `gen/`
-(unchanged files keep their mtime), objects compile into `obj/` with `-MMD` dep tracking,
-and `compile_commands.json` and the emit stamp `.emit_stamp` land beside them, with the
-toolchain probe record `.probes` once a build or `--print-probes` measured a probe. `super-c test`
+per-TU cache and `__sc_manifest` with it), and the C compiler reads that one tree: the
+emitter compares each file with what it holds and writes only the files whose content
+changed, so an unchanged file keeps its mtime (`publish_file`). A build whose emission
+fails writes no unit or header, so the tree stays as the last successful emission left
+it. Objects compile into `obj/` with `-MMD` dep tracking,
+and `compile_commands.json` (written only when its text changes, so C tooling does not reload it) and
+the emit stamp `.emit_stamp` land beside them, with the
+toolchain probe record `.probes` once a build or `--print-probes` measured a probe. The link record
+`<out-dir>/__link-<hash of the binary's path>.cmd` holds the compiler's version line, the link command
+and the probe results it used.
+On Windows, a link or archive line longer than 8192 characters passes its objects through the response
+file `@<record>.rsp` (CreateProcess takes 32,767 characters, and the gcc driver's own lines add to
+ours); the script lane's link does the same with `<tree>/__link.rsp`. `super-c test`
 runs the same engine on the generated test root under the `test` profile in
-`<out-dir>/test/` (`raw/`, `gen/`, `obj/`, the runner `__tests`), with the emit
+`<out-dir>/test/` (`raw/`, `obj/`, the runner `__tests`), with the emit
 stamp and object cache making an unchanged suite a link check; `super-c bench` uses
 `<out-dir>/bench/<profile>/`. Engine code takes every manifest output path from out-dir
 (the `out-dir` key or `--out-dir`, default `build`) and never spells `build/`. The bare

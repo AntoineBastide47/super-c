@@ -54,6 +54,14 @@ struct TailDrop {
 /// Tag bit of a `defers` entry that is a TailDrop index, not a defer statement node.
 const DEFER_TAIL: NodeId = 0x80000000u32;
 
+/// The widest integer pattern piece whose values a match switch lists as cases, and the most cases
+/// of one switch: wider pieces keep their comparison.
+const SW_PIECE_MAX: i64 = 256;
+const SW_CASES_MAX: i64 = 1024;
+/// The deepest expression nesting the argument-order walk follows (`may_write`): deeper, an
+/// argument is assumed to write.
+const WALK_MAX: u32 = 64;
+
 /// One instance-env binding for substitution-aware lowering: generic param decl `(pm, pnode)`
 /// resolves to pool type `(am, at)` (a copy of the backend demand chain, innermost last).
 pub struct LSub {
@@ -243,6 +251,23 @@ extend KeptBody {
     }
 }
 
+/// The function and closure bodies of module `m` of `p`: what the keep holds of it at most.
+pub fn module_bodies(p: &loader::Package, m: usize) usize {
+    if !p.modules.at(m).has_ast {
+        return 0;
+    }
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    let nb9 = a.nodes.len();
+    let mut n: usize = 0;
+    for i in 0..a.nnodes() {
+        let k = a.at_const(Ast::nth_id_n(nb9, i)).kind;
+        if k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_CLOSURE {
+            n += 1;
+        }
+    }
+    return n;
+}
+
 /// Package-lifetime store of finished lowerings, keyed `skey_mix(0, module << 32 | owner)`:
 /// borrowck adopts every body it lowers so the instance graph starts from these instead of
 /// lowering the package a second time. Entries move out on first demand and never return.
@@ -260,23 +285,9 @@ extend Keep {
         return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<KeptBody>::new(), viewers: 0 };
     }
 
-    /// Size `kept` for every function and closure body of `p` at once, so the doubling chain does
-    /// not churn multi-megabyte blocks through the allocator each build.
-    pub fn reserve_bodies(self: &mut Self, p: &loader::Package) {
-        let mut n: usize = 0;
-        for m in 0..p.modules.len() {
-            if !p.modules.at(m).has_ast {
-                continue;
-            }
-            let a = unsafe &*p.module_ast_const(m as ModuleId);
-            let nb9 = a.nodes.len();
-            for i in 0..a.nnodes() {
-                let k = a.at_const(Ast::nth_id_n(nb9, i)).kind;
-                if k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_CLOSURE {
-                    n += 1;
-                }
-            }
-        }
+    /// Size `kept` for `n` bodies, the `module_bodies` of every module, at once, so the doubling
+    /// chain does not churn multi-megabyte blocks through the allocator each build.
+    pub fn reserve_bodies(self: &mut Self, n: usize) {
         self.kept.reserve(n);
     }
 
@@ -744,6 +755,199 @@ extend Lowerer {
         return ir::rv(ir::RV_USE, op, 0, 0, ty);
     }
 
+    // Arguments evaluate left to right: a value read or moved out of a place (operand `op` of
+    // argument `a`) is taken into a temp where it is written when a later argument (`args` from
+    // `from`) may write that place's root binding (`may_write`; for a `static`, any argument that
+    // is not a name or a literal), so the call sees the value at the argument's own position. A temp
+    // that may own its value is registered for the scope-exit drop (`own_temp`): the call consumes
+    // it, an exit before the call releases it. A fresh temporary, nothing else writes, a constant
+    // and every other operand stay as they are; the user-move mark stays on `op` (the move). An
+    // operand that parameter `pi` of `target` borrows (an implicit autoref) is a place, not a value:
+    // it stays too, as do `&mut` references and `[]mut` views (below).
+    fn pin_read(self: &mut Self, op: ir::OperandId, a: NodeId, args: NodeList, from: u32, target: DefId, pi: usize) ir::OperandId {
+        if from >= args.len {
+            return op;
+        }
+        let o = *self.body.operands.at(op as usize);
+        if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE || self.borrowed_arg(target, pi, o.ty) {
+            return op;
+        }
+        // A `&mut` or `[]mut T` handed to a call is reborrowed there, while a copy into a temp
+        // would move it: both stay at the call.
+        let y = *self.f.ty(o.ty);
+        if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 || self.view_kind(
+            o.ty,
+        ) == 2 {
+            return op;
+        }
+        let pl = *self.body.places.at(o.data as usize);
+        if pl.proj_len == 0 && self.body.locals.at(pl.base as usize).storage == ir::LS_TEMP {
+            return op;
+        }
+        let r = self.root_binding(a);
+        if r.node == NODE_NONE {
+            return op;
+        }
+        let stat = self.decl_kind(r) == NodeKind::NODE_CONST;
+        for j in from..args.len {
+            let b = unsafe self.f.list(args)[j as usize];
+            let w = if stat {
+                self.f.node(b).kind != NodeKind::NODE_LITERAL && self.f.node(b).kind != NodeKind::NODE_IDENTIFIER;
+            } else {
+                self.may_write(b, r, 0);
+            };
+            if w {
+                let t = self.copy_op(self.spill(op, self.f.node(a).span));
+                self.own_operand(t, a);
+                return t;
+            }
+        }
+        return op;
+    }
+
+    // Does parameter `pi` of call target `target` take an argument of type `ty` by implicit
+    // borrow: a reference or pointer parameter for an operand that is neither (see `Gen::arg_kinds`)?
+    fn borrowed_arg(self: &Self, target: DefId, pi: usize, ty: TypeId) bool {
+        if self.decl_kind(target) != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        let fa = unsafe &*(&*self.pkg).module_ast_const(target.module);
+        let ps = fa.at_const(target.node).as_data.function.params;
+        if pi >= ps.len as usize {
+            return false;
+        }
+        let pk = fa.type_at(fa.type_of(unsafe fa.list(ps)[pi])).kind;
+        let ok = self.f.ty(ty).kind;
+        return (pk == TypeKind::TYPE_REFERENCE || pk == TypeKind::TYPE_POINTER) && ok != TypeKind::TYPE_REFERENCE && ok != TypeKind::TYPE_POINTER;
+    }
+
+    // The binding place expression `e` is rooted at, through fields, dereferences and indexes;
+    // none for another root (a call result, a literal). Each step moves to a child node.
+    fn root_binding(self: &Self, e: NodeId) DefId {
+        let mut c = e;
+        for _i in 0..unsafe (&*self.f.ast).nnodes() {
+            let n = self.f.node(c);
+            if n.kind == NodeKind::NODE_IDENTIFIER {
+                return self.f.res(c);
+            }
+            if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+                c = n.as_data.member.object;
+            } else if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Star {
+                c = n.as_data.unary.operand;
+            } else if n.kind == NodeKind::NODE_INDEX {
+                c = n.as_data.index.object;
+            } else {
+                break;
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    // Can evaluating expression `id` write a place rooted at binding `r`: an assignment to, a
+    // `&mut` of, or a call of a method not taking `&self` on such a place, or such a place passed to
+    // a call? True for an expression kind this does not follow (a block, a closure, a literal of
+    // an aggregate) and past WALK_MAX levels.
+    fn may_write(self: &Self, id: NodeId, r: DefId, depth: u32) bool {
+        if depth > WALK_MAX {
+            return true;
+        }
+        let n = self.f.node(id);
+        let k = n.kind;
+        if k == NodeKind::NODE_LITERAL || k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
+            return false;
+        }
+        if k == NodeKind::NODE_MEMBER {
+            return !n.as_data.member.path && self.may_write(n.as_data.member.object, r, depth + 1);
+        }
+        if k == NodeKind::NODE_CAST {
+            return self.may_write(n.as_data.cast.expression, r, depth + 1);
+        }
+        if k == NodeKind::NODE_INDEX {
+            return self.may_write(n.as_data.index.object, r, depth + 1) || self.may_write(
+                n.as_data.index.index,
+                r,
+                depth + 1,
+            );
+        }
+        if k == NodeKind::NODE_UNARY {
+            let u = n.as_data.unary;
+            if u.op == tt::TokenType::Ampersand && u.qualifier == TypeQualifier::TYPE_QUAL_MUT && self.same_def(
+                self.root_binding(u.operand),
+                r,
+            ) {
+                return true;
+            }
+            return self.may_write(u.operand, r, depth + 1);
+        }
+        if k == NodeKind::NODE_BINARY {
+            return self.may_write(n.as_data.binary.left, r, depth + 1) || self.may_write(
+                n.as_data.binary.right,
+                r,
+                depth + 1,
+            );
+        }
+        if k == NodeKind::NODE_ASSIGNMENT {
+            let bd = n.as_data.binary;
+            return self.same_def(self.root_binding(bd.left), r) || self.may_write(bd.left, r, depth + 1) || self.may_write(
+                bd.right,
+                r,
+                depth + 1,
+            );
+        }
+        if k != NodeKind::NODE_CALL {
+            return true;
+        }
+        let cd = n.as_data.call;
+        let cn = self.f.node(cd.callee);
+        if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path {
+            let obj = cn.as_data.member.object;
+            if self.same_def(self.root_binding(obj), r) && !self.shared_receiver(id) || self.may_write(
+                obj,
+                r,
+                depth + 1,
+            ) {
+                return true;
+            }
+        } else if cn.kind != NodeKind::NODE_IDENTIFIER && cn.kind != NodeKind::NODE_MEMBER && cn.kind != NodeKind::NODE_GENERIC_SPECIALIZATION {
+            if self.may_write(cd.callee, r, depth + 1) {
+                return true;
+            }
+        }
+        for i in 0..cd.args.len {
+            let b = unsafe self.f.list(cd.args)[i as usize];
+            if self.same_def(self.root_binding(b), r) || self.may_write(b, r, depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Does method call `id` take its receiver as `&self` (no write through it)?
+    fn shared_receiver(self: &Self, id: NodeId) bool {
+        switch self.f.call_info(id) {
+            Some(v) => {
+                let t = DefId { module: ci_module(v), node: ci_decl(v) };
+                if (v & 0xFFu64) == 0 || self.decl_kind(t) != NodeKind::NODE_FUNCTION {
+                    return false;
+                }
+                let fa = unsafe &*(&*self.pkg).module_ast_const(t.module);
+                let ps = fa.at_const(t.node).as_data.function.params;
+                if ps.len == 0 {
+                    return false;
+                }
+                let pt = fa.at_const(unsafe fa.list(ps)[0]).as_data.parameter.ty;
+                return pt != NODE_NONE && fa.at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE && fa.at_const(pt).as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT;
+            },
+            None => {
+                return false;
+            },
+        };
+    }
+
+    const fn same_def(self: &Self, a: DefId, b: DefId) bool {
+        return a.node != NODE_NONE && a.node == b.node && a.module == b.module;
+    }
+
     // Store operand `op` into a fresh temp and return the temp's place (for projections off values).
     fn spill(self: &mut Self, op: ir::OperandId, sp: tok::Span) ir::PlaceId {
         let ty = self.body.operands.at(op as usize).ty;
@@ -1105,6 +1309,13 @@ extend Lowerer {
     pub fn lower_const(self: &mut Self, cnode: NodeId) bool {
         let cd = self.f.node(cnode).as_data.const_def;
         return self.lower_value_body(cd.value, self.nty(cnode), self.f.node(cnode).span);
+    }
+
+    /// `lower_const` through a Lowerer that may hold an earlier body (`retarget` it first for another
+    /// module): its pools keep their heap capacity.
+    pub fn relower_const(self: &mut Self, cnode: NodeId) bool {
+        self.begin_body(cnode);
+        return self.lower_const(cnode);
     }
 
     /// Lower a bare TYPED expression as a one-return body (the facade behind expression-level
@@ -5192,6 +5403,7 @@ extend Lowerer {
                     rop = self.copy_op(self.spill(rop, sp));
                 }
             }
+            rop = self.pin_read(rop, recv, d.args, 0, target, 0);
             argv.push(rop);
         } else if target.node == NODE_NONE {
             // fn-value call (closure, fn pointer): the callee is an operand
@@ -5227,11 +5439,12 @@ extend Lowerer {
                 self.list_node = a;
                 continue;
             }
-            let op = self.lower_expr(a);
+            let mut op = self.lower_expr(a);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
             self.mark_user_move(op);
+            op = self.pin_read(op, a, d.args, i + 1, target, argv.len());
             argv.push(op);
         }
         self.tp(ir::TP_CALL, 0, id);
@@ -8460,8 +8673,70 @@ extend Lowerer {
             self.avput(blocks);
             return;
         }
-        // integers / ranges / opaque literals: a comparison chain, one edge at a time
+        // integers / ranges / opaque literals: a comparison chain, one edge at a time, after the
+        // switch over the pieces `int_switch_plan` gives cases (`sw[e]` 1 for each; `dp` is the piece
+        // the switch's default edge reaches untested)
+        let mut sw = self.avget();
+        let mut dp = pat::P_NONE;
+        let ncase = self.int_switch_plan(t, cx, &n, &mut sw, &mut dp);
+        if ncase != 0 {
+            let mut blocks = self.avget();
+            for e in 0..n.edge_len {
+                blocks.push(
+                    if sw[e as usize] == 1 {
+                        self.open_block();
+                    } else {
+                        ir::IR_NONE;
+                    },
+                );
+            }
+            let dflt = self.open_block();
+            let mut tm = ir::term0(ir::TM_SWITCH, sp);
+            tm.a = self.copy_op(pl);
+            tm.sw_start = self.body.switch_pool.len() as u32;
+            let mut first = dflt;
+            for e in 0..n.edge_len {
+                if sw[e as usize] != 1 {
+                    continue;
+                }
+                if first == dflt {
+                    first = blocks[e as usize];
+                }
+                let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
+                let hi = if ep.kind == pat::PC_INT {
+                    ep.val;
+                } else {
+                    ep.hi;
+                };
+                // A piece holds at most SW_PIECE_MAX values.
+                let mut v = ep.val;
+                while v <= hi {
+                    self.body.switch_pool.push((v as u64 & 0xFFFFFFFFu64) << 32 | blocks[e as usize] as u64);
+                    v += 1;
+                }
+            }
+            tm.sw_len = ncase;
+            tm.t0 = dflt;
+            self.seal(tm, first);
+            for e in 0..n.edge_len {
+                if sw[e as usize] != 1 {
+                    continue;
+                }
+                let mut next = dflt;
+                for e2 in e + 1..n.edge_len {
+                    if sw[e2 as usize] == 1 {
+                        next = blocks[e2 as usize];
+                        break;
+                    }
+                }
+                self.emit_tree(t, cx, t.edges.at((n.edge_start + e) as usize).child, vpl, cache, armb, next, sp);
+            }
+            self.avput(blocks);
+        }
         for e in 0..n.edge_len {
+            if ncase != 0 && (sw[e as usize] == 1 || e == dp) {
+                continue;
+            }
             let eid = (n.edge_start + e) as usize;
             let ep = *cx.pats.at(t.edges.at(eid).pat as usize);
             let hit = self.open_block();
@@ -8546,11 +8821,66 @@ extend Lowerer {
             self.branch_bool(cond, hit, miss, sp);
             self.emit_tree(t, cx, t.edges.at(eid).child, vpl, cache, armb, miss, sp);
         }
+        self.avput(sw);
         if n.default_child != pat::P_NONE {
             self.emit_tree(t, cx, n.default_child, vpl, cache, armb, cont, sp);
+        } else if dp != pat::P_NONE {
+            self.emit_tree(t, cx, t.edges.at((n.edge_start + dp) as usize).child, vpl, cache, armb, cont, sp);
         } else {
             self.seal(ir::term0(ir::TM_UNREACHABLE, sp), cont);
         }
+    }
+
+    // The switch plan of integer test node `n` (its edges are disjoint pieces of the matched type):
+    // `sw[e]` is 1 when the values of edge `e`'s piece are switch cases, which a piece of at most
+    // SW_PIECE_MAX values is while the cases stay within SW_CASES_MAX; a wider piece keeps its test.
+    // With no default child the pieces cover the type, so the widest one is the switch's default
+    // edge (`dp`) and needs no test. The case count; 0 keeps the whole chain: a type past the 32-bit
+    // case encoding, a head of another kind, or fewer than two cases.
+    fn int_switch_plan(
+        self: &Self,
+        t: &pat::DecisionTree,
+        cx: &pat::PatCx,
+        n: &pat::DtNode,
+        sw: &mut Vector<u32>,
+        dp: &mut u32,
+    ) u32 {
+        let mut widest: i64 = 0;
+        let mut wi = pat::P_NONE;
+        for e in 0..n.edge_len {
+            let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
+            if !(ep.kind == pat::PC_INT || ep.kind == pat::PC_RANGE && ep.arity == 1) || ep.bits > 32 {
+                return 0;
+            }
+            sw.push(0);
+            let w = if ep.kind == pat::PC_INT {
+                1;
+            } else {
+                ep.hi - ep.val + 1;
+            };
+            if n.default_child == pat::P_NONE && w > widest {
+                widest = w;
+                wi = e;
+            }
+        }
+        let mut nc: i64 = 0;
+        for e in 0..n.edge_len {
+            let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
+            let w = if ep.kind == pat::PC_INT {
+                1;
+            } else {
+                ep.hi - ep.val + 1;
+            };
+            if e != wi && w <= SW_PIECE_MAX && nc + w <= SW_CASES_MAX {
+                sw.set(e as usize, 1);
+                nc += w;
+            }
+        }
+        if nc < 2 {
+            return 0;
+        }
+        *dp = wi;
+        return nc as u32;
     }
 
     // Tree-driven match lowering: emit the tree, then each arm exactly once (bindings from the

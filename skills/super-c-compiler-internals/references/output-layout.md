@@ -32,14 +32,15 @@ and every tree comparison compares within one profile.
 |------|---------|-------------|
 | `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks, dyn fat types, `@emit_macro` templates, assert helpers, the `__sc_wrap` address conversion, extern and block-wrapper prototypes, dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |
 | `__sc_ext.h` | only when needed: the extern and block-wrapper prototypes with an array declarator of an aggregate (C needs the element complete, and the forward header includes no definition header), after the includes of those definition headers and copies of the declarations they spell | every unit, after `__sc_fwd.h` |
-| `__sc_t/<stem>.h` | one definition header per emitted type (struct, union, payload enum, payload-less enum, generic instance, closure environment, result carrier): the includes of the definition headers of the types its body embeds by value, the type's `typedef` line, copies of the other declarations the body spells, the definition, then the type's layout checks (`_Static_assert` of size and alignment) | units that need the type complete; definition headers that embed it by value or as an array element; prototype headers whose `_ret` typedefs name it or whose array declarators have it as element |
-| `<mod>.h` | the definition headers of the result carriers its `_ret` typedefs name and those of the element types of its array declarators (parameters, constants), copies of the type declarations its prototypes spell, `_ret` typedefs, cross-TU prototypes, constant and descriptor declarations the module owns | TUs that spell one of its symbols (and the module's own shards) |
-| `<mod>.c`, `<mod>__p<k>.c` | the includes (forward header, the definition headers the module's text needs, the prototype headers of the modules it spells symbols of), copies of the typedef lines of the types it names only through pointers, then the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
+| `__sc_t/<stem>.h` | one definition header per emitted type (struct, union, payload enum, payload-less enum, generic instance, closure environment, result carrier): the includes of the definition headers of the types its body embeds by value, the type's `typedef` line, copies of the other declarations the body spells, the definition, then the type's layout checks (`_Static_assert` of size and alignment) | units that need the type complete (also as the result carrier of a `_ret` typedef or the element of an array declarator they declare); definition headers that embed it by value or as an array element; prototype headers whose `_ret` typedefs name it or whose array declarators have it as element |
+| `<mod>.h` | the definition headers of the result carriers its `_ret` typedefs name and those of the element types of its array declarators (parameters, constants), copies of the type declarations its prototypes spell, `_ret` typedefs, cross-TU prototypes, constant and descriptor declarations the module owns | C code that calls the module (the module's interface); no generated file (a unit declares what it uses) |
+| `<mod>.c`, `<mod>__p<k>.c` | the includes (forward header, the definition headers the module's text and its declarations need), copies of the typedef lines of the types it and its declarations name only through pointers, the cross-TU declarations (of every prototype header) its text spells, `_ret` typedefs first (`XDecls`, below), then the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
-| `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point | the next build |
+| `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point; `packs<TAB>n`, the pack count, read the same way; `pch<TAB>1` when the units compile through the precompiled header of `__sc_fwd.h` (from `PCH_UNITS`, four, units that include it: each shard that compiles alone, each pack), which a build that plans the tree without its emission reads | the next build |
 | `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
 | `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). The runtime (`super_rt.c`), the `__ext*` wrappers and a test runner compile on their own | the build (the only C unit of its members) |
-| `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c`): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
+| `__sc_pack<k>.c` | only for a larger program with at least two units of one shard and less than `PACK_UNIT` (64 KiB) of C: one `#include` per such unit whose file stem hashes to pack `k` modulo the pack count, in write order, written after every unit (`pack_plan`). The count is `shard_policy` of those units' bytes from the previous `packs` line of `__sc_shards`; every pack below the count is written, an empty one too. The build compiles each pack and none of its members | the build (the only C unit of its members) |
+| `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c` and the packs): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
 
 Every include line is relative (`../` per module directory level); the tree compiles
 with no `-I` flag. An `extern "C" "<header>"` header and an external C source (the `__ext<k>_`
@@ -88,7 +89,7 @@ the header of the type it collides with.
   the body embeds by value: a declared name outside parentheses followed by a declarator
   name, and the element type of every array declarator, also below a pointer or in a
   function-pointer parameter: C rejects an array of an incomplete type), a unit from its
-  spelling row (`FwdDecls::want`, no scan of the unit text). C11
+  spelling row (`FwdDecls::want`), plus those its cross-TU declarations spell. C11
   allows a repeated typedef, and an enum copy keeps its `SUPER_ENUM_` include guard. C11
   has no forward-declared enum, and prototypes take enums by value, so a prototype header
   gets the full enum.
@@ -112,7 +113,8 @@ the header of the type it collides with.
   `tn_recent`), never reach the output.
 - Layout checks live in the definition header of the checked type, so a unit checks the
   types it includes and a new type changes no unit; an extern enum keeps its check in its
-  module's first shard. A header struct or union has no layout check: its field checks
+  module's first shard. Every defined instance of a module's generic aggregate is checked, whichever
+  module's records name it (`inst_recs`). A header struct or union has no layout check: its field checks
   follow the extern-block includes in `__sc_fwd.h`, so every unit runs them once. The checks are rendered with
   `no_edges` set: they record no use edge and no type need for the module's unit.
 - The headers of `extern "C" "<header>"` blocks are global (`__sc_fwd.h`): every TU can
@@ -162,12 +164,16 @@ the header of the type it collides with.
   declaration of the type; the enclosing symbol records its owner. A context is
   a module TU or `CTX_INST | owner` for an owner's instance shard, and the assembly-time
   renderers (constants, descriptors, dyn tables, block wrappers) switch to the owner's
-  context. A shard includes the prototype headers of its symbol row plus its own
-  module's; its definition headers come from the type-need row (above), and the type
-  edges now only keep a module's TU alive for the transitive TU pruning. Symbols spelled without a
+  context. A shard declares the cross-TU declarations its text spells, from one identifier
+  scan of the text of its module TU or instance unit (`XDecls`, `xd_rows`: the rows on up to
+  eight workers, the largest first; 29 ms of CPU for the compiler's 16 MB of C, about 5 ms of
+  wall time) against the declared names of every prototype header (`decl_name`); C parses
+  every declaration it includes: whole prototype headers cost the compiler's build about 10%
+  of its clang compile and 4% of its gcc one. Its definition headers come from the type-need row
+  (above), and the edges only keep a module's TU alive for the transitive TU pruning. Symbols spelled without a
   module prefix of their own (`String__free` and `Vector__T__push` led by an `inst_name`
   segment, `__sc_ti__T`, fixed-text `Global__alloc`) record their owner explicitly; a new spelling path that omits the
-  edge fails the strict C gate with an implicit declaration. A query that only asks
+  edge can prune the TU that defines the symbol (a link error). A query that only asks
   whether something exists spells nothing: an edge recorded by a spelling the output
   never uses adds an include, and when a memo answers the same query in one worker but
   not in a parallel shard, the tree depends on the worker count (`is_destructible`
@@ -239,24 +245,42 @@ each dependency path once per build and walks the generated tree without a stat 
 Measured on the release compiler with a no-op C compiler (`--cc=true`,
 `SC_CEMIT_STATS=1`), which isolates emission from compilation: the assembly stage takes
 1 to 2 ms; the write stage 240 to 260 ms, of which the build engine's per-file sink
-(`sync` in the probe report, 293 files) takes 180 to 210 ms against 165 ms for the 162
+(`sync` in the probe report, 293 files) took 180 to 210 ms against 165 ms for the 162
 files of the old layout. Three costs had to be removed to get there:
 
 - The object cache hashed every included header again for every unit (7x with
   dependency-local headers): `ch_hash_file` now memoizes each file's transitive hash per
-  build, with include paths normalized (`dir/../x.h` -> `x.h`) so every including
-  directory hits the same entry.
-- `open_out` created parent directories with one `mkdir` per path component for every
-  file; it now opens first and creates directories only when that fails.
+  build, keyed by the normalized include path (`dir/../x.h` -> `x.h`, so every including
+  directory hits the same entry), and hashes the unit, header and unity member texts the
+  emitter handed the sink from memory (`CcStream.htext`): only a file the build never
+  held is read.
+- Parent directories were created with one `mkdir` per path component for every file;
+  `publish_file` now opens first and creates directories only when that fails, and
+  `mkdir_p` stats the full path before it walks the components.
 - The spelling rows are two bit matrices (types, symbols) of `(2n+1) x ceil(n/64)`
   words per mangler instead of three byte matrices: about 5 KiB instead of 51 KiB per
   parallel shard for the compiler's 92 modules.
 
-The manifest hash mixes eight bytes per step, each word read with one copy. After the
-stream, the build engine's safety-net sync compares only the files the stream never
-synced (`CcStream.synced`; the orphan sweep still walks the tree), the sink creates each
-output directory once per build, and a tree that did not exist before the build skips
-the emitter's orphan pruning.
+One tree: the emitter writes `gen_root` in place and the C compiler reads it. Before, a
+manifest build wrote every file into `raw/` and its sink wrote it again into a
+content-synced `gen/`, the compiled tree (about 95 ms per emitting build on macOS, 24 to
+49 ms on Linux, 254 to 350 ms on Windows). Now `publish_file` (`sc_publish`) compares each
+file with the text first (its size, then its bytes; never the manifest's hash, which would
+hide a hand edit) and writes only a changed file, with one `write` call, so an unchanged
+file keeps its mtime, the staleness anchor of its object. The sink hears whether each file
+changed (`CcStream.rewritten`, the same-second guard of `obj_stale`). The headers are
+published on up to four workers (`publish_batch`; file creation in one directory scales
+about 2x on APFS: at `--jobs=4` the write stage less its sink takes 82 instead of 151 ms on a
+fresh tree), then recorded and reported in manifest order, so the tree, the manifest and the
+sink's order do not depend on the worker count. The manifest hash is
+`skey_mix(FNV_BASIS, str_id(text))` over each file's whole text. Measured on the
+self-build (`--jobs=1 --cc=/usr/bin/true`, min of 3): the write stage 363 to 141 ms on a
+fresh tree and 284 to 81 ms on an unchanged one; tree files created 2741 to 1369 cold, and
+none on an unchanged tree; `mkdir` calls 3778 to 236; the write stage's allocations
+280k to 195k cold.
+
+A tree that did not exist before the build skips the emitter's orphan pruning, and the
+pruning stats only names that are not `.c` or `.h`.
 
 ## Shard policy
 

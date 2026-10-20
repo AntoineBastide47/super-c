@@ -18,7 +18,8 @@ set holds above the baseline, then each further row's `-m` flag; the `aarch64-fe
 `x86-features` probes check them under the build's flags, for the features beyond the baseline
 only) and `push_target_attr(set, build, target)` (a function's C `target` attribute: the x86 flag
 names, or `SC_TGT_A64(clang, gcc)` with clang's `+ext` list and GCC's `arch=armv8.N-a+ext`, which
-the runtime header chooses). `IMPLIED` is closed by bounded passes: an implication may name a later row.
+the runtime header chooses). `IMPLIED` is closed by Warshall's algorithm (an implication may name a later
+row), with the bit test and the join spelled inline: every compile-time evaluation interprets it.
 `Manifest.target` carries the platform. `Package.features` holds the build's closed set (the host
 baseline by default); `bsys::features_for` computes it from build.toml and `--target-feature`,
 `main.spc` for a bare build and the `lint` command (`loader::set_load_target`, read by

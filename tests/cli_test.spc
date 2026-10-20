@@ -12,6 +12,8 @@ import build_system::build as bsys;
 import build_system::objcache as ocache;
 import build_system::probe as probe;
 import driver_shim as shim;
+import std::parallel::runtime as prt;
+import std::parallel::sync as psync;
 
 struct Cmd {
     pub b: [char; 2048],
@@ -2378,12 +2380,17 @@ fn test_timeout_dumps_child_processes() {
     let root = p.dir();
     p.mkfile(
         "sleeper.spc",
-        "import std::parallel::time as time;\nfn main() i32 {\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
+        "import stdlib;\nimport std::parallel::time as time;\nfn main() i32 {\n  if stdlib::get_env(\"SLEEPER_NOW\").is_some() {\n    return 0;\n  }\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
     );
     let mut out = String::from_str("build -o ");
     out.push_str(root);
     out.push_str("/sleeper");
     assert(p.compile_flags(out.as_str(), "sleeper.spc").ok(), "the child program builds");
+    // The first exec of a fresh binary pays the OS launch assessment (macOS: 50-200 ms idle, seconds under
+    // a loaded suite). Pay it here, so the hung test's 2 s window holds the hang alone: a child still
+    // starting at the deadline has no handler yet and prints nothing.
+    let mut warm = format("{}/sleeper", root);
+    assert(cli::run_with(warm.cstr(), null, null, null, "SLEEPER_NOW=1") == 0, "the child program runs");
     let mut main = String::from_str(
         "import stdlib;\n@test(timeout = 2)\nfn runs_a_hung_child() {\n  let _ = stdlib::system(\"",
     );
@@ -4893,6 +4900,85 @@ fn small_program_compiles_as_one_unit() {
     assert(unsafe shim::sc_mtime(uo.cstr()) != 0 && unsafe shim::sc_mtime(mo.cstr()) == 0, "only the unit compiles");
 }
 
+// A program over the one-unit limit compiles its small units in packs: `__sc_pack<k>.c` includes them,
+// the build compiles the pack (no object of its members), and `__sc_shards` records the pack count. An
+// edit of one member compiles its pack again, and nothing else.
+@test
+fn small_units_compile_in_packs() {
+    let _unit = cli::set_env("SC_UNITY_MAX", "1"); // over the limit: no `__sc_unity.c`
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 3;\n}\n");
+    p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::three();\n}\n");
+    let root = p.dir();
+    assert_eq(cli::superc_in(root, "run").exit, 3);
+    let pack = cli::read_text(format("{}/build/debug/raw/__sc_pack0.c", root).as_str());
+    assert(
+        pack.contains("#include \"main.c\"") && pack.contains("#include \"util.c\""),
+        "the pack includes the modules",
+    );
+    assert(cli::read_text(format("{}/build/debug/raw/__sc_shards", root).as_str()).contains("\npacks\t1\n"));
+    let mut po = format("{}/build/debug/obj/__sc_pack0.o", root);
+    let mut mo = format("{}/build/debug/obj/main.o", root);
+    assert(unsafe shim::sc_mtime(po.cstr()) != 0 && unsafe shim::sc_mtime(mo.cstr()) == 0, "only the pack compiles");
+    p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 4;\n}\n");
+    // No object cache: a run before this one may hold the edited pack's object.
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
+    assert(r.ok() && r.out_has("\"stale\":1,"), "the edit compiles its pack only");
+    assert_eq(cli::superc_in(root, "run").exit, 4);
+}
+
+// A program of separate units compiles `__sc_fwd.h` once, precompiled (`obj/__sc_fwd.h.gch`), and
+// every unit loads it. A header it includes changes in place, its size kept (clang then checks no
+// mtime, and gcc's dependency list of a unit names no header of the precompiled one): the header and
+// the units compile again, and the program sees the new text.
+@test
+fn precompiled_header_follows_its_includes() {
+    let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("val.h", "static inline int val(void) { return 41; }\n");
+    // `println` brings the std units: enough of them for the precompiled header.
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"val.h\" {\n    fn val() i32;\n}\n\nfn main() i32 {\n    println(\"{}\", unsafe val());\n    return unsafe val();\n}\n",
+    );
+    let root = p.dir();
+    assert_eq(cli::superc_in(root, "run").exit, 41);
+    let mut gch = format("{}/build/debug/obj/__sc_fwd.h.gch", root);
+    assert(unsafe shim::sc_mtime(gch.cstr()) != 0, "the header is precompiled");
+    assert(cli::read_text(format("{}/build/debug/obj/main.cmd", root).as_str()).contains(" -include "));
+    p.mkfile("val.h", "static inline int val(void) { return 42; }\n");
+    assert_eq(cli::superc_in(root, "run").exit, 42);
+}
+
+// A compiler that cannot precompile the header: the units parse its text, and the next build of an
+// unchanged header does not try again.
+@test
+fn units_parse_the_header_a_compiler_cannot_precompile() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // the compiler is a shell script
+    }
+    let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    println(\"{}\", 7);\n    return 7;\n}\n");
+    p.mkfile(
+        "cc.sh",
+        "#!/bin/sh\nfor a in \"$@\"; do\n    if [ \"$a\" = c-header ]; then echo x >> \"$(dirname \"$0\")/pch.log\"; exit 1; fi\ndone\nexec cc \"$@\"\n",
+    );
+    let root = p.dir();
+    let mut cmd = String::new();
+    cmd.format_into("chmod +x \"{}/cc.sh\"", root);
+    assert(cli::run_quiet(cmd.cstr()) == 0, "chmod");
+    let mut a = String::new();
+    a.format_into("run \"--cc={}/cc.sh\"", root);
+    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", a.as_str()).exit, 7);
+    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", a.as_str()).exit, 7);
+    assert(cli::read_text(format("{}/pch.log", root).as_str()).as_str() == "x\n", "one attempt");
+    assert(!cli::read_text(format("{}/build/debug/obj/main.cmd", root).as_str()).contains(" -include "));
+}
+
 // Two modules that bind one C function as `@blocking` get a wrapper each: the wrappers are named by
 // their module, so the program links (one name for both was a duplicate symbol).
 @test
@@ -6817,6 +6903,49 @@ fn main() i32 {
     assert_eq(p.run_bin(), 140);
 }
 
+// `--jobs=N` bounds the task pool the frontend runs on: the load's job count is the pool's worker
+// count, set before its first task.
+@platform(!wasm)
+@test
+fn load_jobs_bound_the_worker_pool() {
+    loader::set_load_jobs(3);
+    let wg = psync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        w.done();
+    };
+    wg.wait();
+    assert_eq(prt::worker_count(), 3usize);
+    loader::set_load_jobs(1);
+    prt::shutdown();
+}
+
+@platform(!windows)
+extern "C" "sys/stat.h" {
+    fn chmod(path: *const char, mode: u32) i32;
+}
+
+// An import resolves to a module in a directory that exists but does not list (search permission
+// without read permission): the import lookup opens the file instead of taking the directory for
+// missing. A root user lists every directory, so the test cannot fail there.
+@platform(!windows)
+@test
+fn import_resolves_under_an_unlistable_directory() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("lib/lib.spc", "pub fn seven() i32 {\n    return 7;\n}\n");
+    p.mkfile("main.spc", "import lib;\n\nfn main() i32 {\n    return lib::seven() - 7;\n}\n");
+    let mut d = format("{}/lib", p.dir());
+    assert(unsafe chmod(d.cstr(), 0o111) == 0, "the directory loses its read permission");
+    let r = p.compile("main.spc");
+    // The scratch cleanup lists the directory.
+    let _ = unsafe chmod(d.cstr(), 0o755);
+    assert(r.ok(), "the import resolves");
+}
+
 // Only the root module's `main` is the program entry. A `main` in another module, of any signature,
 // and a method named `main` are ordinary functions with their module's symbols: the modules link,
 // and the root calls each.
@@ -6890,6 +7019,33 @@ fn main() i32 {
     let cc = p.cc_build("");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 21);
+}
+
+// Glob imports search each imported module's transitive imports before the next glob import: `pick`
+// comes from `c`, which `a` imports, not from `b`; `c` sits in both closures, and `only_b` is found
+// past it.
+@test
+fn glob_import_searches_each_closure_in_order() {
+    let p = cli::proj_new();
+    p.mkfile("c.spc", "pub fn pick() i32 { return 3; }\n");
+    p.mkfile("a.spc", "import c;\npub fn from_a() i32 { return c::pick(); }\n");
+    p.mkfile("b.spc", "import c;\npub fn pick() i32 { return 2; }\npub fn only_b() i32 { return c::pick() * 10; }\n");
+    p.mkfile(
+        "main.spc",
+        M"(import a as *;
+import b as *;
+extern "C" { fn exit(code: i32) void; }
+fn main() i32 {
+  unsafe exit(pick() + only_b());
+  return 0;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the program compiles");
+    let cc = p.cc_build("");
+    assert(cc.ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 33);
 }
 
 // External C code imports: a backing header auto-discovers its same-stem .c sibling; @c.source pulls a
@@ -9115,6 +9271,29 @@ fn project_sweep_removes_idle_outputs() {
     assert(unsafe shim::sc_mtime(own.cstr()) != 0, "the build's own tree stays");
 }
 
+// A root beside the manifest (`root = "main.spc"`) puts the default out-dir where that root's bare build
+// trees would be (`build/<profile>`): the project sweep keeps the engine's own tree there, whose emitted
+// files a build under a fresh emit stamp leaves as old as they are.
+@test
+fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // `find` and `touch -t` need a POSIX host
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build").ok(), "the first build");
+    age_tree(format("{}/build/debug/raw", root).as_str());
+    age_tree(format("{}/build/.sweep", root).as_str());
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", "build");
+    assert(r.ok() && r.out_has("\"skip_emit\":true"), "a build under a fresh emit stamp and an old sweep stamp");
+    let mut rt = format("{}/build/debug/raw/super_rt.h", root);
+    let mut obj = format("{}/build/debug/obj", root);
+    assert(unsafe shim::sc_mtime(rt.cstr()) != 0, "the sweep keeps the engine's tree");
+    assert(unsafe shim::sc_mtime(obj.cstr()) != 0, "and its objects");
+}
+
 // `super-c clean` runs both sweeps now, whatever their stamps: the idle out-dir entries and the dead cache
 // namespaces go, the fresh tree and the live namespace stay. `--full` removes the out-dir and the
 // whole cache root instead; `--cache` is no longer a flag.
@@ -9368,6 +9547,48 @@ pub fn wasm_loop(b: &mut bench::Bencher) {
     let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --filter=zzz");
     assert_eq(none.exit, 1);
     assert(none.out_shows("bench: no benchmark name contains 'zzz'"), "a filter that selects nothing is an error");
+}
+
+// The generated bench runner calls each benchmark directly. The coroutine and cancellation reachability
+// is package-wide: a benchmark held as a fn value, which here reaches a cancellable wait, made every
+// fn-value call in task-reachable code a cancellation edge, so `apply` carried a probe after `f(x)` that
+// no other program built from it has.
+@test
+fn bench_runner_names_no_benchmark_as_a_fn_value() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile(
+        "bench/lane.spc",
+        M"(import std::testing::bench as bench;
+import std::parallel::sync as sync;
+fn twice(x: i32) i32 {
+    return x * 2;
+}
+fn apply(f: fn(i32) i32, x: i32) i32 {
+    return f(x);
+}
+@bench
+pub fn lane(b: &mut bench::Bencher) {
+    while b.running() {
+        let wg = sync::WaitGroup::new();
+        wg.add(1);
+        let w = wg.clone();
+        launch || {
+            assert(apply(twice, 3) == 6);
+            w.done();
+        };
+        wg.wait();
+    }
+}
+)",
+    );
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --no-run");
+    assert(r.ok(), "the runner builds");
+    let c = cli::read_text(format("{}/build/bench/debug/raw/bench/lane.c", root).as_str());
+    assert(c.as_str().contains("lane__apply(lane__twice, 3"), "the task calls apply");
+    assert(!c.as_str().contains("cancel_probe"), "no fn-value call of the benchmark carries a cancellation probe");
 }
 
 // `super-c test --filter=S` builds only the test files with a test whose name contains S: a file without
@@ -9673,9 +9894,9 @@ fn build_paths_with_spaces() {
 }
 
 // Staleness gates, end to end: a no-change build rewrites neither generated C nor objects nor the
-// binary; a header-only change (a struct rename lands in the module's type header, not in main.c) recompiles the
-// dependent object while its unchanged C file keeps its mtime; a manifest cflags change invalidates
-// every object through the command fingerprint, again without touching the generated C.
+// binary; a struct rename lands in the module's type header and a new public function in no unit that
+// does not call it, so main.c keeps its text and mtime and main.o stays; a manifest cflags change
+// invalidates every object through the command fingerprint, again without touching the generated C.
 @test
 fn build_staleness_gates() {
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
@@ -9685,8 +9906,8 @@ fn build_staleness_gates() {
         "src/main.spc",
         "import util;\n\nfn main(argv: Vector<str>) i32 {\n    return util::v(argv.len() as i32 - 1);\n}\n",
     );
-    // `v` stays a real call (a runtime argument, not inlined), so main.c includes util's
-    // prototype header and nothing of its types.
+    // `v` stays a real call (a runtime argument, not inlined), so main.c declares `v` and spells
+    // nothing of util's types.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
@@ -9694,7 +9915,7 @@ fn build_staleness_gates() {
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut genc = String::new();
-    genc.format_into("{}/build/debug/gen/main.c", root);
+    genc.format_into("{}/build/debug/raw/main.c", root);
     let mut objo = String::new();
     objo.format_into("{}/build/debug/obj/main.o", root);
     let mut bin = String::new();
@@ -9702,7 +9923,7 @@ fn build_staleness_gates() {
     let g1 = p13_mtime(genc.as_str());
     let o1 = p13_mtime(objo.as_str());
     let b1 = p13_mtime(bin.as_str());
-    assert(g1 != 0 && o1 != 0 && b1 != 0, "the build produced gen C, an object, and a binary");
+    assert(g1 != 0 && o1 != 0 && b1 != 0, "the build produced C, an object, and a binary");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "no-change build");
     assert(p13_mtime(genc.as_str()) == g1, "a no-change build does not rewrite generated C");
     assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
@@ -9714,9 +9935,9 @@ fn build_staleness_gates() {
         "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
     );
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "layout-change build");
-    assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the sync keeps its mtime");
+    assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the emission keeps its mtime");
     assert(p13_mtime(objo.as_str()) == o1, "a layout edit main.c never embeds rebuilds no dependent object");
-    // Add a public function: util.h (which main.c includes) changes, main.c's own text does not.
+    // Add a public function: util.h changes, and main.c, which declares only what it calls, does not.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
@@ -9724,7 +9945,7 @@ fn build_staleness_gates() {
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "header-change build");
     assert(p13_mtime(genc.as_str()) == g1, "main.c is still byte-identical");
     let o2 = p13_mtime(objo.as_str());
-    assert(o2 > o1, "a changed included header rebuilds every dependent object");
+    assert(o2 == o1, "a function main.c does not call rebuilds nothing of it");
     // A semantic flag change invalidates through the command fingerprint, not through file times.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\ncflags = [\"-DP13_FLAG=1\"]\n");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "flag-change build");
@@ -9753,11 +9974,11 @@ fn build_type_edit_stays_local() {
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut fwd = String::new();
-    fwd.format_into("{}/build/debug/gen/__sc_fwd.h", root);
+    fwd.format_into("{}/build/debug/raw/__sc_fwd.h", root);
     let fwd_text = loader::read_file(fwd.as_str()).unwrap();
     assert(fwd_text.as_str().find("util__S") < 0, "the forward header declares no type");
     let mut paths = Vector::<String>::new();
-    for rel in "gen/__sc_fwd.h gen/other.c obj/other.o gen/main.c obj/main.o".split(" ") {
+    for rel in "raw/__sc_fwd.h raw/other.c obj/other.o raw/main.c obj/main.o".split(" ") {
         let mut s = String::new();
         s.format_into("{}/build/debug/{}", root, rel);
         paths.push(s);
@@ -9804,7 +10025,7 @@ fn build_new_type_recompiles_no_user() {
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut paths = Vector::<String>::new();
-    for rel in "gen/main.c obj/main.o gen/other.c obj/other.o gen/util.c obj/util.o gen/util.h".split(" ") {
+    for rel in "raw/main.c obj/main.o raw/other.c obj/other.o raw/util.c obj/util.o raw/util.h".split(" ") {
         let mut s = String::new();
         s.format_into("{}/build/debug/{}", root, rel);
         paths.push(s);
@@ -9815,9 +10036,9 @@ fn build_new_type_recompiles_no_user() {
         assert(t0[i] != 0, "the build wrote every recorded file");
     }
     let mut hdr = String::new();
-    hdr.format_into("{}/build/debug/gen/__sc_t/util__Added.h", root);
+    hdr.format_into("{}/build/debug/raw/__sc_t/util__Added.h", root);
     let mut man = String::new();
-    man.format_into("{}/build/debug/gen/__sc_manifest", root);
+    man.format_into("{}/build/debug/raw/__sc_manifest", root);
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {\n    pub z: i64,\n}\n");
     p.mkfile("src/util.spc", src.as_str());
@@ -9941,7 +10162,7 @@ fn build_symbol_segment_includes_no_type() {
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut genc = String::new();
-    genc.format_into("{}/build/debug/gen/main.c", root);
+    genc.format_into("{}/build/debug/raw/main.c", root);
     let text = loader::read_file(genc.as_str()).unwrap();
     assert(text.as_str().find("gen__size__util__K") >= 0, "main.c spells the type in the instance symbol");
     assert(text.as_str().find("__sc_t/util__K.h") < 0, "main.c does not include the type's header");
@@ -10064,8 +10285,11 @@ fn build_lto_probe_fallback() {
         probe_result(rec.as_str(), "thin-lto") == "auto: the compiler rejects -flto=thin",
         "the probe record stores the reason",
     );
-    let mut cmdp = String::new();
-    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, unsafe str::from_cstr(cli::binext()));
+    let mut cmdp = bsys::link_record(
+        format("{}/build", root).as_str(),
+        format("build/rel/app{}", unsafe str::from_cstr(cli::binext())).as_str(),
+    );
+    cmdp.push_str(".cmd");
     let l = loader::read_file(cmdp.as_str()).unwrap();
     assert(l.as_str().find("-flto=auto") >= 0, "the link keeps the automatic mode");
     let mut probe = String::new();
@@ -10201,8 +10425,11 @@ fn build_link_failure_keeps_artifact() {
     assert(r0.ok(), "initial build");
     let mut bin = String::new();
     bin.format_into("{}/build/debug/app{}", root, unsafe str::from_cstr(cli::binext()));
-    let mut cmdp = String::new();
-    cmdp.format_into("{}/build/__link-build_debug_app{}.cmd", root, unsafe str::from_cstr(cli::binext()));
+    let mut cmdp = bsys::link_record(
+        format("{}/build", root).as_str(),
+        format("build/debug/app{}", unsafe str::from_cstr(cli::binext())).as_str(),
+    );
+    cmdp.push_str(".cmd");
     let b1 = p13_mtime(bin.as_str());
     let l1 = switch loader::read_file(cmdp.as_str()) {
         Some(v) => v,
@@ -10273,18 +10500,19 @@ fn build_publication_failure_keeps_artifact() {
     // A directory where the generated file goes refuses the write for every user (root ignores a
     // read-only mode).
     let mut gen = String::new();
-    gen.format_into("{}/build/debug/gen/main.c", root);
+    gen.format_into("{}/build/debug/raw/main.c", root);
     assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0 && unsafe shim::sc_mkdir_p(gen.cstr()) == 0, "the lock is in place");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
-    assert(!r.ok() && r.out_has("build: cannot write"), "the publication failure fails the build");
+    assert(!r.ok() && r.out_has("raw/main.c: "), "the publication failure fails the build and names the file");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
     assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0, "the lock is gone");
     assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 4);
 }
 
 // compile_commands.json: one entry per generated translation unit with a full `arguments` argv, so C
-// tooling (clangd and friends) attaches to the generated tree.
+// tooling (clangd and friends) attaches to the generated tree. A build that changes no row leaves the
+// file as it is, so the tooling does not reload it.
 @test
 fn build_compile_commands_json() {
     let p = cli::proj_new();
@@ -10303,9 +10531,12 @@ fn build_compile_commands_json() {
             assert(s.find("\"directory\": ") >= 0, "entries carry the working directory");
         },
         None => {
-            assert(false, "compile_commands.json exists beside the profile's gen/obj trees");
+            assert(false, "compile_commands.json exists beside the profile's raw/obj trees");
         },
     };
+    let m1 = p13_mtime(dbp.as_str());
+    assert(cli::superc_in(root, "build").ok(), "rebuild");
+    assert(p13_mtime(dbp.as_str()) == m1, "an unchanged database is not rewritten");
 }
 
 // The default `debug` profile compiles unoptimized with frame pointers and no sanitizer; `--sanitizers`

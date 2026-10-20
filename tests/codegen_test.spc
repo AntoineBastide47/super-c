@@ -490,6 +490,227 @@ fn branch_hints(b: &mut h::ExitBatch) {
     b.add("branch hints keep value semantics", SRC, 0);
 }
 
+// An integer match lowers to a native C `switch` (each value of a range piece one case label), so the
+// C compiler builds a jump table; the behavior is checked against `if` chains over every value.
+const BYTE_SWITCH: str = M"(fn sw_byte(c: u8) i32 {
+    return switch c {
+        b'M' => 4,
+        b'0'..=b'9' => 1,
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => 2,
+        b' ' | b'\t' | b'\n' => 3,
+        0x80..=0xFF => 5,
+        _ => 0,
+    };
+}
+fn rf_byte(c: u8) i32 {
+    if c == b'M' {
+        return 4;
+    }
+    if c >= b'0' && c <= b'9' {
+        return 1;
+    }
+    if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' {
+        return 2;
+    }
+    if c == b' ' || c == b'\t' || c == b'\n' {
+        return 3;
+    }
+    if c >= 0x80 {
+        return 5;
+    }
+    return 0;
+}
+fn main() i32 {
+    for i in 0..256 {
+        if sw_byte(i as u8) != rf_byte(i as u8) {
+            return 1;
+        }
+    }
+    return 0;
+}
+)";
+
+@test
+fn integer_switch_is_native() {
+    h::expect_c("an integer match is a native switch", BYTE_SWITCH, "switch (c)");
+    h::expect_c("a range piece lists each value", BYTE_SWITCH, "case 48: case 49:");
+}
+
+fn int_switches(b: &mut h::ExitBatch) {
+    b.add("a byte switch takes the arm of every value", BYTE_SWITCH, 0);
+    // Complete coverage with no catch-all (the widest piece is the default edge) and negative cases.
+    b.add(
+        "a signed switch covering its type takes the arm of every value",
+        M"(fn sw_i8(x: i8) i32 {
+    return switch x { -128 => 1, -5..=-1 => 2, 0 => 3, 1..=126 => 4, 127 => 5, -127..=-6 => 6 };
+}
+fn rf_i8(x: i8) i32 {
+    if x == -128 {
+        return 1;
+    }
+    if x >= -5 && x <= -1 {
+        return 2;
+    }
+    if x == 0 {
+        return 3;
+    }
+    if x >= 1 && x <= 126 {
+        return 4;
+    }
+    if x == 127 {
+        return 5;
+    }
+    return 6;
+}
+fn main() i32 {
+    for i in -128..128 {
+        if sw_i8(i as i8) != rf_i8(i as i8) {
+            return 1;
+        }
+    }
+    return 0;
+}
+)",
+        0,
+    );
+    // A piece too wide to list keeps its comparison beside the switch; cases past i32::MAX of a u32.
+    b.add(
+        "wide pieces and high unsigned cases take their arms",
+        M"(fn sw_u16(x: u16) i32 {
+    return switch x { 0..=999 => 1, 1000 => 2, 1001..=1010 => 3, 60000..=65535 => 4, _ => 0 };
+}
+fn rf_u16(x: u16) i32 {
+    if x <= 999 {
+        return 1;
+    }
+    if x == 1000 {
+        return 2;
+    }
+    if x >= 1001 && x <= 1010 {
+        return 3;
+    }
+    if x >= 60000 {
+        return 4;
+    }
+    return 0;
+}
+fn sw_u32(x: u32) i32 {
+    return switch x { 0xFFFFFFFF => 1, 0x80000000 => 2, 7 => 3, _ => 0 };
+}
+fn main() i32 {
+    for i in 0..65536 {
+        if sw_u16(i as u16) != rf_u16(i as u16) {
+            return 1;
+        }
+    }
+    let ok = sw_u32(0xFFFFFFFF) == 1 && sw_u32(0x80000000) == 2 && sw_u32(7) == 3 && sw_u32(0x7FFFFFFF) == 0 && sw_u32(8) == 0;
+    return if ok { 0; } else { 1; };
+}
+)",
+        0,
+    );
+    // A switch inside a loop: an arm's `break` leaves the loop and `continue` takes the next round;
+    // enum arms that share one body.
+    b.add(
+        "a switch in a loop breaks and continues the loop",
+        M"(enum K { A, B, C, D }
+fn count(s: str) i32 {
+    let mut n: i32 = 0;
+    let mut i: usize = 0;
+    while i < s.len() {
+        let c = s.byte_at(i);
+        i += 1;
+        switch c {
+            b' ' => {
+                continue;
+            },
+            b'.' => {
+                break;
+            },
+            b'0'..=b'9' => {
+                n += 10;
+            },
+            _ => {
+                n += 1;
+            },
+        };
+        n += 100;
+    }
+    return n;
+}
+fn kind(k: K) i32 {
+    let mut t: i32 = 0;
+    for _ in 0..3 {
+        switch k {
+            A | C => {
+                t += 1;
+            },
+            B => {
+                break;
+            },
+            D => {
+                t += 5;
+            },
+        };
+    }
+    return t;
+}
+fn main() i32 {
+    let ok = count("a 1b2. zz") == 422 && kind(K::A) == 3 && kind(K::C) == 3 && kind(K::B) == 0 && kind(K::D) == 15;
+    return if ok { 0; } else { 1; };
+}
+)",
+        0,
+    );
+}
+
+// A `const` of a scalar, an array of scalars or a `str` is a read-only C object (its definition and
+// every declaration say `const`); a constant of a struct, which may hold an `UnsafeCell`, stays
+// writable C data.
+const RO_CONSTS: str = M"(const K: u8 = 3;
+const T: [u16; 3] = [1, 2, 3];
+const S: str = "hi";
+struct P { pub x: i32 }
+const Q: P = P { x: 4 };
+static mut M: i32 = 5;
+fn main() i32 {
+    unsafe M += 1;
+    return K as i32 + T[2] as i32 + S.len() as i32 + Q.x + unsafe M - 18;
+}
+)";
+
+@test
+fn read_only_constants() {
+    h::expect_c("a scalar constant is const", RO_CONSTS, "const uint8_t K = 3;");
+    h::expect_c("an array constant is const", RO_CONSTS, "const uint16_t T[3]");
+    h::expect_c("a str constant is const", RO_CONSTS, "const str S");
+    h::expect_c_absent("a struct constant stays writable", RO_CONSTS, "const P Q");
+    h::expect_c_absent("a static mut stays writable", RO_CONSTS, "const int32_t M");
+    h::expect_exit("read-only constants read their values", RO_CONSTS, 0);
+}
+
+// A bounds check the compiler proves leaves no store of its condition: the folded jump keeps the
+// condition only for the IR re-proof, and no C reads it.
+const PROVEN_INDEX: str = M"(fn sum(s: str) u32 {
+    let mut t: u32 = 0;
+    let mut i: usize = 0;
+    while i < s.len() {
+        t += s.byte_at(i) as u32;
+        i += 1;
+    }
+    return t;
+}
+fn main() i32 {
+    return sum("ab") as i32 - 195;
+}
+)";
+
+@test
+fn a_proven_bounds_check_stores_no_condition() {
+    h::expect_c_absent("no dead condition store", PROVEN_INDEX, "(i >= s.len)");
+    h::expect_exit("the loop reads every byte", PROVEN_INDEX, 0);
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test
@@ -507,5 +728,6 @@ fn exit_cases_00() {
     literals(&mut b);
     const_generics(&mut b);
     branch_hints(&mut b);
+    int_switches(&mut b);
     b.run();
 }

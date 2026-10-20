@@ -7,23 +7,47 @@
 // pointer in a wrapper that does. The image is only ever read by the compiler binary that wrote it.
 import string as cstring;
 
-/// The image being written.
+/// The image being written. A sizing writer writes nothing and counts the bytes a save gives
+/// (`len`), so the save can then write into one allocation of that size.
 pub struct Writer {
     pub buf: String,
+    sizing: bool,
+    size: usize,
 }
 
 extend Writer {
     pub fn new() Writer {
-        return Writer { buf: String::new() };
+        return Writer { buf: String::new(), sizing: false, size: 0 };
+    }
+
+    /// A writer that only counts.
+    pub fn sizing() Writer {
+        return Writer { buf: String::new(), sizing: true, size: 0 };
+    }
+
+    /// The bytes written (counted, for a sizing writer).
+    pub fn len(self: &Writer) usize {
+        if self.sizing {
+            return self.size;
+        }
+        return self.buf.len();
     }
 
     /// Append the `n` bytes at `p`.
     pub fn bytes(self: &mut Writer, p: *const u8, n: usize) {
+        if self.sizing {
+            self.size += n;
+            return;
+        }
         self.buf.push_str(unsafe str::from_raw(p, n));
     }
 
     /// Append `v`, little-endian.
     pub fn u64(self: &mut Writer, v: u64) {
+        if self.sizing {
+            self.size += 8;
+            return;
+        }
         for i in 0..8 {
             self.buf.push_byte((v >> (i * 8) as u64) as u8);
         }
@@ -31,6 +55,10 @@ extend Writer {
 
     /// Pad to a multiple of 16 bytes, so the bytes that follow can be read in place.
     pub fn align(self: &mut Writer) {
+        if self.sizing {
+            self.size = (self.size + 15) / 16 * 16;
+            return;
+        }
         while self.buf.len() % 16 != 0 {
             self.buf.push_byte(0);
         }

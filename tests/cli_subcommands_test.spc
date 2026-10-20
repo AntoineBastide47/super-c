@@ -304,6 +304,39 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(bad.out_has("build: transpiler failed"), "the engine names the failed step");
 }
 
+// The emit stamp records the text the build read: an edit made while the build runs makes the next
+// build transpile again instead of reusing the tree of the old text. The edit lands while the build is
+// stopped right after its load: the per-TU cache image it opens then is a FIFO, whose writer's open
+// returns once the build has opened it. An empty module keeps the stamp's fast path.
+@test
+fn emit_stamp_records_the_text_the_build_read() {
+    if cli::on_wasm() || cli::on_windows() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "import lib;\nimport empty;\n\nfn main() i32 {\n    return lib::v();\n}\n");
+    p.mkfile("src/empty.spc", "");
+    p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 3;\n}\n");
+    p.mkfile("lib.next", "pub fn v() i32 {\n    return 5;\n}\n");
+    let root = p.dir();
+    // The FIFO is the per-TU cache image: the cache must be on.
+    unsafe shim::sc_unsetenv("SC_NO_TU_CACHE".ptr() as *const char);
+    assert_eq(cli::superc_env_in(root, "SC_STAMP_TEST", "1", "build -o app").exit, 0);
+    p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 4;\n}\n");
+    let mut cmd = format(
+        "rm build/debug/raw/.tu_cache && mkfifo build/debug/raw/.tu_cache && {{ \"{}\" build -o app >/dev/null 2>&1 & pid=$!; exec 3> build/debug/raw/.tu_cache; kill -STOP $pid; cat lib.next > src/lib.spc; rm build/debug/raw/.tu_cache; exec 3>&-; kill -CONT $pid; wait $pid; }}",
+        cli::superc_path(),
+    );
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, ""), 0);
+    let next = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(next.exit, 5);
+    assert(next.out_has("phase load"), "the edit made during the build transpiles again");
+    let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "run");
+    assert_eq(same.exit, 5);
+    assert(!same.out_has("phase load"), "an unchanged project skips the transpile");
+}
+
 // A dependency path with a space is escaped as `\ ` in the compiler's .d file; read as written, an
 // unchanged object stays fresh instead of recompiling on every build.
 @test

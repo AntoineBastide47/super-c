@@ -12,8 +12,7 @@ profile builds). The manual clean-room form is
 in the self-hosting skill.
 
 The emitted C tree is `gen_root`: `<root>/build/<profile>/raw` for a bare build,
-`<out-dir>/<profile>/raw` for a manifest build. A manifest build also content-syncs it into
-`<out-dir>/<profile>/gen` for the C compile; compare `raw`, the emitter's output.
+`<out-dir>/<profile>/raw` for a manifest build, which the C compile reads too; compare `raw`.
 
 The gate's form (`ci/gate.sh`, `ci/contract.sh`):
 

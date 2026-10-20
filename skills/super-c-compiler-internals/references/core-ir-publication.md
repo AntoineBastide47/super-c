@@ -83,7 +83,7 @@ record that replaced it (the records stay unless the row says otherwise):
 
 | Reader | Record |
 |--------|--------|
-| the borrow replay of every caller: `relate_result_precision` scanned the callee's `return` statements (`tc_result_attributable`) | `ItemSched.ret_attr`, one byte per item, recorded by `bc_record_ret_attr` right after the module's type check (the driver calls it after `check()`; 2 = unrecorded, so the harness and the language server scan live syntax as before) |
+| the borrow replay of every caller: `relate_result_precision` scanned the callee's `return` statements (`tc_result_attributable`) | `ItemSched.ret_attr`, one byte per item, recorded by `bc_record_ret_attr` right after the module's type check (the driver calls it after `check()`; 2 = unrecorded, so the harness and the language server scan live syntax as before; a function without results records 1 without a scan: no caller reads its verdict) |
 | `emit_order`: the generic-call sites of the module's `mono` table name body nodes | none now: `emit_order` computes every module's row from live syntax (`emit_dep_row`); the recorded rows went with the per-module release |
 | `lint_unused_items`: every resolution slot, attributed to its item by span | the item index's post-typecheck edges (`ItemSched.fin_edges`: each module's `module_edges` run again at the end of its type check, when the checker has added the type-path call resolutions the resolver cannot make, laid out by `build_final` after the frontier), the same attribution the index makes from the id ranges; the `method_refs` table stays (its owner is the function node) |
 | `compute_emit_live`: every resolution slot | the module arena's resolutions (declarations, signatures, constants, pinned bodies, import paths) plus the post-typecheck edges' target modules; the lint driver builds the index (`build_serial`) for the same reason |
@@ -177,11 +177,13 @@ measurement (`SC_ITEM_STATS`) read, before the release.
 | Reflection and zero-size specialization (`lower.spc` binder frames, `layout.spc`) | `has_reflect`, `has_zst_cond`, `IN_SIZEOF`/`IN_ALIGNOF` | module arena: aggregate members, generic parameters | none needed |
 | IR printer, verifier and tests (`ir/print.spc`, `ir/verify.spc`, `tests/core_ir_test.spc`) | every pool | module arena: names for the print | none needed |
 
-Two syntax consumers run before the first lowering and are not blockers: the coroutine and
-cancellation reachability (`Package::reach_compute`: one `co_scan` per module over every node,
-14.9 ms, then `reach_solve`; lowering reads its marks to place safepoints; the language server
-keeps the scans per module and solves them alone) and `Keep::reserve_bodies`
-(one pass over every node to count functions and closures).
+Two syntax consumers run before the first lowering and are not blockers, both in the borrow
+stage's prologue (`borrowck_all`, one job per module, `bc_pre_job`, with the module's row of the
+reference table, `Package::mod_refs_row`): the coroutine and cancellation reachability (one
+`co_scan` per module over every node, then `reach_solve`; lowering reads its marks to place
+safepoints; the language server keeps the scans per module and solves them alone; the borrow
+check's single-module entry runs `Package::reach_compute`), and the count of functions and
+closures that sizes the keep (`ir::lower::module_bodies`, `Keep::reserve_bodies`).
 
 ## The semantic facts and their fields
 

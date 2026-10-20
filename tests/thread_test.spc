@@ -215,6 +215,9 @@ fn detach_failure_is_fatal() {
 fn deep_frames(n: i64) i64 {
     let mut pad = Array::<i64, 512>::new(); // 4 KiB per frame
     pad[0] = n;
+    // Publish the frame's address: a C compiler that sees `Array::new` (a pack or unity unit) would
+    // otherwise drop the unread array, and 100k 48-byte frames fit in a thread's 8 MiB stack.
+    unsafe sys::sc_bs_sink((pad.as_ptr() as usize) as u64);
     if n <= 0 {
         return pad[0];
     }

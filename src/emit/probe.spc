@@ -23,8 +23,8 @@ pub const P_DECL: usize = 7; // declaration planning: local analysis and CFG str
 pub const P_RENDER: usize = 8; // statement and expression rendering (less planning)
 pub const P_ASSEMBLE: usize = 9; // header and TU assembly
 pub const P_PUBLISH: usize = 10; // file publication (less the build engine sink)
-pub const P_SYNC: usize = 11; // build engine sink: raw to gen sync and compile planning
-pub const P_COUNT: usize = 14;
+pub const P_SYNC: usize = 11; // build engine sink: compile planning and spawns
+pub const P_COUNT: usize = 17;
 
 /// Repeated-work tallies. The re-lowering rows come in reflection / zero-size pairs: a template
 /// is a generic body whose shared lowering carries the flag, an instance is a demand that reached

@@ -19,9 +19,7 @@ import ir::layout as lay;
 import ir::cpu_features as cf;
 import ir::recursion as recur;
 import utils::persist as *;
-
-/// The C `SEEK_END` whence value used to size a file before reading it.
-pub const SEEK_END: i32 = 2;
+import driver::util as dutil;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
@@ -32,6 +30,12 @@ pub struct Module {
     pub path: String, // "std::string"; the root module is its file stem (owned)
     pub file: String, // filesystem path the source was read from (owned)
     pub source: String, // file contents (owned; span offsets index into it)
+    /// `str_id(source)`: the content this build read, what the emit stamp, the prelude image and the
+    /// per-TU cache record for the module.
+    pub src_id: u64,
+    /// The file's mtime from the stat taken before the read (`read_file_mt`); 0 when the source is not
+    /// a file's.
+    pub mtime: i64,
     pub ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
     pub has_ast: bool,
     pub prelude: bool, // part of the auto-imported std prelude
@@ -180,13 +184,14 @@ pub struct Package {
     pub bootstrap: bool,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
+    pub c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
     pub cc: String, // the C compiler the command line named for a bare build; empty = resolve as usual
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
     /// Resolved external C inputs (`@c.source` files and implicit backing-header `.c` siblings),
-    /// recorded by ext_c_collect: the build engine's emit stamp must dirty on their edits, since
-    /// their content is copied into the generated tree at emission time.
+    /// recorded by ext_c_collect: the build engine's emit stamp must dirty on their edits, since the
+    /// generated wrapper TU `#include`s each one by path (`ext_c_wrap`).
     pub ext_inputs: Vector<String>,
     /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
@@ -262,8 +267,8 @@ pub struct Package {
     /// seeds carry 0.
     pub tt_class: Vector<u8>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
-    /// has any resolution into module `to`, in either arena. `build_mod_refs` fills it once before the
-    /// borrow frontier, while every body is live and after the last resolution write (type check); from
+    /// has any resolution into module `to`, in either arena. The borrow stage fills it once
+    /// (`mod_refs_row` per module), while every body is live and after the last resolution write (type check); from
     /// then on module_imports is an O(1) query whose answer does not depend on which modules have
     /// released their bodies. `mod_refs_ready` gates it (module_imports falls back to the linear scan
     /// on the paths that never build it).
@@ -290,6 +295,8 @@ pub struct Package {
     /// costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
     /// old path_exists even under case-insensitive filesystems).
     pub dir_cache: DirCache,
+    /// The user closure `adopt_user` took from a `UserSpec`, which `load_user` replays.
+    spec: PUnits,
     pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
     /// Batch-lint module mask (`super-c lint` over many files sharing ONE package): when non-empty,
     /// the lint passes report exactly the modules set here instead of the only_mod/prelude filter.
@@ -432,13 +439,13 @@ pub struct RefEdge {
 pub const REF_MODULE_WIDE: u32 = 0x7FFFFFFF;
 pub const REF_BODY_EDGE: u32 = 0x80000000;
 
-/// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
-/// `entries[i]` is sorted; `heads` maps a directory hash to the newest index with that hash, `next[i]` to
-/// the one before it (SYM_NONE ends the chain).
+/// Parallel-table cache of directory listings for import resolution. `state[i]` is what `dir_listing`
+/// gave for `dirs[i]`, `entries[i]` its sorted names; `heads` maps a directory hash to the newest index
+/// with that hash, `next[i]` to the one before it (SYM_NONE ends the chain).
 pub struct DirCache {
     pub dirs: Vector<String>,
     pub entries: Vector<Vector<String>>,
-    pub ok: Vector<bool>,
+    pub state: Vector<u8>,
     pub heads: Map<u64, u32>,
     pub next: Vector<u32>,
 }
@@ -655,6 +662,55 @@ extend SymTab {
 
 // The function call `ni` (callee node `callee`) pins to: the checker's call record, else the callee's
 // resolution, else a member callee's; NODE_NONE for a fn value or a dyn dispatch.
+// Sort `key` ascending, `val` alongside, stably: one scan when the keys are in order already (node
+// order is nearly source order), else a least-significant-digit radix sort, one counting pass of
+// O(n + 256) per key byte that differs among the keys.
+fn sort_spans(key: &mut Vector<u64>, val: &mut Vector<u32>) {
+    let n = key.len();
+    let mut sorted = true;
+    let mut diff: u64 = 0;
+    for i in 1..n {
+        if key[i - 1] > key[i] {
+            sorted = false;
+        }
+        diff = diff | key[i] ^ key[0];
+    }
+    if sorted {
+        return;
+    }
+    let mut k2 = Vector::<u64>::new();
+    let mut v2 = Vector::<u32>::new();
+    k2.resize_default(n);
+    v2.resize_default(n);
+    let mut at = Array::<u32, 257>::new();
+    for d in 0..8u64 {
+        let sh = d * 8;
+        if (diff >> sh & 0xFFu64) == 0 {
+            continue;
+        }
+        for c in 0..257usize {
+            at[c] = 0;
+        }
+        for i in 0..n {
+            let b = (key[i] >> sh & 0xFFu64) as usize;
+            at[b + 1] += 1;
+        }
+        for c in 0..256usize {
+            at[c + 1] += at[c];
+        }
+        for i in 0..n {
+            let b = (key[i] >> sh & 0xFFu64) as usize;
+            k2.set(at[b] as usize, key[i]);
+            v2.set(at[b] as usize, val[i]);
+            at[b] += 1;
+        }
+        let kt = replace(key, k2);
+        k2 = kt;
+        let vt = replace(val, v2);
+        v2 = vt;
+    }
+}
+
 fn pin_callee(a: &Ast, ni: NodeId, callee: NodeId) DefId {
     switch a.call_info_of(ni) {
         Some(v) => {
@@ -1092,39 +1148,31 @@ fn path_exists(path: str) bool {
 }
 
 /// Read a whole file into a String padded with lexer::SOURCE_PAD trailing NULs past len (the lexer's
-/// read-ahead sentinel); None on any I/O error.
+/// read-ahead sentinel); None when `path` is no regular file (a directory opens on Linux, and its size
+/// reads as the largest offset) or on any I/O error.
 pub fn read_file(path: str) Option<String> {
-    // A directory is no file: Linux opens one, and its size reads as the largest offset.
+    let mut mt: i64 = 0;
+    return read_file_mt(path, &mut mt);
+}
+
+/// `read_file`, and the file's mtime (`sc_mtime`) into `mt` from the fstat taken before the read: a later
+/// edit changes the mtime, so the pair vouches for the content read.
+pub fn read_file_mt(path: str, mt: &mut i64) Option<String> {
     let mut pc = String::from_str(path);
-    if unsafe shim::sc_stat_isdir(pc.cstr()) == 1 {
+    let mut sz: i64 = 0;
+    let fd = unsafe shim::sc_file_open(pc.cstr(), &mut sz, mt);
+    if fd < 0 {
         return Option::<String>::None;
     }
-    let f = stdio::fopen(path, "rb");
-    if f == null {
-        return Option::<String>::None;
-    }
-    if unsafe stdio::fseek(f, 0, SEEK_END) != 0 {
-        unsafe stdio::fclose(f);
-        return Option::<String>::None;
-    }
-    let s = unsafe stdio::ftell(f);
-    unsafe stdio::rewind(f);
-    if s < 0 {
-        unsafe stdio::fclose(f);
-        return Option::<String>::None;
-    }
-    let sz = s as usize;
     // Read straight into the result, pre-sized to content + read-ahead padding so pad_nul does not
     // reallocate, then append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n): a read-ahead
     // sentinel the lexer relies on to over-read safely (see lexer::SOURCE_PAD).
-    let mut out = String::with_capacity(sz + lexer::SOURCE_PAD);
-    let n = unsafe stdio::fread(out.spare_mut(sz) as *mut char, 1, sz, f);
-    if n != sz && unsafe stdio::ferror(f) != 0 {
-        unsafe stdio::fclose(f);
+    let mut out = String::with_capacity(sz as usize + lexer::SOURCE_PAD);
+    let n = unsafe shim::sc_file_read_close(fd, out.spare_mut(sz as usize), sz as usize);
+    if n < 0 {
         return Option::<String>::None;
     }
-    unsafe stdio::fclose(f);
-    out.advance_len(n);
+    out.advance_len(n as usize);
     out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
 }
@@ -1219,17 +1267,43 @@ extend DirCache {
             i = self.next[i as usize];
         }
         let mut names = Vector::<String>::new();
-        let dok = dir_listing(dir, &mut names);
+        let st = dir_listing(dir, &mut names);
         self.heads.insert(h, self.dirs.len() as u32);
         self.next.push(head);
         self.dirs.push(String::from_str(dir));
         self.entries.push(names);
-        self.ok.push(dok);
+        self.state.push(st);
         return self.dirs.len() - 1;
+    }
+    // Order the directories by name, rebuilding the hash chains.
+    fn sort(self: &mut Self) {
+        let n = self.dirs.len();
+        let mut ix = Vector::<u32>::with_capacity(n);
+        for i in 0..n {
+            ix.push(i as u32);
+        }
+        ix.sort_by(|a: &u32, b: &u32| self.dirs[(*a) as usize].cmp(&self.dirs[(*b) as usize]));
+        let mut d = DirCache {};
+        for j in 0..n {
+            let i = ix[j] as usize;
+            let h = self.dirs[i].as_str().hash();
+            d.next.push(
+                switch d.heads.get(&h) {
+                    Some(v) => *v,
+                    None => SYM_NONE,
+                },
+            );
+            d.heads.insert(h, j as u32);
+            d.dirs.push(replace(self.dirs.index_mut(i), String::new()));
+            d.entries.push(replace(self.entries.index_mut(i), Vector::<String>::new()));
+            d.state.push(self.state[i]);
+        }
+        *self = d;
     }
     /// Does `path` (a <dir>/<file>) exist? Answered from the cached listing; a listing miss (dir present but
     /// the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
-    /// insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe.
+    /// insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe;
+    /// a directory that exists but does not list asks fopen.
     pub fn exists(self: &mut Self, path: str) bool {
         let n = path.len();
         let mut slash: i64 = -1;
@@ -1246,8 +1320,11 @@ extend DirCache {
         let dir = path.slice(0, slash as usize);
         let file = path.slice(slash as usize + 1, n);
         let idx = self.index_of(dir);
-        if !self.ok[idx] {
+        if self.state[idx] == DIR_ABSENT {
             return false;
+        }
+        if self.state[idx] == DIR_UNREAD {
+            return path_exists(path);
         }
         let ents = self.entries.at(idx);
         let mut lo: usize = 0;
@@ -1267,30 +1344,33 @@ extend DirCache {
         return path_exists(path);
     }
 }
-/// The entry names of `dir`, sorted, into `names`; false when the directory cannot be opened. What
-/// `DirCache` answers from, and what the prelude image checks its directories against.
-pub fn dir_listing(dir: str, names: &mut Vector<String>) bool {
-    let mut dok = false;
-    let mut db = RealBuf {};
-    let dl = dir.len();
-    if dl < 4096 {
-        unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
-        unsafe db.b[dl] = 0 as char;
-        let d = unsafe shim::sc_opendir(&db.b[0]);
-        if d != null {
-            dok = true;
-            loop {
-                let e = unsafe shim::sc_readdir(d);
-                if e == null {
-                    break;
-                }
-                names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
-            }
-            let _ = unsafe shim::sc_closedir(d);
+/// `dir_listing` results: the directory listed, does not exist (nothing under it does), or exists but
+/// does not list (no read permission, no descriptor left): only an open of a file under it tells.
+pub const DIR_ABSENT: u8 = 0;
+pub const DIR_LISTED: u8 = 1;
+pub const DIR_UNREAD: u8 = 2;
+
+/// The entry names of `dir`, sorted, into `names`, and whether it listed (`DIR_LISTED`, `DIR_ABSENT`,
+/// `DIR_UNREAD`). What `DirCache` answers from, and what the prelude image checks its directories against.
+pub fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
+    let mut dp = String::from_str(dir);
+    let d = unsafe shim::sc_opendir(dp.cstr());
+    if d == null {
+        if unsafe shim::sc_errno_absent() == 1 {
+            return DIR_ABSENT;
         }
+        return DIR_UNREAD;
     }
+    loop {
+        let e = unsafe shim::sc_readdir(d);
+        if e == null {
+            break;
+        }
+        names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
+    }
+    let _ = unsafe shim::sc_closedir(d);
     names.sort();
-    return dok;
+    return DIR_LISTED;
 }
 
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
@@ -1437,28 +1517,98 @@ pub fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
     unsafe G_FEATURES = features;
 }
 
-/// Set the worker count for parallel module loading (1 = serial) before the first load.
+/// Set the worker count for parallel module loading (1 = serial; 0 = one per CPU) before the first
+/// load. It is the task pool's worker count too: the load launches the pool's first tasks, and the
+/// analysis that follows runs on the same pool.
 pub fn set_load_jobs(j: u32) {
     unsafe G_LOAD_JOBS = j;
     if j != 1 {
         // Compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks
-        // BEFORE the pool's first launch (a later call is ignored).
+        // BEFORE the pool's first launch (a later call is ignored), as the worker count.
         prt::set_stack_size(8usize << 20);
+        prt::set_worker_count(j as usize);
     }
 }
 
 // One speculative parse unit: filled by a worker task; imports are collected and resolved by the
-// coordinator between waves (the dir cache is a serial memo), and ids are assigned afterwards by
-// a serial DFS replay, so module identity is byte-for-byte the recursive loader's.
+// coordinator as each unit finishes (the dir cache is a serial memo), and ids are assigned afterwards
+// by a serial DFS replay, so module identity is byte-for-byte the recursive loader's.
 struct PUnit {
     pub path: String,
     pub file: String,
     pub source: String,
+    pub src_id: u64,
+    pub mtime: i64,
     pub ast: Ast,
     pub ok: bool,
+    pub resolved: bool, // `file` is what resolve_import_file gives for `path`
     pub child_paths: Vector<String>,
     pub child_files: Vector<String>,
+    pub log: String, // the errors its imports gave (`std_shadowed`), printed when it gets its id
     pub next: u32, // the previous unit whose path hashes alike, or SYM_NONE
+}
+
+// The units of one parallel load, each in a box of its own so a task's unit stays in place while the
+// vector grows, and `heads`: a path hash -> the newest unit with that hash.
+struct PUnits {
+    pub units: Vector<Box<PUnit>>,
+    pub heads: Map<u64, u32>,
+}
+
+extend PUnits {
+    // Append the unit for `path`, read from `file`; `resolved` as PUnit.resolved.
+    fn push(self: &mut Self, path: str, file: str, resolved: bool) {
+        let h = path.hash();
+        let next = switch self.heads.get(&h) {
+            Some(u) => *u,
+            None => SYM_NONE,
+        };
+        self.heads.insert(h, self.units.len() as u32);
+        self.units.push(
+            Box::<PUnit>::new(
+                PUnit {
+                    path: String::from_str(path),
+                    file: String::from_str(file),
+                    source: String::new(),
+                    src_id: 0,
+                    mtime: 0,
+                    ast: Ast::new(0),
+                    ok: false,
+                    resolved: resolved,
+                    child_paths: Vector::<String>::new(),
+                    child_files: Vector::<String>::new(),
+                    log: String::new(),
+                    next: next,
+                },
+            ),
+        );
+    }
+
+    // The index of the unit for `path`, or `units.len()`.
+    fn find(self: &Self, path: str) usize {
+        let mut u = switch self.heads.get(&path.hash()) {
+            Some(h) => *h,
+            None => SYM_NONE,
+        };
+        while u != SYM_NONE {
+            if self.units.at(u as usize).path.as_str() == path {
+                return u as usize;
+            }
+            u = self.units.at(u as usize).next;
+        }
+        return self.units.len();
+    }
+
+    // The parse task of unit `k`, which reports to `done`.
+    fn task(self: &mut Self, k: usize, tags: bool, done: *const PDone) PParse {
+        return PParse { u: self.units.index_mut(k).deref_mut(), k: k as u32, tags: tags, done: done };
+    }
+}
+
+// The units whose parse tasks finished, in the order they finished, for the discovery's coordinator.
+struct PDone {
+    pub m: psy::Mutex<Vector<u32>>,
+    pub cv: psy::Condvar,
 }
 
 // One module on the serial loader's depth-first stack: its unloaded imports and the next to load.
@@ -1470,55 +1620,58 @@ struct LoadFrame {
 
 struct PParse {
     pub u: *mut PUnit,
+    pub k: u32,
     pub tags: bool,
+    pub done: *const PDone,
 }
 
-// The unit slot is pinned for the task's lifetime (units only grow between waves) and each task
-// owns exactly one slot.
+// The unit is boxed, so it stays in place for the task's lifetime, and each task owns exactly one unit;
+// the coordinator keeps `done` until every task has finished.
 unsafe extend PParse as Send {}
 
-// Append the unit for `path`, linked into `heads` (path hash -> newest unit with that hash).
-fn punit_push(units: &mut Vector<PUnit>, heads: &mut Map<u64, u32>, path: str, file: str) {
-    let h = path.hash();
-    let next = switch heads.get(&h) {
-        Some(u) => *u,
-        None => SYM_NONE,
-    };
-    heads.insert(h, units.len() as u32);
-    units.push(
-        PUnit {
-            path: String::from_str(path),
-            file: String::from_str(file),
-            source: String::new(),
-            ast: Ast::new(0),
-            ok: false,
-            child_paths: Vector::<String>::new(),
-            child_files: Vector::<String>::new(),
-            next: next,
-        },
-    );
+/// A user closure read and parsed while the prelude stage checks (`Package::spec_user`): its units, and
+/// the package it loads against, a copy of the prelude's module table, which holds its dir cache.
+pub struct UserSpec {
+    pub v: Package,
+    pub units: PUnits,
+    pub wg: psy::WaitGroup,
 }
 
-// The index of the unit for `path`, or `units.len()`.
-fn punit_find(units: &Vector<PUnit>, heads: &Map<u64, u32>, path: str) usize {
-    let mut u = switch heads.get(&path.hash()) {
-        Some(h) => *h,
-        None => SYM_NONE,
-    };
-    while u != SYM_NONE {
-        if units.at(u as usize).path.as_str() == path {
-            return u as usize;
-        }
-        u = units.at(u as usize).next;
+extend UserSpec {
+    /// A spec that loads nothing.
+    pub fn new() Box<UserSpec> {
+        return Box::<UserSpec>::new(UserSpec { v: Package::new(), units: PUnits {}, wg: psy::WaitGroup::new() });
     }
-    return units.len();
+
+    /// Wait for the tasks of the load.
+    pub fn join(self: &Self) {
+        self.wg.wait_masked();
+    }
+}
+
+struct SpecTask {
+    pub s: *mut UserSpec,
+    pub target: i32,
+}
+
+// The spec is boxed and joined before it drops; until then only the task reaches its package.
+unsafe extend SpecTask as Send {}
+
+// Parse the unit of `t`, then report it to the coordinator.
+fn par_parse_task(t: PParse) {
+    par_parse_one(t);
+    let d = unsafe &*t.done;
+    let mut g = d.m.lock();
+    g.get_mut().push(t.k);
+    d.cv.notify_one();
 }
 
 fn par_parse_one(t: PParse) {
     let u = unsafe &mut *t.u;
-    switch read_file(u.file.as_str()) {
+    switch read_file_mt(u.file.as_str(), &mut u.mtime) {
         Some(sx) => {
             u.source = sx;
+            u.src_id = dutil::str_id(u.source.as_str());
         },
         None => {
             u.ok = false;
@@ -1720,7 +1873,6 @@ struct RealBuf {
     pub b: [char; 4096],
 }
 
-/// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
 // Append the `str::hash` of every identifier of `src[lo..hi]` to `out` (a word that starts with a
 // digit is a number, not a name).
 fn bc_scan_names(src: str, lo: u32, hi: u32, out: &mut Vector<u64>) {
@@ -1745,6 +1897,7 @@ const fn bc_name_byte(c: u8) bool {
     return c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9';
 }
 
+/// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
 pub const fn basename_of(path: str) str {
     let mut k = path.len();
     while k > 0 && path[k - 1] != b'/' {
@@ -2220,9 +2373,63 @@ extend Package {
         self.bind_types();
     }
 
-    /// The second stage: append `root_file`'s module closure after the prelude, then the vector
-    /// backend when a module names a vector. Every module joins the package type table as it loads;
-    /// `index_append` indexes them once the platform filter has run.
+    /// Start reading and parsing `root_file`'s module closure in tasks, for a package with this one's
+    /// settings whose prelude is the one `q` loaded (`load_prelude_stage`), while `q` is checked. Nothing
+    /// starts when loading is serial or the root names a loaded module.
+    pub fn spec_user(self: &Self, q: &Package, root_file: str, target: i32) Box<UserSpec> {
+        let rp = stem_of(root_file);
+        if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || q.find(rp.as_str()) >= 0 {
+            return UserSpec::new();
+        }
+        let mut s = Box::<UserSpec>::new(
+            UserSpec { v: self.settings_copy(), units: PUnits {}, wg: psy::WaitGroup::new() },
+        );
+        // The prelude's module table, which `find`, `find_file` and `std_shadowed` read.
+        let v = &mut s.v;
+        for i in 0..q.modules.len() {
+            let m = q.modules.at(i);
+            let _ = v.add_module(m.path.clone(), m.file.clone(), String::new(), m.src_id, m.mtime, Ast::new(0), false);
+            v.modules[i].prelude = m.prelude;
+        }
+        for i in 0..q.alias_path.len() {
+            v.alias_path.push(q.alias_path.at(i).clone());
+            v.alias_id.push(q.alias_id[i]);
+        }
+        v.root_module = q.modules.len() as u32;
+        s.units.push(rp.as_str(), root_file, false);
+        s.wg.add(1);
+        let t = SpecTask { s: s.deref_mut(), target: target };
+        let wgc = s.wg.clone();
+        launch || {
+            let us = unsafe &mut *t.s;
+            us.v.par_discover(&mut us.units, us.v.bootstrap, t.target);
+            wgc.done();
+        };
+        return s;
+    }
+
+    /// Take the user closure of `s` (`spec_user`), started against the prelude this package holds, for
+    /// `load_user`. Waits for its tasks.
+    pub fn adopt_user(self: &mut Self, mut s: Box<UserSpec>) {
+        s.join();
+        if s.units.units.len() == 0 {
+            return;
+        }
+        assert(
+            self.modules.len() == s.v.modules.len(),
+            "the package holds the prelude the user closure was read against",
+        );
+        self.dir_cache = replace(&mut s.v.dir_cache, DirCache {});
+        for i in self.alias_path.len()..s.v.alias_path.len() {
+            self.alias_path.push(s.v.alias_path.at(i).clone());
+            self.alias_id.push(s.v.alias_id[i]);
+        }
+        self.spec = replace(&mut s.units, PUnits {});
+    }
+
+    /// The second stage: append `root_file`'s module closure after the prelude (from `adopt_user` when
+    /// it took one), then the vector backend when a module names a vector. Every module joins the
+    /// package type table as it loads; `index_append` indexes them once the platform filter has run.
     pub fn load_user(self: &mut Self, root_file: str, std_dir: str, target: i32) {
         self.root_module = self.modules.len() as u32;
         let rp = stem_of(root_file);
@@ -2238,7 +2445,12 @@ extend Package {
             self.ok = false;
             return;
         }
-        self.root = self.load_module(rp.as_str(), rf.as_str(), self.bootstrap, target);
+        if self.spec.units.len() != 0 {
+            let mut us = replace(&mut self.spec, PUnits {});
+            self.root = self.par_replay(&mut us, 0, self.bootstrap, target);
+        } else {
+            self.root = self.load_module(rp.as_str(), rf.as_str(), self.bootstrap, target);
+        }
         self.load_backend(std_dir, target, false);
     }
 
@@ -2297,10 +2509,13 @@ extend Package {
         }
         let mut parsed = parse_source(&mut src, "", false, Vector::<tok::Token>::new());
         assert(parsed.ok, "the build-constant module parses");
+        let sid = dutil::str_id(src.as_str());
         let id = self.add_module(
             String::from_str("__std::build"),
             String::new(),
             src,
+            sid,
+            0,
             replace(&mut parsed.ast, Ast::new(0)),
             true,
         );
@@ -3224,22 +3439,17 @@ extend Package {
         if cancel {
             s.c_row = dm_span.clone();
         }
-        // Insertion sort by start: declaration order is nearly source order already. The
-        // declarations inside one are the run that follows it while their starts stay below its end.
-        for x in 1..dm_span.len() {
-            let mut y = x;
-            while y > 0 && dm_span[y - 1] > dm_span[y] {
-                let ts = dm_span[y - 1];
-                dm_span.set(y - 1, dm_span[y]);
-                dm_span.set(y, ts);
-                let tn = dm_node[y - 1];
-                dm_node.set(y - 1, dm_node[y]);
-                dm_node.set(y, tn);
-                y -= 1;
-            }
-        }
+        // Sorted by start: the declarations inside one are the run that follows it while their
+        // starts stay below its end.
+        sort_spans(&mut dm_span, &mut dm_node);
         let mut open = CO_NONE; // the innermost declaration whose span is still open
-        for x in 0..dm_span.len() {
+        let nd = dm_span.len();
+        s.d_span.reserve(nd);
+        s.d_parent.reserve(nd);
+        s.d_node.reserve(nd);
+        s.d_clo.reserve(nd);
+        s.d_need.reserve(nd);
+        for x in 0..nd {
             let sp = dm_span[x];
             let st = (sp >> 32) as u32;
             while open != CO_NONE && (s.d_span[open as usize] & 0xFFFFFFFFu64) as u32 <= st {
@@ -4546,10 +4756,13 @@ extend Package {
         let mut source = String::from_str(src);
         let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
         let ok = parsed.ok;
+        let sid = dutil::str_id(source.as_str());
         let id = self.add_module(
             String::from_str("main"),
             String::from_str("<harness>"),
             source,
+            sid,
+            0,
             replace(&mut parsed.ast, Ast::new(0)),
             ok,
         ) as usize;
@@ -4562,8 +4775,18 @@ extend Package {
         self.platform_filter_module(id, target);
     }
 
-    // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
-    fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
+    // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`; `src_id` and `mtime` as
+    // `Module` records them) and return its id.
+    fn add_module(
+        self: &mut Self,
+        path: String,
+        file: String,
+        source: String,
+        src_id: u64,
+        mtime: i64,
+        ast: Ast,
+        has_ast: bool,
+    ) i32 {
         let id = self.modules.len() as i32;
         let h = path.as_str().hash();
         self.mod_chain.push(
@@ -4573,7 +4796,18 @@ extend Package {
             },
         );
         self.mod_index.insert(h, id as u32);
-        self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
+        self.modules.push(
+            Module {
+                path: path,
+                file: file,
+                source: source,
+                src_id: src_id,
+                mtime: mtime,
+                ast: ast,
+                has_ast: has_ast,
+                prelude: false,
+            },
+        );
         // A module loaded after `bind_types` (an import resolved on demand) joins the package
         // identity at once: every module of a bound package interns into the one table.
         if has_ast && self.tt.deref().len() != 0 {
@@ -4609,35 +4843,34 @@ extend Package {
         return -1;
     }
 
-    // Whether a project file (under the root, then the alt root) names import path `parts` of `a` while
-    // the prelude stage loaded module `m` for that path from another file: the import would get the std
-    // module. Logs the error.
-    fn std_shadowed(self: &Self, dc: &mut DirCache, a: &Ast, src: str, parts: NodeList, m: usize) bool {
+    // When a project file (under the root, then the alt root) names import path `parts` of `a` while the
+    // prelude stage loaded module `m` for that path from another file (the import would get the std
+    // module), append the error to `log`.
+    fn std_shadowed(self: &Self, dc: &mut DirCache, a: &Ast, src: str, parts: NodeList, m: usize, log: &mut String) {
         let mut f = module_file_path(self.root_dir.as_str(), a, src, parts);
         if !dc.exists(f.as_str()) {
             f = module_index_path(self.root_dir.as_str(), a, src, parts);
             if !dc.exists(f.as_str()) {
                 if self.alt_root.is_empty() {
-                    return false;
+                    return;
                 }
                 f = module_file_path(self.alt_root.as_str(), a, src, parts);
                 if !dc.exists(f.as_str()) {
-                    return false;
+                    return;
                 }
             }
         }
         let mut sf = self.modules.at(m).file.clone();
         if unsafe shim::sc_same_file(f.cstr(), sf.cstr()) == 1 {
-            return false;
+            return;
         }
         let path = self.modules.at(m).path.as_str();
-        eprint(
+        log.format_into(
             "error: '{}' names module '{}', which the std prelude loads from '{}': rename the project file\n",
             f.as_str(),
             path,
             sf.as_str(),
         );
-        return true;
     }
 
     // Module `id`'s imports as a frame for the serial loader's stack. Collected before any import loads:
@@ -4647,18 +4880,27 @@ extend Package {
         let mut f = LoadFrame { paths: Vector::<String>::new(), files: Vector::<String>::new(), next: 0 };
         let ap = (&self.modules.at(id as usize).ast) as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
-        let mut bad = false;
-        self.collect_imports(unsafe &*ap, src, &mut dc, target, &mut f.paths, &mut f.files, &mut bad);
+        let mut log = String::new();
+        self.collect_imports(unsafe &*ap, src, &mut dc, &PUnits {}, target, &mut f.paths, &mut f.files, &mut log);
         self.dir_cache = dc;
-        self.ok = self.ok && !bad;
+        self.print_log(&log);
         return f;
+    }
+
+    // Print the import errors `log` of a module as it gets its id; any clears `ok`.
+    fn print_log(self: &mut Self, log: &String) {
+        if log.len() != 0 {
+            log.eprint();
+            self.ok = false;
+        }
     }
 
     // Every module `a` imports that is not loaded yet, as (module path, file path) pairs, plus the
     // dependencies a sugar keyword pulls in (`launch` -> the runtime, `select` -> the selector, `@blocking`
     // -> the pool). Skipping a loaded import saves resolve_import_file its filesystem probes: a hot std/ffi
-    // module imported by many others would otherwise be probed once per importer. A path can still repeat;
-    // load_module returns the existing id for a loaded path.
+    // module imported by many others would otherwise be probed once per importer; an import a unit of
+    // `queued` resolved already takes that unit's file. A path can still repeat; load_module returns the
+    // existing id for a loaded path. The errors of the imports go to `log`.
     //
     // `a`/`src` come in as raw views because the caller holds them inside `self.modules` and cannot lend them
     // across a `&mut self` call. `dc` is the package's dir cache, which the caller takes out of `self` for
@@ -4668,10 +4910,11 @@ extend Package {
         a: &Ast,
         src: str,
         dc: &mut DirCache,
+        queued: &PUnits,
         target: i32,
         child_paths: &mut Vector<String>,
         child_files: &mut Vector<String>,
-        bad: &mut bool,
+        log: &mut String,
     ) {
         let root_dir = self.root_dir.as_str();
         let alt_root = self.alt_root.as_str();
@@ -4695,13 +4938,18 @@ extend Package {
                 let cp = join_parts(a, src, parts, "::");
                 let found = self.find(cp.as_str());
                 if found >= 0 {
-                    if found as u32 < self.root_module && self.std_shadowed(dc, a, src, parts, found as usize) {
-                        *bad = true;
+                    if found as u32 < self.root_module {
+                        self.std_shadowed(dc, a, src, parts, found as usize, log);
                     }
                     continue;
                 }
+                let u = queued.find(cp.as_str());
+                if u < queued.units.len() && queued.units.at(u).resolved {
+                    child_files.push(queued.units.at(u).file.clone());
+                } else {
+                    child_files.push(resolve_import_file(dc, root_dir, alt_root, std_root, a, src, parts));
+                }
                 child_paths.push(cp);
-                child_files.push(resolve_import_file(dc, root_dir, alt_root, std_root, a, src, parts));
             }
         }
         // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
@@ -4709,39 +4957,21 @@ extend Package {
         // never launches never loads the runtime. load_module returns the existing id for a loaded path, so a
         // duplicate push is harmless.
         if std_root.len() != 0 {
-            let mut has_launch = false;
-            let mut has_select = false;
-            let mut has_parfor = false;
-            let nb9 = a.nodes.len();
-            let nn = a.nnodes();
-            for ni in 0..nn {
-                let k = a.at_const(Ast::nth_id_n(nb9, ni)).kind;
-                if k == NodeKind::NODE_LAUNCH {
-                    has_launch = true;
-                } else if k == NodeKind::NODE_SELECT {
-                    has_select = true;
-                } else if k == NodeKind::NODE_PARALLEL_FOR {
-                    has_parfor = true;
-                }
-                if has_launch && has_select && has_parfor {
-                    break;
-                }
-            }
-            if has_launch {
+            if (a.sugar_marks & SUGAR_LAUNCH) != 0 {
                 let mut rf = String::from_str(std_root);
                 rf.push_str("/std/parallel/runtime.spc");
                 child_paths.push(String::from_str("std::parallel::runtime"));
                 child_files.push(rf);
             }
             // Same for `select`, which lowers to std::parallel::selector's `sugar_*` shims.
-            if has_select {
+            if (a.sugar_marks & SUGAR_SELECT) != 0 {
                 let mut sf = String::from_str(std_root);
                 sf.push_str("/std/parallel/selector.spc");
                 child_paths.push(String::from_str("std::parallel::selector"));
                 child_files.push(sf);
             }
             // Same for `parallel for`, which lowers to std::parallel::data's `range`.
-            if has_parfor {
+            if (a.sugar_marks & SUGAR_PARFOR) != 0 {
                 let mut df = String::from_str(std_root);
                 df.push_str("/std/parallel/data.spc");
                 child_paths.push(String::from_str("std::parallel::data"));
@@ -4785,90 +5015,117 @@ extend Package {
         if existing >= 0 {
             return existing;
         }
-        // The replay's serial loads use the dir cache again: it is out of `self` until then.
+        let mut us = PUnits {};
+        us.push(mod_path, file_path, false);
+        self.par_discover(&mut us, bootstrap_tags, target);
+        return self.par_replay(&mut us, 0, bootstrap_tags, target);
+    }
+
+    // Parse the units of `us` and, transitively, the imports they name that are neither loaded nor
+    // queued, as units of their own: a unit's imports start parsing as soon as it is parsed. The dir
+    // cache is sorted at the end, so its order does not depend on the order the tasks finish in. The
+    // replay's serial loads use the dir cache again: it is out of `self` until then.
+    fn par_discover(self: &mut Self, us: &mut PUnits, bootstrap_tags: bool, target: i32) {
         let mut dc = replace(&mut self.dir_cache, DirCache {});
-        let mut units = Vector::<PUnit>::new();
-        let mut heads = Map::<u64, u32>::new();
-        punit_push(&mut units, &mut heads, mod_path, file_path);
-        let mut next: usize = 0;
-        while next < units.len() {
-            let wave_end = units.len();
-            if wave_end - next == 1 {
-                // A one-unit wave (the root, every prelude file) parses inline: a task could overlap
-                // with nothing and would start the worker pool for it.
-                par_parse_one(PParse { u: units.index_mut(next), tags: bootstrap_tags });
-            } else {
-                let wg = psy::WaitGroup::new();
-                wg.add((wave_end - next) as i64);
-                for k in next..wave_end {
-                    let t = PParse { u: units.index_mut(k), tags: bootstrap_tags };
-                    let wgc = wg.clone();
-                    launch || {
-                        par_parse_one(t);
-                        wgc.done();
-                    };
-                }
-                wg.wait_masked();
+        let done = PDone { m: psy::Mutex::<Vector<u32>>::new(Vector::<u32>::new()), cv: psy::Condvar::new() };
+        let wg = psy::WaitGroup::new();
+        let mut started: usize = 0; // the units before it are parsing or parsed
+        let mut busy: usize = 0; // the tasks not reported yet
+        let mut ready = Vector::<u32>::new(); // the units parsed and not yet resolved
+        // Each pass starts the units queued since the last one, or takes at least one finished unit:
+        // every unit starts and finishes once.
+        loop {
+            if busy == 0 && us.units.len() - started == 1 {
+                // A lone unit (the root of a load, mostly) parses inline: a task could overlap with
+                // nothing and would start the worker pool for it.
+                par_parse_one(us.task(started, bootstrap_tags, &done));
+                ready.push(started as u32);
+                started += 1;
             }
-            for k in next..wave_end {
-                if !units.at(k).ok {
+            while started < us.units.len() {
+                let t = us.task(started, bootstrap_tags, &done);
+                wg.add(1);
+                let wgc = wg.clone();
+                launch || {
+                    par_parse_task(t);
+                    wgc.done();
+                };
+                busy += 1;
+                started += 1;
+            }
+            if ready.len() == 0 {
+                if busy == 0 {
+                    break;
+                }
+                let mut g = done.m.lock();
+                while g.get().len() == 0 {
+                    done.cv.wait_masked(&g);
+                }
+                ready = replace(g.get_mut(), ready);
+                busy -= ready.len();
+            }
+            for r in 0..ready.len() {
+                let k = ready[r] as usize;
+                if !us.units.at(k).ok {
                     continue;
                 }
-                let ap = (&units.at(k).ast) as *const Ast;
-                let sp2 = units.at(k).source.as_str();
+                let ap = (&us.units.at(k).ast) as *const Ast;
+                let sp2 = us.units.at(k).source.as_str();
                 let mut all_paths = Vector::<String>::new();
                 let mut all_files = Vector::<String>::new();
-                let mut bad = false;
-                self.collect_imports(unsafe &*ap, sp2, &mut dc, target, &mut all_paths, &mut all_files, &mut bad);
-                self.ok = self.ok && !bad;
+                let mut log = String::new();
+                self.collect_imports(unsafe &*ap, sp2, &mut dc, us, target, &mut all_paths, &mut all_files, &mut log);
+                us.units.index_mut(k).log = log;
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
                     if self.find_file(cp, all_files[c].as_str()) >= 0 {
                         continue;
                     }
-                    let seen = punit_find(&units, &heads, cp) < units.len();
-                    units.index_mut(k).child_paths.push(String::from_str(cp));
-                    units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
+                    let seen = us.find(cp) < us.units.len();
+                    us.units.index_mut(k).child_paths.push(String::from_str(cp));
+                    us.units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
                     if !seen {
-                        punit_push(&mut units, &mut heads, cp, all_files[c].as_str());
+                        us.push(cp, all_files[c].as_str(), true);
                     }
                 }
             }
-            next = wave_end;
+            ready.clear();
         }
+        // A task touches `done` until its report: it may not outlive this frame.
+        wg.wait_masked();
+        dc.sort();
         self.dir_cache = dc;
-        return self.par_replay(&mut units, &heads, bootstrap_tags, target);
     }
 
-    // DFS in recorded import order over the parsed units: the id-assignment replay. Consumes
+    // DFS in recorded import order over the parsed units from unit `r`: the id-assignment replay. Consumes
     // each unit's source/ast on first visit (later visits of the same path are find() hits).
-    fn par_replay(self: &mut Self, units: &mut Vector<PUnit>, heads: &Map<u64, u32>, bootstrap_tags: bool, target: i32) i32 {
+    fn par_replay(self: &mut Self, us: &mut PUnits, r: usize, bootstrap_tags: bool, target: i32) i32 {
         let mut expand = false;
-        let root = self.par_visit(units, 0, bootstrap_tags, target, &mut expand);
+        let root = self.par_visit(us, r, bootstrap_tags, target, &mut expand);
         // (unit << 32 | next import) pairs: an explicit stack, bounded by the unit count, so a long import
         // chain cannot exhaust the call stack.
         let mut stack = Vector::<u64>::new();
         if expand {
-            stack.push(0u64);
+            stack.push(r as u64 << 32);
         }
         while stack.len() != 0 {
             let top = stack.len() - 1;
             let ui = (stack[top] >> 32) as usize;
             let c = (stack[top] & 0xFFFFFFFFu64) as usize;
-            if c == units.at(ui).child_paths.len() {
+            if c == us.units.at(ui).child_paths.len() {
                 let _ = stack.pop();
                 continue;
             }
             stack.set(top, stack[top] + 1);
-            let cp = units.at(ui).child_paths.at(c).as_str();
+            let cp = us.units.at(ui).child_paths.at(c).as_str();
             // A visited unit gave its path away, so a loaded import is found here, not among the units.
-            if self.find_file(cp, units.at(ui).child_files.at(c).as_str()) >= 0 {
+            if self.find_file(cp, us.units.at(ui).child_files.at(c).as_str()) >= 0 {
                 continue;
             }
-            // The wave loop gave every recorded import its own unit.
-            let ci = punit_find(units, heads, cp);
-            assert(ci < units.len());
-            let _ = self.par_visit(units, ci, bootstrap_tags, target, &mut expand);
+            // The discovery gave every recorded import its own unit.
+            let ci = us.find(cp);
+            assert(ci < us.units.len());
+            let _ = self.par_visit(us, ci, bootstrap_tags, target, &mut expand);
             if expand {
                 stack.push(ci as u64 << 32);
             }
@@ -4878,34 +5135,32 @@ extend Package {
 
     // Give unit `ui` its module id: a loaded path keeps its id, a unit that failed to read or parse goes
     // through the serial loader (which prints its diagnostics and loads its imports), and a parsed unit
-    // is added. `expand` reports the last case: its imports are the replay's to visit.
-    fn par_visit(
-        self: &mut Self,
-        units: &mut Vector<PUnit>,
-        ui: usize,
-        bootstrap_tags: bool,
-        target: i32,
-        expand: &mut bool,
-    ) i32 {
+    // is added and prints its import errors. `expand` reports the last case: its imports are the replay's
+    // to visit.
+    fn par_visit(self: &mut Self, us: &mut PUnits, ui: usize, bootstrap_tags: bool, target: i32, expand: &mut bool) i32 {
         *expand = false;
-        let ex = self.find_file(units.at(ui).path.as_str(), units.at(ui).file.as_str());
+        let ex = self.find_file(us.units.at(ui).path.as_str(), us.units.at(ui).file.as_str());
         if ex >= 0 {
             return ex;
         }
-        if !units.at(ui).ok {
-            let pth = String::from_str(units.at(ui).path.as_str());
-            let fl = String::from_str(units.at(ui).file.as_str());
+        if !us.units.at(ui).ok {
+            let pth = String::from_str(us.units.at(ui).path.as_str());
+            let fl = String::from_str(us.units.at(ui).file.as_str());
             return self.load_module_serial(pth.as_str(), fl.as_str(), bootstrap_tags, target);
         }
-        let u = units.index_mut(ui);
+        let u = us.units.index_mut(ui).deref_mut();
         let id = self.add_module(
             replace(&mut u.path, String::new()),
             replace(&mut u.file, String::new()),
             replace(&mut u.source, String::new()),
+            u.src_id,
+            u.mtime,
             replace(&mut u.ast, Ast::new(0)),
             true,
         );
         self.modules[id as usize].ast.module = id as ModuleId;
+        let log = replace(&mut us.units.index_mut(ui).log, String::new());
+        self.print_log(&log);
         *expand = true;
         return id;
     }
@@ -4956,6 +5211,7 @@ extend Package {
     // fails to parse is added without an Ast. Either failure clears `ok`.
     fn parse_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool) i32 {
         let mut source = String::new();
+        let mut mt: i64 = 0;
         let ovi = self.overlay_index(file_path);
         if ovi >= 0 {
             // Clone + pad exactly like read_file (the lexer relies on the read-ahead NUL sentinel).
@@ -4965,7 +5221,7 @@ extend Package {
             s.pad_nul(lexer::SOURCE_PAD);
             source = s;
         } else {
-            switch read_file(file_path) {
+            switch read_file_mt(file_path, &mut mt) {
                 Some(s) => {
                     source = s;
                 },
@@ -4984,6 +5240,7 @@ extend Package {
             };
         }
 
+        let sid = dutil::str_id(source.as_str());
         let mut tsc = replace(&mut self.tok_scratch, Vector::<tok::Token>::new());
         tsc.clear();
         let mut parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
@@ -4993,6 +5250,8 @@ extend Package {
             String::from_str(mod_path),
             String::from_str(file_path),
             source,
+            sid,
+            mt,
             replace(&mut parsed.ast, Ast::new(0)),
             ok,
         );
@@ -6129,6 +6388,13 @@ extend Package {
         if s == SYM_NONE {
             return NODE_NONE;
         }
+        return self.lookup_sym(mid, s, want_type);
+    }
+
+    /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
+    /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
+    @c.always_inline
+    pub fn lookup_sym(self: &Self, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
         let key = s as u64 * 4u64 + if want_type {
             2u64;
         } else {
@@ -6253,31 +6519,23 @@ extend Package {
         return m as usize >= self.modules.len() || !self.modules[m as usize].prelude;
     }
 
-    /// Fill `mod_refs` from every module's resolutions, both arenas. Call once all resolutions are
-    /// final and before any body arena is released; one pass over the package's resolutions.
-    pub fn build_mod_refs(self: &mut Self) {
+    /// Fill row `from` of `mod_refs` (`row`: its `mod_refs_w` words, zero on entry) from the
+    /// module's resolutions, both arenas. Call once all resolutions are final and before any body
+    /// arena is released; one pass over the module's resolutions, independent of every other row.
+    pub fn mod_refs_row(self: &Self, from: usize, row: []mut u64) {
         let n = self.modules.len();
-        let w = (n + 63) / 64;
-        self.mod_refs_w = w;
-        self.mod_refs.truncate(0);
-        self.mod_refs.resize_default(n * w);
-        for from in 0..n {
-            if !self.modules[from].has_ast {
-                continue;
-            }
-            let base = from * w;
-            let ra = &self.modules[from].ast;
-            let nb = ra.nodes.len();
-            for i in 0..ra.nnodes() {
-                let d = ra.resolution_def(Ast::nth_id_n(nb, i));
-                let to = d.module as usize;
-                if d.node != NODE_NONE && to < n {
-                    let idx = base + to / 64;
-                    self.mod_refs[idx] = self.mod_refs[idx] | 1u64 << (to % 64) as u64;
-                }
+        if !self.modules[from].has_ast {
+            return;
+        }
+        let ra = &self.modules[from].ast;
+        let nb = ra.nodes.len();
+        for i in 0..ra.nnodes() {
+            let d = ra.resolution_def(Ast::nth_id_n(nb, i));
+            let to = d.module as usize;
+            if d.node != NODE_NONE && to < n {
+                row[to / 64] = row[to / 64] | 1u64 << (to % 64) as u64;
             }
         }
-        self.mod_refs_ready = true;
     }
 
     // Does module `from`'s code reference anything in module `to` (a cross-module use edge)?
@@ -6286,7 +6544,7 @@ extend Package {
         if from as usize >= n || !self.modules[from as usize].has_ast {
             return false;
         }
-        // Fast path: O(1) bitset query once built (see build_mod_refs). `to >= n` is untracked, so fall
+        // Fast path: O(1) bitset query once built (see mod_refs_row). `to >= n` is untracked, so fall
         // through to the linear scan (preserves exact semantics for the standalone-test Ast at module==n).
         if self.mod_refs_ready && to as usize < n {
             let word = self.mod_refs[from as usize * self.mod_refs_w + to as usize / 64];
@@ -6612,6 +6870,9 @@ extend Package {
         // __std:: modules appended below have distinct names and never match, so scanning only the initial m0 is
         // sufficient.
         let m0 = self.modules.len();
+        // With parallel loading every file parses in one wave, then each takes its id in name order.
+        let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0;
+        let mut us = PUnits {};
         for k in 0..names.len() {
             let mut file = join2(std_dir, names[k].as_str());
             let mut dup = false;
@@ -6629,10 +6890,24 @@ extend Package {
                 let stem = stem_of(names[k].as_str());
                 let mut modpath = String::from_str("__std::");
                 modpath.push_str(stem.as_str());
-                let id = self.load_module(modpath.as_str(), file.as_str(), self.bootstrap, target);
-                if id >= 0 {
-                    self.modules[id as usize].prelude = true;
+                if par {
+                    us.push(modpath.as_str(), file.as_str(), false);
+                } else {
+                    let id = self.load_module(modpath.as_str(), file.as_str(), self.bootstrap, target);
+                    if id >= 0 {
+                        self.modules[id as usize].prelude = true;
+                    }
                 }
+            }
+        }
+        let roots = us.units.len();
+        if roots != 0 {
+            self.par_discover(&mut us, self.bootstrap, target);
+        }
+        for k in 0..roots {
+            let id = self.par_replay(&mut us, k, self.bootstrap, target);
+            if id >= 0 {
+                self.modules[id as usize].prelude = true;
             }
         }
         return true;

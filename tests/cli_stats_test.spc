@@ -36,7 +36,8 @@ fn stats_switches_report_in_one_build() {
     assert(r.out_has("inline considered"), "the inliner stats line is printed");
     assert(r.out_has("cemit-stage write:"), "a cemit stage timing is printed");
     assert(r.out_shows("{\"v\":1,\"ok\":true,\"profile\":\"debug\""), "the record opens with its version and outcome");
-    assert(r.out_has("\"ms\":{\"stamp\":"), "the phase partition starts at the stamp check");
+    assert(r.out_has("\"ms\":{\"setup\":"), "the phase partition starts at the compile-side setup");
+    assert(r.out_has(",\"stamp\":"), "the stamp check is a phase of its own after the setup");
     assert(r.out_has(",\"link\":"), "and ends at the link");
     assert(r.out_has(",\"total\":"), "the total is reported");
     assert(r.out_has("\"cc\":{\"jobs\":"), "the streamed C compile is reported apart from the partition");
@@ -46,7 +47,9 @@ fn stats_switches_report_in_one_build() {
 }
 
 // The borrow pass frees each analysis slot once no job will lease it again, except under the borrow
-// probe: SC_BORROW_STATS reads every slot after the stage, its retained scratch included.
+// probe: SC_BORROW_STATS reads every slot after the stage, its retained scratch included. The table
+// accounts for the whole stage: its prologue (the type publication, the per-module scans) and the
+// keep run once, each module's checker setup once per module.
 @test
 fn borrow_probe_reads_the_slots_after_the_stage() {
     let p = cli::proj_new();
@@ -57,6 +60,33 @@ fn borrow_probe_reads_the_slots_after_the_stage() {
     assert(r.ok(), "the build succeeds");
     assert(r.out_has("borrow-probe"), "the probe report is printed");
     assert(r.out_has("retained scratch: forest "), "the report reads the slot's retained scratch");
+    let t = r.text();
+    assert(probe_calls(t, "publish") == 1, "the type publication is timed once");
+    assert(probe_calls(t, "reach") == 1, "the prologue scans are timed once");
+    assert(probe_calls(t, "setup") > 1, "each module's checker setup is timed");
+    assert(probe_calls(t, "keep") > 1, "every kept copy is timed");
+    assert(probe_calls(t, "tail") > 1, "the tail-call conversion is timed");
+}
+
+// The calls column of the borrow probe's row `name` in output `t`; 0 when the row is absent.
+fn probe_calls(t: str, name: str) u64 {
+    for ln in t.lines() {
+        let s = ln.trim();
+        if !s.starts_with(name) || !s.slice(name.len(), s.len()).starts_with(" ") {
+            continue;
+        }
+        let mut k = 0;
+        for w in s.split(" ") {
+            if w.len() == 0 {
+                continue;
+            }
+            if k == 2 {
+                return w.parse_u64().unwrap_or(0);
+            }
+            k += 1;
+        }
+    }
+    return 0;
 }
 
 // SC_BUILD_MEM turns the runtime allocation tracker on for the build: the record then carries the

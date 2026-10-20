@@ -82,7 +82,8 @@ module's row from live syntax, `emit_dep_row`) have run. The per-instance check 
 the evaluator's view of the keep has closed, so a condition such as `T::is_signed()` lowers
 its non-generic callee from syntax. The constant pre-pass before emission copies the kept
 bodies it touches (`Interp.copy_kept`) before the view closes, so emission's constants need
-no syntax. The `call_info` and `mono` entries of body-arena nodes go with the arena
+no syntax; it skips a constant whose initializer evaluated whole before the view opened
+(`Interp.whole`), whose callees are the evaluator's own boxes already. The `call_info` and `mono` entries of body-arena nodes go with the arena
 (`Ast::release_body_facts`, in `Package::release_bodies`); the freed `mono` entries'
 distinct type arguments stay in `Ast.mono_live` for the emission liveness. A NODE_BODY
 read after the release is a bounds abort in

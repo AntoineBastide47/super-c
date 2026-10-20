@@ -160,7 +160,7 @@ fn local_analysis_lints() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "enum E {\n    A(i32),\n    B,\n}\n\nfn muts(a: i32) i32 {\n    let mut kept = a;\n    kept = kept + 1;\n    let mut extra = a;\n    return kept + extra;\n}\n\nfn stores(a: i32) i32 {\n    let mut v = a;\n    v = 7;\n    return v;\n}\n\nfn labeled(n: i32) i32 {\n    let mut s = 0;\n    'outer: for i in 0..n {\n        s = s + i;\n    }\n    'used: for i in 0..n {\n        if i == 1 {\n            break 'used;\n        }\n        s = s + i;\n    }\n    return s;\n}\n\nfn unreach(a: i32) i32 {\n    let mut s = a;\n    if a > 0 {\n        return s;\n        s = 0;\n    }\n    return -s;\n}\n\nfn arms(e: E) i32 {\n    return switch e {\n        _ => {\n            0;\n        },\n        B => {\n            1;\n        },\n    };\n}\n\nfn derefs(a: i32) i32 {\n    let r = &a;\n    let b = *&a;\n    let c = &*r;\n    return b + *c;\n}\n\nfn main() i32 {\n    let e = E::A(2);\n    return muts(1) + stores(2) + labeled(3) + unreach(4) + arms(e) + derefs(5) - 27;\n}\n",
+        "enum E {\n    A(i32),\n    B,\n}\n\nfn muts(a: i32) i32 {\n    let mut kept = a;\n    kept = kept + 1;\n    let mut extra = a;\n    return kept + extra;\n}\n\nfn stores(a: i32) i32 {\n    let mut v = a;\n    v = 7;\n    return v;\n}\n\nfn labeled(n: i32) i32 {\n    let mut s = 0;\n    'outer: for i in 0..n {\n        s = s + i;\n    }\n    'used: for i in 0..n {\n        if i == 1 {\n            break 'used;\n        }\n        s = s + i;\n    }\n    return s;\n}\n\nfn unreach(a: i32) i32 {\n    let mut s = a;\n    if a > 0 {\n        return s;\n        s = 0;\n    }\n    return -s;\n}\n\nfn arms(e: E) i32 {\n    return switch e {\n        _ => {\n            0;\n        },\n        B => {\n            1;\n        },\n    };\n}\n\nfn derefs(a: i32) i32 {\n    let r = &a;\n    let b = *&a;\n    let c = &*r;\n    return b + *c;\n}\n\nfn aliased(a: i32) i32 {\n    let mut w = a;\n    w = 2;\n    let r = &w;\n    let mut z = a;\n    z = 4;\n    let f = |q: i32, y: i32| q + z;\n    let mut s = 0;\n    'w: while s < 100 {\n        s = s + 1;\n        'inner: while s < 50 {\n            continue 'w;\n        }\n    }\n    return *r + f(1, 2) + s;\n}\n\nfn main() i32 {\n    let e = E::A(2);\n    return muts(1) + stores(2) + labeled(3) + unreach(4) + arms(e) + derefs(5) + aliased(1) - 30;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint \"");
@@ -175,6 +175,12 @@ fn local_analysis_lints() {
     assert(r.out_has("value assigned to 'v' is overwritten before it is read"));
     assert(r.out_has("unused label ''outer'"));
     assert(!r.out_has("''used'"));
+    // Address-taken and closure-captured bindings are exempt from the dead-store lint.
+    assert(!r.out_has("value assigned to 'w'"));
+    assert(!r.out_has("value assigned to 'z'"));
+    assert(r.out_has("unused parameter 'y'"));
+    assert(r.out_has("unused label ''inner'"));
+    assert(!r.out_has("''w'"));
     assert(r.out_has("unreachable statement"));
     assert(r.out_has("unreachable arm: a previous arm matches every value"));
     assert(r.out_has("unnecessary '*&': the expression can be used directly"));
@@ -346,6 +352,55 @@ fn always_panics_lint() {
     let q = p.run_raw(qargs.as_str());
     assert_eq(q.exit, 0);
     assert(!q.out_has("always panics"), "intent, run-time indexes and folded guards are silent");
+}
+
+// A build checks the project's modules, not the std and ffi trees (check.sh lints those): a provable
+// panic, an unbounded recursion and an unused item in a nested std module or an ffi binding are silent,
+// and the same code in a project module is reported.
+@test
+fn build_checks_skip_std_and_ffi_panic_recursion_and_unused() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    cli::copy_std(root);
+    let code = String::from_str(
+        M"(pub fn zz_TAG_panics() i32 {
+    let y = 13i32;
+    let arr = Array::<i32, 512>::filled(&y);
+    let x = arr.at(1000000);
+    return *x;
+}
+
+pub fn zz_TAG_spins(n: u64) u64 {
+    return zz_TAG_spins(n + 1);
+}
+
+fn zz_TAG_unused() {}
+)",
+    );
+    p.mkfile("sc/std/zz/probe.spc", code.replace("TAG", "std").as_str());
+    p.mkfile("sc/ffi/zz_probe.spc", code.replace("TAG", "ffi").as_str());
+    p.mkfile("own.spc", code.replace("TAG", "own").as_str());
+    p.mkfile(
+        "main.spc",
+        M"(import std::zz::probe;
+import zz_probe;
+import own;
+
+fn main() i32 {
+    let s = probe::zz_std_spins(1) + zz_probe::zz_ffi_spins(1) + own::zz_own_spins(1);
+    return probe::zz_std_panics() + zz_probe::zz_ffi_panics() + own::zz_own_panics() + s as i32;
+}
+)",
+    );
+    let mut env = String::new();
+    env.format_into("{}/cache SC_STD_DIR={}/sc/std", root, root);
+    let r = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), "build main.spc");
+    assert(r.exit != 0, "the project module's findings fail the build");
+    assert(r.out_has("error: this statement always panics at runtime"), "a project panic is reported");
+    assert(r.out_shows("error: function 'zz_own_spins' cannot return without calling itself"), "and its recursion");
+    assert(r.out_shows("unused function 'zz_own_unused'"), "and its unused item");
+    assert(!r.out_has("probe.spc"), "the std and ffi modules report nothing");
+    assert(!r.out_has("zz_std_") && !r.out_has("zz_ffi_"), "nothing names their functions");
 }
 
 // Unbounded recursion is an ERROR on every build (ir/recursion.spc): a function or method no path of

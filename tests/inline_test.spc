@@ -122,6 +122,50 @@ fn a_switch_on_a_const_parameter_inlines_its_one_arm() {
     expect_inlined("switch folding", SWITCH, 14);
 }
 
+// A switch on a literal spelled in hex (`0x41`, whose `Constant.val` holds only a decimal spelling)
+// takes the arm of its value in a splice and in a bound variant: the switch keeps reading its temp.
+const HEX_SPLICE: str = M"(fn code(x: i32) i32 {
+    let s: i32 = switch 0x41u8 {
+        65 => 1,
+        66 => 2,
+        _ => 0,
+    };
+    return s + x;
+}
+fn main(args: Vector<str>) i32 {
+    return code(args.len() as i32) - 2;
+}
+)";
+
+const HEX_BOUND: str = M"(interface Scale {
+    fn k() i32;
+}
+struct A {}
+extend A as Scale {
+    fn k() i32 {
+        return 3;
+    }
+}
+@c.noinline
+fn times<T: Scale>(x: i32x4) i32x4 {
+    let s: i32 = switch 0x41u8 {
+        65 => 1,
+        66 => 2,
+        _ => 0,
+    };
+    return x * i32x4::splat(T::k() + s);
+}
+fn main(args: Vector<str>) i32 {
+    return times::<A>(i32x4::splat(args.len() as i32)).get(2) - 4;
+}
+)";
+
+@test
+fn a_switch_on_a_hex_literal_takes_its_value_arm() {
+    expect_inlined("hex scrutinee in a splice", HEX_SPLICE, 0);
+    expect_inlined("hex scrutinee in a bound variant", HEX_BOUND, 0);
+}
+
 const COUNT: str = M"(fn twice<const M: usize>() usize {
     return M * 2;
 }

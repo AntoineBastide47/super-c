@@ -762,14 +762,39 @@ fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize) ir::R
     return pick(n == 1, src, none);
 }
 
+// The exact value of integer or boolean constant `c` of `b`: `val`, except for a literal spelled other
+// than in plain decimal (`0x41`), whose span holds it (`Constant::int_value`).
+fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v: &mut i64) bool {
+    *v = c.val;
+    if c.kind != ir::CK_INT {
+        return c.kind == ir::CK_BOOL;
+    }
+    // An inlined constant's span indexes its own module (`item` marks it).
+    let m = if c.item.node != NODE_NONE {
+        c.item.module;
+    } else {
+        b.module;
+    };
+    return c.int_value(p.modules.at(m as usize).source.as_str(), v);
+}
+
+// Whether a switch may read scrutinee `o` of `b` in place of its temp: a constant whose `val`, the
+// value `CFlow` and `reach` match the cases against, is its value (a literal `0x41` stays a read).
+fn switch_on_const(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+    if b.operands.at(o as usize).kind != ir::OP_CONST {
+        return false;
+    }
+    let c = b.constants.at(b.operands.at(o as usize).data as usize);
+    let mut v: i64 = 0;
+    return c.kind != ir::CK_INT || const_value(p, b, c, &mut v) && v == c.val;
+}
+
 // The integer value of operand `o` of `b` when it is a constant or a read of a const-generic
 // parameter `binds` bind (types of module `cm`).
 fn int_operand(p: &loader::Package, b: &ir::CoreBody, o: u32, cm: ModuleId, binds: &Vector<GBind>, v: &mut i64) bool {
     let op = *b.operands.at(o as usize);
     if op.kind == ir::OP_CONST {
-        let c = *b.constants.at(op.data as usize);
-        *v = c.val;
-        return c.kind == ir::CK_INT || c.kind == ir::CK_BOOL;
+        return const_value(p, b, b.constants.at(op.data as usize), v);
     }
     let pl = *b.places.at(op.data as usize);
     let l = *b.locals.at(pl.base as usize);
@@ -1079,7 +1104,7 @@ fn alias_copy(b: &ir::CoreBody, i: usize, alias: &Vector<u32>) u32 {
 
 // The declaration-level checks: 0 = a candidate worth keeping, else the rejection. A candidate's
 // enclosing extend block (or NODE_NONE) is written to `ext`.
-fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &mut NodeId, demand: &mut bool) u64 {
+fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mut bool) u64 {
     let p = unsafe &*pkg;
     if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return REJ_BASE | IJ_NOT_FN as u64;
@@ -1105,30 +1130,24 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &
         }
     }
     *ext = extend_of(a, d.node);
-    // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
-    // only when a call site DEMANDS the instance, so a splice of it records the call in the
-    // caller's `demands` (`demand`). `asserts` holds the module's static_assert spans.
-    *demand = false;
-    if f.generics.len != 0 || *ext != NODE_NONE && a.at_const(*ext).as_data.extend_def.generics.len != 0 {
-        let bsp = a.at_const(f.body).span;
-        for k in 0..asserts.len() {
-            let sp = asserts[k];
-            *demand = *demand || (sp >> 32) as u32 >= bsp.start && (sp & 0xFFFFFFFFu64) as u32 <= bsp.end;
-        }
-    }
+    // A GENERIC body carrying a static_assert (`Ast.assert_fns`) defers it per instantiation; that
+    // guard fires only when a call site DEMANDS the instance, so a splice of it records the call in
+    // the caller's `demands` (`demand`).
+    *demand = (f.generics.len != 0 || *ext != NODE_NONE && a.at_const(*ext).as_data.extend_def.generics.len != 0) && a.assert_fns.contains(
+        &d.node,
+    );
     return 0;
 }
 
-// The spans of module `a`'s static_assert nodes, packed `start << 32 | end`: one scan per module,
-// against one per vetted generic callee.
-fn assert_spans(a: &Ast, out: &mut Vector<u64>) {
-    out.clear();
-    for ni in 0..a.nnodes() {
-        let nd = a.at_const(a.nth_id(ni));
-        if nd.kind == NodeKind::NODE_STATIC_ASSERT {
-            out.push(nd.span.start as u64 << 32 | nd.span.end as u64);
-        }
+// The bit of function `d` in a called set whose per-module first words are `base` (one entry per
+// module and a last one: a module's words end where the next one's start), or -1 when its module
+// holds no such bit: a module without an Ast, or a node of the body arena, which `build` never vets.
+fn called_bit(base: &Vector<usize>, d: DefId) i64 {
+    let m = d.module as usize;
+    if Ast::in_body(d.node) || d.node as usize >= (base[m + 1] - base[m]) * 64 {
+        return -1;
     }
+    return (base[m] * 64 + d.node as usize) as i64;
 }
 
 extend InlineStore {
@@ -1154,31 +1173,40 @@ extend InlineStore {
     pub fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
         // Only a body some kept body calls can be inlined: collect the call targets first, so
         // the vetting (an attribute walk and a statement scan per body) runs for those alone.
-        let mut called = Map::<u64, u8>::new();
-        let mut asserts = Vector::<Vector<u64>>::new(); // per module, filled on first use
-        let mut has_asserts = Vector::<u8>::new(); // 0 unknown, 1 filled
-        let nm = unsafe (&*pkg).modules.len();
-        for _ in 0..nm {
-            asserts.push(Vector::<u64>::new());
-            has_asserts.push(0);
+        // A bit per module node (`called_bit`): a call costs a store, not a table insert.
+        let p = unsafe &*pkg;
+        let mut base = Vector::<usize>::new();
+        let mut words: usize = 0;
+        for m in 0..p.modules.len() {
+            base.push(words);
+            if p.modules.at(m).has_ast {
+                words += ((unsafe &*p.module_ast_const(m as ModuleId)).nodes.len() + 63) / 64;
+            }
         }
-        let vec_prog = unsafe (&*pkg).names_vectors();
+        base.push(words);
+        let mut called = Vector::<u64>::new();
+        called.resize_default(words);
+        let vec_prog = p.names_vectors();
         for i in 0..keep.kept.len() {
             let b = &keep.kept.at(i).body;
             for k in 0..b.blocks.len() {
                 let t = &b.blocks.at(k).term;
                 if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
-                    called.insert(callee_key(t.callee), 1);
+                    let at = called_bit(&base, t.callee);
+                    if at >= 0 {
+                        called[at as usize / 64] |= 1u64 << at as u64 % 64;
+                    }
                 }
             }
             // A conformance's method: a call through its interface reaches it once an instance names
             // the receiver (the emitter's bound variants).
             let d = b.owner;
-            if !Ast::in_body(d.node) && unsafe (&*pkg).modules.at(d.module as usize).has_ast {
-                let a = unsafe &*(&*pkg).module_ast_const(d.module);
+            let at = called_bit(&base, d);
+            if at >= 0 {
+                let a = unsafe &*p.module_ast_const(d.module);
                 let ext = extend_of(a, d.node);
                 if ext != NODE_NONE && a.at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
-                    called.insert(callee_key(d), 1);
+                    called[at as usize / 64] |= 1u64 << at as u64 % 64;
                 }
             }
         }
@@ -1194,23 +1222,21 @@ extend InlineStore {
                 self.vec_ix.insert(key, self.vec_bodies.len() as u64);
                 self.vec_bodies.push(ir::CoreBody::compact_from(&lw.body));
             }
-            if self.keep_ix.contains_key(&key) || !called.contains_key(&key) {
+            // A body without a bit is no candidate: an absent entry reads as `vet_decl`'s rejection
+            // of a module without an Ast (`callee_slot`).
+            let at = called_bit(&base, d);
+            if self.keep_ix.contains_key(&key) || at < 0 || (called[at as usize / 64] >> at as u64 % 64 & 1) == 0 {
                 continue;
             }
             // The size gate first: it rejects most bodies at once, before the declaration checks
             // walk the module's attributes.
             let mut r: u64 = 0;
-            if !lw.body.inline_size_ok && !param_switch(unsafe &*pkg, &lw.body) {
+            if !lw.body.inline_size_ok && !param_switch(p, &lw.body) {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
-                let dm = d.module as usize;
-                if dm < nm && has_asserts[dm] == 0 && unsafe (&*pkg).modules.at(dm).has_ast {
-                    assert_spans(unsafe &*(&*pkg).module_ast_const(d.module), asserts.index_mut(dm));
-                    has_asserts.set(dm, 1);
-                }
                 let mut ext = NODE_NONE;
                 let mut demand = false;
-                r = vet_decl(pkg, d, asserts.at(dm), &mut ext, &mut demand);
+                r = vet_decl(pkg, d, &mut ext, &mut demand);
                 if r == 0 {
                     r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len(), demand, vec_prog);
                 }
@@ -1947,7 +1973,7 @@ pub fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
         let tm = b.blocks.at(i).term;
         if tm.kind == ir::TM_SWITCH && b.operands.at(tm.a as usize).kind != ir::OP_CONST {
             let o = scrutinee(unsafe &*pkg, b, tm.a, 0, 0, 0);
-            if b.operands.at(o as usize).kind == ir::OP_CONST {
+            if switch_on_const(unsafe &*pkg, b, o) {
                 b.blocks.index_mut(i).term.a = o;
             }
         }
@@ -2997,7 +3023,7 @@ fn splice(
             continue;
         }
         let o = scrutinee(unsafe &*pkg9, b, tm.a, s0 as usize, l0, b0 as usize);
-        if b.operands.at(o as usize).kind == ir::OP_CONST {
+        if switch_on_const(unsafe &*pkg9, b, o) {
             b.blocks.index_mut(i as usize).term.a = o;
         }
     }

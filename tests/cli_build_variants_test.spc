@@ -191,6 +191,67 @@ fn same_second_edit_recompiles() {
     assert_eq(second.exit, 4);
 }
 
+// A unit this build rewrote recompiles even when its object's record is dated after it, which stands in
+// for an edit in the same second as the previous compile: the engine's own emission tells it what it
+// rewrote, an external transpiler leaves the record `.emit_rewritten` (it names the rewritten unit and
+// not the unchanged one), and a transpiler that leaves none counts its whole tree as rewritten.
+@test
+fn rewritten_unit_recompiles_under_a_later_record() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // `find`, `touch -t` and the `sh` transpiler need a POSIX host
+    }
+    for lane in 0..3 {
+        let p = cli::proj_new();
+        p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+        p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
+        p.mkfile("src/lib.spc", "@c.noinline\npub fn v() i32 {\n    return 3;\n}\n");
+        p.mkfile(
+            "tr.sh",
+            format("\"{}\" \"$@\" || exit $?\nrm -f build/debug/.emit_rewritten\n", cli::superc_path()).as_str(),
+        );
+        let root = p.dir();
+        let args = if lane == 0 {
+            String::from_str("build -o app");
+        } else if lane == 1 {
+            format("build \"--transpiler={}\" -o app", cli::superc_path());
+        } else {
+            String::from_str("build \"--transpiler=sh tr.sh\" -o app");
+        };
+        let app = format("{}/app", root);
+        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the first build");
+        assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
+        let mut later = format("find \"{}/build/debug/obj\" -name \"*.cmd\" -exec touch -t 203001010000 {{}} +", root);
+        assert_eq(cli::run_quiet(later.cstr()), 0);
+        p.mkfile("src/lib.spc", "@c.noinline\npub fn v() i32 {\n    return 4;\n}\n");
+        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the build after the edit");
+        assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 4);
+        if lane == 1 {
+            let rec = cli::read_text(format("{}/build/debug/.emit_rewritten", root).as_str());
+            assert(rec.contains("lib.c\n") && !rec.contains("main.c"), "the record names the rewritten unit alone");
+        }
+    }
+}
+
+// A build whose emission fails leaves the tree it compiles from as the last successful emission wrote
+// it: a later build that emits that text again must not take it for a file older than its object.
+@test
+fn failed_emission_keeps_the_tree() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_env_in(root, E, "1", "build").ok(), "the first build");
+    let c = format("{}/build/debug/raw/main.c", root);
+    let before = cli::read_text(c.as_str());
+    p.mkfile(
+        "src/main.spc",
+        "@c.source(\"missing.c\")\nextern \"C\" {\n    fn gone() i32;\n}\n\nfn main() i32 {\n    return unsafe gone();\n}\n",
+    );
+    let bad = cli::superc_env_in(root, E, "1", "build");
+    assert(!bad.ok() && bad.out_has("cannot find C source"), "a missing C source fails the emission");
+    assert(cli::read_text(c.as_str()).as_str() == before.as_str(), "the failed emission wrote no unit");
+}
+
 // How many C files module `main` emits into `dir`: `main.c` and its parts `main__p<k>.c`.
 fn shard_parts(dir: str) i32 {
     let mut n: i32 = 0;
@@ -236,7 +297,7 @@ fn shard_counts_follow_emitted_size() {
     let r = cli::superc_env_in(root, E, "1", "build");
     assert(r.ok(), "the build succeeds");
     let mut gen = String::from_str(root);
-    gen.push_str("/build/debug/gen");
+    gen.push_str("/build/debug/raw");
     let parts = shard_parts(gen.as_str());
     assert(parts >= 2, "the large module has more than one shard");
     let again = cli::superc_env_in(root, E, "1", "build");

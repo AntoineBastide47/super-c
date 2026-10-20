@@ -75,6 +75,30 @@ fn lint_recurses_a_directory() {
 }
 
 @test
+fn a_listed_file_keeps_its_pub_items_live() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    // A listed file loads without the modules that import it: its pub items, and what they call,
+    // are live. The whole-project lint loads every caller and reports the pub item none reaches.
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "import extra::util;\n\nfn main() i32 {\n    return extra::util::u();\n}\n");
+    p.mkfile(
+        "src/extra/util.spc",
+        "fn half() i32 {\n    return 0;\n}\n\npub fn u() i32 {\n    return half();\n}\n\npub fn dead() i32 {\n    return 1;\n}\n",
+    );
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint src/extra/util.spc");
+    assert(r.ok() && !r.out_has("warning"), "the listed file's pub items and their callees are live");
+    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(w.exit != 0 && w.out_shows("unused public function 'dead'"), "the whole project reports the dead pub item");
+    assert(!w.out_has("'u'") && !w.out_has("'half'"), "and only it");
+}
+
+@test
 fn whole_project_lint_roots_a_nested_project_at_its_manifest() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
     // dependent guest command, so it runs on native and Windows only.

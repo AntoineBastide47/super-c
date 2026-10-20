@@ -10,7 +10,7 @@ run = [
 
 [command.profile]
 run = [
-    "./super-c bench --no-run",
+    "./super-c bench --no-run --filter=self_transpile",
     "samply record --rate 1000 build/bench-bin --in-process",
 ]
 

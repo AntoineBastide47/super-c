@@ -17,7 +17,7 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 1;
+const IMAGE_VER: u64 = 2;
 
 /// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
 /// type-table hash mode.
@@ -50,6 +50,15 @@ fn mix_str(h: u64, s: str) u64 {
     return skey_mix(fnv_cont(h, s), s.len() as u64);
 }
 
+/// The compiler identity (`compiler_id`) the image cache keys on; 0 when the object cache is off, so a build
+/// without it does not hash the compiler.
+pub fn cache_id() u64 {
+    if ocache::object_cache_dir().len() == 0 {
+        return 0;
+    }
+    return compiler_id();
+}
+
 // The cache entry of the image for `key` written by compiler `cid`; empty when the object cache is off.
 fn image_path(key: u64, cid: u64) String {
     let root = ocache::object_cache_dir();
@@ -63,11 +72,17 @@ fn image_path(key: u64, cid: u64) String {
     return ocache::script_entry(ocache::script_ns(root.as_str()).as_str(), name.as_str());
 }
 
-// A directory listing's identity: its names in order, and whether it opened.
-fn dir_id(dir: str) u64 {
+/// The identity of directory `dir`'s listing (`loader::dir_listing`): its names in order, and whether it
+/// listed.
+pub fn dir_id(dir: str) u64 {
     let mut names = Vector::<String>::new();
-    let ok = loader::dir_listing(dir, &mut names);
-    let mut h = skey_mix(FNV_BASIS, ok as u64);
+    let st = loader::dir_listing(dir, &mut names);
+    return listing_id(st, &names);
+}
+
+// The identity of a listing: its `loader::dir_listing` state and its sorted names.
+fn listing_id(st: u8, names: &Vector<String>) u64 {
+    let mut h = skey_mix(FNV_BASIS, st);
     for i in 0..names.len() {
         h = mix_str(h, names.at(i).as_str());
     }
@@ -85,22 +100,23 @@ struct Deps {
 
 extend Deps as Persist {}
 
-fn deps_of(q: &loader::Package, std_dir: str) Deps {
+// What `q` was checked from, as its load read it: a file edited or a directory changed during the check
+// then fails `deps_current`. `std_id` is `dir_id(std_dir)` from before the load.
+fn deps_of(q: &loader::Package, std_dir: str, std_id: u64) Deps {
     let mut d = Deps {};
     for m in 0..q.modules.len() {
-        let f = q.modules.at(m).file.as_str();
         if q.build_module == m as i32 {
             continue; // the build-constant module has no file: its text is the settings
         }
-        d.files.push(String::from_str(f));
-        d.file_ids.push(file_id(f));
+        d.files.push(q.modules.at(m).file.clone());
+        d.file_ids.push(q.modules.at(m).src_id);
     }
     d.dirs.push(String::from_str(std_dir));
-    d.dir_ids.push(dir_id(std_dir));
+    d.dir_ids.push(std_id);
     let dc = &q.dir_cache;
     for i in 0..dc.dirs.len() {
         d.dirs.push(dc.dirs.at(i).clone());
-        d.dir_ids.push(dir_id(dc.dirs.at(i).as_str()));
+        d.dir_ids.push(listing_id(dc.state[i], dc.entries.at(i)));
     }
     return d;
 }
@@ -124,33 +140,42 @@ fn deps_current(d: &Deps) bool {
 /// its engine `e`. The fields not saved are the settings the reader sets itself, caches, and the state
 /// later stages compute.
 pub fn save(q: &loader::Package, e: &iri::Interp) String {
+    // A sizing pass first: the image is then written into one allocation of its size.
+    let mut m = Writer::sizing();
+    save_into(q, e, &mut m);
     let mut w = Writer::new();
-    q.modules.save(&mut w);
-    q.mod_index.save(&mut w);
-    q.mod_chain.save(&mut w);
-    q.alias_path.save(&mut w);
-    q.alias_id.save(&mut w);
-    q.simd_levels.save(&mut w);
-    q.build_module.save(&mut w);
-    q.build_target.save(&mut w);
-    q.ext_inputs.save(&mut w);
-    q.core_module.save(&mut w);
-    q.core_seeded.save(&mut w);
-    w.bytes(((&q.builtin_decls) as *const NodeId) as *const u8, sizeof([NodeId; loader::BT_COUNT_N]));
-    q.method_used.save(&mut w);
-    q.always_methods.save(&mut w);
-    q.tt.deref().save(&mut w);
-    q.pub_map.save(&mut w);
-    q.publications.save(&mut w);
-    q.tt_class.save(&mut w);
-    q.idx.save(&mut w);
-    q.lint_warnings.save(&mut w);
-    q.carry.save(&mut w);
-    e.pending.save(&mut w);
-    e.pending_consts.save(&mut w);
-    e.pending_strict.save(&mut w);
-    e.inst_asserts.save(&mut w);
+    w.buf.reserve_exact(m.len());
+    save_into(q, e, &mut w);
     return replace(&mut w.buf, String::new());
+}
+
+// What `save` writes, into `w`.
+fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
+    q.modules.save(w);
+    q.mod_index.save(w);
+    q.mod_chain.save(w);
+    q.alias_path.save(w);
+    q.alias_id.save(w);
+    q.simd_levels.save(w);
+    q.build_module.save(w);
+    q.build_target.save(w);
+    q.ext_inputs.save(w);
+    q.core_module.save(w);
+    q.core_seeded.save(w);
+    w.bytes(((&q.builtin_decls) as *const NodeId) as *const u8, sizeof([NodeId; loader::BT_COUNT_N]));
+    q.method_used.save(w);
+    q.always_methods.save(w);
+    q.tt.deref().save(w);
+    q.pub_map.save(w);
+    q.publications.save(w);
+    q.tt_class.save(w);
+    q.idx.save(w);
+    q.lint_warnings.save(w);
+    q.carry.save(w);
+    e.pending.save(w);
+    e.pending_consts.save(w);
+    e.pending_strict.save(w);
+    e.inst_asserts.save(w);
 }
 
 /// Load image `img` (from `save`) into `p`, which holds no module yet, and its engine `e`; false when the
@@ -201,18 +226,18 @@ fn header(key: u64, cid: u64, payload: &String) Writer {
 }
 
 /// Store `img` under `key` for compiler `cid` (`compiler_id`) with the dependencies of `q`, the package
-/// that checked it from `std_dir`. A failed write only makes the next build check the prelude again.
-pub fn write(key: u64, cid: u64, q: &loader::Package, std_dir: str, img: &String) {
+/// that checked it from `std_dir`, whose listing had identity `std_id` (`dir_id`) before the load. A
+/// failed write only makes the next build check the prelude again.
+pub fn write(key: u64, cid: u64, q: &loader::Package, std_dir: str, std_id: u64, img: &String) {
     let path = image_path(key, cid);
     if path.len() == 0 {
         return;
     }
     let mut w = header(key, cid, img);
-    deps_of(q, std_dir).save(&mut w);
+    deps_of(q, std_dir, std_id).save(&mut w);
     w.align();
-    w.buf.push_string(img);
     mkdir_p(loader::dirname_of(path.as_str()));
-    let _ = write_file_atomic(path.as_str(), w.buf.as_str());
+    let _ = write_file_atomic_parts(path.as_str(), w.buf.as_str(), img.as_str());
 }
 
 /// The stored image file for `key` that compiler `cid` wrote and whose std files are current, and the

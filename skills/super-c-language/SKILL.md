@@ -304,7 +304,9 @@ A `&mut` reference is exclusive also for unsafe code: reaching its referent thro
 other path while it is live is undefined behavior (its C parameter is `restrict`, see
 `types.md`). A `[]mut T` view is exclusive the same way (Rust's `&mut [T]`). A `&mut` or a
 `[]mut T` copied into a local of its own kind moves (`let t = s;`); passed to a call it is
-reborrowed for the call; stored into a field, a struct, tuple or variant literal, or a closure, it
+reborrowed for the call, and for as long as the result lives when the signature ties them
+(`let d = r.index_mut(0); let n = r.len(); *d = 1` is "cannot use this value while it is
+mutably borrowed"); stored into a field, a struct, tuple or variant literal, or a closure, it
 is reborrowed for as long as that holder lives, so the source is unusable until then
 (`let w = S { a: r }; h(r, w.a)` is "cannot use this value while it is mutably borrowed"). Two
 arguments of one call cannot reach the same storage when one of them hands it over mutably (a `&mut`, a `[]mut T`, or a `&mut` autoref): `h(r, r)`, `h2(r, r)` with
@@ -690,6 +692,7 @@ source text, values, and file:line on failure.
 | `@c.inline` | Suggest inlining |
 | `@c.always_inline` | Force inlining |
 | `@c.noinline` | Prevent inlining |
+| `@c.cold` | Mark rarely called: C `cold`, which implies `noinline`; the C compiler lays out the branches that call it as unlikely |
 | `@c.noreturn` | Mark non-returning |
 | `@c.align(N)` | Set alignment of a struct, a union or a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
 | `@c.packed` | Pack a struct or a union outside an `extern "C"` block (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |

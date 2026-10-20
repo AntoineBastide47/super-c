@@ -59,7 +59,7 @@ fn run_file(
     p.profiles = bsys::profile_names(&bi);
     p.bootstrap = bootstrap_tags;
     let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
-    if prelude_stage(&mut p, &mut cirv, std_dir, target, jobs, ce_steps, ce_mem) {
+    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem) {
         p.load_user(path, std_dir, target);
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
@@ -284,8 +284,10 @@ fn project_paths() Vector<String> {
 }
 
 // `lint` of `paths` from the working directory: build.toml's target settings, then the command line's.
+// `whole`: the paths are the whole project (`project_paths`), so every caller of an item is loaded.
 fn lint_project(
     paths: &Vector<String>,
+    whole: bool,
     co: &CommonOpts,
     bo: &BuildOpts,
     cpu_set: cf::CpuFeatureSet,
@@ -334,10 +336,11 @@ fn lint_project(
                 files.push(String::from_str(pa));
             }
         }
-        // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings.
+        // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings. Listed
+        // files load without the modules that import them, so their pub items stay roots there.
         let mut lpub = false;
         let mo = bman::load("build.toml", false);
-        if !mo.is_none() {
+        if whole && !mo.is_none() {
             let man = mo.unwrap();
             lpub = man.lib_name.len() == 0;
         }
@@ -430,7 +433,7 @@ fn lint_project(
             continue;
         }
         let np = project_paths();
-        if lint_project(&np, co, bo, cpu_set, std_dir, fix, sc) != 0 {
+        if lint_project(&np, true, co, bo, cpu_set, std_dir, fix, sc) != 0 {
             eprintln("lint: the findings above are in the project '{}'", nd.as_str());
             rc = 1;
         }
@@ -1531,7 +1534,7 @@ OPTIONS:
         return 1;
     }
     if mode == Mode::MODE_LINT {
-        return lint_project(&paths, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
+        return lint_project(&paths, file.len() == 0, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
     }
     if emit_sub.len() != 0 {
         // The transpile form works from the project directory, as the engine that runs it does.

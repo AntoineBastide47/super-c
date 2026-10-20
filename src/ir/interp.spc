@@ -1020,6 +1020,13 @@ pub struct Interp {
     // copy a trap's `str`, and a text is never freed or rewritten while the engine lives.
     pub trap_texts: Vector<String>,
     pub sref: Map<u64, i64>, // eval_static memo: -1 definite failure, >0 root+1 (retryable absent)
+    // The roots (module << 32 | node) of top-level evaluations that completed while no keep view was
+    // open: every plain callee they reach is a box of this engine's own, so the constant pass before
+    // emission need not run them again. Node keys only: no publication changes them.
+    pub whole: Set<u64>,
+    // The zero-argument functions (module << 32 | fn) a call of returned from: a run is deterministic,
+    // so the always-panics probe of one finds no panic (`lint_body`).
+    pub ran0: Set<u64>,
     pub fx: Vector<Vector<u8>>, // shallow effect verdicts per (module, fn node)
     pub fxd: Vector<Vector<u8>>, // deep (all-paths) effect verdicts
     pub fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
@@ -1142,6 +1149,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         dbuf: String::new(),
         trap_texts: Vector::<String>::new(),
         sref: Map::<u64, i64>::new(),
+        whole: Set::<u64>::new(),
+        ran0: Set::<u64>::new(),
         fx: Vector::<Vector<u8>>::new(),
         fxd: Vector::<Vector<u8>>::new(),
         fx_no: Map::<u64, FxNo>::new(),
@@ -3912,6 +3921,9 @@ extend Interp {
                 self.trap_in_constfn = false;
             }
             return false;
+        }
+        if args.len() == 0 && binds.len() == 0 && !closure && !self.deferred {
+            self.ran0.insert(fm as u64 << 32 | fnode as u64);
         }
         if t.dests_len == 1 && self.rets.len() > 1 {
             // A multi-return call writes one destination whose members are the return values in order.
@@ -9487,6 +9499,9 @@ extend Interp {
                 return zero;
             }
         }
+        if fd.params.len == 0 && self.ran0.contains(&(m as u64 << 32 | fn_id as u64)) {
+            return zero;
+        }
         self.eval_reset();
         self.subst.truncate(0);
         self.sub_base = 0;
@@ -10377,9 +10392,13 @@ extend Interp {
         // clears the sentinel and stays retryable in a later evaluation (a nested fold's failure
         // holds for this one: `fold_fail`); a dropped attempt (`item_defer`) records nothing
         let scalar = !self.deferred && (v.kind == IV_INT || v.kind == IV_BOOL || v.kind == IV_FLOAT);
+        let agg = !scalar && !self.failed && !self.deferred && (v.kind == IV_OBJ || v.kind == IV_PTR || v.kind == IV_FN || v.kind == IV_STR || v.kind == IV_UNIT);
+        if top && (scalar || agg) && self.keep_view == null {
+            self.whole.insert(key);
+        }
         if scalar {
             self.ememo.insert(key, v);
-        } else if !self.failed && !self.deferred && (v.kind == IV_OBJ || v.kind == IV_PTR || v.kind == IV_FN || v.kind == IV_STR || v.kind == IV_UNIT) {
+        } else if agg {
             self.ememo.insert(key, IVal { kind: EV_AGG_OK, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         } else {
             let _ = self.ememo.remove(&key);
@@ -10925,6 +10944,9 @@ extend Interp {
         self.ev_depth += 1;
         let mut v = self.run_root(m, id);
         self.ev_depth -= 1;
+        if !self.failed && v.kind != IV_NONE && self.keep_view == null {
+            self.whole.insert(key);
+        }
         let scalar = v.kind == IV_INT || v.kind == IV_BOOL || v.kind == IV_FLOAT;
         if scalar {
             self.ememo.insert(key, v);

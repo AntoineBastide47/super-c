@@ -31,7 +31,8 @@ CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off$
 # Checked by the gate on the gen1 tree:
 #   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
 #   module owning generic instances <module>__inst.c, one definition header per type __sc_t/<name>.h),
-#   the shared __sc_fwd.h, the registry TU, the manifest and the runtime super_rt.h/super_rt.c,
+#   the shared __sc_fwd.h, the registry TU, the packs __sc_pack<k>.c of the small units, the manifest
+#   and the runtime super_rt.h/super_rt.c,
 #   every include relative (the tree compiles with no -I flag),
 #   no #line directives, and symbols mangled by module path (lexer__Lexer__scan_tokens).
 CONTRACT_READABLE_FORBIDDEN='^#line '

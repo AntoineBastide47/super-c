@@ -113,9 +113,10 @@ fn feature_functions_keep_their_calls() {
         ),
         "the C target",
     );
-    let m = c.as_str().find("int32_t __sc_user_main(");
-    assert(m > 0, "main");
-    let body = c.as_str().slice(m as usize, c.len());
+    // The definition: the unit declares the function first.
+    let m = c.rfind("int32_t __sc_user_main(");
+    assert(m < c.len(), "main");
+    let body = c.as_str().slice(m, c.len());
     assert(body.contains("wide(") && !body.contains("narrow("), "wide is called, narrow inlined");
     // An AArch64 function's set renders in clang's spelling and GCC's (an architecture base and the
     // extensions beyond it).

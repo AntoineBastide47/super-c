@@ -164,7 +164,8 @@ const fn clean(o: &BorrowOut) bool {
     return o.moves == 0 && o.conflicts == 0 && o.escapes == 0;
 }
 
-// The optimized and reference solvers must produce identical required-point sets per loan.
+// The optimized and reference solvers must produce identical required-point sets per loan, in the
+// row representation the optimized solver picks.
 fn ref_agrees(p: &loader::Package, name: str) bool {
     let node = find_fn(p, name);
     let u = (p.modules.len() - 1) as ModuleId;
@@ -180,8 +181,9 @@ fn ref_agrees(p: &loader::Package, name: str) bool {
     let mut same = true;
     for li in 0..bfacts.loans.len() {
         let row = sv.required(li as u32);
-        for w in 0..rr.pwords {
-            if *rr.required.at((li as u32 * rr.pwords + w) as usize) != sv.req_word(row, w) {
+        for p in 0..bfacts.npoints {
+            let want = (*rr.required.at((li as u32 * rr.pwords + p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
+            if sv.req_at(row, p) != want {
                 same = false;
             }
         }
@@ -414,6 +416,51 @@ fn sparse_rows_agree_with_dense() {
     let (le, lsparse) = rows_agree(&q, "main");
     assert(lsparse, "the long body takes the sparse rows");
     assert(le == 400, "every write under a live borrow is rejected");
+}
+
+@test
+fn out_of_order_accesses_solve_in_point_order() {
+    // Implementation fidelity: the fact walk records some accesses of a loop that borrows an element
+    // and can `break` out of point order. The liveness replay sorts them by point (a stable counting
+    // sort, linear in records and points): the sparse, dense and reference rows agree, the loops are
+    // accepted and the conflict after them is found.
+    let lp = "for k in 0..src.len() { if dst.len() >= 8 { break; } let d = src.index_mut(k); dst.push(D { start: d.start, msg: replace(&mut d.msg, String::new()) }); }\n";
+    let mut src = String::from_str("struct D { pub start: u32, pub msg: String }\n");
+    src.push_str("fn f(dst: &mut Vector<D>, src: &mut Vector<D>) {\n");
+    for _k in 0..200 {
+        src.push_str(lp);
+    }
+    src.push_str("}\nfn g(src: &mut Vector<D>) { let mut v = Vector::<D>::new(); let dst = &mut v;\n");
+    src.push_str(lp);
+    src.push_str("let e = v.index_mut(0); let n = v.len(); e.start = n as u32; }\n");
+    src.push_str(
+        "fn main() i32 { let mut a = Vector::<D>::new(); let mut b = Vector::<D>::new(); f(&mut a, &mut b); g(&mut b); return 0; }\n",
+    );
+    let p = typed_package(src.as_str());
+    let node = find_fn(&p, "f");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let mut ow = bfx::Owner::new(&p);
+    let forest = bmp::MoveForest::build(&lw.body);
+    let bfacts = ow.generate(&lw.body, &forest);
+    let mut late: u32 = 0;
+    let mut hi: u32 = 0;
+    for i in 0..bfacts.accesses.len() {
+        let pt = bfacts.accesses.at(i).point;
+        if pt < hi {
+            late += 1;
+        }
+        hi = hi.max(pt);
+    }
+    assert(late >= 200, "each loop records an access out of point order");
+    let (fe, fsparse) = rows_agree(&p, "f");
+    assert(fe == 0, "the loops are accepted");
+    assert(fsparse, "the long body takes the sparse rows");
+    assert(ref_agrees(&p, "f"), "required sets agree");
+    let (ge, _) = rows_agree(&p, "g");
+    assert(ge != 0, "the use of the vector while an element is borrowed is rejected");
+    assert(ref_agrees(&p, "g"), "required sets agree after the loop");
 }
 
 @test

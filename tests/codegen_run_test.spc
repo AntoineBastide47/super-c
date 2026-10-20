@@ -2666,6 +2666,28 @@ fn instance_static_assert_calls_a_function() {
         ).as_str(),
         "static assertion failed: signed W",
     );
+    // A blanket conformance's method on an instance receiver binds T to the receiver `G<u8>`, never
+    // to the instance's own argument `u8`; the note names the instance with its arguments.
+    const BLANKET: str = "interface Lane {}\nstruct G<T> { pub v: T, pub w: T, pub z: T }\nextend<T> G<T> as Lane {}\ninterface Twice { fn twice(self: &Self) i64; }\n";
+    const CALL: str = "fn main() i32 { let g = G::<u8> { v: 1, w: 2, z: 3 }; return (g.twice() - 1) as i32; }\n";
+    b.add(
+        "a blanket conformance's method on an instance",
+        format(
+            "{}extend<T: Lane> T as Twice {{ fn twice(self: &Self) i64 {{ static_assert(sizeof(T) > 2, \"T is wide\"); return 1; }} }}\n{}",
+            BLANKET,
+            CALL,
+        ).as_str(),
+        0,
+    );
+    h::expect_build_err(
+        "a blanket conformance's method failing for an instance",
+        format(
+            "{}extend<T: Lane> T as Twice {{ fn twice(self: &Self) i64 {{ static_assert(sizeof(T) > 3, \"T is wide\"); return 1; }} }}\n{}",
+            BLANKET,
+            CALL,
+        ).as_str(),
+        "in the instantiation where T = G<u8>",
+    );
     b.run();
 }
 

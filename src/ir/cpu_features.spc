@@ -595,26 +595,23 @@ pub const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
     },
 ];
 
-// Each row's implied set closed under `implies`, the row itself included: each pass joins the sets of
-// the members; a pass that changes nothing ends it (at most FEATURE_COUNT passes reach any chain).
+// Each row's implied set closed under `implies`, the row itself included (Warshall): after step `k`,
+// every row that reaches row `k` holds row `k`, so the last step leaves every row closed. The bit test
+// and the join are spelled inline: every compile-time evaluation of `IMPLIED` would interpret each call.
 const fn closure() [CpuFeatureSet; FEATURE_COUNT] {
     let t: []CpuFeature = CPU_FEATURES;
     let mut c: [CpuFeatureSet; FEATURE_COUNT] = [NONE; FEATURE_COUNT];
     for i in 0..FEATURE_COUNT {
         unsafe c[i] = with(t[i].implies, i);
     }
-    for _ in 0..FEATURE_COUNT {
-        let mut changed = false;
+    for k in 0..FEATURE_COUNT {
+        let kw = k / 64;
+        let kb = (k % 64) as u64;
         for i in 0..FEATURE_COUNT {
-            for j in 0..FEATURE_COUNT {
-                if j != i && has(unsafe c[i], j) && !contains(unsafe c[i], unsafe c[j]) {
-                    unsafe c[i] = join(unsafe c[i], unsafe c[j]);
-                    changed = true;
-                }
+            if (unsafe c[i].w[kw] >> kb & 1) != 0 {
+                unsafe c[i].w[0] |= unsafe c[k].w[0];
+                unsafe c[i].w[1] |= unsafe c[k].w[1];
             }
-        }
-        if !changed {
-            break;
         }
     }
     return c;

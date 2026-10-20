@@ -24,10 +24,12 @@ fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
     }
 }
 
-// Wrap one RESOLVED external C source path `rsl` into a build/ TU (deduped across explicit + implicit adds).
+// Wrap one RESOLVED external C source path `rsl` into a build/ TU (deduped across explicit + implicit adds),
+// published with `publish_file`: `fresh` gets whether this build rewrote it.
 fn ext_c_wrap(
     root: str,
     keep: &mut Vector<String>,
+    fresh: &mut Vector<bool>,
     seen: &mut Vector<String>,
     nsrc: &mut u32,
     rsl: *const char,
@@ -65,31 +67,33 @@ fn ext_c_wrap(
     *nsrc = idx + 1;
     unsafe stdio::snprintf(&mut nm[0], 128, "__ext%u_%s".ptr() as *const char, idx, &stem[0]);
     let mut path = build_out_path(root, str::from_cbuf(nm.as_slice()), ".c");
-    let f = open_out(path.as_str());
-    if f == null {
-        unsafe stdio::perror(path.cstr());
-        *err = true;
-        return;
-    }
     // The wrapper sits at the tree's root.
-    let mut inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
-    let wrote = unsafe stdio::fprintf(
-        f,
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 4\n#include \"%s\"\n".ptr() as *const char,
-        inc.cstr(),
-    ) >= 0;
-    if unsafe stdio::fclose(f) != 0 || !wrote {
+    let inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
+    let text = format(
+        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 4\n#include \"{}\"\n",
+        inc.as_str(),
+    );
+    let rc = publish_file(&mut path, text.as_str());
+    if rc < 0 {
         unsafe stdio::perror(path.cstr());
         *err = true;
         return;
     }
     keep.push(path);
+    fresh.push(rc == 1);
 }
 
 /// Scan every module for @c.source/@c.link and implicit backing-header `.c` siblings: wrapper TUs are
-/// written under gen_root and pushed onto `keep`; link flags go to build/__ldflags (removed when none).
-/// Sets `*err` on an unresolvable source or a write failure; already-set values are never cleared.
-pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &mut bool, target: i32) {
+/// written under gen_root and pushed onto `keep`, and whether this build rewrote each onto `fresh`; link
+/// flags go to build/__ldflags (removed when none). Sets `*err` on an unresolvable source or a write
+/// failure; already-set values are never cleared.
+pub fn ext_c_collect(
+    p: &mut loader::Package,
+    keep: &mut Vector<String>,
+    fresh: &mut Vector<bool>,
+    err: &mut bool,
+    target: i32,
+) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
     // Libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
@@ -173,7 +177,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
                 }
             }
             p.ext_inputs.push(String::from_str(str::from_cbuf(rsl.as_slice())));
-            ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
+            ext_c_wrap(root, keep, fresh, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
         let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
@@ -217,7 +221,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
                 p.ext_inputs.push(String::from_str(str::from_cbuf(cabs.as_slice())));
-                ext_c_wrap(root, keep, &mut seen, &mut nsrc, &cabs[0], err);
+                ext_c_wrap(root, keep, fresh, &mut seen, &mut nsrc, &cabs[0], err);
             }
         }
     }

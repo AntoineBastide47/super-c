@@ -1069,6 +1069,8 @@ pub fn recompile(
         let oldp = pristine_parse(p, i, target);
         let _ = replace(&mut p.modules[i].ast, na);
         p.modules[i].ast.module = i as ModuleId;
+        p.modules[i].src_id = dutil::str_id(ns9.as_str());
+        p.modules[i].mtime = 0;
         p.modules[i].source = ns9;
         p.platform_filter_module(i, target);
         if same_shape(&oldp, &p.modules[i].ast) {

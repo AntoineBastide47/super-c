@@ -5,12 +5,14 @@
 // `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access declare the
 // fields they read as a header type (`struct tm` in an `extern "C" "time.h"` block). `CLOCKS_PER_SEC` binds to the real macro (1000000 on POSIX, 1000 on
 // Windows), so it is a runtime value, not a Super-C constant expression. Calling the raw bindings requires
-// `unsafe` except `clock` and `difftime`; `now`/`cpu_seconds` do not.
+// `unsafe` except `clock` and `difftime`; `now`/`cpu_seconds` do not. The Windows C runtime's `clock` counts
+// wall time since the process started, so `cpu_seconds` reads the process times there (ffi/sc_time.c).
 
 extern "C" {
     /// Seconds since the Unix epoch. Pass `null` to ignore the out-parameter.
     pub fn time(out: *mut void) i64;
-    /// Processor time consumed so far, in clock ticks (divide by CLOCKS_PER_SEC for seconds).
+    /// Processor time consumed so far, in clock ticks (divide by CLOCKS_PER_SEC for seconds). On Windows:
+    /// wall time since the process started.
     @unsafe(safe)
     pub fn clock() i64;
     /// Difference `end - start` in seconds.
@@ -36,7 +38,23 @@ pub fn now() i64 {
     return unsafe time(null);
 }
 
-/// Processor time consumed by the program so far, in seconds.
+@platform(windows)
+extern "C" "sc_time.h" {
+    @unsafe(safe)
+    fn sc_time_cpu_ns() i64;
+}
+
+/// Processor time consumed by the program so far (user and kernel time of every thread), in seconds;
+/// negative when the platform cannot report it. wasm has no process clock: wasi emulates it with the
+/// wall clock.
+@platform(!windows)
 pub fn cpu_seconds() f64 {
     return clock() as f64 / CLOCKS_PER_SEC as f64;
+}
+
+/// Processor time consumed by the program so far (user and kernel time of every thread), in seconds;
+/// negative when the platform cannot report it.
+@platform(windows)
+pub fn cpu_seconds() f64 {
+    return sc_time_cpu_ns() as f64 / 1e9;
 }

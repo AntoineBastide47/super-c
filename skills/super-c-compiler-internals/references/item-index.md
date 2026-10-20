@@ -267,7 +267,7 @@ Three stages run on it (`src/driver/emit.spc`):
   have one writer), with the module's single checker, created at the module's first item
   and freed at its last. Per item the checker's diagnostics and method-mark log are swapped
   out into the item's output slot. The module's last job checks the non-item nodes, closes
-  the module (`check_close`: the instance closure, the whole-module lints), records the
+  the module (`check_close`: the whole-module lints), records the
   result-attributability verdicts and the post-typecheck item edges. A module without items
   has no job: its non-item nodes check after the jobs, once every item is typed, as no item
   (`typecheck_stage`). After the stage the

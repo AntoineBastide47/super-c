@@ -33,7 +33,7 @@ fn expect_error(src: str) {
 @test
 fn keywords() {
     expect_tokens(
-        "as break case const continue defer do else enum extern false fn for if in let move mut null return self Self struct static static_assert true type unsafe where while switch interface extend va_start va_arg va_end match protocol augment name _ i32",
+        "as break case const continue defer do else enum extern false fn for if in let move mut null return self Self struct static static_assert true type unsafe where while switch interface extend va_start va_arg va_end match protocol augment name _ i32 asm dyn pub loop union import launch select sizeof alignof",
         [
             TokenType::As,
             TokenType::Break,
@@ -77,9 +77,214 @@ fn keywords() {
             TokenType::Identifier,
             TokenType::Underscore,
             TokenType::Identifier,
+            TokenType::Asm,
+            TokenType::Dyn,
+            TokenType::Pub,
+            TokenType::Loop,
+            TokenType::Union,
+            TokenType::Import,
+            TokenType::Launch,
+            TokenType::Select,
+            TokenType::Sizeof,
+            TokenType::Alignof,
             TokenType::Eof,
         ],
     );
+}
+
+const KEYWORD_TEXTS: [str<'static>; 46] = [
+    "as",
+    "do",
+    "fn",
+    "if",
+    "in",
+    "asm",
+    "dyn",
+    "for",
+    "let",
+    "mut",
+    "pub",
+    "case",
+    "else",
+    "enum",
+    "loop",
+    "move",
+    "null",
+    "self",
+    "Self",
+    "true",
+    "type",
+    "break",
+    "const",
+    "defer",
+    "false",
+    "union",
+    "where",
+    "while",
+    "extend",
+    "extern",
+    "import",
+    "launch",
+    "return",
+    "select",
+    "struct",
+    "static",
+    "switch",
+    "sizeof",
+    "unsafe",
+    "va_arg",
+    "va_end",
+    "alignof",
+    "continue",
+    "va_start",
+    "interface",
+    "static_assert",
+];
+
+// The kinds of the tokens of `src`, which must lex without an error, as text.
+fn kinds_of(src: str) String {
+    let mut s = String::from_str(src);
+    let mut lx = Lexer::new(&mut s, "");
+    lx.scan_tokens();
+    assert(!lx.has_errors(), "unexpected lexer error");
+    let mut out = String::new();
+    for i in 0..lx.tokens.len() {
+        out.push_str(format("{} ", lx.tokens[i].kind() as u8).as_str());
+    }
+    return out;
+}
+
+// Each keyword is one keyword token, also when bytes follow it in the buffer (the hashed lookup
+// masks the word to the identifier's length); one byte more on either side makes an identifier.
+@test
+fn keyword_boundaries() {
+    let k: []str<'static> = KEYWORD_TEXTS;
+    for i in 0..k.len() {
+        let w = k[i];
+        assert(is_keyword(w), "is_keyword misses a keyword");
+        let mut s = String::from_str(w);
+        let mut lx = Lexer::new(&mut s, "");
+        lx.scan_tokens();
+        let kind = lx.tokens[0].kind();
+        assert(kind != TokenType::Identifier && lx.tokens.len() == 2, "keyword lexes as one keyword token");
+        assert_eq(
+            kinds_of(format("{}(x", w).as_str()),
+            format("{} {} 0 {} ", kind as u8, TokenType::LeftParen as u8, TokenType::Eof as u8),
+        );
+        assert_eq(
+            kinds_of(format("{}+zzzzzzzz", w).as_str()),
+            format("{} {} 0 {} ", kind as u8, TokenType::Plus as u8, TokenType::Eof as u8),
+        );
+        for affix in 0..3 {
+            let n = if affix == 0 {
+                format("{}_", w);
+            } else if affix == 1 {
+                format("_{}", w);
+            } else {
+                format("{}0", w);
+            };
+            assert(!is_keyword(n.as_str()), "is_keyword accepts a longer word");
+            assert_eq(kinds_of(n.as_str()), format("0 {} ", TokenType::Eof as u8));
+        }
+    }
+    let misses: [str<'static>; 8] = ["", "a", "_", "continuo", "va_star", "Static", "interfac", "static_asser"];
+    let m: []str<'static> = misses;
+    for i in 0..m.len() {
+        assert(!is_keyword(m[i]), "is_keyword accepts a non-keyword");
+    }
+}
+
+// The tokens of `src` as `kind:start+len` text and the lexer's diagnostics as `@start` text.
+fn lex_summary(src: str, keep_trivia: bool) String {
+    let mut s = String::from_str(src);
+    let mut lx = Lexer::new(&mut s, "");
+    lx.keep_trivia = keep_trivia;
+    lx.scan_tokens();
+    let mut out = String::new();
+    for i in 0..lx.tokens.len() {
+        let t = lx.tokens[i];
+        out.push_str(format("{}:{}+{} ", t.kind() as u8, t.start(), t.len()).as_str());
+    }
+    for i in 0..lx.errors.errors.len() {
+        out.push_str(format("@{} ", lx.errors.errors[i].start).as_str());
+    }
+    return out;
+}
+
+// An identifier of every length up to 24 ends at each byte that is not [0-9A-Za-z_], also at
+// the class edges ('/' ':' '@' '[' '`' '{' 0x7F), a byte at or above 0x80, and the end of the source.
+@test
+fn identifier_ends() {
+    let part = "abcXYZ_09";
+    let ends: [str<'static>; 11] = ["", " ", "/", ":", "@", "[", "`", "{", "\x7F", "\xC3\xA9", "\xFF"];
+    let e: []str<'static> = ends;
+    for n in 1..25usize {
+        let mut id = String::from_str("q");
+        for j in 1..n {
+            id.push_byte(part[j % part.len()]);
+        }
+        for k in 0..e.len() {
+            let got = lex_summary(format("{}{}", id.as_str(), e[k]).as_str(), false);
+            let mut want = format("0:0+{} ", n);
+            let end = e[k].len();
+            if k == 2 {
+                want.push_str(format("{}:{}+1 ", TokenType::Slash as u8, n).as_str());
+            } else if k == 3 {
+                want.push_str(format("{}:{}+1 ", TokenType::Colon as u8, n).as_str());
+            } else if k == 4 {
+                want.push_str(format("{}:{}+1 ", TokenType::At as u8, n).as_str());
+            } else if k == 5 {
+                want.push_str(format("{}:{}+1 ", TokenType::LeftBracket as u8, n).as_str());
+            } else if k == 7 {
+                want.push_str(format("{}:{}+1 ", TokenType::LeftBrace as u8, n).as_str());
+            }
+            want.push_str(format("{}:{}+0 ", TokenType::Eof as u8, n + end).as_str());
+            if k == 6 || k >= 8 {
+                want.push_str(format("@{} ", n).as_str());
+            }
+            assert_eq(got, want);
+        }
+    }
+}
+
+// A line comment of every length up to 20 ends at '\n', '\r' or the end of the source; a NUL or a
+// malformed UTF-8 byte at any offset is diagnosed exactly there, and valid UTF-8 is accepted.
+@test
+fn line_comment_bytes() {
+    for n in 0..21usize {
+        let mut body = String::new();
+        for _ in 0..n {
+            body.push_byte(b'x');
+        }
+        let lc = TokenType::LineComment as u8;
+        let eof = TokenType::Eof as u8;
+        assert_eq(
+            lex_summary(format("//{}\nab", body.as_str()).as_str(), false),
+            format("0:{}+2 {}:{}+0 ", n + 3, eof, n + 5),
+        );
+        assert_eq(
+            lex_summary(format("//{}\r\nab", body.as_str()).as_str(), true),
+            format("{}:0+{} 0:{}+2 {}:{}+0 ", lc, n + 2, n + 4, eof, n + 6),
+        );
+        assert_eq(
+            lex_summary(format("//{}", body.as_str()).as_str(), true),
+            format("{}:0+{} {}:{}+0 ", lc, n + 2, eof, n + 2),
+        );
+    }
+    for k in 0..18usize {
+        let mut head = String::new();
+        for _ in 0..k {
+            head.push_byte(b'x');
+        }
+        let tail = "yyyyyyyyyyyyyyyyyy";
+        let eof = TokenType::Eof as u8;
+        let ok = format("//{}\xC3\xA9{}\nab", head.as_str(), tail);
+        assert_eq(lex_summary(ok.as_str(), false), format("0:{}+2 {}:{}+0 ", ok.len() - 2, eof, ok.len()));
+        let bad = format("//{}\xFF{}\nab", head.as_str(), tail);
+        assert_eq(lex_summary(bad.as_str(), false), format("0:{}+2 {}:{}+0 @{} ", bad.len() - 2, eof, bad.len(), k + 2));
+        let nul = format("//{}\x00{}\nab", head.as_str(), tail);
+        assert_eq(lex_summary(nul.as_str(), false), format("0:{}+2 {}:{}+0 @{} ", nul.len() - 2, eof, nul.len(), k + 2));
+    }
 }
 
 // `.` before a digit is a plain Dot (tuple element access `t.0`); `0.5` after an expression dot is a float.

@@ -23,7 +23,8 @@ shared `Package`. The production pipeline is `run_package` in `src/driver/emit.s
 prelude_stage             -- the std prelude alone: load, filter, resolve, typecheck through the
   |                          prelude gate (check_prelude), saved as an image and loaded back, or
   |                          the cached image (driver::prelude_image; stages.md)
-load_user                 -- the root's module closure after the prelude (Package.root_module)
+load_user                 -- the root's module closure after the prelude (Package.root_module);
+  |                          its files read and parse while the prelude checks (--jobs)
   |
 platform_filter           -- @platform/@arch gating: compact items by target mask; then
   |                          index_append indexes the new modules
@@ -273,7 +274,8 @@ lowering a fresh boxed body. `Keep.viewers` counts live views; `absorb`/`put` an
 instance graph's take assert it is zero, and the driver clears the view before emission.
 Per-task always-panics engines copy the view pointer and fold their counters back with
 `st_absorb`. The scanner (`fx`) has no verdict that proves a body cannot reach a checked
-operation, so the always-panics pass runs every candidate body.
+operation, so the always-panics pass runs every candidate body, except a zero-parameter function
+a call already returned from (`Interp.ran0`: a run is deterministic).
 
 ## HIR Layer (the desugar stage)
 
@@ -381,7 +383,10 @@ than defining a new context. Two layers:
    - Call loans follow the callee signature: a result pins the autoref'd receiver place,
      or the pointee of a `&mut` argument (`Loan.deref`), only when the signature ties
      that parameter's lifetime to the return (`reborrow_ties`, `has_elided_lt`; elision
-     rules 2 and 3), whether or not the pointee type carries borrows. Loans carry a
+     rules 2 and 3), whether or not the pointee type carries borrows. The loan is exclusive
+     (`LK_MUT`) when the parameter is `&mut` (or the callee a fn value) and the result grants
+     write, as an autoref's is (`implicit_borrow`), else shared: `let d = r.index_mut(0);
+     r.len(); *d = 1` conflicts as `(*r).index_mut(0)` does. Loans carry a
      reference level (`Loan.deep`; subset edges `SD_KEEP`/`SD_DEREF`/`SD_REF`), so a
      reference's own loans and what its referent holds stay apart. No loan forms on a
      place reached through a raw-pointer deref (`behind_raw`). A call-entry claim or a
@@ -406,7 +411,7 @@ than defining a new context. Two layers:
      callee's signature as its extend's target type (`Gen::enter_callee`, `unself`), so a
      `Self` result, a `&mut Self` store target or a `Self` argument ties to the extend's
      lifetimes. A parameter naming `'static` flows its argument's origin into origin 0
-     (`'static`; `callee_flag` bits from 8). An argument taken by implicit autoref for a
+     (`'static`; `CallSig::fl` bits from 8, the per-callee signature summary `Gen::call_sig` memoizes). An argument taken by implicit autoref for a
      `&'static` parameter gets an origin of its own holding a shared loan on the place and
      flowing into origin 0; `body_features` sets `FT_BORROW_OP` for a call to such a callee
      (`Owner::takes_static_ref`), so the body is never loan-skipped.
@@ -617,7 +622,12 @@ comparison keeps its spelling. A constant is every operand C reads as an integer
 expression: a literal, a folded count or parameter, `~c`, a cast of a constant (converted to the
 target width as C converts it) and a plain C operator over two constants (`(intptr_t)(~0ULL >>
 1)`; `c_const_op`), evaluated from the constants' values. A named constant item (`isize::MAX`)
-spells its global symbol, which C does not read as a constant. A literal's exact value comes from
+spells its global symbol, which C does not read as a constant. A `const` of a scalar, a
+payload-free enum, `str` or an array of them is a read-only C object: its definition and every
+`extern` declaration say `const` (`CEmit::stat_specs`, `stat_ro`), so the C compiler keeps its
+loads out of the alias analysis (a non-LTO MinGW lexer object: 111 to 62 loads of
+`TOKEN_MAX_LEN`); a constant of any other type (a struct may hold an `UnsafeCell`) and every
+`static mut` stay writable. A literal's exact value comes from
 `Constant::int_value` (`val` holds only the plain decimal case); `arith_fn` reads a constant shift
 count or divisor the same way, so a hex count past the width reaches the checked helper. `Copy` itself is derived in the checker (`tc_copy_marker`, answered in
 `type_satisfies`); an explicit `extend X as Copy {}` is checked against the derivation
@@ -655,7 +665,7 @@ splice as the caller's own static references. A callee that needs either (an inn
 than a concrete public or header-declared extern function, or a static reference) inlines only
 into a caller that holds a vector (`CalleeInfo.vec_only`, `inl::holds_vector`): the compiler's own
 emitted C keeps its size, and vector kernels inline their helpers. A generic callee with a per-instantiation
-`static_assert` splices too, and the caller's `CoreBody.demands` keeps the call, whose symbol the
+`static_assert` (`Ast.assert_fns`) splices too, and the caller's `CoreBody.demands` keeps the call, whose symbol the
 emitter still demands so the assert runs. A multi-return call's member reads of its result temp
 (and of the temps copied from it) become reads of the return slots.
 
@@ -704,7 +714,10 @@ emission-time fold failures. After the always-panics pass and `flush_consts`,
 `Interp::release_pass` frees the callee bodies lowered since `Interp::body_mark` (taken
 before the pass), except those lowered from a body arena, and the retained dead-object
 storage; the constant pass before emission lowers again the few it needs (from live syntax,
-so with the same result).
+so with the same result). That pass runs only the constants whose initializer did not evaluate
+whole before the keep's view opened (`Interp.whole`): a whole evaluation reached only the
+engine's own boxes, which stay. A call-bearing constant initializer evaluates once in the type
+check: its static capture runs first, and a scalar result answers the fold from the memo.
 emission-time fold failures. A `static_assert` in a generic function's body holds per
 instance. The resolver records each function whose body holds one and that has its own
 generic parameters or sits in an extend with parameters (`Ast.assert_fns`); a checked call
@@ -767,8 +780,10 @@ only), and a static `SS_ENUM` stores the active variant's ordinal in slot 0.
 
 Full monomorphization is the only generic backend.
 
-- **During typecheck:** `close_instances` records concrete generic instantiations into
-  the per-module `Ast.instances` pool; demand tables (`method_used`,
+- **During typecheck:** each module records the concrete generic instantiations its checked
+  code names in its instance list (`Ast::ninstances`); no step closes over the signatures of
+  every instance's methods, so a method that returns a wider instance of its own type
+  instantiates only where the instance graph demands it. Demand tables (`method_used`,
   `always_methods`) gate what emits.
 - **During emission:** `cemit_package` builds an `InstGraph` (`src/graph/instances.spc`)
   seeded with the `irl::Keep` cache and calls `collect()`; it discovers every concrete
@@ -863,8 +878,9 @@ Full monomorphization is the only generic backend.
 `inst_incs`/`inst_heads`/`inst_chunks` per owner module; `fwd_h`, `defs_h[d]` (one
 definition header per type, file `__sc_t/<defs_stem[d]>.h`), `protos_h[m]`, `registry_c`). A consumer that inspects the emitted C (the test harness,
 the bench sink) must concatenate the headers, every shard head, the buffers and the
-tail; the driver writes each shard piecewise (`OutFile`) and never assembles a file
-image. The layout, ownership and shard rules are in
+tail; the driver assembles each shard into one reused buffer (`shard_text`, reserved to the
+shard's length) and publishes it with `publish_file`: one compare, and one write call
+when the content changed. The layout, ownership and shard rules are in
 [output-layout.md](references/output-layout.md).
 Symbols, type spellings and call strings render once and intern into pools
 (`sym_memo`, `sx_nm_pool`, `sx_cs_pool`); a generic call's symbol interns under the
@@ -877,6 +893,18 @@ arms that do not fall through continues in the caller's loop instead of recursin
 a falling chain whose tests need statements first still nests per arm. A body whose
 structured regions pass the bound fails the dry planning pass and takes the flat goto
 layout (`plan_structured`).
+A `TM_SWITCH` of two or more cases on a non-boolean discriminant is a native C `switch`
+in both layouts, so the C compiler builds a jump table (an `if` chain gets none from MinGW
+gcc): each target's case labels together (`SWITCH_LINE_CASES` to a line; a range lists
+every value, as ISO C has no case ranges), a case of the otherwise target left to
+`default`, which the switch always has (`-Wswitch` on an enum discriminant). The goto layout
+spells each case as `goto bb_N;` (`emit_switch_gotos`); the structured one
+(`emit_native_switch`) emits each target's region once, also inside a loop, where an arm's
+loop break is a forward `goto` (`sx_sw_brk`: a C `break` would only leave the switch) and
+`continue` stays. In a loop, a switch whose arms continue or leave it joins where its other
+arms reconverge (`CFlow::compute_follows`). A bounds check `bce` folds keeps its condition
+operand on the goto for the IR re-proof; `count_all` does not count it, so the condition's
+store is dead.
 C11 guarantees string literals of 4095 bytes only (`STR_LIT_MAX`; `-pedantic-errors` rejects a
 longer one). A string constant whose bytes (`str_const_bytes`: frame stripped, escapes decoded)
 pass it spells as a block-scope `static const uint8_t __sc_lit<constant id>[]` of its bytes and a

@@ -60,7 +60,7 @@ const UNAVAILABLE: f64 = -1.0; // a figure whose counter this platform lacks
 static mut G_BUILD_ID: str<'static> = ""; // what the runner was built from (see `begin`)
 static mut G_FLAGS: str<'static> = ""; // the profile and C flags the runner was compiled with
 static mut G_FAILED: bool = false; // a benchmark reported a failure (see `fail`)
-static mut G_FRESH: bool = false; // every benchmark runs in a process of its own (see `run`)
+static mut G_FRESH: bool = false; // every benchmark runs in a process of its own (see `Run::wants`)
 static mut G_BURN_NS: f64 = 0.0; // `burn`'s measured cost per iteration (see `calibrate`)
 
 /// The distribution of a sample set: `summarize` fills one. `p99` is 0 and not reported below
@@ -730,16 +730,9 @@ fn calibrate() {
 
 // --- the runner ---------------------------------------------------------------------------------------
 
-/// One discovered benchmark: its display name, the function, and whether it prints its own report.
-pub struct Entry {
-    pub name: str<'static>,
-    pub run: fn(&mut Bencher) void,
-    pub quiet: bool,
-}
-
-/// The benchmark selection from the runner's arguments: the text after `--filter=`, or "" when every
-/// benchmark runs. `pub` for the generated runner.
-pub fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
+// The benchmark selection from the runner's arguments: the text after `--filter=`, or "" when every
+// benchmark runs.
+fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
     for i in 0..argv.len() {
         let a = argv[i];
         if a.starts_with("--filter=") {
@@ -749,9 +742,8 @@ pub fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
     return "";
 }
 
-/// Whether the benchmark called `name` runs under `filter`: a substring match, and "" selects all.
-/// `pub` for the generated runner.
-pub fn selected(name: str, filter: str) bool {
+// Whether the benchmark called `name` runs under `filter`: a substring match, and "" selects all.
+fn selected(name: str, filter: str) bool {
     return filter.len() == 0 || name.contains(filter);
 }
 
@@ -808,15 +800,6 @@ pub fn fail(what: str) {
     eprintln("bench: FAILED: {}", what);
 }
 
-// Run one benchmark on this thread and report it.
-fn run_one(e: &Entry) {
-    let mut b = Bencher::new(e.name);
-    e.run(&mut b);
-    if !e.quiet {
-        b.report();
-    }
-}
-
 // Release every runtime pool a benchmark may have started. The blocking pool has threads of its own that
 // `runtime::shutdown` does not join, so it goes first; both are no-ops when nothing started them.
 fn shutdown_pools() {
@@ -824,73 +807,103 @@ fn shutdown_pools() {
     runtime::shutdown();
 }
 
-/// Run every selected entry and return the process exit code. Each benchmark runs in a forked process of
-/// its own (so its peak resident set and its runtime pools are its alone, and a crash fails only it), unless
-/// `--in-process` is given or the platform has no fork; a child returns its own code here and the caller
-/// must return it from `main`. `pub` for the generated runner.
-pub fn run(argv: &Vector<str>, entries: &Vector<Entry>) i32 {
-    let filter = filter_of(argv);
-    let mut can_fork = !has_flag(argv, "--in-process");
-    let mut ran: i32 = 0;
-    for i in 0..entries.len() {
-        let e = entries.at(i);
-        if !selected(e.name, filter) {
-            continue;
-        }
-        ran = ran + 1;
-        if can_fork {
-            unsafe sys::sc_bs_flush();
-            let pid = unsafe sys::sc_bs_fork();
-            if pid == 0 {
-                // The child: this one benchmark, then its exit code goes back through `main`, so the
-                // runner's own frames are released and the leak tracker's exit report sees a clean process.
-                unsafe G_FRESH = true;
-                unsafe G_FAILED = false; // an earlier benchmark's failure is the parent's, not this one's
-                run_one(e);
-                shutdown_pools();
-                return if unsafe G_FAILED {
-                    1;
-                } else {
-                    0;
-                };
-            }
-            if pid < 0 {
-                // No fork here (Windows, wasm): the rest of the run stays in this process.
-                can_fork = false;
-            } else {
-                let code = unsafe sys::sc_bs_wait(pid);
-                if code != 0 {
-                    let mut what = String::from_str(e.name);
-                    if code > 128 {
-                        what.push_str(" died with signal ");
-                        what.push_i64(code - 128);
-                    } else {
-                        what.push_str(" exited with code ");
-                        what.push_i64(code);
-                    }
-                    fail(what.as_str());
-                }
-                continue;
-            }
-        }
-        run_one(e);
-    }
-    shutdown_pools();
-    return end(ran, filter);
+/// The generated runner's state: the selection, the process mode and the count of benchmarks run. The
+/// runner calls each benchmark directly, never through a fn value: the coroutine and cancellation
+/// reachability is package-wide, so a benchmark held as a fn value makes every fn-value call of the code
+/// it reaches a cancellation edge, and the benchmark no longer runs the code it measures. `pub` for the
+/// generated runner.
+pub struct Run {
+    filter: String,
+    can_fork: bool,
+    ran: i32, // benchmarks selected so far
+    child: bool, // this process is the forked child of one benchmark
 }
 
-/// Printed once after the last one; `n` is how many ran. A `filter` that selected nothing is an error, as
-/// a mistyped name would otherwise report success; so is any `fail`. `pub` for the generated runner.
-pub fn end(n: i32, filter: str) i32 {
-    println("");
-    println("{} benchmark(s)", n);
-    if n == 0 && filter.len() != 0 {
-        eprintln("bench: no benchmark name contains '{}'", filter);
-        return 1;
+extend Run {
+    /// The run the runner's arguments ask for: `--filter=S` selects, `--in-process` forks no child.
+    pub fn new(argv: &Vector<str>) Run {
+        return Run {
+            filter: String::from_str(filter_of(argv)),
+            can_fork: !has_flag(argv, "--in-process"),
+            ran: 0,
+            child: false,
+        };
     }
-    if unsafe G_FAILED {
-        eprintln("bench: a benchmark reported a failure (see above)");
-        return 1;
+
+    /// Whether the benchmark called `name` runs in this process now. A selected benchmark runs in a forked
+    /// process of its own (so its peak resident set and its runtime pools are its alone, and a crash fails
+    /// only it), unless `--in-process` is given or the platform has no fork: the parent waits for the child
+    /// here and gets false.
+    pub fn wants(self: &mut Self, name: str) bool {
+        if !selected(name, self.filter.as_str()) {
+            return false;
+        }
+        self.ran = self.ran + 1;
+        if !self.can_fork {
+            return true;
+        }
+        unsafe sys::sc_bs_flush();
+        let pid = unsafe sys::sc_bs_fork();
+        if pid == 0 {
+            // The child: this one benchmark, then its exit code goes back through `main` (`done`), so the
+            // runner's own frames are released and the leak tracker's exit report sees a clean process.
+            unsafe G_FRESH = true;
+            unsafe G_FAILED = false; // an earlier benchmark's failure is the parent's, not this one's
+            self.child = true;
+            return true;
+        }
+        if pid < 0 {
+            // No fork here (Windows, wasm): the rest of the run stays in this process.
+            self.can_fork = false;
+            return true;
+        }
+        let code = unsafe sys::sc_bs_wait(pid);
+        if code != 0 {
+            let mut what = String::from_str(name);
+            if code > 128 {
+                what.push_str(" died with signal ");
+                what.push_i64(code - 128);
+            } else {
+                what.push_str(" exited with code ");
+                what.push_i64(code);
+            }
+            fail(what.as_str());
+        }
+        return false;
     }
-    return 0;
+
+    /// After the benchmark `wants` selected ran with `b`: its report unless `quiet`. In a forked child the
+    /// runtime pools are released and the result is the exit code `main` must return now; else -1.
+    pub fn done(self: &Self, b: &mut Bencher, quiet: bool) i32 {
+        if !quiet {
+            b.report();
+        }
+        if !self.child {
+            return -1;
+        }
+        shutdown_pools();
+        return if unsafe G_FAILED {
+            1;
+        } else {
+            0;
+        };
+    }
+
+    /// After the last benchmark: release the runtime pools, print how many ran, and return the process exit
+    /// code. A filter that selected nothing is an error, as a mistyped name would otherwise report success;
+    /// so is any `fail`.
+    pub fn end(self: &Self) i32 {
+        shutdown_pools();
+        println("");
+        println("{} benchmark(s)", self.ran);
+        if self.ran == 0 && self.filter.len() != 0 {
+            eprintln("bench: no benchmark name contains '{}'", self.filter.as_str());
+            return 1;
+        }
+        if unsafe G_FAILED {
+            eprintln("bench: a benchmark reported a failure (see above)");
+            return 1;
+        }
+        return 0;
+    }
 }

@@ -1276,25 +1276,12 @@ extend tc::TypeChecker {
         if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || lts.len == 0 {
             return;
         }
-        // The region of each lifetime argument, by parameter position (REGION_NONE: elided).
-        let mut rs = Vector::<u32>::new();
-        for _i in 0..lts.len {
-            rs.push(REGION_NONE);
-        }
-        let mut k: usize = 0;
-        for i in 0..es.len {
-            let e = unsafe (*a).list(es)[i as usize];
-            if unsafe (*a).at_const(e).kind == NodeKind::NODE_LIFETIME && k < rs.len() {
-                rs.set(k, self.tc_lt_region_of_name(self.tc_lt_name(e)));
-                k += 1;
-            }
-        }
         for i in 0..lts.len {
             let bs = unsafe (*da).at_const(unsafe (*da).list(lts)[i as usize]).as_data.generic_param.bounds;
             for b in 0..bs.len {
                 let bn = self.tc_lt_name_in(d.module, unsafe (*da).list(bs)[b as usize]);
                 if span_is(self.mod_src(d.module), bn, "'static") {
-                    self.region_add_outlives(rs[i as usize], REGION_STATIC);
+                    self.region_add_outlives(self.region_of_lt_arg(es, i), REGION_STATIC);
                     continue;
                 }
                 for j in 0..lts.len {
@@ -1304,11 +1291,28 @@ extend tc::TypeChecker {
                         self.mod_src(d.module),
                         bn,
                     ) {
-                        self.region_add_outlives(rs[i as usize], rs[j as usize]);
+                        self.region_add_outlives(self.region_of_lt_arg(es, i), self.region_of_lt_arg(es, j));
                     }
                 }
             }
         }
+    }
+
+    // The region of lifetime argument `i` (by parameter position) among path arguments `es`
+    // (current module); REGION_NONE when elided.
+    fn region_of_lt_arg(self: &Self, es: NodeList, i: u32) u32 {
+        let a = self.cur_ast();
+        let mut k: u32 = 0;
+        for x in 0..es.len {
+            let e = unsafe (*a).list(es)[x as usize];
+            if unsafe (*a).at_const(e).kind == NodeKind::NODE_LIFETIME {
+                if k == i {
+                    return self.tc_lt_region_of_name(self.tc_lt_name(e));
+                }
+                k += 1;
+            }
+        }
+        return REGION_NONE;
     }
 
     /// Record the declared edge `sup: sub` (sup outlives sub); trivial or REGION_NONE edges are
@@ -1979,7 +1983,9 @@ extend tc::TypeChecker {
             switch irbodies.pop() {
                 Some(lw) => {
                     if ctx.keep != null {
+                        let tk = ctx.st.pr.start();
                         unsafe (&mut *ctx.keep).put(&lw);
+                        ctx.st.pr.stop(bfi::BP_KEEP, tk);
                     }
                     if ctx.recur != null && lw.body.owner.node == id {
                         unsafe (&mut *ctx.recur).add(unsafe &*self.package, &lw.body);
@@ -2496,23 +2502,26 @@ extend tc::TypeChecker {
             let id = unsafe (*a).list(items)[i as usize];
             let k = unsafe (*a).at_const(id).kind;
             if k == NodeKind::NODE_FUNCTION {
-                let ra = self.tc_scan_returns_attributable(m, unsafe (*a).at_const(id).as_data.function.body, 0);
+                let ra = self.bc_fn_ret_attr(m, id);
                 unsafe (&mut *self.package).set_item_ret_attr(m, id, ra);
             } else if k == NodeKind::NODE_EXTEND {
                 let ms = unsafe (*a).at_const(id).as_data.extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe (*a).list(ms)[j as usize];
                     if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                        let ra = self.tc_scan_returns_attributable(
-                            m,
-                            unsafe (*a).at_const(mid).as_data.function.body,
-                            0,
-                        );
+                        let ra = self.bc_fn_ret_attr(m, mid);
                         unsafe (&mut *self.package).set_item_ret_attr(m, mid, ra);
                     }
                 }
             }
         }
+    }
+
+    // The verdict of function `f`: a caller reads it only for a result that carries a borrow, so a
+    // function without results records true without the body scan.
+    fn bc_fn_ret_attr(self: &mut Self, m: ModuleId, f: NodeId) bool {
+        let fd = unsafe (*self.cur_ast()).at_const(f).as_data.function;
+        return fd.returns.len == 0 || self.tc_scan_returns_attributable(m, fd.body, 0);
     }
 
     /// Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular

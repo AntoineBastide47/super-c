@@ -150,6 +150,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     }
 
     /// A borrow of the value for `key`, or `None`. Borrowing (`&V`) keeps the Map the sole owner.
+    @c.always_inline
     pub const fn get(self: &Map<K, V, A>, key: &K) Option<&V> {
         if self.cap == 0 {
             return Option::<&V>::None;

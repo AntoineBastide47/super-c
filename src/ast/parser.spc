@@ -41,14 +41,6 @@ struct AttrSyntax {
     pub expr: NodeId, // the constant-expression arguments (`attr_expr_args`), NODE_NONE otherwise
 }
 
-// The lexer only ever emits single '>' tokens (so nested generics can close); the parser glues
-// '>>', '>=', '>>=' back together. shift_assignment reports a '>>=' discovered deep in the binary
-// chain so the expression level can finish it as an assignment.
-struct BinaryParse {
-    pub expression: NodeId,
-    pub shift_assignment: bool,
-}
-
 pub struct Parser<'a> {
     pub source: str<'a>,
     pub tokens: Vector<Token>,
@@ -2784,17 +2776,50 @@ extend Parser {
         return self.parse_cast_after(self.parse_unary_mode(grammar));
     }
 
-    // Shift and relational operators share a leading `>` token. Parsing both precedence levels
-    // together lets each production consume that token before selecting its tail with one lookahead.
-    fn parse_shift_relational_from_mode(self: &mut Self, left: NodeId, grammar: ExpressionGrammar) BinaryParse {
-        let mut expression = self.parse_binary_level_from_mode(left, 10, grammar).expression;
-        let mut relation_left = NODE_NONE;
-        let mut relation_op = TokenType::Eof;
+    // The binary operator at the cursor. The lexer emits only single '>' tokens (so nested generics
+    // can close); adjacent ones glue back into '>>', '>=' and '>>='. RightShiftEqual (precedence 0)
+    // ends every binary chain, so the expression level reads it as an assignment.
+    const fn binary_op(self: &Self) TokenType {
+        let k = self.peek_type();
+        if k != TokenType::GreaterThan || !self.glued(1) {
+            return k;
+        }
+        let k1 = self.tokens[self.current + 1].kind();
+        if k1 == TokenType::Equal {
+            return TokenType::GreaterThanEqual;
+        }
+        if k1 != TokenType::GreaterThan {
+            return k;
+        }
+        if self.glued(2) && self.tokens[self.current + 2].kind() == TokenType::Equal {
+            return TokenType::RightShiftEqual;
+        }
+        return TokenType::RightShift;
+    }
+
+    // The number of tokens `binary_op` glued into `op`.
+    const fn op_tokens(op: TokenType) usize {
+        return switch op {
+            RightShiftEqual => 3,
+            RightShift | GreaterThanEqual => 2,
+            _ => 1,
+        };
+    }
+
+    // Whether token `current + k` starts where token `current + k - 1` ends.
+    const fn glued(self: &Self, k: usize) bool {
+        return self.tokens[self.current + k - 1].end() == self.tokens[self.current + k].start();
+    }
+
+    // Precedence climbing: one call per operand. Every binary operator is left-associative; the
+    // call returns at the first operator that binds looser than `level` (at least 1).
+    fn parse_binary_level_from_mode(self: &mut Self, left: NodeId, level: i32, grammar: ExpressionGrammar) NodeId {
+        let mut expression = left;
         let mut chain: u32 = 0;
         loop {
-            let mut op = self.peek_type();
-            let mut shift = op == TokenType::LeftShift;
-            if op != TokenType::GreaterThan && !shift && op != TokenType::LessThan && op != TokenType::LessThanEqual {
+            let op = self.binary_op();
+            let prec = Parser::precedence(op);
+            if prec < level {
                 break;
             }
             chain = chain + 1;
@@ -2802,94 +2827,26 @@ extend Parser {
                 self.error_here("expression nested too deeply");
                 break;
             }
-            if op == TokenType::GreaterThan {
-                self.advance();
-                if self.match(TokenType::GreaterThan) {
-                    if self.match(TokenType::Equal) {
-                        if relation_left != NODE_NONE {
-                            expression = self.add_binary(relation_left, relation_op, expression);
-                        }
-                        return BinaryParse { expression: expression, shift_assignment: true };
-                    }
-                    op = TokenType::RightShift;
-                    shift = true;
-                } else {
-                    op = if self.match(TokenType::Equal) {
-                        TokenType::GreaterThanEqual;
-                    } else {
-                        TokenType::GreaterThan;
-                    };
-                }
-            } else {
-                self.advance();
+            self.current = self.current + Parser::op_tokens(op);
+            let mut right = self.parse_cast_mode(grammar);
+            if Parser::precedence(self.binary_op()) > prec {
+                right = self.parse_binary_level_from_mode(right, prec + 1, grammar);
             }
-            if shift {
-                let right = self.parse_binary_level_mode(10, grammar).expression;
-                expression = self.add_binary(expression, op, right);
-            } else {
-                if relation_left != NODE_NONE {
-                    expression = self.add_binary(relation_left, relation_op, expression);
-                }
-                relation_left = expression;
-                relation_op = op;
-                expression = self.parse_binary_level_mode(10, grammar).expression;
-            }
+            expression = self.add_binary(expression, op, right);
         }
-        if relation_left != NODE_NONE {
-            expression = self.add_binary(relation_left, relation_op, expression);
-        }
-        return BinaryParse { expression: expression };
+        return expression;
     }
 
-    fn parse_binary_level_from_mode(self: &mut Self, left: NodeId, level: i32, grammar: ExpressionGrammar) BinaryParse {
-        if level > 11 {
-            return BinaryParse { expression: left };
-        }
-        if level == 8 {
-            return self.parse_shift_relational_from_mode(left, grammar);
-        }
-        let next = if level == 7 {
-            8;
-        } else {
-            level + 1;
-        };
-        let mut parsed = self.parse_binary_level_from_mode(left, next, grammar);
-        if parsed.shift_assignment {
-            return parsed;
-        }
-        let mut chain: u32 = 0;
-        while Parser::precedence(self.peek_type()) == level {
-            chain = chain + 1;
-            if chain > 4096 {
-                self.error_here("expression nested too deeply");
-                break;
-            }
-            let op = self.advance().kind();
-            let right = self.parse_binary_level_mode(next, grammar);
-            parsed.expression = self.add_binary(parsed.expression, op, right.expression);
-            if right.shift_assignment {
-                parsed.shift_assignment = true;
-                break;
-            }
-        }
-        return parsed;
-    }
-
-    fn parse_binary_level_mode(self: &mut Self, level: i32, grammar: ExpressionGrammar) BinaryParse {
+    fn parse_binary_level_mode(self: &mut Self, level: i32, grammar: ExpressionGrammar) NodeId {
         return self.parse_binary_level_from_mode(self.parse_cast_mode(grammar), level, grammar);
     }
 
     fn parse_expression_from_mode(self: &mut Self, first: NodeId, grammar: ExpressionGrammar) NodeId {
-        let parsed = self.parse_binary_level_from_mode(first, 1, grammar);
-        let left = parsed.expression;
+        let left = self.parse_binary_level_from_mode(first, 1, grammar);
         if self.check(TokenType::Range) || self.check(TokenType::RangeInclusive) {
             return self.parse_range_value_mode(left, grammar);
         }
-        let op = if parsed.shift_assignment {
-            TokenType::RightShiftEqual;
-        } else {
-            self.peek_type();
-        };
+        let op = self.binary_op();
         if !Parser::assignment_operator(op) {
             return left;
         }
@@ -2898,9 +2855,7 @@ extend Parser {
             return left;
         }
         self.depth = self.depth + 1;
-        if !parsed.shift_assignment {
-            self.advance();
-        }
+        self.current = self.current + Parser::op_tokens(op);
         let right = self.parse_expression_mode(grammar);
         self.depth = self.depth - 1;
         return self.mk(
@@ -3018,7 +2973,7 @@ extend Parser {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(RangeContext::RANGE_EXPR) {
-            self.parse_binary_level_mode(1, grammar).expression;
+            self.parse_binary_level_mode(1, grammar);
         } else {
             NODE_NONE;
         };
@@ -3222,7 +3177,7 @@ extend Parser {
                     kind = NodeKind::NODE_INLINE_FOR;
                 } else if self.check(TokenType::ParallelFor) {
                     kind = NodeKind::NODE_PARALLEL_FOR;
-                    self.ast.sugar_marks += 1;
+                    self.ast.sugar_marks |= SUGAR_PARFOR;
                 }
                 self.advance();
                 if kind != NodeKind::NODE_FOR {
@@ -3384,7 +3339,7 @@ extend Parser {
                     start,
                     NodeAs { call: CallData { callee: callee, args: args } },
                 );
-                self.ast.sugar_marks += 1;
+                self.ast.sugar_marks |= SUGAR_LAUNCH;
                 result = self.fin(NodeKind::NODE_LAUNCH, start, NodeAs { single: SingleData { value: inner } });
             },
             Select => {
@@ -3503,7 +3458,7 @@ extend Parser {
             // `default` means "never wait", which makes any deadline unreachable.
             self.errors.emit_span(kw, String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"));
         }
-        self.ast.sugar_marks += 1;
+        self.ast.sugar_marks |= SUGAR_SELECT;
         return self.fin(NodeKind::NODE_SELECT, kw.start, NodeAs { block: BlockData { statements: arms } });
     }
 

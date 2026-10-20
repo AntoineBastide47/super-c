@@ -8194,6 +8194,21 @@ fn type_size_limit() {
     );
 }
 
+// A field assigned through a deref (`s.v` for `s: &mut Box<S>`) is a member of `S`, not of `Box`: the
+// target's written-type frame once read `S`'s field type node in `Box`'s module, past that module's
+// nodes once the program's module is the larger one.
+@test
+fn a_field_assigned_through_a_deref_is_no_member_of_the_receiver() {
+    let mut src = String::new();
+    for i in 0..400 {
+        src.format_into("struct P{} {{\n    pub a: i32,\n}}\n", i);
+    }
+    src.push_str(
+        "struct S {\n    pub v: i32,\n}\n\nfn set(s: &mut Box<S>) {\n    s.v = 5;\n}\n\nfn main() i32 {\n    let mut b = Box::new(S { v: 1 });\n    set(&mut b);\n    return b.v - 5;\n}\n",
+    );
+    h::expect_ok("a field assigned through a Box", src.as_str());
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test

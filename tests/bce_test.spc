@@ -639,7 +639,7 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
     let b = h::diff_build(src, []);
     assert(b.built, label);
     let mut path = String::from_str(b.proj.dir());
-    path.push_str("/build/debug/gen/main.c");
+    path.push_str("/build/debug/raw/main.c");
     let c = cli::read_text(path.as_str());
     assert(c.len() != 0, label);
     assert(c.contains("__sc_bounds_vec(") == present, label);
@@ -658,7 +658,7 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
 }
 
 // `vec_check` for several programs in one project build: case k is module `case_k` (`case_module`)
-// under `case_root`, its C is `build/debug/gen/case_k.c`, and each case runs in its own process. On the
+// under `case_root`, its C is `build/debug/raw/case_k.c`, and each case runs in its own process. On the
 // vector conformance lane (a wasm32 run) or when the build fails, each case builds alone.
 struct VecProgs {
     labels: Vector<String>,
@@ -705,7 +705,7 @@ extend VecProgs {
         let root = b.proj.dir();
         for k in 0..self.srcs.len() {
             let label = self.labels.at(k).as_str();
-            let c = cli::read_text(format("{}/build/debug/gen/case_{}.c", root, k).as_str());
+            let c = cli::read_text(format("{}/build/debug/raw/case_{}.c", root, k).as_str());
             if !b.built || !c.contains("case_main(") {
                 eprintln("--- case {} builds alone", k);
                 vec_check(label, self.srcs.at(k).as_str(), *self.present.at(k), self.traps.at(k).as_str());

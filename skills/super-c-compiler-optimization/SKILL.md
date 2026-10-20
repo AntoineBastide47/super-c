@@ -59,8 +59,8 @@ Work through these phases in order. Each phase grounds the next: do not skip ahe
 **Never guess what to optimize.** Every optimization must start from profiled evidence.
 
 ```sh
-# Build the benchmark binary without running it
-super-c bench --no-run
+# Build the transpile lane alone, without running it
+super-c bench --no-run --filter=self_transpile
 
 # Profile with samply (1000 Hz is samply's default rate; raise it for short runs)
 samply record --rate 1000 build/bench-bin --in-process --filter=self_transpile
@@ -68,7 +68,11 @@ samply record --rate 1000 build/bench-bin --in-process --filter=self_transpile
 
 `build/bench-bin` runs each benchmark in a forked child unless given `--in-process`, and samply on
 macOS follows an exec, not a fork: without the flag a capture holds the parent's few samples alone.
-`build/bench-bin` runs every benchmark unless filtered: unfiltered, concurrency I/O and
+Build the lane alone: the coroutine and cancellation reachability is package-wide, so a binary
+that also holds the concurrency benchmarks (they cancel tasks) emits a cancellation tick in
+every task-reachable loop of the compiler (3,590 against 2) and a probe after 229 calls (against 6),
+and its compiler code is not the code a build runs.
+`build/bench-bin` runs every benchmark it holds unless filtered: unfiltered, concurrency I/O and
 scheduler idle time took about 44% of the samples. Filter the run or the profile before
 you conclude. `super-c bench` builds `bench-bin` with the compiler that runs it, so an
 emitter change shows in the benchmark only when the new compiler runs `bench`.
@@ -308,6 +312,13 @@ Summary:
   reporting out of the hot data-processing loops.
 - **Interning deduplication:** reuse existing interning tables. Do not build a second
   hash map for data already interned elsewhere.
+- **Compute once, pass on:** a fact the compiler already holds is reused, never rebuilt.
+  Each of these was a measured cost: the emit stamp read and hashed again the sources the
+  loader had read (now `Module.src_id`), the C tree was written twice (raw, then gen),
+  `IMPLIED` was evaluated five times, the gen tree was listed twice on a no-op build, and
+  the object-cache key read back files the sink had just written. Before you add a walk,
+  hash, file read, or evaluation, find the stage that already has the value and take it
+  from there.
 - **Body-sharing for generic instances:** when multiple monomorphizations share the same
   lowered body, emit once and reference.
 - **Rejected levers:** read the measured list in "What to Avoid" before you try a lever.
@@ -363,7 +374,7 @@ that caused it; `ci/gate.sh` confirms at the end.
 ### Whole-build phases
 
 `SC_BUILD_STATS=- super-c build` prints one JSON record for the real build path: every
-phase of the partition (stamp, load, resolve, typecheck, borrowck, checks, prepare,
+phase of the partition (setup, stamp, load, resolve, typecheck, borrowck, checks, prepare,
 plan, render, publish, sync, compile, link; their sum is `total`), the streamed C
 compile that overlapped emission (`cc`, never added to the total), and peak RSS at
 the frontend, borrowck, plan, publish and build boundaries. `SC_BUILD_MEM=1` adds the
@@ -404,14 +415,20 @@ files per platform; merge their rows into the committed files.
 `SC_BORROW_STATS=1 SC_BUILD_STATS=- super-c build --jobs=1 --out-dir=<fresh>` prints the
 borrow probe (regions, skip tallies, sizes, slowest bodies, retained scratch); add
 `--cc=true` for a 1.2 s frontend-plus-emission run (the link fails after the tables).
-Always a fresh out-dir: the emit stamp otherwise reports `borrowck: 0`. Measured split
-on the reference sources (serial release, 4100 bodies, 2026-09): lowering 18 ms and
-replay 13 ms are required work; the analyses (forest, facts, cfg, liveness, moves,
-solver, rules) sum to about 64 ms and 15k allocations, down from 76 ms and 129k.
-Budget for the analyses, gate the row before accepting a change: analysis time <= 70 ms,
-analysis allocations <= 20k, retained scratch <= `BC_SCRATCH_BUDGET` after any body,
-the borrow probe's `drops` region (the elaboration of every kept body) <= 10 ms and
-<= 2k allocations, the emission `drops` region (bounds-check elimination plus the
+Always a fresh out-dir: the emit stamp otherwise reports `borrowck: 0`. The regions sum to
+the build record's `borrowck` phase less a few ms of loop overhead (the stage's prologue
+is `publish` and `reach`, the kept copies `keep`). Measured split on the reference sources
+(serial release, macOS): at 4,100 bodies (2026-09) lowering 18 ms, replay 13 ms and the
+analyses (forest, facts, cfg, liveness, moves, solver, rules) about 64 ms and 15k
+allocations, down from 76 ms and 129k; at 7,300 bodies (2026-10) lowering about 43 ms and
+replay about 24 ms (required work), the analyses about 108 ms and 8k allocations (facts
+45, solver 35, moves 11, liveness 6, rules 5, forest 3, cfg 3): the same 15 us per body,
+so the corpus growth, not a per-body regression, moved the totals. Budget for the
+analyses, gate the row before accepting a change: analysis time <= 115 ms (16 us per
+body: rescale it with the `bodies` count of the probe), analysis allocations <= 20k,
+retained scratch <= `BC_SCRATCH_BUDGET` after any body, the borrow probe's `drops` region
+(the elaboration of every kept body) <= 12 ms and <= 2k allocations (measured 2026-10:
+10.7 ms and 103), the emission `drops` region (bounds-check elimination plus the
 elaboration of the bodies emission lowers itself, with the `ir/facts.spc` effect and version
 service) <= 36 ms and <= 600 allocations serial (measured 2026-10: 32-34 ms and 575), and
 `SC_BC_VALIDATE=1` builds (serial and every core) clean. The parallel path adds slot pooling, so its allocation count sits

@@ -758,21 +758,57 @@ extend CFlow {
     // Branch join: where a branch's arms reconverge, its immediate post-dominator, but only when
     // the branch dominates it (so it is genuinely inside the branch and emitted once, after the
     // arms). NONE when the arms do not rejoin (each terminates, or the continuation is absorbed into
-    // an arm because it post-dominates through a path that leaves the branch).
+    // an arm because it post-dominates through a path that leaves the branch). A multi-way switch in
+    // a loop whose arms continue the loop or leave it joins where its other arms reconverge: their
+    // targets' nearest common post-dominator, under the same conditions.
     fn compute_follows(self: &mut Self, b: &ir::CoreBody) {
         for x in 0..self.n {
             if !*self.reach.at(x as usize) {
                 continue;
             }
-            if b.blocks.at(x as usize).term.kind != ir::TM_SWITCH {
+            let t = b.blocks.at(x as usize).term;
+            if t.kind != ir::TM_SWITCH {
                 continue;
             }
-            let m = *self.ipdom.at(x as usize);
-            if m != NONE && m != self.n && m != x && self.dominates(x, m) && *self.loop_of.at(x as usize) == *self.loop_of.at(
-                m as usize,
-            ) {
+            let mut m = *self.ipdom.at(x as usize);
+            let h = *self.loop_of.at(x as usize);
+            if !self.joins(x, m) && h != NONE && t.sw_len >= 2 {
+                m = NONE;
+                for k in 0..t.sw_len + 1 {
+                    let s = self.succ(b, x, k);
+                    if s == h || !self.in_loop(h, s) {
+                        continue;
+                    }
+                    m = if m == NONE {
+                        s;
+                    } else {
+                        self.pintersect(m, s);
+                    };
+                }
+            }
+            if self.joins(x, m) {
                 self.follow.set(x as usize, m);
             }
         }
+    }
+
+    // Whether `m` can be the join of branch `x` (see compute_follows).
+    fn joins(self: &Self, x: u32, m: u32) bool {
+        return m != NONE && m != self.n && m != x && self.dominates(x, m) && *self.loop_of.at(x as usize) == *self.loop_of.at(
+            m as usize,
+        );
+    }
+
+    // Whether block `s` lies in the loop headed by `h`: `h` encloses its innermost loop.
+    fn in_loop(self: &Self, h: u32, s: u32) bool {
+        let mut g = *self.loop_of.at(s as usize);
+        // Each step leaves one enclosing loop.
+        while g != NONE {
+            if g == h {
+                return true;
+            }
+            g = *self.loop_parent.at(g as usize);
+        }
+        return false;
     }
 }

@@ -236,7 +236,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     let mut srch = Vector::<u64>::new();
     let mut pre = Vector::<u32>::new();
     for i in 0..n {
-        srch.push(str_id(p.modules[i].source.as_str()));
+        srch.push(p.modules[i].src_id);
         if p.modules[i].prelude {
             pre.push(i as u32);
         }

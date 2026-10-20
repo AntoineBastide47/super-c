@@ -72,7 +72,9 @@ Rules for the costly rungs:
 - The suite shares one object cache (`SC_CACHE_DIR`, set by `super-c test`). A new project
   whose std units another test already compiled compiles only its own unit.
 - A small program compiles as one unit (`__sc_unity.c`). A test that checks per-unit objects,
-  staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`).
+  staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of
+  packs `SC_UNITY_MAX=1`. A program needs four units that include `__sc_fwd.h` (`println` brings the
+  std units) to compile through the precompiled header.
 - `SC_NO_CACHE=1` makes every build of that test compile every unit, std included. Use it
   only where the assertion is about compiles: recompile counts, staleness, cache behavior.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.

@@ -22,6 +22,10 @@ unsafe extend<T: Send, A: Send> Vector<T, A> as Send {}
 
 unsafe extend<T: Sync, A: Sync> Vector<T, A> as Sync {}
 
+extern "C" {
+    fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
+}
+
 extend<T, A: Allocator> Vector<T, A> {
     /// Empty vector backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Vector<T, A> {
@@ -346,6 +350,19 @@ extend<T: Default, A: Allocator> Vector<T, A> {
             i += 1;
         }
         self.len = n;
+    }
+}
+
+extend<T: Copy, A: Allocator> Vector<T, A> {
+    /// Append a copy of every element of `src` with one byte copy.
+    pub fn extend_copy(self: &mut Vector<T, A>, src: &Vector<T, A>) {
+        let n = src.len;
+        if n == 0 {
+            return;
+        }
+        self.reserve(n);
+        unsafe memcpy(self.ptr + self.len, src.ptr, n * sizeof(T));
+        self.len = self.len + n;
     }
 }
 

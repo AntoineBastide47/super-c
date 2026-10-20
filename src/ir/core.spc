@@ -1093,9 +1093,7 @@ pub struct CoreBody {
 // An exact-capacity copy of `v` (a kept body never grows).
 fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     let mut out = Vector::<T>::with_capacity(v.len());
-    for i in 0..v.len() {
-        out.push(*v.at(i));
-    }
+    out.extend_copy(v);
     return out;
 }
 

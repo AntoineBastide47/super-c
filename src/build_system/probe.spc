@@ -37,7 +37,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 20] = [
+const PROBES: [Probe; 22] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -241,6 +241,31 @@ const PROBES: [Probe; 20] = [
         archs: "",
         targets: "",
     },
+    // Apple's clang driver starts the compiler proper as a second process; this runs it in the driver's.
+    // GCC rejects the flag.
+    Probe {
+        id: "integrated-cc1",
+        step: "compile",
+        kind: "accept",
+        flags: "-fintegrated-cc1",
+        forms: "",
+        src: "int f(int x) {\n    return x + 1;\n}\n",
+        archs: "",
+        targets: "",
+    },
+    // A precompiled header without input file times: clang then checks only the sizes of its inputs, and
+    // a touched input with unchanged content does not fail the compile. GCC rejects the flag (it checks
+    // no input).
+    Probe {
+        id: "pch-no-timestamp",
+        step: "compile",
+        kind: "accept",
+        flags: "-Xclang -fno-pch-timestamp",
+        forms: "",
+        src: "int f(int x) {\n    return x + 1;\n}\n",
+        archs: "",
+        targets: "",
+    },
 ];
 
 /// The probe table.
@@ -267,8 +292,12 @@ pub const UVM: usize = 18;
 /// The no-prelink-vectorize probe's index.
 pub const NOVEC: usize = 19;
 
+/// The integrated-cc1 and pch-no-timestamp probes' indexes.
+pub const ICC1: usize = 20;
+pub const PCH_NO_TIME: usize = 21;
+
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 20) - 1;
+pub const ALL: u64 = (1u64 << 22) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 fn nth(s: str, sep: u8, idx: usize) str {
@@ -551,6 +580,16 @@ extend Probes {
             let mut d = self.dir.clone();
             let _ = unsafe shim::sc_rm_rf(d.cstr());
         }
+    }
+
+    /// Measure the probes of mask `need` that the record does not hold now, after `settle` (the build
+    /// waits for them), and save the record.
+    pub fn require(self: &mut Self, need: u64) {
+        self.need |= need;
+        self.spawn();
+        let v = self.ver.clone();
+        self.settle(&v);
+        self.save();
     }
 
     /// Record `res` (and `aux`, what else must hold for it) as probe `i`'s result.

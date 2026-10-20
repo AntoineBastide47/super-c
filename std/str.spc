@@ -235,6 +235,7 @@ unsafe extend str as Sync {}
 // Standard-interface conformances. `eq`/`cmp` take `other: &str` (the `&Self` convention), so `str` works
 // behind `T: Eq`/`T: Ord` bounds and the `==`/`<` operators dispatch to it.
 extend str as Eq {
+    @c.always_inline
     pub const fn eq(self: &str, other: &str) bool {
         if self.len != other.len {
             return false;

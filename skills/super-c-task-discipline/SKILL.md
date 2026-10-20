@@ -185,6 +185,27 @@ times, em-dashes after a ban.
 - If told a text is unreadable, change its structure (sentence length, term choice,
   order), not just individual words.
 
+## 10. Rebuilt Work
+
+The same analysis or code made more than once: parallel agents measured one finding three
+times, each built its own baseline compiler, two added `SplitVec::resize_default` and
+`reset_default` for one job, a test kept its own `copy_tree` beside `cli::copy_std`, and the
+compiler itself recomputed facts it already held.
+
+- Before you analyze or measure, read what exists: the brief, earlier reports, profiles,
+  prototype diffs, CI artifacts. Extend them, re-measure only what changed, and name what
+  you reused.
+- One baseline per round: the coordinator builds one baseline compiler from the base commit
+  with the variants' flags and gives its path in every brief. Agents compare against it and
+  build no baseline of their own.
+- Before you write a helper, search for one that does the job (`grep -rn "fn <name>" src std
+  tests`) and extend it.
+- Brief each agent with the other agents' findings in its area, so one root cause gets one
+  fix.
+- In compiler code, compute a fact once at its creation point and pass it on. Before you add
+  a walk, hash, read, or evaluation, find where the compiler already has the value
+  (`super-c-compiler-optimization`, Phase 6).
+
 ## Rationalizations to Reject
 
 - "I'll report progress and let the user decide." The user decided when they asked.

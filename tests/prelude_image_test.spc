@@ -1,9 +1,11 @@
 // The checked prelude image (`driver::prelude_image`): a build that loads it publishes what a build that
 // checks the prelude publishes, and a std edit makes the next build check the prelude again. Also the
 // interface-default bound a conformance in another module must meet.
-import stdlib;
 import tests::cli_harness as cli;
 import driver::util as du;
+import driver::prelude_image as pimg;
+import module::loader as loader;
+import driver_shim as shim;
 
 // Copy the files and directories under `src` to `dst`.
 fn copy_tree(src: str, dst: str) {
@@ -47,17 +49,7 @@ fn run(root: str, tag: str) i32 {
 fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
     let p = cli::proj_new();
     let root = p.dir();
-    let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
-    let mut sc = String::new();
-    sc.format_into("{}/sc", root);
-    let mut d = String::new();
-    d.format_into("{}/std", sc.as_str());
-    copy_tree(std_dir.as_str(), d.as_str());
-    d.clear();
-    d.format_into("{}/ffi", sc.as_str());
-    let mut ffi = String::new();
-    ffi.format_into("{}/../ffi", std_dir.as_str());
-    copy_tree(ffi.as_str(), d.as_str());
+    cli::copy_std(root);
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let _ = build(root, "0");
     // A new std file: the prelude is checked again (the old image has no `zz_answer`).
@@ -83,6 +75,40 @@ fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
     assert(!r.ok() && r.out_has("names module 'zz_bind', which the std prelude loads from"), "a project file clashes");
     let r2 = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), "build zz_bind.spc");
     assert(!r2.ok() && r2.out_has("the root file 'zz_bind.spc' names module 'zz_bind'"), "a root file clashes");
+}
+
+// The image records the std text the prelude check read: a std file edited after the load (during the
+// check) makes a reader reject the image, and an unchanged tree reads it.
+@test
+fn prelude_image_records_the_std_text_it_checked() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
+    let mut sd = String::new();
+    sd.format_into("{}/std", root);
+    copy_tree(std_dir.as_str(), sd.as_str());
+    let mut fd = String::new();
+    fd.format_into("{}/ffi", root);
+    let mut ffi = String::new();
+    ffi.format_into("{}/../ffi", std_dir.as_str());
+    copy_tree(ffi.as_str(), fd.as_str());
+    let mut cache = String::new();
+    cache.format_into("{}/cache", root);
+    let _g = cli::set_env("SC_CACHE_DIR", cache.as_str());
+    let host = unsafe shim::sc_host_platform();
+    let q = loader::package_load_prelude(root, "", sd.as_str(), host, Vector::<String>::new(), Vector::<String>::new());
+    assert(q.ok && q.modules.len() != 0, "the prelude loads");
+    let img = String::from_str("image");
+    pimg::write(1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    let mut at: usize = 0;
+    assert(pimg::read(1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
+    let mut f = String::new();
+    f.format_into("{}/option.spc", sd.as_str());
+    let mut text = cli::read_text(f.as_str());
+    text.push_str("\n");
+    p.mkfile("std/option.spc", text.as_str());
+    pimg::write(1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    assert(pimg::read(1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
 }
 
 // A conformance in another module whose bounds the receiver does not meet gives no method, not even

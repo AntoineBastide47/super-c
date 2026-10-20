@@ -49,6 +49,8 @@ pub struct TuEmit {
     // (module << 32 | owner) -> the `@c.align` value << 1 | packed.
     lay_built: Vector<bool>,
     lay_attrs: Map<u64, u64>,
+    // Cleared chunk bodies for reuse: `agg_chunk` renders its dependencies first, one body per level.
+    bodies: Vector<String>,
 }
 
 extend TuEmit {
@@ -71,6 +73,7 @@ extend TuEmit {
             fwds: Map::<u64, u64>::new(),
             lay_built: Vector::<bool>::new(),
             lay_attrs: Map::<u64, u64>::new(),
+            bodies: Vector::<String>::new(),
         };
     }
 
@@ -159,18 +162,20 @@ extend TuEmit {
     fn agg_chunk(self: &mut Self, it: &AggItem, nm: str, nb: usize) {
         let da = self.p().module_ast_const(it.m);
         let is_enum = unsafe (*da).at_const(it.decl).kind == NodeKind::NODE_ENUM;
-        let mut body = String::new();
+        let mut body = self.bodies.pop().unwrap_or(String::new());
         let ok = if is_enum {
             self.enum_body(it, nm, &mut body);
         } else {
             self.struct_body(it, nm, &mut body);
         };
         self.mg.pop_subs(nb);
-        if !ok {
+        if ok {
+            self.finish_chunk(&body, nm, it.m, is_enum && !unsafe (*da).enum_has_payload(it.decl));
+        } else {
             self.skipped += 1;
-            return;
         }
-        self.finish_chunk(&body, nm, it.m, is_enum && !unsafe (*da).enum_has_payload(it.decl));
+        body.clear();
+        self.bodies.push(body);
     }
 
     // Define the finished chunk `body` of C name `nm`, owned by `own`.

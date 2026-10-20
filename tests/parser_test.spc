@@ -4,6 +4,8 @@
 import ast::ast as *;
 import lexer::token_type as *;
 import tests::harness as h;
+import lexer::lexer as lex;
+import ast::parser as par;
 
 // Program item `i` (mirror of parser_test.c's `item`): the i-th node in the program's item list.
 const fn item_id(a: &Ast, i: u32) NodeId {
@@ -250,7 +252,7 @@ fn bare_instance_constant_argument() {
 @test
 fn rebuilt_greater_operators() {
     let c = h::parse_ast(
-        "fn f(a: i32, b: i32, c: i32) { let ge = a > = b; let shr = a > > b; a > > = b; let x = a > b >> c; let y = a >> b > c; a | b >>= c; }\n",
+        "fn f(a: i32, b: i32, c: i32) { let ge = a >= b; let shr = a >> b; a >>= b; let x = a > b >> c; let y = a >> b > c; a | b >>= c; }\n",
     );
     assert(c.errors == 0, "left-factored greater-than operators parse");
     let ge = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0);
@@ -269,6 +271,43 @@ fn rebuilt_greater_operators() {
         c.ast.at_const(compound_left).as_data.binary.op == TokenType::Pipe,
         "binary expression folds before shift assignment",
     );
+}
+
+// The source offset of the first parse error in `src`, or u32 MAX when it parses.
+fn first_error_at(src: str) u32 {
+    let mut s = String::from_str(src);
+    let mut lx = lex::Lexer::new(&mut s, "");
+    lx.scan_tokens();
+    let mut ps = par::Parser::new(lx.take_tokens(), s.as_str(), "");
+    ps.build_ast();
+    if !ps.has_errors() {
+        return 0xFFFFFFFF;
+    }
+    return ps.errors.errors[0].start;
+}
+
+// Only adjacent '>' and '=' tokens glue: a space splits '>>', '>=' and '>>=' into separate tokens,
+// and a range end stops before '>>=' as it stops before '='.
+@test
+fn spaced_greater_operators_do_not_glue() {
+    assert(first_error_at("fn f(a: i32) bool { return a > > 2; }\n") == 31, "'> >' is not '>>'");
+    assert(first_error_at("fn f(a: i32) bool { return a > = 3; }\n") == 31, "'> =' is not '>='");
+    assert(first_error_at("fn f(mut d: i32) { d > > = 1; }\n") == 23, "'> > =' is not '>>='");
+    assert(first_error_at("fn f(mut d: i32) { d >> = 1; }\n") == 24, "'>> =' is not '>>='");
+    assert(first_error_at("fn f(mut d: i32) { d > >= 1; }\n") == 23, "'> >=' is not '>>='");
+    assert(first_error_at("fn f(n: i32) { for i in 0..n >>= 1 { } }\n") == 29, "a range end stops before '>>='");
+    assert(first_error_at("fn f(n: i32) { for i in 0..n = 1 { } }\n") == 29, "a range end stops before '='");
+}
+
+// The parser records which sugar markers a module holds: the loader pulls in their runtime modules
+// from that set without a node scan.
+@test
+fn sugar_marks_name_each_marker_kind() {
+    assert(h::parse_ast("fn f() { g(); }\n").ast.sugar_marks == 0, "no marker");
+    let c = h::parse_ast("fn f(n: usize) { launch || {}; parallel for i in 0..n { } }\n");
+    assert(c.errors == 0 && c.ast.sugar_marks == (SUGAR_LAUNCH | SUGAR_PARFOR), "launch and parallel for");
+    let d = h::parse_ast("fn f() { select { v = rx.recv() => {} } }\n");
+    assert(d.errors == 0 && d.ast.sugar_marks == SUGAR_SELECT, "select");
 }
 
 // The condition-expression grammar excludes a bare struct initializer, while delimited child

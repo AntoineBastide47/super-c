@@ -105,7 +105,9 @@ jobs:
           set -eu
           x=${BINEXT:-}
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          "./super-c$x" bench --no-run ${cstd:+"$cstd"}
+          # The transpile lane alone: a benchmark that cancels tasks changes the reachability, and with it
+          # the code, of the whole runner (see bench/transpile_bench.spc).
+          "./super-c$x" bench --no-run --filter=self_transpile ${cstd:+"$cstd"}
           mkdir -p build/profile
           "./super-c$x" build --profile=bench -o "build/profile/super-c-bench$x" ${cstd:+"$cstd"}
           test -x "build/bench-bin$x"

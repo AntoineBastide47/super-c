@@ -345,6 +345,57 @@ int sc_chmod_rw(const char *path) {
 void *sc_opendir(const char *path) { return (void *)opendir(path); }
 void *sc_readdir(void *dir) { return (void *)readdir((DIR *)dir); }
 int sc_closedir(void *dir) { return closedir((DIR *)dir); }
+int sc_errno_absent(void) { return errno == ENOENT || errno == ENOTDIR; }
+
+int sc_file_open(const char *path, int64_t *size, int64_t *mtime) {
+#if defined(_WIN32)
+  struct _stat64 st;
+  int fd = _open(path, _O_RDONLY | _O_BINARY);
+  if (fd < 0)
+    return -1;
+  if (_fstat64(fd, &st) != 0 || (st.st_mode & _S_IFMT) != _S_IFREG) {
+    _close(fd);
+    return -1;
+  }
+#else
+  struct stat st;
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return -1;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    close(fd);
+    return -1;
+  }
+#endif
+  *size = (int64_t)st.st_size;
+  *mtime = (int64_t)st.st_mtime; /* as sc_mtime reads it */
+  return fd;
+}
+
+int64_t sc_file_read_close(int fd, void *buf, size_t n) {
+  size_t got = 0;
+  int bad = 0;
+  /* Every pass reads at least one byte or ends the loop, so it runs at most n times. */
+  while (got < n) {
+#if defined(_WIN32)
+    size_t left = n - got;
+    int r = _read(fd, (char *)buf + got, left > 1u << 30 ? 1u << 30 : (unsigned)left);
+#else
+    ssize_t r = read(fd, (char *)buf + got, n - got);
+#endif
+    if (r <= 0) {
+      bad = r < 0;
+      break;
+    }
+    got += (size_t)r;
+  }
+#if defined(_WIN32)
+  bad |= _close(fd) != 0;
+#else
+  bad |= close(fd) != 0;
+#endif
+  return bad ? -1 : (int64_t)got;
+}
 
 /* ---- build-system helpers (build.toml engine) ---- */
 
@@ -426,9 +477,11 @@ int sc_ncpu(void) {
 #define SC_JS_MAX 1024
 static int sc_js_claimed;
 static int sc_js_release_registered;
+#if !defined(__wasi__) /* WASI has no slot file: its jobserver holds no slot */
 static int sc_js_loaded;
 static int sc_js_slots;
 static unsigned char sc_js_own[SC_JS_MAX]; /* the slot bytes this process holds */
+#endif
 #if defined(_WIN32)
 static HANDLE sc_js_file = INVALID_HANDLE_VALUE;
 
@@ -784,17 +837,25 @@ static char *win_quote_into(char *w, const char *a) {
 }
 #endif
 
-/* Start argv[0..] (NULL-terminated) WITHOUT any shell: argv[0] is PATH-searched, every later entry
-   reaches the child verbatim (spaces, quotes, non-ASCII bytes included). When out_path is non-NULL,
-   the child's stdout+stderr truncate-redirect into it; NULL inherits the parent's. The returned
-   pid/handle is claimed by sc_wait_any/sc_try_wait/sc_waitpid. -1 on spawn failure. */
-long long sc_spawn_argv(const char *const *argv, const char *out_path) {
-  return sc_spawn_argv_in(argv, out_path, NULL);
+static long long spawn_in(const char *file, const char *const *argv, const char *out_path, const char *cwd);
+
+/* Start argv[0..] (NULL-terminated) WITHOUT any shell: the program `file` names (a path), or argv[0]
+   PATH-searched when `file` is NULL; argv[0] reaches the child as written, and every later entry
+   verbatim (spaces, quotes, non-ASCII bytes included). When out_path is non-NULL, the child's
+   stdout+stderr truncate-redirect into it; NULL inherits the parent's. The returned pid/handle is
+   claimed by sc_wait_any/sc_try_wait/sc_waitpid. -1 on spawn failure. */
+long long sc_spawn_argv(const char *file, const char *const *argv, const char *out_path) {
+  return spawn_in(file, argv, out_path, NULL);
 }
 
-/* sc_spawn_argv with the child's working directory set to `cwd` (NULL: this process's). */
+/* sc_spawn_argv of argv[0] with the child's working directory set to `cwd` (NULL: this process's). */
 long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const char *cwd) {
+  return spawn_in(NULL, argv, out_path, cwd);
+}
+
+static long long spawn_in(const char *file, const char *const *argv, const char *out_path, const char *cwd) {
 #if defined(__wasi__)
+  (void)file;
   (void)argv;
   (void)out_path;
   (void)cwd;
@@ -833,7 +894,7 @@ long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const 
     si.hStdOutput = h;
     si.hStdError = h;
   }
-  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, cwd, &si, &pi);
+  BOOL ok = CreateProcessA(file, line, NULL, NULL, TRUE, 0, NULL, cwd, &si, &pi);
   free(line);
   if (h != INVALID_HANDLE_VALUE)
     CloseHandle(h);
@@ -856,15 +917,12 @@ long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const 
   }
   if (cwd) {
 #if defined(__APPLE__) || defined(__GLIBC__)
-    /* macOS 26 deprecates the _np name for the POSIX 2024 one, which older systems lack; the _np
-       one exists on every supported version. */
-#  if defined(__APPLE__)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#  endif
+    /* macOS 26 replaces the _np name with the POSIX 2024 one and deprecates the _np one when the
+       deployment target is 26 or later; an older target has only the _np one. */
+#  if defined(__APPLE__) && __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 260000
+    int crc = posix_spawn_file_actions_addchdir(&fa, cwd);
+#  else
     int crc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
-#  if defined(__APPLE__)
-#    pragma clang diagnostic pop
 #  endif
     if (crc != 0) {
       posix_spawn_file_actions_destroy(&fa);
@@ -876,7 +934,11 @@ long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const 
     return -1;
 #endif
   }
-  int rc = posix_spawnp(&pid, argv[0], pfa, NULL, (char *const *)argv, environ);
+  /* posix_spawnp makes a whole spawn attempt per PATH entry: a program found once starts by its path.
+     A path that does not start (a PATH match that is not executable) falls back to the search. */
+  int rc = file ? posix_spawn(&pid, file, pfa, NULL, (char *const *)argv, environ) : -1;
+  if (rc != 0)
+    rc = posix_spawnp(&pid, argv[0], pfa, NULL, (char *const *)argv, environ);
   if (pfa)
     posix_spawn_file_actions_destroy(&fa);
   return rc == 0 ? (long long)pid : -1;
@@ -885,8 +947,8 @@ long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const 
 
 /* sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure. A child a signal ended
    returns 1 and is named on stderr with the signal: its exit status carries no other trace of it. */
-int sc_exec_argv(const char *const *argv, const char *out_path) {
-  long long pid = sc_spawn_argv(argv, out_path);
+int sc_exec_argv(const char *file, const char *const *argv, const char *out_path) {
+  long long pid = sc_spawn_argv(file, argv, out_path);
   if (pid < 0)
     return -1;
 #if defined(_WIN32) || defined(__wasi__)
@@ -1246,6 +1308,96 @@ int sc_rm_rf(const char *path) {
     sc_unlink(path);
   }
   return sc_lstat_isdir(path) == -1 ? 0 : -1;
+}
+
+/* Make file `path` hold exactly the `n` bytes at `p` (driver_shim.spc). The comparison reads through a
+   16 KiB stack buffer: the emitter can call this on a coroutine stack. */
+int sc_publish(const char *path, const void *p, size_t n) {
+#if defined(_WIN32)
+  int fd = _open(path, _O_RDONLY | _O_BINARY);
+#else
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+#endif
+  if (fd >= 0) {
+#if defined(_WIN32)
+    struct _stat64 st;
+    int same = _fstat64(fd, &st) == 0 && (uint64_t)st.st_size == (uint64_t)n;
+#else
+    struct stat st;
+    int same = fstat(fd, &st) == 0 && (uint64_t)st.st_size == (uint64_t)n;
+#endif
+    size_t off = 0;
+    while (same) {
+      char buf[16384];
+#if defined(_WIN32)
+      const int r = _read(fd, buf, (unsigned)sizeof buf);
+#else
+      const ssize_t r = read(fd, buf, sizeof buf);
+      if (r < 0 && errno == EINTR)
+        continue;
+#endif
+      if (r <= 0) {
+        same = r == 0 && off == n;
+        break;
+      }
+      same = off + (size_t)r <= n && memcmp(buf, (const char *)p + off, (size_t)r) == 0;
+      off += (size_t)r;
+    }
+#if defined(_WIN32)
+    _close(fd);
+#else
+    close(fd);
+#endif
+    if (same)
+      return 0;
+  }
+#if defined(_WIN32)
+  const int wflags = _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY;
+  fd = _open(path, wflags, _S_IREAD | _S_IWRITE);
+#else
+  const int wflags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+  fd = open(path, wflags, 0644);
+#endif
+  if (fd < 0 && errno == ENOENT) {
+    /* The parent directories exist for all but the first file written into each. */
+    const char *s1 = strrchr(path, '/');
+    const char *s2 = strrchr(path, '\\');
+    const char *slash = s2 > s1 ? s2 : s1;
+    char dir[4096];
+    if (slash == NULL || slash == path || (size_t)(slash - path) >= sizeof dir)
+      return -1;
+    memcpy(dir, path, (size_t)(slash - path));
+    dir[slash - path] = 0;
+    sc_mkdir_p(dir);
+#if defined(_WIN32)
+    fd = _open(path, wflags, _S_IREAD | _S_IWRITE);
+#else
+    fd = open(path, wflags, 0644);
+#endif
+  }
+  if (fd < 0)
+    return -1;
+  /* One write per call, no stdio buffer: a file is one system call on every host. */
+  size_t off = 0;
+  while (off < n) {
+    const size_t want = n - off > (1u << 30) ? (1u << 30) : n - off;
+#if defined(_WIN32)
+    const int w = _write(fd, (const char *)p + off, (unsigned)want);
+#else
+    const ssize_t w = write(fd, (const char *)p + off, want);
+    if (w < 0 && errno == EINTR)
+      continue;
+#endif
+    if (w <= 0)
+      break;
+    off += (size_t)w;
+  }
+#if defined(_WIN32)
+  const int cr = _close(fd);
+#else
+  const int cr = close(fd);
+#endif
+  return off == n && cr == 0 ? 1 : -1;
 }
 
 const char *sc_tmpdir(void) {

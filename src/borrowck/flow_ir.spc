@@ -36,9 +36,14 @@ pub const BP_RULES: usize = 8;
 pub const BP_EMIT: usize = 9;
 pub const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
 pub const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
-pub const BP_REACH: usize = 12; // the package's coroutine and cancellation reachability scans (once)
+// The package's coroutine and cancellation reachability (once); in the driver's stage, the whole
+// per-module prologue: the module reference rows, the body counts and the scans.
+pub const BP_REACH: usize = 12;
 pub const BP_DROPS: usize = 13; // drop elaboration of the kept bodies (schedule and rewrite)
-const BP_NAMES: [str<'static>; 14] = [
+pub const BP_PUBLISH: usize = 14; // the type publication before the stage
+pub const BP_KEEP: usize = 15; // the keep: its reservation, the kept copies and their absorption
+pub const BP_TAIL: usize = 16; // tail-call conversion of the kept bodies
+const BP_NAMES: [str<'static>; 17] = [
     "lower",
     "replay",
     "forest",
@@ -53,9 +58,12 @@ const BP_NAMES: [str<'static>; 14] = [
     "decl",
     "reach",
     "drops",
+    "publish",
+    "keep",
+    "tail",
 ];
-static_assert(BP_DROPS + 1 == 14, "one name per borrow region");
-static_assert(BP_DROPS < prb::P_COUNT, "the borrow regions fit the probe");
+static_assert(BP_TAIL + 1 == 17, "one name per borrow region");
+static_assert(BP_TAIL < prb::P_COUNT, "the borrow regions fit the probe");
 
 /// Per-body tallies.
 pub const BT_BODIES: usize = 0; // bodies analyzed (closures included)
@@ -1064,34 +1072,38 @@ extend tc::TypeChecker {
         let mut seen = Vector::<u64>::new();
         // Children first, in source order: a closure's body is checked before every body that can
         // call it, so that call stores its arguments where the body does (`Owner::cap_reach`).
+        // A function without closures, nearly every one, has the one body and needs no order.
         let n = bodies.len();
-        let mut order = Vector::<usize>::with_capacity(n);
-        let mut done = Vector::<bool>::new();
-        done.resize_default(n);
-        let mut stack = Vector::<u64>::new(); // body << 32 | its next child
-        for r in 0..n {
-            if done[r] {
-                continue;
-            }
-            done.set(r, true);
-            stack.push(r as u64 << 32);
-            // Each body is pushed once and each push advances once per child.
-            while stack.len() != 0 {
-                let top = stack[stack.len() - 1];
-                let b = (top >> 32) as usize;
-                let c = (top & 0xFFFFFFFFu64) as usize;
-                if c == bodies.at(b).closures.len() {
-                    stack.truncate(stack.len() - 1);
-                    order.push(b);
+        let mut order = Vector::<usize>::new();
+        if n > 1 {
+            order.reserve(n);
+            let mut done = Vector::<bool>::new();
+            done.resize_default(n);
+            let mut stack = Vector::<u64>::new(); // body << 32 | its next child
+            for r in 0..n {
+                if done[r] {
                     continue;
                 }
-                stack.set(stack.len() - 1, top + 1);
-                let cn = bodies.at(b).closures[c];
-                for cb in 0..n {
-                    if !done[cb] && bodies.at(cb).body.owner.node == cn {
-                        done.set(cb, true);
-                        stack.push(cb as u64 << 32);
-                        break;
+                done.set(r, true);
+                stack.push(r as u64 << 32);
+                // Each body is pushed once and each push advances once per child.
+                while stack.len() != 0 {
+                    let top = stack[stack.len() - 1];
+                    let b = (top >> 32) as usize;
+                    let c = (top & 0xFFFFFFFFu64) as usize;
+                    if c == bodies.at(b).closures.len() {
+                        stack.truncate(stack.len() - 1);
+                        order.push(b);
+                        continue;
+                    }
+                    stack.set(stack.len() - 1, top + 1);
+                    let cn = bodies.at(b).closures[c];
+                    for cb in 0..n {
+                        if !done[cb] && bodies.at(cb).body.owner.node == cn {
+                            done.set(cb, true);
+                            stack.push(cb as u64 << 32);
+                            break;
+                        }
                     }
                 }
             }
@@ -1105,12 +1117,18 @@ extend tc::TypeChecker {
         let tagged = unsafe (*self.cur_ast()).attr_of(f, AttrKind::ATTR_TAIL_RECURSE) != null;
         let convert = ctx.keep != null || tagged;
         for oi in 0..n {
-            let b = order[oi];
+            let b = if n > 1 {
+                order[oi];
+            } else {
+                0usize;
+            };
             if ctx.st.pr.on {
                 ctx.st.tally_ir(bodies.at(b));
             }
             let n0 = out.len();
+            let td = ctx.st.pr.start();
             self.bc_gen_sigs(ow, &bodies.at(b).body);
+            ctx.st.pr.stop(BP_DECL, td);
             self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
             if convert {
                 // A rejected body never reaches emission, and its elaboration has no correct
@@ -1119,7 +1137,9 @@ extend tc::TypeChecker {
                 bc_elaborate(ow, ctx, &mut bodies.index_mut(b).body, !rejected);
                 clean = clean && !rejected;
                 if !rejected {
+                    let tt = ctx.st.pr.start();
                     selfs += self.bc_tail_calls(ow, ctx, &mut bodies.index_mut(b).body);
+                    ctx.st.pr.stop(BP_TAIL, tt);
                 }
             }
             ctx.trim_scratch();

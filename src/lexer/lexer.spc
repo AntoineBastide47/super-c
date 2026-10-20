@@ -14,13 +14,15 @@ pub const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 
 /// Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
 /// pads every module source (String::pad_nul) so the lexer's scan loops drop their per-byte bounds check
-/// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end.
+/// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end; an
+/// 8-byte word read starts at or before the first NUL past the end, so it ends at most 7 bytes past it.
 pub const SOURCE_PAD: usize = 8;
 
 /// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
 /// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
 pub const CC_ID_PART: u8 = 1;
 pub const CC_WS: u8 = 2;
+pub const CC_ID_START: u8 = 4; // an identifier's first byte, except `M` and `b` (literal prefixes)
 pub type CharClass = Array<u8, 256>;
 
 const fn build_char_class() CharClass {
@@ -29,6 +31,9 @@ const fn build_char_class() CharClass {
         let mut fl = 0u8;
         if b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9' {
             fl = fl | CC_ID_PART;
+        }
+        if is_id_start(b) && b != b'M' && b != b'b' {
+            fl = fl | CC_ID_START;
         }
         if b == b' ' || b == b'\t' || b == b'\n' || b == b'\x0b' || b == b'\x0c' || b == b'\r' {
             fl = fl | CC_WS;
@@ -102,6 +107,13 @@ const fn memeq(p: *const u8, text: str) bool {
     return unsafe cstring::memcmp(p, text.ptr(), text.len()) == 0;
 }
 
+// The eight bytes at `p` as one word, `p[0]` lowest (every host the compiler runs on is little-endian).
+const fn word_at(p: *const u8) u64 {
+    let mut w: u64 = 0;
+    unsafe cstring::memcpy((&mut w) as *mut u64, p, 8);
+    return w;
+}
+
 // Whether identifier `p[..n]` (4 to 6 bytes; `in_path`: after `::`) names a vector type or the
 // vector module: `Simd` or `Mask` before `<` or `::` (a type, not `TypeTag::Simd`), `simd` next to
 // `::` (`simd::load`, `import std::simd as v`; not a field), a lane alias (`f32x4`, `u8x16`) or a
@@ -132,176 +144,136 @@ const fn vector_name(p: *const u8, n: usize, in_path: bool) bool {
     return i > 1 && i + 1 < n && unsafe p[i] == b'x' && j == n;
 }
 
-// Keyword lookup bucketed by identifier length, then filtered on the first byte, so a miss costs at
-// most a few same-length memcmps. Safety: `lexeme` must point at >= `len` readable bytes; every
-// memeq compares exactly its bucket's length, never past it.
-const fn keywords(lexeme: *const u8, len: usize) TokenType {
-    let first = unsafe lexeme[0];
-    switch len {
-        2 => {
-            if first == b'a' && memeq(lexeme, "as") {
-                return TokenType::As;
-            }
-            if first == b'd' && memeq(lexeme, "do") {
-                return TokenType::Do;
-            }
-            if first == b'f' && memeq(lexeme, "fn") {
-                return TokenType::Fn;
-            }
-            if first == b'i' && memeq(lexeme, "if") {
-                return TokenType::If;
-            }
-            if first == b'i' && memeq(lexeme, "in") {
-                return TokenType::In;
-            }
-        },
-        3 => {
-            if first == b'a' && memeq(lexeme, "asm") {
-                return TokenType::Asm;
-            }
-            if first == b'd' && memeq(lexeme, "dyn") {
-                return TokenType::Dyn;
-            }
-            if first == b'f' && memeq(lexeme, "for") {
-                return TokenType::For;
-            }
-            if first == b'l' && memeq(lexeme, "let") {
-                return TokenType::Let;
-            }
-            if first == b'm' && memeq(lexeme, "mut") {
-                return TokenType::Mut;
-            }
-            if first == b'p' && memeq(lexeme, "pub") {
-                return TokenType::Pub;
-            }
-        },
-        4 => {
-            if first == b'c' && memeq(lexeme, "case") {
-                return TokenType::Case;
-            }
-            if first == b'e' && memeq(lexeme, "else") {
-                return TokenType::Else;
-            }
-            if first == b'e' && memeq(lexeme, "enum") {
-                return TokenType::Enum;
-            }
-            if first == b'l' && memeq(lexeme, "loop") {
-                return TokenType::Loop;
-            }
-            if first == b'm' && memeq(lexeme, "move") {
-                return TokenType::Move;
-            }
-            if first == b'n' && memeq(lexeme, "null") {
-                return TokenType::Null;
-            }
-            if first == b's' && memeq(lexeme, "self") {
-                return TokenType::SelfLower;
-            }
-            if first == b'S' && memeq(lexeme, "Self") {
-                return TokenType::SelfUpper;
-            }
-            if first == b't' && memeq(lexeme, "true") {
-                return TokenType::True;
-            }
-            if first == b't' && memeq(lexeme, "type") {
-                return TokenType::Type;
-            }
-        },
-        5 => {
-            if first == b'b' && memeq(lexeme, "break") {
-                return TokenType::Break;
-            }
-            if first == b'c' && memeq(lexeme, "const") {
-                return TokenType::Const;
-            }
-            if first == b'd' && memeq(lexeme, "defer") {
-                return TokenType::Defer;
-            }
-            if first == b'f' && memeq(lexeme, "false") {
-                return TokenType::False;
-            }
-            if first == b'u' && memeq(lexeme, "union") {
-                return TokenType::Union;
-            }
-            if first == b'w' && memeq(lexeme, "where") {
-                return TokenType::Where;
-            }
-            if first == b'w' && memeq(lexeme, "while") {
-                return TokenType::While;
-            }
-        },
-        6 => {
-            if first == b'e' && memeq(lexeme, "extend") {
-                return TokenType::Extend;
-            }
-            if first == b'e' && memeq(lexeme, "extern") {
-                return TokenType::Extern;
-            }
-            if first == b'i' && memeq(lexeme, "import") {
-                return TokenType::Import;
-            }
-            if first == b'l' && memeq(lexeme, "launch") {
-                return TokenType::Launch;
-            }
-            if first == b'r' && memeq(lexeme, "return") {
-                return TokenType::Return;
-            }
-            if first == b's' && memeq(lexeme, "select") {
-                return TokenType::Select;
-            }
-            if first == b's' && memeq(lexeme, "struct") {
-                return TokenType::Struct;
-            }
-            if first == b's' && memeq(lexeme, "static") {
-                return TokenType::Static;
-            }
-            if first == b's' && memeq(lexeme, "switch") {
-                return TokenType::Switch;
-            }
-            if first == b's' && memeq(lexeme, "sizeof") {
-                return TokenType::Sizeof;
-            }
-            if first == b'u' && memeq(lexeme, "unsafe") {
-                return TokenType::Unsafe;
-            }
-            if first == b'v' && memeq(lexeme, "va_arg") {
-                return TokenType::VaArg;
-            }
-            if first == b'v' && memeq(lexeme, "va_end") {
-                return TokenType::VaEnd;
-            }
-        },
-        7 => {
-            if memeq(lexeme, "alignof") {
-                return TokenType::Alignof;
-            }
-        },
-        8 => {
-            if memeq(lexeme, "continue") {
-                return TokenType::Continue;
-            }
-            if memeq(lexeme, "va_start") {
-                return TokenType::VaStart;
-            }
-        },
-        9 => {
-            if memeq(lexeme, "interface") {
-                return TokenType::Interface;
-            }
-        },
-        13 => {
-            if memeq(lexeme, "static_assert") {
-                return TokenType::StaticAssert;
-            }
-        },
-        _ => {},
-    };
+// The keywords of 2 to 8 bytes; `interface` and `static_assert` are the longer ones (`long_keyword`).
+struct Keyword {
+    pub text: str<'static>,
+    pub kind: TokenType,
+}
+
+const KEYWORD_COUNT: usize = 44;
+const SHORT_KEYWORDS: [Keyword; KEYWORD_COUNT] = [
+    Keyword { text: "as", kind: TokenType::As },
+    Keyword { text: "do", kind: TokenType::Do },
+    Keyword { text: "fn", kind: TokenType::Fn },
+    Keyword { text: "if", kind: TokenType::If },
+    Keyword { text: "in", kind: TokenType::In },
+    Keyword { text: "asm", kind: TokenType::Asm },
+    Keyword { text: "dyn", kind: TokenType::Dyn },
+    Keyword { text: "for", kind: TokenType::For },
+    Keyword { text: "let", kind: TokenType::Let },
+    Keyword { text: "mut", kind: TokenType::Mut },
+    Keyword { text: "pub", kind: TokenType::Pub },
+    Keyword { text: "case", kind: TokenType::Case },
+    Keyword { text: "else", kind: TokenType::Else },
+    Keyword { text: "enum", kind: TokenType::Enum },
+    Keyword { text: "loop", kind: TokenType::Loop },
+    Keyword { text: "move", kind: TokenType::Move },
+    Keyword { text: "null", kind: TokenType::Null },
+    Keyword { text: "self", kind: TokenType::SelfLower },
+    Keyword { text: "Self", kind: TokenType::SelfUpper },
+    Keyword { text: "true", kind: TokenType::True },
+    Keyword { text: "type", kind: TokenType::Type },
+    Keyword { text: "break", kind: TokenType::Break },
+    Keyword { text: "const", kind: TokenType::Const },
+    Keyword { text: "defer", kind: TokenType::Defer },
+    Keyword { text: "false", kind: TokenType::False },
+    Keyword { text: "union", kind: TokenType::Union },
+    Keyword { text: "where", kind: TokenType::Where },
+    Keyword { text: "while", kind: TokenType::While },
+    Keyword { text: "extend", kind: TokenType::Extend },
+    Keyword { text: "extern", kind: TokenType::Extern },
+    Keyword { text: "import", kind: TokenType::Import },
+    Keyword { text: "launch", kind: TokenType::Launch },
+    Keyword { text: "return", kind: TokenType::Return },
+    Keyword { text: "select", kind: TokenType::Select },
+    Keyword { text: "struct", kind: TokenType::Struct },
+    Keyword { text: "static", kind: TokenType::Static },
+    Keyword { text: "switch", kind: TokenType::Switch },
+    Keyword { text: "sizeof", kind: TokenType::Sizeof },
+    Keyword { text: "unsafe", kind: TokenType::Unsafe },
+    Keyword { text: "va_arg", kind: TokenType::VaArg },
+    Keyword { text: "va_end", kind: TokenType::VaEnd },
+    Keyword { text: "alignof", kind: TokenType::Alignof },
+    Keyword { text: "continue", kind: TokenType::Continue },
+    Keyword { text: "va_start", kind: TokenType::VaStart },
+];
+
+// SHORT_KEYWORDS by a multiply-shift hash of the keyword's word (`word_of`) into 128 slots, so a
+// lookup costs one multiply and one compare. The multiplier is one with no collision on this set
+// (static_assert below); an empty slot holds word 0, which no identifier of 2 bytes or more has.
+const KW_MUL: u64 = 0x82D32DADCCA398C7u64;
+const KW_SLOTS: usize = 128;
+
+struct KeywordTable {
+    pub word: [u64; KW_SLOTS],
+    pub kind: [TokenType; KW_SLOTS],
+}
+
+// The top 7 bits of the product (KW_SLOTS = 128).
+const fn kw_slot(w: u64) usize {
+    return (w.wrapping_mul(KW_MUL) >> 57u64) as usize;
+}
+
+// The bytes of `s` (at most 8) as a little-endian word, zero above its length.
+const fn word_of(s: str) u64 {
+    let mut w: u64 = 0;
+    for i in 0..s.len() {
+        w = w | s[i] as u64 << (i * 8) as u64;
+    }
+    return w;
+}
+
+const fn build_keyword_table() KeywordTable {
+    let mut t = KeywordTable { word: [0u64; KW_SLOTS], kind: [TokenType::Identifier; KW_SLOTS] };
+    let k: []Keyword = SHORT_KEYWORDS;
+    for i in 0..KEYWORD_COUNT {
+        let w = word_of(k[i].text);
+        unsafe t.word[kw_slot(w)] = w;
+        unsafe t.kind[kw_slot(w)] = k[i].kind;
+    }
+    return t;
+}
+
+const KEYWORDS: KeywordTable = build_keyword_table();
+
+// The keyword of word `w` (an identifier of 2 to 8 bytes, see `word_of`), or Identifier.
+const fn short_keyword(w: u64) TokenType {
+    let h = kw_slot(w);
+    if unsafe KEYWORDS.word[h] == w {
+        return unsafe KEYWORDS.kind[h];
+    }
+    return TokenType::Identifier;
+}
+
+const fn keywords_collision_free() bool {
+    let k: []Keyword = SHORT_KEYWORDS;
+    for i in 0..KEYWORD_COUNT {
+        if short_keyword(word_of(k[i].text)) != k[i].kind {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(keywords_collision_free(), "KW_MUL must map SHORT_KEYWORDS to distinct slots");
+
+// The keyword of `p[..len]` for `len` above 8, or Identifier. Safety: `p` points at `len` bytes.
+const fn long_keyword(p: *const u8, len: usize) TokenType {
+    if len == 9 && memeq(p, "interface") {
+        return TokenType::Interface;
+    }
+    if len == 13 && memeq(p, "static_assert") {
+        return TokenType::StaticAssert;
+    }
     return TokenType::Identifier;
 }
 
 /// True when `s` is a reserved word: the lexer never scans it as an identifier.
 pub const fn is_keyword(s: str) bool {
-    return s.len() != 0 && keywords(s.ptr(), s.len()) != TokenType::Identifier;
+    if s.len() <= 8 {
+        return s.len() >= 2 && short_keyword(word_of(s)) != TokenType::Identifier;
+    }
+    return long_keyword(s.ptr(), s.len()) != TokenType::Identifier;
 }
 
 const fn is_mt_open(b: u8) bool {
@@ -370,7 +342,7 @@ extend Lexer {
     }
 
     // The source byte at `i`, unchecked: `i` stays within the SOURCE_PAD NUL bytes past the logical
-    // end, because the scan loops stop at the first NUL and fixed lookahead reads at most 4 bytes past it.
+    // end, because the scan loops stop at the first NUL (see SOURCE_PAD).
     const fn at(self: &Self, i: usize) u8 {
         return unsafe self.bytes.ptr()[i];
     }
@@ -466,8 +438,21 @@ extend Lexer {
     @c.always_inline
     fn identifier(self: &mut Self) {
         let mut i = self.current;
-        while (self.class[self.at(i) as usize] & CC_ID_PART) != 0u8 {
-            i += 1;
+        loop {
+            // Bit 7 of each byte of `id` marks [0-9A-Za-z_], eight bytes at a time. Only a byte at or
+            // above 0x80, never marked, carries into the next byte: one past the first stop byte.
+            let w = word_at(unsafe (self.bytes.ptr() + i));
+            let l = w | 0x2020202020202020u64; // ASCII letters to lower case
+            let alpha = l.wrapping_add(0x1F1F1F1F1F1F1F1Fu64) & ~l.wrapping_add(0x0505050505050505u64);
+            let digit = w.wrapping_add(0x5050505050505050u64) & ~w.wrapping_add(0x4646464646464646u64);
+            let us = w ^ 0x5F5F5F5F5F5F5F5Fu64; // zero at '_'
+            let under = ~(us | (us | 0x8080808080808080u64) - 0x0101010101010101u64);
+            let id = (alpha | digit | under) & 0x8080808080808080u64;
+            if id != 0x8080808080808080u64 {
+                i += (~id & 0x8080808080808080u64).trailing_zeros() / 8;
+                break;
+            }
+            i += 8;
         }
         self.current = i;
 
@@ -478,8 +463,11 @@ extend Lexer {
         }
 
         let mut kind = TokenType::Identifier;
-        if 2 <= identifier_len && identifier_len <= 9 || identifier_len == 13 {
-            kind = keywords(unsafe (self.bytes.ptr() + self.start), identifier_len);
+        if 2 <= identifier_len && identifier_len <= 8 {
+            let w = word_at(unsafe (self.bytes.ptr() + self.start));
+            kind = short_keyword(w & 0xFFFFFFFFFFFFFFFFu64 >> ((8 - identifier_len) * 8) as u64);
+        } else if identifier_len > 8 {
+            kind = long_keyword(unsafe (self.bytes.ptr() + self.start), identifier_len);
         }
         if kind == TokenType::Identifier && identifier_len >= 4 && identifier_len <= 6 && !self.vectors {
             let in_path = self.start >= 2 && self.at(self.start - 1) == b':' && self.at(self.start - 2) == b':';
@@ -512,17 +500,18 @@ extend Lexer {
         self.add_token(kind);
     }
 
+    // The index past the UTF-8 sequence at `i`, or `i + 1` after a diagnostic when it is malformed.
+    // It returns the index instead of advancing a `&mut` one: the address would keep the caller's
+    // scan index in memory.
     @c.cold
-    fn validate_utf8_at(self: &mut Self, i: &mut usize) bool {
+    fn skip_utf8(self: &mut Self, i: usize) usize {
         let mut size: usize = 0;
-        self.decode_at_b(self.at(*i), *i, &mut size);
+        self.decode_at_b(self.at(i), i, &mut size);
         if size == 0 {
-            self.error_at(*i, 1, "source is not valid UTF-8");
-            *i += 1;
-            return false;
+            self.error_at(i, 1, "source is not valid UTF-8");
+            return i + 1;
         }
-        *i += size;
-        return true;
+        return i + size;
     }
 
     fn whitespace(self: &mut Self) {
@@ -536,6 +525,17 @@ extend Lexer {
     fn line_comment(self: &mut Self) {
         let mut i = self.current;
         loop {
+            // Eight bytes at a time while none is '\n', '\r', NUL or at or above 0x80. The word read
+            // stays within SOURCE_PAD: `i` never passes the first NUL.
+            let w = word_at(unsafe (self.bytes.ptr() + i));
+            let lf = w ^ 0x0A0A0A0A0A0A0A0Au64;
+            let cr = w ^ 0x0D0D0D0D0D0D0D0Du64;
+            let ones = 0x0101010101010101u64;
+            let stop = w.wrapping_sub(ones) & ~w | lf.wrapping_sub(ones) & ~lf | cr.wrapping_sub(ones) & ~cr | w;
+            if (stop & 0x8080808080808080u64) == 0u64 {
+                i += 8;
+                continue;
+            }
             let b = self.at(i);
             if b == b'\n' || b == b'\r' {
                 break;
@@ -547,7 +547,7 @@ extend Lexer {
                 self.error_at(i, 1, "NUL byte is not allowed in comments");
                 i += 1;
             } else if b >= 0x80u8 {
-                self.validate_utf8_at(&mut i);
+                i = self.skip_utf8(i);
             } else {
                 i += 1;
             }
@@ -577,7 +577,7 @@ extend Lexer {
                 self.error_at(i, 1, "NUL byte is not allowed in comments");
                 i += 1;
             } else if b >= 0x80u8 {
-                self.validate_utf8_at(&mut i);
+                i = self.skip_utf8(i);
             } else {
                 i += 1;
             }
@@ -706,8 +706,7 @@ extend Lexer {
                 }
                 self.error_at(i - 1, 1, "NUL byte is not allowed in string literals");
             } else if b >= 0x80u8 {
-                i -= 1;
-                self.validate_utf8_at(&mut i);
+                i = self.skip_utf8(i - 1);
             }
         }
     }
@@ -852,7 +851,7 @@ extend Lexer {
                 self.error_at(i, 1, "NUL byte is not allowed in matchertext literals");
                 i += 1;
             } else if b >= 0x80u8 {
-                self.validate_utf8_at(&mut i);
+                i = self.skip_utf8(i);
             } else if is_mt_open(b) {
                 if dn > 0 && self.mt_seq_at(i, dpos, dn, false) {
                     self.current = i + dn;
@@ -1230,10 +1229,17 @@ extend Lexer {
         }
     }
 
+    @c.always_inline
     fn scan_token(self: &mut Self) {
         let c = self.at(self.current);
         if c < 0x80u8 {
             self.current += 1;
+        }
+        // Identifiers, the most frequent tokens, skip the dispatch below; only those starting with
+        // `M` or `b` reach their arms there.
+        if (self.class[c as usize] & CC_ID_START) != 0u8 {
+            self.identifier();
+            return;
         }
         switch c {
             b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\n' | b'\r' => {
@@ -1452,10 +1458,6 @@ extend Lexer {
             },
             b'\0' => {
                 self.error_at(self.start, 1, "NUL byte is not allowed in source");
-                return;
-            },
-            'a'..='z' | 'A'..='Z' | '_' => {
-                self.identifier();
                 return;
             },
             _ => {

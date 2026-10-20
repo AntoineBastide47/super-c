@@ -449,15 +449,41 @@ extend Solver {
             }
             uses.push(enc);
         }
-        // Insertion sort by point (accesses are nearly point-ordered already).
-        for i in 1..uses.len() {
-            let v = uses[i];
-            let mut j = i;
-            while j > 0 && (uses[j - 1] & 0x3FFFFFFF00000000u64) > (v & 0x3FFFFFFF00000000u64) {
-                uses.set(j, uses[j - 1]);
-                j -= 1;
+        // Accesses are nearly point-ordered already: when they are not, a stable counting sort by
+        // point orders them in O(records + points). S_cur32 (free after the CSR fill) holds the
+        // per-point starts and s_cur64 (free until the replay) the sorted records.
+        let mut np: usize = 0; // the largest point + 1
+        let mut sorted = true;
+        for i in 0..uses.len() {
+            let pt = (uses[i] >> 32 & 0x3FFFFFFFu64) as usize;
+            if pt + 1 > np {
+                np = pt + 1;
+            } else if pt + 1 < np {
+                sorted = false;
             }
-            uses.set(j, v);
+        }
+        if !sorted {
+            let mut at = replace(&mut self.s_cur32, Vector::<u32>::new());
+            let mut out = replace(&mut self.s_cur64, Vector::<u64>::new());
+            at.truncate(0);
+            at.resize_default(np + 1);
+            for i in 0..uses.len() {
+                let pt = (uses[i] >> 32 & 0x3FFFFFFFu64) as usize;
+                at.set(pt + 1, at[pt + 1] + 1);
+            }
+            for p in 0..np {
+                at.set(p + 1, at[p + 1] + at[p]);
+            }
+            out.truncate(0);
+            out.resize_default(uses.len());
+            for i in 0..uses.len() {
+                let pt = (uses[i] >> 32 & 0x3FFFFFFFu64) as usize;
+                out.set(at[pt] as usize, uses[i]);
+                at.set(pt, at[pt] + 1);
+            }
+            self.s_cur32 = at;
+            self.s_cur64 = uses;
+            uses = out;
         }
         self.s_uses = uses;
         if self.sparse {
@@ -1268,7 +1294,8 @@ extend Solver {
         return blk.term.kind == ir::TM_CALL && self.fx().block_base[bi] + blk.stmt_len * 2 == p;
     }
 
-    const fn req_at(self: &Self, row: usize, p: u32) bool {
+    /// Is point `p` in the required row `row` (`required`) of either representation?
+    pub const fn req_at(self: &Self, row: usize, p: u32) bool {
         if self.sparse {
             let r = self.rq_range[row];
             let mut lo = (r >> 32) as usize;

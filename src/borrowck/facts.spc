@@ -83,9 +83,24 @@ pub const fn sd_then(a: u8, b: u8) u8 {
 /// `module << 32 | node`).
 const ELIDED_TOK: u64 = 1u64 << 62;
 
-/// The parameters whose `'static` edge `Gen::callee_flag` records (two bits each above bit 8); a
-/// later parameter's argument never flows into `'static`.
+/// The parameters whose `'static` edge `CallSig::fl` records (two bits each above bit 8); a later
+/// parameter's argument never flows into `'static`.
 const STATIC_PARAMS_MAX: u32 = 28;
+
+/// What a call site reads of its callee's signature alone (`Gen::call_sig`), memoized per callee:
+/// call sites re-read the same signatures constantly. A call's own lifetime ties (`call_lt_pairs`)
+/// widen the relation at the site.
+pub struct CallSig {
+    // 4 | explicit `self` first parameter << 0 | named `free` << 1 | the return has an elided
+    // lifetime position << 3; from bit 8, two bits per parameter below STATIC_PARAMS_MAX: the edge
+    // its argument takes into `'static` (0 = the type names no `'static`, 1 = the whole value, 2 =
+    // what lies behind the parameter's own reference). 0 for a fn-value call.
+    pub fl: u64,
+    pub rel: u64, // the outlives relation (`Owner::callee_rel`)
+    pub rbeh: u64, // the return's tokens behind a reference level (`behind_range`), 0 for no function
+    pub rtok: u64, // the return's lifetime tokens: start << 16 | len in tok_pool
+    pub lts: u64, // bit i: parameter i (below 64) has a lifetime position (`sig_lt`)
+}
 
 /// An origin subset edge `from: to` established at `point`, of SD_* kind `delta`.
 pub struct SubsetAt {
@@ -258,7 +273,7 @@ pub struct Owner {
     subst: Vector<OwnSubst>,
     tys: Vector<TypeId>,
     // Per-callee and per-type-node caches: call boundaries re-read the same signatures constantly.
-    pub callee_flags: Map<u64, u64>, // (mod << 32 | node) -> 4 | self << 0 | free << 1 | elided return << 3
+    pub call_sigs: Map<u64, CallSig>, // (mod << 32 | node) -> its signature summary
     pub gen_sigs: Map<u64, TypeId>, // generic parameter or closure (mod << 32 | node) -> its function type
     pub gen_cls: Map<u64, u64>, // closure (mod << 32 | node) -> its classes, start << 16 | len in gen_cls_pool
     pub gen_cls_pool: Vector<u8>,
@@ -290,7 +305,7 @@ pub struct Owner {
     pub sc_tok_b: Vector<u64>, // the inner (argument) side
     pub sc_tok_r: Vector<u64>, // the return's tokens, read across a call's arguments
     pub sc_tok_c: Vector<u64>, // a store's walk down a parameter's `&mut` levels (`store_more`)
-    pub sc_stat: Vector<u64>, // member_bounds: the tokens a declaration makes `'static`
+    pub sc_stat: Vector<u64>, // the tokens a declaration or a callee's signature makes `'static`
     pub sc_stores: Vector<StoreVia>, // the walk's stores through reference arguments
     pub sc_visit: Vector<u64>, // resolve_stores: visited origins (bits)
     pub sc_ties: Vector<u64>,
@@ -2920,16 +2935,14 @@ extend Gen {
         return tt;
     }
 
-    // Cached per-callee flags: bit0 = explicit `self` first parameter, bit1 = named `free`, bit3 = the
-    // return has an elided lifetime position; from bit 8, two bits per parameter below
-    // STATIC_PARAMS_MAX: the edge its argument takes into `'static` (0 = the type names no
-    // `'static`, 1 = the whole value, 2 = what lies behind the parameter's own reference).
-    fn callee_flag(self: &mut Self, callee: DefId) u64 {
+    // The signature summary of `callee` (`CallSig`), memoized; all zero for a fn-value call.
+    fn call_sig(self: &mut Self, callee: DefId) CallSig {
+        let mut cs = CallSig { fl: 0, rel: 0, rbeh: 0, rtok: 0, lts: 0 };
         if callee.node == NODE_NONE {
-            return 0;
+            return cs;
         }
         let key = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
-        switch self.owner().callee_flags.get(&key) {
+        switch self.owner().call_sigs.get(&key) {
             Some(v) => {
                 return *v;
             },
@@ -2938,44 +2951,92 @@ extend Gen {
         let ext0 = self.ext;
         let em0 = self.ext_mod;
         self.enter_callee(callee);
-        let rel = self.owner().callee_rel(callee);
-        let mut stat = Vector::<u64>::new();
-        self.owner().rel_static(rel, &mut stat);
-        let mut fl: u64 = 4;
+        cs.rel = self.owner().callee_rel(callee);
+        let mut stat = replace(&mut self.owner().sc_stat, Vector::<u64>::new());
+        self.owner().rel_static(cs.rel, &mut stat);
+        cs.fl = 4;
         let mut pn = tok::Span { start: 0, end: 0 };
         let mut fn0 = tok::Span { start: 0, end: 0 };
+        let mut rets = NodeList { start: 0, len: 0 };
+        let mut ps = NodeList { start: 0, len: 0 };
+        let mut isfn = false;
         {
             let a = self.owner().ast_of(callee.module);
             let nd = a.at_const(callee.node);
             if nd.kind == NodeKind::NODE_FUNCTION {
+                isfn = true;
                 fn0 = a.at_const(nd.as_data.function.name).as_data.name.text;
                 if nd.as_data.function.params.len != 0 {
                     let p0 = unsafe a.list(nd.as_data.function.params)[0];
                     pn = a.at_const(a.at_const(p0).as_data.parameter.name).as_data.name.text;
                 }
-                let rets = nd.as_data.function.returns;
+                rets = nd.as_data.function.returns;
                 for r in 0..rets.len {
                     if self.has_elided_lt(callee.module, a.slot_type_node(unsafe a.list(rets)[r as usize]), 0) {
-                        fl = fl | 8;
+                        cs.fl = cs.fl | 8;
                     }
                 }
-                let ps = nd.as_data.function.params;
+                ps = nd.as_data.function.params;
                 for i in 0..ps.len.min(STATIC_PARAMS_MAX) {
                     let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
-                    fl = fl | self.static_kind(callee.module, ptn, &stat) as u64 << (8 + 2 * i) as u64;
+                    cs.fl = cs.fl | self.static_kind(callee.module, ptn, &stat) as u64 << (8 + 2 * i) as u64;
                 }
             }
         }
+        self.owner().sc_stat = stat;
         if pn.end > pn.start && self.owner().span_text_is(callee.module, pn, "self") {
-            fl = fl | 1;
+            cs.fl = cs.fl | 1;
         }
         if fn0.end > fn0.start && self.owner().span_text_is(callee.module, fn0, "free") {
-            fl = fl | 2;
+            cs.fl = cs.fl | 2;
+        }
+        if isfn {
+            cs.rbeh = self.behind_range(callee.module, callee.node, true);
+        }
+        let mut rt = replace(&mut self.owner().sc_tok_r, Vector::<u64>::new());
+        rt.truncate(0);
+        for r in 0..rets.len {
+            let ca = self.owner().ast_of(callee.module);
+            let rn = ca.slot_type_node(unsafe ca.list(rets)[r as usize]);
+            self.lt_tokens(callee.module, rn, &mut rt, 0);
+        }
+        let start = self.owner().tok_pool.len();
+        for i in 0..rt.len() {
+            self.owner().tok_pool.push(rt[i]);
+        }
+        cs.rtok = start as u64 << 16 | rt.len() as u64;
+        self.owner().sc_tok_r = rt;
+        for i in 0..ps.len.min(64) {
+            let ptn = self.owner().ast_of(callee.module).at_const(
+                unsafe self.owner().ast_of(callee.module).list(ps)[i as usize],
+            ).as_data.parameter.ty;
+            if self.sig_lt(callee.module, ptn) {
+                cs.lts = cs.lts | 1u64 << i as u64;
+            }
         }
         self.ext = ext0;
         self.ext_mod = em0;
-        self.owner().callee_flags.insert(key, fl);
-        return fl;
+        self.owner().call_sigs.insert(key, cs);
+        return cs;
+    }
+
+    // Does parameter type node `ptn` of module `m` have a lifetime position: an elided one, or a
+    // named lifetime token?
+    fn sig_lt(self: &mut Self, m: ModuleId, ptn: NodeId) bool {
+        if self.has_elided_lt(m, ptn, 0) {
+            return true;
+        }
+        let mut ptok = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
+        ptok.truncate(0);
+        self.lt_tokens(m, ptn, &mut ptok, 0);
+        let mut lt = false;
+        for k in 0..ptok.len() {
+            if ptok[k] >> 63 != 0 {
+                lt = true;
+            }
+        }
+        self.owner().sc_tok_b = ptok;
+        return lt;
     }
 
     // How an argument passed as parameter type `ptn` reaches `'static`: 0 = the type names no
@@ -3058,14 +3119,6 @@ extend Gen {
             }
         }
         return false;
-    }
-
-    fn is_self_callee(self: &mut Self, callee: DefId) bool {
-        return (self.callee_flag(callee) & 1) != 0;
-    }
-
-    fn is_free_callee(self: &mut Self, callee: DefId) bool {
-        return (self.callee_flag(callee) & 2) != 0;
     }
 
     // A `&mut` or `[]mut T` place `p` stored into a field of, or a member of a literal for, place `dst`
@@ -3284,10 +3337,11 @@ extend Gen {
                 self.calling = false;
             } else if t.kind == ir::TM_CALL {
                 self.enter_callee(t.callee);
+                let cs = self.call_sig(t.callee);
                 // A signature relating two lifetimes (`'b: 'a`) ties them as one name would; so do
                 // the function values the call passes (`Ast::call_lts`).
                 self.rel = if self.loans {
-                    self.owner().callee_rel(t.callee);
+                    cs.rel;
                 } else {
                     0u64;
                 };
@@ -3372,7 +3426,7 @@ extend Gen {
                 }
                 // What the SIGNATURE ties to the return: the return's lifetime tokens, whether it has
                 // an elided position, and the borrowing inputs the elision rule picks from.
-                let recv = t.args_len != 0 && self.is_self_callee(t.callee);
+                let recv = t.args_len != 0 && (cs.fl & 1) != 0;
                 let mut rtok = replace(&mut self.owner().sc_tok_r, Vector::<u64>::new());
                 rtok.truncate(0);
                 let mut relide = false;
@@ -3381,23 +3435,11 @@ extend Gen {
                 let mut bidx: u32 = 0;
                 let mut rbeh: u64 = 0; // the return's tokens behind a reference level (tok_pool range)
                 if self.loans && t.callee.node != NODE_NONE {
-                    let mut rets = NodeList { start: 0, len: 0 };
-                    let mut isfn = false;
-                    {
-                        let a3 = self.owner().ast_of(t.callee.module);
-                        let nd3 = a3.at_const(t.callee.node);
-                        if nd3.kind == NodeKind::NODE_FUNCTION {
-                            rets = nd3.as_data.function.returns;
-                            isfn = true;
-                        }
-                    }
-                    if isfn {
-                        rbeh = self.behind_range(t.callee.module, t.callee.node, true);
-                    }
-                    for r3 in 0..rets.len {
-                        let ca = self.owner().ast_of(t.callee.module);
-                        let rn = ca.slot_type_node(unsafe ca.list(rets)[r3 as usize]);
-                        self.lt_tokens(t.callee.module, rn, &mut rtok, 0);
+                    rbeh = cs.rbeh;
+                    let rst = (cs.rtok >> 16) as usize;
+                    for r3 in 0..(cs.rtok & 0xFFFF) as usize {
+                        let tv = self.owner().tok_pool[rst + r3];
+                        rtok.push(tv);
                     }
                     // An argument whose lifetime outlives the return's is tied to it.
                     self.owner().rel_widen(self.rel, true, &mut rtok);
@@ -3405,24 +3447,17 @@ extend Gen {
                     // come from the single borrowing input (rule 2/3; receiver ties are separate).
                     // The dest-origin guards below keep this to carrying results.
                     relide = rtok.len() == 0;
-                    relided = (self.callee_flag(t.callee) & 8) != 0;
+                    relided = (cs.fl & 8) != 0;
                     // The inputs with a lifetime position: references, and views or aggregates
                     // whose lifetimes are elided or named.
                     for i3 in 0..t.args_len {
                         let mut lt = kinds[i3 as usize] == 1 || kinds[i3 as usize] == 2;
                         if !lt && i3 as usize < ptyn.len() {
-                            lt = self.has_elided_lt(t.callee.module, ptyn[i3 as usize], 0);
-                            if !lt {
-                                let mut ptok = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
-                                ptok.truncate(0);
-                                self.lt_tokens(t.callee.module, ptyn[i3 as usize], &mut ptok, 0);
-                                for k in 0..ptok.len() {
-                                    if ptok[k] >> 63 != 0 {
-                                        lt = true;
-                                    }
-                                }
-                                self.owner().sc_tok_b = ptok;
-                            }
+                            lt = if i3 < 64 {
+                                (cs.lts >> i3 as u64 & 1u64) != 0;
+                            } else {
+                                self.sig_lt(t.callee.module, ptyn[i3 as usize]);
+                            };
                         }
                         if lt {
                             nborrowing += 1;
@@ -3432,7 +3467,7 @@ extend Gen {
                 }
                 let ref_self = recv && kinds[0] != 0;
                 // Explicit `.free()` consumes its receiver even though the parameter is `&mut`.
-                let frees = t.args_len == 1 && self.is_free_callee(t.callee);
+                let frees = t.args_len == 1 && (cs.fl & 2) != 0;
                 let mut autoref: u64 = 0; // the arguments below STATIC_PARAMS_MAX taken by implicit autoref
                 for i in 0..t.args_len {
                     let opid = self.body().oper_pool[(t.args_start + i) as usize];
@@ -3510,17 +3545,18 @@ extend Gen {
                 // autoref'd place is the pointee itself: `'static` holds its contents at their own
                 // level, and a `&'static` parameter's implicit borrow of the place.
                 let mut sfl = if self.loans && t.callee.node != NODE_NONE {
-                    self.callee_flag(t.callee) >> 8;
+                    cs.fl >> 8;
                 } else {
                     0u64;
                 };
                 if cext.len() != 0 {
-                    let mut stat = Vector::<u64>::new();
+                    let mut stat = replace(&mut self.owner().sc_stat, Vector::<u64>::new());
                     self.owner().rel_static(self.rel, &mut stat);
                     sfl = 0;
                     for i in 0..ptyn.len().min(STATIC_PARAMS_MAX as usize) {
                         sfl = sfl | self.static_kind(t.callee.module, ptyn[i], &stat) as u64 << (2 * i) as u64;
                     }
+                    self.owner().sc_stat = stat;
                 }
                 if sfl != 0 {
                     for i in 0..t.args_len.min(STATIC_PARAMS_MAX) {
@@ -3625,7 +3661,7 @@ extend Gen {
                 // A `&mut self` receiver whose pointee holds borrows is a STORE TARGET: argument
                 // borrows can land in the container (`v.push(&x)`), so they flow into the
                 // receiver's origin. Other cross-argument stores are the signature checks' job.
-                if self.loans && t.args_len != 0 && kinds[0] == 2 && self.is_self_callee(t.callee) {
+                if self.loans && t.args_len != 0 && kinds[0] == 2 && (cs.fl & 1) != 0 {
                     let op0 = *self.body().operands.at(self.body().oper_pool[t.args_start as usize] as usize);
                     if op0.kind == ir::OP_COPY || op0.kind == ir::OP_MOVE {
                         // A container the FRAME owns (no deref on the way, non-reference base)
@@ -3792,16 +3828,23 @@ extend Gen {
                             // signature ties that parameter's own lifetime to the return, the result
                             // holds a loan on the pointee, so a later claim or write of `*r`
                             // conflicts, whatever other borrows the pointee holds (those flow above).
-                            if (kinds[i as usize] == 1 || kinds[i as usize] == 2 || t.callee.node == NODE_NONE) && self.mut_ref_place(
-                                op.data,
-                            ) && lvl {
+                            // Through a `&mut` parameter (any parameter of a fn value) into a result
+                            // that grants write, the loan is exclusive, as an autoref's is
+                            // (`implicit_borrow`): a later read of `*r` conflicts too.
+                            let kd = kinds[i as usize];
+                            if (kd == 1 || kd == 2 || t.callee.node == NODE_NONE) && self.mut_ref_place(op.data) && lvl {
                                 let deep = self.store_edge(dp) == SD_REF || self.ref_deep(
                                     t.callee.module,
                                     &ptyn,
                                     rbeh,
                                     i,
                                 );
-                                self.push_loan(true, false, true, deep, op.data, LK_SHARED, dor, exit, t.span);
+                                let lk = if kd != 1 && self.grants_write(dty, 0) {
+                                    LK_MUT;
+                                } else {
+                                    LK_SHARED;
+                                };
+                                self.push_loan(true, false, true, deep, op.data, lk, dor, exit, t.span);
                             }
                         }
                     }
@@ -4377,7 +4420,7 @@ extend Owner {
             at: DefId { module: 0, node: NODE_NONE },
             subst: Vector::<OwnSubst>::new(),
             tys: Vector::<TypeId>::new(),
-            callee_flags: Map::<u64, u64>::new(),
+            call_sigs: Map::<u64, CallSig>::new(),
             gen_sigs: Map::<u64, TypeId>::new(),
             gen_cls: Map::<u64, u64>::new(),
             gen_cls_pool: Vector::<u8>::new(),
@@ -4450,23 +4493,25 @@ extend Owner {
     /// whole program.
     pub fn takes_static_ref(self: &mut Self, callee: DefId) bool {
         let rel = self.callee_rel(callee);
-        let mut stat = Vector::<u64>::new();
+        let mut stat = replace(&mut self.sc_stat, Vector::<u64>::new());
         self.rel_static(rel, &mut stat);
         let a = self.ast_of(callee.module);
         let nd = a.at_const(callee.node);
-        if nd.kind != NodeKind::NODE_FUNCTION {
-            return false;
-        }
-        let ps = nd.as_data.function.params;
-        for i in 0..ps.len {
-            let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
-            if ptn != NODE_NONE && a.at_const(ptn).is_ref_type() && stat.contains(
-                &self.lt_tok(callee.module, a.at_const(ptn).as_data.indirect_type.lifetime),
-            ) {
-                return true;
+        let mut r = false;
+        if nd.kind == NodeKind::NODE_FUNCTION {
+            let ps = nd.as_data.function.params;
+            for i in 0..ps.len {
+                let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
+                if ptn != NODE_NONE && a.at_const(ptn).is_ref_type() && stat.contains(
+                    &self.lt_tok(callee.module, a.at_const(ptn).as_data.indirect_type.lifetime),
+                ) {
+                    r = true;
+                    break;
+                }
             }
         }
-        return false;
+        self.sc_stat = stat;
+        return r;
     }
 
     /// The token of lifetime node `lt` of module `m`, a use or a declaration: its name's hash with bit
@@ -4495,9 +4540,11 @@ extend Owner {
             },
             _ => {},
         };
-        let mut out = Vector::<u64>::new();
-        self.rel_fn(callee, &mut out);
-        return self.rel_keep(key, &out);
+        let mut pool = replace(&mut self.rel_pool, Vector::<u64>::new());
+        let start = pool.len();
+        self.rel_fn(callee, &mut pool);
+        self.rel_pool = pool;
+        return self.rel_keep(key, start);
     }
 
     /// The outlives relation among the lifetime parameters of struct or enum `d`, as `callee_rel`
@@ -4510,17 +4557,16 @@ extend Owner {
             },
             _ => {},
         };
-        let mut out = Vector::<u64>::new();
-        self.rel_lts(d.module, self.ast_of(d.module).lifetimes_of(d.node), &mut out);
-        return self.rel_keep(key, &out);
+        let mut pool = replace(&mut self.rel_pool, Vector::<u64>::new());
+        let start = pool.len();
+        self.rel_lts(d.module, self.ast_of(d.module).lifetimes_of(d.node), &mut pool);
+        self.rel_pool = pool;
+        return self.rel_keep(key, start);
     }
 
-    fn rel_keep(self: &mut Self, key: u64, out: &Vector<u64>) u64 {
-        let start = self.rel_pool.len();
-        for i in 0..out.len() {
-            self.rel_pool.push(out[i]);
-        }
-        let r = start as u64 << 16 | (out.len() / 2) as u64;
+    // Record the pairs the relation appended to `rel_pool` from `start` as `key`'s relation.
+    fn rel_keep(self: &mut Self, key: u64, start: usize) u64 {
+        let r = start as u64 << 16 | ((self.rel_pool.len() - start) / 2) as u64;
         self.rel_memo.insert(key, r);
         return r;
     }

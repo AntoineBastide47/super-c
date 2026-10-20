@@ -58,6 +58,13 @@ pub struct DefId {
     pub node: NodeId,
 }
 
+extend DefId as Default {
+    /// The unresolved entry: NODE_NONE in module 0.
+    pub fn default() DefId {
+        return DefId { module: 0, node: NODE_NONE };
+    }
+}
+
 pub enum AttrKind {
     ATTR_INLINE,
     ATTR_ALWAYS_INLINE,
@@ -104,6 +111,11 @@ pub const UNSAFE_SAFE: u32 = 1;
 pub const UNSAFE_CONST: u32 = 2;
 pub const UNSAFE_NAKED: u32 = 4;
 pub const UNSAFE_LINK_SECTION: u32 = 8;
+
+/// `Ast.sugar_marks` bits: the module holds a `launch`, `select` or `parallel for` marker.
+pub const SUGAR_LAUNCH: u32 = 1;
+pub const SUGAR_SELECT: u32 = 2;
+pub const SUGAR_PARFOR: u32 = 4;
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather
 // than inline on the decl data, so `Node` keeps its tuned size: lifetimes are erased, rare, and only
@@ -2437,7 +2449,24 @@ extend<T: Copy> SplitVec<T> {
         return unsafe atomic::load_usize(&self.blen, 1) + self.ovf.len();
     }
 
+    // Base entries inline. The frozen push fills the base to the split before it spills, so
+    // `i < blen` implies `i < split`. `at_slow` is cold so that clang does not lay out the frozen
+    // branch as the fall-through.
+    @c.always_inline
     pub const fn at(self: &Self, i: usize) &T {
+        if self.split == SV_UNFROZEN {
+            if i < self.base.len() {
+                return unsafe &*(self.base.as_ptr() + i);
+            }
+        } else if i < unsafe atomic::load_usize(&self.blen, 1) {
+            return unsafe &*(self.base.as_ptr() + i);
+        }
+        return self.at_slow(i);
+    }
+
+    // The overflow chunks and the bounds failure. `@c.cold` implies `noinline`.
+    @c.cold
+    const fn at_slow(self: &Self, i: usize) &T {
         if self.split == SV_UNFROZEN {
             return self.base.at(i);
         }
@@ -2555,6 +2584,19 @@ extend<T: Copy> SplitVec<T> {
         self.base.clear();
         self.ovf.clear();
         self.split = SV_UNFROZEN;
+    }
+}
+
+extend<T: Copy + Default> SplitVec<T> {
+    /// Unfrozen only: resize the flat base to `n` entries, new ones `T::default()`, in one fill.
+    pub fn resize_default(self: &mut Self, n: usize) {
+        self.base.resize_default(n);
+    }
+
+    /// Clear, then hold `n` default entries, unfrozen. One fill of the flat base.
+    pub fn reset_default(self: &mut Self, n: usize) {
+        self.clear();
+        self.base.resize_default(n);
     }
 }
 
@@ -3092,6 +3134,9 @@ pub struct Ast {
     pub used: Vector<TypeId>,
     pub used_inst: Vector<u32>,
     pub used_bits: Vector<u64>,
+    /// The provisional types a rolled-back stage created (`used_rollback`), a bit per pool index: the
+    /// next intern of one records it as a first touch.
+    pub used_spec: Vector<u64>,
     pub types: SplitVec<u32>,
     pub mono: Vector<MonoUse>,
     // Deferred field-projection bound proofs recorded while this module's bodies were checked
@@ -3185,8 +3230,8 @@ pub struct Ast {
     pub last_use: Vector<NodeId>,
     pub root: NodeId,
     pub module: ModuleId,
-    /// Number of sugar-keyword marker nodes (`launch`/`select`/`parallel for`) the parser built.
-    /// Zero lets the HIR lowering skip its whole-arena marker scan -- the overwhelmingly common case.
+    /// The sugar-keyword marker kinds the parser built (`SUGAR_*` bits). The loader pulls in each
+    /// kind's runtime module from it; zero lets the HIR lowering skip its whole-arena marker scan.
     pub sugar_marks: u32,
     /// The module arena's length when the HIR lowering started: every node at or past it was
     /// appended by a desugar or a checker rewrite inside the body it extends, so it belongs to
@@ -3224,6 +3269,7 @@ extend Ast as Free {
         self.used.free();
         self.used_inst.free();
         self.used_bits.free();
+        self.used_spec.free();
         self.types.free();
         self.mono.free();
         self.proj_obs.free();
@@ -3540,16 +3586,8 @@ extend Ast {
     }
 
     pub fn init_resolutions(self: &mut Self) {
-        self.resolutions.clear();
-        self.resolutions.reserve(self.nodes.len());
-        for _ in 0..self.nodes.len() {
-            self.resolutions.push(DefId { module: 0, node: NODE_NONE });
-        }
-        self.b.resolutions.clear();
-        self.b.resolutions.reserve(self.b.nodes.len());
-        for _ in 0..self.b.nodes.len() {
-            self.b.resolutions.push(DefId { module: 0, node: NODE_NONE });
-        }
+        self.resolutions.reset_default(self.nodes.len());
+        self.b.resolutions.reset_default(self.b.nodes.len());
         assert(!self.seeds_rel.on, "seeds is released");
         for i in 0..self.seeds.len() {
             let sd = *self.seeds.at(i);
@@ -3587,14 +3625,9 @@ extend Ast {
         let pinned = self.types.frozen();
         self.types.clear();
         self.b.types.clear();
-        self.types.reserve(self.nodes.len());
-        self.b.types.reserve(self.b.nodes.len());
-        while self.types.len() < self.nodes.len() {
-            self.types.push(TYPE_NONE);
-        }
-        while self.b.types.len() < self.b.nodes.len() {
-            self.b.types.push(TYPE_NONE);
-        }
+        // One fill each: TYPE_NONE is 0, the u32 default.
+        self.types.resize_default(self.nodes.len());
+        self.b.types.resize_default(self.b.nodes.len());
         if pinned {
             self.types.freeze();
             self.b.types.freeze();
@@ -3607,6 +3640,7 @@ extend Ast {
         self.used.clear();
         self.used_inst.clear();
         self.used_bits.clear();
+        self.used_spec.clear();
         if self.gt.p == null {
             // Module-local identity: seeds go to the pool (the package table carries them otherwise).
             self.pool.seed();
@@ -3771,6 +3805,42 @@ extend Ast {
         return r;
     }
 
+    /// The extent of the `used` records now (`used_rollback`).
+    pub const fn used_mark(self: &Self) u64 {
+        return self.used.len() as u64 << 32 | self.used_inst.len() as u64;
+    }
+
+    /// Drop the `used` records added since `mark`: what a speculative stage touched is no use by the
+    /// program. A final id leaves the membership bits; a provisional one stays in the pool, and its
+    /// next intern records it (`used_spec`).
+    pub fn used_rollback(self: &mut Self, mark: u64) {
+        let n0 = (mark >> 32) as usize;
+        for i in n0..self.used.len() {
+            let id = self.used[i];
+            let k = (id & TYPE_PROV_MASK) as usize;
+            if (id & TYPE_PROV) == 0 {
+                self.used_bits[k / 64] = self.used_bits[k / 64] & ~(1u64 << (k % 64) as u64);
+                continue;
+            }
+            while k / 64 >= self.used_spec.len() {
+                self.used_spec.push(0);
+            }
+            self.used_spec[k / 64] = self.used_spec[k / 64] | 1u64 << (k % 64) as u64;
+        }
+        self.used.truncate(n0);
+        self.used_inst.truncate((mark & 0xFFFFFFFF) as usize);
+    }
+
+    // Whether provisional type `id` is one a rolled-back stage created; clears its bit.
+    fn spec_take(self: &mut Self, id: TypeId) bool {
+        let k = (id & TYPE_PROV_MASK) as usize;
+        if k / 64 >= self.used_spec.len() || (self.used_spec[k / 64] >> (k % 64) as u64 & 1) == 0 {
+            return false;
+        }
+        self.used_spec[k / 64] = self.used_spec[k / 64] & ~(1u64 << (k % 64) as u64);
+        return true;
+    }
+
     /// Record a package-table id this module touched (first touch appends to `used`).
     fn mark_used(self: &mut Self, id: TypeId) {
         let w = (id >> 6) as usize;
@@ -3825,7 +3895,7 @@ extend Ast {
         }
         let before = self.pool.len();
         let id = self.pool.insert_ty(nt) | TYPE_PROV;
-        if self.pool.len() != before {
+        if self.pool.len() != before || self.used_spec.len() != 0 && self.spec_take(id) {
             self.used.push(id);
             if nt.kind == TypeKind::TYPE_INSTANCE {
                 self.used_inst.push(nt.as_data.inst);
@@ -4216,7 +4286,9 @@ extend Ast {
             self.used_bits[w] = self.used_bits[w] | 1u64 << (id & 63) as u64;
         }
         // Every provisional record is published: release the pool's chunks (a module that interns
-        // again after the checkpoint allocates one fresh chunk).
+        // again after the checkpoint allocates one fresh chunk). A published type a rolled-back stage
+        // created has no membership bit: its next intern records it.
+        self.used_spec.clear();
         self.pool.free();
         self.pool = TypePool::new();
     }
@@ -5226,13 +5298,9 @@ const fn slot_of(v: &Vector<u32>, vb: &Vector<u32>, node: NodeId) u32 {
 }
 
 fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
-    let mut want = need;
-    if nodes_len > want {
-        want = nodes_len;
-    }
-    v.reserve(want);
-    while v.len() < want {
-        v.push(0);
+    let want = need.max(nodes_len);
+    if v.len() < want {
+        v.resize_default(want);
     }
 }
 
@@ -5503,11 +5571,7 @@ extend<T: Copy + Persist> SplitVec<T> as Persist {
     fn load(self: &mut SplitVec<T>, r: &mut Reader) {
         let mut v = Vector::<T>::new();
         v.load(r);
-        *self = SplitVec::<T>::new();
-        self.reserve(v.len());
-        for i in 0..v.len() {
-            self.push(*v.at(i));
-        }
+        *self = SplitVec::<T> { base: v, split: SV_UNFROZEN, ovf: ChunkPool::<T>::new(), blen: 0 };
     }
 }
 

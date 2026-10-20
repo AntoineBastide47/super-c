@@ -90,6 +90,33 @@ fn interner() {
     assert(a.type_concrete(a1) && !a.type_concrete(g) && !a.type_concrete(pg), "concreteness is cached recursively");
 }
 
+// The per-node side tables (`mono_at`, `dyn_at`, `deref_at`) grow geometrically to the node count: a
+// record once reserved the target length on top of the current one (three times the nodes here).
+@test
+fn node_side_tables_grow_to_the_node_count() {
+    let mut a = Ast::new(8);
+    let first = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    let t = Ast::builtin(BuiltinType::BT_I32);
+    let grow: [u32; 3] = [1000, 1000, 1];
+    for g in grow {
+        for _ in 0..g {
+            let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+        }
+        a.set_type_args(first, &t, 1);
+        a.add_dyn_use(first, t, t);
+        a.add_deref_use(&DerefUse { node: first, target: t, n: 0 });
+        let n = a.nodes.len();
+        assert_eq(a.mono_at.len(), n);
+        assert(
+            a.mono_at.capacity() <= 2 * n && a.dyn_at.capacity() <= 2 * n && a.deref_at.capacity() <= 2 * n,
+            "the capacity stays at most twice the nodes",
+        );
+    }
+    assert_eq(a.mono_at[first as usize], 3u32);
+    assert_eq(a.dyn_at[first as usize], 3u32);
+    assert_eq(a.deref_at[first as usize], 3u32);
+}
+
 // The intern index grows geometrically: a rebuild leaves the load strictly under the trigger, so a
 // run of hits at the boundary never rebuilds again (it did: about 2,000 rebuilds per transpile).
 @test

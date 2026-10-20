@@ -22,6 +22,9 @@ import ir::inline as inl;
 /// compile either. Exceeding it fails the body with a diagnostic instead of exhausting the stack.
 const RENDER_NEST_MAX: u32 = 256;
 
+/// Case labels on one line of a goto-layout `switch` (a range pattern lists every value).
+const SWITCH_LINE_CASES: u32 = 16;
+
 /// Deepest chain of nested generic instantiations a body is emitted under. Realistic code nests a
 /// few dozen levels; a generic function that reaches itself with a growing type argument (`f::<W<T>>`
 /// inside `f<T>`) never stops, and every level deepens each type the mangler spells.
@@ -183,6 +186,9 @@ pub struct CEmit {
     /// secondary merge the region tree cannot place). Its presence makes the whole body fall back to
     /// the goto layout, so structured output never emits an unplaceable jump.
     sx_goto: bool,
+    /// The loop break the arms of the native `switch` being emitted spell as a forward `goto` (a C
+    /// `break` there would leave the switch); NONE outside such arms.
+    sx_sw_brk: u32,
     /// Per-body local spelling, rebuilt by setup_locals. `sx_coal[l]` is the local `l` coalesces
     /// into (itself when it does not): a transparent `_dst = move _src` where the source is used
     /// nowhere else shares one C variable. `sx_name[l]` is the C identifier for local `l`: the
@@ -463,6 +469,7 @@ extend CEmit {
             sx_fell: false,
             sx_nest: 0,
             sx_goto: false,
+            sx_sw_brk: cfl::NONE,
             sx_coal: Vector::<u32>::new(),
             sx_nm_pool: String::new(),
             sx_nm_off: Vector::<u32>::new(),
@@ -2102,6 +2109,19 @@ extend CEmit {
                 if t.args_len == 1 {
                     // A guarded drop reads its move flag (a local carried on args_start, not a place).
                     reads.set(t.args_start as usize, *reads.at(t.args_start as usize) + 1);
+                }
+            } else if t.kind == ir::TM_GOTO && t.a != ir::IR_NONE && b.operands.at(t.a as usize).kind != ir::OP_CONST {
+                // A bounds check `bce` folded keeps its condition operand for re-proof; no C reads
+                // it, so the condition's store is dead unless something else reads it.
+                let pl = *b.places.at(b.operands.at(t.a as usize).data as usize);
+                let base = pl.base as usize;
+                refs.set(base, refs[base] - 1);
+                self.sx_uses.set(base, self.sx_uses[base] - 1);
+                reads.set(base, reads[base] - 1);
+                if pl.proj_len == 0 {
+                    self.sx_bare.set(base, self.sx_bare[base] - 1);
+                } else if pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF {
+                    self.sx_deref.set(base, self.sx_deref[base] - 1);
                 }
             } else if t.kind == ir::TM_CALL {
                 for d in 0..t.dests_len {
@@ -5695,22 +5715,16 @@ extend CEmit {
                             cd,
                             *chain_kind.at(x as usize) != 1,
                         );
+                        if ok && cd != next {
+                            o.push_str("  goto bb_");
+                            o.push_u64(cd);
+                            o.push_str(";\n");
+                        }
                     } else {
-                        ok = self.emit_switch_gotos(o, b, cf, x);
+                        ok = self.emit_switch_gotos(o, b, cf, x, next);
                     }
                     if !ok {
-                        ok = false;
                         break;
-                    }
-                    let ot = if cd != cfl::NONE {
-                        cd;
-                    } else {
-                        cf.succ(b, x, blk.term.sw_len);
-                    };
-                    if ot != next {
-                        o.push_str("  goto bb_");
-                        o.push_u64(ot);
-                        o.push_str(";\n");
                     }
                 }
             } else if blk.term.kind != ir::TM_RETURN && blk.term.kind != ir::TM_UNREACHABLE {
@@ -5801,8 +5815,12 @@ extend CEmit {
         return true;
     }
 
-    // The per-arm equality tests of a switch terminator: `if ((disc) == value) goto bb_target;`.
-    fn emit_switch_gotos(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32) bool {
+    // A switch terminator's jumps, with `next` the block laid out after `x`: a C `switch` whose cases
+    // jump to their targets, each target's labels together (`case_labels`), so the C compiler builds
+    // a jump table; a one-case or boolean switch as `if ((disc) == value) goto
+    // bb_target;` lines. The otherwise edge is the switch's `default` (an enum discriminant needs one
+    // for -Wswitch), else a `goto` after the tests; neither when it is `next`.
+    fn emit_switch_gotos(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, next: u32) bool {
         let t = b.blocks.at(x as usize).term;
         let mut d = self.sget();
         if !self.emit_operand(b, t.a, &mut d) {
@@ -5810,6 +5828,28 @@ extend CEmit {
             return false;
         }
         let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+        let ot = cf.succ(b, x, t.sw_len);
+        if t.sw_len >= 2 && !isb {
+            o.push_str("  switch (");
+            o.push_string(&d);
+            o.push_str(") {\n");
+            for k in 0..t.sw_len {
+                if self.case_labels(o, false, b, cf, x, k) {
+                    o.push_str(" goto bb_");
+                    o.push_u64(cf.succ(b, x, k));
+                    o.push_str(";\n");
+                }
+            }
+            if ot != next {
+                o.push_str("  default: goto bb_");
+                o.push_u64(ot);
+                o.push_str(";\n  }\n");
+            } else {
+                o.push_str("  default: break;\n  }\n");
+            }
+            self.sput(d);
+            return true;
+        }
         let mut k: u32 = 0;
         while k < t.sw_len {
             o.push_str("  if (");
@@ -5826,7 +5866,46 @@ extend CEmit {
             o.push_str(";\n");
             k = j;
         }
+        if ot != next {
+            o.push_str("  goto bb_");
+            o.push_u64(ot);
+            o.push_str(";\n");
+        }
         self.sput(d);
+        return true;
+    }
+
+    // The case labels of target `cf.succ(b, x, k)` of switch `x` when case `k` is its first and the
+    // target is not the otherwise one (`default` takes those): every case of the target, a range
+    // value by value as ISO C has no case range, SWITCH_LINE_CASES labels to a line. False when case
+    // `k` starts no labels.
+    fn case_labels(self: &mut Self, o: &mut String, dry: bool, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, k: u32) bool {
+        let t = b.blocks.at(x as usize).term;
+        let target = cf.succ(b, x, k);
+        if target == cf.succ(b, x, t.sw_len) {
+            return false;
+        }
+        for q in 0..k {
+            if cf.succ(b, x, q) == target {
+                return false;
+            }
+        }
+        let mut n: u32 = 0;
+        for j in k..t.sw_len {
+            if cf.succ(b, x, j) != target {
+                continue;
+            }
+            if n % SWITCH_LINE_CASES == 0 {
+                self.w(o, dry, mbe::if_s(n == 0, "  case ", "\n  case "));
+            } else {
+                self.w(o, dry, " case ");
+            }
+            if !dry {
+                o.push_i64(self.case_val(b, &t, j));
+            }
+            self.w(o, dry, ":");
+            n += 1;
+        }
         return true;
     }
 
@@ -6094,8 +6173,8 @@ extend CEmit {
         }
     }
 
-    // The value of case `k` of switch terminator `t`: the pool's 32 bits, sign-extended for an i32
-    // discriminant (an enum with a negative tag).
+    // The value of case `k` of switch terminator `t`: the pool's 32 bits, sign-extended for a signed
+    // discriminant (an enum with a negative tag, a negative integer pattern).
     fn case_val(self: &Self, b: &ir::CoreBody, t: &ir::Terminator, k: u32) i64 {
         let v = (b.switch_pool[(t.sw_start + k) as usize] >> 32) as i64;
         let ty = b.operands.at(t.a as usize).ty;
@@ -6103,7 +6182,7 @@ extend CEmit {
             return v;
         }
         let y = self.rty_y(b, ty);
-        if y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_I32 {
+        if y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin as u8 >= BuiltinType::BT_I8 as u8 && y.as_data.builtin as u8 <= BuiltinType::BT_ISIZE as u8 {
             return v - 4294967296;
         }
         return v;
@@ -6195,12 +6274,12 @@ extend CEmit {
                 self.sx_fell = false;
                 return true;
             }
-            if node == brk {
+            if node == brk && brk != self.sx_sw_brk {
                 self.w(o, dry, "  break;\n");
                 self.sx_fell = false;
                 return true;
             }
-            if self.outer_break_target(cf, cont, node) {
+            if node == brk || self.outer_break_target(cf, cont, node) {
                 self.w(o, dry, "  goto bb_");
                 self.wu(o, dry, node);
                 self.w(o, dry, ";\n");
@@ -6273,10 +6352,10 @@ extend CEmit {
         }
     }
 
-    // A switch terminator as an `if`/`else` (or `else if` chain), or a native C `switch` when the
-    // arms are >= 2 integer cases outside any loop (so a case `break` cannot escape a loop). Arms
-    // stop at the branch join `f`, or at the region stop when the arms do not rejoin. When no arm
-    // falls through and the arms do not rejoin, the otherwise region follows the `if` unwrapped as
+    // A switch terminator as an `if`/`else` (or `else if` chain), or a native C `switch` when it has
+    // >= 2 cases on a non-boolean discriminant (`emit_native_switch`; inside a loop an arm's loop
+    // break spells a forward `goto`, as a C `break` would only leave the switch). Arms stop at the
+    // branch join `f`, or at the region stop when the arms do not rejoin. When no arm falls through and the arms do not rejoin, the otherwise region follows the `if` unwrapped as
     // the rest of the caller's region: `tail` receives its entry and the caller continues there.
     fn emit_branch(
         self: &mut Self,
@@ -6320,39 +6399,15 @@ extend CEmit {
         if !dry && !self.emit_operand(b, t.a, d) {
             return false;
         }
-        if t.sw_len >= 2 && brk == cfl::NONE && cont == cfl::NONE {
-            self.w(o, dry, "  switch (");
-            self.ws(o, dry, d);
-            self.w(o, dry, ") {\n");
-            let mut fell = false;
-            for k in 0..t.sw_len {
-                self.w(o, dry, "  case ");
-                if !dry {
-                    o.push_i64(self.case_val(b, &t, k));
-                }
-                self.w(o, dry, ": {\n");
-                if !self.emit_region(o, b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
-                    return false;
-                }
-                if self.sx_fell {
-                    self.w(o, dry, "  break;\n");
-                    fell = true;
-                }
-                self.w(o, dry, "  }\n");
-            }
-            self.w(o, dry, "  default: {\n");
-            if !self.emit_region(o, b, cf, cf.succ(b, x, t.sw_len), arm_stop, brk, cont, dry) {
-                return false;
-            }
-            if self.sx_fell {
-                self.w(o, dry, "  break;\n");
-                fell = true;
-            }
-            self.w(o, dry, "  }\n  }\n");
-            self.sx_fell = fell;
-            return true;
-        }
         let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+        if t.sw_len >= 2 && !isb {
+            // An arm that leaves the enclosing loop jumps past the switch (`sx_sw_brk`).
+            let brk0 = self.sx_sw_brk;
+            self.sx_sw_brk = brk;
+            let ok = self.emit_native_switch(o, b, cf, x, arm_stop, brk, cont, dry, d);
+            self.sx_sw_brk = brk0;
+            return ok;
+        }
         let mut ot = cf.succ(b, x, t.sw_len);
         let mut fell = false;
         // Set when the otherwise region may follow the arms unwrapped once no arm falls through.
@@ -6460,6 +6515,54 @@ extend CEmit {
             self.w(o, dry, "  }");
             ot = cf.succ(b, ot, 1);
         }
+        self.sx_fell = fell;
+        return true;
+    }
+
+    // Switch terminator `x` (discriminant spelled in `d`) as a native C `switch`: each target's case
+    // labels (`case_labels`) before its region, emitted once. Arms stop at `arm_stop`; one that falls
+    // through ends in `break;`, and sx_fell tells whether any did.
+    fn emit_native_switch(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        arm_stop: u32,
+        brk: u32,
+        cont: u32,
+        dry: bool,
+        d: &String,
+    ) bool {
+        let t = b.blocks.at(x as usize).term;
+        let ot = cf.succ(b, x, t.sw_len);
+        self.w(o, dry, "  switch (");
+        self.ws(o, dry, d);
+        self.w(o, dry, ") {\n");
+        let mut fell = false;
+        for k in 0..t.sw_len {
+            if !self.case_labels(o, dry, b, cf, x, k) {
+                continue;
+            }
+            self.w(o, dry, " {\n");
+            if !self.emit_region(o, b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
+                return false;
+            }
+            if self.sx_fell {
+                self.w(o, dry, "  break;\n");
+                fell = true;
+            }
+            self.w(o, dry, "  }\n");
+        }
+        self.w(o, dry, "  default: {\n");
+        if !self.emit_region(o, b, cf, ot, arm_stop, brk, cont, dry) {
+            return false;
+        }
+        if self.sx_fell {
+            self.w(o, dry, "  break;\n");
+            fell = true;
+        }
+        self.w(o, dry, "  }\n  }\n");
         self.sx_fell = fell;
         return true;
     }
@@ -10999,7 +11102,7 @@ extend CEmit {
                             let mut symb = self.sget();
                             symb.push_str(dst.as_str().slice(d0, dst.len()));
                             let mut sd = String::from_str("extern ");
-                            self.stat_align(item, b.module, b.locals.at(base as usize).ty, &mut sd);
+                            self.stat_specs(item, b.module, b.locals.at(base as usize).ty, &mut sd);
                             if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
                                 sd.push_str(";\n");
                                 self.stat_decls.push_string(&sd);
@@ -12103,7 +12206,7 @@ extend CEmit {
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
         if !(idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern) {
             let mut sd = String::from_str("extern ");
-            self.stat_align(item, em, ty, &mut sd);
+            self.stat_specs(item, em, ty, &mut sd);
             if !self.ty_c(em, ty, sym, &mut sd) {
                 return false;
             }
@@ -12122,26 +12225,54 @@ extend CEmit {
         return true;
     }
 
-    /// The alignment specifier of static `item` (its C object of type `ty`, pool `em`) into `out`:
-    /// `_Alignas(N) ` for `@c.align(N)` above the type's own alignment, else nothing, as C rejects a
-    /// weaker specifier. The definition and every declaration spell the same specifier.
-    pub fn stat_align(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
+    /// The declaration specifiers of static `item` (its C object of type `ty`, pool `em`) before its
+    /// type into `out`: `_Alignas(N) ` for `@c.align(N)` above the type's own alignment (C rejects a
+    /// weaker specifier), then `const ` for a read-only constant (`stat_ro`). The definition and every
+    /// declaration spell the same specifiers.
+    pub fn stat_specs(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
         let a = self.p().module_ast_const(item.module);
         let at = unsafe (*a).attr_of(item.node, AttrKind::ATTR_ALIGN);
-        if at == null {
-            return;
+        if at != null {
+            let mut v = (unsafe (*at).arg) as u64;
+            if unsafe (*at).expr {
+                let av = unsafe (*a).attr_value(item.node, AttrKind::ATTR_ALIGN);
+                assert(av.ok, "the checker folds every '@c.align' argument of an emitted static");
+                v = av.v;
+            }
+            let l = self.mg.layout_sub(em, ty);
+            assert(l.ok, "a static's type lays out");
+            if v > l.align {
+                out.format_into("_Alignas({}) ", v);
+            }
         }
-        let mut v = (unsafe (*at).arg) as u64;
-        if unsafe (*at).expr {
-            let av = unsafe (*a).attr_value(item.node, AttrKind::ATTR_ALIGN);
-            assert(av.ok, "the checker folds every '@c.align' argument of an emitted static");
-            v = av.v;
+        if self.stat_ro(item, em, ty) {
+            out.push_str("const ");
         }
-        let l = self.mg.layout_sub(em, ty);
-        assert(l.ok, "a static's type lays out");
-        if v > l.align {
-            out.format_into("_Alignas({}) ", v);
+    }
+
+    // Whether static `item` of type `(em, ty)` is a read-only C object: a `const` (not a `static mut`,
+    // not an extern block's) of a scalar, a payload-free enum, `str`, or an array of them. Such a type
+    // holds no `UnsafeCell` and takes a leading `const`; any other constant stays writable C data (a
+    // struct may hold an `UnsafeCell`, a pointer would spell a const pointee).
+    fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
+        let cd = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
+        if cd.kind != NodeKind::NODE_CONST || cd.as_data.const_def.is_static_mut || cd.as_data.const_def.is_extern {
+            return false;
         }
+        let ea = self.p().module_ast_const(em);
+        let mut t = ty;
+        // Each step enters one array level of a finite type.
+        while unsafe (*ea).type_at(t).kind == TypeKind::TYPE_ARRAY {
+            t = unsafe (*ea).type_at(t).as_data.arr.elem;
+        }
+        let y = *unsafe (*ea).type_at(t);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
+        }
+        if y.kind == TypeKind::TYPE_ENUM {
+            return !unsafe (*self.p().module_ast_const(y.module)).enum_has_payload(y.as_data.decl);
+        }
+        return self.is_str_ty(em, t);
     }
 
     // A generic extend's constant `c` spells `<module prefix><InstName>__<NAME>`, a generic function's

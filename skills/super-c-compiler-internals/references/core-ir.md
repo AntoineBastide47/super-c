@@ -78,8 +78,15 @@ A guard-free match lowers through the decision tree of the pattern compiler
 (`src/pattern/pattern.spc`). An integer column reads each value and range from the checker's
 record (`TypedFacts::pat_value`, in the matched type) and tests the pieces its bounds split the
 type's domain into: every edge keeps each row that holds its piece, and a piece equal to a written
-pattern keeps that pattern's spelling. A column whose literals may spell one value (a float, an
-escaped string, an integer with no record) keeps the arm-order chain. A builtin limit that
+pattern keeps that pattern's spelling. A test node of a type of at most 32 bits whose pieces
+give two or more cases is one `TM_SWITCH` on the value (`Lowerer::int_switch_plan`): each value
+of a piece of at most `SW_PIECE_MAX` (256) values is a case while the switch holds at most
+`SW_CASES_MAX` (1024); a wider piece keeps its comparison on the default edge, and with no
+catch-all the widest piece is the default edge itself. Case values are the pool's 32 bits, so
+the emitter spells them, never the pattern. A column whose literals may spell one value (a
+float, an escaped string, an integer with no record) keeps the arm-order chain. A literal
+scrutinee whose `Constant.val` is not its value (`0x41`) is never forwarded into a switch
+(`inline::switch_on_const`), as `CFlow` folds a constant switch by `val`. A builtin limit that
 literal-only arithmetic or a pattern reads in another integer type lowers to that type's literal
 of its value (`Lowerer::retyped_int_const`): the constant's C object has its own type.
 
@@ -328,8 +335,12 @@ need.
 
 - Consumes ONLY the typed-facts boundary (`ast::facts`) plus syntax and spans: every
   semantic decision is read from recorded facts, never re-derived.
-- Documented evaluation order: receiver before arguments, arguments left to right;
-  short-circuit `&&`/`||` evaluate the right operand only on the deciding path;
+- Documented evaluation order: receiver before arguments, arguments left to right (a
+  call operand reads its place at the call, so `pin_read` copies or moves an argument's
+  value out of its place into a temp where it is written when a later argument may write
+  the place's root binding, `may_write`; an owning temp is registered for the scope-exit
+  drop, and an implicit autoref, a `&mut` and a `[]mut` view stay at the call, where they
+  are reborrowed); short-circuit `&&`/`||` evaluate the right operand only on the deciding path;
   assignment evaluates the target place FIRST, then the value; aggregate fields in
   source order; match scrutinee once, arm tests in order, guard after bindings; `defer`
   bodies run LIFO at every scope exit; multi-return destinations written in declaration

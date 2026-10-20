@@ -17,6 +17,27 @@ fn resize_default_grows_and_truncates() {
     assert_eq(v.len(), 2);
 }
 
+// `extend_copy` appends a `Copy` vector with one byte copy: the elements follow the existing ones,
+// the source is unchanged, and an empty source appends nothing.
+@test
+fn extend_copy_appends() {
+    let mut v = Vector::<u64>::new();
+    v.push(7u64);
+    let mut src = Vector::<u64>::new();
+    for i in 0..100u64 {
+        src.push(i * 3);
+    }
+    v.extend_copy(&src);
+    assert_eq(v.len(), 101);
+    assert_eq(*v.at(0), 7u64);
+    assert_eq(*v.at(1), 0u64);
+    assert_eq(*v.at(100), 297u64);
+    assert_eq(src.len(), 100);
+    let empty = Vector::<u64>::new();
+    v.extend_copy(&empty);
+    assert_eq(v.len(), 101);
+}
+
 @test
 fn push_pop_len() {
     let mut v = Vector::<i32>::new();

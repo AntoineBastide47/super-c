@@ -7,11 +7,18 @@ order. Env-gated verification passes are marked; they are no-ops in a normal bui
 
 Module discovery from the root file's imports; import search roots are the project root,
 an optional manifest `src/` root, then `std/` and `ffi/`. Directory names are sorted so
-ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`.
+ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
+(`par_discover`): a module's file reads and parses in a task, its imports start as soon as it
+is parsed, and a depth-first replay in import order then assigns the ids the serial loader
+gives (`par_replay`); the prelude's files parse in one wave and take their ids in name order.
 
 - Lexer: byte-driven scanner over a NUL-padded source `String` (`SOURCE_PAD`). Output
   `Vector<Token>`; tokens are packed `u64` `(kind, start, len)` spans, no text copied.
-  Character-class table built by `const fn`, held by value per Lexer. Every error is
+  Character-class table built by `const fn`, held by value per Lexer. A keyword of 2 to 8
+  bytes is one multiply-shift hash of its bytes into a table built at compile time from
+  `SHORT_KEYWORDS` (a new keyword goes there; when `KW_MUL` collides on the new set, the
+  `static_assert` fails and a new multiplier is needed); longer ones are in `long_keyword`.
+  Identifier and line-comment scans read 8-byte words, within `SOURCE_PAD`. Every error is
   recovered; the scan always completes. `keep_trivia` (formatter path) also emits
   comment tokens.
 - Parser (`src/ast/parser.spc`; there is no `src/parser/`): context-free LL(1)
@@ -42,10 +49,13 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
   prelude items' raw resolution and post-typecheck edges, readiness states, result verdicts and
   dynamic edges. `load_user` then loads the root's closure after the prelude
   (`Package.root_module` is its first module) and the vector backend when a module names a
-  vector. Every later stage skips the work the prelude stage did: the platform filter and the
-  resolution start at `root_module`, `index_append` extends the prelude's index, the item jobs
-  skip the prelude's items, and the edges of `carry` join the new ones. Module and item ids are
-  prelude-first. The batch lint, the LSP and the test harness still load with `load_root` or
+  vector. When the stage checks the prelude under `--jobs`, the closure's files read and parse
+  while `check_prelude` runs (`Package::spec_user`, against a copy of the prelude's module
+  table), and `load_user` replays them into the package that loaded the image: the ids, the
+  import errors and their order are those of a load after the image. Every later stage skips
+  the work the prelude stage did: the platform filter and the resolution start at
+  `root_module`, `index_append` extends the prelude's index, the item jobs skip the prelude's
+  items, and the edges of `carry` join the new ones. Module and item ids are prelude-first. The batch lint, the LSP and the test harness still load with `load_root` or
   `prelude_package_arch` and run every stage over every module.
 
 ## 2. Platform Filter (`platform_filter`)
@@ -105,9 +115,8 @@ coercion/deref chains, captures, integer pattern values) that `ast::facts` expos
 everything downstream; a declaration's slot is written by the item that owns it, every other reader
 lowers privately. What a check may read as checked follows the static visibility rule
 (`graph::items::visible`), so one worker and every core see the same facts. A module's last
-job checks its non-item nodes (`static_assert`), closes the module (`close_instances`
-records concrete generic instantiations into the per-module `Ast.instances` pool, the
-whole-module lints) and records its post-typecheck item edges. Format-string,
+job checks its non-item nodes (`static_assert`), closes the module (the whole-module
+lints) and records its post-typecheck item edges. Format-string,
 compound-assign and string-switch lowering happen here. Each item's constant-expression
 attribute arguments are checked and folded with the item (`tc_attr_exprs`). Deferred `static_assert`s and
 constants a check could not fold are queued on the interpreter. Diagnostics and method
@@ -181,11 +190,13 @@ modular return-lifetime check) run alongside.
 ## 7. Lint, Panic Check, Const Flush
 
 - `lint_unused_items` (when linting). An extend header is an entity of its own: the interfaces
-  its conformance and its parameters' bounds name are used by it. A lint `fix` attaches to the last warning emitted
+  its conformance and its parameters' bounds name are used by it. Reachability runs over dense
+  entry ids, each index item's owner entry found once, the edges bucketed by source. A lint `fix` attaches to the last warning emitted
   (`Errors::last_warn`, `src/utils/errors.spc`), so call it right after the warning it
   repairs. When a lint disagrees with the compiler, suspect the lint first.
 - `check_recursion` (`src/ir/recursion.spc`): an **error**, run serially on every build of
-  user modules and in `lint`, over a summary of each kept function body (`Summarizer`: its
+  user modules (`lint_reported`: every module outside the std and ffi trees, which check.sh
+  lints) and in `lint`, over a summary of each kept function body (`Summarizer`: its
   ends, its calls of reported functions, its branches; the blocks between them left out, so
   drop elaboration and tail-call conversion do not change the answer). The batch check
   summarizes only the members of a cyclic component of the direct-call graph of the kept
@@ -206,7 +217,8 @@ modular return-lifetime check) run alongside.
   own build with a release compiler (`SC_CEMIT_STATS`, `phase recursion`).
 - `check_always_panics`: an **error**, run on every build of user modules: one job per
   linted module on the item job runner, a private engine leased per worker (the serial
-  path scans with the master engine), diagnostics published in declaration order.
+  path scans with the master engine; a private one starts with the master's `ran0`),
+  diagnostics published in declaration order.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
   re-evaluate now that every module is fully typed; failures carry the CTFE stack. A
   top-level `static_assert` that still does not fold is an error (asserts inside bodies may

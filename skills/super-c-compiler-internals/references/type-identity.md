@@ -151,7 +151,10 @@ provisional id. Every retained per-module table (`types`, `mono`, `dyn_uses`,
 `coerces`, ...) may hold either kind until the next checkpoint;
 `type_at`, `instance` and `const_lin_at` dispatch on the tag. `Ast.used` / `used_inst`
 are the module's distinct final types in first-touch order (the enumeration the
-liveness and instance scans read; there is no per-module type census any more). A
+liveness and instance scans read; there is no per-module type census any more). The
+always-panics probes are speculative: `check_always_panics` rolls back the records they add
+(`used_mark`, `used_rollback`); a provisional type a probe created is recorded at its next
+intern (`used_spec`), so emission reads the same records whether a probe ran or not. A
 publication releases the module pool's chunks: a module that interns nothing after its
 last checkpoint retains no pool at all.
 
@@ -220,7 +223,8 @@ owner's writes happen before the read) and the id is final (the prelude after th
 checkpoint, everything after the first package-wide one), a foreign reader takes the
 record of a parameter, field or constant instead of lowering its syntax again
 (`decl_type_in`, and `node_type_in` for a member or return that may be a declaration or
-a bare type node); otherwise it lowers and memoizes per checker (`fdecl_memo`; the
+a bare type node; `fdecl_memo` keeps the record for the item that read it, since
+visibility is per reading item); otherwise it lowers and memoizes per checker (`fdecl_memo`; the
 foreign signature type nodes `node_type_in` reads, whatever their shape, and the
 generic-path nodes of `lower_type_in_f` in `lower_memo`). A slot is never read while its
 owner may still be writing it: the visibility rule is the happens-before edge. This is what `TypeChecker` and the borrow checker
@@ -320,7 +324,7 @@ phase still performs before any publication.
 ./super-c build --profile=release -o build/sc-ts
 SC_TYPE_STATS=1 SC_NO_TU_CACHE=1 build/sc-ts build --cc=true --jobs=1 --out-dir=build/tsout -o build/tsout/x
 SC_TYPE_TABLE=build/tt.txt build/sc-ts build --cc=true --jobs=1 --out-dir=build/tsout2 -o build/tsout2/x
-./super-c bench --no-run
+./super-c bench --no-run --filter=self_transpile
 samply record --save-only --unstable-presymbolicate -o build/ts.profile.json.gz build/bench-bin --in-process --filter=self_transpile
 python3 skills/super-c-compiler-optimization/scripts/samply_top.py build/ts.profile.json.gz
 ```

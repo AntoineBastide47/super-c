@@ -71,7 +71,8 @@ const fn lanes_end(l: &[u64; 4], tot: u64) u64 {
     return h | (h == 0) as u64;
 }
 
-/// A content hash of the file at `path`; 0 when it cannot be read or is empty.
+/// A content hash of the file at `path`: `str_id` of its bytes (a regular file reads in whole 64 KiB
+/// blocks, a multiple of the 32-byte groups); 0 when it cannot be read.
 pub fn file_id(path: str) u64 {
     let f = stdio::fopen(path, "rb");
     if f == null {
@@ -101,7 +102,7 @@ pub fn file_id(path: str) u64 {
     }
     let bad = unsafe stdio::ferror(f) != 0;
     unsafe stdio::fclose(f);
-    if bad || tot == 0 {
+    if bad {
         return 0;
     }
     return lanes_end(&l, tot);
@@ -218,23 +219,33 @@ pub fn split_args(out: &mut Vector<String>, s: str) {
 
 /// Spawn `args` and wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
 pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
+    return exec_at(null, args, log);
+}
+
+/// `exec_args` of program `file` (a path; null: `args[0]` searched in PATH), `args` its argv.
+pub fn exec_at(file: *const char, args: &mut Vector<String>, log: *const char) i32 {
     let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
     for i in 0..args.len() {
         ptrs.push(args[i].cstr() as usize);
     }
     ptrs.push(0);
-    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
+    return unsafe shim::sc_exec_argv(file, ptrs.as_ptr() as *const *const char, log);
 }
 
 /// Spawn `args` without a shell; `log` (may be null) captures the child's stdout+stderr. The child's pid,
 /// or -1 on spawn failure.
 pub fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
+    return spawn_at(null, args, log);
+}
+
+/// `spawn_args` of program `file` (a path; null: `args[0]` searched in PATH), `args` its argv.
+pub fn spawn_at(file: *const char, args: &mut Vector<String>, log: *const char) i64 {
     let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
     for i in 0..args.len() {
         ptrs.push(args[i].cstr() as usize);
     }
     ptrs.push(0);
-    return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
+    return unsafe shim::sc_spawn_argv(file, ptrs.as_ptr() as *const *const char, log);
 }
 
 /// A copy of argv `src`.
@@ -253,13 +264,18 @@ pub fn push_arg(out: &mut Vector<String>, s: str) {
 
 /// False when the file cannot be opened, or a short write or failed close left it incomplete.
 pub fn write_file(path: str, body: str) bool {
+    return write_file_parts(path, body, "");
+}
+
+/// `write_file` of `head` followed by `body`, which stay apart in memory.
+pub fn write_file_parts(path: str, head: str, body: str) bool {
     let f = stdio::fopen(path, "wb");
     if f == null {
         return false;
     }
-    let n = unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
+    let n = unsafe stdio::fwrite(head.ptr(), 1, head.len(), f) + unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
     let rc = unsafe stdio::fclose(f);
-    return n == body.len() && rc == 0;
+    return n == head.len() + body.len() && rc == 0;
 }
 
 /// Copy file `srcp` to `dstp` (created or truncated); false when either cannot be opened or any read,
@@ -307,23 +323,35 @@ pub fn link_or_copy(srcp: str, dstp: str) bool {
     return unsafe shim::sc_link(s.cstr(), d.cstr()) == 0 || copy_file(srcp, dstp);
 }
 
-/// The units of emitted tree `root` that its `__sc_unity.c` includes, as paths relative to `root`: they
-/// compile only through it (a small program's units, `driver::emit::UNITY_MAX`). Empty when the tree
-/// has no such file.
+/// The units of emitted tree `root` that its packs include, as paths relative to `root`: they compile
+/// only through them (`driver::emit::pack_plan`: a small program's units in `__sc_unity.c`, a larger
+/// one's small units in `__sc_pack0.c`, `__sc_pack1.c`, ..). Empty when the tree has no pack.
 pub fn unity_members(root: str, out: &mut Set<String>) {
-    let mut up = String::from_str(root);
-    up.push_str("/__sc_unity.c");
-    let body = loader::read_file(up.as_str());
-    if body.is_none() {
-        return;
-    }
-    let b = body.unwrap();
-    for line in b.as_str().lines() {
-        if line.starts_with("#include \"") && line.ends_with("\"") {
-            out.insert(String::from_str(line.slice(10, line.len() - 1)));
+    for k in 0..SHARD_MAX + 1 {
+        let up = if k == 0 {
+            format("{}/__sc_unity.c", root);
+        } else {
+            format("{}/__sc_pack{}.c", root, k - 1);
+        };
+        let body = loader::read_file(up.as_str());
+        if body.is_none() {
+            if k != 0 {
+                return;
+            }
+            continue;
+        }
+        let b = body.unwrap();
+        for line in b.as_str().lines() {
+            if line.starts_with("#include \"") && line.ends_with("\"") {
+                out.insert(String::from_str(line.slice(10, line.len() - 1)));
+            }
         }
     }
 }
+
+/// The most shards one module may have (a chunk's shard is a `u8`), and the most packs a tree has: a
+/// pack count is a shard count (`driver::emit::shard_policy`).
+pub const SHARD_MAX: u32 = 64;
 
 /// The name a generated file in directory `dir` includes file `abs` by (both real paths): relative when
 /// both lie below the working directory, so a tree that moves with its project (a copy, a worktree,
@@ -360,10 +388,15 @@ const fn below(p: str, d: str) bool {
 /// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
 /// failure: an old or missing record only makes the next build redo that work.
 pub fn write_file_atomic(path: str, body: str) bool {
+    return write_file_atomic_parts(path, body, "");
+}
+
+/// `write_file_atomic` of `head` followed by `body` (`write_file_parts`).
+pub fn write_file_atomic_parts(path: str, head: str, body: str) bool {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
     let mut dst = String::from_str(path);
-    if write_file(tmp.as_str(), body) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
+    if write_file_parts(tmp.as_str(), head, body) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
         return true;
     }
     let _ = unsafe shim::sc_unlink(tmp.cstr());
@@ -395,6 +428,7 @@ pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
 }
 
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
+/// An existing directory costs one stat: the components are created only when it is missing.
 pub fn mkdir_p(path: str) {
     let n = path.len();
     if n == 0 || n >= 4096 {
@@ -404,6 +438,9 @@ pub fn mkdir_p(path: str) {
     unsafe buf.copy_from(path.ptr(), n);
     buf[n] = 0 as char;
     let base = (&buf[0]) as *const char; // read-only C string view; the buffer is edited in place below
+    if unsafe shim::sc_stat_isdir(base) == 1 {
+        return;
+    }
     for i in 1..n {
         if buf[i] == '/' as char {
             buf[i] = 0 as char;
@@ -414,26 +451,11 @@ pub fn mkdir_p(path: str) {
     let _ = unsafe shim::sc_mkdir(base);
 }
 
-/// Open `path` for writing, creating any missing parent directories when the first attempt
-/// fails (the directories exist for all but the first file written into each).
-pub fn open_out(path: str) *mut stdio::FILE {
-    let f = stdio::fopen(path, "wb");
-    if f != null {
-        return f;
-    }
-    let p = path.ptr();
-    let n = path.len();
-    let mut slash: usize = n;
-    for i in 0..n {
-        if unsafe p[i] == b'/' {
-            slash = i;
-        }
-    }
-    if slash == n {
-        return null;
-    }
-    mkdir_p(unsafe str::from_raw(p, slash));
-    return stdio::fopen(path, "wb");
+/// Make file `path` hold exactly `body`, creating missing parent directories: a file that already holds
+/// it is not written, so it keeps its mtime (the build's staleness anchor). 1 when the file was written,
+/// 0 when it already held `body`, -1 when it could not be opened, written or closed in full.
+pub fn publish_file(path: &mut String, body: str) i32 {
+    return unsafe shim::sc_publish(path.cstr(), body.ptr(), body.len());
 }
 
 /// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -472,13 +494,14 @@ fn prune_dir(dir: *const char, keep: &Set<str>) {
             continue;
         }
         let path = (&pb[0]) as *const char;
-        if unsafe shim::sc_stat_isdir(path) != 0 {
-            prune_dir(path, keep);
-            let _ = unsafe shim::sc_rmdir(path);
-            continue;
-        }
-        let l = unsafe cstring::strlen(name); // only generated .c/.h translation units are ours to prune
+        // Only generated .c/.h translation units are ours to prune. Such a name is a file (a module
+        // directory name has no dot), so only other names cost a stat.
+        let l = unsafe cstring::strlen(name);
         if !(l >= 2 && unsafe name[l - 2] == '.' as char && (unsafe name[l - 1] == 'c' as char || unsafe name[l - 1] == 'h' as char)) {
+            if unsafe shim::sc_stat_isdir(path) == 1 {
+                prune_dir(path, keep);
+                let _ = unsafe shim::sc_rmdir(path);
+            }
             continue;
         }
         let ps = unsafe str::from_cstr(path);
@@ -490,33 +513,26 @@ fn prune_dir(dir: *const char, keep: &Set<str>) {
 }
 
 /// The runtime header shared by every generated module (the C standard library includes plus the
-/// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside.
-/// False, after a message, when either file cannot be written in full.
-pub fn write_super_rt(gen_dir: str) bool {
+/// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside, each
+/// published with `publish_file`. -1, after a message, when either file cannot be written in full; else
+/// bit 0 set when the header was rewritten and bit 1 when the source was.
+pub fn write_super_rt(gen_dir: str) i32 {
     let mut path = build_out_path(gen_dir, "super_rt", ".h");
-    let f = open_out(path.as_str());
-    let mut ok = f != null;
-    if ok {
-        ok = unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f) >= 0;
-        ok = unsafe stdio::fputs(rtc::super_rt_includes(), f) >= 0 && ok;
-        ok = unsafe stdio::fputs("#endif\n".ptr() as *const char, f) >= 0 && ok;
-        ok = unsafe stdio::fclose(f) == 0 && ok;
-    }
-    if !ok {
+    let mut h = String::from_str("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n");
+    h.push_str(unsafe str::from_cstr(rtc::super_rt_includes()));
+    h.push_str("#endif\n");
+    let hr = publish_file(&mut path, h.as_str());
+    if hr < 0 {
         unsafe stdio::perror(path.cstr());
-        return false;
+        return -1;
     }
     let mut cpath = build_out_path(gen_dir, "super_rt", ".c");
-    let cf = open_out(cpath.as_str());
-    ok = cf != null;
-    if ok {
-        ok = unsafe stdio::fputs(rtc::super_rt_source(), cf) >= 0;
-        ok = unsafe stdio::fclose(cf) == 0 && ok;
-    }
-    if !ok {
+    let cr = publish_file(&mut cpath, unsafe str::from_cstr(rtc::super_rt_source()));
+    if cr < 0 {
         unsafe stdio::perror(cpath.cstr());
+        return -1;
     }
-    return ok;
+    return hr | cr << 1;
 }
 
 // Cross toolchains

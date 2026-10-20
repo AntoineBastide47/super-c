@@ -111,7 +111,7 @@ pub const fn super_rt_includes() *const char {
    failure take Relaxed, Acquire or SeqCst; a store takes Relaxed, Release or SeqCst; a read-modify-write,
    a compare-exchange success and a fence take all five. SC_MO_CAS strengthens the success order to at
    least the failure order, as the C builtin requires. */
-static _Noreturn void __sc_trap_order(void);
+_Noreturn void __sc_trap_order(void);
 #define SC_MO_BAD (__sc_trap_order(), __ATOMIC_SEQ_CST)
 #define SC_MO_RMW(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==2?__ATOMIC_RELEASE:(mo)==3?__ATOMIC_ACQ_REL:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
 #define SC_MO_LD(mo) ((mo)==0?__ATOMIC_RELAXED:(mo)==1?__ATOMIC_ACQUIRE:(mo)==4?__ATOMIC_SEQ_CST:SC_MO_BAD)
@@ -158,33 +158,12 @@ static inline __attribute__((unused)) int* __sc_errno_location(void){return &err
    happened in rather than just the process. Zero on a plain thread. */
 extern _Thread_local uint64_t __sc_task_id;
 void __sc_set_task_id(uint64_t __id);
-/* abort() does not flush, and stdout and stderr are block-buffered when captured into a pipe or a file:
-   the output printed before the trap and the diagnostic these print are then lost. Flush both first. */
-static _Noreturn __attribute__((unused, cold)) void __sc_panic(const char *__m) {
-  if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
-  else fprintf(stderr, "super-c: %s\n", __m);
-  fflush(NULL);
-  abort();
-}
-static _Noreturn __attribute__((unused, cold)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
-  if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
-  else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
-  fflush(NULL);
-  abort();
-}
-/* The failure path of `assert`: cold and out of line, so a function that asserts stays small enough
-   for the C compiler to inline. */
-static _Noreturn __attribute__((unused, cold, noinline, format(printf, 1, 2))) void __sc_assert_fail(const char *__f, ...) {
-  va_list __a;
-  va_start(__a, __f);
-  vfprintf(stderr, __f, __a);
-  va_end(__a);
-  fflush(NULL);
-  abort();
-}
-static _Noreturn __attribute__((unused)) void __sc_trap_order(void) {
-  __sc_panic("invalid memory order");
-}
+/* The traps, defined once in super_rt.c (a static copy would land in every object): a message on
+   stderr, then abort. `__sc_assert_fail` is the failure path of `assert`, out of line so a function
+   that asserts stays small enough for the C compiler to inline. */
+_Noreturn __attribute__((cold)) void __sc_panic(const char *__m);
+_Noreturn __attribute__((cold)) void __sc_panic_str(const uint8_t *__p, size_t __n);
+_Noreturn __attribute__((cold, noinline, format(printf, 1, 2))) void __sc_assert_fail(const char *__f, ...);
 static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {
   if (__i >= __n) __sc_panic("index out of bounds");
   return __i;
@@ -255,9 +234,7 @@ SC_F2I_UNSIGNED(size_t, usize, SIZE_MAX) SC_F2I_UNSIGNED(char, char, UCHAR_MAX)
 #undef SC_F2I_SIGNED
 #undef SC_F2I_UNSIGNED
 /* Pointer distance over a zero-sized element type: bytes cannot encode an element count. */
-static _Noreturn __attribute__((unused, cold)) void __sc_zst_ptrdiff(void) {
-  __sc_panic("pointer distance on a zero-sized element type");
-}
+_Noreturn __attribute__((cold)) void __sc_zst_ptrdiff(void);
 /* Preemption hook, installed by the scheduler BEFORE it starts any worker, so every read of it
    happens-after that write and no synchronization is needed here. */
 extern void (*__sc_pre_hook)(void);
@@ -340,6 +317,7 @@ pub const fn super_rt_source() *const char {
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdarg.h>
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -387,6 +365,36 @@ int sc_rt_asan(void) {
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */
 _Thread_local uint64_t __sc_task_id = 0;
 void __sc_set_task_id(uint64_t __id) { __sc_task_id = __id; }
+
+/* The traps super_rt.h declares. abort() does not flush, and stdout and stderr are block-buffered when
+   captured into a pipe or a file: the output printed before the trap and the diagnostic these print are
+   then lost. Flush both first. */
+_Noreturn __attribute__((cold)) void __sc_panic(const char *__m) {
+  if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
+  else fprintf(stderr, "super-c: %s\n", __m);
+  fflush(NULL);
+  abort();
+}
+_Noreturn __attribute__((cold)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
+  if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
+  else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
+  fflush(NULL);
+  abort();
+}
+_Noreturn __attribute__((cold, noinline, format(printf, 1, 2))) void __sc_assert_fail(const char *__f, ...) {
+  va_list __a;
+  va_start(__a, __f);
+  vfprintf(stderr, __f, __a);
+  va_end(__a);
+  fflush(NULL);
+  abort();
+}
+_Noreturn void __sc_trap_order(void) {
+  __sc_panic("invalid memory order");
+}
+_Noreturn __attribute__((cold)) void __sc_zst_ptrdiff(void) {
+  __sc_panic("pointer distance on a zero-sized element type");
+}
 
 /* Stack overflow report. A stack that runs into its guard faults, and without a handler the process dies
    on a bare SIGSEGV or SIGBUS. This prints which stack ran out and exits with 134, the status of the abort

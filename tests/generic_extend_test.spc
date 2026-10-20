@@ -352,6 +352,91 @@ fn main() i32 {
     );
 }
 
+// A conformance method may return a wider instance of its own type: its methods instantiate on
+// demand, so the chain `W<i32>`, `W<W<i32>>`, ... stops where the program does (the type check once
+// closed every concrete instance's method signatures and ran out of type ids).
+fn wider_conformance_results(b: &mut h::ExitBatch) {
+    let src = M"(struct W<T> {
+    pub x: T,
+}
+interface Grow {
+    fn grow(self: &Self) i32;
+}
+extend<T> W<T> as Grow {
+    fn grow(self: &Self) i32 {
+        return 1;
+    }
+}
+interface Wrap<T> {
+    fn wrap(self: Self) W<W<T>>;
+}
+extend<T> W<T> as Wrap<T> {
+    fn wrap(self: Self) W<W<T>> {
+        return W::<W<T>> { x: self };
+    }
+}
+fn main() i32 {
+    let w = W::<i32> { x: 3 };
+    let ww = w.wrap();
+    return ww.grow() + ww.x.x - 4;
+}
+)";
+    b.add("a conformance method returns a wider instance", src, 0);
+}
+
+// An inherited default's field obligation runs against every instance the checked code names, one
+// the result of another conformance's method included.
+@test
+fn an_instance_a_conformance_method_returns_meets_the_default_bounds() {
+    h::expect_build_err(
+        "the returned instance's field lacks the bound",
+        M"(interface Sz {
+    fn sz(self: &Self) i32 {
+        return sum_fields(self);
+    }
+}
+fn sum_fields<T>(v: &T) i32 {
+    let mut n: i32 = 0;
+    inline for f in fields(v) {
+        n += one(&f.value);
+    }
+    return n;
+}
+fn one<V: Sz>(v: &V) i32 {
+    return v.sz();
+}
+extend i32 as Sz {
+    fn sz(self: &i32) i32 {
+        return 1;
+    }
+}
+struct NoSz {
+    pub p: u32,
+}
+struct G<T> {
+    pub x: T,
+}
+extend<T> G<T> as Sz {}
+struct H<T> {
+    pub v: T,
+}
+interface Get<T> {
+    fn get(self: &Self, x: T) G<T>;
+}
+extend<T> H<T> as Get<T> {
+    fn get(self: &Self, x: T) G<T> {
+        return G::<T> { x: x };
+    }
+}
+fn main() i32 {
+    let h = H::<NoSz> { v: NoSz { p: 1 } };
+    return h.get(NoSz { p: 2 }).sz();
+}
+)",
+        "a field of 'G<NoSz>' does not satisfy a bound required by the interface's default method 'sz'",
+    );
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test
@@ -360,5 +445,6 @@ fn exit_cases_00() {
     reflection_lists_applying_generic_conformances(&mut b);
     user_extends_of_std_types(&mut b);
     lane_interfaces_and_aliases(&mut b);
+    wider_conformance_results(&mut b);
     b.run();
 }

@@ -21,20 +21,21 @@ extern "C" {
 /// Phase boundaries in pipeline order: phase `k` runs from boundary `k - 1` to boundary `k`, so
 /// the phases partition the build and their sum is the total by construction.
 pub const B_START: usize = 0;
-pub const B_STAMP: usize = 1; // emit-stamp check
-pub const B_LOAD: usize = 2; // load, lex, parse
-pub const B_RESOLVE: usize = 3;
-pub const B_TYPECHECK: usize = 4; // typecheck and deferred signature work
-pub const B_BORROWCK: usize = 5; // Core IR lowering and borrow analysis
-pub const B_CHECKS: usize = 6; // layout, facts verification, always-panics, deferred asserts
-pub const B_PREPARE: usize = 7; // runtime and external C wrappers, live set, emit order
-pub const B_PLAN: usize = 8; // instance discovery and C planning
-pub const B_RENDER: usize = 9; // C rendering
-pub const B_PUBLISH: usize = 10; // files written, per-TU cache, orphan prune, emit stamp record
-pub const B_SYNC: usize = 11; // gen tree sync and stamp install
-pub const B_COMPILE: usize = 12; // external C compilation drained
-pub const B_LINK: usize = 13;
-pub const B_COUNT: usize = 14;
+pub const B_SETUP: usize = 1; // compile-side setup: output directories, C compiler probe, compile stream
+pub const B_STAMP: usize = 2; // emit-stamp check
+pub const B_LOAD: usize = 3; // load, lex, parse
+pub const B_RESOLVE: usize = 4;
+pub const B_TYPECHECK: usize = 5; // typecheck and deferred signature work
+pub const B_BORROWCK: usize = 6; // Core IR lowering and borrow analysis
+pub const B_CHECKS: usize = 7; // layout, facts verification, always-panics, deferred asserts
+pub const B_PREPARE: usize = 8; // runtime and external C wrappers, live set, emit order
+pub const B_PLAN: usize = 9; // instance discovery and C planning
+pub const B_RENDER: usize = 10; // C rendering
+pub const B_PUBLISH: usize = 11; // files written, per-TU cache, orphan prune, emit stamp record
+pub const B_SYNC: usize = 12; // external transpiler record and stamp install
+pub const B_COMPILE: usize = 13; // external C compilation drained
+pub const B_LINK: usize = 14;
+pub const B_COUNT: usize = 15;
 
 // Memory boundaries, as indexes into the samples: frontend, borrow analysis, C plan, C output
 // published, build complete. Epoch `k` covers the allocations made before memory boundary `k`.
@@ -276,7 +277,8 @@ pub fn finish(rc: i32) {
 }
 
 /// The name of the phase that ends at boundary `k + 1`.
-pub const PHASE_NAMES: [str<'static>; 13] = [
+pub const PHASE_NAMES: [str<'static>; 14] = [
+    "setup",
     "stamp",
     "load",
     "resolve",
@@ -291,7 +293,7 @@ pub const PHASE_NAMES: [str<'static>; 13] = [
     "compile",
     "link",
 ];
-static_assert(B_COUNT == 14, "one phase name per boundary after the start");
+static_assert(B_COUNT == 15, "one phase name per boundary after the start");
 const MEM_NAMES: [str<'static>; 5] = ["frontend", "borrowck", "plan", "publish", "build"];
 static_assert(MEM_N == 5, "one name per memory boundary");
 

@@ -848,3 +848,122 @@ fn nested_generic_instances_own_their_members() {
     assert(r.built, "nested generic owners build");
     assert_eq(r.exit, 79);
 }
+
+// A `&mut` reference passed to a `&mut self` method whose result grants write is an exclusive
+// reborrow of its pointee: the result's loan conflicts with every later use of the pointee while the
+// result lives, as an autoref of the pointee (`(*src).index_mut(..)`) or a local's does. A use after
+// the result's last use, and shared calls, stay accepted.
+@test
+fn reborrow_through_a_mut_reference_argument() {
+    let pre = "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(1); return f(&mut v); }\n";
+    h::expect_err_msg(
+        "index_mut then at",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = src.index_mut(0); let r = src.at(0); *d = 5; return *r; }}\n",
+            pre,
+        ).as_str(),
+        "cannot borrow this value as immutable while it is already borrowed as mutable",
+    );
+    h::expect_err_msg(
+        "index_mut then len",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = src.index_mut(0); let n = src.len(); *d = n as i32; return 0; }}\n",
+            pre,
+        ).as_str(),
+        "cannot use this value while it is mutably borrowed",
+    );
+    h::expect_err_msg(
+        "index_mut then push",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = src.index_mut(0); src.push(2); *d = 3; return 0; }}\n",
+            pre,
+        ).as_str(),
+        "cannot use this value while it is mutably borrowed",
+    );
+    let push = h::compile(
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = src.index_mut(0); src.push(2); *d = 3; return 0; }}\n",
+            pre,
+        ).as_str(),
+        h::STAGE_TYPECHECK,
+    );
+    assert(!push.msg_has("immutable"), "the reborrow is named mutable");
+    h::expect_err_msg(
+        "explicit deref, index_mut then len",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = (*src).index_mut(0); let n = src.len(); *d = n as i32; return 0; }}\n",
+            pre,
+        ).as_str(),
+        "cannot use this value while it is mutably borrowed",
+    );
+    h::expect_err_msg(
+        "local, index_mut then len",
+        "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(1); let d = v.index_mut(0); let n = v.len(); *d = n as i32; return 0; }\n",
+        "cannot use this value while it is mutably borrowed",
+    );
+    check_case(
+        "use after the reborrow's last use",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let d = src.index_mut(0); *d = 3; src.push(2); return *src.at(0) + src.len() as i32; }}\n",
+            pre,
+        ).as_str(),
+        true,
+    );
+    check_case(
+        "shared calls through a mutable reference",
+        format(
+            "{}fn f(src: &mut Vector<i32>) i32 {{ let r = src.at(0); let n = src.len(); return *r + n as i32; }}\n",
+            pre,
+        ).as_str(),
+        true,
+    );
+}
+
+// Arguments evaluate left to right: a scalar read out of a place is taken at its own position when a
+// later argument may write the place (`ir::lower` `pin_read`). So a field read through a `Box`'s
+// `Deref` ends that borrow before a later argument's `&mut` (the plain-reference shape always
+// compiled), and the call sees the value before a later argument changes it.
+@test
+fn argument_reads_take_their_position() {
+    let def = "struct U { pub a: String, pub n: u64 }\nfn take(a: String, n: u64, b: String) u64 { return a.len() as u64 + n + b.len() as u64; }\n";
+    h::expect_exit(
+        "a field read through Box before a later &mut argument",
+        format(
+            "{}fn main() i32 {{ let mut v = Vector::<Box<U>>::new(); v.push(Box::<U>::new(U {{ a: String::new(), n: 3 }})); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
+            def,
+        ).as_str(),
+        3,
+    );
+    h::expect_exit(
+        "a field read through a reference before a later &mut argument",
+        format(
+            "{}fn main() i32 {{ let mut v = Vector::<U>::new(); v.push(U {{ a: String::new(), n: 3 }}); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
+            def,
+        ).as_str(),
+        3,
+    );
+    h::expect_exit(
+        "a field read before a later argument writes it",
+        "struct U { pub n: u64 }\nfn set(u: &mut U) u64 { u.n = 5; return 0; }\nfn take2(a: u64, b: u64) u64 { return a * 10 + b; }\nfn main() i32 { let mut x = U { n: 3 }; let mut bx = Box::<U>::new(U { n: 3 }); let r = take2(x.n, set(&mut x)); let r2 = take2(bx.n, set(&mut *bx)); return (r + r2) as i32; }\n",
+        60,
+    );
+    h::expect_exit(
+        "a struct value read before a later argument writes it",
+        "struct P { pub a: i64, pub b: i64 }\nfn set(p: &mut P) i64 { p.a = 5; return 0; }\nfn take(p: P, z: i64) i64 { return p.a * 10 + z; }\nfn main() i32 { let mut p = P { a: 3, b: 0 }; return take(p, set(&mut p)) as i32; }\n",
+        30,
+    );
+    // An owned argument moves at its own position, so a later argument may no longer borrow it (the
+    // call used to see the value that argument changed).
+    h::expect_err_msg(
+        "an owned argument borrowed by a later argument",
+        "fn grow(s: &mut String) u64 { s.push_str(\"cd\"); return 0; }\nfn take(a: String, b: u64) u64 { return a.len() as u64 + b; }\nfn main() i32 { let mut s = String::from_str(\"ab\"); return take(s, grow(&mut s)) as i32; }\n",
+        "use of moved value",
+    );
+    // The moved-out value is a scope temporary: an exit inside a later argument releases it.
+    let r = h::compile_and_run_env(
+        "fn take(a: String, b: u64) u64 { return a.len() as u64 * 10 + b; }\nfn f(c: bool) u64 { let s = String::from_str(\"abc\"); return take(s, switch c { true => { return 7; }, false => 2u64, }); }\nfn main() i32 { return (f(true) + f(false)) as i32; }\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "an exit in a later argument builds");
+    assert_eq(r.exit, 39);
+}

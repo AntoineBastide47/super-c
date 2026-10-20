@@ -68,6 +68,14 @@ extern "C" "driver_shim.h" {
     pub fn sc_readdir(dir: *mut void) *mut void;
     /// Close a stream from sc_opendir; 0 on success.
     pub fn sc_closedir(dir: *mut void) i32;
+    /// 1 when errno says a path does not exist (ENOENT, ENOTDIR): what a failed `sc_opendir` means.
+    pub fn sc_errno_absent() i32;
+    /// Open `path` to read it whole: its descriptor, with the file's size in `size` and its `sc_mtime`
+    /// value in `mtime`, from one fstat; -1 when it does not open or is no regular file.
+    pub fn sc_file_open(path: *const char, size: *mut i64, mtime: *mut i64) i32;
+    /// Read up to `n` bytes of descriptor `fd` into `buf`, then close it: the count read (fewer when the
+    /// file ends first), or -1 on a read or close error.
+    pub fn sc_file_read_close(fd: i32, buf: *mut void, n: usize) i64;
     /// Modification time in seconds; 0 when the file does not exist (the build engine's staleness sentinel).
     pub fn sc_mtime(path: *const char) i64;
     /// Modification time in nanoseconds (100 ns steps on Windows); 0 when the file does not exist.
@@ -86,17 +94,18 @@ extern "C" "driver_shim.h" {
     pub fn sc_ticks_ms() i64;
     /// Peak resident set size of this process in bytes; 0 when the platform cannot report it.
     pub fn sc_peak_rss() i64;
-    /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: argv[0] is PATH-searched and
-    /// every later entry reaches the child verbatim, spaces, quotes, and non-ASCII bytes included.
+    /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: the program `file` names (a
+    /// path), or argv[0] PATH-searched when `file` is null. argv[0] reaches the child as written, every
+    /// later entry verbatim, spaces, quotes, and non-ASCII bytes included.
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
     /// Returns a pid/handle for sc_wait_any/sc_try_wait/sc_waitpid, or -1 on spawn failure.
-    pub fn sc_spawn_argv(argv: *const *const char, out_path: *const char) i64;
-    /// `sc_spawn_argv` with the child's working directory set to `cwd` (null: this process's); -1 also
-    /// where the C library has no way to set it at spawn.
+    pub fn sc_spawn_argv(file: *const char, argv: *const *const char, out_path: *const char) i64;
+    /// `sc_spawn_argv` of argv[0] with the child's working directory set to `cwd` (null: this process's);
+    /// -1 also where the C library has no way to set it at spawn.
     pub fn sc_spawn_argv_in(argv: *const *const char, out_path: *const char, cwd: *const char) i64;
     /// Spawn through sc_spawn_argv and wait: the child's exit code, or -1 on spawn/wait failure. A child a
     /// signal ended returns 1 and is named on stderr with the signal.
-    pub fn sc_exec_argv(argv: *const *const char, out_path: *const char) i32;
+    pub fn sc_exec_argv(file: *const char, argv: *const *const char, out_path: *const char) i32;
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
     pub fn sc_wait_any(pids: *const i64, n: i32, code: *mut i32) i32;
@@ -144,6 +153,11 @@ extern "C" "driver_shim.h" {
     pub fn sc_exec(cmd: *const char) i32;
     /// `mkdir -p`: create every missing component of `path`. 0 on success.
     pub fn sc_mkdir_p(path: *const char) i32;
+    /// Make file `path` hold exactly the `n` bytes at `p`, creating missing parent directories: a file that
+    /// already holds them is not written, so it keeps its mtime. 1 when the file was written (one write
+    /// call, no stdio buffer), 0 when it already held the bytes, -1 when it could not be opened, written
+    /// or closed in full.
+    pub fn sc_publish(path: *const char, p: *const u8, n: usize) i32;
     /// `rm -rf`: delete `path` and anything under it; a link is removed, never followed. 0 once it is gone.
     pub fn sc_rm_rf(path: *const char) i32;
     /// The system temp directory, without a trailing separator.

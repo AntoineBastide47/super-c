@@ -75,6 +75,10 @@ fn scan(self: &mut Lexer) {
 }
 ```
 
+Do not pass the address of a hot loop's index (`&mut i`) to a helper, also a cold one: the
+address keeps `i` in memory, so the C compiler stores and reloads it on every iteration. Return
+the new index instead (`i = self.skip_utf8(i)` in `src/lexer/lexer.spc`).
+
 ## Data-Plane / Control-Plane Separation
 
 Keep diagnostics, error formatting, and recovery logic out of hot data-processing loops.
@@ -206,7 +210,11 @@ Frontend and typecheck:
   the profile, or flat cycles and +3.1 Kalloc.
 - A prelude `str` type cache: no change; the probes are not hot.
 - A second round of `@c.always_inline` on small hot functions: at most 1 Mcyc per phase
-  for +165 KB of text.
+  for +165 KB of text under clang LTO, which already inlines them. gcc LTO (Linux, Windows)
+  does not: an inline `SplitVec::at` fast path with a `@c.cold` slow path, plus
+  `@c.always_inline` on `Map::get` and `str::eq`, cut the serial self-transpile's load to
+  plan phases by 49 ms (-6%) and its instructions by 4% under gcc-15 LTO, and is neutral under
+  clang. Check a new inlining lever with both compilers.
 - Parser micro-optimizations (double `raw_peek`, duplicate range checks, token re-reads):
   LTO already removes them.
 - A hand-written word compare in `Ty::eq`: +2.5% typecheck. Clang lowers the fixed 16 B
@@ -228,8 +236,10 @@ Emission and emitted C:
   and must exclude `static mut`.
 - Per-instance `method_used`, hash-compressed instance names, a body topological sort to
   drop private prototypes: unsound or bad for debugging.
-- Guards for constant division and shift operands, `match` as a C `switch`, copies of
-  operator-overload operands: `-O2` removes them already.
+- Guards for constant division and shift operands, copies of operator-overload operands:
+  `-O2` removes them already. (`match` as a C `switch` does pay: MinGW gcc turned the lexer's
+  `if`/`goto` chain into 106 compares and clang built a jump table for part of it; the native
+  switch cut the lexer pass about 9% on clang and gcc-15.)
 - A parallel instance drain with one shard per demand: 9x slower than serial (shard
   construction dominates). Waves use `2 * jobs` contiguous slices (`src/driver/emit.spc`).
 - A parallel `InstGraph.collect`: its first-discovery order defines the canonical output
@@ -259,8 +269,8 @@ body (about 1.8 KiB) and reached 7 MiB each for the compiler's own sources; they
 doubling frees a 3.5 MiB block into a 7 MiB one on every build; macOS malloc kept those freed
 large regions mapped and resident (`vmmap --summary`: `MALLOC_LARGE (empty)`), and the
 100-round serial benchmark climbed from 288 to 445 MiB peak RSS once the surrounding
-allocation sequence changed. `Keep::reserve_bodies` (one node-kind count over the
-package) and `InstGraph::collect` (the keep's length) size them once; peak RSS returned
+allocation sequence changed. `Keep::reserve_bodies` (the sum of `ir::lower::module_bodies`, one node-kind count per
+module in the borrow stage's prologue) and `InstGraph::collect` (the keep's length) size them once; peak RSS returned
 to 285 MiB. Sample a growing process with `vmmap` and `malloc_history` under
 `MallocStackLogging=1` before bisecting source changes: the empty region sizes name the
 vector. `MallocStackLogging` works on `build/bench-bin`, not on a `--sanitizers` compiler,

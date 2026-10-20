@@ -120,7 +120,7 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     p.mkfile("probe.c", src.as_str());
     // The runtime the emitted code calls (arithmetic helpers, panics).
     let rt = format("{}/rt", root);
-    assert(dutil::write_super_rt(rt.as_str()), "runtime written");
+    assert(dutil::write_super_rt(rt.as_str()) >= 0, "runtime written");
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
     let mut cmd = format(
