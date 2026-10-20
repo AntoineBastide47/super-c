@@ -543,6 +543,8 @@ fn pool_main(arg: *mut void) *mut void {
     let t = arg as *mut PThread;
     let p = unsafe (*t).pool;
     unsafe sc_runtime::sc_rt_widx_set(POOL_THREAD);
+    // Report an overflow rather than dying on a bare fault: a call runs user code on this stack.
+    unsafe sc_runtime::sc_rt_stack_guard_install();
     while unsafe atomic::load_i32(&mut unsafe (*t).published, 1) == 0 {
         unsafe sc_runtime::sc_rt_park(&mut (*t).published, 0, -1);
     }

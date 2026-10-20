@@ -5,10 +5,7 @@
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE 1
 #endif
-/* glibc hides the machine context behind this. Without it every member of `mcontext_t` is spelled with a
-   leading double underscore (`sp` is `__sp`, `gregs` is `__gregs`) and the `REG_*` register indices are not
-   declared at all, so the stack-overflow reporter below fails to compile -- and since this file backs the
-   whole runtime, that took down every program using `launch` on Linux while macOS stayed green. */
+/* glibc declares pthread_getattr_np, which the stack-overflow arming below reads, only under this. */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE 1
 #endif
@@ -176,6 +173,27 @@ void sc_lk_counts(uint64_t *out) { memset(out, 0, 2 * sizeof *out); }
 #endif
 #if SC_RT_LK_STATS < 3
 int sc_rt_asan(void) { return 0; }
+#endif
+/* The stack-overflow report lives in super_rt.c too: arm a thread (its stack bounds when known; the signal
+   stack to release at its end, or null), release that signal stack, the task stack size the message
+   quotes, and on Windows the report for a coroutine stack. The stand-ins report nothing. */
+void *__sc_stack_arm(uintptr_t lo, uintptr_t hi);
+void __sc_stack_disarm(void *alt);
+void __sc_stack_task_size(size_t bytes);
+#ifdef _WIN32
+void __sc_stack_overflow(void);
+#endif
+#if SC_RT_LK_STATS < 4
+void *__sc_stack_arm(uintptr_t lo, uintptr_t hi) {
+  (void)lo;
+  (void)hi;
+  return 0;
+}
+void __sc_stack_disarm(void *alt) { (void)alt; }
+void __sc_stack_task_size(size_t bytes) { (void)bytes; }
+#ifdef _WIN32
+void __sc_stack_overflow(void) { _Exit(134); }
+#endif
 #endif
 
 /* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------
@@ -460,49 +478,13 @@ void sc_rt_stack_reuse(void *usable, size_t size) {
   (void)size;
 }
 
-static size_t sc_rt_stk_size = 0;
-/* Every worker writes the SAME value here, but "same value" is not a synchronisation argument -- a plain
-   write racing a plain read is undefined however benign it looks, and the reader is a signal handler. The
-   relaxed pair costs nothing and makes it defined. */
-void sc_rt_stack_note_size(size_t bytes) { __atomic_store_n(&sc_rt_stk_size, bytes, __ATOMIC_RELAXED); }
+void sc_rt_stack_note_size(size_t bytes) { __sc_stack_task_size(bytes); }
 
 #if defined(__x86_64__)
 /* The thread's OWN stack, recorded when the thread arms itself. A fault on it is the OS's business: ntdll
    grows thread stacks itself, and stepping in front of that would replace working behaviour with ours. */
 static _Thread_local uintptr_t sc_rt_thread_stack_base = 0;
 static size_t sc_rt_pagesz = 4096; /* cached at install: the handler should query nothing it can avoid */
-
-static void sc_rt_say(const char *s) {
-  DWORD w = 0;
-  size_t n = 0;
-  while (s[n]) n++;
-  WriteFile(GetStdHandle(STD_ERROR_HANDLE), s, (DWORD)n, &w, 0);
-}
-
-static void sc_rt_say_u64(uint64_t v) {
-  char b[24];
-  int i = (int)sizeof b;
-  b[--i] = 0;
-  if (!v) b[--i] = '0';
-  while (v) {
-    b[--i] = (char)('0' + (v % 10));
-    v /= 10;
-  }
-  sc_rt_say(b + i);
-}
-
-/* The task cannot continue and neither can the process: say which, and go. */
-static void sc_rt_report_overflow(void) {
-  sc_rt_say("\nsuper-c: stack overflow");
-  if (__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED)) {
-    sc_rt_say(" (");
-    sc_rt_say_u64((uint64_t)__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED));
-    sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
-  }
-  sc_rt_say("\n");
-  /* Not ExitProcess: its DLL detach and CRT teardown would run on the exhausted stack. As POSIX `_exit`. */
-  TerminateProcess(GetCurrentProcess(), 134);
-}
 
 /* Grow the running coroutine stack into its reservation, or report that there is nothing left to grow into.
    Touching the PAGE_GUARD page raises STATUS_GUARD_PAGE_VIOLATION exactly once and clears the guard bit, so
@@ -523,7 +505,7 @@ static LONG CALLBACK sc_rt_stack_veh(EXCEPTION_POINTERS *ep) {
      DeallocationStack: that it reports as STATUS_STACK_OVERFLOW, with NO address attached, which is why
      this has to come before every test that reads one. Letting it fall through those tests is what made an
      exhausted task die silently instead of saying so. On a coroutine stack the code means one thing. */
-  if (code == EXCEPTION_STACK_OVERFLOW) sc_rt_report_overflow();
+  if (code == EXCEPTION_STACK_OVERFLOW) __sc_stack_overflow(); /* the task and the process cannot go on */
 
   if (ep->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
 
@@ -541,7 +523,7 @@ static LONG CALLBACK sc_rt_stack_veh(EXCEPTION_POINTERS *ep) {
   if (want < floor) {
     /* Room for the report, as the kernel gives it on its own path; it reports whether or not this commits. */
     VirtualAlloc((void *)(dealloc + pg), (size_t)(limit - (dealloc + pg)), MEM_COMMIT, PAGE_READWRITE);
-    sc_rt_report_overflow();
+    __sc_stack_overflow();
   }
   if (!VirtualAlloc((void *)want, (size_t)(limit - want), MEM_COMMIT, PAGE_READWRITE))
     return EXCEPTION_CONTINUE_SEARCH;
@@ -557,10 +539,12 @@ void sc_rt_stack_guard_install(void) {
   /* Every thread stores the same value while the handler may read it: relaxed makes that defined. */
   __atomic_store_n(&sc_rt_pagesz, (size_t)si.dwPageSize, __ATOMIC_RELAXED);
   sc_rt_thread_stack_base = sc_teb_read(SC_TEB_STACK_BASE);
+  (void)__sc_stack_arm(0, 0); /* the stack guarantee the report on this thread's own stack runs in */
   if (InterlockedCompareExchange(&once, 1, 0) == 0) AddVectoredExceptionHandler(1, sc_rt_stack_veh);
 }
 #else
-void sc_rt_stack_guard_install(void) {} /* fibers own their stacks; growth is the OS's business */
+/* Fibers own their stacks, and growth is the OS's business: only the report on the thread's own stack. */
+void sc_rt_stack_guard_install(void) { (void)__sc_stack_arm(0, 0); }
 #endif
 
 /* Threads. `_beginthreadex` rather than CreateThread: the runtime allocates on worker threads, and this is
@@ -1289,142 +1273,47 @@ void sc_rt_stack_reuse(void *usable, size_t size) {
 #endif
 }
 
-/* ---- stack-overflow reporting ---------------------------------------------------------------------- */
+/* ---- stack-overflow reporting ----------------------------------------------------------------------
+   The handler is the program's own (super_rt.c, armed for the main thread before main); each thread the
+   substrate starts arms itself here. It judges a fault from the faulting address and stack pointer, with
+   no per-switch bookkeeping: tracking the live coroutine stack in thread-local storage cost 15 ns per
+   switch on macOS, where every _Thread_local access goes through tlv_get_addr. */
+void sc_rt_stack_note_size(size_t bytes) { __sc_stack_task_size(bytes); }
 
-/* The stack size the runtime hands out, for the message only. A plain global, written once before the pool
-   starts: keeping this off the switch path matters more than precision, because the alternative -- tracking
-   the live stack in thread-local storage -- cost 15ns per switch on macOS, where every _Thread_local access
-   goes through tlv_get_addr. */
-static size_t sc_rt_stk_size = 0;
-
-/* Every worker writes the SAME value here, but "same value" is not a synchronisation argument -- a plain
-   write racing a plain read is undefined however benign it looks, and the reader is a signal handler. The
-   relaxed pair costs nothing and makes it defined. */
-void sc_rt_stack_note_size(size_t bytes) { __atomic_store_n(&sc_rt_stk_size, bytes, __ATOMIC_RELAXED); }
-
-static void sc_rt_say(const char *s) {
-  size_t n = 0;
-  while (s[n]) n++;
-  ssize_t w = write(2, s, n); /* write() is async-signal-safe; printf is not */
-  (void)w;
-}
-
-static void sc_rt_say_u64(uint64_t v) {
-  char b[24];
-  int i = (int)sizeof b;
-  b[--i] = 0;
-  if (!v) b[--i] = '0';
-  while (v) {
-    b[--i] = (char)('0' + (v % 10));
-    v /= 10;
-  }
-  sc_rt_say(b + i);
-}
-
-/* The stack pointer at the moment of the fault, straight out of the signal context. */
-static uintptr_t sc_rt_fault_sp(void *uc) {
-#if defined(__APPLE__)
-  /* Darwin hands the handler a context aligned to 8 bytes while its type asks for 16: read the two fields
-     as bytes, not through the misaligned types. */
-  const char *mc;
-  uint64_t sp;
-  memcpy(&mc, (const char *)uc + offsetof(ucontext_t, uc_mcontext), sizeof mc);
-#if defined(__aarch64__)
-  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__sp), sizeof sp);
-#else
-  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__rsp), sizeof sp);
-#endif
-  return (uintptr_t)sp;
-#elif defined(__linux__) && defined(__aarch64__)
-  return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.sp;
-#elif defined(__linux__) && defined(__x86_64__)
-  return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RSP];
-#else
-  (void)uc;
-  return 0; /* unknown layout: fall through to the default handler rather than guess */
-#endif
-}
-
-/* A fault NEAR the stack pointer is a stack that ran out; a fault anywhere else is a bug in the program and
-   must still look like one. No registry of live stacks is needed for that, and no per-switch bookkeeping --
-   which is the point: the diagnosis costs nothing until something actually crashes. */
-static void sc_rt_overflow(int sig, siginfo_t *si, void *uc) {
-  uintptr_t sp = sc_rt_fault_sp(uc);
-  uintptr_t a = (uintptr_t)si->si_addr;
-  uintptr_t d = a > sp ? a - sp : sp - a;
-  /* Generous either way: a frame larger than the guard page steps clean over it, landing the fault BELOW
-     the guard with sp already past it. 128 KiB is far wider than any single frame yet far narrower than the
-     distance a wild pointer lands from the stack. */
-  if (sp != 0 && d < 128 * 1024) {
-    sc_rt_say("\nsuper-c: stack overflow");
-    if (__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED)) {
-      sc_rt_say(" (");
-      sc_rt_say_u64((uint64_t)__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED));
-      sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
-    }
-    sc_rt_say("\n");
-    _exit(134);
-  }
-  /* Not a stack fault: put the default back and take it for real. */
-  struct sigaction d2;
-  memset(&d2, 0, sizeof d2);
-  d2.sa_handler = SIG_DFL;
-  sigaction(sig, &d2, 0);
-  raise(sig);
-}
-
-/* Each worker's signal stack is released when the thread exits, through a thread-specific key: a pool
+/* Each thread's signal stack is released when the thread exits, through a thread-specific key: a pool
    that restarts starts new threads, and each would otherwise keep a mapping forever. */
 static pthread_key_t sc_rt_sigstk_key;
 static pthread_once_t sc_rt_sigstk_once = PTHREAD_ONCE_INIT;
 static int sc_rt_sigstk_keyed = 0;
 
-static size_t sc_rt_sigstk_size(void) { return (size_t)SIGSTKSZ < 32768 ? 32768 : (size_t)SIGSTKSZ; }
-
-static void sc_rt_sigstk_drop(void *m) {
-  stack_t ss;
-  memset(&ss, 0, sizeof ss);
-  ss.ss_flags = SS_DISABLE;
-  sigaltstack(&ss, 0);
-  munmap(m, sc_rt_sigstk_size());
-}
+static void sc_rt_sigstk_drop(void *m) { __sc_stack_disarm(m); }
 
 static void sc_rt_sigstk_key_init(void) {
   sc_rt_sigstk_keyed = pthread_key_create(&sc_rt_sigstk_key, sc_rt_sigstk_drop) == 0;
 }
 
-/* The handler is process-wide: installed once, and every worker waits for it (pthread_once) before it
-   runs a task, so no overflow can meet the default action while another worker is still installing. */
-static pthread_once_t sc_rt_overflow_once = PTHREAD_ONCE_INIT;
-
-static void sc_rt_overflow_install(void) {
-  struct sigaction sa;
-  memset(&sa, 0, sizeof sa);
-  sa.sa_sigaction = sc_rt_overflow;
-  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGSEGV, &sa, 0);
-  sigaction(SIGBUS, &sa, 0); /* macOS reports a guard-page hit as SIGBUS, Linux as SIGSEGV */
-}
-
 void sc_rt_stack_guard_install(void) {
-  /* A signal stack of this thread's own: the handler runs when a stack is exhausted, so it cannot run on
-     that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. Without the
-     key there is no way to release it at thread exit, so the thread does without. */
+  /* Without the key there is no way to release the signal stack at thread exit, so the thread does
+     without. */
   pthread_once(&sc_rt_sigstk_once, sc_rt_sigstk_key_init);
-  const size_t sz = sc_rt_sigstk_size();
-  void *m = sc_rt_sigstk_keyed ? mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) : MAP_FAILED;
-  if (m != MAP_FAILED) {
-    stack_t ss;
-    memset(&ss, 0, sizeof ss);
-    ss.ss_sp = m;
-    ss.ss_size = sz;
-    if (sigaltstack(&ss, 0) != 0)
-      munmap(m, sz);
-    else if (pthread_setspecific(sc_rt_sigstk_key, m) != 0)
-      sc_rt_sigstk_drop(m);
+  if (!sc_rt_sigstk_keyed) return;
+  uintptr_t lo = 0, hi = 0;
+#if defined(__linux__)
+  /* The bounds of this thread's stack, so a fault at its guard reads as an overflow wherever the stack
+     pointer is (macOS gives them to the program's own runtime without libpthread). */
+  pthread_attr_t at;
+  if (pthread_getattr_np(pthread_self(), &at) == 0) {
+    void *addr = 0;
+    size_t size = 0;
+    if (pthread_attr_getstack(&at, &addr, &size) == 0) {
+      lo = (uintptr_t)addr;
+      hi = lo + size;
+    }
+    pthread_attr_destroy(&at);
   }
-  pthread_once(&sc_rt_overflow_once, sc_rt_overflow_install);
+#endif
+  void *m = __sc_stack_arm(lo, hi);
+  if (m != 0 && pthread_setspecific(sc_rt_sigstk_key, m) != 0) __sc_stack_disarm(m);
 }
 
 /* Threads and their locks. The handle is a heap `pthread_t` rather than a cast: `pthread_t` is opaque and

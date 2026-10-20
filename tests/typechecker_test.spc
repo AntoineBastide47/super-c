@@ -1209,6 +1209,12 @@ fn bug_regressions() {
         "fn main() i32 { let a: u128 = 1; let b = a as bool; return 0; }\n",
         "invalid cast",
     );
+    // An implicit widening after an explicit `widen` call: the call's session still maps `M`, and the
+    // conversion's probe maps it again; the probe's mapping must take the evidence.
+    h::expect_ok(
+        "implicit widening after an explicit widen call",
+        "fn f() u64 { let m = UInt::<20>::from_u64(3); return UInt::<100>::widen(&m).to_u64(); }\nfn g() u64 { let a: u128 = 7; let b: u256 = a; return b.to_u64(); }\n",
+    );
     // Enum-valued const generic parameters: the argument is a named constant descriptor, the value
     // participates in the type's identity, and the parameter folds in expression position. A DEFAULT on a
     // const parameter fills an omitted argument: `S` alone means `S<FB>`.

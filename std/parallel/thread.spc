@@ -74,6 +74,7 @@ pub struct ThreadPayload<F, T> {
 /// publish the result, drop the producer's reference. Monomorphized per (F, T); its address is handed to
 /// `sc_rt_thread_create`. `pub` for linkage.
 pub unsafe fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
+    unsafe sc_runtime::sc_rt_stack_guard_install(); // report an overflow rather than dying on a bare fault
     let pp = arg as *mut ThreadPayload<F, T>;
     let c = unsafe (*pp).cell;
     {

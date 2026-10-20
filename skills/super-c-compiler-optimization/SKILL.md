@@ -63,9 +63,11 @@ Work through these phases in order. Each phase grounds the next: do not skip ahe
 super-c bench --no-run
 
 # Profile with samply (1000 Hz is samply's default rate; raise it for short runs)
-samply record --rate 1000 build/bench-bin --filter=self_transpile
+samply record --rate 1000 build/bench-bin --in-process --filter=self_transpile
 ```
 
+`build/bench-bin` runs each benchmark in a forked child unless given `--in-process`, and samply on
+macOS follows an exec, not a fork: without the flag a capture holds the parent's few samples alone.
 `build/bench-bin` runs every benchmark unless filtered: unfiltered, concurrency I/O and
 scheduler idle time took about 44% of the samples. Filter the run or the profile before
 you conclude. `super-c bench` builds `bench-bin` with the compiler that runs it, so an
@@ -90,7 +92,7 @@ sidecar. Without it, native frames in the saved JSON are unsymbolicated hex addr
 # Capture N runs headlessly (each run writes profile + symbol sidecar)
 for i in $(seq 1 15); do
   samply record --save-only --unstable-presymbolicate \
-    -o "prof-$i.profile.json.gz" build/bench-bin --filter=self_transpile
+    -o "prof-$i.profile.json.gz" build/bench-bin --in-process --filter=self_transpile
 done
 
 # Aggregate all runs into one hotspot ranking (runs-present, then total samples)

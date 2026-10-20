@@ -1,0 +1,184 @@
+# Where the compiler spends its time on each CI platform, run on demand from the Actions tab. Each job
+# builds the bench-profile binaries (symbols, frame pointers, LTO) and profiles two lanes with samply:
+#
+#   transpile  build/bench-bin --filter=self_transpile: 100 serial rounds of the build's transpile step,
+#              then one cold build through the engine
+#   build      a cold self-build through the real engine on every core (caches off), by the
+#              bench-profile compiler
+#
+# Each lane first runs once without the sampler for its tables: the benchmark record (SC_BENCH_OUT), and
+# the SC_BUILD_STATS record with the emitter and borrow probes of a serial and an every-core build. The
+# job summary ranks each lane's hottest functions over all its captures, counting only the compiler's
+# own threads (samply_top.py --process), not the C compiler and linker it starts. The profiles with
+# their symbol sidecars and the tables are uploaded per platform: `samply load <profile>` opens one.
+name: Profile
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "samply captures per lane"
+        required: false
+        default: "5"
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: profile-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  profile:
+    if: github.actor == github.repository_owner
+    name: profile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+            samply: samply-aarch64-apple-darwin.tar.xz
+            samply_sha256: 7597239aa3769e75058be5ed359dbfe067f5e7714a5f052c45dd81d509aec17f
+          - os: ubuntu-latest
+            target: linux
+            samply: samply-x86_64-unknown-linux-gnu.tar.xz
+            samply_sha256: 61875daad67888798690dea3cb2748279df6ac299c5c6a857d67eed7642473d9
+          - os: windows-latest
+            target: windows
+            samply: samply-x86_64-pc-windows-msvc.zip
+            samply_sha256: 8fed74dac18197bbb2520125b0199255e09709bed7903a7672a06225a5d7e976
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUNS: ${{ github.event.inputs.runs }}
+      # Every cache off, so each build of the build lane does the same cold work.
+      COLD: SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: ccache-${{ matrix.target }}-profile
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
+
+      # A pinned release, checked against the hash recorded here, not against the release's own hash file.
+      - name: Install samply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ matrix.samply }}
+          SHA256: ${{ matrix.samply_sha256 }}
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/samply"
+          mkdir -p "$dir"
+          gh release download samply-v0.13.1 --repo mstange/samply --pattern "$ASSET" --dir "$dir"
+          if command -v sha256sum >/dev/null 2>&1; then sum="sha256sum"; else sum="shasum -a 256"; fi
+          ( cd "$dir" && echo "$SHA256  $ASSET" | $sum -c - )
+          case "$ASSET" in
+            *.zip) ( cd "$dir" && 7z x -y "$ASSET" >/dev/null ); bin="$dir" ;;
+            *) tar -xJf "$dir/$ASSET" -C "$dir"; bin="$dir/${ASSET%.tar.xz}" ;;
+          esac
+          "$bin/samply${BINEXT:-}" --version
+          if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$bin" >> "$GITHUB_PATH"; else echo "$bin" >> "$GITHUB_PATH"; fi
+
+      - name: Allow perf events (Linux)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.perf_event_paranoid=1 kernel.perf_event_mlock_kb=2048
+
+      - name: Build the bench-profile binaries
+        run: |
+          set -eu
+          x=${BINEXT:-}
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          "./super-c$x" bench --no-run ${cstd:+"$cstd"}
+          mkdir -p build/profile
+          "./super-c$x" build --profile=bench -o "build/profile/super-c-bench$x" ${cstd:+"$cstd"}
+          test -x "build/bench-bin$x"
+          test -x "build/profile/super-c-bench$x"
+
+      - name: Record the phase tables
+        run: |
+          set -eu
+          x=${BINEXT:-}
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          out=build/profile/out
+          mkdir -p prof
+          run() { # log file, then the command
+            log=$1; shift
+            "$@" >"$log" 2>&1 || { cat "$log"; echo "failed: $*"; exit 1; }
+          }
+          run prof/transpile.txt env SC_BENCH_OUT=prof/transpile.json "build/bench-bin$x" --filter=self_transpile
+          rm -rf "$out"
+          run prof/build-j1.txt env $COLD SC_BUILD_STATS=prof/build-j1.jsonl SC_CEMIT_STATS=1 SC_BORROW_STATS=1 \
+            "build/profile/super-c-bench$x" build --jobs=1 --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"}
+          rm -rf "$out"
+          run prof/build-jall.txt env $COLD SC_BUILD_STATS=prof/build-jall.jsonl SC_CEMIT_STATS=1 \
+            "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"}
+
+      # The sampled binary is samply's root process: `env` runs samply itself, so no wrapper sits between.
+      # The benchmark runs `--in-process`: samply on macOS follows an exec, not a fork.
+      - name: Sample the lanes
+        run: |
+          set -eu
+          x=${BINEXT:-}
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          out=build/profile/out
+          rec="samply record --save-only --unstable-presymbolicate --rate 1000"
+          i=0
+          while [ "$i" -lt "${RUNS:-5}" ]; do
+            i=$((i + 1))
+            echo "capture $i/${RUNS:-5}"
+            $rec -o "prof/transpile-$i.profile.json.gz" "build/bench-bin$x" --in-process --filter=self_transpile >prof/last.txt 2>&1 ||
+              { cat prof/last.txt; echo "transpile capture $i failed"; exit 1; }
+            rm -rf "$out"
+            env $COLD $rec -o "prof/build-$i.profile.json.gz" \
+              "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"} >prof/last.txt 2>&1 ||
+              { cat prof/last.txt; echo "build capture $i failed"; exit 1; }
+          done
+
+      - name: Rank the hot functions
+        run: |
+          set -eu
+          py=$(command -v python3 || command -v python)
+          top=skills/super-c-compiler-optimization/scripts/samply_top.py
+          "$py" "$top" --process=bench-bin prof/transpile-*.profile.json.gz >prof/transpile-top.txt
+          "$py" "$top" --process=super-c-bench prof/build-*.profile.json.gz >prof/build-top.txt
+          block() { # title, file, open|closed
+            printf '<details%s><summary>%s</summary>\n\n```\n' "$([ "$3" = open ] && echo ' open')" "$1"
+            cat "$2"
+            printf '```\n</details>\n\n'
+          }
+          {
+            echo "## ${{ matrix.target }}"
+            block "transpile lane: hot functions" prof/transpile-top.txt open
+            block "build lane (every core): hot functions" prof/build-top.txt open
+            block "self_transpile benchmark table" prof/transpile.txt closed
+            block "serial cold build: stats, emitter and borrow probes" prof/build-j1.txt closed
+            block "every-core cold build: stats and emitter probe" prof/build-jall.txt closed
+          } >>"$GITHUB_STEP_SUMMARY"
+          cat prof/transpile-top.txt prof/build-top.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: profile-${{ matrix.target }}
+          path: prof
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: ./.github/actions/ccache-save
+        with:
+          cache: ccache-${{ matrix.target }}-profile
+          sha: ${{ github.sha }}

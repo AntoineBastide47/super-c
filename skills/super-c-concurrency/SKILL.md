@@ -574,9 +574,35 @@ behind one thread. A 16-thread pool measured worse (284 against 267 Mcycles).
 |------|---------|
 | `SC_TASK_TRACE=1` | Trace scheduler decisions for the life of the process |
 | Panic messages | Include task id: `panic: [task 7] message` |
+| Stack overflow report | Names the stack that ran out, exits 134 (see below) |
+| Illegal instruction report | POSIX: `super-c: illegal instruction at 0x<pc>` (a jump through a corrupt code address, or code for a CPU feature the machine lacks), then the previous handler or the default action (the status stays SIGILL); under ASan, ASan's report with the stack (`handle_sigill=1` in `__asan_default_options`) |
 | `runtime::live_tasks()` | Return count of tasks still alive |
 | Shutdown report | Account for tasks that never finished |
 | `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
+
+**Stack overflow report.** The program's runtime (`super_rt.c`, `src/driver/rt_c.spc`) arms the
+main thread before `main`; every thread std starts (pool workers, blocking-pool threads, the
+reactor, `thread::spawn`) calls `sc_rt_stack_guard_install` first. On POSIX an armed thread has a
+signal stack whose base records its own stack's bounds; a SIGSEGV (SIGBUS on macOS) is an
+overflow at the guard of the thread's own stack or, on a coroutine stack, within 128 KiB of the
+stack pointer, so nothing is tracked per switch. Any other fault goes to the handler installed
+before, or to the default action. Windows reports `EXCEPTION_STACK_OVERFLOW` from a vectored
+handler, each armed thread keeping a 16 KiB stack guarantee. The report is one line on stderr,
+then exit 134 (the test runner counts it as a panic):
+
+```
+super-c: stack overflow in the main thread (8388608 byte stack)
+super-c: stack overflow in a thread (8388608 byte stack)
+super-c: [task 3] stack overflow (262144 byte task stack exhausted; raise it with runtime::set_stack_size)
+```
+
+A job on a worker's own stack prints `[task N]` with the thread form. Under AddressSanitizer the
+handler is armed too, so an overflow still ends as a panic; any other fault goes on to ASan's own
+report. The handler is async-signal-safe, so it flushes nothing: output still buffered in stdout is
+lost. Signal stacks of ended threads wait in a 64-slot lock-free cache: arming costs about 0.2 us
+per thread from it (macOS; 0.4 us on Linux) against 2 us for a fresh mapping, and about 2 us once
+at startup. Under ASan there is no cache: ASan unmaps the signal stack in place when a thread ends,
+so an armed thread's stack replaces ASan's (freed at arming) and stays for ASan to unmap.
 
 The shutdown report prints each unfinished task's `state`, `phase`, `done` and `handoff`:
 `done true handoff 1` is a worker stuck in that task's park hand-off tail, and the cure is

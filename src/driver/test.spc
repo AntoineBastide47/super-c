@@ -556,6 +556,7 @@ static void sc_runner_abort(int sig) {
   fflush(stderr);
   signal(sig, SIG_DFL);
 }
+#define SC_RUNNER_JS_MAX 1024
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
@@ -567,19 +568,56 @@ static void sc_runner_abort(int sig) {
 #define sc_chdir _chdir
 #define sc_setenv(n, v) _putenv_s(n, v)
 #define sc_unsetenv(n) _putenv_s(n, "")
-static HANDLE sc_runner_js;
+/* The process-tree jobserver the compiler made (driver_shim.c): each slot is one byte of a slot file,
+   held by a LockFileEx byte lock, which the system drops when the holder ends. */
+static HANDLE sc_runner_js = INVALID_HANDLE_VALUE;
+static int sc_runner_js_slots = -1;
 static int sc_runner_jobserver_active(void) {
-  if (sc_runner_js != NULL) return 1;
-  const char *name = getenv("SC_JOBSERVER_SEMAPHORE");
-  if (name == NULL || name[0] == '\0') return 0;
-  sc_runner_js = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, name);
-  return sc_runner_js != NULL;
+  if (sc_runner_js_slots >= 0) return 1;
+  const char *v = getenv("SC_JOBSERVER");
+  int n = -1, used = 0;
+  if (v == NULL || sscanf(v, "%d,%n", &n, &used) != 1 || used == 0 || n < 0 || n > SC_RUNNER_JS_MAX) return 0;
+  sc_runner_js = CreateFileA(v + used, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (sc_runner_js == INVALID_HANDLE_VALUE) return 0;
+  sc_runner_js_slots = n;
+  return 1;
 }
-static int sc_runner_jobserver_try_acquire(void) {
-  return sc_runner_jobserver_active() && WaitForSingleObject(sc_runner_js, 0) == WAIT_OBJECT_0;
+/* Lock (`lock` 1) or unlock slot byte `i`: 1 done, 0 another process holds it, -1 an error. */
+static int sc_runner_jobserver_lock(int i, int lock) {
+  OVERLAPPED ov;
+  memset(&ov, 0, sizeof ov);
+  ov.Offset = (DWORD)i;
+  if (!lock) return UnlockFileEx(sc_runner_js, 0, 1, 0, &ov) ? 1 : -1;
+  if (LockFileEx(sc_runner_js, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return 1;
+  return GetLastError() == ERROR_LOCK_VIOLATION ? 0 : -1;
 }
-static int sc_runner_jobserver_release(void) {
-  return sc_runner_jobserver_active() && ReleaseSemaphore(sc_runner_js, 1, NULL);
+/* A runner started without an inherited jobserver makes its own of `capacity` slots, one implicit, as
+   the compiler does (driver_shim.c): the tests and every process they start share one budget. 1 when a
+   jobserver is active. */
+static int sc_runner_jobserver_init(int capacity) {
+  if (sc_runner_jobserver_active()) return 1;
+  const int n = capacity < 1 ? 0 : capacity - 1 > SC_RUNNER_JS_MAX ? SC_RUNNER_JS_MAX : capacity - 1;
+  char dir[MAX_PATH];
+  const DWORD dl = GetTempPathA(sizeof dir, dir);
+  if (dl == 0 || dl >= sizeof dir) return 0;
+  char path[MAX_PATH + 64];
+  const int pl = snprintf(path, sizeof path, "%ssuper-c-jobs-%lu-%llu", dir, (unsigned long)GetCurrentProcessId(),
+                          (unsigned long long)GetTickCount64());
+  if (pl < 1 || (size_t)pl >= sizeof path) return 0;
+  sc_runner_js = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+  if (sc_runner_js == INVALID_HANDLE_VALUE) return 0;
+  char text[MAX_PATH + 96];
+  const int tl = snprintf(text, sizeof text, "%d,%s", n, path);
+  /* _putenv_s sets the C runtime's copy, which getenv and _spawnv read, and the process's own. */
+  if (tl < 1 || (size_t)tl >= sizeof text || _putenv_s("SC_JOBSERVER", text) != 0) {
+    CloseHandle(sc_runner_js);
+    sc_runner_js = INVALID_HANDLE_VALUE;
+    return 0;
+  }
+  sc_runner_js_slots = n;
+  return 1;
 }
 #else
 #include <errno.h>
@@ -599,28 +637,92 @@ extern char **environ;
 #define sc_chdir chdir
 #define sc_setenv(n, v) setenv(n, v, 1)
 #define sc_unsetenv(n) unsetenv(n)
-static int sc_runner_js_read = -1;
-static int sc_runner_js_write = -1;
+/* The process-tree jobserver the compiler made (driver_shim.c): each slot is one byte of the unlinked
+   slot file whose descriptor every process inherits, held by an fcntl record lock, which the system
+   drops when the holder ends and a forked child does not inherit. */
+static int sc_runner_js = -1;
+static int sc_runner_js_slots = -1;
 static int sc_runner_jobserver_active(void) {
-  if (sc_runner_js_read >= 0 && sc_runner_js_write >= 0) return 1;
-  const char *fds = getenv("SC_JOBSERVER_FDS");
-  int r = -1;
-  int w = -1;
+  if (sc_runner_js_slots >= 0) return 1;
+  const char *v = getenv("SC_JOBSERVER");
+  int n = -1, fd = -1;
   char tail = 0;
-  if (fds == NULL || sscanf(fds, "%d,%d%c", &r, &w, &tail) != 2 || r < 0 || w < 0) return 0;
-  if (fcntl(r, F_GETFL) < 0 || fcntl(w, F_GETFL) < 0) return 0;
-  sc_runner_js_read = r;
-  sc_runner_js_write = w;
+  if (v == NULL || sscanf(v, "%d,%d%c", &n, &fd, &tail) != 2 || n < 0 || n > SC_RUNNER_JS_MAX || fd < 0) return 0;
+  if (fcntl(fd, F_GETFD) < 0) return 0;
+  sc_runner_js = fd;
+  sc_runner_js_slots = n;
   return 1;
 }
+/* Lock (`lock` 1) or unlock slot byte `i`: 1 done, 0 another process holds it, -1 an error. */
+static int sc_runner_jobserver_lock(int i, int lock) {
+  struct flock fl;
+  memset(&fl, 0, sizeof fl);
+  fl.l_type = lock ? F_WRLCK : F_UNLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = i;
+  fl.l_len = 1;
+  for (;;) {
+    if (fcntl(sc_runner_js, F_SETLK, &fl) == 0) return 1;
+    if (errno == EINTR) continue;
+    return lock && (errno == EACCES || errno == EAGAIN) ? 0 : -1;
+  }
+}
+/* A runner started without an inherited jobserver makes its own of `capacity` slots, one implicit, as
+   the compiler does (driver_shim.c): the tests and every process they start share one budget. 1 when a
+   jobserver is active. */
+static int sc_runner_jobserver_init(int capacity) {
+  if (sc_runner_jobserver_active()) return 1;
+  const int n = capacity < 1 ? 0 : capacity - 1 > SC_RUNNER_JS_MAX ? SC_RUNNER_JS_MAX : capacity - 1;
+  const char *dir = getenv("TMPDIR");
+  char path[1024];
+  const int pl = snprintf(path, sizeof path, "%s/super-c-jobs-XXXXXX", dir != NULL && dir[0] != 0 ? dir : "/tmp");
+  if (pl < 1 || (size_t)pl >= sizeof path) return 0;
+  /* No FD_CLOEXEC: every process the tree starts inherits the descriptor. */
+  const int fd = mkstemp(path);
+  if (fd < 0) return 0;
+  if (unlink(path) != 0) {
+    close(fd);
+    return 0;
+  }
+  char text[64];
+  const int tl = snprintf(text, sizeof text, "%d,%d", n, fd);
+  if (tl < 1 || (size_t)tl >= sizeof text || setenv("SC_JOBSERVER", text, 1) != 0) {
+    close(fd);
+    return 0;
+  }
+  sc_runner_js = fd;
+  sc_runner_js_slots = n;
+  return 1;
+}
+#endif
+static unsigned char sc_runner_js_own[SC_RUNNER_JS_MAX]; /* the slot bytes the runner holds */
+/* Take a free slot: 1, or 0 when every slot is held. A lock error aborts: the tree's budget is gone. */
 static int sc_runner_jobserver_try_acquire(void) {
-  char token = 0;
-  return sc_runner_jobserver_active() && read(sc_runner_js_read, &token, 1) == 1;
+  if (!sc_runner_jobserver_active()) return 0;
+  for (int i = 0; i < sc_runner_js_slots; i++) {
+    if (sc_runner_js_own[i]) continue;
+    const int r = sc_runner_jobserver_lock(i, 1);
+    if (r < 0) abort();
+    if (r == 1) {
+      sc_runner_js_own[i] = 1;
+      return 1;
+    }
+  }
+  return 0;
 }
+/* Give back one held slot: 1, or 0 when the runner holds none or the unlock fails. */
 static int sc_runner_jobserver_release(void) {
-  const char token = '+';
-  return sc_runner_jobserver_active() && write(sc_runner_js_write, &token, 1) == 1;
+  if (!sc_runner_jobserver_active()) return 0;
+  for (int i = 0; i < sc_runner_js_slots; i++) {
+    if (sc_runner_js_own[i]) {
+      if (sc_runner_jobserver_lock(i, 0) != 1) return 0;
+      sc_runner_js_own[i] = 0;
+      return 1;
+    }
+  }
+  return 0;
 }
+#if !defined(_WIN32)
 /* Timeout diagnostics. Each test's capture file is a named file, and the test's process carries its path in
    SC_TEST_DIAG, which every process it starts inherits: the runtime of every Super-C program in the tree
    answers SIGURG by appending its own threads' stacks there (__sc_diag_install, super_rt), and a library
@@ -1086,6 +1188,10 @@ int main(int argc, char **argv) {
     }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
+  if (!sc_runner_jobserver_init(jobs)) {
+    fprintf(stderr, "test runner: cannot make a jobserver\n");
+    return 101;
+  }
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
   for (int i = 0; i < SC_NTESTS; i++) sc_dur[i] = -1;
   const int nsel = sc_select(filter, shard, shards, weights, sel);
@@ -1353,6 +1459,10 @@ int main(int argc, char **argv) {
     SC_TESTS[run_one].fn(genv);
     if (genv) sc_genv_free(genv);
     return 0;
+  }
+  if (!sc_runner_jobserver_init(jobs)) {
+    fprintf(stderr, "test runner: cannot make a jobserver\n");
+    return 101;
   }
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
   for (int i = 0; i < SC_NTESTS; i++) sc_dur[i] = -1;

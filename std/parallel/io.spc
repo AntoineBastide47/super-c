@@ -625,6 +625,7 @@ fn settle_all(r: *mut Reactor, b: &mut Batch) {
 // The reactor thread: drain commands, deliver events, sleep in the poller; at shutdown, settle every wait
 // and keep acknowledging disarms until no admitted wait remains, then leave.
 fn reactor_main(arg: *mut void) *mut void {
+    unsafe sc_runtime::sc_rt_stack_guard_install(); // report an overflow rather than dying on a bare fault
     let r = arg as *mut Reactor;
     let mut evs = EvBuf {};
     let mut b = Batch { head: null, tail: null, n: 0 };

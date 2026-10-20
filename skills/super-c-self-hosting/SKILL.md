@@ -137,6 +137,12 @@ step 4, tests embed the new syntax only inside string literals.
 A C helper that std calls goes in a header beside std (for example `std/int128.h`), never in
 the compiler-embedded `super_rt.h` (`src/driver/rt_c.spc`): the release binary emits its own
 older runtime header, so a helper added there is missing when the release builds the tree.
+The exception is an entry point of `super_rt.c` that `ffi/sc_rt.c` calls: it raises the runtime
+API level the wrapper TU defines (`SC_RT_LK_STATS` in `src/driver/extc.spc`, now 4), and
+`sc_rt.c` defines a stand-in under `#if SC_RT_LK_STATS < <level>`, so a tree the release builds
+links the stand-in (super-c-ffi, backing sources). The stack-overflow entry points
+(`__sc_stack_arm`, `__sc_stack_disarm`, `__sc_stack_task_size`, `__sc_stack_overflow`) follow it;
+a stage-1 compiler built by the release therefore reports no stack overflow.
 
 ## Recovery from a Broken Compiler
 

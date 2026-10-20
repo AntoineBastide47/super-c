@@ -42,7 +42,7 @@
 #  include <psapi.h>
 #elif !defined(__wasi__)
 #  include <poll.h>     /* sc_file_pending */
-#  include <signal.h>   /* kill(pid, 0) liveness probe */
+#  include <signal.h>   /* kill: the liveness probe, sc_kill */
 #  include <sys/resource.h> /* getrusage: peak RSS */
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
@@ -416,124 +416,146 @@ int sc_ncpu(void) {
 #endif
 }
 
+/* The process-tree jobserver: `capacity` slots for the whole tree, one of them implicit to the process
+   that made it. Each other slot is one byte of a slot file, held by a byte-range lock: fcntl F_SETLK
+   (POSIX) or LockFileEx (Windows). The system drops a process's locks when it ends, by an exit, an abort
+   or a kill, so a slot is never lost, and a forked child does not inherit its parent's POSIX locks.
+   SC_JOBSERVER names the file to every process of the tree: "<slots>,<fd>" on POSIX, the inherited
+   descriptor of the unlinked file; "<slots>,<path>" on Windows, a temporary file the system deletes when
+   its last handle closes. */
+#define SC_JS_MAX 1024
 static int sc_js_claimed;
 static int sc_js_release_registered;
+static int sc_js_loaded;
+static int sc_js_slots;
+static unsigned char sc_js_own[SC_JS_MAX]; /* the slot bytes this process holds */
 #if defined(_WIN32)
-static HANDLE sc_js_sem;
+static HANDLE sc_js_file = INVALID_HANDLE_VALUE;
 
 static int sc_jobserver_load(void) {
-  if (sc_js_sem != NULL)
+  if (sc_js_loaded)
     return 1;
-  const char *name = getenv("SC_JOBSERVER_SEMAPHORE");
-  if (name == NULL || name[0] == '\0')
+  const char *v = getenv("SC_JOBSERVER");
+  int n = -1;
+  int used = 0;
+  if (v == NULL || sscanf(v, "%d,%n", &n, &used) != 1 || used == 0 || n < 0 || n > SC_JS_MAX)
     return 0;
-  sc_js_sem = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, name);
-  return sc_js_sem != NULL;
+  sc_js_file = CreateFileA(v + used, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (sc_js_file == INVALID_HANDLE_VALUE)
+    return 0;
+  sc_js_slots = n;
+  sc_js_loaded = 1;
+  return 1;
 }
 
 int sc_jobserver_init(int capacity) {
   if (sc_jobserver_load())
     return 1;
-  if (capacity < 1)
-    capacity = 1;
-  char name[96];
-  int n = snprintf(name, sizeof name, "Local\\super-c-jobs-%lu-%llu", (unsigned long)GetCurrentProcessId(),
-                   (unsigned long long)GetTickCount64());
-  if (n < 1 || (size_t)n >= sizeof name)
+  const int n = capacity < 1 ? 0 : capacity - 1 > SC_JS_MAX ? SC_JS_MAX : capacity - 1;
+  char dir[MAX_PATH];
+  const DWORD dl = GetTempPathA(sizeof dir, dir);
+  if (dl == 0 || dl >= sizeof dir)
     return 0;
-  sc_js_sem = CreateSemaphoreA(NULL, capacity - 1, capacity, name);
-  if (sc_js_sem == NULL)
+  char path[MAX_PATH + 64];
+  int pl = snprintf(path, sizeof path, "%ssuper-c-jobs-%lu-%llu", dir, (unsigned long)GetCurrentProcessId(),
+                    (unsigned long long)GetTickCount64());
+  if (pl < 1 || (size_t)pl >= sizeof path)
     return 0;
-  if (!SetEnvironmentVariableA("SC_JOBSERVER_SEMAPHORE", name)) {
-    CloseHandle(sc_js_sem);
-    sc_js_sem = NULL;
+  sc_js_file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+  if (sc_js_file == INVALID_HANDLE_VALUE)
+    return 0;
+  char text[MAX_PATH + 96];
+  int tl = snprintf(text, sizeof text, "%d,%s", n, path);
+  if (tl < 1 || (size_t)tl >= sizeof text || !SetEnvironmentVariableA("SC_JOBSERVER", text)) {
+    CloseHandle(sc_js_file);
+    sc_js_file = INVALID_HANDLE_VALUE;
     return 0;
   }
+  sc_js_slots = n;
+  sc_js_loaded = 1;
   return 1;
 }
 
-static int sc_jobserver_active(void) { return sc_jobserver_load(); }
-
-static int sc_jobserver_try_acquire(void) {
-  if (!sc_jobserver_load())
-    return 0;
-  return WaitForSingleObject(sc_js_sem, 0) == WAIT_OBJECT_0;
-}
-
-static int sc_jobserver_release(void) {
-  if (!sc_jobserver_load())
-    return 0;
-  return ReleaseSemaphore(sc_js_sem, 1, NULL) ? 1 : 0;
+static int sc_jobserver_lock(int i, int lock) {
+  OVERLAPPED ov;
+  memset(&ov, 0, sizeof ov);
+  ov.Offset = (DWORD)i;
+  if (!lock)
+    return UnlockFileEx(sc_js_file, 0, 1, 0, &ov) ? 1 : -1;
+  if (LockFileEx(sc_js_file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov))
+    return 1;
+  return GetLastError() == ERROR_LOCK_VIOLATION ? 0 : -1;
 }
 #elif !defined(__wasi__)
-static int sc_js_read = -1;
-static int sc_js_write = -1;
+static int sc_js_fd = -1;
 
 static int sc_jobserver_load(void) {
-  if (sc_js_read >= 0 && sc_js_write >= 0)
+  if (sc_js_loaded)
     return 1;
-  const char *fds = getenv("SC_JOBSERVER_FDS");
-  int r = -1;
-  int w = -1;
+  const char *v = getenv("SC_JOBSERVER");
+  int n = -1;
+  int fd = -1;
   char tail = 0;
-  if (fds == NULL || sscanf(fds, "%d,%d%c", &r, &w, &tail) != 2 || r < 0 || w < 0)
+  if (v == NULL || sscanf(v, "%d,%d%c", &n, &fd, &tail) != 2 || n < 0 || n > SC_JS_MAX || fd < 0)
     return 0;
-  if (fcntl(r, F_GETFL) < 0 || fcntl(w, F_GETFL) < 0)
+  if (fcntl(fd, F_GETFD) < 0)
     return 0;
-  sc_js_read = r;
-  sc_js_write = w;
+  sc_js_fd = fd;
+  sc_js_slots = n;
+  sc_js_loaded = 1;
   return 1;
 }
 
 int sc_jobserver_init(int capacity) {
   if (sc_jobserver_load())
     return 1;
-  if (capacity < 1)
-    capacity = 1;
-  int fds[2];
-  if (pipe(fds) != 0)
+  const int n = capacity < 1 ? 0 : capacity - 1 > SC_JS_MAX ? SC_JS_MAX : capacity - 1;
+  const char *dir = getenv("TMPDIR");
+  char path[1024];
+  int pl = snprintf(path, sizeof path, "%s/super-c-jobs-XXXXXX", dir != NULL && dir[0] != 0 ? dir : "/tmp");
+  if (pl < 1 || (size_t)pl >= sizeof path)
     return 0;
-  int rf = fcntl(fds[0], F_GETFL);
-  int wf = fcntl(fds[1], F_GETFL);
-  if (rf < 0 || wf < 0 || fcntl(fds[0], F_SETFL, rf | O_NONBLOCK) != 0 ||
-      fcntl(fds[1], F_SETFL, wf | O_NONBLOCK) != 0) {
-    close(fds[0]);
-    close(fds[1]);
+  /* No FD_CLOEXEC: every process the tree starts inherits the descriptor. */
+  const int fd = mkstemp(path);
+  if (fd < 0)
     return 0;
-  }
-  const char token = '+';
-  for (int i = 1; i < capacity; i++) {
-    if (write(fds[1], &token, 1) != 1)
-      break;
+  if (unlink(path) != 0) {
+    close(fd);
+    return 0;
   }
   char text[64];
-  int n = snprintf(text, sizeof text, "%d,%d", fds[0], fds[1]);
-  if (n < 1 || (size_t)n >= sizeof text || setenv("SC_JOBSERVER_FDS", text, 1) != 0) {
-    close(fds[0]);
-    close(fds[1]);
+  int tl = snprintf(text, sizeof text, "%d,%d", n, fd);
+  if (tl < 1 || (size_t)tl >= sizeof text || setenv("SC_JOBSERVER", text, 1) != 0) {
+    close(fd);
     return 0;
   }
-  sc_js_read = fds[0];
-  sc_js_write = fds[1];
+  sc_js_fd = fd;
+  sc_js_slots = n;
+  sc_js_loaded = 1;
   return 1;
 }
 
-static int sc_jobserver_active(void) { return sc_jobserver_load(); }
-
-static int sc_jobserver_try_acquire(void) {
-  if (!sc_jobserver_load())
-    return 0;
-  char token = 0;
-  return read(sc_js_read, &token, 1) == 1;
+/* Lock (`lock` 1) or unlock slot byte `i`: 1 done, 0 another process holds it, -1 an error. */
+static int sc_jobserver_lock(int i, int lock) {
+  struct flock fl;
+  memset(&fl, 0, sizeof fl);
+  fl.l_type = lock ? F_WRLCK : F_UNLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = i;
+  fl.l_len = 1;
+  for (;;) {
+    if (fcntl(sc_js_fd, F_SETLK, &fl) == 0)
+      return 1;
+    if (errno == EINTR)
+      continue;
+    return lock && (errno == EACCES || errno == EAGAIN) ? 0 : -1;
+  }
 }
+#endif
 
-static int sc_jobserver_release(void) {
-  if (!sc_jobserver_load())
-    return 0;
-  const char token = '+';
-  return write(sc_js_write, &token, 1) == 1;
-}
-#else
+#if defined(__wasi__)
 int sc_jobserver_init(int capacity) {
   (void)capacity;
   return 0;
@@ -541,6 +563,41 @@ int sc_jobserver_init(int capacity) {
 static int sc_jobserver_active(void) { return 0; }
 static int sc_jobserver_try_acquire(void) { return 0; }
 static int sc_jobserver_release(void) { return 0; }
+#else
+static int sc_jobserver_active(void) { return sc_jobserver_load(); }
+
+/* Take a free slot: 1, or 0 when every slot is held. A lock error is fatal: the tree's budget is gone. */
+static int sc_jobserver_try_acquire(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  for (int i = 0; i < sc_js_slots; i++) {
+    if (sc_js_own[i])
+      continue;
+    const int r = sc_jobserver_lock(i, 1);
+    if (r < 0)
+      abort();
+    if (r == 1) {
+      sc_js_own[i] = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Give back one held slot: 1, or 0 when this process holds none. */
+static int sc_jobserver_release(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  for (int i = 0; i < sc_js_slots; i++) {
+    if (sc_js_own[i]) {
+      if (sc_jobserver_lock(i, 0) != 1)
+        abort();
+      sc_js_own[i] = 0;
+      return 1;
+    }
+  }
+  return 0;
+}
 #endif
 
 void sc_jobserver_release_claim(void) {
@@ -918,6 +975,20 @@ int sc_try_wait(const int64_t *pids, int n, int *code) {
     }
   }
   return -1;
+#endif
+}
+
+/* End child `pid` (an `sc_spawn_argv` id) at once, as an outside kill does: SIGKILL on POSIX,
+   TerminateProcess on its handle on Windows. 0 when the kill is sent, -1 on error; the caller still
+   waits for the child. */
+int sc_kill(long long pid) {
+#if defined(__wasi__)
+  (void)pid;
+  return -1;
+#elif defined(_WIN32)
+  return TerminateProcess((HANDLE)(intptr_t)pid, 137) ? 0 : -1;
+#else
+  return kill((pid_t)pid, SIGKILL) == 0 ? 0 : -1;
 #endif
 }
 

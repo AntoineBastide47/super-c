@@ -63,6 +63,7 @@ long long sc_spawn_argv_in(const char *const *argv, const char *out_path, const 
 int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1; a killing signal is named on stderr */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_try_wait(const int64_t *pids, int n, int *code); /* non-blocking sc_wait_any; -1 when none exited; never reaps outside `pids` */
+int sc_kill(long long pid); /* end child `pid` at once (SIGKILL, TerminateProcess); 0 when sent */
 int sc_waitpid(long long pid, int *code); /* wait for ONE specific child; 0 on success, -1 on error */
 /* Make `path` executable (0755). No-op on Windows, which goes by extension. 0 on success. */
 int sc_chmod_exec(const char *path);

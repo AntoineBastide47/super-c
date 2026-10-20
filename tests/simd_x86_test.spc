@@ -208,6 +208,86 @@ fn kernel_asm(label: str, src: str, flags: []str, want: []str, avoid: []str) {
     assert(d.len() == 0, label);
 }
 
+// Kernels built as one program: each `fn k` of a source is renamed `k<i>`, with `@c.noinline`.
+struct Kernels {
+    decls: String,
+    labels: Vector<String>,
+    want: Vector<Vector<String>>,
+    avoid: Vector<Vector<String>>,
+}
+
+extend Kernels {
+    fn new() Kernels {
+        return Kernels {
+            decls: String::new(),
+            labels: Vector::<String>::new(),
+            want: Vector::<Vector<String>>::new(),
+            avoid: Vector::<Vector<String>>::new(),
+        };
+    }
+
+    // Kernel `k` of `src` lowers to assembly holding each mnemonic of `want` and none of `avoid`.
+    fn add(self: &mut Kernels, label: str, src: str, want: []str, avoid: []str) {
+        let name = format("k{}", self.labels.len());
+        self.decls.format_into(
+            "@c.noinline\n{}",
+            String::from_str(src).replace("fn k(", format("fn {}(", name.as_str()).as_str()).as_str(),
+        );
+        self.labels.push(String::from_str(label));
+        let mut w = Vector::<String>::new();
+        for x in want {
+            w.push(String::from_str(x));
+        }
+        self.want.push(w);
+        let mut a = Vector::<String>::new();
+        for x in avoid {
+            a.push(String::from_str(x));
+        }
+        self.avoid.push(a);
+    }
+
+    // Build every kernel under the release profile, then check each one's assembly. A kernel that takes
+    // a `[]mut T` has its body in `main__k<i>__r` (the split view ABI); `main__k<i>` only forwards to it.
+    fn run(self: &Kernels) {
+        let src = format(
+            "import std::simd;\nimport std::cpu;\n{}fn main(args: Vector<str>) i32 {{\n    return 0;\n}}\n",
+            self.decls.as_str(),
+        );
+        let ops: []str = RELEASE;
+        let b = h::diff_build(src.as_str(), ops);
+        if !b.built {
+            eprintln("{}", b.diag.as_str());
+        }
+        assert(b.built, "the kernels build");
+        let mut code = String::new();
+        let e = h::asm_text(&b, ops, "main__k0", &mut code);
+        assert(e.len() == 0, e.as_str());
+        let mut failed = false;
+        for i in 0..self.labels.len() {
+            let mut fname = format("main__k{}", i);
+            if code.as_str().contains(format("main__k{}__r", i).as_str()) {
+                fname.push_str("__r");
+            }
+            let label = self.labels.at(i).as_str();
+            for w in 0..self.want.at(i).len() {
+                let d = h::asm_match(code.as_str(), fname.as_str(), [self.want.at(i).at(w).as_str()], []);
+                if d.len() != 0 {
+                    eprintln("{}: {}", label, d.as_str());
+                    failed = true;
+                }
+            }
+            for a in 0..self.avoid.at(i).len() {
+                let d = h::asm_match(code.as_str(), fname.as_str(), [], [self.avoid.at(i).at(a).as_str()]);
+                if d.len() != 0 {
+                    eprintln("{}: {}", label, d.as_str());
+                    failed = true;
+                }
+            }
+        }
+        assert(!failed, "every kernel lowers to its instructions");
+    }
+}
+
 // Each level's kernels lower to its instructions: SSE at the baseline, AVX2 and FMA in an
 // `x86-64-v3` function, AVX-512 (mask registers, compress, 512-bit arithmetic with
 // `--simd-width=512`) in an `x86-64-v4` one; a baseline function names no AVX register.
@@ -216,104 +296,90 @@ fn operations_lower_to_their_instructions() {
     if !x86_host() {
         return;
     }
-    let ops: []str = RELEASE;
+    let mut ks = Kernels::new();
     // A run with more features (`SC_SIMD_FEATURES`) builds every function with them: no baseline one.
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     let base = more == null || unsafe *more == 0 as char;
     if base {
-        kernel_asm(
-            "f32x4 add",
-            "fn k(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\n",
-            ops,
-            ["addps"],
-            ["%ymm", "%zmm"],
-        );
+        ks.add("f32x4 add", "fn k(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\n", ["addps"], ["%ymm", "%zmm"]);
     }
     if base {
-        kernel_asm(
+        ks.add(
             "u8x16 compare to a mask",
             "fn k(a: u8x16, b: u8x16) u64 {\n    return a.equal(b).to_bits();\n}\n",
-            ops,
             ["pcmpeqb", "pmovmskb"],
             ["%ymm"],
         );
     }
     let v3 = "@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\n";
-    kernel_asm(
+    ks.add(
         "f32x8 add",
         format("{}fn k(a: f32x8, b: f32x8) f32x8 {{\n    return a + b;\n}}\n", v3).as_str(),
-        ops,
         ["vaddps", "%ymm"],
         [],
     );
-    kernel_asm(
+    ks.add(
         "fma",
         format("{}fn k(a: f32x8, b: f32x8) f32x8 {{\n    return a.fma(b, a);\n}}\n", v3).as_str(),
-        ops,
         ["vfmadd"],
         [],
     );
     // Under run features with AVX-512BW (an `x86-64-v4` run) the comparison gives a mask register.
     let src = format("{}fn k(a: u8x32, b: u8x32) u64 {{\n    return a.equal(b).to_bits();\n}}\n", v3);
     if cf::has(se::run_features(true), cf::find_variant("Avx512bw") as usize) {
-        kernel_asm("u8x32 compare to a mask", src.as_str(), ops, ["vpcmpeqb", "%k", "kmov"], ["vpmovmskb"]);
+        ks.add("u8x32 compare to a mask", src.as_str(), ["vpcmpeqb", "%k", "kmov"], ["vpmovmskb"]);
     } else {
-        kernel_asm("u8x32 compare to a mask", src.as_str(), ops, ["vpcmpeqb", "vpmovmskb"], []);
+        ks.add("u8x32 compare to a mask", src.as_str(), ["vpcmpeqb", "vpmovmskb"], []);
     }
-    kernel_asm(
+    ks.add(
         "gather",
         format(
             "{}fn k(s: []f32, x: u32x8) f32x8 {{\n    return simd::gather(s, x, Mask::<8>::splat(true), f32x8::splat(0.0));\n}}\n",
             v3,
         ).as_str(),
-        ops,
         ["vgatherqps"],
         [],
     );
     let v4 = "@arch(x86_64)\n@target_feature(cpu::X86_64_V4)\n";
-    kernel_asm(
+    ks.add(
         "compress through a mask register",
         format(
             "{}fn k(m: u64, a: i32x16, b: i32x16) i32x16 {{\n    return simd::compress(Mask::<16>::from_bits_truncate(m), a, b);\n}}\n",
             v4,
         ).as_str(),
-        ops,
         ["vpcompressd", "%k"],
         [],
     );
-    kernel_asm(
+    ks.add(
         "compress_store through a masked store",
         format(
             "{}fn k(s: []mut i32, m: u64, a: i32x16) usize {{\n    return simd::compress_store(s, 0, Mask::<16>::from_bits_truncate(m), a);\n}}\n",
             v4,
         ).as_str(),
-        ops,
         ["vpcompressd", "vmovdqu32", "%k"],
         [],
     );
-    kernel_asm(
+    ks.add(
         "a stored comparison chooses through a mask register",
         format("{}fn k(a: i32x8, b: i32x8) i32x8 {{\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}}\n", v4).as_str(),
-        ops,
         ["vpcmpd", "%k"],
         [],
     );
     if base {
-        kernel_asm(
+        ks.add(
             "a baseline function beside an AVX2 one splits into SSE",
             "@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\nfn w(a: f32x8) f32x8 {\n    return a + a;\n}\nfn k(a: f32x8, b: f32x8) f32x8 {\n    return a + b + unsafe w(a);\n}\n",
-            ops,
             ["addps"],
             ["%ymm", "%zmm"],
         );
     }
-    kernel_asm(
+    ks.add(
         "a comparison into a mask register",
         format("{}fn k(a: i32x8, b: i32x8) u64 {{\n    return a.less_than(b).to_bits();\n}}\n", v4).as_str(),
-        ops,
         ["vpcmpd", "%k", "kmov"],
         ["vpmovmskb", "vmovmskps"],
     );
+    ks.run();
     kernel_asm(
         "512 bits with --simd-width=512",
         format("{}fn k(a: f32x16, b: f32x16) f32x16 {{\n    return a * b;\n}}\n", v4).as_str(),

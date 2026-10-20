@@ -130,8 +130,9 @@ extern "C" "sc_rt.h" {
     /// Bytes currently mapped for task stacks, guard pages included.
     @unsafe(safe)
     pub fn sc_rt_stack_bytes() usize;
-    /// Arm this thread to report a stack overflow instead of dying on a bare fault; `note_size` supplies
-    /// the size the message quotes. No-op on Windows builds other than x86-64 and on wasm.
+    /// Arm this thread to report a stack overflow instead of dying on a bare fault: every thread the
+    /// runtime starts calls it first. `note_size` supplies the task stack size the message quotes. No-op
+    /// on wasm.
     pub fn sc_rt_stack_guard_install() void;
     /// Record the usable stack size for the overflow report.
     pub fn sc_rt_stack_note_size(bytes: usize) void;

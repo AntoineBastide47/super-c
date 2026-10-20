@@ -362,7 +362,8 @@ __attribute__((constructor)) static void __sc_binary_stdio(void) {
 
 /* ASan's use-after-return check moves frames to a fake stack, where GCC (13.3 to 15) places an object
    aligned above 32 bytes 32 bytes off: an AVX-512 build faults on its aligned moves. The fake stack is
-   off by default; ASAN_OPTIONS still overrides it. */
+   off by default. An illegal instruction (a jump through a corrupt code address) gets ASan's report, with
+   the faulting pc and the stack, instead of a bare SIGILL. ASAN_OPTIONS still overrides both. */
 #if defined(__SANITIZE_ADDRESS__)
 #define SC_RT_ASAN 1
 #elif defined(__has_feature)
@@ -371,7 +372,7 @@ __attribute__((constructor)) static void __sc_binary_stdio(void) {
 #endif
 #endif
 #if defined(SC_RT_ASAN)
-const char *__asan_default_options(void) { return "detect_stack_use_after_return=0"; }
+const char *__asan_default_options(void) { return "detect_stack_use_after_return=0:handle_sigill=1"; }
 #endif
 /* Declared in ffi/sc_rt.h: ASan's redzones make frames larger, and the coroutine runtime sizes its default
    task stack by this. */
@@ -386,6 +387,354 @@ int sc_rt_asan(void) {
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */
 _Thread_local uint64_t __sc_task_id = 0;
 void __sc_set_task_id(uint64_t __id) { __sc_task_id = __id; }
+
+/* Stack overflow report. A stack that runs into its guard faults, and without a handler the process dies
+   on a bare SIGSEGV or SIGBUS. This prints which stack ran out and exits with 134, the status of the abort
+   a panic ends in (the test runner reads both as a panic). The main thread is armed before main; std's
+   runtime arms every thread it starts (`__sc_stack_arm`, ffi/sc_rt.c). On POSIX an armed thread runs the
+   handler on a signal stack of its own, since the faulting stack has no room left, and the base of that
+   signal stack records the bounds of the thread's own stack. The handler finds the record through
+   sigaltstack, so it reads no thread-local storage before it knows the thread is armed. A fault is an
+   overflow when its address is in the guard region below the running thread's own stack or, while the
+   thread runs on another stack (a coroutine's), within SC_STK_NEAR of the stack pointer. Any other fault
+   goes to the handler installed before this one, else to the default action: a wild pointer still
+   crashes as one, and under AddressSanitizer gets ASan's report. Windows raises EXCEPTION_STACK_OVERFLOW
+   for an exhausted stack only: a vectored handler reports it, and every armed thread keeps a stack
+   guarantee for the report to run in. Every function the handlers call is async-signal-safe. */
+#if !defined(__wasm__)
+static size_t __sc_stk_task = 0; /* the task stack size std's runtime hands out, for the message only */
+void __sc_stack_task_size(size_t __b) { __atomic_store_n(&__sc_stk_task, __b, __ATOMIC_RELAXED); }
+static size_t __sc_stk_put(char *__b, size_t __n, const char *__s) {
+  while (*__s != 0 && __n < 255) __b[__n++] = *__s++;
+  return __n;
+}
+static size_t __sc_stk_num(char *__b, size_t __n, uint64_t __v) {
+  char d[24];
+  int i = 23;
+  d[i] = 0;
+  do {
+    d[--i] = (char)('0' + __v % 10);
+    __v /= 10;
+  } while (__v != 0);
+  return __sc_stk_put(__b, __n, d + i);
+}
+/* The report, into a 256-byte `__b` so it reaches stderr in one write: `__task` when the running
+   coroutine's stack ran out, else the thread's own stack, of `__size` bytes when known. */
+static size_t __sc_stk_text(char *__b, int __task, int __main, uint64_t __size) {
+  size_t n = __sc_stk_put(__b, 0, "\nsuper-c: ");
+  const uint64_t id = __sc_task_id;
+  if (id != 0) {
+    n = __sc_stk_put(__b, n, "\133task "); /* '[' and ']' as escapes: this text's matchers must pair */
+    n = __sc_stk_num(__b, n, id);
+    n = __sc_stk_put(__b, n, "\135 ");
+  }
+  n = __sc_stk_put(__b, n, "stack overflow");
+  const size_t ts = __atomic_load_n(&__sc_stk_task, __ATOMIC_RELAXED);
+  if (__task && ts != 0) {
+    n = __sc_stk_put(__b, n, " (");
+    n = __sc_stk_num(__b, n, ts);
+    n = __sc_stk_put(__b, n, " byte task stack exhausted; raise it with runtime::set_stack_size)");
+  } else if (!__task) {
+    n = __sc_stk_put(__b, n, __main ? " in the main thread" : " in a thread");
+    if (__size != 0) {
+      n = __sc_stk_put(__b, n, " (");
+      n = __sc_stk_num(__b, n, __size);
+      n = __sc_stk_put(__b, n, " byte stack)");
+    }
+  }
+  return __sc_stk_put(__b, n, "\n");
+}
+#endif
+#if defined(_WIN32)
+/* kernel32, declared by hand as GetModuleHandleA is: <windows.h> is not included here. */
+void *AddVectoredExceptionHandler(unsigned long __first, long (*__h)(void *));
+int SetThreadStackGuarantee(unsigned long *__bytes);
+unsigned long GetCurrentThreadId(void);
+void GetCurrentThreadStackLimits(uintptr_t *__lo, uintptr_t *__hi);
+void *GetStdHandle(unsigned long __which);
+int WriteFile(void *__h, const void *__p, unsigned long __n, unsigned long *__done, void *__ov);
+void *GetCurrentProcess(void);
+int TerminateProcess(void *__p, unsigned __code);
+static unsigned long __sc_stk_main_id = 0;
+static void __sc_stk_report(int __task) {
+  char b[256];
+  uintptr_t lo = 0, hi = 0;
+  if (!__task) GetCurrentThreadStackLimits(&lo, &hi);
+  const size_t n = __sc_stk_text(b, __task, GetCurrentThreadId() == __sc_stk_main_id, hi - lo);
+  unsigned long w = 0;
+  WriteFile(GetStdHandle((unsigned long)-12), b, (unsigned long)n, &w, 0); /* STD_ERROR_HANDLE */
+  /* Not ExitProcess: its DLL detach and CRT teardown would run on the exhausted stack. */
+  TerminateProcess(GetCurrentProcess(), 134);
+}
+/* A coroutine stack ran out (ffi/sc_rt.c grows and guards those itself). */
+void __sc_stack_overflow(void) { __sc_stk_report(1); }
+/* `__ep` is the EXCEPTION_POINTERS; its first member points at the EXCEPTION_RECORD, whose first member
+   is the code. */
+static long __sc_stk_veh(void *__ep) {
+  if (**(const unsigned long *const *)__ep == 0xC00000FDul) __sc_stk_report(0); /* EXCEPTION_STACK_OVERFLOW */
+  return 0; /* EXCEPTION_CONTINUE_SEARCH */
+}
+/* The stack the report runs in once the guard is gone: the exception record alone, with its AVX-512
+   register state, fills the page the system leaves. */
+void *__sc_stack_arm(uintptr_t __lo, uintptr_t __hi) {
+  (void)__lo;
+  (void)__hi;
+  unsigned long g = 16384;
+  (void)SetThreadStackGuarantee(&g);
+  return 0;
+}
+void __sc_stack_disarm(void *__alt) { (void)__alt; }
+__attribute__((constructor)) static void __sc_stk_boot(void) {
+  __sc_stk_main_id = GetCurrentThreadId();
+  (void)AddVectoredExceptionHandler(0, __sc_stk_veh);
+  (void)__sc_stack_arm(0, 0);
+}
+#elif defined(__wasm__)
+/* No signals: the engine reports an exhausted call stack itself. */
+#else
+#include <signal.h>
+#include <stddef.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+#include <sys/ucontext.h>
+#endif
+#define SC_STK_MAGIC 0x31544b535f4353ull /* "SC_STK1" */
+/* A fault this close to the stack pointer is the stack running out: wider than any frame that stays
+   near its guard, far narrower than where a wild pointer lands. */
+#define SC_STK_NEAR ((uintptr_t)128 << 10)
+/* Around a stack's low end: its guard (glibc counted the guard into the stack, pages may be 64 KiB),
+   and how far below it a frame has already moved the stack pointer at the fault where no probe touches
+   the frame first (Linux). Smaller than a coroutine stack, so a coroutine stack mapped just below a
+   worker's own stack does not read as the worker's. */
+#define SC_STK_SLACK ((uintptr_t)64 << 10)
+typedef struct {
+  uint64_t magic;
+  uintptr_t lo, hi; /* the thread's own stack runs from lo up to hi; lo == 0 when unknown */
+  uint64_t main;
+} __sc_stk_rec;
+static int __sc_stk_on = 0; /* the handler is installed */
+static size_t __sc_stk_alt = 0; /* bytes of each signal stack */
+static struct sigaction __sc_stk_prev[2]; /* SIGSEGV's and SIGBUS's actions before this one */
+static _Thread_local void *__sc_stk_mine = 0; /* this thread's signal stack */
+/* Signal stacks of ended threads, for the next armed thread: a fresh mapping, its first touch and its
+   unmap cost about 2 us of each thread's start. Each slot is taken and filled with one atomic operation,
+   so the cache needs no lock; at most SC_STK_CACHE stacks wait in it, the rest are unmapped. */
+#define SC_STK_CACHE 64
+static void *__sc_stk_cache[SC_STK_CACHE];
+static void *__sc_stk_take(void) {
+  for (int i = 0; i < SC_STK_CACHE; i++) {
+    void *m = __atomic_exchange_n(&__sc_stk_cache[i], (void *)0, __ATOMIC_ACQUIRE);
+    if (m != 0) return m;
+  }
+  return 0;
+}
+static void __sc_stk_give(void *__m) {
+  for (int i = 0; i < SC_STK_CACHE; i++) {
+    void *none = 0;
+    if (__atomic_compare_exchange_n(&__sc_stk_cache[i], &none, __m, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+      return;
+  }
+  munmap(__m, __sc_stk_alt);
+}
+
+/* The calling thread's stack, when it can be known without reading /proc. The main thread's on Linux
+   from its size limit and its top, where the kernel copies the program's path (AT_EXECFN):
+   pthread_getattr_np would read /proc/self/maps and needs libpthread on older glibc. */
+static void __sc_stk_bounds(uintptr_t *__lo, uintptr_t *__hi, int __main) {
+#if defined(__APPLE__)
+  (void)__main;
+  pthread_t t = pthread_self();
+  *__hi = (uintptr_t)pthread_get_stackaddr_np(t);
+  *__lo = *__hi - (uintptr_t)pthread_get_stacksize_np(t);
+#elif defined(__linux__)
+  struct rlimit rl;
+  const char *top = __main ? (const char *)getauxval(AT_EXECFN) : 0;
+  if (top == 0 || getrlimit(RLIMIT_STACK, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return;
+  const uintptr_t pg = (uintptr_t)sysconf(_SC_PAGESIZE);
+  const uintptr_t hi = ((uintptr_t)top + strlen(top) + pg) & ~(pg - 1);
+  if ((uintptr_t)rl.rlim_cur >= hi) return;
+  *__hi = hi;
+  *__lo = hi - (uintptr_t)rl.rlim_cur;
+#else
+  (void)__lo;
+  (void)__hi;
+  (void)__main;
+#endif
+}
+
+/* The stack pointer at the fault, from the signal context; 0 where the layout is not known. */
+static uintptr_t __sc_stk_sp(void *__uc) {
+#if defined(__APPLE__)
+  /* Darwin hands the handler a context aligned to 8 bytes while its type asks for 16: read the two
+     fields as bytes, not through the misaligned types. */
+  const char *mc;
+  uint64_t sp;
+  memcpy(&mc, (const char *)__uc + offsetof(ucontext_t, uc_mcontext), sizeof mc);
+#if defined(__aarch64__)
+  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__sp), sizeof sp);
+#else
+  memcpy(&sp, mc + offsetof(struct __darwin_mcontext64, __ss.__rsp), sizeof sp);
+#endif
+  return (uintptr_t)sp;
+#elif defined(__linux__) && defined(__aarch64__)
+  return (uintptr_t)((ucontext_t *)__uc)->uc_mcontext.sp;
+#elif defined(__linux__) && defined(__x86_64__)
+  return (uintptr_t)((ucontext_t *)__uc)->uc_mcontext.gregs[REG_RSP];
+#else
+  (void)__uc;
+  return 0;
+#endif
+}
+
+static void __sc_stk_fault(int __sig, siginfo_t *__si, void *__uc) {
+  stack_t cur;
+  const __sc_stk_rec *r = 0;
+  if (sigaltstack(0, &cur) == 0 && (cur.ss_flags & SS_ONSTACK) != 0 && cur.ss_size >= sizeof *r &&
+      ((const __sc_stk_rec *)cur.ss_sp)->magic == SC_STK_MAGIC)
+    r = (const __sc_stk_rec *)cur.ss_sp;
+  const int code = __si->si_code;
+  const int fault = __sig == SIGSEGV ? code == SEGV_MAPERR || code == SEGV_ACCERR
+                                     : code == BUS_ADRALN || code == BUS_ADRERR || code == BUS_OBJERR;
+  if (r != 0 && fault) {
+    const uintptr_t a = (uintptr_t)__si->si_addr;
+    const uintptr_t sp = __sc_stk_sp(__uc);
+    const int near = sp != 0 && (a > sp ? a - sp : sp - a) < SC_STK_NEAR;
+    const uintptr_t floor = r->lo > SC_STK_SLACK ? r->lo - SC_STK_SLACK : 0;
+    const int own = r->lo != 0 && sp >= floor && sp < r->hi;
+    const int guard = r->lo != 0 && a >= floor && a < r->lo + SC_STK_SLACK;
+    /* On its own stack, the thread overflowed when the fault is at the guard, or near the stack pointer
+       below the top (the Linux main thread grows until another mapping stops it). */
+    if ((own || sp == 0) ? (guard || (own && near && a >= floor && a < r->hi)) : near) {
+      char b[256];
+      const int task = !own && sp != 0 && __sc_task_id != 0; /* off the thread's stack: a coroutine's */
+      const size_t n = __sc_stk_text(b, task, r->main != 0, own ? r->hi - r->lo : 0);
+      const ssize_t w = write(2, b, n);
+      (void)w;
+      _exit(134);
+    }
+  }
+  const struct sigaction *p = &__sc_stk_prev[__sig == SIGSEGV ? 0 : 1];
+  if ((p->sa_flags & SA_SIGINFO) != 0 && p->sa_sigaction != 0) {
+    p->sa_sigaction(__sig, __si, __uc);
+    return;
+  }
+  if ((p->sa_flags & SA_SIGINFO) == 0 && p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
+    p->sa_handler(__sig);
+    return;
+  }
+  struct sigaction d;
+  memset(&d, 0, sizeof d);
+  d.sa_handler = SIG_DFL;
+  sigemptyset(&d.sa_mask);
+  sigaction(__sig, &d, 0);
+  raise(__sig);
+}
+
+static void *__sc_stk_arm(uintptr_t __lo, uintptr_t __hi, uint64_t __main) {
+  /* Reading the thread-local first also has macOS allocate this thread's block here, never in the
+     handler (which reads __sc_task_id). */
+  if (__sc_stk_mine != 0 || !__atomic_load_n(&__sc_stk_on, __ATOMIC_ACQUIRE)) return 0;
+  const size_t sz = __sc_stk_alt;
+  void *m = __sc_stk_take();
+  if (m == 0) m = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (m == MAP_FAILED) return 0;
+  if (__lo == 0) __sc_stk_bounds(&__lo, &__hi, __main != 0);
+  __sc_stk_rec *r = (__sc_stk_rec *)m;
+  r->magic = SC_STK_MAGIC;
+  r->lo = __lo;
+  r->hi = __hi;
+  r->main = __main;
+  stack_t ss;
+  memset(&ss, 0, sizeof ss);
+  ss.ss_sp = m;
+  ss.ss_size = sz;
+  stack_t old;
+  if (sigaltstack(&ss, &old) != 0) {
+    __sc_stk_give(m);
+    return 0;
+  }
+#if defined(SC_RT_ASAN)
+  /* ASan gives each thread a signal stack and unmaps the one in place when the thread ends: this one
+     replaces ASan's, which nothing else frees. */
+  if ((old.ss_flags & SS_DISABLE) == 0 && old.ss_sp != 0) munmap(old.ss_sp, old.ss_size);
+#else
+  (void)old;
+#endif
+  __sc_stk_mine = m;
+  return m;
+}
+/* Arm the calling thread, its stack from __lo up to __hi when the caller knows it (0, 0 otherwise).
+   Returns the signal stack to release with `__sc_stack_disarm` when the thread ends, or 0 when nothing
+   was armed: no handler, already armed, or no memory. */
+void *__sc_stack_arm(uintptr_t __lo, uintptr_t __hi) { return __sc_stk_arm(__lo, __hi, 0); }
+void __sc_stack_disarm(void *__alt) {
+#if defined(SC_RT_ASAN)
+  /* ASan's end of the thread unmaps the signal stack in place: it stays, and the cache never holds one. */
+  (void)__alt;
+#else
+  stack_t ss;
+  memset(&ss, 0, sizeof ss);
+  ss.ss_flags = SS_DISABLE;
+  ss.ss_size = __sc_stk_alt; /* Darwin checks the size even when disabling */
+  sigaltstack(&ss, 0);
+  __sc_stk_give(__alt);
+#endif
+}
+/* An illegal instruction is a jump through a corrupt code address, or code for a CPU feature this one
+   lacks: the report names the address, then the handler installed before, else the default action, ends
+   the process (its status still says SIGILL). Async-signal-safe, as the overflow handler. */
+static struct sigaction __sc_ill_prev;
+static void __sc_ill_fault(int __sig, siginfo_t *__si, void *__uc) {
+  char b[64];
+  size_t n = __sc_stk_put(b, 0, "\nsuper-c: illegal instruction at 0x");
+  const uintptr_t a = (uintptr_t)__si->si_addr;
+  for (int s = (int)sizeof a * 8 - 4; s >= 0; s -= 4) b[n++] = "0123456789abcdef"[(a >> s) & 15];
+  b[n++] = '\n';
+  const ssize_t w = write(2, b, n);
+  (void)w;
+  if ((__sc_ill_prev.sa_flags & SA_SIGINFO) != 0 && __sc_ill_prev.sa_sigaction != 0) {
+    __sc_ill_prev.sa_sigaction(__sig, __si, __uc);
+    return;
+  }
+  if ((__sc_ill_prev.sa_flags & SA_SIGINFO) == 0 && __sc_ill_prev.sa_handler != SIG_DFL && __sc_ill_prev.sa_handler != SIG_IGN) {
+    __sc_ill_prev.sa_handler(__sig);
+    return;
+  }
+  struct sigaction d;
+  memset(&d, 0, sizeof d);
+  d.sa_handler = SIG_DFL;
+  sigemptyset(&d.sa_mask);
+  sigaction(__sig, &d, 0);
+  raise(__sig);
+}
+__attribute__((constructor)) static void __sc_stk_boot(void) {
+  struct sigaction ill;
+  memset(&ill, 0, sizeof ill);
+  ill.sa_sigaction = __sc_ill_fault;
+  ill.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&ill.sa_mask);
+  (void)sigaction(SIGILL, &ill, &__sc_ill_prev);
+  const size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+  const size_t want = (size_t)SIGSTKSZ < 65536 ? 65536 : (size_t)SIGSTKSZ;
+  __sc_stk_alt = (want + pg - 1) & ~(pg - 1);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = __sc_stk_fault;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  if (sigaction(SIGSEGV, &sa, &__sc_stk_prev[0]) != 0) return;
+#if defined(__APPLE__)
+  (void)sigaction(SIGBUS, &sa, &__sc_stk_prev[1]); /* macOS reports a guard-page hit as SIGBUS */
+#endif
+  __atomic_store_n(&__sc_stk_on, 1, __ATOMIC_RELEASE);
+  (void)__sc_stk_arm(0, 0, 1);
+}
+#endif
 
 /* Preemption hook (see super_rt.h). Inert until a scheduler installs it. */
 void (*__sc_pre_hook)(void) = 0;

@@ -215,7 +215,8 @@ suite, and a filter no test matches is an error. The runner then runs only the m
 tests of those files. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. Run directly, the runner takes `--filter=S`,
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
-and exits 2 on any other argument. Every compiler the CLI harnesses
+and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
+of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run shares the global object cache: `super-c
 test` exports its absolute root as `SC_CACHE_DIR`, so a unit any earlier build, test or suite
 run compiled is not compiled again. A test that checks cache behavior sets its own

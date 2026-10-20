@@ -212,6 +212,39 @@ fn detach_failure_is_fatal() {
     let _h = h;
 }
 
+fn deep_frames(n: i64) i64 {
+    let mut pad = Array::<i64, 512>::new(); // 4 KiB per frame
+    pad[0] = n;
+    if n <= 0 {
+        return pad[0];
+    }
+    return deep_frames(n - 1) + pad[0];
+}
+
+// A spawned thread that runs out of stack ends the process through the overflow report, which the
+// runner counts as a panic, never as a bare fault.
+@test(should_panic)
+fn thread_stack_overflow_ends_as_a_panic() {
+    let depth = 100000 + platform::ncpu() as i64; // 400 MiB of frames, and not const-foldable
+    let h = thread::spawn(
+        fn() i64 {
+            return deep_frames(depth);
+        },
+    );
+    let _ = h.join();
+}
+
+// A blocking-pool thread runs the call's code on its own stack, armed the same way.
+@test(should_panic)
+fn blocking_call_stack_overflow_ends_as_a_panic() {
+    let depth = 100000 + platform::ncpu() as i64;
+    let _ = blocking::call(
+        fn() i64 {
+            return deep_frames(depth);
+        },
+    );
+}
+
 @test(should_panic)
 fn task_stack_map_failure_is_fatal() {
     unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_STACK_MAP, 1);

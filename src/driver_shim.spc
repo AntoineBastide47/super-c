@@ -103,6 +103,9 @@ extern "C" "driver_shim.h" {
     /// Non-blocking `sc_wait_any`: index of an already-exited child, or -1 when none has exited yet.
     /// Never reaps a pid outside `pids`, so it is safe while the parallel emit workers are alive.
     pub fn sc_try_wait(pids: *const i64, n: i32, code: *mut i32) i32;
+    /// End child `pid` (an `sc_spawn_argv` id) at once, as an outside kill does; 0 when sent, -1 on
+    /// error. The caller still waits for it.
+    pub fn sc_kill(pid: i64) i32;
     /// Wait for ONE specific child; its exit code via `code`. 0 on success, -1 on error/Windows.
     pub fn sc_waitpid(pid: i64, code: *mut i32) i32;
     /// rename() that also replaces an existing destination on Windows, including one that is a RUNNING

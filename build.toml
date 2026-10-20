@@ -11,7 +11,7 @@ run = [
 [command.profile]
 run = [
     "./super-c bench --no-run",
-    "samply record --rate 1000 build/bench-bin",
+    "samply record --rate 1000 build/bench-bin --in-process",
 ]
 
 [command.gate]

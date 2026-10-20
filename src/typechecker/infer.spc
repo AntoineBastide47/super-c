@@ -354,9 +354,13 @@ extend Solver {
         return slot;
     }
 
-    /// The session slot mapped for generic parameter `d`, or -1. Linear over the active session.
+    /// The session slot mapped for generic parameter `d`, or -1. Linear over the active session, the
+    /// newest mapping first: a probe's mapping shadows the session's mapping of the same parameter
+    /// (a call session's map stays until the next call starts one).
     pub const fn slot_of(self: &Self, d: DefId) i32 {
-        for i in self.sess.pd as usize..self.s_pd.len() {
+        let mut i = self.s_pd.len();
+        while i > self.sess.pd as usize {
+            i -= 1;
             if self.s_pd[i].module == d.module && self.s_pd[i].node == d.node {
                 return (i - self.sess.pd as usize) as i32;
             }

@@ -315,7 +315,7 @@ run = [
 [command.profile]           # a command's `env` entries are set in the process environment, never as a shell prefix
 run = [
     "./super-c bench --no-run",
-    "samply record --rate 1000 build/bench-bin",
+    "samply record --rate 1000 build/bench-bin --in-process",
 ]
 
 [profile.fast]               # a profile: optimization level, flags, linker arguments, strip, LTO mode
@@ -779,6 +779,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_STD_DIR` | The std directory, in place of the `std/` found beside the compiler binary (`exe_std_dir` in `src/main.spc`). `super-c test` sets it for the compiler under test, which `--out-dir` may place outside the project, when the project holds `std/core.spc` and the variable is unset (`src/build_system/build.spc`) |
 | `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
+| `SC_JOBSERVER` | The process-tree jobserver the first compiler of a tree makes, or a test runner started without one (`--jobs` slots), and every process it starts joins: `<slots>,<fd>` on POSIX (the inherited descriptor of an unlinked slot file), `<slots>,<path>` on Windows (a temporary file deleted with its last handle). A process holds a slot as a byte-range lock on one byte (`fcntl` record lock, `LockFileEx`), which the system drops when the process ends by any exit, abort or kill, so a killed process never takes slots with it. One more slot is implicit to each process |
 | `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); `0` compiles every unit alone, as a large program does (tests of per-unit objects and staleness set it) |
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |

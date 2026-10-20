@@ -91,13 +91,16 @@ void sc_rt_stack_free(void *usable, size_t size);
    resident set (untouched pages) show them; this is the one place that does. */
 size_t sc_rt_stack_bytes(void);
 
-/* Turn a coroutine stack overflow into a message instead of a bare SIGSEGV/SIGBUS. `install` arms the
-   calling thread: on POSIX a signal stack of its own (the faulting stack is by definition exhausted, so the
-   handler cannot run on it, and the thread's exit releases it) and, once per process, the handler itself;
-   on Windows x86-64 a vectored exception handler that also grows coroutine stacks. The handler decides
-   from the faulting stack pointer, so nothing is tracked per switch; `note_size` only supplies the number
-   quoted in the message. Anything not near the stack is left to the default handler -- a wild pointer must
-   still look like the crash it is. `install` is a no-op on other Windows builds and on wasm. */
+/* Report a stack overflow on the calling thread, its own stack or a coroutine's, instead of dying on a bare
+   SIGSEGV/SIGBUS. The handler and the report are the program's runtime (super_rt.c), which arms the main
+   thread before main; every thread the substrate's users start calls `install` first. On POSIX that gives
+   the thread a signal stack of its own (the faulting stack is exhausted, so the handler cannot run on it;
+   the thread's exit releases it) and records its stack bounds; on Windows a stack guarantee for the report,
+   and on x86-64 a vectored exception handler that also grows coroutine stacks. A fault counts as an
+   overflow at the guard of the thread's own stack or, on a coroutine stack, near the stack pointer, so
+   nothing is tracked per switch; anything else goes on to the previous handler or the default action -- a
+   wild pointer must still look like the crash it is. `note_size` only supplies the task stack size quoted
+   in the message. `install` is a no-op on wasm. */
 void sc_rt_stack_guard_install(void);
 void sc_rt_stack_note_size(size_t bytes);
 /* 1 in a program built with AddressSanitizer, whose frames carry redzones; defined by the generated

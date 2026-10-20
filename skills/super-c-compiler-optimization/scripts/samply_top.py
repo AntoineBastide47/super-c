@@ -4,12 +4,14 @@
 Usage:
     samply record --save-only --unstable-presymbolicate -o run1.profile.json.gz <cmd>
     ... repeat for run2..runN ...
-    python3 samply_top.py run*.profile.json.gz
+    python3 samply_top.py [--process=NAME] run*.profile.json.gz
 
 Each profile needs its `<name>.syms.json` sidecar (written by --unstable-presymbolicate)
 next to it; without the sidecar, native frames print as hex addresses. Functions are
 ranked by how many runs they appear in, then by total samples, so a one-run fluke sorts
-below a hotspot that shows up everywhere.
+below a hotspot that shows up everywhere. samply also records the child processes of the
+command (the C compiler and linker of a build); `--process=NAME` counts only the threads of
+processes whose name starts with NAME.
 
 Exits non-zero when no samples were read: an empty aggregation is a broken capture, not
 a quiet program.
@@ -60,13 +62,15 @@ def resolve(strings, libsyms, breakpad_id: str, addr: int):
     return strings[sym]
 
 
-def profile_counts(path: str) -> collections.Counter:
+def profile_counts(path: str, process: str) -> collections.Counter:
     with gzip.open(path) as f:
         prof = json.load(f)
     strings, libsyms = load_sidecar(path)
     plibs = prof["libs"]
     counts = collections.Counter()
     for th in prof["threads"]:
+        if not (th.get("processName") or "").startswith(process):
+            continue
         ft, fn, rt = th["frameTable"], th["funcTable"], th["resourceTable"]
         tstr = th["stringArray"]
         for s in th["samples"]["stack"]:
@@ -88,10 +92,13 @@ def profile_counts(path: str) -> collections.Counter:
 
 def main() -> int:
     paths = sys.argv[1:]
+    process = ""
+    if paths and paths[0].startswith("--process="):
+        process = paths.pop(0)[len("--process="):]
     if not paths:
         print(__doc__, file=sys.stderr)
         return 2
-    per_run = [profile_counts(p) for p in paths]
+    per_run = [profile_counts(p, process) for p in paths]
     total_samples = sum(sum(c.values()) for c in per_run)
     if total_samples == 0:
         print("error: zero samples across all profiles - capture is broken", file=sys.stderr)

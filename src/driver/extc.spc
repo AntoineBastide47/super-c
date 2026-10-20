@@ -75,7 +75,7 @@ fn ext_c_wrap(
     let mut inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
     let wrote = unsafe stdio::fprintf(
         f,
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 3\n#include \"%s\"\n".ptr() as *const char,
+        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 4\n#include \"%s\"\n".ptr() as *const char,
         inc.cstr(),
     ) >= 0;
     if unsafe stdio::fclose(f) != 0 || !wrote {

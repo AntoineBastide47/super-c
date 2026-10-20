@@ -2352,6 +2352,24 @@ fn main() i32 { return 0; }
     assert_eq(p.run_bin(), 0);
 }
 
+// A runner started without an inherited jobserver makes its own of `--jobs` slots, one implicit, as
+// `super-c test` does: its tests and the processes they start share that budget.
+@test
+fn a_runner_run_directly_makes_its_own_jobserver() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import stdlib;\n@test\nfn names_the_jobserver() {\n    let v = stdlib::getenv(\"SC_JOBSERVER\");\n    if v != null {\n        println(\"jobserver {}\", unsafe str::from_cstr(v));\n    }\n}\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    assert(p.compile_flags("--test --quiet", "main.spc").ok(), "the runner builds and passes");
+    let mut runner = String::new();
+    runner.format_into("{}/build/debug/raw/__tests{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    // An empty SC_JOBSERVER names no jobserver, as an unset one does. `--no-fork` shows the test's output.
+    let r = cli::exe_env_in(runner.as_str(), p.dir(), "SC_JOBSERVER", "", "--jobs=3 --no-fork");
+    assert(r.ok(), "the runner passes");
+    assert(r.out_shows("jobserver 2,"), "the runner's jobserver has two slots beside the implicit one");
+}
+
 // A should_panic test passes only on a panic: a crash, or a nonzero exit such as a leak report's 23, fails it.
 @test
 fn should_panic_needs_a_panic() {
@@ -4127,6 +4145,111 @@ fn main() i32 {
     let wild = p.run_bin_env("");
     assert(wild.exit != 0, "a wild write still crashes");
     assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
+}
+
+// A thread's own stack reports its overflow too, the main thread's (armed before main) and a spawned
+// one's (armed by the runtime): the message names the stack and the exit status is 134, which the test
+// runner reads as a panic. A null write on the main thread and a wild write on a spawned thread are
+// crashes, not overflows, and must not say otherwise.
+@test
+fn thread_stack_overflow_is_reported() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import stdlib;
+import std::parallel::thread as thread;
+import std::parallel::platform as platform;
+
+fn deep(n: i64) i64 {
+    let mut pad = Array::<i64, 512>::new(); // 4 KiB per frame
+    pad[0] = n;
+    if n <= 0 {
+        return pad[0];
+    }
+    return deep(n - 1) + pad[0];
+}
+
+@arch(aarch64)
+fn illegal() {
+    unsafe { asm("udf #0"); }
+}
+
+@arch(x86_64)
+fn illegal() {
+    unsafe { asm("ud2"); }
+}
+
+@arch(wasm32)
+fn illegal() {}
+
+fn mode() str<'static> {
+    let m = stdlib::getenv("SO_MODE");
+    if m == null {
+        return "";
+    }
+    return unsafe str::from_cstr(m);
+}
+
+fn main() i32 {
+    let depth = 100000 + platform::ncpu() as i64; // 400 MiB of frames, and not const-foldable
+    if mode() == "main" {
+        return deep(depth) as i32;
+    }
+    if mode() == "thread" {
+        let h = thread::spawn(
+            fn() i64 {
+                return deep(depth);
+            },
+        );
+        return h.join() as i32;
+    }
+    if mode() == "ill" {
+        illegal();
+        return 0;
+    }
+    if mode() == "null" {
+        let bad = (platform::ncpu() - platform::ncpu()) as *mut i64;
+        unsafe *bad = 1;
+        return 0;
+    }
+    if mode() == "wild" {
+        let h = thread::spawn(
+            fn() i64 {
+                let bad = (4096 + platform::ncpu()) as *mut i64;
+                unsafe *bad = 1;
+                return 0;
+            },
+        );
+        return h.join() as i32;
+    }
+    return 3;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the program compiles");
+    let cc = p.cc_build("");
+    assert(cc.ok(), "the emitted C compiles and links");
+    let main_over = p.run_bin_env("SO_MODE=main ");
+    assert_eq(main_over.exit, 134);
+    assert(main_over.out_shows("stack overflow in the main thread"), "the main thread's overflow says so");
+    let thread_over = p.run_bin_env("SO_MODE=thread ");
+    assert_eq(thread_over.exit, 134);
+    assert(thread_over.out_shows("stack overflow in a thread"), "a spawned thread's overflow says so");
+    let null_write = p.run_bin_env("SO_MODE=null ");
+    assert(null_write.exit != 0, "a null write still crashes");
+    assert(null_write.exit != 134, "with its own status");
+    assert(!null_write.out_has("stack overflow"), "and is NOT reported as a stack overflow");
+    let wild = p.run_bin_env("SO_MODE=wild ");
+    assert(wild.exit != 0, "a wild write on a thread still crashes");
+    assert(wild.exit != 134, "with its own status");
+    assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
+    if !cli::on_windows() && !cli::on_wasm() {
+        let ill = p.run_bin_env("SO_MODE=ill ");
+        assert(ill.exit != 0, "an illegal instruction still ends the process");
+        assert(ill.exit != 134, "by its signal, not as an overflow");
+        assert(ill.out_shows("super-c: illegal instruction at 0x"), "and names the address");
+    }
 }
 
 // Diagnostics: every task carries a process-unique id, the runtime accounts for tasks created
@@ -11619,4 +11742,56 @@ fn a_build_waits_for_the_holder_of_its_tree() {
     assert(told, "the second build says it waits for the tree");
     assert(still, "the second build waits while the tree is held");
     assert(unsafe shim::sc_waitpid(pid, &mut code) == 0 && code == 0, "the second build finishes once the tree is free");
+}
+
+// A process killed while it holds jobserver slots gives them back: the system drops its slot locks at
+// any end, a kill included. A build of a tree this test holds claims every free slot of the test's own
+// four-slot jobserver, then waits; killed there, its slots are free for the next claim. (Under
+// --test-no-fork the process keeps this jobserver for the later tests: a smaller budget, never a wrong
+// result.)
+@test
+fn a_killed_build_gives_its_jobserver_slots_back() {
+    if cli::on_wasm() {
+        return; // WASI has no file locks and no jobserver
+    }
+    let _js = cli::set_env("SC_JOBSERVER", "");
+    assert(unsafe shim::sc_jobserver_init(4) == 1, "the test makes a jobserver of its own");
+    // A manifest build takes its tree's lock with every slot it claimed (a serial script build hands
+    // its slots back first).
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_env_in(root, "SC_LEAK_CHECK", "fatal", "build").ok(), "the tree builds");
+    let mut lock = format("{}/build/debug/.lock", root);
+    let h = unsafe shim::sc_tree_lock(lock.cstr(), 0);
+    assert(h >= 0, "the test takes the tree's lock");
+    let mut log = format("{}/build.log", root);
+    let mut sc = String::from_str(cli::superc_path());
+    let mut build = String::from_str("build");
+    let mut jobs = String::from_str("--jobs=4");
+    let mut ptrs = Vector::<usize>::new();
+    ptrs.push(sc.cstr() as usize);
+    ptrs.push(build.cstr() as usize);
+    ptrs.push(jobs.cstr() as usize);
+    ptrs.push(0);
+    let pid = unsafe shim::sc_spawn_argv_in(ptrs.as_ptr() as *const *const char, log.cstr(), p.rootp());
+    assert(pid > 0, "the build starts");
+    let mut told = false;
+    for _ in 0..600 {
+        if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
+            told = true;
+            break;
+        }
+        ptime::sleep(ptime::Duration::from_millis(50));
+    }
+    assert(told, "the build waits for the tree");
+    assert_eq(unsafe shim::sc_jobserver_claim(4), 1);
+    unsafe shim::sc_jobserver_release_claim();
+    assert(unsafe shim::sc_kill(pid) == 0, "the build is killed");
+    let mut code: i32 = 0;
+    let _ = unsafe shim::sc_waitpid(pid, &mut code);
+    unsafe shim::sc_tree_unlock(h);
+    assert_eq(unsafe shim::sc_jobserver_claim(4), 4);
+    unsafe shim::sc_jobserver_release_claim();
 }
