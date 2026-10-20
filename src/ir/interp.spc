@@ -118,14 +118,21 @@ pub struct FxNo<'a> {
 
 pub const IT_MAX_FRAMES: u32 = 48;
 // Referenced constants evaluated inside each other: the evaluation that reaches IT_ITEM_NEST
-// evaluates its remaining dependencies iteratively (`prefetch_items`). Only a constant it cannot
-// find in a lowered initializer (one a lowering folds) still nests, up to IT_ITEM_MAX_NEST. Each
-// level takes 2 to 4 KiB of native stack in a release build: far below a 1 MiB thread stack.
+// evaluates its remaining dependencies iteratively (`prefetch_items`). A constant it cannot find
+// in a lowered initializer (reached through a function body or a lowering's fold), and a fold a
+// lowering asks for, nest at most IT_DEFER_DEPTH native levels (constants, folds, instances and
+// calls) above the outermost nested evaluation, which evaluates a deeper one first
+// (`defer_retry`). Each has its own IT_MAX_FRAMES calls, and a generic constant's instances nest up
+// to IT_ITEM_MAX_NEST inside one of them. A constant level takes 2 to 4 KiB of native stack in a
+// release build, a call level less: far below a 1 MiB thread stack.
 const IT_ITEM_NEST: usize = 16;
-const IT_ITEM_MAX_NEST: usize = 64;
-pub const IT_MAX_OBJS: usize = 65536;
+const IT_DEFER_DEPTH: u32 = 64;
+const IT_ITEM_MAX_NEST: u32 = 64;
 pub const IT_DEFAULT_STEPS: u32 = 2097152; // 1 << 21
-pub const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory
+// The steps of one always-panics probe (`lint_body`): 1 << 16, below the 80k to 134k steps the
+// object count limit the memory budget replaced gave the heaviest probes of a vector-math build.
+const IT_PROBE_STEPS: u32 = 65536;
+pub const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory (96 MiB)
 const IT_RETAIN_SLOTS: u64 = 262144; // 1 << 18 slots (6 MiB) of dead-object storage kept between evaluations
 const CLONE_MAX_DEPTH: i32 = 32;
 
@@ -290,6 +297,12 @@ extend Interp {
         self.item_dead.clear();
         self.item_dead_frames.clear();
         self.ememo.clear();
+        // an index list's key holds its substitution's type ids
+        self.lane_memo.clear();
+        self.lane_rows.truncate(0);
+        self.lane_envs.truncate(0);
+        self.lane_pool.truncate(0);
+        self.lane_fail.clear();
         // A binding-free body's key names only its declaration: those slots stay reachable (their
         // syntax may be released before the next evaluation); a bound one hashes type ids and is
         // re-lowered on demand.
@@ -329,8 +342,21 @@ const fn obj_meta(dst: &mut IObj, src: &IObj) {
     dst.at = src.at;
 }
 
-// Members ordered by alignment: 88 bytes after the vector (87 of members, one tail byte), and no padding
+// Members ordered by alignment: 96 bytes after the vector (90 of members, six tail bytes), and no padding
 // but the vector's round-up to 8 (on a 32-bit target).
+//
+// Storage lifetime: a call's frame and every object allocated while it runs belong to its region
+// (`lvl`, the call depth); level 0 is evaluation-wide storage (constant frames, heap blocks, literal
+// bytes, item cells). An object stored into an object of a lower level, or returned, moves to that
+// level; the rest is released when the call returns. A region object that a pointer outside the
+// region names (`esc`) stays as a dead header: a later access through the pointer traps.
+/// The extent of an engine's callee cache (`Interp::body_mark`): `release_pass` frees what was
+/// cached past it.
+pub struct BodyMark {
+    pub slots: usize,
+    pub boxes: usize,
+}
+
 pub struct IObj {
     pub slots: Vector<IVal>,
     pub bytes: u64, // heap blocks: the byte size malloc gave out
@@ -349,8 +375,17 @@ pub struct IObj {
     pub item: u8, // item cell (`item_cell`): dm/dn name the item; 1: a constant, slot 0 holds its value; 2: a `static mut`
     pub frame: u8, // a call frame: slots hold the locals
     pub nargs: u8,
+    pub lvl: u8, // the region that releases it (0: the evaluation's end)
+    pub esc: u8, // a pointer to it was stored where it outlives its region
+    pub unchg: u8, // kept storage of a referenced constant, outside the budget (`iso_leave`)
 }
-static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 7) / 8 * 8 + 88, "IObj keeps its members in alignment order");
+static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 7) / 8 * 8 + 96, "IObj keeps its members in alignment order");
+
+// The budget charge of one object's header, in IVal slots.
+const OBJ_SLOTS: u64 = (sizeof(IObj) + sizeof(IVal) - 1) as u64 / sizeof(IVal) as u64;
+const DEAD_FREED: u8 = 1; // freed heap block, or a slot of the free list
+const DEAD_RETURNED: u8 = 2; // storage of a returned call that a pointer outside it names
+const MAX_OBJ_ID: usize = 0xFFFFFFFE; // object ids are 32-bit (IV_PTR packs them)
 
 const fn none() IVal {
     return IVal { kind: IV_NONE, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 };
@@ -746,6 +781,9 @@ struct DeclView {
     pub kind: u8,
 }
 
+// The most call memo rows whose table an evaluation's reset keeps; a larger table is dropped.
+const MEMO_KEEP_ROWS: usize = 4096;
+
 /// One memoized scalar call: the callee, its arguments (`n` values at `a0` of the memo's pool)
 /// and its result.
 struct MemoRow {
@@ -757,7 +795,10 @@ struct MemoRow {
 }
 
 /// Scalar call results keyed by callee and exact argument values. The hash only selects a row; a
-/// hit compares every stored input, so a hash collision is a miss, never a wrong value.
+/// hit compares every stored input, so a hash collision is a miss, never a wrong value. The memo
+/// lives for one evaluation (`eval_reset`, `iso_enter`): a hit skips the steps and memory of the
+/// call, so a memo shared with another constant's evaluation would make one constant's budget
+/// depend on which constants ran before it.
 pub struct CallMemo {
     pub ix: Map<u64, u32>,
     pub rows: Vector<MemoRow>,
@@ -784,19 +825,96 @@ extend MKey as Eq {
     }
 }
 
+// The kinds of a nested evaluation an attempt stops at (`DTask`): a referenced constant, a fold
+// (`eval_g`), an index list (`eval_lanes`).
+const DT_ITEM: u8 = 0;
+const DT_FOLD: u8 = 1;
+const DT_LANES: u8 = 2;
+
+// A nested evaluation an attempt stopped at (`defer_deep`), identified by `id`: the kind in bits
+// 62 and 63 over a constant's item key (module << 32 | node), a fold's `ememo` key (the same
+// form), or an index list's row in `lane_rows`.
+pub struct DTask {
+    pub kind: u8,
+    pub id: u64,
+    pub m: ModuleId,
+    pub node: NodeId,
+}
+
+// The exact identity of a `DTask` of `kind` keyed by `key`: a module id is 16 bits, so a key
+// never reaches bit 62.
+const fn dtask_id(kind: u8, key: u64) u64 {
+    return kind as u64 << 62 | key;
+}
+
+// The whole key of a `body_of` slot: module << 32 | fn node, and its bindings
+// (`body_binds[b0..b0 + bn]`).
+pub struct BodyKey {
+    pub def: u64,
+    pub b0: u32,
+    pub bn: u32,
+}
+
+/// An index list `eval_lanes` evaluated: its whole key (module, node, the substitution at
+/// `lane_envs[e0..e0 + en]`) and, once it evaluated, its lanes (`lane_pool[v0..v0 + vn]`).
+pub struct LaneRow {
+    pub m: ModuleId,
+    pub id: NodeId,
+    pub e0: u32,
+    pub en: u32,
+    pub v0: u32,
+    pub vn: u32,
+    pub ok: bool,
+}
+
+// The outermost nested evaluation's state across its attempts (`defer_enter`): the trap before it,
+// and the stopped evaluations already settled.
+struct DSave {
+    pub trap: str<'static>,
+    pub kind: u8,
+    pub steps: u32,
+    pub nframes: u8,
+    pub span: tok::Span,
+    pub tcf: bool,
+    pub done: Set<u64>,
+}
+
+// The budgets and the call memo of the evaluation an isolated one (`iso_enter`) interrupts.
+struct Iso {
+    pub steps: u32,
+    pub nframes: u32,
+    pub fstack: [DefId; 48],
+    pub lvl: u8,
+    pub live: u64,
+    pub a0: usize,
+    pub inst_n: u32,
+    pub untrapped: bool, // no trap was set: one the isolated evaluation sets is its own
+    pub tcf: bool,
+    pub memo: CallMemo,
+}
+
 pub struct Interp {
     pub pkg: *const loader::Package,
     pub steps: u32,
     pub max_steps: u32,
     pub max_slots: u64,
     pub objs: Vector<IObj>,
-    pub objs_live: usize,
-    pub live_slots: u64,
+    pub objs_live: usize, // ids in use: live, dead, or on `free_ids`
+    pub live_slots: u64, // the budget's charge: slots and headers (`OBJ_SLOTS`) of every charged object
+    pub free_ids: Vector<u32>, // released ids `obj_new` reuses
+    pub alog: Vector<u32>, // every allocated id not on `free_ids`, in allocation order (regions and rollbacks scan its tail)
+    pub lvl: u8, // the region new objects belong to
+    pub ndepth: u32, // native nesting levels: constants, instances and calls being evaluated
+    pub inst_n: u32, // generic constant instances nested inside the current constant's evaluation
+    pub defer_base: i64, // `ndepth` at the outermost nested evaluation (`item_defer`); -1 = none
+    pub deferred: bool, // the current attempt stopped at `defer_task`, an evaluation nested too deep
+    pub defer_task: DTask,
+    pub fold_fail: Set<u64>, // this evaluation's nested folds that failed (`ememo` keys)
+    pub lane_fail: Map<u64, u8>, // this evaluation's nested index lists that failed (`lane_rows` rows): their status
+    pub esc_work: Vector<u32>, // `esc_to` scratch
+    pub esc_ptrs: Vector<u32>,
     pub slot_cap: u64, // slot capacity the object store holds, live and retained
     pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
-    // The lowest object id a reference (IV_OBJ, IV_PTR) was stored into since the running call began
-    // (`note_wr`); `call` reclaims the call's objects only when it is past them. u32::MAX: none.
-    pub wr_min: u32,
     pub failed: bool,
     // `read_place`/`write_place` admit a scalar union member other than the active one (`pun_ok`);
     // `resolve_place` then reports the member asked for (`pun_slot`, -1 for none) and resolves to the
@@ -820,6 +938,8 @@ pub struct Interp {
     pub body_keys: Vector<u64>, // the body_of key hash of each slot
     pub body_plain: Vector<u64>, // module << 32 | fn node of a binding-free slot, else PLAIN_NONE
     pub body_ix: Map<u64, u64>, // bkey -> body_ptr slot (the linear key scan was O(n^2) over a sweep)
+    pub body_def: Vector<BodyKey>, // the whole key of each slot: a hit of `body_ix` compares it
+    pub body_binds: Vector<ISub>, // the `BodyKey` bindings
     /// Per body_keys slot, where the lowering lives: `BODY_KEPT | k` = slot k of the keep view,
     /// otherwise an index into `bodies`.
     pub body_slot: Vector<u64>,
@@ -865,8 +985,10 @@ pub struct Interp {
     pub subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
     pub sub_base: usize,
     pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
-    pub lane_memo: Map<u64, u64>, // an evaluated index list (`eval_lanes`): its start << 32 | length in `lane_pool`
-    pub lane_pool: Vector<u64>,
+    pub lane_memo: Map<u64, u32>, // an index list's key hash -> its row in `lane_rows` (`lane_row`)
+    pub lane_rows: Vector<LaneRow>,
+    pub lane_envs: Vector<irl::LSub>, // the `LaneRow` substitutions
+    pub lane_pool: Vector<u64>, // the `LaneRow` lists
     pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
     pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
@@ -930,9 +1052,20 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         objs: Vector::<IObj>::new(),
         objs_live: 0,
         live_slots: 0,
+        free_ids: Vector::<u32>::new(),
+        alog: Vector::<u32>::new(),
+        lvl: 0,
+        ndepth: 0,
+        inst_n: 0,
+        defer_base: -1,
+        deferred: false,
+        defer_task: DTask { kind: DT_ITEM, id: 0, m: 0, node: NODE_NONE },
+        fold_fail: Set::<u64>::new(),
+        lane_fail: Map::<u64, u8>::new(),
+        esc_work: Vector::<u32>::new(),
+        esc_ptrs: Vector::<u32>::new(),
         slot_cap: 0,
         zcell: 0,
-        wr_min: 0xFFFFFFFFu32,
         failed: false,
         pun_ok: false,
         pun_slot: -1,
@@ -949,6 +1082,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_keys: Vector::<u64>::new(),
         body_plain: Vector::<u64>::new(),
         body_ix: Map::<u64, u64>::new(),
+        body_def: Vector::<BodyKey>::new(),
+        body_binds: Vector::<ISub>::new(),
         body_slot: Vector::<u64>::new(),
         keep_view: null,
         copy_kept: false,
@@ -962,7 +1097,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         method_memo: Map::<MKey, u64>::new(),
         conf_memo: Map::<MKey, u64>::new(),
         conf_pool: Vector::<DefId>::new(),
-        call_memo: CallMemo { ix: Map::<u64, u32>::new(), rows: Vector::<MemoRow>::new(), args: Vector::<IVal>::new() },
+        call_memo: CallMemo::new(),
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
         item_seen: Set::<u64>::new(),
@@ -981,7 +1116,9 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         subst: Vector::<ISub>::new(),
         sub_base: 0,
         view_memo: Map::<u64, DeclView>::new(),
-        lane_memo: Map::<u64, u64>::new(),
+        lane_memo: Map::<u64, u32>::new(),
+        lane_rows: Vector::<LaneRow>::new(),
+        lane_envs: Vector::<irl::LSub>::new(),
         lane_pool: Vector::<u64>::new(),
         statics: Vector::<StaticObj>::new(),
         all_typed: false,
@@ -1030,7 +1167,7 @@ pub fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64) Interp {
         e.max_steps = steps;
     }
     if mem != 0 {
-        e.max_slots = mem / 32; // bytes -> IVal slots
+        e.max_slots = mem / sizeof(IVal) as u64;
     }
     return e;
 }
@@ -1110,13 +1247,10 @@ fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
 
 extend Interp {
     /// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
-    /// lowered-callee cache and the call memo (scalar-only, so no object id can dangle across the
-    /// object-store reset) persist -- one interpreter serves a whole emission pass.
-    /// `max_steps` bounds this evaluation only; the engine's own budget is restored after it.
-    pub fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
+    /// lowered-callee cache and the referenced-constant memos persist -- one interpreter serves a
+    /// whole emission pass.
+    pub fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
         self.eval_reset();
-        let steps0 = self.max_steps;
-        self.max_steps = max_steps;
         self.subst.truncate(0);
         self.sub_base = 0;
         let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
@@ -1127,12 +1261,12 @@ extend Interp {
         } else {
             self.failed = true;
         }
-        self.max_steps = steps0;
         return r;
     }
 
-    /// Clear the per-evaluation state: the step count, the trap, the frames, and the object store.
-    /// The dead objects keep their slot storage for reuse while it totals at most IT_RETAIN_SLOTS.
+    /// Clear the per-evaluation state: the step count, the trap, the frames, the call memo, and the
+    /// object store. The dead objects keep their slot storage for reuse while it totals at most
+    /// IT_RETAIN_SLOTS.
     fn eval_reset(self: &mut Self) {
         if self.slot_cap > IT_RETAIN_SLOTS {
             self.objs.clear();
@@ -1146,17 +1280,32 @@ extend Interp {
         self.nframes = 0;
         self.objs_live = 0;
         self.live_slots = 0;
+        self.free_ids.truncate(0);
+        self.alog.truncate(0);
+        self.lvl = 0;
+        self.ndepth = 0;
+        self.inst_n = 0;
+        self.defer_base = -1;
+        self.deferred = false;
+        if self.fold_fail.len() != 0 {
+            self.fold_fail = Set::<u64>::new();
+        }
+        if self.lane_fail.len() != 0 {
+            self.lane_fail.clear();
+        }
         self.zcell = 0;
-        self.wr_min = 0xFFFFFFFFu32;
+        self.call_memo.reset();
         self.item_active.truncate(0);
         if self.item_cells.len() != 0 {
             self.item_cells.clear();
+        }
+        if self.item_objs.len() != 0 {
+            self.item_objs.clear();
         }
         if self.item_seen.len() != 0 {
             self.item_seen = Set::<u64>::new();
             self.item_fail.clear();
             self.item_fail_frames.truncate(0);
-            self.item_objs.clear();
         }
         self.failed = false;
     }
@@ -1247,6 +1396,31 @@ extend Interp {
         self.it_trap(kind, unsafe str::from_raw(t.ptr(), t.len()));
     }
 
+    // The trap of an access to dead storage `d` (`DEAD_FREED`, `DEAD_RETURNED`).
+    @c.cold
+    fn dead_trap(self: &mut Self, d: u8) bool {
+        if d == DEAD_RETURNED {
+            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after return");
+        } else {
+            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
+        }
+        return false;
+    }
+
+    // The trap of a compile-time layout query that reaches header struct `l.hn` (`Layout.hn`): its C
+    // header owns the layout, which only the C compiler knows.
+    @c.cold
+    fn header_trap(self: &mut Self, l: lay::Layout, what: str) {
+        let a = unsafe &*self.p().module_ast_const(l.hm);
+        let ns = a.at_const(a.at_const(l.hn).as_data.aggregate.name).as_data.name.text;
+        let text = format(
+            "the {} of '{}' is its C header's: it has no compile-time value",
+            what,
+            self.src_of(l.hm).slice(ns.start as usize, ns.end as usize),
+        );
+        self.it_trap_text(IT_TRAP_UNSUPPORTED, text);
+    }
+
     const fn bail(self: &mut Self) IVal {
         self.failed = true;
         return none();
@@ -1277,22 +1451,6 @@ extend Interp {
         return unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
     }
 
-    // Record a store of `v` into object `id` for `call`'s reclamation: a reference stored into an object
-    // older than the running call keeps the call's objects alive.
-    fn note_wr(self: &mut Self, id: u32, v: IVal) {
-        if (v.kind == IV_OBJ || v.kind == IV_PTR) && id < self.wr_min {
-            self.wr_min = id;
-        }
-    }
-
-    // Record that object `id` grew: when it is older than the running call, the call's objects stay
-    // (reclaiming them resets the live-slot count, which now holds the growth).
-    fn note_grow(self: &mut Self, id: u32) {
-        if id < self.wr_min {
-            self.wr_min = id;
-        }
-    }
-
     // A new `n`-slot object of decl (dm, dn); 0 = failed.
     fn obj_decl(self: &mut Self, n: u32, dm: ModuleId, dn: NodeId) u32 {
         let o = self.obj_new(n);
@@ -1304,13 +1462,22 @@ extend Interp {
     }
 
     fn obj_new(self: &mut Self, len: u64) u32 {
-        if self.objs_live >= IT_MAX_OBJS || len > self.max_slots - self.live_slots {
+        let reuse = self.free_ids.len() != 0;
+        if !reuse && self.objs_live >= MAX_OBJ_ID || self.live_slots + OBJ_SLOTS > self.max_slots || len > self.max_slots - self.live_slots - OBJ_SLOTS {
             self.it_trap(IT_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return 0;
         }
-        if self.objs_live < self.objs.len() {
+        let mut id: u32 = 0;
+        if reuse {
+            id = self.free_ids[self.free_ids.len() - 1];
+            self.free_ids.truncate(self.free_ids.len() - 1);
+        } else {
+            self.objs_live += 1;
+            id = self.objs_live as u32;
+        }
+        if id as usize <= self.objs.len() {
             // reuse a retained object: refit its slot vector, zero the metadata push{} would zero
-            let o = unsafe (self.objs.as_ptr() as *mut IObj + self.objs_live);
+            let o = unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
             unsafe (*o).slots.clear();
             if len != 0 {
                 let c0 = unsafe (*o).slots.capacity();
@@ -1334,6 +1501,8 @@ extend Interp {
             unsafe (*o).em = 0;
             unsafe (*o).et = TYPE_NONE;
             unsafe (*o).esz = 0;
+            unsafe (*o).esc = 0;
+            unsafe (*o).unchg = 0;
         } else {
             let mut slots = Vector::<IVal>::new();
             if len != 0 {
@@ -1345,20 +1514,250 @@ extend Interp {
             self.slot_cap += slots.capacity() as u64;
             self.objs.push(IObj { slots: slots, uactive: -1, dn: NODE_NONE });
         }
-        self.objs_live += 1;
-        self.live_slots += len;
-        return self.objs_live as u32;
+        unsafe (*self.obj_ptr(id)).lvl = self.lvl;
+        self.alog.push(id);
+        self.live_slots += len + OBJ_SLOTS;
+        return id;
+    }
+
+    // A new `len`-slot object of evaluation-wide storage (level 0); 0 = failed.
+    fn obj_static(self: &mut Self, len: u64) u32 {
+        let id = self.obj_new(len);
+        if id != 0 {
+            unsafe (*self.obj_ptr(id)).lvl = 0;
+        }
+        return id;
+    }
+
+    // Release object `id`: its slots leave the budget, and its id returns to the free list (`keep`:
+    // stays a dead header, level 0, so an access through a pointer to it traps). The charge it held
+    // comes back to the caller, which owns the budget's accounting.
+    fn obj_release(self: &mut Self, id: u32, keep: bool) u64 {
+        let o = self.obj_ptr(id);
+        let mut charge = (unsafe (*o).slots.len()) as u64;
+        unsafe (*o).slots.clear();
+        unsafe (*o).esc = 0;
+        if keep {
+            unsafe (*o).dead = DEAD_RETURNED;
+            unsafe (*o).lvl = 0;
+        } else {
+            unsafe (*o).dead = DEAD_FREED;
+            unsafe (*o).item = 0;
+            unsafe (*o).frame = 0;
+            self.free_ids.push(id);
+            charge += OBJ_SLOTS;
+        }
+        if unsafe (*o).unchg != 0 {
+            return 0;
+        }
+        return charge;
+    }
+
+    // Value `v` was stored into an object of level `l`: every object it embeds moves to that level,
+    // and an object of a higher level a pointer in it names is marked escaped. An explicit work
+    // stack walks the embedding tree.
+    fn esc_to(self: &mut Self, v: IVal, l: u8) {
+        if v.kind == IV_PTR {
+            let t = self.obj_ptr(pv_obj(v));
+            if t != null && unsafe (*t).lvl > l {
+                unsafe (*t).esc = 1;
+            }
+            return;
+        }
+        if v.kind != IV_OBJ {
+            return;
+        }
+        let p0 = self.obj_ptr(v.i as u32);
+        if p0 == null || unsafe (*p0).lvl <= l {
+            return;
+        }
+        self.esc_work.truncate(0);
+        self.esc_ptrs.truncate(0);
+        self.esc_work.push(v.i as u32);
+        // each object is embedded in at most one parent, so it enters the stack at most once
+        while self.esc_work.len() != 0 {
+            let id = self.esc_work[self.esc_work.len() - 1];
+            self.esc_work.truncate(self.esc_work.len() - 1);
+            let o = self.obj_ptr(id);
+            if unsafe (*o).lvl <= l {
+                continue;
+            }
+            unsafe (*o).lvl = l;
+            for k in 0..unsafe (*o).slots.len() {
+                let sv = unsafe (*o).slots[k];
+                if sv.kind == IV_OBJ {
+                    let c = self.obj_ptr(sv.i as u32);
+                    if c != null && unsafe (*c).lvl > l {
+                        self.esc_work.push(sv.i as u32);
+                    }
+                } else if sv.kind == IV_PTR && pv_obj(sv) != 0 {
+                    self.esc_ptrs.push(pv_obj(sv));
+                }
+            }
+        }
+        // after the moves: a pointer into the moved tree itself does not escape
+        for k in 0..self.esc_ptrs.len() {
+            let t = self.obj_ptr(self.esc_ptrs[k]);
+            if t != null && unsafe (*t).lvl > l {
+                unsafe (*t).esc = 1;
+            }
+        }
+    }
+
+    // Store `v` into slot `slot` of object `id`, moving what it embeds to the object's level.
+    fn store(self: &mut Self, id: u32, slot: usize, v: IVal) {
+        let o = self.obj_ptr(id);
+        unsafe (*o).slots.set(slot, v);
+        let l = unsafe (*o).lvl;
+        if l < self.lvl && (v.kind == IV_OBJ || v.kind == IV_PTR) {
+            self.esc_to(v, l);
+        }
+    }
+
+    // Close the region of the call that ran at level `depth` and returned to level `l0`, whose
+    // allocations start at `alog[a0]`: the returned values move to `l0`, and every object still at
+    // `depth` is released (kept as a dead header when a pointer to it escaped).
+    fn region_close(self: &mut Self, a0: usize, depth: u8, l0: u8) {
+        if !self.failed {
+            for i in 0..self.rets.len() {
+                let rv = self.rets[i];
+                self.esc_to(rv, l0);
+            }
+        }
+        let mut w = a0;
+        for k in a0..self.alog.len() {
+            let id = self.alog[k];
+            let o = self.obj_ptr(id);
+            if unsafe (*o).lvl < depth {
+                self.alog.set(w, id);
+                w += 1;
+            } else if unsafe (*o).esc != 0 {
+                self.live_slots -= self.obj_release(id, true);
+                self.alog.set(w, id);
+                w += 1;
+            } else {
+                self.live_slots -= self.obj_release(id, false);
+            }
+        }
+        self.alog.truncate(w);
+    }
+
+    // Start an evaluation inside another (a referenced constant, or a fold a lowering asks for) with
+    // its own step, call depth, instance nesting and memory budgets and its own call memo, so its
+    // success and its cost do not depend on which evaluation runs it first. The native stack stays
+    // bounded through `defer_deep`.
+    fn iso_enter(self: &mut Self) Iso {
+        let s = Iso {
+            steps: self.steps,
+            nframes: self.nframes,
+            fstack: self.fstack,
+            lvl: self.lvl,
+            live: self.live_slots,
+            a0: self.alog.len(),
+            inst_n: self.inst_n,
+            untrapped: self.trap.len() == 0,
+            tcf: self.trap_in_constfn,
+            memo: replace(&mut self.call_memo, CallMemo::new()),
+        };
+        self.steps = 0;
+        self.nframes = 0;
+        self.inst_n = 0;
+        self.lvl = 0;
+        self.live_slots = 0;
+        return s;
+    }
+
+    // Resume the evaluation `s` saved. `keep`: the isolated evaluation's objects stay (a value
+    // points into them), outside the budget; otherwise they are released. A trap a fold set is
+    // dropped: the resumed evaluation reports its own. A trap a constant set fails the resumed
+    // evaluation too: it keeps its own step count, and its call stack continues the resumed one.
+    fn iso_leave(self: &mut Self, mut s: Iso, keep: bool, fold: bool) {
+        if fold {
+            if s.untrapped {
+                self.trap = "";
+                self.trap_kind = IT_TRAP_NONE;
+                self.trap_nframes = 0;
+            }
+            self.trap_in_constfn = s.tcf;
+        } else if s.untrapped && self.trap.len() != 0 && s.nframes != 0 {
+            let inner = (self.trap_nframes as u32).min(IT_MAX_FRAMES - s.nframes);
+            let mut i = inner;
+            while i > 0 {
+                i -= 1;
+                unsafe self.trap_stack[(s.nframes + i) as usize] = unsafe self.trap_stack[i as usize];
+            }
+            for k in 0..s.nframes {
+                unsafe self.trap_stack[k as usize] = unsafe s.fstack[k as usize];
+            }
+            self.trap_nframes = (s.nframes + inner) as u8;
+        }
+        if keep {
+            for k in s.a0..self.alog.len() {
+                unsafe (*self.obj_ptr(self.alog[k])).unchg = 1;
+            }
+        } else {
+            self.rollback(s.a0, 0);
+        }
+        self.steps = s.steps;
+        self.nframes = s.nframes;
+        self.fstack = s.fstack;
+        self.inst_n = s.inst_n;
+        self.lvl = s.lvl;
+        self.live_slots = s.live;
+        let _ = replace(&mut self.call_memo, replace(&mut s.memo, CallMemo::new()));
+    }
+
+    // Release every object allocated since `alog[a0]` and restore the budget's charge `live0`: the
+    // undo of an evaluation whose objects nothing outside it reaches. A per-evaluation table that
+    // names a released object drops the entry.
+    fn rollback(self: &mut Self, a0: usize, live0: u64) {
+        for k in a0..self.alog.len() {
+            let _ = self.obj_release(self.alog[k], false);
+        }
+        self.alog.truncate(a0);
+        self.live_slots = live0;
+        if self.zcell != 0 && unsafe (*self.obj_ptr(self.zcell)).dead == DEAD_FREED {
+            self.zcell = 0;
+        }
+        if self.item_objs.len() != 0 {
+            let mut keys = Vector::<u64>::new();
+            let mut ki = self.item_objs.keys();
+            loop {
+                switch ki.next() {
+                    Some(k) => {
+                        keys.push(*k);
+                    },
+                    _ => {
+                        break;
+                    },
+                };
+            }
+            for i in 0..keys.len() {
+                let v = *self.item_objs.get(&keys[i]).unwrap();
+                let t = pick(v.kind == IV_OBJ, v.i as u32, pv_obj(v));
+                if (v.kind == IV_OBJ || v.kind == IV_PTR) && t != 0 && unsafe (*self.obj_ptr(t)).dead == DEAD_FREED {
+                    let _ = self.item_objs.remove(&keys[i]);
+                }
+            }
+        }
     }
 
     fn obj_resize(self: &mut Self, id: u32, len: u64) bool {
         let cur = (unsafe (*self.obj_ptr(id)).slots.len()) as u64;
-        if len > cur && len - cur > self.max_slots - self.live_slots {
+        // storage kept outside the budget joins it before it changes size
+        let adopt = pick(unsafe (*self.obj_ptr(id)).unchg != 0, cur + OBJ_SLOTS, 0u64);
+        let mut grow: u64 = 0;
+        if len > cur {
+            grow = len - cur;
+        }
+        if adopt + grow > self.max_slots - self.live_slots {
             self.it_trap(IT_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return false;
         }
         let o = self.obj_ptr(id);
+        unsafe (*o).unchg = 0;
+        self.live_slots += adopt;
         if len > cur {
-            self.note_grow(id);
             let c0 = unsafe (*o).slots.capacity();
             let mut i = cur;
             while i < len {
@@ -1369,6 +1768,7 @@ extend Interp {
             self.live_slots += len - cur;
         } else if len < cur {
             unsafe (*o).slots.truncate(len as usize);
+            self.live_slots -= cur - len;
         }
         return true;
     }
@@ -1381,8 +1781,7 @@ extend Interp {
         for i in 0..n {
             let c = self.obj_clone(v, depth);
             ok = ok && (v.kind == IV_NONE || c.kind != IV_NONE);
-            self.note_wr(id, c);
-            unsafe (*self.obj_ptr(id)).slots.set((from + i) as usize, c);
+            self.store(id, (from + i) as usize, c);
         }
         return ok;
     }
@@ -1496,8 +1895,7 @@ extend Interp {
             return false;
         }
         if unsafe (*o).dead != 0 {
-            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
-            return false;
+            return self.dead_trap(unsafe (*o).dead);
         }
         if pv_off(pv) as usize >= unsafe (*o).slots.len() {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
@@ -2455,14 +2853,7 @@ extend Interp {
                 // a reference-typed parameter binds the caller's value WITHOUT a copy: an
                 // aggregate handle is the reference, so cloning would sever the aliasing
                 let lty = b.locals.at(li).ty;
-                let mut rm2: ModuleId = 0;
-                let mut rt2 = TYPE_NONE;
-                let mut ref_like = false;
-                if lty != TYPE_NONE && self.rty(b.module, lty, &mut rm2, &mut rt2) {
-                    let yk = (unsafe &*self.p().module_ast_const(rm2)).type_at(rt2).kind;
-                    ref_like = yk == TypeKind::TYPE_REFERENCE || yk == TypeKind::TYPE_POINTER;
-                }
-                let mut av = if ref_like {
+                let mut av = if self.ref_like(b.module, lty) {
                     *args.at(i);
                 } else {
                     self.obj_clone(*args.at(i), 0);
@@ -2571,17 +2962,15 @@ extend Interp {
             bkey = (bkey ^ sb.am as u64).wrapping_mul(1099511628211u64);
             bkey = (bkey ^ sb.at as u64).wrapping_mul(1099511628211u64);
         }
-        switch self.body_ix.get(&bkey) {
-            Some(v) => {
-                let si = (*v) as usize;
-                if self.copy_kept && (self.body_slot[si] & BODY_KEPT) != 0 {
-                    let owned = self.own_kept(self.body_slot[si] & BODY_MASK);
-                    self.body_slot.set(si, owned);
-                }
-                return si as i64;
-            },
-            None => {},
-        };
+        let hit = self.body_find(bkey, m, fnode, binds);
+        if hit >= 0 {
+            let si = hit as usize;
+            if self.copy_kept && (self.body_slot[si] & BODY_KEPT) != 0 {
+                let owned = self.own_kept(self.body_slot[si] & BODY_MASK);
+                self.body_slot.set(si, owned);
+            }
+            return hit;
+        }
         self.st_lookups += 1;
         if binds.len() == 0 && self.keep_view != null {
             // A checked, borrow-checked body the backend will emit as is: execute it in place.
@@ -2589,32 +2978,21 @@ extend Interp {
             let ki = (unsafe &*self.keep_view).view(m, fnode);
             if ki >= 0 {
                 self.st_kept_hits += 1;
+                let mut at = BODY_KEPT | ki as u64;
                 if self.copy_kept {
-                    let owned = self.own_kept(ki as u64);
-                    self.body_slot.push(owned);
-                } else {
-                    self.body_slot.push(BODY_KEPT | ki as u64);
+                    at = self.own_kept(ki as u64);
                 }
-                self.body_keys.push(bkey);
-                self.body_plain.push(m as u64 << 32 | fnode as u64);
-                self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
-                return self.body_keys.len() as i64 - 1;
+                return self.body_add(bkey, m, fnode, binds, at);
             }
         }
         if binds.len() == 0 && self.parent != null {
-            switch unsafe (&*self.parent).body_ix.get(&bkey) {
-                Some(v) => {
-                    let ps = unsafe (&*self.parent).body_slot[(*v) as usize];
-                    if (ps & (BODY_KEPT | BODY_PARENT)) == 0 {
-                        self.body_slot.push(BODY_PARENT | ps);
-                        self.body_keys.push(bkey);
-                        self.body_plain.push(m as u64 << 32 | fnode as u64);
-                        self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
-                        return self.body_keys.len() as i64 - 1;
-                    }
-                },
-                None => {},
-            };
+            let pi = unsafe (&*self.parent).body_find(bkey, m, fnode, binds);
+            if pi >= 0 {
+                let ps = unsafe (&*self.parent).body_slot[pi as usize];
+                if (ps & (BODY_KEPT | BODY_PARENT)) == 0 {
+                    return self.body_add(bkey, m, fnode, binds, BODY_PARENT | ps);
+                }
+            }
         }
         {
             // an UNCHECKED body must not run: lowering would degrade its widths to i64 and
@@ -2674,6 +3052,9 @@ extend Interp {
             self.err_refused = self.err_refused || lw.failed_on_error_type();
             return -1;
         }
+        if self.deferred {
+            return -1; // a fold it ran was dropped (`defer_retry`): lower it again
+        }
         self.st_fresh += 1;
         if binds.len() != 0 {
             self.st_fresh_generic += 1;
@@ -2681,16 +3062,49 @@ extend Interp {
             self.st_fresh_miss += 1;
         }
         self.bodies.push(Box::new(lw));
-        self.body_slot.push(self.bodies.len() as u64 - 1);
-        self.body_keys.push(bkey);
-        self.body_plain.push(
-            if binds.len() == 0 {
-                m as u64 << 32 | fnode as u64;
-            } else {
-                PLAIN_NONE;
+        return self.body_add(bkey, m, fnode, binds, self.bodies.len() as u64 - 1);
+    }
+
+    /// The slot that caches the body of `(m, fnode)` under `binds`, whose key hashes to `h`
+    /// (`body_of`); -1 when none does. The hash only selects a slot: a hit compares the whole key,
+    /// so a hash two keys share is a miss, never another key's body.
+    pub fn body_find(self: &Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>) i64 {
+        let mut si: usize = 0;
+        switch self.body_ix.get(&h) {
+            Some(v) => {
+                si = (*v) as usize;
             },
+            None => {
+                return -1;
+            },
+        };
+        let k = self.body_def[si];
+        if k.def != (m as u64 << 32 | fnode as u64) || k.bn as usize != binds.len() {
+            return -1;
+        }
+        for i in 0..binds.len() {
+            let a = self.body_binds[k.b0 as usize + i];
+            let b = *binds.at(i);
+            if a.pmod != b.pmod || a.pnode != b.pnode || a.am != b.am || a.at != b.at {
+                return -1;
+            }
+        }
+        return si as i64;
+    }
+
+    /// Record a new slot for the body of `(m, fnode)` under `binds`, hashing to `h`, whose lowering
+    /// is `at` (`body_slot`); a slot whose key shares `h` leaves the index. The new slot's index.
+    pub fn body_add(self: &mut Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>, at: u64) i64 {
+        self.body_slot.push(at);
+        self.body_keys.push(h);
+        self.body_plain.push(pick(binds.len() == 0, m as u64 << 32 | fnode as u64, PLAIN_NONE));
+        self.body_def.push(
+            BodyKey { def: m as u64 << 32 | fnode as u64, b0: self.body_binds.len() as u32, bn: binds.len() as u32 },
         );
-        self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
+        for i in 0..binds.len() {
+            self.body_binds.push(*binds.at(i));
+        }
+        self.body_ix.insert(h, self.body_keys.len() as u64 - 1);
         return self.body_keys.len() as i64 - 1;
     }
 
@@ -2834,7 +3248,15 @@ extend Interp {
         self.eng_enter();
         for i in 0..self.body_slot.len() {
             if (self.body_slot[i] & BODY_KEPT) != 0 {
-                let _ = self.body_ix.remove(&self.body_keys[i]);
+                // the index entry of its hash may name another key's slot: only its own leaves
+                let h = self.body_keys[i];
+                let own = switch self.body_ix.get(&h) {
+                    Some(v) => *v == i as u64,
+                    None => false,
+                };
+                if own {
+                    let _ = self.body_ix.remove(&h);
+                }
                 self.body_slot.set(i, 0);
                 self.body_plain.set(i, PLAIN_NONE);
             }
@@ -2844,6 +3266,76 @@ extend Interp {
         unsafe (*kp).viewers -= 1;
         self.keep_view = null;
         self.eng_leave();
+    }
+
+    /// The extent of the callee cache now (see `release_pass`).
+    pub const fn body_mark(self: &Self) BodyMark {
+        return BodyMark { slots: self.body_slot.len(), boxes: self.bodies.len() };
+    }
+
+    /// Between two evaluations, free what the evaluations since `mark` left behind: the dead-object
+    /// storage the object store retains for reuse (`IT_RETAIN_SLOTS`), and every callee cached past
+    /// `mark` that a later miss finds again: a view of the keep, or a box lowered from module-arena
+    /// syntax. A box lowered from a body arena stays, since that arena may be released before the
+    /// next reader. Lowering is a function of the syntax and the frozen facts, so a later miss gets
+    /// the same body.
+    pub fn release_pass(self: &mut Self, mark: BodyMark) {
+        assert(self.nframes == 0 && self.in_run == 0 && self.ndepth == 0, "release_pass runs between evaluations");
+        assert(mark.slots <= self.body_slot.len() && mark.boxes <= self.bodies.len(), "a mark of this cache");
+        self.objs = Vector::<IObj>::new();
+        self.slot_cap = 0;
+        self.objs_live = 0;
+        self.live_slots = 0;
+        self.free_ids = Vector::<u32>::new();
+        self.alog = Vector::<u32>::new();
+        self.zcell = 0;
+        // Slots past the mark leave the index, then the kept ones move down (their boxes too),
+        // and the index takes each back where no older slot holds its hash.
+        for i in mark.slots..self.body_slot.len() {
+            let h = self.body_keys[i];
+            let own = switch self.body_ix.get(&h) {
+                Some(v) => *v == i as u64,
+                None => false,
+            };
+            if own {
+                let _ = self.body_ix.remove(&h);
+            }
+        }
+        let mut w = mark.slots;
+        let mut nb = mark.boxes;
+        let mut wb = if mark.slots < self.body_def.len() {
+            self.body_def[mark.slots].b0 as usize;
+        } else {
+            self.body_binds.len();
+        };
+        for i in mark.slots..self.body_slot.len() {
+            let sl = self.body_slot[i];
+            let k = self.body_def[i];
+            if (sl & (BODY_KEPT | BODY_PARENT)) != 0 || !Ast::in_body((k.def & 0xFFFFFFFFu64) as NodeId) {
+                continue;
+            }
+            assert(sl >= nb as u64, "boxes past the mark follow their slots in order");
+            self.bodies.swap(nb, sl as usize);
+            for j in 0..k.bn as usize {
+                self.body_binds.set(wb + j, self.body_binds[k.b0 as usize + j]);
+            }
+            self.body_slot.set(w, nb as u64);
+            self.body_keys.set(w, self.body_keys[i]);
+            self.body_plain.set(w, self.body_plain[i]);
+            self.body_def.set(w, BodyKey { def: k.def, b0: wb as u32, bn: k.bn });
+            if !self.body_ix.contains_key(&self.body_keys[w]) {
+                self.body_ix.insert(self.body_keys[w], w as u64);
+            }
+            w += 1;
+            nb += 1;
+            wb += k.bn as usize;
+        }
+        self.body_slot.truncate(w);
+        self.body_keys.truncate(w);
+        self.body_plain.truncate(w);
+        self.body_def.truncate(w);
+        self.body_binds.truncate(wb);
+        self.bodies.truncate(nb);
     }
 
     // Every interpreted call takes its argument vector from a pool (one per live frame), so the
@@ -2857,29 +3349,8 @@ extend Interp {
             None => {},
         };
         args.clear();
-        let objs0 = self.objs_live;
-        let slots0 = self.live_slots;
-        let wr0 = self.wr_min;
-        self.wr_min = 0xFFFFFFFFu32;
-        let ncells = self.item_cells.len();
-        let nitems = self.item_objs.len();
         let ok = self.call_in(b, env, t, &mut args);
         self.argpool.push(args);
-        // The objects the call made (its frame, the copies of its by-value arguments, the cells of its
-        // autoref'd ones, its temporaries) die with it unless an older object received a reference
-        // (`wr_min`) or an item cache took one: the call's results are written by now, a reference
-        // among them into an older place. The budget then bounds the live objects, not every
-        // temporary of the evaluation.
-        if ok && self.wr_min as usize > objs0 && self.item_cells.len() == ncells && self.item_objs.len() == nitems {
-            self.objs_live = objs0;
-            self.live_slots = slots0;
-            if self.zcell as usize > objs0 {
-                self.zcell = 0;
-            }
-        }
-        if wr0 < self.wr_min {
-            self.wr_min = wr0;
-        }
         return ok;
     }
 
@@ -3419,7 +3890,15 @@ extend Interp {
         }
         unsafe self.fstack[self.nframes as usize] = DefId { module: fm, node: fnode };
         self.nframes += 1;
+        // the call's region: its frame and what it allocates, released at its return
+        let l0 = self.lvl;
+        let a0 = self.alog.len();
+        self.lvl = self.nframes as u8;
+        self.ndepth += 1;
         let mut r = self.run(unsafe &*bb, args);
+        self.ndepth -= 1;
+        self.lvl = l0;
+        self.region_close(a0, self.nframes as u8, l0);
         self.nframes -= 1;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
@@ -3446,7 +3925,7 @@ extend Interp {
             let dty = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
             r = IVal { kind: IV_OBJ, tm: b.module, ty: self.vty(b, dty), i: id, f: 0.0 };
         }
-        if memoable && r.kind != IV_OBJ && r.kind != IV_PTR {
+        if memoable && r.kind != IV_OBJ && r.kind != IV_PTR && !self.deferred {
             self.call_memo.put(mkey, fm, fnode, args, r);
         }
         // every return slot lands in its destination (self.rets dies with the next frame)
@@ -3482,7 +3961,7 @@ extend Interp {
 
     // A new C-heap block of `bytes` bytes; `*out` = a `(tm, ty)` pointer to it.
     fn heap_new(self: &mut Self, bytes: u64, tm: ModuleId, ty: TypeId, out: &mut IVal) bool {
-        let o = self.obj_new(0);
+        let o = self.obj_static(0);
         if o == 0 {
             return false;
         }
@@ -3490,6 +3969,33 @@ extend Interp {
         unsafe (*self.obj_ptr(o)).bytes = bytes;
         *out = iv_ptr(tm, ty, o, 0);
         return true;
+    }
+
+    // Free heap block `id`: it and every object its elements embed become dead headers whose slots
+    // leave the budget (a pointer into any of them still traps).
+    fn heap_release(self: &mut Self, id: u32) {
+        self.esc_work.truncate(0);
+        self.esc_work.push(id);
+        // each object is embedded in at most one parent, so it enters the stack at most once
+        while self.esc_work.len() != 0 {
+            let oid = self.esc_work[self.esc_work.len() - 1];
+            self.esc_work.truncate(self.esc_work.len() - 1);
+            let o = self.obj_ptr(oid);
+            for k in 0..unsafe (*o).slots.len() {
+                let sv = unsafe (*o).slots[k];
+                if sv.kind == IV_OBJ {
+                    let c = self.obj_ptr(sv.i as u32);
+                    if c != null && unsafe (*c).dead == 0 {
+                        self.esc_work.push(sv.i as u32);
+                    }
+                }
+            }
+            if unsafe (*o).unchg == 0 {
+                self.live_slots -= (unsafe (*o).slots.len()) as u64;
+            }
+            unsafe (*o).slots.clear();
+            unsafe (*o).dead = DEAD_FREED;
+        }
     }
 
     // Intercepted extern calls: the C heap, the trap runtime, std's Int<N> overflow and 128-bit probe, the
@@ -3570,7 +4076,7 @@ extend Interp {
                     self.it_trap(IT_TRAP_UB_DOUBLE_FREE, "double free");
                     return false;
                 }
-                unsafe (*blk).dead = 1;
+                self.heap_release(pid);
             }
             out = iv_unit();
         } else if ci == ir::CI_MEMSET {
@@ -3724,8 +4230,7 @@ extend Interp {
             return self.fail();
         }
         if unsafe (*blk).dead != 0 {
-            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
-            return false;
+            return self.dead_trap(unsafe (*blk).dead);
         }
         if unsafe (*blk).et == TYPE_NONE && pv_off(*args.at(0)) == 0 {
             let bytes = unsafe (*blk).bytes;
@@ -3803,8 +4308,7 @@ extend Interp {
             return self.fail();
         }
         if unsafe (*dp).dead != 0 || unsafe (*sp2).dead != 0 {
-            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
-            return false;
+            return self.dead_trap(pick(unsafe (*dp).dead != 0, unsafe (*dp).dead, unsafe (*sp2).dead));
         }
         // A fresh HEAP block with no element type yet adopts the source's, exactly as memset does.
         // An inline array (String's small buffer) is not a heap block and must not be reshaped.
@@ -3859,8 +4363,7 @@ extend Interp {
             if cloned.kind == IV_NONE {
                 return self.fail();
             }
-            self.note_wr(did, cloned);
-            unsafe (*self.obj_ptr(did)).slots.set((doff + i) as usize, cloned);
+            self.store(did, (doff + i) as usize, cloned);
         }
         *out = *args.at(0);
         return true;
@@ -3893,8 +4396,7 @@ extend Interp {
             return self.fail();
         }
         if unsafe (*b1).dead != 0 || unsafe (*b2).dead != 0 {
-            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
-            return false;
+            return self.dead_trap(pick(unsafe (*b1).dead != 0, unsafe (*b1).dead, unsafe (*b2).dead));
         }
         let o1 = pv_off(*args.at(0)) as u64;
         let o2 = pv_off(*args.at(1)) as u64;
@@ -4033,6 +4535,12 @@ extend Interp {
     /// objects die with the evaluation that built them); a re-entry while active is a cyclic
     /// constant dependency. A function item is its value.
     fn item_value(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
+        return self.item_value_in(m, cnode, false);
+    }
+
+    // `item_value`; `spec`: the evaluation only records the constant's value or failure for later
+    // references (`item_speculate`), so no copy of an aggregate is made for the caller.
+    fn item_value_in(self: &mut Self, m: ModuleId, cnode: NodeId, spec: bool) IVal {
         let key = m as u64 << 32 | cnode as u64;
         switch self.item_memo.get(&key) {
             Some(v) => {
@@ -4098,6 +4606,8 @@ extend Interp {
                 },
                 None => {},
             };
+        }
+        if self.item_objs.len() != 0 {
             switch self.item_objs.get(&key) {
                 Some(v) => {
                     // a fresh copy, as evaluating it again would build
@@ -4129,18 +4639,149 @@ extend Interp {
         if cd.value == NODE_NONE || cd.is_extern || cd.is_static_mut {
             return self.bail();
         }
-        if self.item_active.len() >= IT_ITEM_MAX_NEST {
-            self.it_trap(IT_TRAP_BUDGET_DEPTH, "constant evaluation nests too deeply");
-            return none();
+        // A fold of the initializer (`eval_g`) is an isolated evaluation too: its scalar is the value.
+        switch self.ememo.get(&(m as u64 << 32 | cd.value as u64)) {
+            Some(v) => {
+                if v.kind == IV_INT || v.kind == IV_BOOL || v.kind == IV_FLOAT {
+                    let fv = *v;
+                    self.item_memo.insert(key, fv);
+                    return fv;
+                }
+            },
+            None => {},
+        };
+        if self.defer_base < 0 {
+            return self.item_defer(m, cnode, key, spec);
         }
+        // Past IT_DEFER_DEPTH native levels above the outermost evaluation, a constant is not
+        // evaluated here: the outermost one evaluates it first and runs again (`item_defer`).
+        if self.defer_deep(DT_ITEM, key, m, cnode) {
+            return self.bail();
+        }
+        return self.item_eval(m, cnode, key, spec);
+    }
+
+    // Evaluate constant `(m, cnode)` as the outermost one. When a dependency is too deep to nest, the
+    // attempt is dropped, the dependency chain evaluates from here (`item_speculate`, one constant at
+    // a time, the deepest first), and the constant runs again. Each attempt is isolated and every
+    // record an evaluation leaves is kept, so the last attempt computes what any evaluation order
+    // computes: a constant's result never depends on the depth of the native stack.
+    fn item_defer(self: &mut Self, m: ModuleId, cnode: NodeId, key: u64, spec: bool) IVal {
+        let mut ds = self.defer_enter();
+        let mut r = none();
+        // each round evaluates at least one more of the finite set of evaluations this one needs
+        loop {
+            r = self.item_eval(m, cnode, key, spec);
+            if !self.deferred {
+                break;
+            }
+            if !self.defer_retry(&mut ds, dtask_id(DT_ITEM, key)) {
+                self.it_trap(IT_TRAP_CYCLE, "cyclic constant dependency");
+                r = none();
+                break;
+            }
+        }
+        self.defer_base = -1;
+        return r;
+    }
+
+    // Become the outermost evaluation (`item_defer`): nested ones deeper than IT_DEFER_DEPTH stop
+    // and are evaluated from here first.
+    fn defer_enter(self: &mut Self) DSave {
+        self.defer_base = self.ndepth;
+        return DSave {
+            trap: self.trap,
+            kind: self.trap_kind,
+            steps: self.trap_steps,
+            nframes: self.trap_nframes,
+            span: self.trap_span,
+            tcf: self.trap_in_constfn,
+            done: Set::<u64>::new(),
+        };
+    }
+
+    // The outermost evaluation's attempt stopped at `defer_task`: undo the attempt's trap, then
+    // evaluate the stopped evaluation and, deepest first, every one it stops at in turn, so each
+    // leaves its record (a memo or a failure) for the next attempt. False when an evaluation
+    // stops at one already met: a cycle through `own`.
+    fn defer_retry(self: &mut Self, ds: &mut DSave, own: u64) bool {
+        self.deferred = false;
+        self.failed = false;
+        self.trap = ds.trap;
+        self.trap_kind = ds.kind;
+        self.trap_steps = ds.steps;
+        self.trap_nframes = ds.nframes;
+        self.trap_span = ds.span;
+        self.trap_in_constfn = ds.tcf;
+        let mut work = Vector::<DTask>::new();
+        work.push(self.defer_task);
+        // each task is pushed once (a repeat is a cycle) and popped once it is settled
+        while work.len() != 0 {
+            let t = work[work.len() - 1];
+            if t.id == own || ds.done.contains(&t.id) {
+                return false;
+            }
+            self.defer_settle(t);
+            if self.deferred {
+                self.deferred = false;
+                let e = self.defer_task;
+                for i in 0..work.len() {
+                    if work[i].id == e.id {
+                        return false;
+                    }
+                }
+                work.push(e);
+            } else {
+                ds.done.insert(t.id);
+                let _ = work.pop();
+            }
+        }
+        return true;
+    }
+
+    // Evaluate stopped evaluation `t` from the outermost one: its value or its failure is recorded
+    // (`item_memo` .. `item_fail`, `ememo` / `fold_fail`, `lane_memo` / `lane_fail`).
+    fn defer_settle(self: &mut Self, t: DTask) {
+        if t.kind == DT_ITEM {
+            self.item_seen.insert(t.m as u64 << 32 | t.node as u64); // `item_fail` answers the next attempt
+            self.item_speculate(t.m, t.node);
+        } else if t.kind == DT_FOLD {
+            let _ = self.eval_g(t.m, t.node);
+        } else {
+            let row = *self.lane_rows.at((t.id & 0xFFFFFFFF) as usize);
+            let mut env = Vector::<irl::LSub>::new();
+            for i in 0..row.en {
+                env.push(self.lane_envs[(row.e0 + i) as usize]);
+            }
+            let mut out = Vector::<u64>::new();
+            let _ = self.eval_lanes(t.m, t.node, &env, &mut out);
+        }
+    }
+
+    // Whether a nested evaluation starting here is past IT_DEFER_DEPTH native levels above the
+    // outermost one; if so, it is recorded as the attempt's stop (`defer_task`, `dtask_id`).
+    fn defer_deep(self: &mut Self, kind: u8, key: u64, m: ModuleId, node: NodeId) bool {
+        if self.ndepth as i64 - self.defer_base < IT_DEFER_DEPTH as i64 {
+            return false;
+        }
+        self.deferred = true;
+        self.defer_task = DTask { kind: kind, id: dtask_id(kind, key), m: m, node: node };
+        return true;
+    }
+
+    // The isolated evaluation of constant `(m, cnode)` (`item_value_in`).
+    fn item_eval(self: &mut Self, m: ModuleId, cnode: NodeId, key: u64, spec: bool) IVal {
         if self.item_active.len() == IT_ITEM_NEST {
             self.prefetch_items(m, cnode);
         }
         let own = self.trap.len() == 0;
-        let steps0 = self.steps;
         let tcf0 = self.trap_in_constfn;
         self.trap_in_constfn = false;
+        // The constant evaluates as it does alone, whatever references it first: its own budgets
+        // and call memo, and none of its objects charged to the referrer.
+        let iso = self.iso_enter();
         self.item_active.push(key);
+        self.ndepth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
         let mut r = none();
         if lw.lower_const(cnode) {
@@ -4150,25 +4791,45 @@ extend Interp {
             self.err_refused = self.err_refused || lw.failed_on_error_type();
             let _ = self.bail();
         }
+        self.ndepth -= 1;
         let _ = self.item_active.pop();
+        // a dropped attempt (`item_defer`) records nothing
+        let ok = !self.failed && !self.deferred;
         // a trap of its own that no budget caused fails the constant wherever it is evaluated
-        if self.failed && own && self.trap.len() != 0 && self.trap_kind > IT_TRAP_BUDGET_DEPTH {
-            let f = self.item_fail_of(true, steps0, true);
+        if self.failed && !self.deferred && own && self.trap.len() != 0 && self.trap_kind > IT_TRAP_BUDGET_DEPTH {
+            let f = self.item_fail_of(true, true);
             self.item_dead.insert(key, f);
         }
         self.trap_in_constfn = self.trap_in_constfn || tcf0;
-        if !self.failed && r.kind != IV_OBJ && r.kind != IV_PTR && r.kind != IV_NONE {
+        let mut fz = none();
+        if ok && r.kind != IV_OBJ && r.kind != IV_PTR && r.kind != IV_NONE {
             self.item_memo.insert(key, r);
-        } else if !self.failed && r.kind == IV_OBJ {
+        } else if ok && r.kind == IV_OBJ {
             let n0 = self.item_frozen.len();
-            let fz = self.obj_freeze(r, 0);
+            fz = self.obj_freeze(r, 0);
             if fz.kind != IV_NONE {
                 self.item_aggs.insert(key, fz);
             } else {
                 self.item_frozen.truncate(n0);
             }
         }
-        return r;
+        // A value with pointers keeps the objects it points into for the rest of the evaluation;
+        // each reference copies it, as each reference of a frozen aggregate thaws one.
+        let keep = ok && fz.kind == IV_NONE && (r.kind == IV_OBJ || r.kind == IV_PTR);
+        self.iso_leave(iso, keep, false);
+        if keep {
+            self.item_objs.insert(key, r);
+        }
+        if self.deferred {
+            return self.bail();
+        }
+        if spec || !ok {
+            return r;
+        }
+        if fz.kind != IV_NONE {
+            return self.obj_thaw(fz);
+        }
+        return self.obj_clone(r, 0);
     }
 
     // The value of generic constant `c.item` for the instance `c` names: a generic extend's constant
@@ -4244,7 +4905,8 @@ extend Interp {
         } else {
             return self.bail();
         }
-        if self.item_active.len() >= IT_ITEM_MAX_NEST {
+        // counted inside the current constant's evaluation, whose own depth it is
+        if self.inst_n >= IT_ITEM_MAX_NEST {
             self.it_trap(IT_TRAP_BUDGET_DEPTH, "constant evaluation nests too deeply");
             return none();
         }
@@ -4265,7 +4927,15 @@ extend Interp {
         let prev_base = self.sub_base;
         self.sub_base = sb0;
         let args = Vector::<IVal>::new();
+        // a constant's frame is static storage: its value may point into it
+        let l0 = self.lvl;
+        self.lvl = 0;
+        self.inst_n += 1;
+        self.ndepth += 1;
         let r = self.run(&lw.body, &args);
+        self.ndepth -= 1;
+        self.inst_n -= 1;
+        self.lvl = l0;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
         let _ = self.item_active.pop();
@@ -4284,16 +4954,11 @@ extend Interp {
         am: *const ModuleId,
         at: *const TypeId,
         n: usize,
-        max_steps: u32,
     ) IVal {
         self.eval_reset();
-        let steps0 = self.max_steps;
-        self.max_steps = max_steps;
         self.subst.truncate(0);
         self.sub_base = 0;
-        let r = self.inst_value(m, cnode, pm, pn, am, at, n);
-        self.max_steps = steps0;
-        return r;
+        return self.inst_value(m, cnode, pm, pn, am, at, n);
     }
 
     /// The cell holding the value of referenced item `it`. A constant or static has one per
@@ -4319,15 +4984,15 @@ extend Interp {
         let mut v = none();
         if !is_static {
             v = self.item_value(it.module, it.node);
-            if self.failed {
+            if self.failed || self.deferred {
                 return 0;
             }
         }
-        let cell = self.obj_new(1);
+        let cell = self.obj_static(1);
         if cell == 0 {
             return 0;
         }
-        unsafe (*self.obj_ptr(cell)).slots.set(0, v);
+        self.store(cell, 0, v);
         if is_const {
             unsafe (*self.obj_ptr(cell)).item = pick(is_static, 2u8, 1u8);
             unsafe (*self.obj_ptr(cell)).dm = it.module;
@@ -4349,8 +5014,9 @@ extend Interp {
         let mut work = Vector::<u64>::new();
         let mut ready = Vector::<bool>::new();
         self.item_deps(m, cnode, &mut work, &mut ready);
-        // each queued constant is popped twice at most: expanded, then evaluated
-        while work.len() != 0 {
+        // each queued constant is popped twice at most: expanded, then evaluated; a dropped attempt
+        // (`item_defer`) stops
+        while work.len() != 0 && !self.deferred {
             let k = work[work.len() - 1];
             let dm = (k >> 32) as ModuleId;
             let dn = (k & 0xFFFFFFFF) as NodeId;
@@ -4404,8 +5070,8 @@ extend Interp {
     }
 
     // Evaluate `(m, cnode)` ahead of its reference: a scalar value lands in the memo, an aggregate
-    // in `item_objs`, a failure in `item_fail` for `item_replay`; every other effect but the steps
-    // (and the objects an aggregate holds) is undone.
+    // in `item_aggs` or `item_objs`, a failure in `item_fail` for `item_replay`; the evaluation is
+    // isolated (`iso_enter`), so nothing else remains.
     fn item_speculate(self: &mut Self, m: ModuleId, cnode: NodeId) {
         let key = m as u64 << 32 | cnode as u64;
         let trap0 = self.trap;
@@ -4414,20 +5080,14 @@ extend Interp {
         let tn0 = self.trap_nframes;
         let tspan0 = self.trap_span;
         let tcf0 = self.trap_in_constfn;
-        let objs0 = self.objs_live;
-        let slots0 = self.live_slots;
-        let steps0 = self.steps;
         self.trap_in_constfn = false;
-        let v = self.item_value(m, cnode);
+        let _ = self.item_value_in(m, cnode, true);
         // the trap is this constant's own only when none was set before it ran
         let own = trap0.len() == 0 && self.trap.len() != 0;
-        if self.failed {
-            let f = self.item_fail_of(own, steps0, false);
+        if self.failed && !self.deferred {
+            let f = self.item_fail_of(own, false);
             self.item_fail.insert(key, f);
-        } else if v.kind == IV_OBJ {
-            self.item_objs.insert(key, v);
         }
-        let kept = !self.failed && v.kind == IV_OBJ;
         self.failed = false;
         self.trap = trap0;
         self.trap_kind = kind0;
@@ -4435,19 +5095,12 @@ extend Interp {
         self.trap_nframes = tn0;
         self.trap_span = tspan0;
         self.trap_in_constfn = tcf0;
-        if kept {
-            return;
-        }
-        self.objs_live = objs0;
-        self.live_slots = slots0;
-        if self.zcell as usize > objs0 {
-            self.zcell = 0;
-        }
     }
 
-    // The failure record of the constant evaluation that started at `steps0` and just failed, its
-    // frames appended to `item_dead_frames` (`dead`) or `item_fail_frames`.
-    fn item_fail_of(self: &mut Self, own: bool, steps0: u32, dead: bool) ItemFail {
+    // The failure record of the constant evaluation that just failed, its frames (those past the
+    // current ones) appended to `item_dead_frames` (`dead`) or `item_fail_frames`. The evaluation
+    // was isolated (`iso_enter`), so the trap's step count is its own.
+    fn item_fail_of(self: &mut Self, own: bool, dead: bool) ItemFail {
         let frames = if dead {
             &mut self.item_dead_frames;
         } else {
@@ -4456,7 +5109,7 @@ extend Interp {
         let fstart = frames.len() as u32;
         let mut dsteps: u32 = 0;
         if own {
-            dsteps = self.trap_steps - steps0;
+            dsteps = self.trap_steps;
             for i in self.nframes..self.trap_nframes as u32 {
                 frames.push(unsafe self.trap_stack[i as usize]);
             }
@@ -4473,12 +5126,13 @@ extend Interp {
     }
 
     // Fail as the evaluation `f` of a constant failed, from the current frames: what evaluating it
-    // here again would do. `dead`: `f` is a record of `item_dead`.
+    // here again would do (that evaluation is isolated, so the trap keeps its own step count).
+    // `dead`: `f` is a record of `item_dead`.
     fn item_replay(self: &mut Self, f: ItemFail, dead: bool) IVal {
         if f.own && self.trap.len() == 0 {
             self.trap = f.trap;
             self.trap_kind = f.kind;
-            self.trap_steps = self.steps + f.steps;
+            self.trap_steps = f.steps;
             self.trap_span = self.top_span;
             let mut n = self.nframes;
             for i in 0..n {
@@ -4604,7 +5258,7 @@ extend Interp {
         // `ptr()` to a C string API reads: the block holds it too, so compile time agrees.
         let nb = bytes.len() as u32;
         bytes.push(0);
-        let block = self.obj_new(nb + 1);
+        let block = self.obj_static(nb + 1);
         if block == 0 {
             return none();
         }
@@ -4664,13 +5318,12 @@ extend Interp {
             return v;
         }
         self.live_slots += (want_len - have) as u64;
-        // An older object that grows keeps the call's count of live slots (`call`).
-        self.note_grow(v.i as u32);
         for _ in have..want_len {
             let cloned = self.obj_clone(ez, 0);
             let c0 = unsafe (*self.obj_ptr(v.i as u32)).slots.capacity();
-            unsafe (*self.obj_ptr(v.i as u32)).slots.push(cloned);
+            unsafe (*self.obj_ptr(v.i as u32)).slots.push(none());
             self.slot_cap += (unsafe (*self.obj_ptr(v.i as u32)).slots.capacity() - c0) as u64;
+            self.store(v.i as u32, unsafe (*self.obj_ptr(v.i as u32)).slots.len() - 1, cloned);
         }
         return v;
     }
@@ -4751,7 +5404,6 @@ extend Interp {
         } else {
             TYPE_NONE;
         };
-        self.note_wr(so, iv_ptr(0, TYPE_NONE, obj, off));
         unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, obj, off));
         unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
         return IVal { kind: IV_OBJ, tm: m, ty: sty, i: so, f: 0.0 };
@@ -4847,8 +5499,7 @@ extend Interp {
             return self.fail(); // a `static mut` is read and written at run time only
         }
         if unsafe (*top).dead != 0 {
-            self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
-            return false;
+            return self.dead_trap(unsafe (*top).dead);
         }
         let no = pv_off(p) as i64 + idx;
         if no < 0 || no as usize >= unsafe (*top).slots.len() {
@@ -4875,7 +5526,6 @@ extend Interp {
                     return false;
                 }
                 cref = iv_ptr(0, TYPE_NONE, cell, 0);
-                self.note_wr(env, cref);
                 unsafe (*self.obj_ptr(env)).slots.set(pl.base as usize, cref);
             }
             *obj = pv_obj(cref);
@@ -4894,8 +5544,7 @@ extend Interp {
                 if self.failed || sv.kind != IV_OBJ {
                     return self.fail();
                 }
-                self.note_wr(*obj, sv);
-                unsafe (*self.obj_ptr(*obj)).slots.set((*slot) as usize, sv);
+                self.store(*obj, (*slot) as usize, sv);
                 cur = sv;
             }
             if pj.kind == ir::PJ_DEREF {
@@ -5075,7 +5724,7 @@ extend Interp {
             return false;
         }
         if self.zcell == 0 {
-            self.zcell = self.obj_new(1);
+            self.zcell = self.obj_static(1);
             if self.zcell == 0 {
                 return false;
             }
@@ -5138,6 +5787,13 @@ extend Interp {
             // A write through another scalar member makes that member the active one.
             slot = self.pun_slot as u32;
         }
+        // A reference-typed local binds an aggregate handle without a copy, as a reference-typed
+        // parameter does (`run`): the handle is the reference.
+        let pl = *b.places.at(pid as usize);
+        if v.kind == IV_OBJ && obj == env && pl.proj_len == 0 && self.ref_like(b.module, pl.ty) {
+            unsafe (*self.obj_ptr(env)).slots.set(slot as usize, v);
+            return;
+        }
         let cv = self.obj_clone(v, 0);
         if v.kind != IV_NONE && cv.kind == IV_NONE {
             self.failed = true;
@@ -5153,11 +5809,9 @@ extend Interp {
                 return;
             }
             for k in 0..unsafe (*src).slots.len() {
-                let sv = unsafe (*src).slots[k];
-                self.note_wr(target, sv);
-                unsafe (*dst).slots.set(k, sv);
+                self.store(target, k, unsafe (*self.obj_ptr(cv.i as u32)).slots[k]);
             }
-            unsafe (*dst).uactive = unsafe (*src).uactive;
+            unsafe (*self.obj_ptr(target)).uactive = unsafe (*self.obj_ptr(cv.i as u32)).uactive;
             return;
         }
         let op = self.obj_ptr(obj);
@@ -5172,8 +5826,19 @@ extend Interp {
         ) {
             unsafe (*op).uactive = slot as i32;
         }
-        self.note_wr(obj, cv);
-        unsafe (*op).slots.set(slot as usize, cv);
+        self.store(obj, slot as usize, cv);
+    }
+
+    // Whether type `ty` of module `m` is a reference or a pointer: an aggregate handle of that type
+    // is the reference, aliasing its referent.
+    fn ref_like(self: &Self, m: ModuleId, ty: TypeId) bool {
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        if ty == TYPE_NONE || !self.rty(m, ty, &mut rm, &mut rt) {
+            return false;
+        }
+        let yk = (unsafe &*self.p().module_ast_const(rm)).type_at(rt).kind;
+        return yk == TypeKind::TYPE_REFERENCE || yk == TypeKind::TYPE_POINTER;
     }
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
@@ -5663,6 +6328,10 @@ extend Interp {
                 }
                 let l = self.lsvc.layout(lm, lt);
                 if !l.ok {
+                    if l.hn != NODE_NONE {
+                        self.header_trap(l, pick(rv.c == ir::IN_SIZEOF, "size", "alignment"));
+                        return none();
+                    }
                     return self.bail();
                 }
                 let mut v = l.size;
@@ -5705,7 +6374,11 @@ extend Interp {
                 if yt.kind != TypeKind::TYPE_STRUCT {
                     return self.bail();
                 }
+                // a descriptor is static data: evaluation-wide storage
+                let l0 = self.lvl;
+                self.lvl = 0;
                 let v = self.type_info_decl(b.module, yt.module, yt.as_data.decl, rv.target, tm2, tt2);
+                self.lvl = l0;
                 if v.kind != IV_OBJ {
                     return self.bail();
                 }
@@ -8381,7 +9054,6 @@ extend Interp {
         };
         let cell = self.obj_new(1);
         if cell != 0 {
-            self.note_wr(cell, t);
             unsafe (*self.obj_ptr(cell)).slots.set(0, t);
             promo.insert(key, cell);
         }
@@ -8829,7 +9501,12 @@ extend Interp {
         self.lint_on = true;
         let bb = self.body_at(bidx);
         let args = Vector::<IVal>::new();
+        // A probe is a lint: its cost has a fixed bound below the evaluation budget. A value it
+        // computes is a constant's or a fold's own, which a smaller budget only fails to reach.
+        let steps0 = self.max_steps;
+        self.max_steps = steps0.min(IT_PROBE_STEPS);
         let _ = self.run(unsafe &*bb, &args);
+        self.max_steps = steps0;
         self.lint_on = false;
         self.failed = false;
         if (it_trap_is_ub(self.trap_kind) || self.trap_kind == IT_TRAP_PANIC && self.trap_in_constfn) && self.trap_span.end > self.trap_span.start {
@@ -9640,24 +10317,75 @@ extend Interp {
         let top = self.ev_depth == 0 && self.in_run == 0;
         if top {
             self.eval_reset();
+            return self.eval_g_run(m, id, key, true);
         }
+        // a fold a lowering asks for inside a run: once per evaluation, and within the native
+        // depth the outermost nested evaluation allows (`defer_deep`)
+        if self.fold_fail.contains(&key) || self.defer_base >= 0 && self.defer_deep(DT_FOLD, key, m, id) {
+            return none();
+        }
+        if self.defer_base >= 0 {
+            return self.eval_g_run(m, id, key, false);
+        }
+        let mut ds = self.defer_enter();
+        let failed0 = self.failed;
+        let mut v = none();
+        // each round evaluates at least one more of the finite set of evaluations this one needs
+        loop {
+            v = self.eval_g_run(m, id, key, false);
+            if !self.deferred {
+                break;
+            }
+            if !self.defer_retry(&mut ds, dtask_id(DT_FOLD, key)) {
+                // a cycle: the fold fails, and as a fold it leaves no trap
+                self.trap = ds.trap;
+                self.trap_kind = ds.kind;
+                self.trap_nframes = ds.nframes;
+                self.failed = failed0;
+                v = none();
+                break;
+            }
+        }
+        self.defer_base = -1;
+        return v;
+    }
+
+    // `eval_g` past its memo: the fold itself, isolated unless `top`.
+    fn eval_g_run(self: &mut Self, m: ModuleId, id: NodeId, key: u64, top: bool) IVal {
         let failed0 = self.failed;
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
+        // a fold a lowering asks for inside a run evaluates as it does alone (`iso_enter`)
+        let mut iso = Option::<Iso>::None;
+        if !top {
+            iso = Option::<Iso>::Some(self.iso_enter());
+        }
         self.ev_depth += 1;
+        self.ndepth += 1;
         let v = self.run_root(m, id);
+        self.ndepth -= 1;
         self.ev_depth -= 1;
+        switch iso {
+            Some(s) => {
+                self.iso_leave(s, false, true);
+            },
+            None => {},
+        };
         if top && self.record_folds && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // scalar success stores the value; non-scalar success stores the positive fact; failure
-        // clears the sentinel and stays retryable
-        let scalar = v.kind == IV_INT || v.kind == IV_BOOL || v.kind == IV_FLOAT;
+        // clears the sentinel and stays retryable in a later evaluation (a nested fold's failure
+        // holds for this one: `fold_fail`); a dropped attempt (`item_defer`) records nothing
+        let scalar = !self.deferred && (v.kind == IV_INT || v.kind == IV_BOOL || v.kind == IV_FLOAT);
         if scalar {
             self.ememo.insert(key, v);
-        } else if !self.failed && (v.kind == IV_OBJ || v.kind == IV_PTR || v.kind == IV_FN || v.kind == IV_STR || v.kind == IV_UNIT) {
+        } else if !self.failed && !self.deferred && (v.kind == IV_OBJ || v.kind == IV_PTR || v.kind == IV_FN || v.kind == IV_STR || v.kind == IV_UNIT) {
             self.ememo.insert(key, IVal { kind: EV_AGG_OK, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         } else {
             let _ = self.ememo.remove(&key);
+            if !top && !self.deferred {
+                self.fold_fail.insert(key);
+            }
         }
         if !top {
             self.failed = failed0;
@@ -9684,24 +10412,117 @@ extend Interp {
             key = (key ^ (e.pm as u64 << 32 | e.pnode as u64)).wrapping_mul(1099511628211u64);
             key = (key ^ (e.am as u64 << 32 | e.at as u64)).wrapping_mul(1099511628211u64);
         }
-        switch self.lane_memo.get(&key) {
+        let row = self.lane_row(key, m, id, env);
+        let lr = *self.lane_rows.at(row as usize);
+        if lr.ok {
+            for k in 0..lr.vn {
+                out.push(self.lane_pool[(lr.v0 + k) as usize]);
+            }
+            self.eng_leave();
+            return 0;
+        }
+        let n0 = out.len();
+        let st = self.eval_lanes_at(m, id, env, out, row);
+        if st == 0 && !self.deferred {
+            let v0 = self.lane_pool.len() as u32;
+            for k in n0..out.len() {
+                self.lane_pool.push(out[k]);
+            }
+            let r = self.lane_rows.index_mut(row as usize);
+            r.v0 = v0;
+            r.vn = (out.len() - n0) as u32;
+            r.ok = true;
+        }
+        self.eng_leave();
+        return st;
+    }
+
+    /// The row of `lane_rows` that holds index list `id` of module `m` under substitution `env`,
+    /// whose key hashes to `h` (`eval_lanes`), a new one when none does. The hash only selects a
+    /// row: a hit compares the whole key, so a hash two keys share is a miss, and the new row takes
+    /// the hash over.
+    pub fn lane_row(self: &mut Self, h: u64, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>) u32 {
+        switch self.lane_memo.get(&h) {
             Some(v) => {
-                for k in 0..*v & 0xFFFFFFFF {
-                    out.push(self.lane_pool[((*v >> 32) + k) as usize]);
+                let r = *self.lane_rows.at((*v) as usize);
+                let mut same = r.m == m && r.id == id && r.en as usize == env.len();
+                let mut i: usize = 0;
+                while same && i < env.len() {
+                    let a = self.lane_envs[r.e0 as usize + i];
+                    let b = *env.at(i);
+                    same = a.pm == b.pm && a.pnode == b.pnode && a.am == b.am && a.at == b.at;
+                    i += 1;
                 }
-                self.eng_leave();
-                return 0;
+                if same {
+                    return *v;
+                }
             },
             None => {},
         };
-        let st = self.eval_lanes_run(m, id, env, out);
-        if st == 0 {
-            self.lane_memo.insert(key, self.lane_pool.len() as u64 << 32 | out.len() as u64);
-            for k in 0..out.len() {
-                self.lane_pool.push(out[k]);
+        let row = self.lane_rows.len() as u32;
+        self.lane_rows.push(
+            LaneRow { m: m, id: id, e0: self.lane_envs.len() as u32, en: env.len() as u32, v0: 0, vn: 0, ok: false },
+        );
+        for i in 0..env.len() {
+            self.lane_envs.push(*env.at(i));
+        }
+        self.lane_memo.insert(h, row);
+        return row;
+    }
+
+    // `eval_lanes` past its memo (`row` of `lane_rows`): a list a lowering asks for inside a run is
+    // evaluated once per evaluation, within the native depth the outermost nested evaluation
+    // allows, as a fold is (`eval_g`).
+    fn eval_lanes_at(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>, key: u64) u8 {
+        if self.ev_depth == 0 && self.in_run == 0 {
+            return self.eval_lanes_run(m, id, env, out);
+        }
+        switch self.lane_fail.get(&key) {
+            Some(st) => {
+                return *st;
+            },
+            None => {},
+        };
+        if self.defer_base >= 0 {
+            if self.defer_deep(DT_LANES, key, m, id) {
+                return 1;
+            }
+            return self.lane_run(m, id, env, out, key);
+        }
+        let mut ds = self.defer_enter();
+        let failed0 = self.failed;
+        let n0 = out.len();
+        let mut st: u8 = 1;
+        // each round evaluates at least one more of the finite set of evaluations this one needs
+        loop {
+            out.truncate(n0);
+            st = self.lane_run(m, id, env, out, key);
+            if !self.deferred {
+                break;
+            }
+            if !self.defer_retry(&mut ds, dtask_id(DT_LANES, key)) {
+                // a cycle: the list does not evaluate, and as a fold it leaves no trap
+                self.trap = ds.trap;
+                self.trap_kind = ds.kind;
+                self.trap_nframes = ds.nframes;
+                self.failed = failed0;
+                out.truncate(n0);
+                st = 1;
+                break;
             }
         }
-        self.eng_leave();
+        self.defer_base = -1;
+        return st;
+    }
+
+    // One nested evaluation of an index list (`eval_lanes_at`): a failure holds for this evaluation.
+    fn lane_run(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>, key: u64) u8 {
+        self.ndepth += 1;
+        let st = self.eval_lanes_run(m, id, env, out);
+        self.ndepth -= 1;
+        if st != 0 && !self.deferred {
+            self.lane_fail.insert(key, st);
+        }
         return st;
     }
 
@@ -9741,6 +10562,11 @@ extend Interp {
         self.sub_base = sb0;
         self.ev_depth += 1;
         let mut st: u8 = 1;
+        // a list a lowering asks for inside a run evaluates as it does alone (`iso_enter`)
+        let mut iso = Option::<Iso>::None;
+        if !top {
+            iso = Option::<Iso>::Some(self.iso_enter());
+        }
         if lw.lower_expr_root(id) {
             let args = Vector::<IVal>::new();
             let v = self.run(&lw.body, &args);
@@ -9759,6 +10585,12 @@ extend Interp {
                 st = 2;
             }
         }
+        switch iso {
+            Some(s) => {
+                self.iso_leave(s, false, true);
+            },
+            None => {},
+        };
         self.ev_depth -= 1;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
@@ -10598,6 +11430,9 @@ extend Interp {
         if tag != 0 {
             let lay0 = self.lsvc.layout(tm, tt);
             if !lay0.ok {
+                if lay0.hn != NODE_NONE {
+                    self.header_trap(lay0, "layout");
+                }
                 return none();
             }
             size = lay0.size;
@@ -11000,5 +11835,19 @@ extend CallMemo {
         self.ix.clear();
         self.rows.clear();
         self.args.clear();
+    }
+
+    fn new() CallMemo {
+        return CallMemo { ix: Map::<u64, u32>::new(), rows: Vector::<MemoRow>::new(), args: Vector::<IVal>::new() };
+    }
+
+    // Empty the memo for the next evaluation: a large table is dropped, since clearing costs its
+    // capacity and most evaluations use a few rows.
+    fn reset(self: &mut Self) {
+        if self.rows.len() > MEMO_KEEP_ROWS {
+            let _ = replace(self, CallMemo::new());
+        } else if self.rows.len() != 0 {
+            self.clear();
+        }
     }
 }

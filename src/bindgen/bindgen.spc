@@ -13,7 +13,7 @@
 //
 // Scope: functions, the typedefs needed to spell their signatures, enums (tagged ones as `enum`, anonymous
 // enumerators and object-like macros as constants), fielded structs/unions where every member is modelable
-// (the emitted C layout-asserts them against the header on every target; bitfields and anonymous members
+// (the emitted C checks each field against the header on every target; bitfields and anonymous members
 // fall back to opaque), `extern` globals (const-qualified as `const`, writable as `static mut`), and opaque
 // `pub type` for everything reached only through a pointer. Function-LIKE macros cannot appear at all: the
 // preprocessor has already expanded them away by the time anything here runs.
@@ -321,20 +321,21 @@ struct Alias {
 }
 
 struct Field {
-    pub name: String,
+    pub name: String, // the C member's name
     pub ty: String,
 }
 
 // A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
-// Super-C form (a bitfield, an anonymous member, a flexible array, an unmodelled type) because a
-// record with a field silently dropped has the wrong LAYOUT, and every call through it would corrupt
-// memory. Such a record falls back to the opaque `pub type`, which is merely limited rather than wrong.
+// Super-C form (a bitfield, an anonymous member, a flexible array, an unmodelled type): such a record
+// falls back to the opaque `pub type`, which keeps every member out of reach instead of binding some.
+// `tagless`: the body had no tag, so `tag` is the typedef that names it (`typedef struct { .. } Foo;`).
 struct Record {
     pub tag: String,
     pub fields: Vector<Field>,
     pub is_union: bool,
     pub ok: bool,
     pub mine: bool,
+    pub tagless: bool,
 }
 
 struct EnumVal {
@@ -344,11 +345,13 @@ struct EnumVal {
 
 // A C enum. A TAGGED one becomes a Super-C `enum` (its tag is a type a signature can name); an anonymous
 // one is the "block of constants" idiom and becomes plain consts, which is how C code uses it.
+// `tagless`: the body had no tag, so `tag` is the typedef that names it (`typedef enum { .. } Foo;`).
 struct EnumDef {
     pub tag: String,
     pub vals: Vector<EnumVal>,
     pub ok: bool,
     pub mine: bool,
+    pub tagless: bool,
 }
 
 struct ConstDef {
@@ -1543,9 +1546,8 @@ extend Lexer {
     }
 
     // `{ <member declarations> }`. Members are ordinary declarations, so the same specifier/declarator parse
-    // runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
-    // changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
-    // than no record at all.
+    // runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: a field
+    // list cannot express them, so the record stays opaque.
     fn parse_record_body(self: &mut Self, c: &mut Collected, tag: str, is_union: bool, dump: str) {
         let mut r = Record {
             tag: String::from_str(tag),
@@ -1616,9 +1618,7 @@ extend Lexer {
                     } else {
                         ty.render(&mut rt);
                     }
-                    let mut fname = String::new();
-                    safe_name(nm.as_str(), &mut fname);
-                    r.fields.push(Field { name: fname, ty: rt });
+                    r.fields.push(Field { name: String::from_str(nm.as_str()), ty: rt });
                 }
                 self.skip_noise();
                 if self.at_punct(b',') {
@@ -1942,8 +1942,8 @@ extend Lexer {
             *variadic = va;
             *params = ps; // every caller passes an empty vector
         }
-        // An array PARAMETER is a pointer: that is C's own rule. An array FIELD is not: dropping its extent
-        // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
+        // An array PARAMETER is a pointer: that is C's own rule. An array FIELD is not: its extent is its
+        // size, so the bound is carried out and the field keeps `[T; N]`.
         let mut first = true;
         while self.at_punct(b'[') {
             if decay {
@@ -2234,6 +2234,7 @@ extend Collected {
             let idx = pend as usize;
             if pend_enum && idx < self.enums.len() && self.enums[idx].tag.len() == 0 {
                 self.enums[idx].tag.push_str(name);
+                self.enums[idx].tagless = true;
                 self.aliases.push(
                     Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
                 );
@@ -2241,6 +2242,7 @@ extend Collected {
             }
             if !pend_enum && idx < self.records.len() && self.records[idx].tag.len() == 0 {
                 self.records[idx].tag.push_str(name);
+                self.records[idx].tagless = true;
                 self.aliases.push(
                     Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
                 );
@@ -2412,9 +2414,9 @@ extend Collected {
             if !e.mine || !e.ok || e.tag.len() == 0 {
                 continue;
             }
-            let ai = self.alias_of(e.tag.as_str());
-            if !(ai >= 0 && self.aliases.at(ai as usize).opaque) {
-                out.format_into("    @c.import(\"enum {}\")\n", e.tag.as_str());
+            // An enum spells as its tag (`enum x`); one with no tag as the typedef that names it.
+            if e.tagless {
+                out.format_into("    @c.import(\"{}\")\n", e.tag.as_str());
             }
             out.format_into("    pub enum {} {{\n", e.tag.as_str());
             for j in 0..e.vals.len() {
@@ -2425,8 +2427,8 @@ extend Collected {
             out.push_str("    }\n\n");
         }
         // Inside the block, so these ARE the header's types rather than look-alikes: the emitted C uses the
-        // header's own definition and asserts this layout against it. A tag C never typedef'd has to be
-        // spelled `struct x` there, which is what the pinned symbol carries.
+        // header's own definition and checks each field against it. A record spells as its tag
+        // (`struct x`); one with no tag spells as the typedef that names it, which the pin carries.
         for i in 0..self.records.len() {
             let r = self.records.at(i);
             if !r.mine || !r.ok || r.tag.len() == 0 {
@@ -2437,14 +2439,19 @@ extend Collected {
             } else {
                 "struct";
             };
-            let ai = self.alias_of(r.tag.as_str());
-            let typedefed = ai >= 0 && self.aliases.at(ai as usize).opaque;
-            if !typedefed {
-                out.format_into("    @c.import(\"{} {}\")\n", kw, r.tag.as_str());
+            if r.tagless {
+                out.format_into("    @c.import(\"{}\")\n", r.tag.as_str());
             }
             out.format_into("    pub {} {} {{\n", kw, r.tag.as_str());
             for j in 0..r.fields.len() {
-                out.format_into("        pub {}: {},\n", r.fields[j].name.as_str(), r.fields[j].ty.as_str());
+                // A member named by a keyword binds under its escaped name, pinned to the C member.
+                let fname = r.fields[j].name.as_str();
+                if keyword(fname) {
+                    out.format_into("        @c.import(\"{}\")\n", fname);
+                }
+                out.push_str("        pub ");
+                safe_name(fname, out);
+                out.format_into(": {},\n", r.fields[j].ty.as_str());
             }
             out.push_str("    }\n\n");
         }

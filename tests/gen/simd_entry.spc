@@ -651,8 +651,13 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
 /// one program, the same output planned and with lane loops, and a call of each entry.
 pub fn check_memory(text: str) String {
     let src = memory_program();
-    let mut r = h::same_output(src.as_str(), ["--profile=ubsan"], ["--profile=ubsan", "SC_SIMD_SCALAR=1"], ["", "x"]);
     let m = h::diff_build(src.as_str(), ["--profile=ubsan"]);
+    let s = h::diff_build(src.as_str(), ["--profile=ubsan", "SC_SIMD_SCALAR=1"]);
+    let mut r = if m.built && s.built {
+        h::same_runs(&m, &s, ["", "x"]);
+    } else {
+        format("the program does not build:\n{}{}", m.diag.as_str(), s.diag.as_str());
+    };
     let c = emitted_c(&m, "ubsan");
     let es = entries(text);
     let run = run_features(true);

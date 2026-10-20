@@ -225,6 +225,41 @@ through a function value names the routine); atomics are not evaluable. The veri
 tag on an unresolved call, with another arity, of an unknown kind, or on another terminator. The
 printer writes ` intrinsic <kind>` after the call's arguments.
 
+## Self Tail Calls (`src/ir/tailcall.spc`)
+
+`convert` runs on an elaborated function body (not a closure, a constant or an interface
+default). A `TM_CALL` of the body's own owner converts when all of these hold, else it is a
+`TailMiss` with its `TR_*` reason:
+
+- The path from the call to `TM_RETURN` holds only whole-local moves of the result into the
+  return slot (with several results, whole copies of the destination temporary and member reads
+  that move member `k` into slot `k`), storage markers and constant stores into frame locals (drop flags): no
+  `TM_DROP` (`TR_DROP`), no other statement or call (`TR_AFTER`, `TR_CANCEL` for the
+  cancellation probe), no other use of the result (`TR_NOT_TAIL`).
+- No interface dispatch, no named receiver type, and every generic argument is the function's
+  own parameter (the extend's first for a keyed extend); an associated function of a generic
+  extend never converts (`TR_INSTANCE`).
+- Each argument has its parameter's type, or a function item for a function-pointer
+  parameter, a safe numeric widening (`RV_CAST`), an implicit borrow (`RV_REF`) or an
+  implicit dereference of its place, as `CEmit::emit_call_arg` spells the call
+  (`TR_ADJUST` otherwise).
+- No new parameter value may hold a borrow of frame storage (`TR_BORROW`): a flow-insensitive
+  taint over the body marks the locals that may hold one (borrows of places outside a
+  dereference, a fixed array's views, implicit borrows at calls, results of calls given one,
+  everything borrowed once a call is given two or a borrow is stored through a reference). A
+  frame borrow made a raw pointer or an integer, stored into a static or given to inline
+  assembly refuses every call of the body (`TR_ADDRESS`). A call with a never-typed argument
+  never runs and is skipped.
+
+The rewrite adds an empty entry block that jumps to the old entry (the loop head), stores each
+argument into its parameter in order (an argument that reads a parameter an earlier store
+overwrote, a part of its own parameter, or memory through a frame borrow is first copied into a
+temporary), copies the path's storage deaths of non-argument locals, and jumps to the head. A
+stored parameter becomes `is_mutable`, so a fixed-array parameter gets its entry copy and a
+`&mut` parameter loses `restrict`. Path blocks left unreachable are emptied
+(`TM_UNREACHABLE`) and the operands of their moves become a unit constant, so no read of the
+dead result temp keeps it declared; the statement pool is rebuilt in block order.
+
 ## Effects and Facts (`src/ir/facts.spc`)
 
 The fact service over one final elaborated body; bounds-check elimination (`ir/bce.spc`) is its
@@ -302,6 +337,9 @@ need.
   parameter makes the implicit borrow: the emitter spells `&x` (`emit_call_arg`), the
   evaluator passes a pointer to the operand's place, or to a new cell for a temporary
   (`autoref_args`), so `x.get()` on a builtin runs at compile time as it runs in C.
+- A call whose result type is `never` continues in a block no edge reaches (its successor is
+  `TM_UNREACHABLE`): a `never` value exists nowhere, so no consumer, the emitter included, sees
+  a reachable read of one.
 - A body that reaches a construct the lowering cannot handle fails with a reason string.
 - **One lowering per body:** `irl::Keep` caches `KeptBody` records (body plus closures) keyed by body; borrowck
   fills it, emission's InstGraph walks it. Bodies with `has_reflect` / `has_zst_cond`

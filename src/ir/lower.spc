@@ -87,6 +87,28 @@ struct ViewDecls {
     pub v_array: DefId,
 }
 
+// The nodes whose value an `if`, `switch` or value-block arm yields as the whole expression's value:
+// the arm (`arm`), its value (`val`: the arm itself or its block's tail) and the operand of a `&`
+// that is the value (`rf`). A temporary one of them borrows (an array viewed as a slice, a `&`
+// operand) lives in the scope around the expression, as it would without the arms: `depth` scopes
+// are open there (EXT_NONE: no arm is being lowered).
+struct ExtCx {
+    pub arm: NodeId,
+    pub val: NodeId,
+    pub rf: NodeId,
+    pub depth: u32,
+}
+
+const EXT_NONE: u32 = 0xFFFFFFFFu32;
+
+// The result of a lowering given a destination (`lower_into`) that stored its value there: no
+// operand reads it, since a temp and a copy are what the destination saves. Never an OperandId.
+const WROTE: ir::OperandId = 0xFFFFFFFEu32;
+
+const fn ext_none() ExtCx {
+    return ExtCx { arm: NODE_NONE, val: NODE_NONE, rf: NODE_NONE, depth: EXT_NONE };
+}
+
 const fn vd_none() DefId {
     return DefId { module: 0, node: NODE_NONE };
 }
@@ -139,6 +161,7 @@ pub struct Lowerer {
     scope_defers: Vector<usize>, // per open scope: defers length at entry
     scope_locals: Vector<ir::LocalId>, // user locals per scope, in declaration order
     scope_local_marks: Vector<usize>, // per open scope: scope_locals length at entry
+    ext: ExtCx, // the value arm being lowered: its borrowed temporaries' scope
     // `local << 32 | source place` per by-value pattern binding, in binding order: a guarded arm
     // hands its bindings back to the scrutinee on the guard's failure edge.
     moved_binds: Vector<u64>,
@@ -349,6 +372,7 @@ extend Lowerer {
             scope_defers: Vector::<usize>::new(),
             scope_locals: Vector::<ir::LocalId>::new(),
             scope_local_marks: Vector::<usize>::new(),
+            ext: ext_none(),
             moved_binds: Vector::<u64>::new(),
             item_keys: Vector::<u64>::new(),
             item_ix: Map::<u64, ir::LocalId>::new(),
@@ -632,6 +656,34 @@ extend Lowerer {
         return pl;
     }
 
+    // Store `rv` into destination `dest` (`lower_into`) when there is one and it holds the
+    // rvalue's type: WROTE. Otherwise into a fresh temp, and the operand that reads it.
+    fn rv_out(self: &mut Self, dest: ir::PlaceId, rv: ir::Rvalue, sp: tok::Span) ir::OperandId {
+        if dest != ir::IR_NONE && self.body.places.at(dest as usize).ty == rv.target {
+            self.assign(dest, rv, sp);
+            return WROTE;
+        }
+        return self.copy_op(self.rv_temp(rv, sp));
+    }
+
+    // The place a value of type `ty` lowers into: `dest` when there is one and it holds `ty`, else a
+    // fresh temp's.
+    fn out_place(self: &mut Self, dest: ir::PlaceId, ty: TypeId, sp: tok::Span) ir::PlaceId {
+        if dest != ir::IR_NONE && self.body.places.at(dest as usize).ty == ty {
+            return dest;
+        }
+        return self.place_of_local(self.temp(ty, sp));
+    }
+
+    // The result of a producer that wrote place `pl`, given destination `dest`: WROTE when `pl` is
+    // `dest`, else the operand that reads `pl`.
+    fn out_op(self: &mut Self, dest: ir::PlaceId, pl: ir::PlaceId) ir::OperandId {
+        if pl == dest {
+            return WROTE;
+        }
+        return self.copy_op(pl);
+    }
+
     fn place_of_local(self: &mut Self, l: ir::LocalId) ir::PlaceId {
         let ty = self.body.locals.at(l as usize).ty;
         self.body.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ty });
@@ -703,8 +755,31 @@ extend Lowerer {
         }
         ld.decl = key;
         self.body.locals.set(pl.base as usize, ld);
-        self.scope_locals.push(pl.base);
+        let d = self.ext.depth as usize;
+        if self.ext_on(key) && d < self.scope_local_marks.len() {
+            // A temporary an arm's value borrows: the last local of the scope around the arms.
+            self.scope_locals.insert(self.scope_local_marks[d], pl.base);
+            for i in d..self.scope_local_marks.len() {
+                self.scope_local_marks.set(i, self.scope_local_marks[i] + 1);
+            }
+        } else {
+            self.scope_locals.push(pl.base);
+        }
         return true;
+    }
+
+    // Whether node `id` is in the value position of the arm being lowered (`ExtCx`).
+    const fn ext_on(self: &Self, id: NodeId) bool {
+        return id != NODE_NONE && (id == self.ext.arm || id == self.ext.val || id == self.ext.rf);
+    }
+
+    // The scope depth a value `if`, `switch` or block `id` gives the temporaries its arms' values
+    // borrow: the depth around it, or its own arm's when `id` is the value of an enclosing arm.
+    const fn ext_depth_for(self: &Self, id: NodeId) u32 {
+        if self.ext_on(id) {
+            return self.ext.depth;
+        }
+        return self.scope_local_marks.len() as u32;
     }
 
     // `own_temp` for an operand an operator only reads, when its type can own: a builtin, pointer
@@ -900,8 +975,7 @@ extend Lowerer {
         // and printer rely on.
         let rets = fd.returns;
         for i in 0..rets.len {
-            let rn = unsafe self.f.list(rets)[i as usize];
-            let rt = self.nty(rn);
+            let rt = self.ret_ty(unsafe self.f.list(rets)[i as usize]);
             let _ = self.body.add_local(self.local_decl(rt, ir::LS_RET, true, sp, NODE_NONE));
         }
         self.body.returns = rets.len;
@@ -962,8 +1036,8 @@ extend Lowerer {
         let sp = self.f.node(cnode).span;
         let rets = cd.returns;
         for i in 0..rets.len {
-            let rn = unsafe self.f.list(rets)[i as usize];
-            let _ = self.body.add_local(self.local_decl(self.nty(rn), ir::LS_RET, true, sp, NODE_NONE));
+            let rt = self.ret_ty(unsafe self.f.list(rets)[i as usize]);
+            let _ = self.body.add_local(self.local_decl(rt, ir::LS_RET, true, sp, NODE_NONE));
         }
         self.body.returns = rets.len;
         if rets.len == 0 && cd.expr_body {
@@ -1007,7 +1081,7 @@ extend Lowerer {
         self.scope_enter();
         if cd.expr_body && self.body.returns != 0 {
             let pl = self.place_of_local(0);
-            self.lower_value_into(cd.body, pl);
+            self.lower_value_into(cd.body, pl, EXT_NONE);
         } else {
             self.lower_stmt(cd.body);
         }
@@ -1034,12 +1108,8 @@ extend Lowerer {
         self.body.returns = 1;
         self.open_entry();
         if expr != NODE_NONE {
-            let op = self.lower_expr(expr);
-            if op != ir::IR_NONE {
-                let pl = self.place_of_local(0);
-                let rv = self.rv_use(op, ty);
-                self.assign(pl, rv, sp);
-            }
+            let pl = self.place_of_local(0);
+            let _ = self.lower_into(expr, pl, false, sp);
         }
         return self.finish_body(sp);
     }
@@ -1257,13 +1327,11 @@ extend Lowerer {
             }
             // The pattern's names bind after the value: nothing is pending while it evaluates.
             let cb = self.chk_open(ld.value, false);
-            let vop = self.lower_expr(ld.value);
+            let vpl = self.value_temp(ld.value, true, sp);
             self.chk_close(cb);
-            if vop == ir::IR_NONE {
+            if vpl == ir::IR_NONE {
                 return;
             }
-            self.mark_user_move(vop);
-            let vpl = self.spill(vop, sp);
             self.pattern_bind(ld.name, vpl);
             let tk: u8 = if nk == NodeKind::NODE_PATTERN_TUPLE {
                 ir::TP_LET_TUPLE;
@@ -1286,16 +1354,13 @@ extend Lowerer {
             // skips it.
             self.pending_lets.push(l);
             let cb = self.chk_open(ld.value, true);
-            let op = self.lower_expr(ld.value);
+            let pl = self.place_of_local(l);
+            let ok = self.lower_into(ld.value, pl, true, sp);
             self.chk_close(cb);
             let _ = self.pending_lets.pop();
-            if op == ir::IR_NONE {
+            if !ok {
                 return;
             }
-            self.mark_user_move(op);
-            let pl = self.place_of_local(l);
-            let rv = self.rv_use(op, ty);
-            self.assign(pl, rv, sp);
         }
         self.tp(ir::TP_LET, 0, id);
     }
@@ -1308,13 +1373,11 @@ extend Lowerer {
             // `return pair();`: the call's results, member by member, are the return values.
             let v = unsafe self.f.list(rd.values)[0];
             let cb = self.chk_open(v, false);
-            let op = self.lower_expr(v);
+            let tpl = self.value_temp(v, true, sp);
             self.chk_close(cb);
-            if op == ir::IR_NONE {
+            if tpl == ir::IR_NONE {
                 return;
             }
-            self.mark_user_move(op);
-            let tpl = self.spill(op, sp);
             for i in 0..self.body.returns {
                 let ty = self.body.locals.at(i as usize).ty;
                 let mpl = self.place_project(
@@ -1342,17 +1405,13 @@ extend Lowerer {
                 root = v;
             }
             let cb = self.chk_open(root, false);
-            let op = self.lower_expr(v);
+            let pl = self.place_of_local(i);
+            let ok = self.lower_into(v, pl, true, sp);
             self.chk_close(cb);
-            if op == ir::IR_NONE {
+            if !ok {
                 return;
             }
-            self.mark_user_move(op);
             self.tp(ir::TP_RET_VAL, i, v);
-            let pl = self.place_of_local(i);
-            let ty = self.body.locals.at(i as usize).ty;
-            let rv = self.rv_use(op, ty);
-            self.assign(pl, rv, sp);
         }
         self.tp(ir::TP_RET_POST, 0, id);
         self.emit_defers_down_to(0);
@@ -1393,14 +1452,13 @@ extend Lowerer {
         }
         let lc = self.loops[li as usize];
         if fd.value != NODE_NONE {
-            let op = self.lower_expr(fd.value);
-            if op == ir::IR_NONE {
-                return;
-            }
+            // The loop's result is its destination: written once, then the loop exits.
             if lc.result != ir::IR_NONE {
-                let ty = self.body.places.at(lc.result as usize).ty;
-                let rv = self.rv_use(op, ty);
-                self.assign(lc.result, rv, sp);
+                if !self.lower_into(fd.value, lc.result, false, sp) {
+                    return;
+                }
+            } else if self.lower_expr(fd.value) == ir::IR_NONE {
+                return;
             }
         }
         self.emit_defers_down_to(lc.brk_defer_depth);
@@ -1486,26 +1544,28 @@ extend Lowerer {
         if cop == ir::IR_NONE {
             return false;
         }
+        let depth = self.ext_depth_for(id);
         let then_b = self.open_block();
         let els_b = self.open_block();
         let join = self.open_block();
         self.branch_bool(cop, then_b, els_b, sp);
         self.tp(ir::TP_FLOW_SAVE, 0, id);
-        self.lower_arm(d.then_branch, dest);
+        self.lower_arm(d.then_branch, dest, depth);
         self.tp(ir::TP_FLOW_ELSE, 0, id);
         self.seal(ir::goto_term(join, sp), els_b);
-        self.lower_arm(d.else_branch, dest);
+        self.lower_arm(d.else_branch, dest, depth);
         self.tp(ir::TP_FLOW_JOIN, 0, id);
         self.seal(ir::goto_term(join, sp), join);
         return true;
     }
 
-    // Lower arm `n` as a statement (`dest` none) or as a value into `dest`.
-    fn lower_arm(self: &mut Self, n: NodeId, dest: ir::PlaceId) {
+    // Lower arm `n` as a statement (`dest` none) or as a value into `dest`, whose borrowed
+    // temporaries live at scope depth `depth`.
+    fn lower_arm(self: &mut Self, n: NodeId, dest: ir::PlaceId, depth: u32) {
         if dest == ir::IR_NONE {
             self.lower_stmt(n);
         } else {
-            self.lower_value_into(n, dest);
+            self.lower_value_into(n, dest, depth);
         }
     }
 
@@ -1885,6 +1945,13 @@ extend Lowerer {
             return t;
         }
         return self.proj_ty_map(t, 0, NodeList { start: 0, len: 0 }, null, 0);
+    }
+
+    // The type of result `rn` of a signature: a named result (`(r: T)`) is a parameter node, typed
+    // through its type node.
+    fn ret_ty(self: &mut Self, rn: NodeId) TypeId {
+        let n = *self.f.node(rn);
+        return self.nty(pick(n.kind == NodeKind::NODE_PARAMETER, n.as_data.parameter.ty, rn));
     }
 
     // Every node-type read routes through the active-copy substitution.
@@ -3393,11 +3460,9 @@ extend Lowerer {
         // A `for` statement's head evaluates nothing unregistered besides `next`'s own result: a
         // clean position unless an enclosing value block masks it, or the narrow std::parallel rule.
         if self.chk_mask == 0 && !self.chk_narrow {
-            let top = self.copy_op(tpl);
-            self.cancel_check_at(next_def, false, top, opt_ty, sp);
+            self.cancel_check_at(next_def, false, tpl, opt_ty, sp);
         } else {
-            let top = self.copy_op(tpl);
-            self.poison_check_at(next_def, false, top, sp);
+            self.poison_check_at(next_def, false, tpl, sp);
         }
         let ut = Ast::builtin(BuiltinType::BT_U32);
         let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, tpl, 0, 0, ut), sp);
@@ -3514,6 +3579,72 @@ extend Lowerer {
     // dyn erasure) recorded at the node wrap the base operand here, so consumers never re-read the
     // side tables.
     fn lower_expr(self: &mut Self, id: NodeId) ir::OperandId {
+        return self.lower_expr_d(id, ir::IR_NONE);
+    }
+
+    // Lower expression `id` so its value lands in place `dest`, the destination of a `let`, a
+    // return value, an arm or a scrutinee (contract below). False when it fails to lower. `user`:
+    // the value is a user consumption (`mark_user_move`) when it is read from a place. `sp` is the
+    // span of the store into `dest` when no producer writes it (the statement's).
+    //
+    // The destination contract: nothing the expression evaluates reads, names, borrows or drops
+    // `dest`, and `dest` holds no value to drop. A value written there early is then unobservable,
+    // so a producer (an `if`, `switch` or block arm, a loop's `break`, an aggregate, a call, a
+    // conversion) stores its result into `dest` itself instead of into a temporary the caller
+    // copies. A fresh `let` local, a return slot (in which no call writes, `emit_call`) and a fresh
+    // temporary hold it. An assignment's place does not: the old value drops after the new one is
+    // computed and the place may be read by it (`x = f(x)`), and an arm's defers and its locals'
+    // drops run after its value is stored.
+    fn lower_into(self: &mut Self, id: NodeId, dest: ir::PlaceId, user: bool, sp: tok::Span) bool {
+        let op = self.lower_expr_d(id, dest);
+        if op == ir::IR_NONE {
+            return false;
+        }
+        if op != WROTE {
+            if user {
+                self.mark_user_move(op);
+            }
+            let ty = self.body.places.at(dest as usize).ty;
+            self.assign(dest, self.rv_use(op, ty), sp);
+        }
+        return true;
+    }
+
+    // A fresh temp holding the value of `id`, the place of a spilled operand; IR_NONE when it fails
+    // to lower. The value lowers into the temp (`lower_into`) when its type is the node's, so no
+    // temporary that a spill copies precedes it. `user` and `sp`, the temp's span, as for
+    // `lower_into`.
+    fn value_temp(self: &mut Self, id: NodeId, user: bool, sp: tok::Span) ir::PlaceId {
+        if self.plain_value(id) && self.nty(id) != TYPE_NONE {
+            let pl = self.place_of_local(self.temp(self.nty(id), sp));
+            if !self.lower_into(id, pl, user, sp) {
+                return ir::IR_NONE;
+            }
+            return pl;
+        }
+        let op = self.lower_expr(id);
+        if op == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        if user {
+            self.mark_user_move(op);
+        }
+        return self.spill(op, sp);
+    }
+
+    // Whether the checker recorded no conversion on node `id` that `apply_adjust` applies: its
+    // base value is its value.
+    fn plain_value(self: &Self, id: NodeId) bool {
+        if self.f.coercion(id) != null || self.f.dyn_conv(id) != null || self.f.wide_lit(id) != null {
+            return false;
+        }
+        let n = self.f.node(id);
+        let star = n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Star;
+        return n.kind == NodeKind::NODE_MEMBER || star || self.f.derefs(id) == null;
+    }
+
+    // `lower_expr` with destination `dest` (IR_NONE: none): WROTE when the value was stored there.
+    fn lower_expr_d(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         if id == NODE_NONE || self.err.len() != 0 {
             return ir::IR_NONE;
         }
@@ -3539,18 +3670,28 @@ extend Lowerer {
                 if apl == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
-                return self.addr_op(apl, self.nty(id), pty, sp);
+                return self.addr_op(apl, self.nty(id), pty, sp, dest);
             }
         }
-        let base = self.lower_expr_base(id);
-        if base == ir::IR_NONE {
-            return ir::IR_NONE;
+        // The base value is the value when no conversion follows it.
+        let mut bdest = ir::IR_NONE;
+        if dest != ir::IR_NONE && self.plain_value(id) && self.nty(id) == self.body.places.at(dest as usize).ty {
+            bdest = dest;
         }
-        return self.apply_adjust(id, base);
+        let base = self.lower_expr_base(id, bdest);
+        if base == ir::IR_NONE || base == WROTE {
+            return base;
+        }
+        return self.apply_adjust_d(id, base, self.f.node(id).span, dest);
     }
 
-    fn apply_adjust(self: &mut Self, id: NodeId, base: ir::OperandId) ir::OperandId {
-        let sp = self.f.node(id).span;
+    // Apply the conversions the checker recorded on node `id` to its value `base`, at span `sp`.
+    fn apply_adjust(self: &mut Self, id: NodeId, base: ir::OperandId, sp: tok::Span) ir::OperandId {
+        return self.apply_adjust_d(id, base, sp, ir::IR_NONE);
+    }
+
+    // `apply_adjust` whose last conversion stores into destination `dest` (`rv_out`).
+    fn apply_adjust_d(self: &mut Self, id: NodeId, base: ir::OperandId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
         let mut op = base;
         // A deref coercion recorded on a non-place expression (a `&W` value meeting a `&Target`
         // parameter): members and `*x` consume their chains in place lowering; every other node
@@ -3575,12 +3716,21 @@ extend Lowerer {
                         }
                         let start = self.body.oper_pool.len() as u32;
                         self.body.oper_pool.push(op);
-                        let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp);
-                        self.maybe_cancel_check(id, m, false, res, rt2, sp);
-                        if res == ir::IR_NONE {
-                            return ir::IR_NONE;
-                        }
-                        op = res;
+                        let rpl = self.emit_call_to(
+                            m,
+                            ir::IR_NONE,
+                            start,
+                            1,
+                            0,
+                            0,
+                            TYPE_NONE,
+                            TYPE_NONE,
+                            rt2,
+                            sp,
+                            ir::IR_NONE,
+                        );
+                        self.maybe_cancel_check(id, m, false, rpl, rt2, sp);
+                        op = self.copy_op(rpl);
                     }
                 }
             }
@@ -3589,7 +3739,9 @@ extend Lowerer {
         // keeps the array. The view temp is the one place the emitter builds `{ arr, N }`; it
         // borrows the array (`b` = the view kind), so an array temporary lives to the scope's end.
         // A call records the view as a conversion and keeps its array type.
+        // Each conversion below stores into `dest` when no later one follows it.
         let mut co = self.f.coercion(id);
+        let dy = self.f.dyn_conv(id);
         {
             let ot = self.body.operands.at(op as usize).ty;
             if ot != TYPE_NONE && self.f.ty(ot).kind == TypeKind::TYPE_ARRAY {
@@ -3598,13 +3750,16 @@ extend Lowerer {
                     vt = unsafe (*co).target;
                     co = null;
                 }
+                let fin = pick(co == null && dy == null, dest, ir::IR_NONE);
                 let vk = self.view_kind(vt);
                 if vk != 0 {
-                    let _ = self.own_temp(op, id);
-                    op = self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, op, vk, 0, vt), sp));
+                    op = self.view_of(op, id, vt, vk, sp, fin);
                 } else if vt != TYPE_NONE && self.f.ty(vt).kind == TypeKind::TYPE_SIMD {
                     // An array literal the checker typed as a vector: its array, then the lanes.
-                    op = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, op, ir::CAST_SIMD_ARRAY, 0, vt), sp));
+                    op = self.rv_out(fin, ir::rv(ir::RV_CAST, op, ir::CAST_SIMD_ARRAY, 0, vt), sp);
+                }
+                if op == WROTE {
+                    return op;
                 }
             }
         }
@@ -3612,7 +3767,10 @@ extend Lowerer {
             self.body.operands.at(op as usize).ty,
         ) == 2 {
             // `[]mut T` as `[]T`: the shared view borrows the view, as an array's view borrows it.
-            op = self.copy_op(self.rv_temp(ir::rv(ir::RV_USE, op, 1, 0, unsafe (*co).target), sp));
+            op = self.rv_out(pick(dy == null, dest, ir::IR_NONE), ir::rv(ir::RV_USE, op, 1, 0, unsafe (*co).target), sp);
+            if op == WROTE {
+                return op;
+            }
             co = null;
         }
         if co != null && self.f.wide_lit(id) != null {
@@ -3625,26 +3783,52 @@ extend Lowerer {
         if co != null {
             let target = unsafe (*co).target;
             let method = unsafe (*co).method;
-            let t = self.temp(target, sp);
-            let pl = self.place_of_local(t);
             let ck: u8 = if method.node != NODE_NONE {
                 ir::CAST_COERCE_FROM;
             } else {
                 ir::CAST_NUMERIC;
             };
-            self.assign(pl, ir::Rvalue { kind: ir::RV_CAST, a: op, b: ck, c: 0, target: target, item: method }, sp);
-            op = self.copy_op(pl);
+            op = self.rv_out(
+                pick(dy == null, dest, ir::IR_NONE),
+                ir::Rvalue { kind: ir::RV_CAST, a: op, b: ck, c: 0, target: target, item: method },
+                sp,
+            );
+            if op == WROTE {
+                return op;
+            }
         }
-        let dy = self.f.dyn_conv(id);
         if dy != null {
             let dt = unsafe (*dy).dyn_ty;
-            let pl = self.rv_temp(ir::rv(ir::RV_DYN, op, unsafe (*dy).alloc, 0, dt), sp);
-            op = self.copy_op(pl);
+            op = self.rv_out(dest, ir::rv(ir::RV_DYN, op, unsafe (*dy).alloc, 0, dt), sp);
         }
         return op;
     }
 
-    fn lower_expr_base(self: &mut Self, id: NodeId) ir::OperandId {
+    // The view of kind `vk` and type `vt` of array operand `op`, stored into `dest` (`rv_out`); a
+    // temporary array lives in the scope `key` registers it in (`own_temp`).
+    fn view_of(self: &mut Self, op: ir::OperandId, key: NodeId, vt: TypeId, vk: u32, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
+        let _ = self.own_temp(op, key);
+        return self.rv_out(dest, ir::rv(ir::RV_USE, op, vk, 0, vt), sp);
+    }
+
+    // Value `op` of `if`, `switch` or block arm `arm` as `ty`, the type of the whole expression: the
+    // checker types the whole expression as a slice when the arms yield arrays, so each arm's array
+    // becomes its view here, at span `sp`.
+    fn arm_view(self: &mut Self, op: ir::OperandId, arm: NodeId, ty: TypeId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
+        let ot = self.body.operands.at(op as usize).ty;
+        if ot == TYPE_NONE || self.f.ty(ot).kind != TypeKind::TYPE_ARRAY {
+            return op;
+        }
+        let vk = self.view_kind(ty);
+        if vk == 0 {
+            return op;
+        }
+        return self.view_of(op, arm, ty, vk, sp, dest);
+    }
+
+    // The value of node `id` before its conversions; a producer stores it into `dest` (IR_NONE:
+    // none) when the destination holds its type (`rv_out`, `out_place`): WROTE.
+    fn lower_expr_base(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let k = self.f.node(id).kind;
         let sp = self.f.node(id).span;
         let ty = self.nty(id);
@@ -3652,6 +3836,11 @@ extend Lowerer {
             return self.lower_literal(id);
         }
         if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER || k == NodeKind::NODE_INDEX {
+            // An item that is a value, no place: its value, not a temporary that copies it.
+            let vi = self.value_item(id);
+            if vi.node != NODE_NONE {
+                return self.item_value(id, vi, ty, sp, dest);
+            }
             let pl = self.lower_place(id);
             if pl == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -3689,16 +3878,16 @@ extend Lowerer {
                     return self.copy_op(pl);
                 }
             }
-            return self.lower_unary(id);
+            return self.lower_unary(id, dest);
         }
         if k == NodeKind::NODE_BINARY {
-            return self.lower_binary(id);
+            return self.lower_binary(id, dest);
         }
         if k == NodeKind::NODE_ASSIGNMENT {
             return self.lower_assignment(id);
         }
         if k == NodeKind::NODE_CALL {
-            return self.lower_call(id);
+            return self.lower_call(id, dest);
         }
         if k == NodeKind::NODE_CAST {
             let d = self.f.node(id).as_data.cast;
@@ -3734,7 +3923,7 @@ extend Lowerer {
                 if aop != NODE_NONE {
                     let apl = self.lower_place(aop);
                     if apl != ir::IR_NONE {
-                        let a = self.addr_op(apl, self.nty(e), ty, sp);
+                        let a = self.addr_op(apl, self.nty(e), ty, sp, dest);
                         if er9 {
                             self.tp(ir::TP_CAST_ERASE, 0, d.expression);
                         }
@@ -3771,44 +3960,41 @@ extend Lowerer {
                 }
             }
             let ck = self.cast_kind(self.body.operands.at(op as usize).ty, cty);
-            let pl = self.rv_temp(ir::rv(ir::RV_CAST, op, ck, 0, cty), sp);
+            let r = self.rv_out(dest, ir::rv(ir::RV_CAST, op, ck, 0, cty), sp);
             if er9 {
                 self.tp(ir::TP_CAST_ERASE, 0, d.expression);
             }
-            return self.copy_op(pl);
+            return r;
         }
         if k == NodeKind::NODE_STRUCT_INITIALIZER {
-            return self.lower_struct_init(id);
+            return self.lower_struct_init(id, dest);
         }
         if k == NodeKind::NODE_ARRAY_LITERAL || k == NodeKind::NODE_TUPLE {
-            return self.lower_array_or_tuple(id);
+            return self.lower_array_or_tuple(id, dest);
         }
         if k == NodeKind::NODE_RANGE {
-            return self.lower_range(id);
+            return self.lower_range(id, dest);
         }
         if k == NodeKind::NODE_IF {
-            return self.lower_if_expr(id);
+            return self.lower_if_expr(id, dest);
         }
         if k == NodeKind::NODE_MATCH {
-            let t = self.temp(ty, sp);
-            let pl = self.place_of_local(t);
+            let pl = self.out_place(dest, ty, sp);
             if !self.lower_match(id, pl) {
                 return ir::IR_NONE;
             }
-            return self.copy_op(pl);
+            return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_WHILE {
             // `loop { .. break v; .. }` in value position
-            let t = self.temp(ty, sp);
-            let pl = self.place_of_local(t);
+            let pl = self.out_place(dest, ty, sp);
             self.lower_loop_expr(id, pl);
-            return self.copy_op(pl);
+            return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_BLOCK {
-            let t = self.temp(ty, sp);
-            let pl = self.place_of_local(t);
-            self.lower_value_block(id, pl);
-            return self.copy_op(pl);
+            let pl = self.out_place(dest, ty, sp);
+            self.lower_value_block(id, pl, false);
+            return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
             let ik: u8 = if k == NodeKind::NODE_SIZEOF {
@@ -3816,13 +4002,13 @@ extend Lowerer {
             } else {
                 ir::IN_ALIGNOF;
             };
-            return self.intrinsic_value(ik, self.nty(self.f.node(id).as_data.single.value), ty, sp);
+            return self.intrinsic_value(ik, self.nty(self.f.node(id).as_data.single.value), ty, sp, dest);
         }
         if k == NodeKind::NODE_VA_EXPR {
-            return self.lower_va(id);
+            return self.lower_va(id, dest);
         }
         if k == NodeKind::NODE_CLOSURE {
-            return self.lower_closure(id);
+            return self.lower_closure(id, dest);
         }
         if k == NodeKind::NODE_GENERIC_SPECIALIZATION {
             let d = self.f.node(id).as_data.specialization;
@@ -3830,7 +4016,7 @@ extend Lowerer {
         }
         if k == NodeKind::NODE_TYPE_PATH {
             // A path in value position: unit variant construction or an item constant.
-            return self.lower_path_value(id);
+            return self.lower_path_value(id, dest);
         }
         self.fail_at("expr-kind", id);
         return ir::IR_NONE;
@@ -3903,18 +4089,24 @@ extend Lowerer {
         return self.kop(ir::CK_INT, ty, parse_dec(self.src, d.raw), d.raw);
     }
 
-    fn lower_unary(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_unary(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.unary;
         if d.op == tt::TokenType::Move || d.op == tt::TokenType::Unsafe {
             // `move` or `unsafe` over a value that is not a place (a literal, a closure, a call) is
             // that value: no temporary hides it from the analyses that read it. `lower_expr` noted
             // the `unsafe` span.
-            return self.lower_expr(d.operand);
+            return self.lower_expr_d(d.operand, dest);
         }
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.op == tt::TokenType::Ampersand || d.op == tt::TokenType::AmpersandAmpersand {
+            // `&` as an arm's value: the temporary it borrows lives as the arm's value needs.
+            let rf = self.ext.rf;
+            if self.ext_on(id) {
+                self.ext.rf = d.operand;
+            }
             let pl = self.lower_place(d.operand);
+            self.ext.rf = rf;
             if pl == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -3945,7 +4137,7 @@ extend Lowerer {
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
                 bty = sa.intern_type(Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
             }
-            return self.copy_op(self.rv_temp(ir::rv(rk, pl, mutable, 0, bty), sp));
+            return self.rv_out(dest, ir::rv(rk, pl, mutable, 0, bty), sp);
         }
         if d.op == tt::TokenType::Star {
             let pl = self.lower_place(id);
@@ -3955,7 +4147,7 @@ extend Lowerer {
             return self.copy_op(pl);
         }
         if d.op == tt::TokenType::Question {
-            return self.lower_question(id, d.operand);
+            return self.lower_question(id, d.operand, dest);
         }
         // A negative wide literal records its (two's-complemented) limbs on the UNARY node.
         if self.f.wide_lit(id) != null {
@@ -4008,26 +4200,25 @@ extend Lowerer {
                     NODE_NONE,
                     ty,
                     false,
+                    dest,
                 );
             },
             None => {},
         };
-        let pl = self.rv_temp(ir::rv(ir::RV_UNARY, op, d.op as u32, 0, ty), sp);
-        return self.copy_op(pl);
+        return self.rv_out(dest, ir::rv(ir::RV_UNARY, op, d.op as u32, 0, ty), sp);
     }
 
     // `expr?`: test the carrier's discriminant; the ok arm yields the payload, the error arm writes
     // the converted error variant into the return slot and returns through the pending defers and
     // storage deaths.
-    fn lower_question(self: &mut Self, id: NodeId, operand: NodeId) ir::OperandId {
+    fn lower_question(self: &mut Self, id: NodeId, operand: NodeId, dest: ir::PlaceId) ir::OperandId {
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
-        let vop = self.lower_expr(operand);
-        if vop == ir::IR_NONE {
+        // `?` consumes the carrier like any other user move.
+        let vpl = self.value_temp(operand, true, sp);
+        if vpl == ir::IR_NONE {
             return ir::IR_NONE;
         }
-        self.mark_user_move(vop); // `?` consumes the carrier like any other user move
-        let vpl = self.spill(vop, sp);
         let mut ok_ord: i64 = -1;
         let vd = self.carrier_variant(self.body.places.at(vpl as usize).ty, "Some", "Ok", &mut ok_ord);
         if ok_ord < 0 {
@@ -4109,7 +4300,7 @@ extend Lowerer {
         let fpl = self.place_project(ppl, ir::Projection { kind: ir::PJ_FIELD, data: 0, sub: NODE_NONE, ty: ty });
         // The payload leaves the consumed carrier through a plumbing move (as a pattern bind does), so
         // the caller's user move reads a whole temp, not a field of a Free value.
-        return self.copy_op(self.spill(self.copy_op(fpl), sp));
+        return self.rv_out(dest, self.rv_use(self.copy_op(fpl), ty), sp);
     }
 
     // Whether variant `vd` carries a payload.
@@ -4164,13 +4355,24 @@ extend Lowerer {
     // A left-associative chain (`x + x + ... + x`) nests on its left operand. Its left spine is
     // lowered with a loop, so the stack depth does not grow with the chain: each node's setup runs
     // outermost first and the rest of its work innermost first, the order recursion would give.
-    fn lower_binary(self: &mut Self, id: NodeId) ir::OperandId {
-        let mut spine = self.avget(); // node, setup place pairs
+    // The root's value lands in `dest` (`rv_out`).
+    fn lower_binary(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
+        let mut spine = self.avget(); // node, setup place, destination triples
         let mut n = id;
+        let mut up = dest; // the destination of `n`'s value
         loop {
+            let rpl = self.lower_binary_setup(n, up);
             spine.push(n);
-            spine.push(self.lower_binary_setup(n));
-            n = self.f.node(n).as_data.binary.left;
+            spine.push(rpl);
+            spine.push(up);
+            let l = self.f.node(n).as_data.binary.left;
+            // The left operand of `&&`/`||` that is itself one writes the parent's result place:
+            // the parent's first store would copy it there.
+            up = ir::IR_NONE;
+            if rpl != ir::IR_NONE && self.short_circuit(l) && self.plain_value(l) && self.nty(l) == self.nty(n) {
+                up = rpl;
+            }
+            n = l;
             if self.f.node(n).kind != NodeKind::NODE_BINARY {
                 break;
             }
@@ -4178,37 +4380,45 @@ extend Lowerer {
         let mut op = self.lower_expr(n);
         let mut i = spine.len();
         while i > 0 && op != ir::IR_NONE {
-            i -= 2;
+            i -= 3;
             let b = spine[i];
-            op = self.lower_binary_rest(b, spine[i + 1], op);
-            if b != id && op != ir::IR_NONE {
-                op = self.apply_adjust(b, op);
+            op = self.lower_binary_rest(b, spine[i + 1], op, spine[i + 2]);
+            if b != id && op != ir::IR_NONE && op != WROTE {
+                op = self.apply_adjust(b, op, self.f.node(b).span);
             }
         }
         self.avput(spine);
         return op;
     }
 
-    // The work of binary node `id` before its left operand: the result place of `&&`/`||`
-    // (IR_NONE for the other operators).
-    fn lower_binary_setup(self: &mut Self, id: NodeId) ir::PlaceId {
-        let op = self.f.node(id).as_data.binary.op;
-        if op != tt::TokenType::AmpersandAmpersand && op != tt::TokenType::PipePipe {
-            return ir::IR_NONE;
-        }
-        let t = self.temp(self.nty(id), self.f.node(id).span);
-        return self.place_of_local(t);
+    // Whether node `id` is an `&&` or `||`.
+    const fn short_circuit(self: &Self, id: NodeId) bool {
+        let n = self.f.node(id);
+        return n.kind == NodeKind::NODE_BINARY && (n.as_data.binary.op == tt::TokenType::AmpersandAmpersand || n.as_data.binary.op == tt::TokenType::PipePipe);
     }
 
-    // The work of binary node `id` after its left operand `lop`; `rpl` is its setup place.
-    fn lower_binary_rest(self: &mut Self, id: NodeId, rpl: ir::PlaceId, lop: ir::OperandId) ir::OperandId {
+    // The work of binary node `id` before its left operand: the result place of `&&`/`||`, which is
+    // `dest` when it holds the result's type (IR_NONE for the other operators).
+    fn lower_binary_setup(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::PlaceId {
+        if !self.short_circuit(id) {
+            return ir::IR_NONE;
+        }
+        return self.out_place(dest, self.nty(id), self.f.node(id).span);
+    }
+
+    // The work of binary node `id` after its left operand `lop` (WROTE: a left `&&`/`||` stored it
+    // into `rpl`, `lower_binary`); `rpl` is its setup place, and the value lands in `dest`
+    // (`rv_out`).
+    fn lower_binary_rest(self: &mut Self, id: NodeId, rpl: ir::PlaceId, lop: ir::OperandId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.binary;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.op == tt::TokenType::AmpersandAmpersand || d.op == tt::TokenType::PipePipe {
             // result = lhs; if (deciding) result = rhs
-            let rv = self.rv_use(lop, ty);
-            self.assign(rpl, rv, sp);
+            if lop != WROTE {
+                let rv = self.rv_use(lop, ty);
+                self.assign(rpl, rv, sp);
+            }
             let rhs_b = self.open_block();
             let join = self.open_block();
             let cop = self.copy_op(rpl);
@@ -4231,7 +4441,7 @@ extend Lowerer {
             let rv2 = self.rv_use(rop, ty);
             self.assign(rpl, rv2, sp);
             self.seal(ir::goto_term(join, sp), join);
-            return self.copy_op(rpl);
+            return self.out_op(dest, rpl);
         }
         switch self.f.op_method(id) {
             Some(m) => {
@@ -4246,6 +4456,7 @@ extend Lowerer {
                         d.right,
                         ty,
                         false,
+                        dest,
                     );
                 }
                 // A comparison of aggregates: `eq` decides `==` and `!=`, `cmp`'s sign the ordering. It
@@ -4261,15 +4472,16 @@ extend Lowerer {
                     d.right,
                     pick(eq, ty, it),
                     true,
+                    pick(d.op == tt::TokenType::EqualEqual, dest, ir::IR_NONE),
                 );
                 if r == ir::IR_NONE || d.op == tt::TokenType::EqualEqual {
                     return r;
                 }
                 if eq {
-                    return self.copy_op(self.rv_temp(ir::rv(ir::RV_UNARY, r, tt::TokenType::Bang as u32, 0, ty), sp));
+                    return self.rv_out(dest, ir::rv(ir::RV_UNARY, r, tt::TokenType::Bang as u32, 0, ty), sp);
                 }
                 let zero = self.kop(ir::CK_INT, it, 0, sp);
-                return self.copy_op(self.rv_temp(ir::rv(ir::RV_BINARY, r, zero, d.op as u8, ty), sp));
+                return self.rv_out(dest, ir::rv(ir::RV_BINARY, r, zero, d.op as u8, ty), sp);
             },
             None => {},
         };
@@ -4281,12 +4493,11 @@ extend Lowerer {
         // comparison side such as `mk() == s`) is dropped by its scope.
         self.own_operand(lop, d.left);
         self.own_operand(rop, d.right);
-        let pl = self.rv_temp(ir::rv(ir::RV_BINARY, lop, rop, d.op as u8, ty), sp);
-        return self.copy_op(pl);
+        return self.rv_out(dest, ir::rv(ir::RV_BINARY, lop, rop, d.op as u8, ty), sp);
     }
 
     // An operator method call (binary/compound/unary/index overloads) after the receiver: `lop` is the
-    // lowered left operand; `ty` is the result type.
+    // lowered left operand; `ty` is the result type, which lands in `dest` (`emit_call_to`).
     fn lower_op_call_from(
         self: &mut Self,
         id: NodeId,
@@ -4296,6 +4507,7 @@ extend Lowerer {
         rhs: NodeId,
         ty: TypeId,
         reads: bool,
+        dest: ir::PlaceId,
     ) ir::OperandId {
         let sp = self.f.node(id).span;
         if self.is_intrinsic_fn(DefId { module: m, node: decl }) {
@@ -4328,7 +4540,7 @@ extend Lowerer {
                 self.own_operand(rop, rhs);
             }
         }
-        return self.lower_op_call_ops(id, m, decl, recv, rop, ty);
+        return self.lower_op_call_ops(id, m, decl, recv, rop, ty, dest);
     }
 
     // The receiver operand `lop` of operator method `md`: a constant receiver (`2.0 * v` through
@@ -4341,7 +4553,8 @@ extend Lowerer {
     }
 
     // The call of operator method `decl` on node `id` over the lowered receiver `lop` (`op_recv`) and
-    // right operand `rop` (IR_NONE: none); `ty` is the result type.
+    // right operand `rop` (IR_NONE: none); `ty` is the result type, which lands in `dest`
+    // (`emit_call_to`).
     fn lower_op_call_ops(
         self: &mut Self,
         id: NodeId,
@@ -4350,6 +4563,7 @@ extend Lowerer {
         lop: ir::OperandId,
         rop_in: ir::OperandId,
         ty: TypeId,
+        dest: ir::PlaceId,
     ) ir::OperandId {
         let sp = self.f.node(id).span;
         let mut argv = self.avget();
@@ -4389,16 +4603,28 @@ extend Lowerer {
         // A keyed extend's operator (`ext_keyed`) names the extend's arguments, as a call does.
         let ts = self.body.targ_pool.len() as u32;
         let tn = self.copy_targs(id);
-        let res = self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, ts, tn, bc, TYPE_NONE, ty, sp);
+        let rpl = self.emit_call_to(
+            DefId { module: m, node: decl },
+            ir::IR_NONE,
+            start,
+            n,
+            ts,
+            tn,
+            bc,
+            TYPE_NONE,
+            ty,
+            sp,
+            dest,
+        );
         // The operator's implicit call is checked like an explicit one; a compound assignment checks
         // after it stores the result (`lower_assignment`).
         if self.f.node(id).kind != NodeKind::NODE_ASSIGNMENT {
-            self.maybe_cancel_check(id, DefId { module: m, node: decl }, false, res, ty, sp);
+            self.maybe_cancel_check(id, DefId { module: m, node: decl }, false, rpl, ty, sp);
         } else if !self.chk_has(id) || !self.chk_place_clean(self.f.node(id).as_data.binary.left) {
             // Unchecked after the store: poison must not reach the place.
-            self.poison_check_at(DefId { module: m, node: decl }, false, res, sp);
+            self.poison_check_at(DefId { module: m, node: decl }, false, rpl, sp);
         }
-        return res;
+        return self.out_op(dest, rpl);
     }
 
     // Whether parameter `i` of function `f` is declared a reference.
@@ -4468,8 +4694,34 @@ extend Lowerer {
         ty: TypeId,
         sp: tok::Span,
     ) ir::OperandId {
-        let t = self.temp(ty, sp);
-        let dst = self.place_of_local(t);
+        return self.copy_op(
+            self.emit_call_to(callee, callee_op, start, n, targs_start, targs_len, iface, recv, ty, sp, ir::IR_NONE),
+        );
+    }
+
+    // `emit_call` whose result lands in destination `dest` (`out_place`); returns the result's
+    // place. A return slot is never a call's destination: the slot's store before `return`
+    // spells `return f(..)` (the emitter's return-slot forwarding), and a tail call is a call
+    // into a temporary moved into the slot (`ir::tailcall`).
+    fn emit_call_to(
+        self: &mut Self,
+        callee: DefId,
+        callee_op: ir::OperandId,
+        start: u32,
+        n: u32,
+        targs_start: u32,
+        targs_len: u32,
+        iface: TypeId,
+        recv: TypeId,
+        ty: TypeId,
+        sp: tok::Span,
+        dest: ir::PlaceId,
+    ) ir::PlaceId {
+        let mut d = dest;
+        if d != ir::IR_NONE && self.body.locals.at(self.body.places.at(d as usize).base as usize).storage == ir::LS_RET {
+            d = ir::IR_NONE;
+        }
+        let dst = self.out_place(d, ty, sp);
         let dstart = self.body.dest_pool.len() as u32;
         self.body.dest_pool.push(dst);
         let mut tm = ir::term0(ir::TM_CALL, sp);
@@ -4487,7 +4739,13 @@ extend Lowerer {
         let cont = self.open_block();
         tm.t0 = cont;
         self.seal(tm, cont);
-        return self.copy_op(dst);
+        if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_NEVER {
+            // The call does not return: its `never` result exists nowhere, and the code that reads
+            // it lowers into a block no edge reaches.
+            let dead = self.open_block();
+            self.seal(ir::term0(ir::TM_UNREACHABLE, sp), dead);
+        }
+        return dst;
     }
 
     // The verified intrinsic kind of a call of `callee` with the `n` arguments at `start`: the callee
@@ -4517,7 +4775,9 @@ extend Lowerer {
         return k;
     }
 
-    fn lower_call(self: &mut Self, id: NodeId) ir::OperandId {
+    // A call, or the aggregate or intrinsic a call spells; its value lands in `dest`
+    // (`emit_call_to`, `rv_out`).
+    fn lower_call(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.call;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
@@ -4551,7 +4811,7 @@ extend Lowerer {
                 } else {
                     ir::AGG_VARIANT;
                 };
-                let r9 = self.finish_aggregate(agg, vd, &argv, ty, sp);
+                let r9 = self.finish_aggregate(agg, vd, &argv, ty, sp, dest);
                 self.avput(argv);
                 return r9;
             }
@@ -4585,7 +4845,7 @@ extend Lowerer {
             if mu != null && unsafe (*mu).n != 0 {
                 bt9 = unsafe (*mu).args[0];
             }
-            return self.intrinsic_value(ir::IN_TYPE_INFO, bt9, ty, sp);
+            return self.intrinsic_value(ir::IN_TYPE_INFO, bt9, ty, sp, dest);
         }
         // `dyn_cast::<T>(v)`: ordinary IR -- a vtable type-id test branching into Some/None
         // construction, so every downstream pass (drops, borrows, backend) sees plain code.
@@ -4620,8 +4880,7 @@ extend Lowerer {
             let fstart = self.pool_ops(&argv);
             self.avput(argv);
             self.assign(self.place_of_local(fl), ir::rv(ir::RV_INTRINSIC, fstart, 1, ir::IN_DYN_TID, rt9), sp);
-            let res = self.temp(ty, sp);
-            let rpl = self.place_of_local(res);
+            let rpl = self.out_place(dest, ty, sp);
             let some_b = self.open_block();
             let none_b = self.open_block();
             let join = self.open_block();
@@ -4635,27 +4894,17 @@ extend Lowerer {
             self.assign(self.place_of_local(dv), ir::rv(ir::RV_INTRINSIC, dstart, 1, ir::IN_DYN_DATA, rt9), sp);
             let mut sargs = self.avget();
             sargs.push(self.copy_op(self.place_of_local(dv)));
-            let sv = self.finish_aggregate(ir::AGG_VARIANT, svd, &sargs, ty, sp);
+            let _ = self.finish_aggregate(ir::AGG_VARIANT, svd, &sargs, ty, sp, rpl);
             self.avput(sargs);
-            if sv == ir::IR_NONE {
-                return ir::IR_NONE;
-            }
-            let srv = self.rv_use(sv, ty);
-            self.assign(rpl, srv, sp);
             self.seal(ir::goto_term(join, sp), none_b);
             let nargs = self.avget();
-            let nv = self.finish_aggregate(ir::AGG_VARIANT, nvd, &nargs, ty, sp);
+            let _ = self.finish_aggregate(ir::AGG_VARIANT, nvd, &nargs, ty, sp, rpl);
             self.avput(nargs);
-            if nv == ir::IR_NONE {
-                return ir::IR_NONE;
-            }
-            let nrv = self.rv_use(nv, ty);
-            self.assign(rpl, nrv, sp);
             self.seal(ir::goto_term(join, sp), join);
-            return self.copy_op(rpl);
+            return self.out_op(dest, rpl);
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "zeroed") {
-            return self.intrinsic_value(ir::IN_ZEROED, 0, ty, sp);
+            return self.intrinsic_value(ir::IN_ZEROED, 0, ty, sp, dest);
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "dangling") {
             // the pointee rides in `b` so the backend can pick the sentinel alignment
@@ -4664,7 +4913,7 @@ extend Lowerer {
             if mu != null && unsafe (*mu).n != 0 {
                 bt9 = unsafe (*mu).args[0];
             }
-            return self.intrinsic_value(ir::IN_DANGLING, bt9, ty, sp);
+            return self.intrinsic_value(ir::IN_DANGLING, bt9, ty, sp, dest);
         }
         // assert family: compiler builtins -- lower to TM_ASSERT so the backend bakes the failing
         // expression's text and location (the std placeholder bodies are never called). The
@@ -4888,9 +5137,9 @@ extend Lowerer {
                 impl9 = self.nty(self.f.node(pm9).as_data.member.object);
             }
         }
-        let res = self.emit_call(target, callee_op, start, n, ts, tn, bc, impl9, ty, sp);
-        self.maybe_cancel_check(id, target, callee_op != ir::IR_NONE, res, ty, sp);
-        return res;
+        let rpl = self.emit_call_to(target, callee_op, start, n, ts, tn, bc, impl9, ty, sp, dest);
+        self.maybe_cancel_check(id, target, callee_op != ir::IR_NONE, rpl, ty, sp);
+        return self.out_op(dest, rpl);
     }
 
     // The compiled cancellation edge. After a call that can reach cancellation acceptance, a
@@ -4939,7 +5188,7 @@ extend Lowerer {
         id: NodeId,
         target: DefId,
         is_fn_value: bool,
-        res: ir::OperandId,
+        res: ir::PlaceId,
         ty: TypeId,
         sp: tok::Span,
     ) {
@@ -4986,8 +5235,9 @@ extend Lowerer {
     // so an accepted request waits for the next edge, but a callee that returned through its own
     // ladder (probe 1) returned poison, which nothing may read. That edge unwinds at once, its
     // ladder dropping the pending temporaries with the scope's locals (drop elaboration frees the
-    // ones still initialized). `res` is the call's result, never dropped here.
-    fn poison_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, sp: tok::Span) {
+    // ones still initialized). `res` is the place of the call's result (IR_NONE: none), never
+    // dropped here.
+    fn poison_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::PlaceId, sp: tok::Span) {
         if !self.chk_callee(target, is_fn_value) {
             return;
         }
@@ -5007,10 +5257,7 @@ extend Lowerer {
         self.seal(t, ladder_b);
         let mut rl = ir::IR_NONE;
         if res != ir::IR_NONE {
-            let ro = *self.body.operands.at(res as usize);
-            if ro.kind == ir::OP_COPY || ro.kind == ir::OP_MOVE {
-                rl = self.body.places.at(ro.data as usize).base;
-            }
+            rl = self.body.places.at(res as usize).base;
         }
         let mark = self.scope_locals.len();
         for l in self.chk_lbase..self.body.locals.len() as u32 {
@@ -5031,8 +5278,9 @@ extend Lowerer {
         self.scope_locals.truncate(mark);
     }
 
-    // The check after a call in a clean position (see `maybe_cancel_check`).
-    fn cancel_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::OperandId, ty: TypeId, sp: tok::Span) {
+    // The check after a call in a clean position (see `maybe_cancel_check`); `res` is the place of
+    // the call's result (IR_NONE: none).
+    fn cancel_check_at(self: &mut Self, target: DefId, is_fn_value: bool, res: ir::PlaceId, ty: TypeId, sp: tok::Span) {
         if !self.chk_callee(target, is_fn_value) {
             return;
         }
@@ -5054,17 +5302,12 @@ extend Lowerer {
         t.t0 = cont_b;
         self.seal(t, real_b);
         // Real value: spill it into a tracked local so the ladder (and any later exit) frees it.
-        let mut spillable = res != ir::IR_NONE && ty != TYPE_NONE && ty != ut;
-        if spillable {
-            let rk = self.body.operands.at(res as usize).kind;
-            spillable = rk == ir::OP_COPY || rk == ir::OP_MOVE;
-        }
-        if spillable {
+        if res != ir::IR_NONE && ty != TYPE_NONE && ty != ut {
             // The spill's whole lifetime is THIS block: live, take the value, die (the drop
             // elaborates unconditionally right here, before the defers -- temporary operation state
             // is removed first). Nothing outside the block can see it, so no loan the value carries
             // outlives the check.
-            let rpl = self.body.operands.at(res as usize).data;
+            let rpl = res;
             let sl = self.body.add_local(self.local_decl(ty, ir::LS_INL, false, sp, NODE_NONE));
             self.stmt(
                 ir::Statement { kind: ir::ST_STORAGE_LIVE, place: ir::IR_NONE, rvalue: ir::IR_NONE, a: sl, span: sp },
@@ -5283,8 +5526,8 @@ extend Lowerer {
         self.seal(rt, next);
     }
 
-    fn intrinsic_value(self: &mut Self, ik: u8, bv: TypeId, ty: TypeId, sp: tok::Span) ir::OperandId {
-        return self.copy_op(self.rv_temp(ir::rv(ir::RV_INTRINSIC, self.body.oper_pool.len() as u32, bv, ik, ty), sp));
+    fn intrinsic_value(self: &mut Self, ik: u8, bv: TypeId, ty: TypeId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
+        return self.rv_out(dest, ir::rv(ir::RV_INTRINSIC, self.body.oper_pool.len() as u32, bv, ik, ty), sp);
     }
 
     // Whether `f` is an `@intrinsic` function: a call lowers to the operation it names.
@@ -5317,8 +5560,8 @@ extend Lowerer {
                 self.place_of_local(self.item_local(DefId { module: ly.module, node: ly.as_data.decl }, ut, sp)),
             );
         }
-        let a = self.intrinsic_value(ir::IN_SIZEOF, vt, ut, sp);
-        let b = self.intrinsic_value(ir::IN_SIZEOF, self.f.ty(vt).as_data.arr.elem, ut, sp);
+        let a = self.intrinsic_value(ir::IN_SIZEOF, vt, ut, sp, ir::IR_NONE);
+        let b = self.intrinsic_value(ir::IN_SIZEOF, self.f.ty(vt).as_data.arr.elem, ut, sp, ir::IR_NONE);
         return self.copy_op(self.rv_temp(ir::rv(ir::RV_BINARY, a, b, tt::TokenType::Slash as u8, ut), sp));
     }
 
@@ -5661,6 +5904,7 @@ extend Lowerer {
                     d.right,
                     lt,
                     false,
+                    ir::IR_NONE,
                 );
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
@@ -5711,17 +5955,16 @@ extend Lowerer {
             let rv = self.rv_use(rop, lt);
             self.assign(pl, rv, sp);
         } else {
+            // `x op= y` stores `x op y` into the place in one statement: the operator reads its
+            // operands before the store.
             let lop = self.copy_op(pl);
-            let tp = self.rv_temp(ir::rv(ir::RV_BINARY, lop, rop, compound_base_op(d.op) as u8, lt), sp);
-            let cop = self.copy_op(tp);
-            let rv = self.rv_use(cop, lt);
-            self.assign(pl, rv, sp);
+            self.assign(pl, ir::rv(ir::RV_BINARY, lop, rop, compound_base_op(d.op) as u8, lt), sp);
         }
         self.tp(ir::TP_ASSIGN_POST, 0, id);
         return self.unit_op(ty, sp);
     }
 
-    fn lower_struct_init(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_struct_init(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.struct_initializer;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
@@ -5796,22 +6039,31 @@ extend Lowerer {
             }
         }
         if is_var {
-            let rv9 = self.finish_aggregate(ir::AGG_VARIANT, sd, &argv, ty, sp);
+            let rv9 = self.finish_aggregate(ir::AGG_VARIANT, sd, &argv, ty, sp, dest);
             self.avput(argv);
             return rv9;
         }
-        let rs9 = self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp);
+        let rs9 = self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp, dest);
         self.avput(argv);
         return rs9;
     }
 
-    fn finish_aggregate(self: &mut Self, agg: u8, item: DefId, ops: &Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
+    // The aggregate of operands `ops`, stored into `dest` (`rv_out`).
+    fn finish_aggregate(
+        self: &mut Self,
+        agg: u8,
+        item: DefId,
+        ops: &Vector<ir::OperandId>,
+        ty: TypeId,
+        sp: tok::Span,
+        dest: ir::PlaceId,
+    ) ir::OperandId {
         let start = self.pool_ops(ops);
         let rv = ir::Rvalue { kind: ir::RV_AGGREGATE, a: start, b: ops.len() as u32, c: agg, target: ty, item: item };
-        return self.copy_op(self.rv_temp(rv, sp));
+        return self.rv_out(dest, rv, sp);
     }
 
-    fn lower_array_or_tuple(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_array_or_tuple(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.array_literal;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
@@ -5828,7 +6080,7 @@ extend Lowerer {
                 return ir::IR_NONE;
             }
             if ty == TYPE_NONE || self.f.ty(ty).kind == TypeKind::TYPE_ARRAY {
-                return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, ty), sp));
+                return self.rv_out(dest, ir::rv(ir::RV_REPEAT, vop, cop, 0, ty), sp);
             }
             if self.f.ty(ty).kind == TypeKind::TYPE_SIMD {
                 // A repeat typed as a vector fills its array; `apply_adjust` converts it.
@@ -5918,12 +6170,12 @@ extend Lowerer {
                 Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: argv.len() as u32 } } },
             );
         }
-        let ra9 = self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp);
+        let ra9 = self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp, dest);
         self.avput(argv);
         return ra9;
     }
 
-    fn lower_range(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_range(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.pattern_range;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
@@ -5952,70 +6204,98 @@ extend Lowerer {
             iv = 1;
         }
         argv.push(self.kop(ir::CK_BOOL, bt, iv, tok::Span { start: 0, end: 0 }));
-        let rr9 = self.finish_aggregate(ir::AGG_STRUCT, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp);
+        let rr9 = self.finish_aggregate(ir::AGG_STRUCT, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp, dest);
         self.avput(argv);
         return rr9;
     }
 
-    fn lower_if_expr(self: &mut Self, id: NodeId) ir::OperandId {
+    // A value `if`: each arm writes `dest` (`out_place`).
+    fn lower_if_expr(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let sp = self.f.node(id).span;
-        let pl = self.place_of_local(self.temp(self.nty(id), sp));
+        let pl = self.out_place(dest, self.nty(id), sp);
         let d = self.f.node(id).as_data.if_stmt;
         let kc = self.bc_cond(d.condition);
         if kc >= 0 {
-            self.lower_arm(pick(kc == 1, d.then_branch, d.else_branch), pl);
+            self.lower_arm(pick(kc == 1, d.then_branch, d.else_branch), pl, self.ext_depth_for(id));
         } else if !self.lower_if_arms(id, pl) {
             return ir::IR_NONE;
         }
-        return self.copy_op(pl);
+        return self.out_op(dest, pl);
     }
 
-    // The address of place `apl` as raw pointer type `pty`; `rt` is the written borrow's type (a
-    // `&mut` borrow gives a mutable address).
-    fn addr_op(self: &mut Self, apl: ir::PlaceId, rt: TypeId, pty: TypeId, sp: tok::Span) ir::OperandId {
+    // The address of place `apl` as raw pointer type `pty`, stored into `dest` (`rv_out`); `rt` is
+    // the written borrow's type (a `&mut` borrow gives a mutable address).
+    fn addr_op(self: &mut Self, apl: ir::PlaceId, rt: TypeId, pty: TypeId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
         let mu: u32 = if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
             1;
         } else {
             0;
         };
-        return self.copy_op(self.rv_temp(ir::rv(ir::RV_ADDR, apl, mu, 0, pty), sp));
+        return self.rv_out(dest, ir::rv(ir::RV_ADDR, apl, mu, 0, pty), sp);
     }
 
     // Lower a branch that produces a value into `dest`: a block whose last expression statement is
-    // the value, or a bare expression.
-    fn lower_value_into(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
+    // the value, or a bare expression. The temporaries the value borrows live at scope depth
+    // `depth` (EXT_NONE: in the branch's own scopes). The value's producer writes `dest` itself
+    // (`lower_expr_d`), so `dest` follows the `lower_into` contract.
+    fn lower_value_into(self: &mut Self, id: NodeId, dest: ir::PlaceId, depth: u32) {
         if id == NODE_NONE || self.err.len() != 0 {
             return;
         }
+        let outer = self.ext;
+        self.ext = ext_none();
+        if depth != EXT_NONE {
+            self.ext = ExtCx { arm: id, val: id, rf: NODE_NONE, depth: depth };
+        }
         if self.f.node(id).kind == NodeKind::NODE_BLOCK {
-            self.lower_value_block(id, dest);
-            return;
+            if depth != EXT_NONE {
+                self.ext.val = self.value_tail(id);
+            }
+            self.lower_value_block(id, dest, true);
+        } else {
+            let ty = self.body.places.at(dest as usize).ty;
+            let mut op = self.lower_expr_d(id, dest);
+            if op != ir::IR_NONE && op != WROTE {
+                op = self.arm_view(op, id, ty, self.f.node(id).span, dest);
+            }
+            if op != ir::IR_NONE && op != WROTE {
+                let rv = self.rv_use(op, ty);
+                self.assign(dest, rv, self.f.node(id).span);
+            }
         }
-        let op = self.lower_expr(id);
-        if op == ir::IR_NONE {
-            return;
+        self.ext = outer;
+    }
+
+    // The expression value block `id` yields: its last statement's expression, or NODE_NONE.
+    const fn value_tail(self: &Self, id: NodeId) NodeId {
+        let stmts = self.f.node(id).as_data.block.statements;
+        if stmts.len == 0 {
+            return NODE_NONE;
         }
-        let ty = self.body.places.at(dest as usize).ty;
-        let rv = self.rv_use(op, ty);
-        self.assign(dest, rv, self.f.node(id).span);
+        let s = unsafe self.f.list(stmts)[(stmts.len - 1) as usize];
+        if self.f.node(s).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
+            return NODE_NONE;
+        }
+        return self.f.node(s).as_data.single.value;
     }
 
     // A value block: statements run, and the LAST expression statement's value lands in `dest`.
     // A block with no value-producing tail still writes `dest` (unit), so every consumer of the
-    // destination reads initialized storage.
-    fn lower_value_block(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
+    // destination reads initialized storage. `arm`: the block is an arm, and the conversions the
+    // checker recorded on it apply to the tail's value.
+    fn lower_value_block(self: &mut Self, id: NodeId, dest: ir::PlaceId, arm: bool) {
         // Outside the open root's clean nodes, something unregistered is pending: no root inside.
         let masked = !self.chk_has(id);
         if masked {
             self.chk_mask += 1;
         }
-        self.lower_value_block_in(id, dest);
+        self.lower_value_block_in(id, dest, arm);
         if masked {
             self.chk_mask -= 1;
         }
     }
 
-    fn lower_value_block_in(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
+    fn lower_value_block_in(self: &mut Self, id: NodeId, dest: ir::PlaceId, arm: bool) {
         self.tp(ir::TP_SCOPE_PUSH, 0, id);
         self.scope_enter();
         let stmts = self.f.node(id).as_data.block.statements;
@@ -6027,14 +6307,28 @@ extend Lowerer {
                 let v = self.f.node(s).as_data.single.value;
                 self.tp(ir::TP_MARK_PUSH, 0, s);
                 let cb = self.chk_open(v, false);
-                let op = self.lower_expr(v);
+                // The tail writes `dest` unless the arm's conversions follow it.
+                let tdest = pick(!arm || self.plain_value(id), dest, ir::IR_NONE);
+                let mut op = self.lower_expr_d(v, tdest);
+                if op != ir::IR_NONE && op != WROTE {
+                    // The block's conversions apply at its value, which a borrow error names.
+                    let vsp = self.f.node(v).span;
+                    if arm {
+                        op = self.apply_adjust_d(id, op, vsp, dest);
+                    }
+                    if op != WROTE {
+                        op = self.arm_view(op, id, ty, vsp, dest);
+                    }
+                }
                 self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, s);
                 if op == ir::IR_NONE {
                     return;
                 }
-                let rv = self.rv_use(op, ty);
-                self.assign(dest, rv, self.f.node(s).span);
+                if op != WROTE {
+                    let rv = self.rv_use(op, ty);
+                    self.assign(dest, rv, self.f.node(s).span);
+                }
                 wrote = true;
             } else {
                 self.lower_stmt(s);
@@ -6218,7 +6512,7 @@ extend Lowerer {
         let _ = self.loops.pop();
     }
 
-    fn lower_va(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_va(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let d = self.f.node(id).as_data.va_op;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
@@ -6260,11 +6554,10 @@ extend Lowerer {
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
-        let pl = self.rv_temp(ir::rv(ir::RV_INTRINSIC, start, n, ir::IN_VA_ARG, ty), sp);
-        return self.copy_op(pl);
+        return self.rv_out(dest, ir::rv(ir::RV_INTRINSIC, start, n, ir::IN_VA_ARG, ty), sp);
     }
 
-    fn lower_closure(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_closure(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let caps = self.f.captures(id);
@@ -6287,7 +6580,8 @@ extend Lowerer {
         let fresh = self.pool_ops(&argv);
         let kept = argv.len() as u32;
         self.avput(argv);
-        let pl = self.rv_temp(
+        return self.rv_out(
+            dest,
             ir::Rvalue {
                 kind: ir::RV_CLOSURE,
                 a: fresh,
@@ -6298,7 +6592,6 @@ extend Lowerer {
             },
             sp,
         );
-        return self.copy_op(pl);
     }
 
     // A capture entry names the captured binding's decl (identifier node resolving to it).
@@ -6338,7 +6631,7 @@ extend Lowerer {
         return d;
     }
 
-    fn lower_path_value(self: &mut Self, id: NodeId) ir::OperandId {
+    fn lower_path_value(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let d = self.path_res(id);
@@ -6346,11 +6639,44 @@ extend Lowerer {
             self.fail_at("path-unresolved", id);
             return ir::IR_NONE;
         }
-        return self.item_value(id, d, ty, sp);
+        return self.item_value(id, d, ty, sp, dest);
     }
 
-    // An item in value position: functions become item constants, constants/statics become places.
-    fn item_value(self: &mut Self, id: NodeId, d0: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
+    // The item an identifier or member path `id` names when it is a value and no place: a function,
+    // a variant, a constant with type arguments (`item_value`), and through a path any item but a
+    // plain constant (`lower_member_place`). NODE_NONE otherwise: `lower_place` lowers it.
+    fn value_item(self: &mut Self, id: NodeId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let n = self.f.node(id);
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            let d = self.f.res(id);
+            if d.node == NODE_NONE || d.module == self.module && self.local_of(d.node) != ir::IR_NONE {
+                return none;
+            }
+            let dk = self.decl_kind(d);
+            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT || dk == NodeKind::NODE_CONST && self.f.type_args(
+                id,
+            ) != null {
+                return d;
+            }
+            return none;
+        }
+        if n.kind != NodeKind::NODE_MEMBER || !n.as_data.member.path {
+            return none;
+        }
+        let pd = self.path_res(id);
+        if pd.node == NODE_NONE || self.decl_kind(pd) == NodeKind::NODE_CONST && self.f.type_args(id) == null && !self.retyped_int_const(
+            pd,
+            self.nty(id),
+        ) {
+            return none;
+        }
+        return pd;
+    }
+
+    // An item in value position: functions become item constants, constants/statics become places;
+    // a unit variant's value lands in `dest` (`finish_aggregate`).
+    fn item_value(self: &mut Self, id: NodeId, d0: DefId, ty: TypeId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
         let mut d = d0;
         // An unresolved member on a resolved ENUM object: member resolution is the checker's act,
         // so a not-yet-checked module's `E::V` (a const initializer demanded early) finds the
@@ -6387,7 +6713,7 @@ extend Lowerer {
         if dk == NodeKind::NODE_VARIANT {
             // unit variant construction
             let argv = self.avget();
-            let ru9 = self.finish_aggregate(ir::AGG_VARIANT, d, &argv, ty, sp);
+            let ru9 = self.finish_aggregate(ir::AGG_VARIANT, d, &argv, ty, sp, dest);
             self.avput(argv);
             return ru9;
         }
@@ -6468,7 +6794,7 @@ extend Lowerer {
             if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT || dk == NodeKind::NODE_CONST && self.f.type_args(
                 id,
             ) != null {
-                let op = self.item_value(id, d, ty, sp);
+                let op = self.item_value(id, d, ty, sp, ir::IR_NONE);
                 if op == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
@@ -6548,12 +6874,9 @@ extend Lowerer {
                 let rop = self.copy_op(base);
                 let start = self.body.oper_pool.len() as u32;
                 self.body.oper_pool.push(rop);
-                let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp);
-                if res == ir::IR_NONE {
-                    return ir::IR_NONE;
-                }
-                self.maybe_cancel_check(key, m, false, res, rt2, sp);
-                base = self.spill(res, sp);
+                // The call's result place is the base: no temporary copies it.
+                base = self.emit_call_to(m, ir::IR_NONE, start, 1, 0, 0, TYPE_NONE, TYPE_NONE, rt2, sp, ir::IR_NONE);
+                self.maybe_cancel_check(key, m, false, base, rt2, sp);
             } else {
                 base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: rt });
             }
@@ -6696,7 +7019,7 @@ extend Lowerer {
                 let l2 = self.item_local(pd, ty, sp);
                 return self.place_of_local(l2);
             }
-            let op = self.lower_path_value(id);
+            let op = self.lower_path_value(id, ir::IR_NONE);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -7019,12 +7342,13 @@ extend Lowerer {
             &argv,
             self.nty(d.index),
             sp,
+            ir::IR_NONE,
         );
         self.avput(argv);
         if rop == ir::IR_NONE {
             return ir::IR_NONE;
         }
-        let res = self.lower_op_call_ops(id, md.module, md.node, recv, rop, self.nty(id));
+        let res = self.lower_op_call_ops(id, md.module, md.node, recv, rop, self.nty(id), ir::IR_NONE);
         if res == ir::IR_NONE {
             return ir::IR_NONE;
         }
@@ -7102,6 +7426,7 @@ extend Lowerer {
                     d.index,
                     rty,
                     false,
+                    ir::IR_NONE,
                 );
                 if res == ir::IR_NONE {
                     return ir::IR_NONE;
@@ -7254,27 +7579,37 @@ extend Lowerer {
         let d = self.f.node(id).as_data.match_expr;
         let sp = self.f.node(id).span;
         let taken = self.bc_profile_arm(d);
+        let depth = self.ext_depth_for(id);
         if taken != NODE_NONE {
             self.scope_enter();
-            self.lower_arm(taken, dest);
+            self.lower_arm(taken, dest, depth);
             self.scope_exit();
             return self.err.len() == 0;
         }
         self.tp(ir::TP_MARK_PUSH, 0, id);
-        let vop = self.lower_expr(d.value);
-        if vop == ir::IR_NONE {
-            return false;
-        }
         let sty = self.nty(d.value);
         let mut by_value = false;
+        let mut user = false;
         if sty != TYPE_NONE {
             let sk = self.f.ty(sty).kind;
-            if sk != TypeKind::TYPE_REFERENCE && sk != TypeKind::TYPE_POINTER {
-                self.mark_user_move(vop); // by-value scrutinee consumes like any other user move
-                by_value = sk != TypeKind::TYPE_BUILTIN;
-            }
+            // A by-value scrutinee consumes like any other user move.
+            user = sk != TypeKind::TYPE_REFERENCE && sk != TypeKind::TYPE_POINTER;
+            by_value = user && sk != TypeKind::TYPE_BUILTIN;
         }
-        let vpl = self.spill(vop, sp);
+        let mut guarded = false;
+        for i in 0..d.arms.len {
+            guarded = guarded || self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm.guard != NODE_NONE;
+        }
+        // The scrutinee evaluates once into a temp the tests read. A local of a type that owns
+        // nothing is tested in place when no guard runs between the tests: only the arm bodies,
+        // which run after every test, can write it.
+        let mut vpl = self.scrutinee_local(d.value);
+        if by_value || guarded || vpl == ir::IR_NONE {
+            vpl = self.value_temp(d.value, user, sp);
+        }
+        if vpl == ir::IR_NONE {
+            return false;
+        }
         // A by-value scrutinee's temporary owns the value. Every arm scope ends its storage, so drop
         // elaboration frees there what the arm's bindings did not move out.
         let mut own = ir::IR_NONE;
@@ -7354,7 +7689,7 @@ extend Lowerer {
             }
             self.moved_binds.truncate(bmark);
             if dest != ir::IR_NONE {
-                self.lower_value_into(ad.body, dest);
+                self.lower_value_into(ad.body, dest, depth);
             } else {
                 self.lower_stmt(ad.body);
             }
@@ -7370,6 +7705,26 @@ extend Lowerer {
         let u = ir::term0(ir::TM_UNREACHABLE, sp);
         self.seal(u, join);
         return true;
+    }
+
+    // The place of the user local or argument scrutinee `v` names, or IR_NONE.
+    fn scrutinee_local(self: &mut Self, v: NodeId) ir::PlaceId {
+        if self.f.node(v).kind != NodeKind::NODE_IDENTIFIER || !self.plain_value(v) {
+            return ir::IR_NONE;
+        }
+        let r = self.f.res(v);
+        if r.module != self.module || r.node == NODE_NONE {
+            return ir::IR_NONE;
+        }
+        let l = self.local_of(r.node);
+        if l == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let st = self.body.locals.at(l as usize).storage;
+        if st != ir::LS_USER && st != ir::LS_ARG {
+            return ir::IR_NONE;
+        }
+        return self.place_of_local(l);
     }
 
     // Register the owned scrutinee temporary `own` (IR_NONE: none) in the arm scope just entered:
@@ -7986,6 +8341,7 @@ extend Lowerer {
     ) {
         let d = self.f.node(id).as_data.match_expr;
         let sp = self.f.node(id).span;
+        let depth = self.ext_depth_for(id);
         let join = self.open_block();
         let mut armb = self.avget();
         for i in 0..d.arms.len {
@@ -8013,7 +8369,7 @@ extend Lowerer {
             self.tp(ir::TP_ARM, i, arm9);
             self.pattern_bind_total(ad.pattern, vpl);
             if dest != ir::IR_NONE {
-                self.lower_value_into(ad.body, dest);
+                self.lower_value_into(ad.body, dest, depth);
             } else {
                 self.lower_stmt(ad.body);
             }

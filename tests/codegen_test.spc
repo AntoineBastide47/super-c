@@ -13,7 +13,7 @@ const SWITCH_RANGES: str = "fn classify(n: i32) i32 {\n  return switch n {\n    
 
 const REFS: str = "struct P { pub x: i32, }\nfn reads(r: &P) i32 { return r.x; }\nfn writes(w: &mut P) { w.x = 1; }\nfn raw_c(pc: *const i32) i32 { return unsafe *pc; }\nfn raw_m(pm: *mut i32) { unsafe *pm = 1; }\n";
 
-const EXTERN: str = "extern \"C\" {\n  fn putchar(c: i32) i32;\n}\nfn main() i32 { let r: i32 = unsafe putchar(72); }\n";
+const EXTERN: str = "extern \"C\" {\n  fn putchar(c: i32) i32;\n}\nfn main() i32 { let r: i32 = unsafe putchar(72); return r - 72; }\n";
 
 const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g: str = \"hi\"; return f(g) as i32; }\n";
 
@@ -47,19 +47,21 @@ fn structured_backend() {
     h::expect_c("early-return-in-loop is structured", EARLY, "while (i < n)");
     b.add("early-return-in-loop behaves", EARLY, 0);
 
+    // A root module's items keep their bare C names (a module prefixes its own), so the collision
+    // programs build alone.
     // A parameter named after a type in scope must not hide the typedef: the whole TU stays legal
     // C and behaves (the emitter disambiguates the variable name).
     let COLLIDE: str = "struct Node { pub v: i32 }\nfn take(Node: i32, n: Node) i32 { return Node + n.v; }\nfn main() i32 { return take(2, Node { v: 3 }) - 5; }\n";
-    b.add("a variable named after a type stays legal C", COLLIDE, 0);
+    h::expect_exit("a variable named after a type stays legal C", COLLIDE, 0);
 
     // A parameter named after an enum constant the body constructs must not hide it: the emitted
     // `return C::Red` still reads the constant, not the parameter.
     let ECOLLIDE: str = "enum C { Red, Green }\nfn pick(C_Red: i32) C { return C::Red; }\nfn main() i32 { return pick(1) as i32; }\n";
-    b.add("a variable named after an enum constant stays correct", ECOLLIDE, 0);
+    h::expect_exit("a variable named after an enum constant stays correct", ECOLLIDE, 0);
 
     // A parameter named after the MANGLED symbol of a generic call (`id__i32`) must not hide it.
     let GCOLLIDE: str = "fn id<T>(x: T) T { return x; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32; }\nfn main() i32 { return collide(1) - 8; }\n";
-    b.add("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
+    h::expect_exit("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
 
     // A user item cannot spell a generated symbol (`id__i32_1` beside the instance `id__i32`): the
     // name is reserved, so no item collides with an instance.
@@ -307,12 +309,12 @@ fn errors(b: &mut h::ExitBatch) {
     );
     b.add(
         "local const reads fold or materialize",
-        "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { const T: [i32; 2] = [1, 2]; return T[0]; }\nfn main() i32 { unsafe exit(m() - 1); }\n",
+        "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { const T: [i32; 2] = [1, 2]; return T[0]; }\nfn main() i32 { return m() - 1; }\n",
         0,
     );
     b.add(
         "do/while runs the body first",
-        "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { let mut i: i32 = 0; do { i = i + 1; } while i < 3; return i; }\nfn main() i32 { unsafe exit(m() - 3); }\n",
+        "extern \"C\" { fn exit(c: i32) void; }\nfn m() i32 { let mut i: i32 = 0; do { i = i + 1; } while i < 3; return i; }\nfn main() i32 { return m() - 3; }\n",
         0,
     );
 }
@@ -385,8 +387,8 @@ fn attributes() {
     );
     h::expect_c(
         "section + used",
-        "@c.section(\"hot\")\n@c.used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
-        "__attribute__((used, section(\"hot\")))",
+        "@platform(macos | ios)\n@unsafe(link_section = \"__TEXT,__hot\")\n@c.used\nfn a() i32 { return 0; }\n@platform(windows | linux | android)\n@unsafe(link_section = \".hot\")\n@c.used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
+        "__attribute__((used, section(\"",
     );
     h::expect_c(
         "packed struct",

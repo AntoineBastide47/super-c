@@ -2085,8 +2085,10 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Whether statement `id` never completes normally: a `return`, `break` or `continue`, an
-    /// expression of type `!`, a `loop` no `break` leaves, a block holding such a statement, or
-    /// an `if` whose two branches both do. The statement after one is unreachable.
+    /// expression of type `!` (a call of a `!` or `@c.noreturn` function), a `loop` no `break`
+    /// leaves, a block or `unsafe` block holding such a statement, an `if` whose two branches both
+    /// do, or a `switch` whose every arm does (a switch is exhaustive). The statement after one is
+    /// unreachable.
     fn stmt_diverges(self: &Self, id: NodeId, depth: u32) bool {
         if id == NODE_NONE || depth > 64 {
             return false;
@@ -2097,12 +2099,20 @@ extend<'a> TypeChecker<'a> {
             return true;
         }
         if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-            let vt = unsafe (*a).type_of(n.as_data.single.value);
-            return vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+            return self.stmt_diverges(n.as_data.single.value, depth + 1);
         }
-        if n.kind == NodeKind::NODE_WHILE {
-            let vt = unsafe (*a).type_of(id);
-            return vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Unsafe {
+            return self.stmt_diverges(n.as_data.unary.operand, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_MATCH {
+            let arms = n.as_data.match_expr.arms;
+            for i in 0..arms.len {
+                let arm = unsafe (*a).at_const(unsafe (*a).list(arms)[i as usize]);
+                if arm.kind != NodeKind::NODE_MATCH_ARM || !self.stmt_diverges(arm.as_data.match_arm.body, depth + 1) {
+                    return false;
+                }
+            }
+            return arms.len != 0;
         }
         if n.kind == NodeKind::NODE_BLOCK {
             let stmts = n.as_data.block.statements;
@@ -2120,7 +2130,43 @@ extend<'a> TypeChecker<'a> {
                 depth + 1,
             );
         }
-        return false;
+        // A `loop` (typed `!` when no `break` leaves it) or any other expression of type `!`.
+        let vt = unsafe (*a).type_of(id);
+        return vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+    }
+
+    // A body with results (`rets`, not `void` or `!`) whose end is reachable would hand its caller
+    // results nothing wrote: an error at `sp`, the name of the function (`what`) or the closure.
+    fn tc_end_returns(self: &mut Self, rets: NodeList, body: NodeId, sp: tok::Span, what: str) {
+        let a = self.cur_ast();
+        if rets.len == 0 || body == NODE_NONE {
+            return;
+        }
+        if rets.len == 1 {
+            let t = self.resolve_type(unsafe (*a).slot_type_node(unsafe (*a).list(rets)[0]));
+            let y = *self.type_at(t);
+            if t == TYPE_NONE || t == TYPE_ERROR || y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID {
+                return;
+            }
+        }
+        if self.stmt_diverges(body, 0) {
+            return;
+        }
+        if what.len() == 0 {
+            self.errors.emit_span(sp, format("this closure can reach the end of its body without returning a value"));
+        } else {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "{} '{}' can reach the end of its body without returning a value",
+                    what,
+                    diag::span_str(self.source, sp.start, sp.end),
+                ),
+            );
+        }
+        self.errors.note(
+            format("return a value on every path, or end the path in a call of a function that returns '!'"),
+        );
     }
 
     fn tc_fold_int(self: &mut Self, nid: NodeId, out: &mut i64) bool {
@@ -2322,6 +2368,180 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
+    // `@unsafe(naked)` function `id`: the C function has no prologue or epilogue, so its body is only
+    // assembly, which cannot name a parameter or a local; the assembly sees the C calling convention of
+    // the signature, so every parameter and the result is a scalar with one C spelling; and the target
+    // must have naked functions.
+    fn tc_check_naked(self: &mut Self, id: NodeId, fnd: FunctionData) {
+        let a = self.cur_ast();
+        let sp = self.name_span(fnd.name);
+        let pk = unsafe &*self.package;
+        if pk.arch == 2 {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "'@unsafe(naked)' is not supported on wasm32: a WebAssembly function has no prologue or epilogue",
+                ),
+            );
+            return;
+        }
+        let it = gitems::owner_of(pk, self.cur_module(), id);
+        let ext = if it != loader::ITEM_NONE && pk.idx.items.at(it as usize).owner != loader::ITEM_NONE {
+            pk.idx.items.at(pk.idx.items.at(it as usize).owner as usize).node;
+        } else {
+            NODE_NONE;
+        };
+        let ek = if ext != NODE_NONE {
+            unsafe (*a).at_const(ext).kind;
+        } else {
+            NodeKind::NODE_NONE_KIND;
+        };
+        if fnd.generics.len != 0 || ek == NodeKind::NODE_INTERFACE || ek == NodeKind::NODE_EXTEND && unsafe (*a).at_const(
+            ext,
+        ).as_data.extend_def.generics.len != 0 {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a '@unsafe(naked)' function cannot be generic or an interface method: its assembly is written for one signature",
+                ),
+            );
+        }
+        if fnd.is_const() {
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a '@unsafe(naked)' function cannot be a 'const fn': compile-time evaluation cannot run assembly",
+                ),
+            );
+        }
+        if self.tc_attr(self.cur_module(), id, AttrKind::ATTR_INLINE) != null || self.tc_attr(
+            self.cur_module(),
+            id,
+            AttrKind::ATTR_ALWAYS_INLINE,
+        ) != null {
+            self.errors.emit_span(
+                sp,
+                format("a '@unsafe(naked)' function cannot be inlined: its assembly returns from the function itself"),
+            );
+        }
+        // Several results are one error, at the first.
+        for i in 0..fnd.params.len + pick(fnd.returns.len > 1, 1u32, fnd.returns.len) {
+            let ret = i >= fnd.params.len;
+            let nid = if ret {
+                unsafe (*a).list(fnd.returns)[(i - fnd.params.len) as usize];
+            } else {
+                unsafe (*a).list(fnd.params)[i as usize];
+            };
+            if !ret && unsafe (*a).at_const(nid).kind != NodeKind::NODE_PARAMETER {
+                continue;
+            }
+            let t = self.resolve_type(
+                if ret {
+                    unsafe (*a).slot_type_node(nid);
+                } else {
+                    unsafe (*a).at_const(nid).as_data.parameter.ty;
+                },
+            );
+            let y = *self.type_at(t);
+            let scalar = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin as u32 <= BuiltinType::BT_F64 as u32 || ret && (y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID);
+            if t != TYPE_ERROR && (!scalar || ret && fnd.returns.len > 1) {
+                self.errors.emit_span(
+                    unsafe (*a).at_const(nid).span,
+                    format(
+                        "a '@unsafe(naked)' function takes and returns only integers, floats, 'bool', 'char' and raw pointers: its assembly sees their C calling convention",
+                    ),
+                );
+            }
+        }
+        let body = unsafe (*a).at_const(fnd.body);
+        let ss = body.as_data.block.statements;
+        if body.kind != NodeKind::NODE_BLOCK || ss.len == 0 {
+            self.errors.emit_span(
+                sp,
+                format("a '@unsafe(naked)' function needs a body of 'asm' statements: they are its whole machine code"),
+            );
+            return;
+        }
+        for i in 0..ss.len {
+            let st = unsafe (*a).at_const(unsafe (*a).list(ss)[i as usize]);
+            if st.kind != NodeKind::NODE_ASM {
+                self.errors.emit_span(
+                    st.span,
+                    format(
+                        "the body of a '@unsafe(naked)' function holds only 'asm(\"...\");' statements: no code sets up a frame for anything else",
+                    ),
+                );
+            } else if st.as_data.asm_stmt.outputs.len != 0 || st.as_data.asm_stmt.inputs.len != 0 || st.as_data.asm_stmt.clobbers.len != 0 {
+                self.errors.emit_span(
+                    st.span,
+                    format(
+                        "an 'asm' statement in a '@unsafe(naked)' function takes no operands or clobbers: it reads the parameters where the calling convention puts them",
+                    ),
+                );
+            }
+        }
+    }
+
+    // The section `@unsafe(link_section = "name")` of `owner` names, for the target's object format:
+    // a Mach-O section is `segment,section`, each part 1 to 16 bytes, optionally followed by its type
+    // and attributes; other formats take one name. A name holds letters, digits, '_', '.' and '$'
+    // (and '+' in a Mach-O attribute list), so it is one token for every assembler. WebAssembly puts
+    // every function in its code section: only a `static mut` takes one there.
+    fn tc_check_link_section(self: &mut Self, owner: NodeId, is_fn: bool) {
+        let at = self.tc_attr(self.cur_module(), owner, AttrKind::ATTR_UNSAFE);
+        if at == null || (unsafe (*at).arg & UNSAFE_LINK_SECTION) == 0 {
+            return;
+        }
+        let sp = unsafe (*at).str_span;
+        let name = diag::span_str(self.source, sp.start, sp.end);
+        let target = unsafe (*self.package).build_target;
+        let macho = target == 1 || target == 4;
+        let mut why: str = "";
+        if is_fn && target == 3 {
+            why = "a WebAssembly function is always in the code section";
+        } else if name.len() == 0 {
+            why = "the name is empty";
+        }
+        let mut field: usize = 0;
+        let mut flen: usize = 0;
+        let mut i: usize = 0;
+        while why.len() == 0 && i <= name.len() {
+            // The end of the name closes the last part, as a ',' does.
+            let c = if i < name.len() {
+                name.byte_at(i);
+            } else {
+                b',';
+            };
+            i += 1;
+            if c == b',' && (macho || i > name.len()) {
+                if macho && field < 2 && (flen == 0 || flen > 16) {
+                    why = "a Mach-O section is 'segment,section', each part 1 to 16 bytes (e.g. \"__DATA,__mydata\")";
+                }
+                field += 1;
+                flen = 0;
+                if field > 5 {
+                    why = "a Mach-O section has at most 5 parts: 'segment,section,type,attributes,stub size'";
+                }
+                continue;
+            }
+            let ok = c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b'.' || c == b'$' || c == b'+' && field >= 3;
+            if !ok {
+                why = if macho {
+                    "a part of a Mach-O section holds only letters, digits, '_', '.' and '$' ('+' between attributes)";
+                } else {
+                    "a section name holds only letters, digits, '_', '.' and '$'";
+                };
+            }
+            flen += 1;
+        }
+        if why.len() == 0 && macho && field < 2 {
+            why = "a Mach-O section is 'segment,section', each part 1 to 16 bytes (e.g. \"__DATA,__mydata\")";
+        }
+        if why.len() != 0 {
+            self.errors.emit_span(sp, format("invalid link section \"{}\": {}", name, why));
+        }
+    }
+
     fn through_raw_pointer(self: &Self, ty0: TypeId) bool {
         let mut ty = ty0;
         let mut y = self.type_at(ty);
@@ -2344,6 +2564,18 @@ extend<'a> TypeChecker<'a> {
         self.errors.emit_span(
             name,
             format("no field '{}' on '{}'", diag::span_str(self.source, name.start, name.end), tb.as_str()),
+        );
+        if self.tc_header_type(ty) {
+            self.tc_note_header_fields();
+        }
+    }
+
+    @c.cold
+    fn tc_note_header_fields(self: &mut Self) {
+        self.errors.note(
+            format(
+                "a C header type has the fields its 'extern \"C\"' declaration lists; add the C member there to use it",
+            ),
         );
     }
 
@@ -4155,9 +4387,11 @@ extend<'a> TypeChecker<'a> {
     // Does `node` need the context type pushed into it before it can be checked? A generic function
     // named as a value and a generic enum's variant without type arguments carry no complete type of
     // their own; an array literal's element type comes from the parameter when its elements are
-    // unsuffixed literals (or when it is empty).
+    // unsuffixed literals (or when it is empty); an `if` or `switch` value converts each arm to the
+    // parameter's type, as it does a `let`'s.
     fn tc_wants_param_type(self: &mut Self, node: NodeId) bool {
-        if unsafe (*self.cur_ast()).at_const(node).kind == NodeKind::NODE_ARRAY_LITERAL {
+        let k = unsafe (*self.cur_ast()).at_const(node).kind;
+        if k == NodeKind::NODE_ARRAY_LITERAL || k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH {
             return true;
         }
         return self.tc_generic_fn_named(node).node != NODE_NONE || self.tc_bare_generic_variant(node) || self.tc_bare_generic_struct_lit(
@@ -12191,7 +12425,7 @@ extend<'a> TypeChecker<'a> {
                 }
             } else {
                 let cf = self.icx.current_fn;
-                unsafe (*self.cur_ast()).method_refs.push(MethodRef { owner: cf, recv: r, callee: d });
+                unsafe (*self.cur_ast()).push_method_ref(MethodRef { owner: cf, recv: r, callee: d });
             }
         }
         // Marks repeat heavily (memoized lookups re-fire them): once the callee is already used,
@@ -19660,6 +19894,19 @@ extend<'a> TypeChecker<'a> {
             unsafe (*self.cur_ast()).set_type(itn, dt);
         }
         self.check_copy_conformance(id, iface, suba[0]);
+        if self.is_free_iface(iface) && self.tc_extern_type(suba[0]) {
+            let sp = unsafe (*self.cur_ast()).at_const(itn).span;
+            let tb = self.type_str(suba[0]);
+            self.errors.emit_span(
+                sp,
+                format("'{}' is a type of an 'extern \"C\"' block: it cannot implement 'Free'", tb.as_str()),
+            );
+            self.errors.note(
+                format(
+                    "a C type is a C value that copies and has no drop glue; wrap it in a struct that implements 'Free'",
+                ),
+            );
+        }
         let lanes = self.iface_named(iface, "SimdElement") || self.iface_named(iface, "SimdInt") || self.iface_named(
             iface,
             "SimdSigned",
@@ -20270,16 +20517,24 @@ extend TypeChecker {
     fn binary_numeric(
         self: &mut Self,
         id: NodeId,
-        l: TypeId,
+        l0: TypeId,
         ln: NodeId,
         lk: u8,
-        r: TypeId,
+        r0: TypeId,
         rn: NodeId,
         rk: u8,
         require_int: bool,
     ) TypeId {
-        if untyped(l) || untyped(r) {
+        if untyped(l0) || untyped(r0) {
             return TYPE_NONE;
+        }
+        // A diverging operand takes the other operand's type: the operation never runs.
+        let mut l = l0;
+        let mut r = r0;
+        if self.type_at(r).kind == TypeKind::TYPE_NEVER {
+            r = l;
+        } else if self.type_at(l).kind == TypeKind::TYPE_NEVER {
+            l = r;
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         let mut ok = self.is_numeric(l) && self.is_numeric(r);
@@ -20378,6 +20633,11 @@ extend TypeChecker {
         }
         let lt = *self.type_at(ls);
         let right = unsafe (*self.cur_ast()).at_const(id).as_data.binary.right;
+        let rt0 = unsafe (*self.cur_ast()).type_of(right);
+        if rt0 != TYPE_NONE && self.type_at(rt0).kind == TypeKind::TYPE_NEVER {
+            // A diverging right operand selects no method: it takes the left operand's type.
+            return false;
+        }
         if lt.kind == TypeKind::TYPE_GENERIC {
             // A bound's method that takes the right operand, else a generic conformance that does
             // (`T as Sub<Vec<T, N>>`), else the bound's method, whose argument check reports.
@@ -21078,7 +21338,9 @@ extend TypeChecker {
             return self.binary_numeric(id, l, ln, lk, r, rn, rlk, true);
         }
         if op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe {
-            if !untyped(l) && !self.is_bool(l) || !untyped(r) && !self.is_bool(r) {
+            let lb = untyped(l) || self.is_bool(l) || self.type_at(l).kind == TypeKind::TYPE_NEVER;
+            let rb = untyped(r) || self.is_bool(r) || self.type_at(r).kind == TypeKind::TYPE_NEVER;
+            if !lb || !rb {
                 self.errors.emit_span(sp, format("logical operator requires 'bool' operands"));
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
@@ -21771,7 +22033,7 @@ extend TypeChecker {
         if rt.kind == TypeKind::TYPE_INSTANCE {
             let oi = *unsafe (*self.cur_ast()).instance(rt.as_data.inst);
             if oi.n >= 1 {
-                unsafe (*self.cur_ast()).call_info.insert(forid, nx.module as u64 << 40 | nx.node as u64 << 8);
+                unsafe (*self.cur_ast()).set_call_info(forid, nx.module as u64 << 40 | nx.node as u64 << 8);
                 let tt = ret;
                 unsafe (*self.cur_ast()).set_type_args(forid, &tt, 1);
                 return oi.args[0];
@@ -23906,7 +24168,7 @@ extend TypeChecker {
         let fa = self.mod_ast(fmod);
         // Record what the flow pass replays for this call: the resolved function and receiver skip.
         if named && fdecl != NODE_NONE {
-            unsafe (*self.cur_ast()).call_info.insert(id, fmod as u64 << 40 | fdecl as u64 << 8 | skip as u64);
+            unsafe (*self.cur_ast()).set_call_info(id, fmod as u64 << 40 | fdecl as u64 << 8 | skip as u64);
         }
         let sp = unsafe (*a).at_const(id).span;
         let cn_kind = unsafe (*a).at_const(callee_id).kind;
@@ -25938,6 +26200,8 @@ extend TypeChecker {
             self.errors.note(format("auto-deref stopped after its maximum of 8 hops"));
         } else if self.aggregate_decl(base, &mut bm, &mut bd) && self.find_method(bm, bd, name).node != NODE_NONE {
             self.errors.note(format("the extend that declares it has a target these generic arguments do not match"));
+        } else if self.tc_header_type(self.strip(base)) {
+            self.tc_note_header_fields();
         } else {
             self.errors.note(
                 format(
@@ -27305,9 +27569,19 @@ extend TypeChecker {
             }
         } else {
             let saved = self.icx.current_returns;
-            self.icx.current_returns = unsafe (*a).at_const(id).as_data.closure.returns;
-            self.check_stmt(unsafe (*a).at_const(id).as_data.closure.body);
+            let cd = unsafe (*a).at_const(id).as_data.closure;
+            self.icx.current_returns = cd.returns;
+            let ne = self.errors.errors.len();
+            self.check_stmt(cd.body);
             self.icx.current_returns = saved;
+            if self.errors.errors.len() == ne {
+                // The closure's head: from its parameter list to its body.
+                let hsp = tok::Span {
+                    start: unsafe (*a).at_const(id).span.start,
+                    end: unsafe (*a).at_const(cd.body).span.start,
+                };
+                self.tc_end_returns(cd.returns, cd.body, hsp, "");
+            }
         }
         self.loop_floor = saved_lf;
         self.icx.nclos = self.icx.nclos - 1;
@@ -28998,7 +29272,14 @@ extend TypeChecker {
             }
         }
         if n < 0 && slen == TYPE_NONE {
-            self.errors.emit_span(sp, format("an array repeat count must be a constant expression"));
+            if ceptr != null && unsafe (*ceptr).trap_get().len() != 0 {
+                self.errors.emit_span(
+                    sp,
+                    format("an array repeat count cannot be evaluated: {}", unsafe (*ceptr).trap_detail()),
+                );
+            } else {
+                self.errors.emit_span(sp, format("an array repeat count must be a constant expression"));
+            }
             return TYPE_NONE;
         }
         if n > 0xFFFFFFFFi64 {
@@ -29871,6 +30152,93 @@ extend TypeChecker {
         return y.kind == TypeKind::TYPE_OPAQUE && self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null;
     }
 
+    // Whether `t` is a header struct or union (a `struct` or `union` of an `extern "C"` block): its C
+    // header owns the layout, and the declaration lists only some of its fields.
+    fn tc_header_type(self: &Self, t: TypeId) bool {
+        if t == TYPE_NONE || t == TYPE_ERROR {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind != TypeKind::TYPE_STRUCT {
+            return false;
+        }
+        let dn = unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl);
+        return dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_extern;
+    }
+
+    // Whether `t` is a type an `extern "C"` block declares: an opaque type, a header struct or union,
+    // or an extern enum. Each is a C value: it copies as C copies it and has no drop glue.
+    fn tc_extern_type(self: &Self, t: TypeId) bool {
+        if t == TYPE_NONE || t == TYPE_ERROR {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            return true;
+        }
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM {
+            return false;
+        }
+        return unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl).as_data.aggregate.is_extern;
+    }
+
+    // Whether header-struct field type `t0` has a C equivalent the emitted layout checks can name: a
+    // scalar, a raw pointer, a plain `fn` pointer, a type of an extern block, or an array of these.
+    fn tc_c_field_type(self: &Self, t0: TypeId) bool {
+        let mut t = t0;
+        for _ in 0..64 {
+            if t == TYPE_ERROR {
+                return true; // reported where it was written
+            }
+            if t == TYPE_NONE {
+                return false;
+            }
+            let y = *self.type_at(t);
+            if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
+                t = y.as_data.arr.elem;
+                continue;
+            }
+            if y.kind == TypeKind::TYPE_BUILTIN {
+                return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
+            }
+            if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_OPAQUE {
+                return true;
+            }
+            if y.kind == TypeKind::TYPE_FUNCTION {
+                return y.fn_sig() && (y.qualifier & FN_MOVE) == 0;
+            }
+            if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+                return unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl).as_data.aggregate.is_extern;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    // Field `fid` (type `ft`) of header struct `sid`: a C type, which the C compiler can check against
+    // the header. None owns a value (`tc_extern_type`), so the struct needs no drop glue.
+    fn tc_header_field(self: &mut Self, sid: NodeId, fid: NodeId, ft: TypeId) {
+        let a = self.cur_ast();
+        let fd = unsafe (*a).at_const(fid).as_data.field;
+        let sp = unsafe (*a).at_const(fd.ty).span;
+        let fsp = unsafe (*a).at_const(fd.name).span;
+        let ssp = unsafe (*a).at_const(unsafe (*a).at_const(sid).as_data.aggregate.name).span;
+        let fname = diag::span_str(self.source, fsp.start, fsp.end);
+        let sname = diag::span_str(self.source, ssp.start, ssp.end);
+        if !self.tc_c_field_type(ft) {
+            let tb = self.type_str(ft);
+            self.errors.emit_span(
+                sp,
+                format("field '{}' of '{}' has type '{}', which has no C equivalent", fname, sname, tb.as_str()),
+            );
+            self.errors.note(
+                format(
+                    "a C header type's field is a C scalar, a raw pointer, a 'fn' pointer, a type of an 'extern \"C\"' block, or an array of these",
+                ),
+            );
+        }
+    }
+
     // A register type is a local, a parameter or a result only: as the element, target, member or
     // argument the type at node `id` makes it, it is an error. Its layout (a 32-byte register aligns
     // to 32 in GCC and Clang) stays out of every storage layout.
@@ -30370,7 +30738,7 @@ extend TypeChecker {
             // A `loop` no `break` leaves is a statement of type `!`: the statement after it is
             // unreachable (`stmt_diverges`).
             let e = unsafe self.loop_stack[le as usize];
-            if self.lint && unsafe (*a).at_const(id).as_data.while_stmt.condition == NODE_NONE && !e.saw_bare && !e.saw_value {
+            if unsafe (*a).at_const(id).as_data.while_stmt.condition == NODE_NONE && !e.saw_bare && !e.saw_value {
                 let never = unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_NEVER });
                 unsafe (*self.cur_ast()).set_type(id, never);
             }
@@ -31324,6 +31692,11 @@ extend TypeChecker {
                 if fnd.is_intrinsic() {
                     self.tc_check_intrinsic(id);
                 }
+                let naked = (unsafe (*self.cur_ast()).unsafe_claims(id) & UNSAFE_NAKED) != 0;
+                if naked {
+                    self.tc_check_naked(id, fnd);
+                }
+                self.tc_check_link_section(id, true);
                 // `@blocking` is implemented by packing the call's arguments into a frame the pool thread
                 // runs from, and a variadic call has no fixed shape to pack, so say so here rather than
                 // let codegen quietly emit an ordinary (worker-blocking) call.
@@ -31389,7 +31762,10 @@ extend TypeChecker {
                     }
                     lsv.free();
                 }
-                if span_is(self.source, self.name_span(fnd.name), "main") {
+                if span_is(self.source, self.name_span(fnd.name), "main") && unsafe (*self.package).is_entry(
+                    self.cur_module(),
+                    id,
+                ) {
                     let rets = fnd.returns;
                     let mut rt = TYPE_NONE;
                     if rets.len == 1 {
@@ -31445,8 +31821,10 @@ extend TypeChecker {
                 self.loop_depth = 0;
                 if fnd.body != NODE_NONE && !fnd.is_intrinsic() {
                     // An `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
-                    // no per-statement markers; the safety obligation sits at the call sites.
-                    if fnd.is_unsafe() {
+                    // no per-statement markers; the safety obligation sits at the call sites. A naked
+                    // function's `@unsafe` is the marker of its assembly.
+                    let whole = fnd.is_unsafe() || naked;
+                    if whole {
                         self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
                     }
                     // Nodes a desugar appends belong to the arena of the body they extend.
@@ -31459,8 +31837,14 @@ extend TypeChecker {
                     self.check_stmt(fnd.body);
                     unsafe (*self.cur_ast()).sink_body = false;
                     self.tc_record_free_touches(id, fnd, appended_from);
-                    if fnd.is_unsafe() {
+                    if whole {
                         self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
+                    }
+                    // A naked function's assembly returns; after a body error the verdict would be a
+                    // follow-on.
+                    if !naked && self.errors.errors.len() == self.err_wm {
+                        let nsp = self.name_span(fnd.name);
+                        self.tc_end_returns(fnd.returns, fnd.body, nsp, "function");
                     }
                 }
                 // Def-site `const fn` validation, AFTER the body walk: type-based disqualifiers
@@ -31469,7 +31853,8 @@ extend TypeChecker {
                 // The body of an `@unsafe(const)` extern function is a compile-time model: the same
                 // check applies to it.
                 let modeled = fnd.is_extern() && fnd.body != NODE_NONE;
-                if (fnd.is_const() || modeled) && fnd.body != NODE_NONE {
+                // A naked `const fn` has its own error (`tc_check_naked`).
+                if (fnd.is_const() || modeled) && fnd.body != NODE_NONE && !naked {
                     let ceptr = self.cir();
                     self.ev_err = false;
                     if ceptr != null && self.fn_recheck_as(self.cur_module(), id) == iri::FX_NO && !self.ev_err {
@@ -31555,6 +31940,9 @@ extend TypeChecker {
                             self.tc_no_reg(mn.as_data.field.ty, ft);
                             if packed {
                                 self.tc_packed_field(mn.as_data.field.ty, ft);
+                            }
+                            if agg.is_extern && nk == NodeKind::NODE_STRUCT {
+                                self.tc_header_field(id, mid, ft);
                             }
                         } else {
                             if mn.as_data.variant.value != NODE_NONE {
@@ -31676,6 +32064,7 @@ extend TypeChecker {
     // storage cannot represent.
     fn check_const_decl(self: &mut Self, id: NodeId, declared: TypeId) {
         let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
+        self.tc_check_link_section(id, false);
         self.tc_no_reg(cd.ty, declared);
         let dtk = self.type_at(declared).kind;
         // An owning (Free) type IS representable: its object graph, heap blocks included,
@@ -32089,19 +32478,36 @@ extend TypeChecker {
         }
     }
 
-    /// Entry point: types every top-level item in declaration order, closes concrete generic
-    /// instances (interning their methods' signature types), runs whole-module lints, and
-    /// finalizes diagnostics. The typed Ast stays in its module slot; the borrowck pass re-walks
-    /// it from there. The driver's item scheduler runs the same three steps per item.
+    /// Entry point: types every top-level item in declaration order, then the top-level nodes
+    /// that are no item (`check_orphans`), closes concrete generic instances (interning their
+    /// methods' signature types), runs whole-module lints, and finalizes diagnostics in
+    /// declaration order. The typed Ast stays in its module slot; the borrowck pass re-walks it
+    /// from there. The driver's item scheduler runs the same steps per item and module.
     pub fn check(self: &mut Self) {
         self.check_open();
+        let m = self.cur_module();
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
-        let mut prev: NodeId = 0;
+        let mut outs = Vector::<diag::Errors>::with_capacity(items.len as usize);
         for i in 0..items.len {
             let it9 = unsafe (*self.cur_ast()).list(items)[i as usize];
-            self.check_one(it9, prev);
-            prev = it9;
+            let rec = unsafe (*self.package).item_of(m, it9);
+            if rec != loader::ITEM_NONE {
+                self.check_one(it9, unsafe (*self.package).sched.top_lo[rec as usize]);
+            }
+            outs.push(replace(&mut self.errors, diag::Errors::new()));
         }
+        self.check_orphans();
+        let mut oi: usize = 0;
+        for i in 0..items.len {
+            let it9 = unsafe (*self.cur_ast()).list(items)[i as usize];
+            if unsafe (*self.package).item_of(m, it9) != loader::ITEM_NONE {
+                self.errors.append(outs.index_mut(i as usize));
+            } else if oi < self.orphan_errs.len() {
+                self.errors.append(self.orphan_errs.index_mut(oi));
+                oi += 1;
+            }
+        }
+        self.orphan_errs.clear();
         self.check_close();
     }
 
@@ -32171,8 +32577,10 @@ extend TypeChecker {
 
     /// Check the module's top-level nodes that are no item (a `static_assert`) after every item
     /// of the module: the reader is the module's last item with every component the module's
-    /// items depend on, and the module's own, as visible (`gitems::Reach::of_module`). Each
-    /// node's diagnostics land in `orphan_errs`, in declaration order.
+    /// items depend on, and the module's own, as visible (`gitems::Reach::of_module`; without
+    /// components, the Checked items). A module without items reads as no item: the driver
+    /// checks it once every item of the package is typed. Each node's diagnostics land in
+    /// `orphan_errs`, in declaration order.
     pub fn check_orphans(self: &mut Self) {
         if !unsafe (*self.package).sched.built {
             return;
@@ -32180,9 +32588,6 @@ extend TypeChecker {
         let m = self.cur_module();
         let i0 = unsafe (*self.package).idx.mod_items[m as usize];
         let i1 = unsafe (*self.package).idx.mod_items[m as usize + 1];
-        if i1 == i0 {
-            return;
-        }
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
         let mut prev: NodeId = 0;
         let mut set = false;
@@ -32192,11 +32597,13 @@ extend TypeChecker {
                 prev = it9;
                 continue;
             }
-            if !set {
-                self.reach.of_module(unsafe &*self.package, m as usize);
+            if !set && i1 != i0 {
+                if unsafe (*self.package).sched.ncomp != 0 {
+                    self.reach.of_module(unsafe &*self.package, m as usize);
+                }
                 self.cur_item = i1 - 1;
-                set = true;
             }
+            set = true;
             self.cur_top = it9;
             self.cur_lo = prev;
             let held = replace(&mut self.errors, diag::Errors::new());

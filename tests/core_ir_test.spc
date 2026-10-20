@@ -15,6 +15,8 @@ import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
 import ir::facts as fx;
+import ir::tailcall as irt;
+import borrowck::facts as bfx;
 import lexer::token as tok;
 import tests::harness as h;
 
@@ -843,4 +845,470 @@ fn memory_annotations_reach_the_effect_query() {
         kinds.len() == 5 && kinds[0] == fx::MA_READ && kinds[1] == fx::MA_WRITE && kinds[2] == fx::MA_LANES && kinds[3] == fx::MA_NONE && kinds[4] == fx::MA_WRITE,
         "one call each, in order",
     );
+}
+
+// ---- self tail calls (`ir::tailcall`) -----------------------------------------------------------------
+
+// The pass over one lowered body: the call to itself becomes stores into the parameters and a jump
+// to the start, the body still verifies, and a swap of two parameters copies the one an earlier
+// store overwrites. A call whose result the function uses stays a call, with its reason.
+@test
+fn self_tail_calls_become_parameter_stores_and_a_jump() {
+    let p = typed_package(
+        "fn sw(a: i64, b: i64, n: i64) i64 {\n    if n == 0 {\n        return a;\n    }\n    return sw(b, a, n - 1);\n}\nfn add(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + add(n - 1);\n}\nfn main() i32 {\n    return (sw(1, 2, 3) + add(2)) as i32;\n}\n",
+    );
+    let u = (p.modules.len() - 1) as ModuleId;
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
+    let mut ow = bfx::Owner::new(&p);
+    let mut misses = Vector::<irt::TailMiss>::new();
+    let node = find_fn(&p, "sw");
+    let mut lw = irl::Lowerer::new(&p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let nl = lw.body.locals.len();
+    assert_eq(irt::convert(&mut lw.body, &mut ow, &mut misses), 1);
+    assert_eq(misses.len(), 0);
+    assert(irv::verify(&lw.body, tp, &p).len() == 0, "the converted body verifies");
+    for b in 0..lw.body.blocks.len() {
+        assert(lw.body.blocks.at(b).term.kind != ir::TM_CALL, "no call is left");
+    }
+    // `a` is read for `b` after the store into `a`: one copy.
+    assert_eq(lw.body.locals.len(), nl + 1);
+    let node2 = find_fn(&p, "add");
+    let mut lw2 = irl::Lowerer::new(&p, u, node2);
+    assert(lw2.lower_fn(node2), "body lowers");
+    assert_eq(irt::convert(&mut lw2.body, &mut ow, &mut misses), 0);
+    assert_eq(misses.len(), 1);
+    assert_eq(misses[0].reason, irt::TR_NOT_TAIL);
+}
+
+// Each function recurses ten million times: no default stack holds that many frames, so it returns
+// only because its calls to itself became jumps. The forms: an accumulator, a swap of two parameters,
+// a `&mut self` method, a `&mut` collection, owned values moved back and swapped, a generic value, a
+// value `switch`, two `&mut` parameters swapped, a fixed array (the caller's stays as it was), a
+// receiver read through a reference to the parameter, a widened argument, swapped `[]mut` views, a
+// function as a function pointer, two results moved member by member and the tail of a slice (a
+// million calls).
+const TAIL_DEEP: str = M"(struct Counter {
+    pub c: i64,
+}
+extend Counter {
+    @tail_recurse
+    fn go(self: &mut Counter, n: i64) {
+        if n == 0 {
+            return;
+        }
+        self.c += 1;
+        self.go(n - 1);
+    }
+}
+struct P {
+    pub x: i64,
+}
+extend P {
+    @tail_recurse
+    fn walk(self: P, n: i64) i64 {
+        if n == 0 {
+            return self.x;
+        }
+        let r = &self;
+        return r.walk(n - 1);
+    }
+}
+enum E {
+    A(i64),
+    B,
+}
+@tail_recurse
+fn count(n: i64, acc: i64) i64 {
+    if n == 0 {
+        return acc;
+    }
+    return count(n - 1, acc + 1);
+}
+@tail_recurse
+fn swap(a: i64, b: i64, n: i64) i64 {
+    if n == 0 {
+        return a * 10 + b;
+    }
+    return swap(b, a, n - 1);
+}
+@tail_recurse
+fn fill(v: &mut Vector<i64>, n: i64) {
+    if n == 0 {
+        return;
+    }
+    v.push(n);
+    fill(v, n - 1);
+}
+@tail_recurse
+fn grow(acc: String, n: i64) String {
+    if n == 0 {
+        return acc;
+    }
+    let mut a = acc;
+    a.push_str("x");
+    return grow(a, n - 1);
+}
+@tail_recurse
+fn sw(a: String, b: String, n: i64) String {
+    if n == 0 {
+        return a;
+    }
+    return sw(b, a, n - 1);
+}
+@tail_recurse
+fn ident<T>(x: T, n: i64) T {
+    if n == 0 {
+        return x;
+    }
+    return ident(x, n - 1);
+}
+@tail_recurse
+fn pick(e: E, n: i64) i64 {
+    return switch e {
+        A(k) => if n == 0 {
+            k;
+        } else {
+            pick(E::A(k + 1), n - 1);
+        },
+        B => 0,
+    };
+}
+@tail_recurse
+fn bump(a: &mut i64, b: &mut i64, n: i64) {
+    if n == 0 {
+        return;
+    }
+    *a += 1;
+    bump(b, a, n - 1);
+}
+@tail_recurse
+fn arr(a: [i64; 3], n: i64) i64 {
+    if n == 0 {
+        return a[0] * 100 + a[1] * 10 + a[2];
+    }
+    return arr([a[2], a[0], a[1]], n - 1);
+}
+@tail_recurse
+fn widen(x: i64, n: i64) i64 {
+    if n == 0 {
+        return x;
+    }
+    let s: i32 = 5;
+    return widen(s, n - 1);
+}
+@tail_recurse
+fn views(a: []mut i64, b: []mut i64, n: i64) {
+    if n == 0 {
+        return;
+    }
+    a[0] += 1;
+    views(b, a, n - 1);
+}
+@tail_recurse
+fn two(n: i64, a: i64) (i64, i64) {
+    if n == 0 {
+        return a, a + 1;
+    }
+    let (x, y) = two(n - 1, a + 1);
+    return x, y;
+}
+@tail_recurse
+fn sum(s: []i64, acc: i64) i64 {
+    if s.len() == 0 {
+        return acc;
+    }
+    return sum(s[1..], acc + s[0]);
+}
+fn inc(x: i64) i64 {
+    return x + 1;
+}
+@tail_recurse
+fn iter(f: fn(i64) i64, x: i64, n: i64) i64 {
+    if n == 0 {
+        return x;
+    }
+    return iter(inc, f(x), n - 1);
+}
+fn main() i32 {
+    let big: i64 = 10000000;
+    let mut c = Counter { c: 0 };
+    c.go(big);
+    let mut v = Vector::<i64>::new();
+    fill(&mut v, big);
+    let s = grow(String::from_str(""), big);
+    let t = sw(String::from_str("a"), String::from_str("b"), big + 1);
+    let mut x = 0i64;
+    let mut y = 0i64;
+    bump(&mut x, &mut y, big + 1);
+    let a: [i64; 3] = [1, 2, 3];
+    let mut p: [i64; 1] = [0];
+    let mut q: [i64; 1] = [0];
+    views(p, q, big + 1);
+    let mut w = Vector::<i64>::new();
+    for i in 0..1000000 {
+        w.push(i % 3);
+    }
+    let (ta, tb) = two(big, 0);
+    let ok = ta == big && tb == big + 1 && count(big, 0) == big && swap(1, 2, big + 1) == 21 && c.c == big && v.len() as i64 == big && s.len() as i64 == big && t.as_str() == "b" && ident(7i64, big) == 7 && pick(E::A(0), big) == big && x == big / 2 + 1 && y == big / 2 && arr(a, big + 1) == 231 && a[0] == 1 && P { x: 4 }.walk(big) == 4 && widen(1, big) == 5 && p[0] == big / 2 + 1 && q[0] == big / 2 && iter(inc, 0, big) == big && sum(w[0..w.len()], 0) == 999999;
+    return pick(E::B, 0) as i32 + if ok {
+        0;
+    } else {
+        1;
+    };
+}
+)";
+
+@test
+fn self_tail_calls_run_in_one_frame_in_every_profile() {
+    // The emitted C calls none of the functions from its own body.
+    let c = h::compile_c_user(TAIL_DEEP);
+    assert(c.ok(), "the program compiles");
+    let code = unsafe str::from_cstr(c.code);
+    assert(!h::c_fn(code, "int64_t count(").contains("count("), "count loops");
+    assert(!h::c_fn(code, "void fill(").contains("fill("), "fill loops");
+    assert(!h::c_fn(code, "String sw(").contains("sw("), "sw loops");
+    assert(!h::c_fn(code, "void Counter__go(").contains("Counter__go("), "the method loops");
+    for prof in ["--profile=debug", "--profile=release"] {
+        let b = h::diff_build(TAIL_DEEP, [prof]);
+        assert(b.built, prof);
+        let r = h::diff_run(&b, "");
+        if r.exit != 0 {
+            eprintln("{}: exit {}: {}", prof, r.exit, r.err.as_str());
+        }
+        assert(r.exit == 0, prof);
+    }
+}
+
+// One program per reason a call to itself stays a call: under `@tail_recurse` each is an error that
+// names it.
+@test
+fn tail_recurse_rejects_a_call_not_in_tail_position() {
+    h::expect_err_msg(
+        "result used",
+        "@tail_recurse\nfn f(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\nfn main() i32 {\n    return f(3) as i32;\n}\n",
+        "cannot become a jump: it is not in tail position",
+    );
+}
+
+@test
+fn tail_recurse_rejects_results_returned_in_another_order() {
+    h::expect_err_msg(
+        "swapped results",
+        "@tail_recurse\nfn f(n: i64, a: i64) (i64, i64) {\n    if n == 0 {\n        return a, 0;\n    }\n    let (x, y) = f(n - 1, a);\n    return y, x;\n}\nfn main() i32 {\n    let (a, b) = f(3, 1);\n    return (a + b) as i32;\n}\n",
+        "cannot become a jump: it is not in tail position",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_drop_after_the_call() {
+    h::expect_err_msg(
+        "drop",
+        "@tail_recurse\nfn f(n: i64) i64 {\n    let s = String::from_str(\"x\");\n    if n == 0 {\n        return s.len() as i64;\n    }\n    return f(n - 1);\n}\nfn main() i32 {\n    return f(3) as i32;\n}\n",
+        "cannot become a jump: 's' is dropped after it returns",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_defer_after_the_call() {
+    h::expect_err_msg(
+        "defer",
+        "fn effect(x: i64) i64 {\n    return x;\n}\n@tail_recurse\nfn f(n: i64) i64 {\n    defer {\n        let _ = effect(1);\n    }\n    if n == 0 {\n        return 0;\n    }\n    return f(n - 1);\n}\nfn main() i32 {\n    return f(3) as i32;\n}\n",
+        "cannot become a jump: a 'defer' block runs after it returns",
+    );
+}
+
+@test
+fn tail_recurse_rejects_code_after_the_call() {
+    h::expect_err_msg(
+        "code after",
+        "fn effect(x: i64) i64 {\n    return x;\n}\n@tail_recurse\nfn f(n: i64) {\n    if n == 0 {\n        return;\n    }\n    f(n - 1);\n    let _ = effect(n);\n}\nfn main() i32 {\n    f(3);\n    return 0;\n}\n",
+        "cannot become a jump: code runs after it returns",
+    );
+}
+
+@test
+fn tail_recurse_rejects_another_instance() {
+    h::expect_err_msg(
+        "generic arguments",
+        "@tail_recurse\nfn f<T>(x: T, n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    return f::<i64>(n, n - 1);\n}\nfn main() i32 {\n    return f::<u8>(1, 3) as i32;\n}\n",
+        "cannot become a jump: it may call another instance of the function",
+    );
+}
+
+@test
+fn tail_recurse_rejects_an_argument_of_another_type() {
+    h::expect_err_msg(
+        "receiver of another instance",
+        "struct W<T> {\n    pub v: T,\n}\nextend<T> W<T> {\n    @tail_recurse\n    fn depth(self: &W<T>, n: i64) i64 {\n        if n == 0 {\n            return 0;\n        }\n        let o = W::<i64> { v: 1 };\n        return o.depth(n - 1);\n    }\n}\nfn main() i32 {\n    let w = W::<u8> { v: 1 };\n    return w.depth(2) as i32;\n}\n",
+        "cannot become a jump: the argument for parameter 'self' has another type than the parameter",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_borrow_of_the_frame() {
+    h::expect_err_msg(
+        "borrow",
+        "@tail_recurse\nfn f(p: &i64, n: i64) i64 {\n    let x = n;\n    if n == 0 {\n        return *p;\n    }\n    return f(&x, n - 1);\n}\nfn main() i32 {\n    let a = 1i64;\n    return f(&a, 3) as i32;\n}\n",
+        "cannot become a jump: the argument for parameter 'p' may hold a borrow of 'x', which the next iteration overwrites",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_raw_address_of_the_frame() {
+    h::expect_err_msg(
+        "raw address",
+        "@tail_recurse\nfn f(n: i64) i64 {\n    let x = n;\n    let p = &x as *const i64;\n    if n == 0 {\n        return unsafe *p;\n    }\n    return f(n - 1);\n}\nfn main() i32 {\n    return f(3) as i32;\n}\n",
+        "cannot become a jump: the function takes a raw address of 'x'",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_cancellation_check_after_the_call() {
+    // The program imports std::parallel, which the in-process compile does not load: a build.
+    h::expect_build_err(
+        "cancellation",
+        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n",
+        "cannot become a jump: it can accept a task cancellation",
+    );
+}
+
+@test
+fn tail_recurse_rejects_a_call_from_a_closure() {
+    h::expect_err_msg(
+        "closure",
+        "@tail_recurse\nfn f(n: i64) i64 {\n    let g = || f(n - 1);\n    if n == 0 {\n        return 0;\n    }\n    return g();\n}\nfn main() i32 {\n    return f(2) as i32;\n}\n",
+        "cannot become a jump: the call is inside a closure",
+    );
+}
+
+@test
+fn tail_recurse_requires_a_call_to_itself() {
+    h::expect_err_msg(
+        "no call",
+        "@tail_recurse\nfn f(n: i64) i64 {\n    return n;\n}\nfn main() i32 {\n    return f(0) as i32;\n}\n",
+        "'@tail_recurse' function 'f' never calls itself",
+    );
+}
+
+@test
+fn tail_recurse_applies_to_a_function_with_a_body() {
+    h::expect_err_msg(
+        "extern",
+        "extern \"C\" {\n    @tail_recurse\n    fn abs(x: i32) i32;\n}\nfn main() i32 {\n    return unsafe abs(0);\n}\n",
+        "'@tail_recurse' may only be applied to a function with a body",
+    );
+}
+
+// A call whose argument diverges never runs: it is neither converted nor an error.
+@test
+fn tail_recurse_ignores_a_call_that_never_runs() {
+    let c = h::compile_c_user(
+        "@tail_recurse\nfn f(x: i64, n: i64) i64 {\n    if n == 0 {\n        return x;\n    }\n    if n == 1 {\n        return f(panic(\"stop\"), n - 1);\n    }\n    return f(x, n - 1);\n}\nfn main() i32 {\n    return f(0, 3) as i32;\n}\n",
+    );
+    assert(c.ok(), "no error");
+}
+
+// A `never` value exists nowhere: the code that reads one is unreachable, so every position it can
+// take (an argument, a `let` initializer, a struct or array member, either operand of an arithmetic,
+// comparison or logical operator, a returned value, a method receiver through a binding) builds and
+// runs to the panic. The program takes the form to run from its argument count; with none it
+// exits 0.
+const NEVER_FORMS: str = M"(struct P {
+    pub a: String,
+    pub b: i64,
+}
+extend P {
+    fn get(self: &P) i64 {
+        return self.b;
+    }
+}
+fn g(x: i64, n: i64) i64 {
+    return x + n;
+}
+@c.noreturn
+fn stop() {
+    panic("stop");
+}
+fn form(n: i64) i64 {
+    if n == 1 {
+        return g(stop(), n - 1);
+    }
+    if n == 2 {
+        let s: String = stop();
+        return s.len() as i64;
+    }
+    if n == 3 {
+        let p = P { a: stop(), b: 1 };
+        return p.b;
+    }
+    if n == 4 {
+        let a: [i64; 2] = [stop(), 2];
+        return a[1];
+    }
+    if n == 5 {
+        return n + stop();
+    }
+    if n == 6 {
+        return stop() * n;
+    }
+    if n == 7 && n < stop() {
+        return 1;
+    }
+    if n == 8 && stop() {
+        return 1;
+    }
+    if n == 9 {
+        let s: String = string(n);
+        return s.len() as i64;
+    }
+    if n == 10 {
+        let p: &P = stop();
+        return p.get();
+    }
+    return 0;
+}
+fn string(n: i64) String {
+    if n == 9 {
+        return stop();
+    }
+    return String::from_str("r");
+}
+fn main(args: Vector<str>) i32 {
+    return form(args.len() as i64 - 1) as i32;
+}
+)";
+
+// One build, one run per form: each form reaches its panic, and with no argument the program exits 0.
+@test
+fn a_never_value_builds_in_every_position() {
+    let b = h::diff_build(NEVER_FORMS, []);
+    if !b.built {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(b.built, "the forms build");
+    let forms: []str = [
+        "argument",
+        "let initializer",
+        "struct member",
+        "array element",
+        "right operand",
+        "left operand",
+        "comparison operand",
+        "logical operand",
+        "returned value",
+        "method receiver",
+    ];
+    let none = h::diff_run(&b, "");
+    assert_eq(none.exit, 0);
+    let mut args = String::new();
+    for i in 0..forms.len() {
+        args.push_str(" x");
+        let r = h::diff_run(&b, args.as_str());
+        let ok = r.exit != 0 && r.err.contains("panic: stop") && !r.err.contains("Sanitizer");
+        if !ok {
+            eprintln("{}: exit {}: {}", forms[i], r.exit, r.err.as_str());
+        }
+        assert(ok, forms[i]);
+    }
 }

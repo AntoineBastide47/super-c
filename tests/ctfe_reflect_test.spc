@@ -2,6 +2,73 @@
 // arithmetic and its overflow trap, enum variant counting through type_info, and the tuple-field
 // binder (whose field names come from the tuple type_info).
 import tests::harness as h;
+import ir::interp as iri;
+import ir::lower as irl;
+import module::loader as loader;
+import driver_shim as shim;
+import ast::ast as *;
+
+// The engine's hash-keyed caches with one hash forced on two keys: each key keeps its own entry.
+@test
+fn a_shared_hash_never_answers_another_index_list() {
+    let mut e = iri::interp_new(null);
+    let mut a = Vector::<irl::LSub>::new();
+    a.push(irl::LSub { pm: 1, pnode: 2, am: 3, at: 4 });
+    let mut b = Vector::<irl::LSub>::new();
+    b.push(irl::LSub { pm: 1, pnode: 2, am: 3, at: 5 });
+    let ra = e.lane_row(7, 0, 10, &a);
+    assert(e.lane_row(7, 0, 10, &a) == ra, "the same key finds its row");
+    let rb = e.lane_row(7, 0, 10, &b);
+    assert(rb != ra, "another substitution under the same hash is a miss");
+    assert(e.lane_row(7, 0, 11, &b) != rb, "another node under the same hash is a miss");
+    let rb2 = e.lane_row(7, 0, 10, &b);
+    assert(rb2 != ra, "a key never answers with another key's row");
+}
+
+@test
+fn a_shared_hash_never_answers_another_body() {
+    let mut e = iri::interp_new(null);
+    let mut a = Vector::<iri::ISub>::new();
+    a.push(iri::ISub { pmod: 1, pnode: 2, am: 3, at: 4 });
+    let mut b = Vector::<iri::ISub>::new();
+    b.push(iri::ISub { pmod: 1, pnode: 2, am: 3, at: 5 });
+    let none = Vector::<iri::ISub>::new();
+    let sa = e.body_add(9, 0, 5, &a, 0);
+    assert(e.body_find(9, 0, 5, &a) == sa, "the same key finds its body");
+    assert(e.body_find(9, 0, 5, &b) < 0, "other bindings under the same hash are a miss");
+    assert(e.body_find(9, 0, 6, &a) < 0, "another function under the same hash is a miss");
+    assert(e.body_find(9, 0, 5, &none) < 0, "the binding-free body under the same hash is a miss");
+    let sn = e.body_add(9, 0, 5, &none, 0);
+    assert(e.body_find(9, 0, 5, &none) == sn, "the new key takes the hash over");
+    assert(e.body_find(9, 0, 5, &a) < 0, "and the old key misses, never finds the new body");
+}
+
+// After a pass, the callee cache keeps what it had before the mark and, past the mark, only a body
+// lowered from a body arena: a keep view slot and a box lowered from module-arena syntax are found
+// again by a later miss.
+@test
+fn release_pass_keeps_only_bodies_a_later_miss_cannot_lower() {
+    let p = loader::package_from_source("fn main() i32 {\n    return 0;\n}\n", "std", unsafe shim::sc_host_platform());
+    let pk = (&p) as *const loader::Package;
+    let mut e = iri::interp_new(null);
+    let none = Vector::<iri::ISub>::new();
+    e.bodies.push(Box::new(irl::Lowerer::new(pk, 0, 11)));
+    let s0 = e.body_add(1, 0, 11, &none, 0);
+    let mark = e.body_mark();
+    let _ = e.body_add(2, 0, 12, &none, 1u64 << 63); // a slot of the keep view
+    e.bodies.push(Box::new(irl::Lowerer::new(pk, 0, 13)));
+    let _ = e.body_add(3, 0, 13, &none, 1);
+    e.bodies.push(Box::new(irl::Lowerer::new(pk, 0, NODE_BODY | 14)));
+    let _ = e.body_add(4, 0, NODE_BODY | 14, &none, 2);
+    e.release_pass(mark);
+    assert(e.body_find(1, 0, 11, &none) == s0, "a slot before the mark stays");
+    assert(e.body_find(2, 0, 12, &none) < 0, "a keep view slot is released");
+    assert(e.body_find(3, 0, 13, &none) < 0, "a box lowered from module-arena syntax is released");
+    let sk = e.body_find(4, 0, NODE_BODY | 14, &none);
+    assert(sk == 1, "a box lowered from a body arena stays, moved down");
+    assert_eq(e.bodies.len(), 2usize);
+    assert_eq(e.bodies.at(e.body_slot[sk as usize] as usize).get().body.owner.node, NODE_BODY | 14);
+}
 
 @test
 fn const_overflow_is_rejected() {
@@ -48,6 +115,138 @@ fn tuple_field_binder_names_each_element(b: &mut h::ExitBatch) {
         "each element is bound under its position's name",
         "fn main() i32 {\n    let t = (10, true, 'x');\n    let mut s = String::new();\n    inline for f in fields(&t) { s.push_str(f.name); }\n    return if s.as_str() == \"_0_1_2\" { 0; } else { 1; };\n}\n",
         0,
+    );
+}
+
+// `n` constants in one dependency cycle of items, each reading the one before through two
+// functions (C0 = 1, Ci = C(i-1) + 1), declared in increasing order or in decreasing order.
+fn hidden_chain(n: i32, down: bool) String {
+    let mut s = String::from_str("const fn table(j: u64) u64 {\n    return switch j {\n");
+    for i in 0..n {
+        s.push_str(format("        {} => C{},\n", i, i).as_str());
+    }
+    s.push_str("        _ => 0,\n    };\n}\n");
+    s.push_str("const fn h(i: u64) u64 {\n    if i == 0 {\n        return 1;\n    }\n    return table(i - 1) + 1;\n}\n");
+    for k in 0..n {
+        let i = if down {
+            n - 1 - k;
+        } else {
+            k;
+        };
+        s.push_str(format("const C{}: u64 = h({});\n", i, i).as_str());
+    }
+    s.push_str(format("fn main() i32 {{ return (C{} % 256) as i32; }}\n", n - 1).as_str());
+    return s;
+}
+
+fn a_deep_hidden_constant_chain_folds_in_either_order(b: &mut h::ExitBatch) {
+    // The constants reach each other through function bodies, so they nest: 100 levels fold
+    // whichever constant evaluates first.
+    let up = hidden_chain(100, false);
+    b.add("a 100-deep chain declared upward", up.as_str(), 100);
+    let down = hidden_chain(100, true);
+    b.add("a 100-deep chain declared downward", down.as_str(), 100);
+}
+
+// A generic function's index list folds when its instance `rot::<k>` first lowers: `A` lowers it
+// under 46 interpreted calls, `B` shallow, and the list itself needs k + 1. `with_b` 0: no `B`,
+// 1: `A` first, 2: `B` first.
+fn deep_lowering_fold(k: i32, with_b: i32) String {
+    let mut s = String::from_str(
+        M"(import std::simd;
+const fn down(n: usize) usize {
+    if n == 0 { return 0; }
+    return down(n - 1);
+}
+fn rot<const K: usize>(v: Simd<i32, 4>) Simd<i32, 4> {
+    return simd::swizzle(v, [down(K) + 3, 1, 2, 0]);
+}
+fn nest(n: usize, v: Simd<i32, 4>) i32 {
+    if n == 0 { return rot::<30>(v)[0]; }
+    return nest(n - 1, v);
+}
+)",
+    );
+    let a = "const A: i32 = nest(45, simd::iota::<i32, 4>());\n";
+    let b = "const B: i32 = rot::<30>(simd::iota::<i32, 4>())[0];\n";
+    if with_b == 0 {
+        s.push_str(a);
+        s.push_str("fn main() i32 { return A; }\n");
+    } else if with_b == 1 {
+        s.push_str(a);
+        s.push_str(b);
+        s.push_str("fn main() i32 { return A + B; }\n");
+    } else {
+        s.push_str(b);
+        s.push_str(a);
+        s.push_str("fn main() i32 { return A + B; }\n");
+    }
+    return s.replace("rot::<30>", format("rot::<{}>", k).as_str());
+}
+
+fn a_lowering_fold_deep_in_a_call_stack_folds_in_either_order(b: &mut h::ExitBatch) {
+    // The fold has its own call depth: 31 calls fit whatever lowers the instance first.
+    let alone = deep_lowering_fold(30, 0);
+    b.add("the deep constant alone", alone.as_str(), 3);
+    let af = deep_lowering_fold(30, 1);
+    b.add("the deep constant first", af.as_str(), 6);
+    let bf = deep_lowering_fold(30, 2);
+    b.add("the shallow constant first", bf.as_str(), 6);
+}
+
+@test
+fn a_lowering_fold_past_the_call_limit_fails_in_either_order() {
+    // 61 calls exceed the limit itself: `A` fails the same way in both orders.
+    let why = "constant 'A' cannot be evaluated at compile time: the index list cannot be evaluated: it traps";
+    let af = deep_lowering_fold(60, 1);
+    h::expect_err_msg("the deep constant first", af.as_str(), why);
+    // `B` traps first there: the build reports `A` after it.
+    let bf = deep_lowering_fold(60, 2);
+    h::expect_build_err("the shallow constant first", bf.as_str(), why);
+}
+
+@test
+fn a_constant_reports_its_own_trap_after_a_failed_lowering_fold() {
+    // Lowering `pick` folds the build condition, which traps; the constant then traps in `pick`
+    // and reports that trap, not the fold's.
+    h::expect_build_err(
+        "the constant's own trap",
+        M"(const ONE: u64 = 1;
+const ZERO: u64 = 0;
+const fn pick() u64 {
+    if PROFILE == "debug" && ONE / ZERO == 0 { return 1; }
+    return 2;
+}
+const X: u64 = pick();
+fn main() i32 { return X as i32; }
+)",
+        "constant 'X' cannot be evaluated at compile time: division by zero (call stack: pick;",
+    );
+}
+
+fn a_payload_bound_through_a_reference_aliases_the_value(b: &mut h::ExitBatch) {
+    // `switch self` on `self: &mut Self` binds the payload of the caller's value, not of a copy:
+    // the pushes reach `e`, and the returned reference does not point into the callee's frame.
+    b.add(
+        "a payload reference writes through",
+        M"(enum E { A(i64), B(Vector<i64>) }
+extend E {
+    fn vec_mut(self: &mut Self) &mut Vector<i64> {
+        return switch self { B(v) => v, _ => panic("not B") };
+    }
+}
+fn fill() i64 {
+    let mut e = E::B(Vector::<i64>::new());
+    let v = e.vec_mut();
+    v.push(3);
+    v.push(4);
+    let w = e.vec_mut();
+    return w.len() as i64 + w[1];
+}
+const F: i64 = fill();
+fn main() i32 { return (F + fill()) as i32; }
+)",
+        12,
     );
 }
 
@@ -259,6 +458,9 @@ fn exit_cases_00() {
     constants_keep_every_instance_argument(&mut b);
     a_constant_binds_a_static_method_from_its_path(&mut b);
     a_repeat_constant_fills_every_element(&mut b);
+    a_deep_hidden_constant_chain_folds_in_either_order(&mut b);
+    a_lowering_fold_deep_in_a_call_stack_folds_in_either_order(&mut b);
+    a_payload_bound_through_a_reference_aliases_the_value(&mut b);
     byte_view_of_a_scalar_copies_its_bytes(&mut b);
     b.run();
 }

@@ -165,8 +165,14 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
             }
         }
     }
-    // Coroutine and cancellation reachability are package-wide: a launched body in one module decides
-    // the safepoints and cancellation probes emitted in modules it never imports.
+    return reach_fold(h, p);
+}
+
+/// Fold `p`'s coroutine and cancellation reachability into hash `h0`. It is package-wide: a launched
+/// body in one module decides the safepoints and cancellation probes emitted in modules it never
+/// imports. The language server reads it to see whether a solve changed the answer.
+pub fn reach_fold(h0: u64, p: &loader::Package) u64 {
+    let mut h = h0;
     let mut reach = p.co_state as u64 | p.cancel_state as u64 << 8;
     if p.cancel_used {
         reach = reach | 1u64 << 16;

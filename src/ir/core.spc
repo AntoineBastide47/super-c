@@ -1084,6 +1084,9 @@ pub struct CoreBody {
     /// The calls the inliner replaced whose callee instance holds a per-instantiation
     /// `static_assert`: the emitter still demands each instance, so the assert still runs.
     pub demands: Vector<Terminator>,
+    /// The blocks whose `TM_GOTO` replaced a call of the body's function to itself (`ir::tailcall`):
+    /// the unbounded-recursion check reads each one as that call (`ir::recursion`).
+    pub tail_jumps: Vector<BlockId>,
     pub entry: BlockId,
 }
 
@@ -1200,6 +1203,7 @@ extend CoreBody {
             asm_spans: Vector::<tok::Span>::new(),
             simd_aux: Vector::<u32>::new(),
             demands: Vector::<Terminator>::new(),
+            tail_jumps: Vector::<BlockId>::new(),
             entry: 0,
         };
     }
@@ -1238,6 +1242,7 @@ extend CoreBody {
         self.asm_spans.truncate(0);
         self.simd_aux.truncate(0);
         self.demands.truncate(0);
+        self.tail_jumps.truncate(0);
         self.entry = 0;
     }
 
@@ -1247,7 +1252,7 @@ extend CoreBody {
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
         n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
-        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity()) * 4;
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
         n += self.demands.capacity() * sizeof(Terminator);
@@ -1287,6 +1292,7 @@ extend CoreBody {
         out.asm_spans = exact(&src.asm_spans);
         out.simd_aux = exact(&src.simd_aux);
         out.demands = exact(&src.demands);
+        out.tail_jumps = exact(&src.tail_jumps);
         return out;
     }
 

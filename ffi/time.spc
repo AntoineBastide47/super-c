@@ -2,8 +2,8 @@
 //
 // C's `time_t`/`clock_t` are integer typedefs, exposed here as `i64` values; the `time_t*` out-parameter
 // of `time` is taken as `*mut void` (pass `null` to ignore it). Calendar APIs use `*mut void` for
-// `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access should provide
-// platform-specific layout glue. `CLOCKS_PER_SEC` binds to the real macro (1000000 on POSIX, 1000 on
+// `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access declare the
+// fields they read as a header type (`struct tm` in an `extern "C" "time.h"` block). `CLOCKS_PER_SEC` binds to the real macro (1000000 on POSIX, 1000 on
 // Windows), so it is a runtime value, not a Super-C constant expression. Calling the raw bindings requires
 // `unsafe` except `clock` and `difftime`; `now`/`cpu_seconds` do not.
 

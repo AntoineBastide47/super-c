@@ -360,8 +360,8 @@ const ATTR_DOCS: [AttrDoc; 34] = [
     AttrDoc { name: "fmt.skip", sig: "@fmt.skip", doc: "The formatter keeps the item as written." },
     AttrDoc {
         name: "unsafe",
-        sig: "@unsafe(safe, const)",
-        doc: "Unverified claims on an extern function. `safe`: callable without `unsafe`. `const`: its body models it at compile time.",
+        sig: "@unsafe(safe, const, naked, link_section = \"name\")",
+        doc: "Unverified claims. On an extern function, `safe`: callable without `unsafe`; `const`: its body models it at compile time. `naked`: the function's body is its whole machine code, `asm` statements without a prologue or epilogue. `link_section`: the function or `static mut` goes in this object-file section.",
     },
     AttrDoc {
         name: "intrinsic",
@@ -378,6 +378,11 @@ const ATTR_DOCS: [AttrDoc; 34] = [
         sig: "@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])",
         doc: "`std` only: a backend entry of vector operation `X` for these CPU features.",
     },
+    AttrDoc {
+        name: "tail_recurse",
+        sig: "@tail_recurse",
+        doc: "Every call of the function to itself must be a tail call that becomes a jump; one that cannot is an error.",
+    },
     AttrDoc { name: "c.inline", sig: "@c.inline", doc: "Asks the C compiler to inline the function." },
     AttrDoc { name: "c.always_inline", sig: "@c.always_inline", doc: "Forces the C compiler to inline the function." },
     AttrDoc { name: "c.noinline", sig: "@c.noinline", doc: "Prevents the C compiler from inlining the function." },
@@ -393,7 +398,6 @@ const ATTR_DOCS: [AttrDoc; 34] = [
     },
     AttrDoc { name: "c.export", sig: "@c.export(\"sym\")", doc: "Gives the item exactly this C symbol name." },
     AttrDoc { name: "c.import", sig: "@c.import(\"sym\")", doc: "Binds the item to exactly this C symbol name." },
-    AttrDoc { name: "c.section", sig: "@c.section(\"s\")", doc: "Puts the item in this object file section." },
     AttrDoc {
         name: "c.source",
         sig: "@c.source(\"file.c\")",

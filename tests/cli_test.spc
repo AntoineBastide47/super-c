@@ -4,6 +4,7 @@
 // Each @test writes a source tree with cli::Proj, compiles it (compile-only, emitting build/), then cc's the
 // emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line matchertext literals.
 import tests::cli_harness as cli;
+import tests::harness as h;
 import stdio;
 import stdlib;
 import module::loader as loader;
@@ -386,7 +387,9 @@ fn rec(d: []mut i32, k: usize) i32 {
         return *d.at(0);
     }
     d.set(0, *d.at(0) + 1);
-    return rec(d, k - 1);
+    // Not a tail call (the addition runs after it), so the recursive call stays a call.
+    let v = rec(d, k - 1);
+    return v + 0;
 }
 fn pick(x: []mut i32) []mut i32 {
     return x;
@@ -419,7 +422,7 @@ fn main(args: Vector<str>) i32 {
 fn mut_views_split_into_restrict_pointers() {
     let p = cli::proj_new();
     p.mkfile("main.spc", SPLIT_VIEWS);
-    assert(p.compile("main.spc").ok());
+    assert(p.compile("main.spc").ok(), "the program compiles");
     assert(p.gen_has("main.c", "void axpy__r(double *restrict __sc_sp"), "the definition splits the view");
     assert(
         p.gen_has("main.c", "void axpy(SliceMut__f64 __sc_a0, Slice__f64 __sc_a1, double __sc_a2) {"),
@@ -429,9 +432,9 @@ fn mut_views_split_into_restrict_pointers() {
         p.gen_has("main.c", "void sc_scale(SliceMut__f32 __sc_a0, float __sc_a1) {"),
         "an export keeps the struct ABI",
     );
-    assert(p.gen_has("main.c", "return rec__r(d.ptr, d.len, "), "a direct call passes the pointer and the length");
-    assert(p.cc_build("-pedantic-errors ").ok());
-    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+    assert(p.gen_has("main.c", "rec__r(d.ptr, d.len, "), "a direct call passes the pointer and the length");
+    assert(p.cc_build("-pedantic-errors ").ok(), "the emitted C compiles under -pedantic-errors");
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok(), "the program runs clean");
 }
 
 // A literal pattern and both ends of a range pattern take the matched value's type, read through a
@@ -485,18 +488,31 @@ fn main() i32 {
 fn pattern_literals_take_the_scrutinee_type() {
     let p = cli::proj_new();
     p.mkfile("main.spc", PAT_LITS);
-    assert(p.compile("main.spc").ok());
-    assert(p.cc_build("-pedantic-errors ").ok());
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.cc_build("-pedantic-errors ").ok(), "the emitted C compiles under -pedantic-errors");
     let r = p.run_bin_env("");
-    assert(r.ok() && r.out_shows("3 2 1 4 1 1 1"));
-    p.mkfile("u8.spc", "fn f(x: u8) i32 {\n    return switch x {\n        0..=300 => 1,\n        _ => 0,\n    };\n}\n");
-    p.expect_fail("u8.spc", "error: integer literal is out of range for 'u8'");
-    p.mkfile("i8.spc", "fn f(x: &i8) i32 {\n    if let -129 = x {\n        return 1;\n    }\n    return 0;\n}\n");
-    p.expect_fail("i8.spc", "error: integer literal is out of range for 'i8'");
-    p.mkfile("neg.spc", "fn f(x: u32) i32 {\n    return switch x {\n        -1 => 1,\n        _ => 0,\n    };\n}\n");
-    p.expect_fail("neg.spc", "error: cannot apply unary operator '-' to type 'u32'");
-    p.mkfile("text.spc", "fn f(x: i32) i32 {\n    return switch x {\n        \"a\" => 1,\n        _ => 0,\n    };\n}\n");
-    p.expect_fail("text.spc", "error: mismatched types: expected 'i32', found 'str'");
+    assert(r.ok(), "the program runs clean");
+    assert(r.out_shows("3 2 1 4 1 1 1"), "each pattern matches in its type");
+    h::expect_err_msg(
+        "a range bound out of range",
+        "fn f(x: u8) i32 {\n    return switch x {\n        0..=300 => 1,\n        _ => 0,\n    };\n}\n",
+        "error: integer literal is out of range for 'u8'",
+    );
+    h::expect_err_msg(
+        "a literal out of range through a reference",
+        "fn f(x: &i8) i32 {\n    if let -129 = x {\n        return 1;\n    }\n    return 0;\n}\n",
+        "error: integer literal is out of range for 'i8'",
+    );
+    h::expect_err_msg(
+        "a negative literal of an unsigned type",
+        "fn f(x: u32) i32 {\n    return switch x {\n        -1 => 1,\n        _ => 0,\n    };\n}\n",
+        "error: cannot apply unary operator '-' to type 'u32'",
+    );
+    h::expect_err_msg(
+        "a string literal of an integer",
+        "fn f(x: i32) i32 {\n    return switch x {\n        \"a\" => 1,\n        _ => 0,\n    };\n}\n",
+        "error: mismatched types: expected 'i32', found 'str'",
+    );
 }
 
 // A second module's enums used across the boundary: value return, payload-less match, payload construction
@@ -518,13 +534,13 @@ extern "C" { fn exit(code: i32) void; }
 fn color_code(c: lib::lib::Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }
 fn box_amt(b: lib::lib::Box) i32 { return switch b { Filled(n) => n, Empty => -1, }; }
 fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
-  unsafe exit(color_code(c) + box_amt(b)); }
+  unsafe exit(color_code(c) + box_amt(b)); return 0; }
 )",
     );
     let r = p.compile("xm.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 21);
 }
 
@@ -546,19 +562,19 @@ static_assert(sizeof(Wrap<[i32; 4]>) == 16, "array arg layout");
 fn main() i32 {
   let a: [i32; 2 + 2] = [[K] = 30, [K + 1] = 10, [1 - 1] = 2];
   let w = Wrap::<[i32; 4]> { v: [1, 2, 3, 4] };
-  unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32));
+  unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32)); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(p.gen_has("main.c", "[2] = 30"), "const designator index folded into the C output");
     assert(
         p.gen_has("__sc_t/Pt.h", "_Static_assert(sizeof(Pt) == 8"),
         "layout verification assert in the definition header",
     );
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 54);
 
     // A folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error.
@@ -566,6 +582,14 @@ fn main() i32 {
     let e = p.compile("main.spc");
     assert(e.exit != 0, "folded-false static_assert fails the build");
     assert(e.out_has("static assertion failed"), "and names the failure");
+    // A module without items checks its top-level asserts too, once every item is typed.
+    p.mkfile("only.spc", "static_assert(1 + 1 == 3, \"in a module without items\");\n");
+    p.mkfile("main.spc", "import only;\n\nfn main() i32 {\n    return 0;\n}\n");
+    let oe = p.compile("main.spc");
+    assert(oe.exit != 0, "a false assert in a module without items fails the build");
+    assert(oe.out_has("static assertion failed"), "a false assert in a module without items is reported");
+    assert(oe.out_has("only.spc:1:15"), "at the assert");
+    p.mkfile("main.spc", "static_assert(1 + 1 == 3, \"nope\");\nfn main() i32 { return 0; }\n");
     // Tiny budgets keep plain scalar folding working.
     let b = p.compile_flags("--const-eval-steps=4096 --const-eval-memory=1M", "main.spc");
     assert(b.exit != 0, "tiny budgets still fold scalar asserts");
@@ -992,13 +1016,13 @@ fn main() i32 {
     let q: lib::Q2<i32> = lib::mk(1);
     let w = W { q: lib::Pair::<lib::Q1<i64>, lib::Q1<i64>> { a: lib::Pair::<i64, i64> { a: 5, b: 6 }, b: lib::Pair::<i64, i64> { a: 7, b: 8 } } };
     let z: Q3<u8> = lib::mk2();
-    unsafe exit(q.a.a + get(q) + w.q.b.a as i32 + get(w.q) as i32 + z.b.a.b as i32);
+    unsafe exit(q.a.a + get(q) + w.q.b.a as i32 + get(w.q) as i32 + z.b.a.b as i32); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
-    assert(p.cc_build("").ok());
+    assert(r.ok(), "the program compiles");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 1 + 3 + 7 + 7 + 2);
 }
 
@@ -1530,10 +1554,155 @@ fn main() i32 { return 0; }
 )",
     );
     let rw = p.compile("main.spc");
-    assert(rw.ok());
+    assert(rw.ok(), "the program compiles");
     assert(
         p.gen_has("main.c", M"(_Static_assert(true, "raw folds"))"),
         "matchertext literal len folded at compile time",
+    );
+}
+
+// A call's frame, its temporaries and every freed heap block return to the memory budget, so the
+// budget, not a count of calls or objects, limits an evaluation.
+@test
+fn ctfe_memory_budget_is_the_only_limit() {
+    let p = cli::proj_new();
+    let calls = M"(const fn inc(x: u64) u64 { return x + 1; }
+const fn count(n: u64) u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    while i < n { s = inc(s); i += 1; }
+    return s;
+}
+const A: u64 = count(100000);
+fn main() i32 { return (A % 7) as i32; }
+)";
+    h::expect_ok("100000 calls fold", calls);
+    p.mkfile("calls.spc", calls);
+    let cs = p.compile_flags("--const-eval-memory=16K", "calls.spc");
+    assert(cs.ok(), "the frames of returned calls leave a 16 KiB budget");
+    h::expect_ok(
+        "70000 live objects fold inside the budget",
+        M"(struct Pair { pub a: u32, pub b: u32 }
+const fn pairs() u32 {
+    let ps: [Pair; 70000] = [Pair { a: 1, b: 2 }; 70000];
+    return ps[69999].a + ps[3].b;
+}
+const N: u32 = pairs();
+fn main() i32 { return N as i32; }
+)",
+    );
+    p.mkfile(
+        "heap.spc",
+        M"(extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
+const fn block(n: usize) u64 {
+    let p = unsafe malloc(n * 8) as *mut u64;
+    unsafe p[n - 1] = 5;
+    let v = unsafe p[n - 1];
+    unsafe free(p);
+    return v;
+}
+const fn blocks() u64 {
+    let mut s: u64 = 0;
+    for i in 0..20usize { s += block(100000 + i); }
+    return s;
+}
+const H: u64 = blocks();
+fn main() i32 { return (H % 7) as i32; }
+)",
+    );
+    let h = p.compile_flags("--const-eval-memory=4M", "heap.spc");
+    assert(h.ok(), "freed heap blocks return to the budget");
+    p.mkfile(
+        "big.spc",
+        M"(extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
+const fn block(n: usize) u64 {
+    let p = unsafe malloc(n * 8) as *mut u64;
+    unsafe p[n - 1] = 5;
+    let v = unsafe p[n - 1];
+    unsafe free(p);
+    return v;
+}
+const B: u64 = block(4000000);
+fn main() i32 { return B as i32; }
+)",
+    );
+    // A slot holds one 24-byte value: 96 MiB holds the 4000000 elements, 72 MiB does not.
+    let b96 = p.compile_flags("--const-eval-memory=96M", "big.spc");
+    assert(b96.ok(), "--const-eval-memory=96M is 96 MiB");
+    let b72 = p.compile_flags("--const-eval-memory=72M", "big.spc");
+    assert(b72.exit != 0, "a block past the budget fails");
+    assert(
+        b72.out_shows("constant 'B' cannot be evaluated at compile time: const-eval memory budget exceeded"),
+        "and names the budget",
+    );
+}
+
+// A constant's result does not depend on the constants evaluated before it: the call memo lives for
+// one evaluation, and a referenced constant evaluates under its own budget.
+@test
+fn ctfe_constant_result_is_independent_of_order() {
+    let p = cli::proj_new();
+    let spins = M"(const fn spin(n: u64) u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    while i < n { s += i; i += 1; }
+    return s;
+}
+const fn spin2(n: u64) u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    while i < n { s += i; i += 1; }
+    return s;
+}
+fn main() i32 { return 0; }
+)";
+    let q = "const Q: u64 = spin(5000) + spin2(5000);\n";
+    let pc = "const P: u64 = spin(5000);\n";
+    let why = "constant 'Q' cannot be evaluated at compile time: const-eval step budget exceeded (call stack: spin2; steps: 50001/50000)";
+    p.mkfile("alone.spc", format("{}{}", spins, q).as_str());
+    p.mkfile("after.spc", format("{}{}{}", spins, pc, q).as_str());
+    p.mkfile("before.spc", format("{}{}{}", spins, q, pc).as_str());
+    let alone = p.compile_flags("--const-eval-steps=50000", "alone.spc");
+    assert(alone.exit != 0, "Q alone fails the build");
+    assert(alone.out_shows(why), "Q alone exceeds the step budget");
+    let after = p.compile_flags("--const-eval-steps=50000", "after.spc");
+    assert(after.exit != 0, "Q after P fails the build");
+    assert(after.out_shows(why), "Q after P fails as alone");
+    let before = p.compile_flags("--const-eval-steps=50000", "before.spc");
+    assert(before.exit != 0, "Q before P fails the build");
+    assert(before.out_shows(why), "Q before P fails as alone");
+    assert(!after.out_has("constant 'P'"), "P before Q folds");
+    assert(!before.out_has("constant 'P'"), "P after Q folds");
+    // A referenced constant's steps are its own: B passes before and after A.
+    let a = "const A: u64 = spin(5000);\n";
+    let b = "const B: u64 = A + spin2(5001);\n";
+    p.mkfile("ref_first.spc", format("{}{}{}", spins, b, a).as_str());
+    p.mkfile("ref_last.spc", format("{}{}{}", spins, a, b).as_str());
+    let rf = p.compile_flags("--const-eval-steps=50000", "ref_first.spc");
+    assert(rf.ok(), "B before A folds");
+    let rl = p.compile_flags("--const-eval-steps=50000", "ref_last.spc");
+    assert(rl.ok(), "B after A folds");
+}
+
+// A pointer into a returned call's local is dangling: reading it in a constant is an error.
+@test
+fn ctfe_pointer_into_a_returned_call_traps() {
+    h::expect_err_msg(
+        "the dangling read fails the build",
+        M"(struct Holder { pub p: *const i32 }
+fn keep(h: &mut Holder, x: i32) {
+    let v = x + 1;
+    h.p = &v;
+}
+const fn read() i32 {
+    let mut h = Holder { p: null };
+    keep(&mut h, 4);
+    return unsafe *h.p;
+}
+const D: i32 = read();
+fn main() i32 { return D; }
+)",
+        "constant 'D' cannot be evaluated at compile time: use after return",
     );
 }
 
@@ -1587,7 +1756,7 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(
         p.gen_has("main.c", M"(_Static_assert(true, "deferred: asserts may precede their callee"))"),
         "assert above its callee folds",
@@ -1596,24 +1765,22 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     assert(p.gen_has("main.c", M"(_Static_assert(true, "the abstract heap folds"))"), "malloc/free fold");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "payload enums fold"))"), "Option + switch folds");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 
     // A would-be runtime trap in a required-const context reports its reason.
-    p.mkfile(
-        "main.spc",
+    h::expect_err_msg(
+        "a trapping assert fails the build",
         M"(fn div0(n: i32) i32 { return 10 / n; }
 static_assert(div0(0) == 1, "traps");
 fn main() i32 { return 0; }
 )",
+        "division by zero",
     );
-    let d = p.compile("main.spc");
-    assert(d.exit != 0, "a trapping assert fails the build");
-    assert(d.out_has("division by zero"), "and names the trap");
 
     // Use-after-free is caught by the abstract heap.
-    p.mkfile(
-        "main.spc",
+    h::expect_err_msg(
+        "use-after-free fails the build",
         M"(extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
 fn uaf() i32 {
   let p = unsafe malloc(sizeof(i32)) as *mut i32;
@@ -1624,10 +1791,8 @@ fn uaf() i32 {
 static_assert(uaf() == 1, "uaf");
 fn main() i32 { return 0; }
 )",
+        "use after free",
     );
-    let u = p.compile("main.spc");
-    assert(u.exit != 0, "use-after-free fails the build");
-    assert(u.out_has("use after free"), "and names it");
 }
 
 // The last CTFE surface: `?` early return, array->slice coercion, range indexing into a Vector, struct-
@@ -2089,13 +2254,13 @@ extend lib::lib::Vec2 { fn sum(self: &lib::lib::Vec2) i32 { return self.x + self
 fn main() i32 {
   let v: lib::lib::V = lib::lib::Vec2 { x: 5, y: 7 };
   let w = lib::lib::mk(1, 2);
-  unsafe exit(v.sum() + w.sum() + lib::lib::BASE); }
+  unsafe exit(v.sum() + w.sum() + lib::lib::BASE); return 0; }
 )",
     );
     let r = p.compile("feat.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 115);
 }
 
@@ -2490,17 +2655,17 @@ fn main() i32 {
   let o = opt::opt::Opt::<Bar>::Some(Bar { x: 30 });
   let a = o.unwrap_or(Bar { x: 0 }).x;
   let m = o.map(bx).unwrap_or(0);
-  unsafe exit(a + m); }
+  unsafe exit(a + m); return 0; }
 )",
     );
     let r = p.compile("genbv.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(
         p.gen_has("__sc_t/opt__Opt__genbv__Bar.h", "struct opt__Opt__genbv__Bar {"),
         "instance full-monomorphized in its own definition header",
     );
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 60);
 }
 
@@ -2527,13 +2692,13 @@ extend Bar as bx::bx::Clone { fn clone(self: &Self) Bar { return Bar { x: self.x
 fn main() i32 {
   let b = bx::bx::Bx::<Bar> { v: Bar { x: 21 } };
   let d = b.dup();
-  unsafe exit(d.v.x + b.v.x); }
+  unsafe exit(d.v.x + b.v.x); return 0; }
 )",
     );
     let r = p.compile("genbd.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -2548,15 +2713,15 @@ fn emit_macro_export() {
 @emit_macro
 pub struct Pair<T> { pub a: T, pub b: T }
 extend<T: Copy> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }
-fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); }
+fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); return 0; }
 )",
     );
     let r = p.compile("emac.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(p.gen_has("__sc_fwd.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
     assert(p.gen_has("__sc_fwd.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 7);
 
     // A plain-C consumer instantiates the template over its own C type (no Super-C compiler involved).
@@ -2610,13 +2775,13 @@ pub struct Wrap<T> { pub v: T }
 extend<T> Wrap<T> { pub fn raw(self: &Wrap<T>) i32 { return 7; } }
 extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.mark(); } }
 struct Plain { pub n: i32 }
-fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); }
+fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); return 0; }
 )",
     );
     let r = p.compile("pibf.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 7);
 }
 
@@ -2670,13 +2835,13 @@ extend<T: Copy> Wrap<T> {
   fn get(self: &Self) T { return self.v; }
   fn unused_method(self: &Self) T { return self.v; }
 }
-fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(s.value() + w.get()); }
+fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(s.value() + w.get()); return 0; }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -2754,9 +2919,10 @@ fn main() i32 {
 // capture (which the capture analysis turns into an implicit `&mut` into the launcher's frame).
 @test
 fn launch_rejects_borrowed_capture() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+    // The programs import std::parallel, which the in-process compile does not load: a build.
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "launching a closure that captures a borrow is rejected, citing the 'static bound",
         M"(import std::parallel::runtime as rt;
 import std::parallel::atomics as atom;
 
@@ -2770,14 +2936,10 @@ fn main() i32 {
     return 0;
 }
 )",
+        "'static",
     );
-    let r = p.compile("main.spc");
-    assert(r.exit != 0, "launching a closure that captures a borrow is rejected");
-    assert(r.out_has("'static"), "the rejection cites the 'static bound");
-
-    let q = cli::proj_new();
-    q.mkfile(
-        "main.spc",
+    b.add(
+        "spawning a closure that mutates a capture is rejected, naming the mutated capture",
         M"(import std::parallel::thread as thread;
 
 fn main() i32 {
@@ -2789,10 +2951,10 @@ fn main() i32 {
     return h.join() as i32;
 }
 )",
+        "or mutates a capture, which captures `&mut`",
     );
-    let r2 = q.compile("main.spc");
-    assert(r2.exit != 0, "spawning a closure that mutates a capture is rejected");
-    assert(r2.out_shows("or mutates a capture, which captures `&mut`"), "the rejection names the mutated capture");
+    let p = cli::proj_new();
+    p.expect_batch(b);
 }
 
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
@@ -4139,9 +4301,9 @@ fn main() i32 {
 )",
     );
     let r3 = p.compile("main.spc");
-    assert(r3.ok());
+    assert(r3.ok(), "the program compiles");
     let cc3 = p.cc_build("");
-    assert(cc3.ok());
+    assert(cc3.ok(), "the emitted C compiles and links");
     let wild = p.run_bin_env("");
     assert(wild.exit != 0, "a wild write still crashes");
     assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
@@ -6353,14 +6515,14 @@ fn interior_mutability_via_unsafe_cell() {
 @test
 fn prelude_output_is_demand_driven() {
     let p = cli::proj_new();
-    p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); }\n");
+    p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); return 0; }\n");
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(!p.gen_exists("__std/vector.c"), "trivial output should not emit unused std vector.c");
     assert(!p.gen_exists("__std/map.c"), "trivial output should not emit unused std map.c");
     assert(!p.gen_exists("__std/string.c"), "trivial output should not emit unused std string.c");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -6383,14 +6545,14 @@ extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 fn main() i32 {
   let o = lib::lib::Outer::<Bar> { inner: lib::lib::Inner::<Bar> { value: Bar { x: 42 } } };
-  unsafe exit(o.get().x);
+  unsafe exit(o.get().x); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -6407,13 +6569,13 @@ extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
 extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe ((*self).s * (*self).s); } }
 fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }
-fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
+fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); return 0; }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 36);
 }
 
@@ -6452,14 +6614,14 @@ fn main() i32 {
     let t = total(&c, &q);
     let u = shapes::local_view(&q);
     let w = d.tag() + q.tag();
-    unsafe exit(t + u + w + d.area());
+    unsafe exit(t + u + w + d.area()); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 25);
 }
 
@@ -6478,14 +6640,14 @@ fn main() i32 {
   let mut acc = 0;
   if ctype::is_digit(53) { acc = acc + 1; }
   if ctype::is_alpha(53) { acc = acc + 10; }
-  unsafe exit(s + acc);
+  unsafe exit(s + acc); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("-lm");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 13);
 }
 
@@ -6644,15 +6806,37 @@ import facade as *;
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
   let d = D { v: deep::dtag() / 10 };
-  unsafe exit(s::tag() + tag() + dtag() + d.v);
+  unsafe exit(s::tag() + tag() + dtag() + d.v); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 140);
+}
+
+// Only the root module's `main` is the program entry. A `main` in another module, of any signature,
+// and a method named `main` are ordinary functions with their module's symbols: the modules link,
+// and the root calls each.
+@test
+fn non_root_main_is_ordinary() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "other.spc",
+        "pub fn main() i32 {\n    return 41;\n}\n\npub fn twice(k: i32) i32 {\n    return main() - 41 + 2 * k;\n}\n\npub struct A {\n    pub v: i32,\n}\n\nextend A {\n    pub fn main(self: &A, k: i32) i32 {\n        return self.v + k;\n    }\n}\n",
+    );
+    p.mkfile("third.spc", "pub fn main(k: i32) i32 {\n    return k;\n}\n");
+    p.mkfile(
+        "main.spc",
+        "import other;\nimport third;\n\nfn main() i32 {\n    let a = other::A { v: 3 };\n    return other::main() + other::twice(3) + a.main(-3) + third::main(-47);\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the program compiles");
+    let cc = p.cc_build("");
+    assert(cc.ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 0);
 }
 
 // A glob-imported name shadows a prelude name, as a declaration does: `dot` (a std::simd function) and
@@ -6668,13 +6852,14 @@ extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
   let s = String { n: 2 };
   unsafe exit(dot(3, 4) + s.n);
+  return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 14);
 }
 
@@ -6696,13 +6881,14 @@ extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
   let q = qq::one();
   unsafe exit(q.w + mq::two() * 10);
+  return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 21);
 }
 
@@ -6729,23 +6915,23 @@ fn external_c_sources() {
     );
     src.push_str(lib);
     src.push_str(
-        "\")\nextern \"C\" \"extra.h\" {\n  fn extra_mul(a: i32, b: i32) i32;\n}\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }\n",
+        "\")\nextern \"C\" \"extra.h\" {\n  fn extra_mul(a: i32, b: i32) i32;\n}\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); return 0; }\n",
     );
     p.mkfile("main.spc", src.as_str());
     let mut flag = String::from_str("-l");
     flag.push_str(lib);
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(p.gen_has("__ldflags", flag.as_str()), "@c.link lands in build/__ldflags");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 48);
 
     // Drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays;
     // the prelude's float methods are emitted into every program, so libm is on every POSIX link line.
-    p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
+    p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n");
     let r2 = p.compile("main.spc");
-    assert(r2.ok());
+    assert(r2.ok(), "the program compiles");
     assert_eq(p.gen_count("__ext"), 0);
     assert(!p.gen_has("__ldflags", flag.as_str()), "a dropped extern block takes its link flag with it");
     if !cli::on_windows() {
@@ -6755,7 +6941,7 @@ fn external_c_sources() {
     // A missing source file is a hard error.
     p.mkfile(
         "main.spc",
-        "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n",
+        "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n",
     );
     let miss = p.compile("main.spc");
     assert(miss.exit != 0, "missing @c.source errors");
@@ -6889,14 +7075,14 @@ fn main() i32 {
   let c = circle::Circle { r: 2 };
   let p = point::Point { x: 5 };
   let n: i32 = 4;
-  unsafe exit(c.describe() + dyn_describe(&c) + p.describe() + n.describe());
+  unsafe exit(c.describe() + dyn_describe(&c) + p.describe() + n.describe()); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 70);
 }
 
@@ -6954,14 +7140,14 @@ fn main() i32 {
   let mut an = a::AN { v: 30, link: null };
   let mut bn = b::BN { v: 2, link: (&mut an) as *mut a::AN };
   let linked = unsafe (*bn.link).v + bn.v;
-  unsafe exit(linked + a::even(10) * 10);
+  unsafe exit(linked + a::even(10) * 10); return 0;
 }
 )",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 
     // A mutual by-value embedding is infinite size.
@@ -6975,27 +7161,25 @@ fn main() i32 {
 // Module-layer negative paths: missing modules and using a non-public type/const/field across modules.
 @test
 fn module_errors() {
+    // A missing module stops the compile before any located error: alone.
     let miss = cli::proj_new();
     miss.mkfile("main.spc", "import nope::nope;\nfn main() i32 { return 0; }\n");
     miss.expect_fail("main.spc", "cannot open module");
 
-    let privty = cli::proj_new();
-    privty.mkfile(
-        "main.spc",
-        "import lib::lib;\nfn use_it(p: lib::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n",
+    // Each case imports its own library directory.
+    let p = cli::proj_new();
+    p.mkfile("l1/lib.spc", "enum Secret { A, B }\npub fn ok() i32 { return 1; }\n");
+    p.mkfile("l2/lib.spc", "const K: i32 = 9;\n");
+    p.mkfile("l3/lib.spc", "pub struct P { x: i32 }\npub fn mk() P { return P { x: 5 }; }\n");
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "a private type",
+        "import l1::lib;\nfn use_it(p: l1::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "no public type",
     );
-    privty.mkfile("lib/lib.spc", "enum Secret { A, B }\npub fn ok() i32 { return 1; }\n");
-    privty.expect_fail("main.spc", "no public type");
-
-    let privc = cli::proj_new();
-    privc.mkfile("main.spc", "import lib::lib;\nfn main() i32 { return lib::lib::K; }\n");
-    privc.mkfile("lib/lib.spc", "const K: i32 = 9;\n");
-    privc.expect_fail("main.spc", "no public");
-
-    let privf = cli::proj_new();
-    privf.mkfile("main.spc", "import lib::lib;\nfn main() i32 { let p = lib::lib::mk(); return p.x; }\n");
-    privf.mkfile("lib/lib.spc", "pub struct P { x: i32 }\npub fn mk() P { return P { x: 5 }; }\n");
-    privf.expect_fail("main.spc", "is private");
+    b.add("a private constant", "import l2::lib;\nfn main() i32 { return l2::lib::K; }\n", "no public");
+    b.add("a private field", "import l3::lib;\nfn main() i32 { let p = l3::lib::mk(); return p.x; }\n", "is private");
+    p.expect_batch(b);
 }
 
 // The module every module-qualified path test imports: public and private constants, a type with a
@@ -7023,18 +7207,11 @@ fn g<const N: u64>() u64 { return N; }
 fn g8<const N: u8>() u8 { return N; }
 )";
 
-// Compile QUAL_PRE with `main` running `body` (line 9) and expect exactly one error, `want`, at
-// main.spc:`at`.
-fn qual_fails(body: str, want: str, at: str) {
-    let p = cli::proj_new();
-    p.mkfile("m.spc", QUAL_MOD);
-    p.mkfile("main.spc", format("{}fn main() i32 {{\n    {}\n    return 0;\n}}\n", QUAL_PRE, body).as_str());
-    let r = p.compile("main.spc");
-    assert(r.exit != 0 && r.out_shows(format("error: {}\n--> ", want).as_str()), body);
-    assert(r.out_shows(format("main.spc:{}\n", at).as_str()), body);
-    let out = unsafe str::from_cstr(r.out);
-    let first = out.find("error: ");
-    assert(first >= 0 && out.slice(first as usize + 1, out.len()).find("error: ") < 0, body);
+// Add to `b` (whose programs start with QUAL_PRE) the case of `main` running `body` (line 9) with
+// exactly one error, `want`, at main.spc:`at`.
+fn qual_fails(b: &mut cli::Batch, body: str, want: str, at: str) {
+    let src = format("fn main() i32 {{\n    {}\n    return 0;\n}}\n", body);
+    b.add_at(body, src.as_str(), format("error: {}\n--> ", want).as_str(), at);
 }
 
 // A constant a module qualifies is a const argument exactly as its unqualified spelling: a public
@@ -7066,39 +7243,49 @@ fn main() i32 {
 )",
         ).as_str(),
     );
-    assert(p.compile("main.spc").ok());
-    assert(p.cc_build("-pedantic-errors ").ok());
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.cc_build("-pedantic-errors ").ok(), "the emitted C compiles and links");
     let r = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(r.ok() && r.out_shows("18446752 7 2 8 18446744073709551615 10\n"));
+    assert(r.ok(), "the program runs clean");
+    assert(r.out_shows("18446752 7 2 8 18446744073709551615 10\n"), "each qualified constant has its value");
 
-    qual_fails("let w: W<m::P> = W { x: 1 };", "no public type or constant 'P' in the imported module", "9:17");
-    qual_fails("let w = g::<m::P>();", "no public type or constant 'P' in the imported module", "9:20");
-    qual_fails("let w: W<{m::P}> = W { x: 1 };", "no public item 'P' in module 'm'", "9:18");
-    qual_fails("let w: W<m::Foo::Q> = W { x: 1 };", "no associated constant 'Q' on 'm::Foo'", "9:22");
-    qual_fails("let w = g::<m::Foo::Z>();", "no associated constant 'Z' on 'm::Foo'", "9:25");
-    qual_fails("let w = g::<{m::Foo::Q}>();", "no associated constant 'Q' on 'm::Foo'", "9:26");
-    qual_fails("let w = F::<m::D::Q> { x: 1 };", "no variant or associated constant 'Q' on 'm::D'", "9:23");
-    qual_fails("let w = g8::<m::B>();", "mismatched types: expected 'u8', found 'u64'", "9:18");
+    let mut b = cli::Batch::new(QUAL_PRE, "");
+    b.one = true;
+    qual_fails(&mut b, "let w: W<m::P> = W { x: 1 };", "no public type or constant 'P' in the imported module", "9:17");
+    qual_fails(&mut b, "let w = g::<m::P>();", "no public type or constant 'P' in the imported module", "9:20");
+    qual_fails(&mut b, "let w: W<{m::P}> = W { x: 1 };", "no public item 'P' in module 'm'", "9:18");
+    qual_fails(&mut b, "let w: W<m::Foo::Q> = W { x: 1 };", "no associated constant 'Q' on 'm::Foo'", "9:22");
+    qual_fails(&mut b, "let w = g::<m::Foo::Z>();", "no associated constant 'Z' on 'm::Foo'", "9:25");
+    qual_fails(&mut b, "let w = g::<{m::Foo::Q}>();", "no associated constant 'Q' on 'm::Foo'", "9:26");
+    qual_fails(&mut b, "let w = F::<m::D::Q> { x: 1 };", "no variant or associated constant 'Q' on 'm::D'", "9:23");
+    qual_fails(&mut b, "let w = g8::<m::B>();", "mismatched types: expected 'u8', found 'u64'", "9:18");
     qual_fails(
+        &mut b,
         "let w = g8::<m::U::MAX>();",
         "const generic argument 18446744073709551615 is out of range for 'u8'",
         "9:18",
     );
-    qual_fails("let w: W<m::Foo>;", "expected a constant for const parameter 'N', found type 'Foo'", "9:14");
-    qual_fails("let w: *const Vector<m::B>;", "expected a type for generic parameter 'T', found a constant", "9:26");
-    qual_fails("let w: W<m::D::Y>;", "mismatched types: expected 'u64', found 'D'", "9:14");
-    qual_fails("let z: m::Foo::U = m::Foo { a: 1 };", "no type 'U' in 'm::Foo'", "9:20");
-    qual_fails("let z: m::Foo::K = 5;", "expected a type, found constant 'm::Foo::K'", "9:12");
-    qual_fails("let z: m::U::MAX = 5;", "expected a type, found constant 'm::U::MAX'", "9:12");
-    qual_fails("let z: m::D::Y = m::D::Y;", "expected a type, found variant 'm::D::Y'", "9:12");
-    qual_fails("let z = 3 as m::U::MAX;", "expected a type, found constant 'm::U::MAX'", "9:18");
+    qual_fails(&mut b, "let w: W<m::Foo>;", "expected a constant for const parameter 'N', found type 'Foo'", "9:14");
+    qual_fails(
+        &mut b,
+        "let w: *const Vector<m::B>;",
+        "expected a type for generic parameter 'T', found a constant",
+        "9:26",
+    );
+    qual_fails(&mut b, "let w: W<m::D::Y>;", "mismatched types: expected 'u64', found 'D'", "9:14");
+    qual_fails(&mut b, "let z: m::Foo::U = m::Foo { a: 1 };", "no type 'U' in 'm::Foo'", "9:20");
+    qual_fails(&mut b, "let z: m::Foo::K = 5;", "expected a type, found constant 'm::Foo::K'", "9:12");
+    qual_fails(&mut b, "let z: m::U::MAX = 5;", "expected a type, found constant 'm::U::MAX'", "9:12");
+    qual_fails(&mut b, "let z: m::D::Y = m::D::Y;", "expected a type, found variant 'm::D::Y'", "9:12");
+    qual_fails(&mut b, "let z = 3 as m::U::MAX;", "expected a type, found constant 'm::U::MAX'", "9:18");
+    p.expect_batch(b);
 }
 
 // An extensionless input still produces build/<stem>.c.
 @test
 fn extensionless_appends() {
     let p = cli::proj_new();
-    p.mkfile("noext", "fn main() i32 { }\n");
+    p.mkfile("noext", "fn main() i32 { return 0; }\n");
     let mut _r = p.compile("noext"); // result held for RAII only
     assert(p.gen_exists("noext.c"), "an extensionless input still produces build/<stem>.c");
 }
@@ -7167,49 +7354,47 @@ fn main() i32 {
 
 @test
 fn ctfe_hardening() {
-    let p = cli::proj_new();
-    p.mkfile("cyc.spc", M"(const A: i32 = B;
+    h::expect_err_msg(
+        "a constant cycle",
+        M"(const A: i32 = B;
 const B: i32 = A;
 static_assert(A == 0);
 fn main() i32 { return 0; }
-)");
-    p.expect_fail("cyc.spc", "cyclic constant dependency");
-
-    let p2 = cli::proj_new();
-    p2.mkfile(
-        "ub.spc",
+)",
+        "cyclic constant dependency",
+    );
+    h::expect_err_msg(
+        "a division by a zero constant",
         M"(const Z: i32 = 0;
 fn scale(x: i32) i32 { return x * 2 / Z; }
 fn main() i32 { return scale(4); }
 )",
+        "undefined behavior",
     );
-    p2.expect_fail("ub.spc", "undefined behavior");
+    h::expect_err_msg(
+        "a run-time array length",
+        M"(fn main() i32 { let n = 4; let a: [i32; n] = [1, 2, 3, 4]; return a[0] - 1; }
+)",
+        "array length must be a constant expression",
+    );
+}
 
-    let p3 = cli::proj_new();
-    p3.mkfile("sc.spc", M"(const Z: i32 = 0;
+fn ctfe_hardening_runs(b: &mut h::ExitBatch) {
+    b.add(
+        "a short-circuit guards the division by a zero constant",
+        M"(const Z: i32 = 0;
 fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
-)");
-    let r3 = p3.compile("sc.spc");
-    assert(r3.ok());
-    let cc3 = p3.cc_build("");
-    assert(cc3.ok());
-    assert_eq(p3.run_bin(), 0);
-
-    let p4 = cli::proj_new();
-    p4.mkfile("len.spc", M"(fn main() i32 { let n = 4; let a: [i32; n] = [1, 2, 3, 4]; return a[0] - 1; }
-)");
-    p4.expect_fail("len.spc", "array length must be a constant expression");
-
+)",
+        0,
+    );
     // A provable panic in a NON-const fn stays runtime behavior (build ok, binary aborts).
-    let p5 = cli::proj_new();
-    p5.mkfile("pan.spc", M"(fn boom() i32 { panic("boom"); }
+    b.add_trap(
+        "the panic still aborts at runtime",
+        M"(fn boom() i32 { panic("boom"); }
 fn main() i32 { return boom(); }
-)");
-    let r5 = p5.compile("pan.spc");
-    assert(r5.ok());
-    let cc5 = p5.cc_build("");
-    assert(cc5.ok());
-    assert(p5.run_bin() != 0, "the panic still aborts at runtime");
+)",
+        "boom",
+    );
 }
 
 // A cycle and a failing constant at the far end of a 5000-constant chain report their own
@@ -7221,40 +7406,38 @@ fn deep_constant_chain_failures() {
         cyc.push_str(format("const C{}: i32 = C{} + 1;\n", i, (i + 1) % 5000).as_str());
     }
     cyc.push_str("static_assert(C0 == 0);\nfn main() i32 { return 0; }\n");
-    let p = cli::proj_new();
-    p.mkfile("cyc.spc", cyc.as_str());
-    p.expect_fail("cyc.spc", "cyclic constant dependency");
+    h::expect_err_msg("a 5000-constant cycle", cyc.as_str(), "cyclic constant dependency");
 
     let mut ub = String::from_str("const C0: i32 = 1 / 0;\n");
     for i in 1..5000 {
         ub.push_str(format("const C{}: i32 = C{} % 7 + 1;\n", i, i - 1).as_str());
     }
     ub.push_str("fn main() i32 { return C4999; }\n");
-    let p2 = cli::proj_new();
-    p2.mkfile("ub.spc", ub.as_str());
-    p2.expect_fail("ub.spc", "error: constant 'C0' cannot be evaluated at compile time: division by zero");
+    h::expect_err_msg(
+        "a trap at the far end of a 5000-constant chain",
+        ub.as_str(),
+        "error: constant 'C0' cannot be evaluated at compile time: division by zero",
+    );
 }
 
 // A call-free constant used only by a function body that cannot fold reports at the constant before
 // emission: a cycle at every constant on it, a refusal once the flush finds it still undecided.
 @test
 fn call_free_constant_failures() {
-    let p = cli::proj_new();
-    p.mkfile("cyc.spc", "const A: i32 = B + 1;\nconst B: i32 = A + 1;\nfn main() i32 { return A; }\n");
-    let r = p.compile("cyc.spc");
-    assert(r.exit != 0);
-    assert(r.out_has("error: constant 'A' cannot be evaluated at compile time: cyclic constant dependency"));
-    assert(r.out_has("error: constant 'B' cannot be evaluated at compile time: cyclic constant dependency"));
-    assert(!r.out_has("internal"));
-
-    let p2 = cli::proj_new();
-    p2.mkfile("mut.spc", "static mut S: i32 = 1;\nconst C: i32 = unsafe S;\nfn main() i32 { return C; }\n");
-    let r2 = p2.compile("mut.spc");
-    assert(r2.exit != 0);
-    assert(
-        r2.out_has("error: constant cannot be evaluated at compile time: the initializer does not fold to a constant"),
+    // The cycle's program is two cases: one per constant on it. The build reports the second
+    // constant and the flush's refusal, which the in-process check does not reach.
+    let cyc = "const A: i32 = B + 1;\nconst B: i32 = A + 1;\nfn main() i32 { return A; }\n";
+    let mut b = cli::Batch::new("", "");
+    b.forbid("internal");
+    b.add("the cycle at A", cyc, "error: constant 'A' cannot be evaluated at compile time: cyclic constant dependency");
+    b.add("the cycle at B", cyc, "error: constant 'B' cannot be evaluated at compile time: cyclic constant dependency");
+    b.add(
+        "a constant that reads a static",
+        "static mut S: i32 = 1;\nconst C: i32 = unsafe S;\nfn main() i32 { return C; }\n",
+        "error: constant cannot be evaluated at compile time: the initializer does not fold to a constant",
     );
-    assert(!r2.out_has("internal"));
+    let p = cli::proj_new();
+    p.expect_batch(b);
 }
 
 // A chain of aggregate constants evaluates each once: a reference thaws the memoized value
@@ -7313,32 +7496,35 @@ fn duplicate_unknown_attribute_under_bootstrap_tags() {
 // constant context runs at run time, and legal recursion between const fns.
 @test
 fn const_fn_semantics() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "bad.spc",
+    // The programs import stdlib, which the in-process compile does not load: a build.
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "a const fn that calls an extern function",
         M"(import stdlib;
 const fn bad() i32 { return unsafe stdlib::rand(); }
 fn main() i32 { return 0; }
 )",
+        "declared 'const fn' but calls an extern function",
     );
-    p.expect_fail("bad.spc", "declared 'const fn' but calls an extern function");
 
-    let p2 = cli::proj_new();
-    p2.mkfile(
-        "trans.spc",
+    b.add(
+        "a const fn that calls a function that cannot be evaluated",
         M"(import stdlib;
 fn helper() i32 { return unsafe stdlib::rand(); }
 const fn outer() i32 { return helper(); }
 fn main() i32 { return 0; }
 )",
+        "calls a function that cannot be evaluated at compile time",
     );
-    p2.expect_fail("trans.spc", "calls a function that cannot be evaluated at compile time");
+    let bp = cli::proj_new();
+    bp.expect_batch(b);
+}
 
+fn const_fn_semantics_runs(b: &mut h::ExitBatch) {
     // A dangling-sentinel pointer (`alignof(T) as *mut T`) folds: the shape every ZST buffer in
     // std relies on, and a `const fn` caller with known arguments must evaluate through it.
-    let pz = cli::proj_new();
-    pz.mkfile(
-        "dang.spc",
+    b.add(
+        "a dangling-sentinel pointer folds",
         M"(extern "C" { fn exit(c: i32) void; }
 const fn dang<T>() *mut T { return alignof(T) as *mut T; }
 const fn probe() i32 {
@@ -7346,19 +7532,13 @@ const fn probe() i32 {
     if a == null { return 1; }
     return 0;
 }
-fn main() i32 { unsafe exit(probe()); }
+fn main() i32 { unsafe exit(probe()); return 0; }
 )",
+        0,
     );
-    let rz = pz.compile("dang.spc");
-    assert(rz.ok());
-    let ccz = pz.cc_build("");
-    assert(ccz.ok());
-    assert_eq(pz.run_bin(), 0);
-
     // A `const fn` call with known arguments outside a constant context is a run-time call.
-    let p4 = cli::proj_new();
-    p4.mkfile(
-        "runtime.spc",
+    b.add(
+        "a const fn call outside a constant context runs",
         M"(const fn spin(n: u64) u64 {
     let mut s: u64 = 0;
     let mut i: u64 = 0;
@@ -7367,28 +7547,18 @@ fn main() i32 { unsafe exit(probe()); }
 }
 fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0; }
 )",
+        0,
     );
-    let r4 = p4.compile("runtime.spc");
-    assert(r4.ok());
-    let cc4 = p4.cc_build("");
-    assert(cc4.ok());
-    assert_eq(p4.run_bin(), 0);
-
     // Mutually recursive const fns are legal; const fn also runs as a normal function at runtime.
-    let p5 = cli::proj_new();
-    p5.mkfile(
-        "rec.spc",
+    b.add(
+        "mutually recursive const fns fold and run",
         M"(const fn is_even(n: u32) bool { if n == 0 { return true; } return is_odd(n - 1); }
 const fn is_odd(n: u32) bool { if n == 0 { return false; } return is_even(n - 1); }
 static_assert(is_even(10));
 fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; } return 1; }
 )",
+        0,
     );
-    let r5 = p5.compile("rec.spc");
-    assert(r5.ok());
-    let cc5 = p5.cc_build("");
-    assert(cc5.ok());
-    assert_eq(p5.run_bin(), 0);
 }
 
 // Mandatory evaluation of call-bearing const initializers: a non-evaluable initializer is a hard
@@ -7397,25 +7567,26 @@ fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; }
 @test
 fn mandatory_consts() {
     let p = cli::proj_new();
-    p.mkfile(
-        "silent.spc",
+    // Two programs import stdlib, which the in-process compile does not load: one build for the three.
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "a silent failure of an initializer",
         M"(import stdlib;
 fn noisy() i32 { return unsafe stdlib::rand(); }
 const X: i32 = noisy() + 1;
 fn main() i32 { return X * 0; }
 )",
+        "constant cannot be evaluated at compile time",
     );
-    p.expect_fail("silent.spc", "constant cannot be evaluated at compile time");
 
-    let p2 = cli::proj_new();
-    p2.mkfile(
-        "trap.spc",
+    b.add(
+        "a trapping initializer",
         M"(fn div(a: i32, b: i32) i32 { return a / b; }
 const D: i32 = div(1, 0);
 fn main() i32 { return D; }
 )",
+        "division by zero",
     );
-    p2.expect_fail("trap.spc", "division by zero");
 
     let p3 = cli::proj_new();
     p3.mkfile("lib/cf.spc", "pub const fn triple(x: i32) i32 { return x * 3; }\n");
@@ -7428,15 +7599,14 @@ fn main() i32 { return T - 27; }
 )",
     );
     let r3 = p3.compile("use.spc");
-    assert(r3.ok());
+    assert(r3.ok(), "the program compiles");
     let cc3 = p3.cc_build("");
-    assert(cc3.ok());
+    assert(cc3.ok(), "the emitted C compiles and links");
     assert_eq(p3.run_bin(), 0);
 
     // A const pointing at freed compile-time memory is rejected.
-    let p4 = cli::proj_new();
-    p4.mkfile(
-        "dang.spc",
+    b.add(
+        "a constant that points at freed compile-time memory",
         M"(import stdlib;
 pub struct Holder { pub p: *mut i32 }
 fn mk() Holder {
@@ -7447,8 +7617,9 @@ fn mk() Holder {
 const H: Holder = mk();
 fn main() i32 { return 0; }
 )",
+        "freed compile-time memory",
     );
-    p4.expect_fail("dang.spc", "freed compile-time memory");
+    p.expect_batch(b);
 }
 
 // A local constant is a compile-time value like an item constant, whatever its initializer calls:
@@ -7456,27 +7627,16 @@ fn main() i32 { return 0; }
 // an error, and a per-instance constant's failure names the constant.
 @test
 fn local_consts_are_compile_time() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "fold.spc",
-        M"(fn sq(x: i32) i32 { return x * x; }
-fn main() i32 {
-    const LOC: i32 = sq(6);
-    return LOC - 36;
-}
-)",
-    );
-    let r = p.compile("fold.spc");
-    assert(r.ok());
-    assert(p.gen_has("fold.c", "LOC__"), "the local constant is static data");
-    assert(p.gen_has("fold__inst.c", " = 36;"), "its value is computed at compile time");
-    let cc = p.cc_build("");
-    assert(cc.ok());
-    assert_eq(p.run_bin(), 0);
+    let c = h::compile_c(LOCAL_FOLD);
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("LOC__"), "the local constant is static data");
+    assert(c.code_has(" = 36;"), "its value is computed at compile time");
 
-    let p2 = cli::proj_new();
-    p2.mkfile(
-        "silent.spc",
+    // The silent failure imports stdlib, which the in-process compile does not load, and the
+    // instance's constant fails when the build lowers the instance: one build for the two.
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "a silent failure of a local constant",
         M"(import stdlib;
 fn noisy() i32 { return unsafe stdlib::rand(); }
 fn main() i32 {
@@ -7484,25 +7644,10 @@ fn main() i32 {
     return X * 0;
 }
 )",
+        "constant cannot be evaluated at compile time",
     );
-    p2.expect_fail("silent.spc", "constant cannot be evaluated at compile time");
-
-    let p3 = cli::proj_new();
-    p3.mkfile(
-        "var.spc",
-        M"(fn sq(x: i32) i32 { return x * x; }
-fn main(argv: Vector<str>) i32 {
-    let y = argv.len() as i32;
-    const Z: i32 = sq(y);
-    return Z - 1;
-}
-)",
-    );
-    p3.expect_fail("var.spc", "a constant cannot read the variable 'y'");
-
-    let p4 = cli::proj_new();
-    p4.mkfile(
-        "inst.spc",
+    b.add(
+        "a per-instance constant's failure names the constant",
         M"(fn bad<T>(x: usize) usize {
     if x > 3 {
         const B: usize = 10 / (sizeof(T) - sizeof(T));
@@ -7512,8 +7657,32 @@ fn main(argv: Vector<str>) i32 {
 }
 fn main(argv: Vector<str>) i32 { return bad::<u8>(argv.len()) as i32 - 1; }
 )",
+        "constant 'B' cannot be evaluated at compile time for an instance: division by zero",
     );
-    p4.expect_fail("inst.spc", "constant 'B' cannot be evaluated at compile time for an instance: division by zero");
+    let bp = cli::proj_new();
+    bp.expect_batch(b);
+    h::expect_err_msg(
+        "a local constant cannot read a variable",
+        M"(fn sq(x: i32) i32 { return x * x; }
+fn main(argv: Vector<str>) i32 {
+    let y = argv.len() as i32;
+    const Z: i32 = sq(y);
+    return Z - 1;
+}
+)",
+        "a constant cannot read the variable 'y'",
+    );
+}
+
+const LOCAL_FOLD: str = M"(fn sq(x: i32) i32 { return x * x; }
+fn main() i32 {
+    const LOC: i32 = sq(6);
+    return LOC - 36;
+}
+)";
+
+fn local_consts_run(b: &mut h::ExitBatch) {
+    b.add("a local constant folds", LOCAL_FOLD, 0);
 }
 
 // `@unsafe(...)` lists claims about an extern function, in any order: `safe` makes it callable without
@@ -7547,68 +7716,78 @@ fn main(argv: Vector<str>) i32 {
 )",
     );
     let r = p.compile("ok.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     assert(p.gen_has("ok.c", "llabs(_"), "a run-time call goes to the C symbol");
     assert(!p.gen_has("ok.c", "int64_t llabs("), "the model body is never emitted");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 
-    unsafe_attr_rejects(
+    // Each program fails to compile with a diagnostic containing its text.
+    h::expect_err_msg(
+        "safe outside an extern block",
         "@unsafe(safe)\nfn f() i32 { return 1; }\nfn main() i32 { return f() - 1; }\n",
         "may only be applied to a function in an 'extern \"C\"' block",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "an unknown claim",
         "extern \"C\" {\n    @unsafe(fast) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
-        "attribute '@unsafe' takes a list of the claims 'safe' and 'const'",
+        "attribute '@unsafe' takes a list of the claims 'safe', 'const', 'naked' and 'link_section = \"name\"'",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a duplicate attribute",
         "extern \"C\" {\n    @unsafe(safe) @unsafe(const) fn llabs(x: i64) i64 { return x; }\n}\nfn main() i32 { return 0; }\n",
         "duplicate attribute '@unsafe'",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a claim listed twice",
         "extern \"C\" {\n    @unsafe(safe, safe) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
         "claim 'safe' is listed twice in '@unsafe(...)'",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a safe function that takes a raw pointer",
         "extern \"C\" {\n    @unsafe(safe) fn strlen(s: *const u8) usize;\n}\nfn main() i32 { return 0; }\n",
         "cannot take a raw pointer",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a safe variadic function",
         "extern \"C\" {\n    @unsafe(safe) fn printf(f: i32, ...) i32;\n}\nfn main() i32 { return 0; }\n",
         "cannot be variadic",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a safe function that returns a borrow",
         "extern \"C\" {\n    @unsafe(safe) fn get(x: &i32) &i32;\n}\nfn main() i32 { return 0; }\n",
         "cannot return a borrow",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "an extern body without the const claim",
         "extern \"C\" {\n    fn abs(x: i32) i32 { return x; }\n}\nfn main() i32 { return 0; }\n",
         "extern function declarations cannot have a body",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a const claim without a body",
         "extern \"C\" {\n    @unsafe(const) fn abs(x: i32) i32;\n}\nfn main() i32 { return 0; }\n",
         "an '@unsafe(const)' extern function needs a body",
     );
-    unsafe_attr_rejects(
+    h::expect_err_msg(
+        "a call of a const extern function needs unsafe",
         "extern \"C\" {\n    @unsafe(const) fn llabs(x: i64) i64 { return x; }\n}\nfn main() i32 { return llabs(0) as i32; }\n",
         "calling an extern \"C\" function requires an 'unsafe' block",
     );
-    unsafe_attr_rejects(
+    // These import stdlib, which the in-process compile does not load: a build.
+    let mut b = cli::Batch::new("", "");
+    b.file = String::from_str("bad.spc");
+    b.add(
+        "a const extern body that calls an extern function",
         "import stdlib;\nextern \"C\" {\n    @unsafe(const) fn r() i32 { return unsafe stdlib::rand(); }\n}\nfn main() i32 { return 0; }\n",
         "is declared '@unsafe(const)' but calls an extern function",
     );
-    unsafe_attr_rejects(
+    b.add(
+        "an extern function named as a value needs unsafe",
         "import stdlib;\nfn main() i32 {\n    let f: fn(i32) void = stdlib::exit;\n    f(0);\n    return 0;\n}\n",
         "naming an extern \"C\" function as a value requires an 'unsafe' block",
     );
-}
-
-// `src` as a one-file project fails to compile with a diagnostic containing `want`.
-fn unsafe_attr_rejects(src: str, want: str) {
-    let q = cli::proj_new();
-    q.mkfile("bad.spc", src);
-    q.expect_fail("bad.spc", want);
+    p.expect_batch(b);
 }
 
 // The ffi/ bindings carry the claims: libm and the pointer-free queries are callable without `unsafe`, and
@@ -7725,42 +7904,42 @@ fn main() i32 {
 )",
     );
     let r2 = p2.compile("own.spc");
-    assert(r2.ok());
+    assert(r2.ok(), "the program compiles");
     assert(p2.gen_has("own__inst.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
     assert(!p2.gen_has("own__inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let cc2 = p2.cc_build("");
-    assert(cc2.ok());
+    assert(cc2.ok(), "the emitted C compiles and links");
     // Bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer.
     let lk2 = p2.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(lk2.ok());
+    assert(lk2.ok(), "the program runs without a leak");
 
     // And nothing can obtain a copy to free, or mutate it in place.
-    let p3 = cli::proj_new();
-    p3.mkfile(
-        "own2.spc",
+    h::expect_err_msg(
+        "a copy of an owning constant",
         "const V: Vector<u32> = [1u32, 2u32].into();\nfn main() i32 {\n    let c = V;\n    return (c.len()) as i32;\n}\n",
+        "cannot move a value out of a 'const' binding",
     );
-    p3.expect_fail("own2.spc", "cannot move a value out of a 'const' binding");
-    let p4 = cli::proj_new();
-    p4.mkfile(
-        "own3.spc",
+    h::expect_err_msg(
+        "a mutation of an owning constant",
         "const V: Vector<u32> = [1u32, 2u32].into();\nfn main() i32 {\n    V.push(3u32);\n    return 0;\n}\n",
+        "cannot call a '&mut self' method on an immutable binding",
     );
-    p4.expect_fail("own3.spc", "cannot call a '&mut self' method on an immutable binding");
     // An owning constant has no runtime construction to fall back on: it folds, or it is an error.
-    let p5 = cli::proj_new();
-    p5.mkfile(
-        "own4.spc",
+    // The flush before emission reports the two below, which the in-process check does not reach.
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "an owning constant built from a run-time value",
         "extern \"C\" { fn rand() i32; }\nfn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(unsafe rand());\n    return v;\n}\nconst V: Vector<i32> = mk();\nfn main() i32 { return 0; }\n",
+        "cannot be evaluated at compile time",
     );
-    p5.expect_fail("own4.spc", "cannot be evaluated at compile time");
     // Inline assembly has no compile-time meaning either: a constant cannot be built from it.
-    let p6 = cli::proj_new();
-    p6.mkfile(
-        "asm.spc",
+    b.add(
+        "a constant built from inline assembly",
         "fn mk() i64 {\n    let mut o: i64 = 0;\n    unsafe { asm(\"mov %0, #1\" : \"=r\"(o)); }\n    return o;\n}\nconst V: i64 = mk();\nfn main() i32 { return V as i32; }\n",
+        "cannot be evaluated at compile time",
     );
-    p6.expect_fail("asm.spc", "cannot be evaluated at compile time");
+    let bp = cli::proj_new();
+    bp.expect_batch(b);
 }
 
 // Differential: a const fn produces the same value at compile time (const initializer) and at
@@ -7874,7 +8053,7 @@ fn bindgen_generates_callable_bindings() {
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     let gen = p.run_raw(args.as_str());
-    assert(gen.ok());
+    assert(gen.ok(), "bindgen succeeds");
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
@@ -7901,15 +8080,15 @@ fn bindgen_generates_callable_bindings() {
         "import lib;\n\nfn main() i32 {\n    let c = unsafe lib::lib_open(3);\n    let n = unsafe lib::lib_len(c, \"abcd\".ptr() as *const char, 2);\n    unsafe lib::lib_close(c);\n    if n == 9 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
 // The bindings a C library needs: its records, its enums and its constants, not just its
 // functions. A record declared inside the extern block IS the header's type: the emitted C uses the
-// header's own definition and asserts this layout against it, so the test passes a struct BY POINTER
+// header's own definition and checks each field against it, so the test passes a struct BY POINTER
 // and BY VALUE, reads an enumerator back through C, and compares a generated const.
 @test
 fn bindgen_generates_records_enums_and_consts() {
@@ -7944,10 +8123,15 @@ fn bindgen_generates_records_enums_and_consts() {
     // Folded from LIB_VERSION + 1.
     assert(spc.as_str().contains("pub const LIB_EXPR: i32 = 8;"));
     assert(spc.as_str().contains("LIB_SLOW = 10"));
+    // A tag C never typedef'd spells as its tag, with no pin.
+    assert(spc.as_str().contains("    pub enum lib_mode {"));
+    assert(!spc.as_str().contains("@c.import(\"enum lib_mode\")"));
     // C's auto-increment continues from the explicit value.
     assert(spc.as_str().contains("LIB_LAST = 11"));
-    // A tag C never typedef'd.
-    assert(spc.as_str().contains("@c.import(\"struct lib_cfg\")"));
+    // A record spells as its tag: no pin, whether C typedef'd it (`lib_pt`) or not (`lib_cfg`).
+    assert(spc.as_str().contains("    pub struct lib_cfg {"));
+    assert(!spc.as_str().contains("@c.import(\"struct lib_cfg\")"));
+    assert(!spc.as_str().contains("@c.import(\"lib_pt\")"));
     // An array field keeps its extent.
     assert(spc.as_str().contains("pub tag: [char; 8]"));
     // A bitfield has no field-list form.
@@ -7958,9 +8142,9 @@ fn bindgen_generates_records_enums_and_consts() {
         "import lib;\n\nfn main() i32 {\n    let mut cfg = lib::lib_cfg {\n        name: \"c\".ptr() as *const char,\n        len: 5,\n        origin: lib::lib_pt { x: 2, y: 3 },\n        tag: [0 as char; 8],\n        mode: lib::lib_mode::LIB_SLOW,\n    };\n    cfg.tag[0] = 'A' as char;\n    let n = unsafe lib::lib_sum(&cfg);\n    let o = unsafe lib::lib_origin(&cfg);\n    let m = unsafe lib::lib_mode_of(lib::lib_mode::LIB_LAST);\n    if n == 85 && o.x == 2 && o.y == 3 && m == 11 && lib::LIB_VERSION == 7 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8100,9 +8284,10 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     assert(spc.as_str().contains("pub const LIB_MIX: i32 = 5;"));
     // Function-like macros have no const form.
     assert(!spc.as_str().contains("LIB_CALL"));
-    // Named by its typedef, having no tag.
-    assert(spc.as_str().contains("pub struct lib_pt"));
-    assert(spc.as_str().contains("pub union lib_val"));
+    // Named by its typedef, having no tag: the pin is the typedef name.
+    assert(spc.as_str().contains("@c.import(\"lib_pt\")\n    pub struct lib_pt"));
+    assert(spc.as_str().contains("@c.import(\"lib_val\")\n    pub union lib_val"));
+    assert(spc.as_str().contains("@c.import(\"lib_mode\")\n    pub enum lib_mode"));
     // An enumerator written as an expression.
     assert(spc.as_str().contains("LIB_B = 8"));
     // And C's auto-increment continues from it.
@@ -8115,9 +8300,9 @@ fn bindgen_expressions_anonymous_types_and_globals() {
         "import lib;\n\nfn main() i32 {\n    let pt = lib::lib_pt { x: 2, y: 3 };\n    let n = unsafe lib::lib_use(&pt, lib::lib_mode::LIB_B);\n    let c = unsafe lib::lib_counter;\n    if n == 13 && c == 41 && lib::LIB_SUM == 12 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8359,22 +8544,22 @@ fn extern_static_mut_binds_a_writable_global() {
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    unsafe {\n        counter = counter + 41;\n    }\n    return unsafe counter - 42;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert(r.ok());
+    assert(r.ok(), "the program compiles");
     let cc = p.cc_build("");
-    assert(cc.ok());
+    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
     // The write is guarded exactly like any static mut.
-    p.mkfile(
-        "main.spc",
+    h::expect_err_msg(
+        "a write without unsafe",
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    counter = 5;\n    return 0;\n}\n",
+        "requires an 'unsafe' block",
     );
-    p.expect_fail("main.spc", "requires an 'unsafe' block");
     // And the C side owns the storage: an initializer here is refused.
-    p.mkfile(
-        "main.spc",
+    h::expect_err_msg(
+        "an initializer",
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32 = 3;\n}\nfn main() i32 { return 0; }\n",
+        "the C side defines it",
     );
-    p.expect_fail("main.spc", "the C side defines it");
 }
 
 // Bindgen binds globals by what C itself declares: writable ones as `static mut`, const-qualified
@@ -8458,16 +8643,17 @@ fn bindgen_escapes_keyword_names() {
     let mut gp = String::new();
     gp.format_into("{}/lib.spc", root);
     let spc = loader::read_file(gp.as_str()).unwrap();
-    assert(spc.as_str().contains("pub select_: i32,"));
+    // A record member is the C member it pins: the escaped field reads `select` through C.
+    assert(spc.as_str().contains("@c.import(\"select\")\n        pub select_: i32,"));
     assert(spc.as_str().contains("@c.import(\"select\")\n    pub fn select_(a: i32, b: i32) i32;"));
     assert(spc.as_str().contains("@c.import(\"launch\")\n    pub static mut launch_: i32;"));
     assert(spc.as_str().contains("@c.import(\"move\")\n    pub const move_: i32;"));
     p.mkfile(
         "main.spc",
-        "import lib;\n\nfn main() i32 {\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ - 16;\n}\n",
+        "import lib;\n\nfn main() i32 {\n    let mut q = lib::pair { select_: 4, n: 1 };\n    q.select_ = q.select_ + unsafe lib::pair_n(&mut q);\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ + q.select_ - 21;\n}\n",
     );
-    assert(p.compile("main.spc").ok());
-    assert(p.cc_build("").ok());
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -10132,7 +10318,7 @@ fn diverging_function_called_from_another_module() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/c1.spc",
-        "extern \"C\" {\n    fn exit(code: i32) void;\n}\n\npub fn f() i32 {\n    unsafe exit(5);\n}\n",
+        "extern \"C\" {\n    @c.noreturn\n    fn exit(code: i32) void;\n}\n\npub fn f() i32 {\n    unsafe exit(5);\n}\n",
     );
     p.mkfile("src/main.spc", "import c1;\n\nfn main() i32 {\n    let v = c1::f();\n    return v;\n}\n");
     assert_eq(cli::superc_in(p.dir(), "run").exit, 5);
@@ -10191,6 +10377,7 @@ fn main() i32 {
     let w: [u16; 4] = [1, 2, 3, 4];
     let f = fn(x: i32) i32 { return x + p.a; };
     unsafe exit(count(shapes::Shape::Line(p.a, p.b)) + shapes::total(&v, &q) as i32 + shapes::last(w) as i32 + f(0));
+    return 0;
 }
 )";
 
@@ -10753,25 +10940,37 @@ fn main() i32 {
 fn runtime_arithmetic_follows_the_profile() {
     let p = cli::proj_new();
     p.mkfile("main.spc", ARITH_RULES);
-    assert(p.compile("main.spc").ok());
+    // Off the wasm lane the two builds below compile the program.
+    if cli::on_wasm() {
+        assert(p.compile("main.spc").ok(), "the program compiles");
+    }
     // Negating MIN overflows at compile time too.
-    p.mkfile("neg.spc", "const M: i8 = -128;\nconst N: i8 = -M;\nfn main() i32 {\n    return N as i32;\n}\n");
-    p.expect_fail("neg.spc", "error: constant 'N' cannot be evaluated at compile time: arithmetic overflow");
+    h::expect_err_msg(
+        "negating MIN in a constant",
+        "const M: i8 = -128;\nconst N: i8 = -M;\nfn main() i32 {\n    return N as i32;\n}\n",
+        "error: constant 'N' cannot be evaluated at compile time: arithmetic overflow",
+    );
     // Unsigned overflow in a constant expression is an error too, at every width.
-    p.mkfile("uadd.spc", "const C: u8 = 255 + 1;\nfn main() i32 {\n    return C as i32;\n}\n");
-    p.expect_fail("uadd.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
-    p.mkfile("usub.spc", "fn main() i32 {\n    let x: u32 = 0 - 231;\n    return x as i32;\n}\n");
-    p.expect_fail("usub.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
-    p.mkfile(
-        "umul.spc",
+    h::expect_err_msg(
+        "a u8 constant past its range",
+        "const C: u8 = 255 + 1;\nfn main() i32 {\n    return C as i32;\n}\n",
+        "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow",
+    );
+    h::expect_err_msg(
+        "an unsigned subtraction below zero",
+        "fn main() i32 {\n    let x: u32 = 0 - 231;\n    return x as i32;\n}\n",
+        "error: this operation is undefined behavior when executed: arithmetic overflow",
+    );
+    h::expect_err_msg(
+        "a u64 constant product past its range",
         "const fn twice(x: u64) u64 {\n    return x * 2;\n}\nconst C: u64 = twice(u64::MAX);\nfn main() i32 {\n    return C as i32;\n}\n",
+        "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow",
     );
-    p.expect_fail("umul.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
-    p.mkfile(
-        "umax.spc",
+    h::expect_err_msg(
+        "a u32 addition past its range",
         "fn main() i32 {\n    let x: u32 = u32::MAX + 1;\n    let z: usize = 0;\n    return (x + (z - 1) as u32) as i32;\n}\n",
+        "error: this operation is undefined behavior when executed: arithmetic overflow",
     );
-    p.expect_fail("umax.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
     if cli::on_wasm() {
         return;
     }
@@ -10833,12 +11032,15 @@ fn runtime_arithmetic_follows_the_profile() {
             root,
             root,
         );
-        assert(p.run_raw(args.as_str()).ok());
+        assert(p.run_raw(args.as_str()).ok(), args.as_str());
         let r0 = p.run_bin_env("CASE=0 ");
-        assert(r0.ok());
-        assert(r0.out_shows("32767 0 32767 64 127 127") && r0.out_shows("-1.5 1.5"));
-        assert(r0.out_shows("2147483647 -9223372036854775808 0 255") && r0.out_shows("0 32767 3 -3"));
-        assert(r0.out_shows("200") && r0.out_shows("1255 256"));
+        assert(r0.ok(), "case 0 runs");
+        assert(r0.out_shows("32767 0 32767 64 127 127"), "case 0's output");
+        assert(r0.out_shows("-1.5 1.5"), "case 0's output");
+        assert(r0.out_shows("2147483647 -9223372036854775808 0 255"), "case 0's output");
+        assert(r0.out_shows("0 32767 3 -3"), "case 0's output");
+        assert(r0.out_shows("200"), "case 0's output");
+        assert(r0.out_shows("1255 256"), "case 0's output");
         for c in 1usize..23 {
             let mut env = String::new();
             env.format_into("CASE={} ", c);
@@ -10852,15 +11054,15 @@ fn runtime_arithmetic_follows_the_profile() {
             };
             if (c < 9 || c >= 16) && release {
                 want.push_str(wrapped[k]);
-                assert(r.ok());
+                assert(r.ok(), env.as_str());
             } else if c < 9 || c >= 16 {
                 want.format_into("attempt to {} with overflow", checked[k]);
-                assert(r.exit != 0);
+                assert(r.exit != 0, env.as_str());
             } else {
                 want.format_into("attempt to {}", always[c - 9]);
-                assert(r.exit != 0);
+                assert(r.exit != 0, env.as_str());
             }
-            assert(r.out_shows(want.as_str()));
+            assert(r.out_shows(want.as_str()), env.as_str());
         }
     }
 }
@@ -10969,31 +11171,37 @@ fn main() i32 {
 fn library_int_overflow_follows_the_profile() {
     let p = cli::proj_new();
     p.mkfile("main.spc", INT_RULES);
-    assert(p.compile("main.spc").ok());
-    p.mkfile(
-        "ctfe.spc",
+    // Off the wasm lane the two builds below compile the program.
+    if cli::on_wasm() {
+        assert(p.compile("main.spc").ok(), "the program compiles");
+    }
+    h::expect_err_msg(
+        "i128 MAX + 1 in a constant",
         "fn f() i128 {\n    return i128::max() + i128::one();\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow",
     );
-    p.expect_fail("ctfe.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
-    p.mkfile(
-        "uctfe.spc",
+    h::expect_err_msg(
+        "u128 0 - 1 in a constant",
         "fn f() u128 {\n    return u128::zero() - u128::one();\n}\n\nconst F: u128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow",
     );
-    p.expect_fail("uctfe.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
-    p.mkfile("upow.spc", "const F: u256 = u256::from_u64(2).pow(256);\n\nfn main() i32 {\n    return 0;\n}\n");
-    p.expect_fail("upow.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
+    h::expect_err_msg(
+        "u256 two to the 256 in a constant",
+        "const F: u256 = u256::from_u64(2).pow(256);\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow",
+    );
     // Division traps as the built-in `/` does at compile time: MIN / -1 overflows, a zero divisor
     // divides by zero.
-    p.mkfile(
-        "div.spc",
+    h::expect_err_msg(
+        "i128 MIN / -1 in a constant",
         "fn f() i128 {\n    return i128::min() / i128::from_i64(-1);\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow",
     );
-    p.expect_fail("div.spc", "error: constant 'F' cannot be evaluated at compile time: arithmetic overflow");
-    p.mkfile(
-        "zero.spc",
+    h::expect_err_msg(
+        "an i128 remainder by zero in a constant",
         "fn f() i128 {\n    return i128::one() % i128::zero();\n}\n\nconst F: i128 = f();\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'F' cannot be evaluated at compile time: division by zero",
     );
-    p.expect_fail("zero.spc", "error: constant 'F' cannot be evaluated at compile time: division by zero");
     if cli::on_wasm() {
         return;
     }
@@ -11041,7 +11249,7 @@ fn library_int_overflow_follows_the_profile() {
             root,
             root,
         );
-        assert(p.run_raw(args.as_str()).ok());
+        assert(p.run_raw(args.as_str()).ok(), args.as_str());
         // Division traps in every profile, with the built-in messages.
         let traps: []str = [
             "attempt to divide with overflow",
@@ -11050,7 +11258,8 @@ fn library_int_overflow_follows_the_profile() {
             "attempt to calculate the remainder with a divisor of zero",
         ];
         let r0 = p.run_bin_env("CASE=0 ");
-        assert(r0.ok() && r0.out_shows("0 340282366920938463463374607431768211455 true 0 1 true true"));
+        assert(r0.ok(), "case 0 runs");
+        assert(r0.out_shows("0 340282366920938463463374607431768211455 true 0 1 true true"), "case 0's output");
         for c in 1usize..17 {
             let mut env = String::new();
             env.format_into("CASE={} ", c);
@@ -11063,15 +11272,15 @@ fn library_int_overflow_follows_the_profile() {
             };
             if c >= 7 && c < 11 {
                 want.push_str(traps[c - 7]);
-                assert(r.exit != 0);
+                assert(r.exit != 0, env.as_str());
             } else if release {
                 want.push_str(wrapped[k]);
-                assert(r.ok());
+                assert(r.ok(), env.as_str());
             } else {
                 want.format_into("attempt to {} with overflow", checked[k]);
-                assert(r.exit != 0);
+                assert(r.exit != 0, env.as_str());
             }
-            assert(r.out_shows(want.as_str()));
+            assert(r.out_shows(want.as_str()), env.as_str());
         }
     }
 }
@@ -11118,14 +11327,16 @@ fn main() i32 {
 fn literal_arithmetic_is_computed_in_its_type() {
     let p = cli::proj_new();
     p.mkfile("main.spc", LIT_RULES);
-    assert(p.compile("main.spc").ok());
-    if !cli::on_wasm() {
+    // The build compiles the program the script compile would: the guest only compiles.
+    if cli::on_wasm() {
+        assert(p.compile("main.spc").ok(), "the program compiles");
+    } else {
         let root = p.dir();
         let mut args = String::new();
         args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
-        assert(p.run_raw(args.as_str()).ok());
+        assert(p.run_raw(args.as_str()).ok(), "the program builds");
         let r = p.run_bin_env("");
-        assert(r.ok());
+        assert(r.ok(), "the program runs");
         assert(
             r.out_shows(
                 "4000000000 4000000000 2147483648 9223372036854775808 1099511627776 -2147483648 -4000000000 5 2147483648",
@@ -11135,29 +11346,50 @@ fn literal_arithmetic_is_computed_in_its_type() {
         assert(r.out_shows("9223372036854775808 1e+40 3"));
     }
     // A declared or suffixed type that overflows is an error, at run time and at compile time.
-    p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
-    p.expect_fail("decl.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
-    p.mkfile("sfx.spc", "fn main() i32 {\n    let i = 2000000000i32 * 2;\n    return i;\n}\n");
-    p.expect_fail("sfx.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
-    p.mkfile("const.spc", "const C: i32 = i32::MAX + 1;\n\nfn main() i32 {\n    return C;\n}\n");
-    p.expect_fail("const.spc", "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow");
+    h::expect_err_msg(
+        "a declared i32 that overflows",
+        "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n",
+        "error: this operation is undefined behavior when executed: arithmetic overflow",
+    );
+    h::expect_err_msg(
+        "a suffixed i32 that overflows",
+        "fn main() i32 {\n    let i = 2000000000i32 * 2;\n    return i;\n}\n",
+        "error: this operation is undefined behavior when executed: arithmetic overflow",
+    );
+    h::expect_err_msg(
+        "an i32 constant that overflows",
+        "const C: i32 = i32::MAX + 1;\n\nfn main() i32 {\n    return C;\n}\n",
+        "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow",
+    );
     // A literal past 64 bits that no wide expectation takes is the checker's error, also in a constant
     // initializer the evaluator runs.
-    p.mkfile(
-        "big.spc",
+    h::expect_err_msg(
+        "a literal past 64 bits in a constant initializer",
         "fn f(x: u256) u256 {\n    return x;\n}\n\nconst C: u256 = f(123456789012345678901234567890123);\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: integer literal is too large to fit in a 64-bit integer\n--> ",
     );
-    p.expect_fail("big.spc", "error: integer literal is too large to fit in a 64-bit integer\n--> ");
     // An integer literal never becomes a float: mixing the two kinds is a type error, in literal-only
     // arithmetic, beside a float value and against a declared float type.
-    p.mkfile("mix.spc", "fn main() i32 {\n    let x = (1 / 2) * 2.0;\n    return 0;\n}\n");
-    p.expect_fail("mix.spc", "error: mismatched types: expected 'i32', found 'f32'");
-    p.mkfile("mixf.spc", "const F: f32 = 1.5 * 2;\n\nfn main() i32 {\n    return 0;\n}\n");
-    p.expect_fail("mixf.spc", "error: mismatched types: expected 'f32', found 'i32'");
-    p.mkfile("mixv.spc", "fn main() i32 {\n    let y: f64 = 2.0;\n    let x = y * 2;\n    return 0;\n}\n");
-    p.expect_fail("mixv.spc", "error: mismatched types: expected 'f64', found 'i32'");
-    p.mkfile("mixd.spc", "fn main() i32 {\n    let f: f32 = 1 + 2;\n    let g: f32 = 1;\n    return 0;\n}\n");
-    p.expect_fail("mixd.spc", "error: mismatched types: expected 'f32', found 'i32'");
+    h::expect_err_msg(
+        "integer literal arithmetic times a float literal",
+        "fn main() i32 {\n    let x = (1 / 2) * 2.0;\n    return 0;\n}\n",
+        "error: mismatched types: expected 'i32', found 'f32'",
+    );
+    h::expect_err_msg(
+        "a float constant times an integer literal",
+        "const F: f32 = 1.5 * 2;\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: mismatched types: expected 'f32', found 'i32'",
+    );
+    h::expect_err_msg(
+        "a float value times an integer literal",
+        "fn main() i32 {\n    let y: f64 = 2.0;\n    let x = y * 2;\n    return 0;\n}\n",
+        "error: mismatched types: expected 'f64', found 'i32'",
+    );
+    h::expect_err_msg(
+        "an integer literal for a declared float",
+        "fn main() i32 {\n    let f: f32 = 1 + 2;\n    let g: f32 = 1;\n    return 0;\n}\n",
+        "error: mismatched types: expected 'f32', found 'i32'",
+    );
 }
 
 // The builtin numeric types' MIN and MAX: Rust's values (a float's are the finite extremes), usable in
@@ -11190,7 +11422,10 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok());
+    // Off the wasm lane the build below compiles the program.
+    if cli::on_wasm() {
+        assert(p.compile("main.spc").ok(), "the program compiles");
+    }
     // wasm32: 32-bit isize and usize, checked by the constant evaluator.
     p.mkfile(
         "wasm.spc",
@@ -11199,19 +11434,22 @@ fn main() i32 {
     let root = p.dir();
     let mut wargs = String::new();
     wargs.format_into("\"{}/wasm.spc\" --target=wasm", root);
-    assert(p.run_raw(wargs.as_str()).ok());
+    assert(p.run_raw(wargs.as_str()).ok(), "the wasm32 limits check");
     // A declared type rejects the widened value.
-    p.mkfile("decl.spc", "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n");
-    p.expect_fail("decl.spc", "error: this operation is undefined behavior when executed: arithmetic overflow");
+    h::expect_err_msg(
+        "a declared type rejects the widened value",
+        "fn main() i32 {\n    let i: i32 = i32::MAX + 1;\n    return i;\n}\n",
+        "error: this operation is undefined behavior when executed: arithmetic overflow",
+    );
     if cli::on_wasm() {
         return;
     }
     let mut args = String::new();
     args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
-    assert(p.run_raw(args.as_str()).ok());
+    assert(p.run_raw(args.as_str()).ok(), "the program builds");
     let r = p.run_bin_env("");
-    assert(r.ok());
-    assert(r.out_shows("2147483648 255 2147483647 -2147483648 18446744073709551615 -32768"));
+    assert(r.ok(), "the program runs");
+    assert(r.out_shows("2147483648 255 2147483647 -2147483648 18446744073709551615 -32768"), "the limits print");
 }
 
 // Builtin limits and associated constants as const-generic arguments and as patterns emit strict ISO C:
@@ -11258,69 +11496,61 @@ fn main() i32 {
 @test
 fn const_generic_overflow_is_an_error() {
     let p = cli::proj_new();
-    p.mkfile(
-        "call.spc",
+    let mut b = cli::Batch::new("", "");
+    // No case is a backend failure.
+    b.forbid("internal");
+    b.add(
+        "an i64 product through a call",
         "fn g<const M: i64>() i64 {\n    return M;\n}\n\nfn f<const N: i64>() i64 {\n    return g::<{N * 2}>();\n}\n\nfn main() i32 {\n    return f::<5000000000000000000>() as i32;\n}\n",
-    );
-    p.expect_fail("call.spc", "error: const expression {2 * N} overflows i64 for N = 5000000000000000000");
-    assert(!p.compile("call.spc").out_has("internal"));
-    p.mkfile(
-        "type.spc",
-        "struct B<const M: i64> {\n    pub x: i32,\n}\n\nfn f<const N: i64>() i32 {\n    let b = B::<{N * 2 + 1}> { x: 1 };\n    return b.x;\n}\n\nfn main() i32 {\n    return f::<5000000000000000000>();\n}\n",
+        "error: const expression {2 * N} overflows i64 for N = 5000000000000000000",
     );
     // The written `N * 2` overflows before the `+ 1`: the step is the error, at its own span.
-    p.expect_fail("type.spc", "error: const expression {N * 2} overflows i64 for N = 5000000000000000000");
+    b.add(
+        "the step of a type argument",
+        "struct B<const M: i64> {\n    pub x: i32,\n}\n\nfn f<const N: i64>() i32 {\n    let b = B::<{N * 2 + 1}> { x: 1 };\n    return b.x;\n}\n\nfn main() i32 {\n    return f::<5000000000000000000>();\n}\n",
+        "error: const expression {N * 2} overflows i64 for N = 5000000000000000000",
+    );
     // A form computes exactly: a constant past i64 is legal where written (a negative K brings the
     // value back into i64) and the instance whose value leaves i64 is the error.
-    p.mkfile(
-        "form.spc",
+    b.add(
+        "a form whose constant leaves i64",
         "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{K + 9000000000000000000 + 9000000000000000000}>();\n}\n\nfn main() i32 {\n    return h::<1>() as i32;\n}\n",
+        "error: const expression {K + 18000000000000000000} overflows i64 for K = 1",
     );
-    p.expect_fail("form.spc", "error: const expression {K + 18000000000000000000} overflows i64 for K = 1");
     // Division by -1 of a form whose constant is i64::MIN: the negated constant is 2^63.
-    p.mkfile(
-        "neg.spc",
+    b.add(
+        "a division by -1 of i64 MIN",
         "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{(K - 9223372036854775807 - 1) / -1}>();\n}\n\nfn main() i32 {\n    return h::<0>() as i32;\n}\n",
+        "error: const expression {-K + 9223372036854775808} overflows i64 for K = 0",
     );
-    p.expect_fail("neg.spc", "error: const expression {-K + 9223372036854775808} overflows i64 for K = 0");
-    p.mkfile(
-        "negbound.spc",
+    b.add(
+        "a negation of i64 MIN",
         "fn f<const N: i64>() i64 {\n    return N;\n}\n\nfn h<const K: i64>() i64 {\n    return f::<{K / -1}>();\n}\n\nfn main() i32 {\n    return h::<{0 - 9223372036854775807 - 1}>() as i32;\n}\n",
+        "error: const expression {-K} overflows i64 for K = -9223372036854775808",
     );
-    p.expect_fail("negbound.spc", "error: const expression {-K} overflows i64 for K = -9223372036854775808");
-    p.mkfile(
-        "sig.spc",
+    b.add(
+        "a signature's form",
         "struct B<const M: i64> {\n    pub x: i32,\n}\n\nfn g<const M: i64>() B<{M + 9000000000000000000}> {\n    return B::<{M + 9000000000000000000}> { x: 1 };\n}\n\nfn h<const K: i64>() i32 {\n    let b = g::<{K + 9000000000000000000}>();\n    return b.x;\n}\n\nfn main() i32 {\n    return h::<1>();\n}\n",
-    );
-    p.expect_fail(
-        "sig.spc",
         "error: const expression {M + 9000000000000000000} overflows i64 for M = 9000000000000000001",
     );
     // A form computes in its parameters' type: a u8 form and a u64 one leave theirs, and a u8
     // parameter that inference binds through a u64 position takes the value only when it fits.
-    p.mkfile(
-        "u8.spc",
+    b.add(
+        "a u8 form",
         "fn g<const M: u8>() u8 {\n    return M;\n}\n\nfn f<const N: u8>() u8 {\n    return g::<{N + 1}>();\n}\n\nfn main() i32 {\n    return f::<255>() as i32;\n}\n",
+        "error: const expression {N + 1} overflows u8 for N = 255",
     );
-    p.expect_fail("u8.spc", "error: const expression {N + 1} overflows u8 for N = 255");
-    p.mkfile(
-        "u64.spc",
+    b.add(
+        "a u64 form",
         "fn g<const M: u64>() u64 {\n    return M;\n}\n\nfn f<const N: u64>() u64 {\n    return g::<{N - 1}>();\n}\n\nfn main() i32 {\n    return f::<0>() as i32;\n}\n",
+        "error: const expression {N - 1} overflows u64 for N = 0",
     );
-    p.expect_fail("u64.spc", "error: const expression {N - 1} overflows u64 for N = 0");
-    p.mkfile(
-        "narrow.spc",
+    b.add(
+        "a u8 parameter bound through a u64 position",
         "struct B<const M: u64> {\n    pub x: i32,\n}\n\nfn g<const K: u8>(b: B<K>) i32 {\n    return b.x;\n}\n\nfn h<const Q: u64>() i32 {\n    let b = B::<Q> { x: 0 };\n    return g(b);\n}\n\nfn main() i32 {\n    return h::<300>();\n}\n",
+        "error: const expression {Q} overflows u8 for Q = 300",
     );
-    p.expect_fail("narrow.spc", "error: const expression {Q} overflows u8 for Q = 300");
-}
-
-// Compiling `file` fails with a diagnostic holding `msg` whose location ends with `at` (file:line:col).
-fn expect_fail_at(p: &cli::Proj, file: str, msg: str, at: str) {
-    let r = p.compile(file);
-    assert(r.exit != 0, "expected nonzero exit on a bad program");
-    assert(r.out_has(format("{}\n--> ", msg).as_str()), "diagnostic missing expected text");
-    assert(r.out_has(at), "diagnostic at the expected location");
+    p.expect_batch(b);
 }
 
 // A const-generic expression computes step by step in its type, as the written expression does at
@@ -11336,15 +11566,20 @@ fn const_generic_steps_follow_the_written_expression() {
     );
     let r = p.compile("steps.spc");
     assert(r.exit != 0, "the step overflows");
-    assert(r.out_has("error: const expression {N * 2} overflows u64 for N = 18446744073709551615\n--> "));
-    assert(r.out_has("steps.spc:12:18"), "at the step");
-    assert(r.out_has("in the instantiation of 'g' demanded here\n--> "));
-    assert(r.out_has("steps.spc:17:12"), "at the demand");
-    p.mkfile(
-        "field.spc",
-        "struct S<const N: u8> {\n    pub a: [u8; N * 2 - N],\n}\n\nfn main() i32 {\n    let s = S::<200> { a: [0; 200] };\n    return s.a[0];\n}\n",
+    assert(
+        r.out_has("error: const expression {N * 2} overflows u64 for N = 18446744073709551615\n--> "),
+        "the step names its expression and binding",
     );
-    expect_fail_at(&p, "field.spc", "error: const expression {N * 2} overflows u8 for N = 200", "field.spc:2:17");
+    assert(r.out_has("steps.spc:12:18"), "at the step");
+    assert(r.out_has("in the instantiation of 'g' demanded here\n--> "), "the note names the demand");
+    assert(r.out_has("steps.spc:17:12"), "at the demand");
+    let mut b = cli::Batch::new("", "");
+    b.add_at(
+        "a field's array length",
+        "struct S<const N: u8> {\n    pub a: [u8; N * 2 - N],\n}\n\nfn main() i32 {\n    let s = S::<200> { a: [0; 200] };\n    return s.a[0];\n}\n",
+        "error: const expression {N * 2} overflows u8 for N = 200\n--> ",
+        "2:17",
+    );
     // A method's steps are its own instantiation's: F<u64::MAX> is fine until `bad` is called.
     const METHODS: str = "struct F<const N: u64> {\n    pub v: i32,\n}\n\nextend<const N: u64> F<N> {\n    fn good(self: &Self) u64 {\n        return N;\n    }\n\n    fn bad(self: &Self) u64 {\n        let y = F::<{N * 2 - N}> { v: 2 };\n        return y.good();\n    }\n}\n\nfn main() i32 {\n    let f = F::<18446744073709551615> { v: 1 };\n    return (f.good() - 18446744073709551615) as i32;\n}\n";
     p.mkfile("good.spc", METHODS);
@@ -11352,52 +11587,35 @@ fn const_generic_steps_follow_the_written_expression() {
     let mut bad = String::from_str(METHODS);
     bad.push_str("\nfn use_bad() u64 {\n    let b = F::<18446744073709551615> { v: 1 };\n    return b.bad();\n}\n");
     bad = bad.replace("return (f.good() - 18446744073709551615)", "return (use_bad() - f.good())");
-    p.mkfile("bad.spc", bad.as_str());
-    expect_fail_at(
-        &p,
-        "bad.spc",
-        "error: const expression {N * 2} overflows u64 for N = 18446744073709551615",
-        "bad.spc:11:22",
+    b.add_at(
+        "a called method's own instantiation",
+        bad.as_str(),
+        "error: const expression {N * 2} overflows u64 for N = 18446744073709551615\n--> ",
+        "11:22",
     );
-    p.mkfile(
-        "div.spc",
+    b.add_at(
+        "a negative quotient",
         "struct G<const N: i64> {\n    pub v: i32,\n}\n\nfn q<const N: i64>() G<{(N - 10) / 4 + 100}> {\n    return G::<{(N - 10) / 4 + 100}> { v: 3 };\n}\n\nfn main() i32 {\n    return q::<1>().v;\n}\n",
+        "error: const expression {(N - 10) / 4} truncates the negative quotient -9 / 4 for N = 1: a const-generic division needs a dividend that is not negative or a divisor that divides it\n--> ",
+        "5:25",
     );
-    expect_fail_at(
-        &p,
-        "div.spc",
-        "error: const expression {(N - 10) / 4} truncates the negative quotient -9 / 4 for N = 1: a const-generic division needs a dividend that is not negative or a divisor that divides it",
-        "div.spc:5:25",
-    );
-    p.mkfile(
-        "shl.spc",
+    b.add_at(
+        "a shift",
         "struct F<const N: u64> {\n    pub v: i32,\n}\n\nfn s<const N: u64>() i32 {\n    let z = F::<{(N << 1) >> 1}> { v: 4 };\n    return z.v;\n}\n\nfn main() i32 {\n    return s::<18446744073709551615>();\n}\n",
+        "error: const expression {N << 1} overflows u64 for N = 18446744073709551615\n--> ",
+        "6:19",
     );
-    expect_fail_at(
-        &p,
-        "shl.spc",
-        "error: const expression {N << 1} overflows u64 for N = 18446744073709551615",
-        "shl.spc:6:19",
-    );
-    p.mkfile(
-        "alias.spc",
+    b.add_at(
+        "an alias's argument",
         "struct F<const N: u64> {\n    pub v: i32,\n}\n\ntype A<const M: u64> = F<{M * 2 - M}>;\n\nfn f<const N: u64>() i32 {\n    let x = A::<N> { v: 1 };\n    return x.v;\n}\n\nfn main() i32 {\n    return f::<18446744073709551615>();\n}\n",
+        "error: const expression {M * 2} overflows u64 for N = 18446744073709551615\n--> ",
+        "5:27",
     );
-    expect_fail_at(
-        &p,
-        "alias.spc",
-        "error: const expression {M * 2} overflows u64 for N = 18446744073709551615",
-        "alias.spc:5:27",
-    );
-    p.mkfile(
-        "nested.spc",
+    b.add_at(
+        "a nested alias",
         "struct F<const N: u64> {\n    pub v: i32,\n}\n\ntype A<const M: u64> = F<{M - 5}>;\n\ntype B<const K: u64> = A<{K + 10}>;\n\nfn f<const N: u64>() i32 {\n    let x = B::<N> { v: 1 };\n    return x.v;\n}\n\nfn main() i32 {\n    return f::<18446744073709551610>();\n}\n",
-    );
-    expect_fail_at(
-        &p,
-        "nested.spc",
-        "error: const expression {K + 10} overflows u64 for N = 18446744073709551610",
-        "nested.spc:7:27",
+        "error: const expression {K + 10} overflows u64 for N = 18446744073709551610\n--> ",
+        "7:27",
     );
     // The constant evaluator runs an instantiation only when its steps hold, and a layout needs the
     // written member types to compute.
@@ -11405,21 +11623,28 @@ fn const_generic_steps_follow_the_written_expression() {
         "ctfe.spc",
         "struct F<const N: u64> {\n    pub v: i32,\n}\n\nextend<const N: u64> F<N> {\n    fn n(self: &Self) u64 {\n        return N;\n    }\n}\n\nfn h<const N: u64>() u64 {\n    let y = F::<{N * 2 - N}> { v: 1 };\n    return y.n();\n}\n\nstatic_assert(h::<9>() == 9);\nstatic_assert(h::<18446744073709551615>() == 18446744073709551615);\n\nfn main() i32 {\n    return 0;\n}\n",
     );
-    expect_fail_at(
-        &p,
-        "ctfe.spc",
-        "error: static assertion cannot be evaluated: arithmetic overflow in a const-generic expression",
-        "ctfe.spc:17:15",
+    let rc = p.compile("ctfe.spc");
+    assert(rc.exit != 0, "expected nonzero exit on a bad program");
+    assert(
+        rc.out_has(
+            "error: static assertion cannot be evaluated: arithmetic overflow in a const-generic expression\n--> ",
+        ),
+        "diagnostic missing expected text",
     );
-    assert(!p.compile("ctfe.spc").out_has("ctfe.spc:16:"), "the valid instantiation evaluates");
+    assert(rc.out_has("ctfe.spc:17:15"), "diagnostic at the expected location");
+    assert(!rc.out_has("ctfe.spc:16:"), "the valid instantiation evaluates");
     p.mkfile(
         "layout.spc",
         "struct T<const N: u8> {\n    pub a: [u8; N + 1],\n}\n\nstatic_assert(sizeof(T<254>) == 255);\nstatic_assert(sizeof(T<255>) == 256);\n\nfn main() i32 {\n    return 0;\n}\n",
     );
     let rl = p.compile("layout.spc");
-    assert(rl.out_has("error: static assertion cannot be evaluated: the condition does not fold to a constant\n--> "));
+    assert(
+        rl.out_has("error: static assertion cannot be evaluated: the condition does not fold to a constant\n--> "),
+        "the overflowing layout does not fold",
+    );
     assert(rl.out_has("layout.spc:6:15"), "at the overflowing instance");
     assert(!rl.out_has("layout.spc:5:"), "the fitting instance lays out");
+    p.expect_batch(b);
 }
 
 // Every instance checks what its generic body asserts about it: a constant index into a symbolic
@@ -11428,82 +11653,90 @@ fn const_generic_steps_follow_the_written_expression() {
 @test
 fn instances_check_indexes_and_default_bodies() {
     let p = cli::proj_new();
-    p.mkfile(
-        "idx.spc",
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "a constant index past a symbolic array",
         "struct S<const N: usize> {\n    pub a: [u8; N],\n}\n\nextend<const N: usize> S<N> {\n    fn third(self: &Self) u8 {\n        return self.a[2];\n    }\n}\n\nfn main() i32 {\n    let s = S::<2> { a: [1, 2] };\n    return s.third() as i32;\n}\n",
+        "error: index 2 is out of bounds for an array of length 2 for N = 2",
     );
-    p.expect_fail("idx.spc", "error: index 2 is out of bounds for an array of length 2 for N = 2");
-    p.mkfile(
-        "idx_const.spc",
+    b.add(
+        "an index past a const-generic array in a constant",
         "fn g<const N: usize>(a: [u8; N]) u8 {\n    return a[2];\n}\n\nconst C: u8 = g::<2>([1, 2]);\n\nfn main() i32 {\n    return C as i32;\n}\n",
-    );
-    p.expect_fail(
-        "idx_const.spc",
         "error: constant 'C' cannot be evaluated at compile time: an index past the end of a const-generic array",
     );
-    p.mkfile(
-        "dflt.spc",
+    b.add(
+        "an interface default body's step",
         "struct U<const M: u64> {\n    pub v: u64,\n}\n\ninterface I<const K: u64> {\n    fn d(self: &Self) u64 {\n        let u = U::<{K - 1}> { v: 3 };\n        return u.v + K;\n    }\n}\n\nstruct F {\n    pub x: u64,\n}\n\nextend F as I<0> {}\n\nfn main() i32 {\n    let f = F { x: 0 };\n    return f.d() as i32;\n}\n",
+        "error: const expression {K - 1} overflows u64 for K = 0",
     );
-    p.expect_fail("dflt.spc", "error: const expression {K - 1} overflows u64 for K = 0");
-    p.mkfile(
-        "conf.spc",
+    b.add(
+        "a conformance's arguments",
         "struct U<const M: u64> {\n    pub v: u64,\n}\n\ninterface I<const K: u64> {\n    fn d(self: &Self) u64 {\n        let u = U::<{K - 1}> { v: 3 };\n        return u.v + K;\n    }\n}\n\nstruct G<const N: u64> {\n    pub x: u64,\n}\n\nextend<const N: u64> G<{N + 1}> as I<{N * 2}> {}\n\nfn main() i32 {\n    let g = G::<18446744073709551615> { x: 0 };\n    return g.d() as i32;\n}\n",
+        "error: const expression {2 * N} overflows u64 for N = 18446744073709551614",
     );
-    p.expect_fail("conf.spc", "error: const expression {2 * N} overflows u64 for N = 18446744073709551614");
+    p.expect_batch(b);
 }
 
 // A variant the build constants do not have is an error even in a removed branch, and so is a
 // profile name no profile has; the build-constant names are reserved.
 @test
 fn build_constant_mistakes_are_errors() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "variant.spc",
+    h::expect_err_msg(
+        "an unknown Platform variant in a removed branch",
         "fn main() i32 {\n    if PLATFORM == Platform::Macos {\n        return 1;\n    }\n    return 0;\n}\n",
-    );
-    p.expect_fail(
-        "variant.spc",
         "unknown Platform variant 'Macos'; expected Windows, MacOS, Linux, Wasm, IOS, or Android",
     );
-    p.mkfile(
-        "arm.spc",
+    h::expect_err_msg(
+        "an unknown Endian variant in a switch arm",
         "fn main() i32 {\n    return switch ENDIAN {\n        Little => 0,\n        Large => 1,\n    };\n}\n",
+        "unknown Endian variant 'Large'; expected Little or Big",
     );
-    p.expect_fail("arm.spc", "unknown Endian variant 'Large'; expected Little or Big");
-    p.mkfile(
-        "profile.spc",
-        "fn main() i32 {\n    if PROFILE == \"relase\" {\n        return 1;\n    }\n    return 0;\n}\n",
+    h::expect_err_msg(
+        "a local named TEST",
+        "fn main() i32 {\n    let TEST = 1;\n    return TEST;\n}\n",
+        "'TEST' is a reserved build constant name",
     );
-    p.expect_fail("profile.spc", "unknown profile 'relase'; this build knows");
-    p.mkfile(
-        "arm_profile.spc",
-        "fn main() i32 {\n    return switch PROFILE {\n        \"debug\" => 0,\n        \"bogus\" => 1,\n        _ => 2,\n    };\n}\n",
+    h::expect_err_msg(
+        "an item named PLATFORM",
+        "fn PLATFORM() i32 {\n    return 0;\n}\n\nfn main() i32 {\n    return 0;\n}\n",
+        "'PLATFORM' is a reserved build constant name",
     );
-    p.expect_fail("arm_profile.spc", "unknown profile 'bogus'");
-    p.mkfile("local.spc", "fn main() i32 {\n    let TEST = 1;\n    return TEST;\n}\n");
-    p.expect_fail("local.spc", "'TEST' is a reserved build constant name");
-    p.mkfile("item.spc", "fn PLATFORM() i32 {\n    return 0;\n}\n\nfn main() i32 {\n    return 0;\n}\n");
-    p.expect_fail("item.spc", "'PLATFORM' is a reserved build constant name");
-    p.mkfile(
-        "param.spc",
+    h::expect_err_msg(
+        "a parameter named POINTER_WIDTH",
         "fn f(POINTER_WIDTH: i32) i32 {\n    return POINTER_WIDTH;\n}\n\nfn main() i32 {\n    return f(0);\n}\n",
+        "'POINTER_WIDTH' is a reserved build constant name",
     );
-    p.expect_fail("param.spc", "'POINTER_WIDTH' is a reserved build constant name");
     // The enums' names are reserved too: a `Platform` of the program's own would make the filter
     // decide `PLATFORM == Platform::Windows` against std's `Platform` without a type check.
-    p.mkfile(
-        "shadow.spc",
+    h::expect_err_msg(
+        "an enum named Platform",
         "enum Platform { Windows, Other }\n\nfn main() i32 {\n    if PLATFORM == Platform::Windows {\n        return 1;\n    }\n    return 0;\n}\n",
+        "'Platform' is a reserved build constant type name",
     );
-    p.expect_fail("shadow.spc", "'Platform' is a reserved build constant type name");
-    p.mkfile("arch.spc", "struct Arch { pub w: i32 }\n\nfn main() i32 {\n    return 0;\n}\n");
-    p.expect_fail("arch.spc", "'Arch' is a reserved build constant type name");
-    p.mkfile(
-        "endian.spc",
+    h::expect_err_msg(
+        "a struct named Arch",
+        "struct Arch { pub w: i32 }\n\nfn main() i32 {\n    return 0;\n}\n",
+        "'Arch' is a reserved build constant type name",
+    );
+    h::expect_err_msg(
+        "a type parameter named Endian",
         "fn f<Endian>(x: Endian) Endian {\n    return x;\n}\n\nfn main() i32 {\n    return f(0);\n}\n",
+        "'Endian' is a reserved build constant type name",
     );
-    p.expect_fail("endian.spc", "'Endian' is a reserved build constant type name");
+    // The profile names are the build's: a build checks them.
+    let p = cli::proj_new();
+    let mut b = cli::Batch::new("", "");
+    b.add(
+        "an unknown profile in a comparison",
+        "fn main() i32 {\n    if PROFILE == \"relase\" {\n        return 1;\n    }\n    return 0;\n}\n",
+        "unknown profile 'relase'; this build knows",
+    );
+    b.add(
+        "an unknown profile in a switch arm",
+        "fn main() i32 {\n    return switch PROFILE {\n        \"debug\" => 0,\n        \"bogus\" => 1,\n        _ => 2,\n    };\n}\n",
+        "unknown profile 'bogus'",
+    );
+    p.expect_batch(b);
 }
 
 // Build script `main.spc` of directory `dir` to `prog` with object cache root `cache` and `jobs`
@@ -11794,4 +12027,14 @@ fn a_killed_build_gives_its_jobserver_slots_back() {
     unsafe shim::sc_tree_unlock(h);
     assert_eq(unsafe shim::sc_jobserver_claim(4), 4);
     unsafe shim::sc_jobserver_release_claim();
+}
+
+// The exit-code and trap cases of the provider functions above, one program per group (`h::ExitBatch`).
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    ctfe_hardening_runs(&mut b);
+    const_fn_semantics_runs(&mut b);
+    local_consts_run(&mut b);
+    b.run();
 }

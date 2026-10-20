@@ -1,6 +1,7 @@
 // Self-hosted port of tests/ast_test.c: the node arena, the scratch-stack NodeList builder, and the type
 // interner of ast::ast. Part of the selfhost/tests suite.
 import ast::ast as *;
+import ast::facts as facts;
 
 // A frozen array spills past its pin; thawing folds the spill back so a later pin addresses every entry.
 // The resolve frontier once thawed only two of a module's four arrays, and the next frontier's pin moved
@@ -138,4 +139,68 @@ fn interner_survives_full_collisions() {
     }
     unsafe TS_COLLIDE = was;
     assert_eq(a.pool.len(), seeds + n);
+}
+
+// A module with one module-arena and one body-arena call record and one method reference.
+fn facts_fixture() Ast {
+    let mut a = Ast::new(8);
+    let id = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
+    a.set_call_info(id, 5);
+    a.set_call_info(NODE_BODY | 2, 6);
+    a.push_method_ref(MethodRef { owner: id, recv: TYPE_NONE, callee: DefId { module: 0, node: id } });
+    return a;
+}
+
+// SC_FACTS_CHECK holds a released table to its snapshot up to the release and to its released
+// length after it, and requires each release at its point.
+@test
+fn facts_check_follows_the_table_releases() {
+    let mut a = facts_fixture();
+    let w = facts::watermark(&a);
+    a.release_bodies();
+    a.release_body_facts();
+    assert_eq(a.call_info.len(), 1usize);
+    assert_eq(facts::watermark_check(&a, &w, 0, false), 0u32);
+    assert(facts::watermark_check(&a, &w, 0, true) != 0, "the checked tables are due after the checks");
+    a.release_checked_tables();
+    assert_eq(facts::watermark_check(&a, &w, 0, true), 0u32);
+
+    // A write after the snapshot and before the release point is caught, though the release
+    // then frees the entry it wrote.
+    let mut b = facts_fixture();
+    let wb = facts::watermark(&b);
+    b.set_call_info(NODE_BODY | 3, 7);
+    b.release_bodies();
+    b.release_body_facts();
+    assert_eq(facts::watermark_check(&b, &wb, 0, false), 1u32);
+
+    let mut c = facts_fixture();
+    let wc = facts::watermark(&c);
+    c.push_method_ref(*c.method_refs_live().at(0));
+    c.release_bodies();
+    c.release_body_facts();
+    c.release_checked_tables();
+    assert_eq(facts::watermark_check(&c, &wc, 0, true), 1u32);
+
+    // Bodies released without their facts break the release rule.
+    let mut d = facts_fixture();
+    let wd = facts::watermark(&d);
+    d.release_bodies();
+    assert_eq(facts::watermark_check(&d, &wd, 0, false), 1u32);
+}
+
+// A read of a released body node's facts is a programmer error.
+@test(should_panic)
+fn released_body_facts_refuse_a_read() {
+    let mut a = facts_fixture();
+    a.release_bodies();
+    a.release_body_facts();
+    let _ = a.call_info_of(NODE_BODY | 2);
+}
+
+@test(should_panic)
+fn released_method_refs_refuse_a_write() {
+    let mut a = facts_fixture();
+    a.release_checked_tables();
+    a.push_method_ref(MethodRef { owner: 0, recv: TYPE_NONE, callee: DefId { module: 0, node: 0 } });
 }

@@ -366,12 +366,15 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `parse_ast_for_fmt(src)` | Parse with trivia for formatter tests |
 | `compile_c(src)` | Compile to C through the production backend; the returned text is the shared headers, the snippet's own TU (part heads, buffer and tail) and the instance TU, without the prelude's TUs, so a needle cannot match a prelude function body |
 | `compile_c_user(src)` | `compile_c` with the snippet's own TU only |
+| `c_fn(code, def)` | The text of the C function whose definition opens with `def` (pass the full signature and ` {\n`: a prototype also starts with the signature), to its closing brace |
 | `compile_c_arch(src, arch)` | `compile_c` for instruction set `arch` (0 x86_64, 1 aarch64) with its baseline, on any host |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
-| `ExitBatch` (`new`, `add(label, src, code)`, `run`) | Exit-code cases built as one program: each case becomes module `c<k>` with its `fn main()` renamed `case_main` and public, the program builds once and runs once per case (`prog <k>`). A case whose `main` takes parameters, and every case of a batch that does not build, builds alone through `expect_exit`. A test file turns its exit-code tests into provider functions `fn name(b: &mut h::ExitBatch)` that tests `exit_cases_NN` run in groups of about 20 cases |
+| `expect_trap(label, src, msg)` | Build and run `src`; require a failing exit and `msg` in its stdout and stderr |
+| `ExitBatch` (`new`, `add(label, src, code)`, `add_trap(label, src, msg)`, `run`) | Exit-code and trap cases built as one program: each case becomes module `c<k>` with its `fn main()` or `fn main(NAME: Vector<str>)` renamed `case_main` and public, the program builds once and runs once per case (`prog <k>`); a `main` that takes the arguments gets them without `<k>`, as a run of its own program does. A case with another `main`, and every case of a batch that does not build, builds alone through `expect_exit` or `expect_trap`. A case module's items take its module prefix in C (`c3__Node`): a case about a root module's bare C names builds alone. A test file turns its exit-code tests into provider functions `fn name(b: &mut h::ExitBatch)` that tests `exit_cases_NN` run in groups of about 20 cases |
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
 | `expect_run(label, src, arg, msg)` | Build `src` (debug profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
+| `expect_runs(label, src, args, msgs)` | `expect_run` for each argument `args[i]` with message `msgs[i]`, from one build per option set |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
 | `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (a `contains` entry `a|b` is met by either, for equivalent instructions C compilers pick between (`uminv|umaxv`); an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
 
@@ -379,6 +382,28 @@ These are backed by `loader::package_from_source`, which applies `@platform`/`@a
 filtering for the host and loads the vector backend for a snippet that names a vector, like a
 real build, except the three differential oracles, which build
 through the compiler under test (below).
+
+### Families of cases in few compiler runs
+
+Each run of the compiler under test loads and checks std again, so a test with many small programs
+puts them in one build. A batch never lets one case's result satisfy another's check, and every case
+it does not pass runs alone with its original check, which names the case by its label.
+
+- `cli::Batch::new(head, tail)` holds negative cases: `add(label, src, want)` and `add_at(label, src,
+  want, at)` (`at` is `L:C` in the case's program `head + src + tail`); `one` requires exactly one error per
+  case; `flags` and `file` (default `main.spc`) set the compile. A round compiles every unverified
+  case as module `case_k` of one root, so the cases share no names, and verifies a case only by a
+  diagnostic whose primary location is in `case_k.spc` (and at `at`). An error of an earlier stage
+  stops the compiler before later stages, so each round verifies one more stage. After a round
+  that verifies none, each remaining case compiles alone. Run it with `p.expect_batch(b)` (the
+  script compile of `cli::Proj`) or `h::expect_build_errs(b)` (the `expect_build_err` check through
+  `diff_build`). A case whose error is located outside its file (a `static_assert` in std) cannot
+  be verified in a round: check it alone (`expect_build_err`).
+- `h::ExitBatch` holds `expect_exit` and `expect_trap` cases (see the table above).
+- `h::expect_runs(label, src, args, msgs)` checks several runs of one build.
+- `h::same_runs(a, b, runs)` compares two `DiffBuild`s the caller made, so a test that also needs
+  one of the builds (its assembly, its C) builds each once; `diff_proj()` and `diff_build_in(p,
+  opts)` build a project with more files than `main.spc`.
 
 `compile`, `compile_std` and the `compile_c` family do not load the prelude themselves on macOS
 and Linux. The suite's global fixture (`@test_init(global)` in `tests/harness.spc`, so no test

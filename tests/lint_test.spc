@@ -305,22 +305,26 @@ fn driver_lints() {
 @test
 fn always_panics_lint() {
     let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        "fn main() i32 {\n    let y = 13i32;\n    let arr = Array::<i32, 512>::filled(&y);\n    let x = arr.at(1000000);\n    return *x;\n}\n",
+    let at = "fn main() i32 {\n    let y = 13i32;\n    let arr = Array::<i32, 512>::filled(&y);\n    let x = arr.at(1000000);\n    return *x;\n}\n";
+    // An error on the PLAIN compile path, not only under `lint`. Through a closure: the call stack
+    // names the closure frame (its syntax may be released by then).
+    let mut c = cli::Batch::new("", "");
+    c.add("a provable panic fails the build", at, "error: this statement always panics at runtime");
+    c.add("the panic names its call stack", at, "call stack: at -> panic");
+    c.add(
+        "a closure's call stack",
+        "fn main() i32 {\n    let f = |a: i32| a + 2147483647;\n    return f(1);\n}\n",
+        "error: this statement is undefined behavior when executed: arithmetic overflow (call stack: <closure>;",
     );
-    // An error on the PLAIN compile path, not only under `lint`.
-    let c = p.compile("main.spc");
-    assert(c.exit != 0, "a provable panic fails the build");
-    assert(c.out_has("error: this statement always panics at runtime"));
-    assert(c.out_has("call stack: at -> panic"));
+    p.expect_batch(c);
     let root = p.dir();
+    p.mkfile("main.spc", at);
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
-    assert(r.exit != 0);
-    assert(r.out_has("error: this statement always panics at runtime"));
+    assert(r.exit != 0, "the lint fails on a provable panic");
+    assert(r.out_has("error: this statement always panics at runtime"), "and names it");
 
     // UB through folded locals errors too (its own wording: UB is not a panic).
     p.mkfile("ub.spc", "fn main() i32 {\n    let z = 0;\n    let q = 1 / z;\n    return q;\n}\n");
@@ -328,17 +332,8 @@ fn always_panics_lint() {
     uargs.push_str(root);
     uargs.push_str("/ub.spc\"");
     let u = p.run_raw(uargs.as_str());
-    assert(u.exit != 0);
-    assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"));
-    // Through a closure: the call stack names the closure frame (its syntax may be released by then).
-    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a + 2147483647;\n    return f(1);\n}\n");
-    let cl = p.compile("clos.spc");
-    assert(cl.exit != 0);
-    assert(
-        cl.out_has(
-            "error: this statement is undefined behavior when executed: arithmetic overflow (call stack: <closure>;",
-        ),
-    );
+    assert(u.exit != 0, "the lint fails on a provable division by zero");
+    assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"), "and names it");
 
     // Silent: an explicit panic helper (intent), a runtime-dependent index, and a guard that folds false.
     p.mkfile(
@@ -350,7 +345,180 @@ fn always_panics_lint() {
     qargs.push_str("/quiet.spc\"");
     let q = p.run_raw(qargs.as_str());
     assert_eq(q.exit, 0);
-    assert(!q.out_has("always panics"));
+    assert(!q.out_has("always panics"), "intent, run-time indexes and folded guards are silent");
+}
+
+// Unbounded recursion is an ERROR on every build (ir/recursion.spc): a function or method no path of
+// which returns before it calls itself again, directly or through a cycle of such functions, a call in
+// tail position or after a loop included. A base case, a panic, an exit and a call through a function
+// value each give a path that ends, and stay silent.
+@test
+fn unbounded_recursion_is_an_error() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct Bag {
+    pub n: usize,
+}
+
+extend Bag {
+    pub fn size(self: &Bag) usize {
+        return self.size();
+    }
+}
+
+fn forever(n: u64) u64 {
+    return forever(n + 1);
+}
+
+fn ping(n: i32) i32 {
+    return pong(n + 1);
+}
+
+fn pong(n: i32) i32 {
+    if n > 3 {
+        return ping(n);
+    }
+    return ping(n - 1);
+}
+
+fn spin(n: i32) i32 {
+    let mut i = n;
+    while i < 100 {
+        i += 1;
+    }
+    return spin(i);
+}
+
+fn main(args: Vector<str>) i32 {
+    let b = Bag { n: args.len() };
+    return forever(1) as i32 + ping(1) + spin(0) + b.size() as i32;
+}
+)",
+    );
+    let c = p.compile("main.spc");
+    assert(c.exit != 0, "unbounded recursion fails the build");
+    assert(c.out_shows("error: function 'forever' cannot return without calling itself"), "a direct call");
+    assert(c.out_shows("error: function 'size' cannot return without calling itself"), "a method");
+    assert(c.out_shows("error: function 'spin' cannot return without calling itself"), "a call after a loop");
+    assert(
+        c.out_shows("error: function 'ping' cannot return without calling 'pong', which cannot return either"),
+        "a cycle's first function",
+    );
+    assert(
+        c.out_shows("error: function 'pong' cannot return without calling 'ping', which cannot return either"),
+        "a cycle's second function",
+    );
+    assert(c.out_shows("no path returns before such a call"), "the reason");
+    assert(!c.out_has("function 'main'"), "a caller of the cycle is not part of it");
+
+    p.mkfile(
+        "quiet.spc",
+        M"(import stdlib;
+
+fn counted(n: i32) i32 {
+    if n <= 0 {
+        return 0;
+    }
+    return counted(n - 1);
+}
+
+fn until_panic(n: i32) i32 {
+    if n == 0 {
+        panic("done");
+    }
+    return until_panic(n - 1);
+}
+
+fn until_exit(n: i32) i32 {
+    if n == 0 {
+        unsafe stdlib::exit(0);
+    }
+    return until_exit(n - 1);
+}
+
+fn through(f: fn(i32) i32, n: i32) i32 {
+    return f(n);
+}
+
+fn twice(n: i32) i32 {
+    return through(twice, n);
+}
+
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as i32;
+    if k > 100 {
+        return twice(k);
+    }
+    return counted(k) + until_panic(k) + until_exit(k);
+}
+)",
+    );
+    let q = p.compile("quiet.spc");
+    assert(q.ok(), "a path that ends is silent");
+}
+
+// A function that cannot end is reported at its first call of a function that cannot end either, never
+// at an earlier call of one that ends. A cancellation the lowering checks after a call in a task is
+// not a path of the body: it does not end the function.
+@test
+fn unbounded_recursion_names_a_call_that_never_returns() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn first(n: i32) i32 {
+    let a = second(n);
+    return first(a);
+}
+
+fn second(n: i32) i32 {
+    if n == 0 {
+        return 0;
+    }
+    return first(n - 1);
+}
+
+fn main() i32 {
+    return first(1);
+}
+)",
+    );
+    let c = p.compile("main.spc");
+    assert(c.exit != 0, "unbounded recursion fails the build");
+    assert(
+        c.out_shows("error: function 'first' cannot return without calling itself"),
+        "at the call that never returns",
+    );
+    assert(!c.out_has("function 'second'"), "second returns when its argument is 0");
+    p.mkfile(
+        "task.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+
+fn spin(n: i64) i64 {
+    time::sleep(time::Duration::from_nanos(1));
+    return spin(n - 1);
+}
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        let _ = spin(3);
+        w.done();
+    };
+    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let t = p.compile("task.spc");
+    assert(t.exit != 0, "a cancellation does not end the recursion");
+    assert(t.out_shows("error: function 'spin' cannot return without calling itself"), "the task's recursion");
 }
 
 // A constant operation that traps on every execution is an error at the operation: an ordinary body,
@@ -361,77 +529,65 @@ fn always_panics_lint() {
 fn constant_traps_at_the_operation() {
     let p = cli::proj_new();
     let root = p.dir();
-    p.mkfile(
-        "body.spc",
-        "fn main() i32 {\n    let x: i32 = 5;\n    let a = x / (1 - 1);\n    let b = x << 40;\n    let c: i8 = -(-128i8);\n    let d: i32 = 2147483647 + 1;\n    return a + b + c as i32 + d;\n}\n",
-    );
-    let b = p.compile("body.spc");
-    assert(b.exit != 0);
     let op = "error: this operation is undefined behavior when executed:";
-    assert(b.out_shows(format("{} division by zero\n--> {}/body.spc:3:13", op, root).as_str()));
-    assert(b.out_shows(format("{} shift out of range\n--> {}/body.spc:4:13", op, root).as_str()));
-    assert(b.out_shows(format("{} arithmetic overflow\n--> {}/body.spc:5:17", op, root).as_str()));
-    assert(b.out_shows(format("{} arithmetic overflow\n--> {}/body.spc:6:18", op, root).as_str()));
-    p.mkfile("clos.spc", "fn main() i32 {\n    let f = |a: i32| a + (2147483647 + 1);\n    return f(1);\n}\n");
-    let c = p.compile("clos.spc");
-    assert(c.exit != 0);
-    assert(c.out_shows(format("{} arithmetic overflow\n--> {}/clos.spc:2:27", op, root).as_str()));
-    p.mkfile(
-        "gen.spc",
-        "fn g<T>(x: T) i32 {\n    return 2147483647 + 1;\n}\n\nfn main() i32 {\n    return g::<i32>(1) + g::<u8>(2);\n}\n",
+    let body = "fn main() i32 {\n    let x: i32 = 5;\n    let a = x / (1 - 1);\n    let b = x << 40;\n    let c: i8 = -(-128i8);\n    let d: i32 = 2147483647 + 1;\n    return a + b + c as i32 + d;\n}\n";
+    let gen = "fn g<T>(x: T) i32 {\n    return 2147483647 + 1;\n}\n\nfn main() i32 {\n    return g::<i32>(1) + g::<u8>(2);\n}\n";
+    let mut b = cli::Batch::new("", "");
+    // The generic body traps once, with a note, and not at the call; no initializer fails internally.
+    b.forbid("call stack");
+    b.forbid("internal");
+    b.add_at("a division by zero", body, format("{} division by zero\n--> ", op).as_str(), "3:13");
+    b.add_at("a shift out of range", body, format("{} shift out of range\n--> ", op).as_str(), "4:13");
+    b.add_at("a negation overflow", body, format("{} arithmetic overflow\n--> ", op).as_str(), "5:17");
+    b.add_at("an addition overflow", body, format("{} arithmetic overflow\n--> ", op).as_str(), "6:18");
+    b.add_at(
+        "in a closure",
+        "fn main() i32 {\n    let f = |a: i32| a + (2147483647 + 1);\n    return f(1);\n}\n",
+        format("{} arithmetic overflow\n--> ", op).as_str(),
+        "2:27",
     );
-    let g = p.compile("gen.spc");
-    assert(g.exit != 0);
-    assert(g.out_shows(format("{} arithmetic overflow\n--> {}/gen.spc:2:12", op, root).as_str()));
-    assert(g.out_shows("= note: its operands do not depend on a type parameter: every instantiation traps"));
-    assert(!g.out_has("call stack"));
-    p.mkfile("unused.spc", "static mut S: i32 = 2147483647 + 1;\n\nfn main() i32 {\n    return 0;\n}\n");
-    let un = p.compile("unused.spc");
-    assert(un.exit != 0);
-    assert(
-        un.out_shows(
-            format(
-                "error: static 'S' cannot be evaluated at compile time: arithmetic overflow\n--> {}/unused.spc:1:21",
-                root,
-            ).as_str(),
-        ),
+    b.add_at("in a generic body", gen, format("{} arithmetic overflow\n--> ", op).as_str(), "2:12");
+    b.add_at(
+        "the generic body's note",
+        gen,
+        "= note: its operands do not depend on a type parameter: every instantiation traps",
+        "2:12",
     );
-    p.mkfile("used.spc", "static mut U: i32 = 7 / 0;\n\nfn main() i32 {\n    return unsafe U;\n}\n");
-    let us = p.compile("used.spc");
-    assert(us.exit != 0);
-    assert(
-        us.out_shows(
-            format(
-                "error: static 'U' cannot be evaluated at compile time: division by zero\n--> {}/used.spc:1:21",
-                root,
-            ).as_str(),
-        ),
+    b.add_at(
+        "an unused static",
+        "static mut S: i32 = 2147483647 + 1;\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: static 'S' cannot be evaluated at compile time: arithmetic overflow\n--> ",
+        "1:21",
     );
-    assert(!us.out_has("internal"));
-    p.mkfile("cst.spc", "const C: u8 = 255 + 1;\n\nfn main() i32 {\n    return 0;\n}\n");
-    let k = p.compile("cst.spc");
-    assert(k.exit != 0);
-    assert(
-        k.out_shows(
-            format(
-                "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow\n--> {}/cst.spc:1:15",
-                root,
-            ).as_str(),
-        ),
+    b.add_at(
+        "a used static",
+        "static mut U: i32 = 7 / 0;\n\nfn main() i32 {\n    return unsafe U;\n}\n",
+        "error: static 'U' cannot be evaluated at compile time: division by zero\n--> ",
+        "1:21",
     );
+    b.add_at(
+        "a constant",
+        "const C: u8 = 255 + 1;\n\nfn main() i32 {\n    return 0;\n}\n",
+        "error: constant 'C' cannot be evaluated at compile time: arithmetic overflow\n--> ",
+        "1:15",
+    );
+    p.expect_batch(b);
     p.mkfile(
         "call.spc",
         "const fn f(x: i32) i32 {\n    return x + 2147483647;\n}\n\nstatic mut S: i32 = f(1);\n\nfn main() i32 {\n    return 0;\n}\n",
     );
     let cl = p.compile("call.spc");
-    assert(cl.exit != 0);
-    assert(cl.out_shows("error: static 'S' cannot be evaluated at compile time: arithmetic overflow (call stack: f;"));
-    assert(cl.out_shows(format("\n--> {}/call.spc:5:12", root).as_str()));
+    assert(cl.exit != 0, "a trap through a call fails the build");
+    assert(
+        cl.out_shows("error: static 'S' cannot be evaluated at compile time: arithmetic overflow (call stack: f;"),
+        "the trap names the item and its call stack",
+    );
+    assert(cl.out_shows(format("\n--> {}/call.spc:5:12", root).as_str()), "at the item's initializer");
     p.mkfile(
         "dead.spc",
         "fn main() i32 {\n    let x: i32 = 5;\n    if false {\n        return x / 0;\n    }\n    if 1 > 2 {\n        return 2147483647i32 + 1;\n    } else {\n        return 0;\n    }\n}\n",
     );
-    assert(p.compile("dead.spc").ok());
+    assert(p.compile("dead.spc").ok(), "a branch a closed guard removes does not trap");
 }
 
 // A private associated function reached only through a type path (`S::helper(..)`) is resolved by

@@ -447,13 +447,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 test_err(p, m as ModuleId, sp, "a '@test' function returns nothing");
                 continue;
             }
-            let nmnode = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.name;
-            let nmsp = unsafe (*p.module_ast_const(m as ModuleId)).at_const(nmnode).as_data.name.text;
-            if ext == NODE_NONE && nmsp.end - nmsp.start == 4 && unsafe cstring::memcmp(
-                src + nmsp.start as usize,
-                "main".ptr(),
-                4,
-            ) == 0 {
+            if ext == NODE_NONE && p.is_entry(m as ModuleId, at.owner) {
                 test_err(p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)");
                 continue;
             }

@@ -203,7 +203,8 @@ command line's, as a build does. In a project with `src/`, a subdirectory with i
 
 Lints: unused imports/members/labels, unnecessary `mut`/`unsafe`/cast, unreachable
 statements/arms/branches (after a `return`, an `if` whose two branches both leave, a
-`loop` no `break` leaves; the dead branch of a constant condition), constant conditions
+`switch` whose arms all leave, a `loop` no `break` leaves; the dead branch of a constant
+condition), constant conditions
 (a closed `if`/`while` condition the engine folds: `--fix` folds an `if` statement into
 its live branch, drops `while false`, spells `while true` as `loop`; `do { } while
 false` is the run-once idiom and is left alone; a condition over a build constant such as

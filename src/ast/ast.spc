@@ -67,7 +67,7 @@ pub enum AttrKind {
     ATTR_PACKED,
     ATTR_EXPORT,
     ATTR_IMPORT,
-    ATTR_SECTION,
+    ATTR_SECTION, // unused: a section is `@unsafe(link_section = "s")` (ATTR_UNSAFE)
     ATTR_USED,
     ATTR_UNUSED,
     ATTR_EMIT_MACRO,
@@ -85,7 +85,7 @@ pub enum AttrKind {
     // the middle silently renumbers the rest.
     ATTR_BENCH,
     ATTR_NO_CONST,
-    ATTR_UNSAFE, // `@unsafe(safe, const)`: unverified claims about an extern function, in `arg`
+    ATTR_UNSAFE, // `@unsafe(safe, const, naked, link_section = "s")`: unverified claims, in `arg`
     ATTR_INTRINSIC, // `@intrinsic("name")` (std only): a bodiless function the compiler implements
     ATTR_TARGET_FEATURE, // `@target_feature([cpu::Feature; K])`: callable only where the build has them
     ATTR_SIMD_IMPL, // `@simd_impl(simd::Op, [cpu::Feature; K])` (std only): a hardware vector operation
@@ -93,12 +93,17 @@ pub enum AttrKind {
     ATTR_C_READS, // `@c.reads(param, bytes)` on an extern function: it reads that range through `param`
     ATTR_C_WRITES, // `@c.writes(param, bytes)`: it writes that range through `param`
     ATTR_C_LANE_ACCESS, // `@c.lane_access`: it touches memory in active lanes at lane-dependent addresses
+    ATTR_TAIL_RECURSE, // `@tail_recurse`: every call of the function to itself converts to a jump (`ir::tailcall`)
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
-/// `const` gives it a body that models it at compile time.
+/// `const` gives it a body that models it at compile time; `naked` makes a function's body its whole
+/// machine code, no prologue or epilogue; `link_section` places a function or `static mut` in the
+/// object-file section `Attr.str_span` names.
 pub const UNSAFE_SAFE: u32 = 1;
 pub const UNSAFE_CONST: u32 = 2;
+pub const UNSAFE_NAKED: u32 = 4;
+pub const UNSAFE_LINK_SECTION: u32 = 8;
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather
 // than inline on the decl data, so `Node` keeps its tuned size: lifetimes are erased, rare, and only
@@ -2234,6 +2239,16 @@ pub struct MonoUse {
     pub n: u8,
     pub args: [TypeId; 8],
 }
+
+/// A frozen table the batch driver frees at its last reader: `on` from the release, with the
+/// table's length just before (`pre`) and just after (`post`) it. The SC_FACTS_CHECK watermarks
+/// compare `pre` with their snapshot and `post` with the table, so a change on either side of the
+/// release still shows; every later read or write of the freed part is an assertion failure.
+pub struct Released {
+    pub on: bool,
+    pub pre: u32,
+    pub post: u32,
+}
 pub struct DynUse {
     pub node: NodeId,
     pub src: TypeId,
@@ -3121,6 +3136,8 @@ pub struct Ast {
     pub lane_callers: Vector<NodeId>,
     /// The module declares a register type (`@c.value`).
     pub has_c_value: bool,
+    /// A field of the module pins its C member name (`@c.import` on a header type's field).
+    pub has_member_pins: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
     /// What a call's arguments make the callee's lifetimes outlive (`TypeChecker::tc_lt_call_export`):
@@ -3140,6 +3157,16 @@ pub struct Ast {
     /// and locals by resolution, never by text); `init_resolutions` re-applies them so a re-resolve
     /// of the retained arena keeps them.
     pub seeds: Vector<Seed>,
+    /// The tables freed at their last reader in a batch build: the body-arena entries of
+    /// `call_info` and `mono` with the bodies (`release_body_facts`), `method_refs` and `seeds`
+    /// after the checks (`release_checked_tables`).
+    pub call_info_rel: Released,
+    pub mono_rel: Released,
+    pub method_refs_rel: Released,
+    pub seeds_rel: Released,
+    /// The distinct type arguments of the body-arena `mono` entries `release_body_facts` freed:
+    /// what the emission liveness reads of them.
+    pub mono_live: Vector<TypeId>,
     /// What the emitter reads of a closure after its body syntax is released: recorded by the
     /// checker (`record_closure`), the mutable-capture mask finalized by the borrow checker.
     pub closure_facts: Vector<ClosureFact>,
@@ -3403,6 +3430,86 @@ extend Ast {
         self.seeds.truncate(w);
     }
 
+    /// Free the `call_info` and `mono` entries of body-arena nodes once the body arena is released
+    /// (batch builds): no later pass reads a body node. The freed entries' distinct type arguments
+    /// stay in `mono_live`, which the emission liveness reads.
+    pub fn release_body_facts(self: &mut Self) {
+        assert(
+            self.b.released && !self.call_info_rel.on && !self.mono_rel.on,
+            "body facts release once, after the bodies",
+        );
+        let mut ci = Map::<u32, u64>::new();
+        for k in self.call_info.keys() {
+            if !Ast::in_body(*k) {
+                ci.insert(*k, *self.call_info.get(k).unwrap());
+            }
+        }
+        self.call_info_rel = Released { on: true, pre: self.call_info.len() as u32, post: ci.len() as u32 };
+        self.call_info = ci;
+        let mut kept = Vector::<MonoUse>::new();
+        for i in 0..self.mono.len() {
+            let u = *self.mono.at(i);
+            if Ast::in_body(u.node) {
+                for k in 0..u.n {
+                    self.mono_live.push(unsafe u.args[k as usize]);
+                }
+                continue;
+            }
+            // A module entry keeps its slot; a superseded one (the node recorded again) stays
+            // unindexed, as before.
+            if self.mono_at[u.node as usize] == i as u32 + 1 {
+                self.mono_at[u.node as usize] = kept.len() as u32 + 1;
+            }
+            kept.push(u);
+        }
+        self.mono_live.sort();
+        let mut w: usize = 0;
+        for i in 0..self.mono_live.len() {
+            if w == 0 || self.mono_live[w - 1] != self.mono_live[i] {
+                self.mono_live.set(w, self.mono_live[i]);
+                w += 1;
+            }
+        }
+        self.mono_live.truncate(w);
+        self.mono_rel = Released { on: true, pre: self.mono.len() as u32, post: kept.len() as u32 };
+        self.mono = kept;
+    }
+
+    /// Free `method_refs` (read by the unused-item lint) and `seeds` (read by a re-resolve, which
+    /// a batch build never runs after its type check) once the batch driver's checks are done.
+    pub fn release_checked_tables(self: &mut Self) {
+        assert(!self.method_refs_rel.on && !self.seeds_rel.on, "the checked tables release once");
+        self.method_refs_rel = Released { on: true, pre: self.method_refs.len() as u32, post: 0 };
+        self.method_refs = Vector::<MethodRef>::new();
+        self.seeds_rel = Released { on: true, pre: self.seeds.len() as u32, post: 0 };
+        self.seeds = Vector::<Seed>::new();
+    }
+
+    /// The call target the type checker recorded at call node `n` ((fmod << 40 | fdecl << 8 | skip)).
+    pub fn call_info_of(self: &Self, n: NodeId) Option<u64> {
+        assert(!self.call_info_rel.on || !Ast::in_body(n), "call_info of a released body node");
+        return switch self.call_info.get(&n) {
+            Some(v) => Option::<u64>::Some(*v),
+            None => Option::<u64>::None,
+        };
+    }
+
+    pub fn set_call_info(self: &mut Self, n: NodeId, v: u64) {
+        assert(!self.call_info_rel.on, "call_info is released");
+        self.call_info.insert(n, v);
+    }
+
+    /// The method references the type checker recorded (the unused-item lint's input).
+    pub fn method_refs_live(self: &Self) &Vector<MethodRef> {
+        assert(!self.method_refs_rel.on, "method_refs is released");
+        return &self.method_refs;
+    }
+
+    pub fn push_method_ref(self: &mut Self, r: MethodRef) {
+        assert(!self.method_refs_rel.on, "method_refs is released");
+        self.method_refs.push(r);
+    }
+
     pub const fn mark(self: &Self) u32 {
         return self.scratch.len() as u32;
     }
@@ -3443,6 +3550,7 @@ extend Ast {
         for _ in 0..self.b.nodes.len() {
             self.b.resolutions.push(DefId { module: 0, node: NODE_NONE });
         }
+        assert(!self.seeds_rel.on, "seeds is released");
         for i in 0..self.seeds.len() {
             let sd = *self.seeds.at(i);
             self.set_resolution_def(sd.at, sd.def);
@@ -4472,6 +4580,7 @@ extend Ast {
         if m > 8 {
             m = 8;
         }
+        assert(!self.mono_rel.on, "mono is released");
         let mut u = MonoUse { node: node, n: m };
         for i in 0..m {
             unsafe u.args[i] = unsafe args[i];
@@ -4489,12 +4598,14 @@ extend Ast {
     }
 
     /// The `mono` slot recorded for `node` plus one, or 0 if none.
-    pub const fn mono_slot(self: &Self, node: NodeId) u32 {
+    pub fn mono_slot(self: &Self, node: NodeId) u32 {
+        assert(!self.mono_rel.on || !Ast::in_body(node), "mono of a released body node");
         return slot_of(&self.mono_at, &self.b.mono_at, node);
     }
 
     /// The type args recorded for `node`, or null if none.
-    pub const fn type_args(self: &Self, node: NodeId) *const MonoUse {
+    pub fn type_args(self: &Self, node: NodeId) *const MonoUse {
+        assert(!self.mono_rel.on || !Ast::in_body(node), "mono of a released body node");
         let idx = slot_of(&self.mono_at, &self.b.mono_at, node);
         if idx == 0 {
             return null;
@@ -4671,6 +4782,7 @@ extend Ast {
     /// Resolve the synthesized identifier `ref_id` for good: the resolver never looks its text up,
     /// and a re-resolve restores the binding (see `seeds`).
     pub fn seed_resolution(self: &mut Self, ref_id: NodeId, decl: DefId) {
+        assert(!self.seeds_rel.on, "seeds is released");
         self.set_resolution_def(ref_id, decl);
         self.seeds.push(Seed { at: ref_id, def: decl });
     }
@@ -4899,6 +5011,16 @@ extend Ast {
         return switch self.attr_ix.get(&(owner as u64 << 8 | kind as u64)) {
             Some(i) => self.attrs.at((*i) as usize),
             None => null,
+        };
+    }
+
+    /// The `@unsafe(...)` claims of `owner` (`UNSAFE_*` bits), 0 without one.
+    pub const fn unsafe_claims(self: &Self, owner: NodeId) u32 {
+        let at = self.attr_of(owner, AttrKind::ATTR_UNSAFE);
+        return if at == null {
+            0u32;
+        } else {
+            unsafe (*at).arg;
         };
     }
 
@@ -5772,5 +5894,7 @@ extend BcErr as Persist {}
 extend TypePool as Persist {}
 
 extend BodyArena as Persist {}
+
+extend Released as Persist {}
 
 extend Ast as Persist {}

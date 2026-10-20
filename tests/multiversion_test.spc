@@ -26,10 +26,17 @@ const NEED: str = "`wide` needs `+sse3,+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16,+lah
 @test
 fn uses_beyond_the_callers_features_need_unsafe() {
     let p = cli::proj_new();
-    let r = x86(&p, "fn main(args: Vector<str>) i32 {\n    return wide(args.len() as i32) - 2;\n}\n", "");
-    assert(!r.ok() && r.out_has(NEED) && r.out_has("main.spc:8:12"), "a call");
-    let c = x86(&p, "fn main() i32 {\n    let f: fn(i32) i32 = wide;\n    return f(0) - 1;\n}\n", "");
-    assert(!c.ok() && c.out_has(NEED), "a pointer coercion");
+    // A call, and a pointer coercion.
+    let mut uses = cli::Batch::new(V3, "");
+    uses.flags = String::from_str("--arch=x86_64 --target=linux");
+    uses.add_at(
+        "a call",
+        "fn main(args: Vector<str>) i32 {\n    return wide(args.len() as i32) - 2;\n}\n",
+        NEED,
+        "8:12",
+    );
+    uses.add("a pointer coercion", "fn main() i32 {\n    let f: fn(i32) i32 = wide;\n    return f(0) - 1;\n}\n", NEED);
+    p.expect_batch(uses);
     let ok = x86(
         &p,
         "@arch(x86_64)\n@target_feature(cpu::X86_64_V4)\nfn caller(a: i32) i32 {\n    let f: fn(i32) i32 = wide;\n    return wide(a) + f(a);\n}\nfn main(args: Vector<str>) i32 {\n    let f: fn(i32) i32 = unsafe wide;\n    return unsafe wide(0) + f(0) + unsafe caller(args.len() as i32) - 6;\n}\n",
@@ -57,39 +64,29 @@ fn uses_beyond_the_callers_features_need_unsafe() {
 @test
 fn closure_bounds_reject_feature_functions() {
     let p = cli::proj_new();
-    let r = x86(
-        &p,
-        "fn apply<F: fn(i32) i32>(f: F, a: i32) i32 {\n    return f(a);\n}\nfn main() i32 {\n    return unsafe apply(wide, 0) - 1;\n}\n",
-        "",
-    );
-    assert(
-        !r.ok() && r.out_has(
-            "`wide` needs CPU features: it is no value of a closure bound (`F: fn(..)`); pass a function pointer `fn(..)` instead",
-        ),
+    let mut b = cli::Batch::new(V3, "");
+    b.flags = String::from_str("--arch=x86_64 --target=linux");
+    b.add(
         "a closure bound",
+        "fn apply<F: fn(i32) i32>(f: F, a: i32) i32 {\n    return f(a);\n}\nfn main() i32 {\n    return unsafe apply(wide, 0) - 1;\n}\n",
+        "`wide` needs CPU features: it is no value of a closure bound (`F: fn(..)`); pass a function pointer `fn(..)` instead",
     );
     // By its type: through a local, or as an `unsafe` operand.
-    let v = x86(
-        &p,
-        "fn apply<F: fn(i32) i32>(f: F, a: i32) i32 {\n    return f(a);\n}\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\nfn inner(a: i32) i32 {\n    let g = wide;\n    return apply(g, a);\n}\nfn main() i32 {\n    return apply(unsafe wide, 0) + unsafe inner(0) - 2;\n}\n",
-        "",
+    let by_type = "fn apply<F: fn(i32) i32>(f: F, a: i32) i32 {\n    return f(a);\n}\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\nfn inner(a: i32) i32 {\n    let g = wide;\n    return apply(g, a);\n}\nfn main() i32 {\n    return apply(unsafe wide, 0) + unsafe inner(0) - 2;\n}\n";
+    b.add("through a local", by_type, "`g` needs CPU features");
+    b.add("as an `unsafe` operand", by_type, "`unsafe wide` needs CPU features");
+    b.add(
+        "an export",
+        "@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\n@c.export(\"k\")\npub fn k() {}\nfn main() i32 {\n    return 0;\n}\n",
+        "a '@c.export' function cannot need CPU features",
     );
-    assert(
-        !v.ok() && v.out_has("`g` needs CPU features") && v.out_has("`unsafe wide` needs CPU features"),
-        "any value of its type",
-    );
+    p.expect_batch(b);
     let ok = x86(
         &p,
         "fn apply(f: fn(i32) i32, a: i32) i32 {\n    return f(a);\n}\nfn main() i32 {\n    return apply(unsafe wide, 0) - 1;\n}\n",
         "",
     );
     assert(ok.ok(), "a function pointer");
-    let e = x86(
-        &p,
-        "@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\n@c.export(\"k\")\npub fn k() {}\nfn main() i32 {\n    return 0;\n}\n",
-        "",
-    );
-    assert(!e.ok() && e.out_has("a '@c.export' function cannot need CPU features"), "an export");
 }
 
 // The C of such a function carries its target attribute; the release inliner keeps its call in a
@@ -224,49 +221,63 @@ fn vector_functions_choose_their_copy_at_run_time() {
 
 // A function's address casts to `usize`, and back inside `unsafe`; a generic cast to a type that is no
 // function pointer fails for that instance.
-@test
-fn function_addresses_cast_to_usize_and_back() {
-    h::expect_exit(
+fn function_addresses_cast_to_usize_and_back(b: &mut h::ExitBatch) {
+    b.add(
         "a round trip",
         "fn add1(a: i32) i32 {\n    return a + 1;\n}\nfn main() i32 {\n    let f: fn(i32) i32 = add1;\n    let x = add1 as usize;\n    let y = f as usize;\n    let g = unsafe (x as fn(i32) i32);\n    return g(41) - 42 + pick(x == y && x != 0, 0, 1);\n}\nfn pick(c: bool, a: i32, b: i32) i32 {\n    if c {\n        return a;\n    }\n    return b;\n}\n",
         0,
     );
+    // `FnPtr` through a `where` predicate.
+    b.add(
+        "a where predicate",
+        "fn back<F>(u: usize) F where F: FnPtr {\n    return unsafe (u as F);\n}\nfn one() i32 {\n    return 1;\n}\nfn main() i32 {\n    let f = back::<fn() i32>(one as usize);\n    return f() - 1;\n}\n",
+        0,
+    );
+}
+
+@test
+fn function_address_casts_are_checked() {
     h::expect_err_msg(
         "back without unsafe",
         "fn add1(a: i32) i32 {\n    return a + 1;\n}\nfn main() i32 {\n    let g = (add1 as usize) as fn(i32) i32;\n    return g(0) - 1;\n}\n",
         "casting an address to a function pointer",
     );
-    h::expect_build_err(
+    // The build checks a cast in a generic body per instance, and the dispatch table's types.
+    let mut errs = cli::Batch::new("", "");
+    errs.add(
         "a closure bound is no function pointer",
         "import std::cpu;\nimport std::cpu::detect as detect;\nstatic mut D: detect::Dispatch = detect::Dispatch::new();\nfn main() i32 {\n    let k = 1;\n    let c = fn() i32 { return k; };\n    let f = unsafe detect::dispatch(&mut unsafe D, [(cpu::Feature::Neon, c)], c);\n    return f() - 1;\n}\n",
         "FnPtr",
     );
-    h::expect_build_err(
+    errs.add(
         "a generic cast to a struct",
         "struct S {\n    pub v: usize,\n}\nfn to<T>(x: usize) T {\n    return unsafe (x as T);\n}\nfn main() i32 {\n    let s = to::<S>(0);\n    return s.v as i32;\n}\n",
         "invalid cast from 'usize' to 'S'",
-    );
-    // `FnPtr` through a `where` predicate.
-    h::expect_exit(
-        "a where predicate",
-        "fn back<F>(u: usize) F where F: FnPtr {\n    return unsafe (u as F);\n}\nfn one() i32 {\n    return 1;\n}\nfn main() i32 {\n    let f = back::<fn() i32>(one as usize);\n    return f() - 1;\n}\n",
-        0,
     );
     h::expect_err_msg(
         "a number as a reference",
         "fn main() i32 {\n    let r = 16usize as &i32;\n    return 0;\n}\n",
         "a reference never comes from a number",
     );
-    h::expect_build_err(
+    errs.add(
         "a generic cast of a number to a reference",
         "fn conv<T>(x: usize) T {\n    return x as T;\n}\nfn main() i32 {\n    let r = conv::<&i32>(16);\n    return 0;\n}\n",
         "invalid cast from 'usize' to '&i32'",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a closure as an address",
         "fn main(args: Vector<str>) i32 {\n    let k = args.len();\n    let c = fn(x: usize) usize { return x + k; };\n    let u = c as usize;\n    return (u - u) as i32;\n}\n",
         "invalid cast from",
     );
+    h::expect_build_errs(errs);
+}
+
+// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`).
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    function_addresses_cast_to_usize_and_back(&mut b);
+    b.run();
 }
 
 // A dispatch row whose feature does not imply its function's features is reported: the row would run
@@ -381,26 +392,49 @@ fn main() i32 {
 }
 )";
 
-// Build `DISPATCH` with `flags` and run it with environment `env`: its output, "fail" when it fails.
-fn dispatch_run(flags: str, env: str) String {
+// `DISPATCH` built with `flags`, and with the build's environment variable `key` set to `val` when
+// `key` is not empty: its project, and whether it built.
+fn dispatch_build(flags: str, key: str, val: str) (cli::Proj, bool) {
     let p = cli::proj_new();
     p.mkfile("main.spc", DISPATCH);
     let root = p.dir();
-    let b = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags).as_str());
+    let args = format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags);
+    let b = if key.len() == 0 {
+        p.run_raw(args.as_str());
+    } else {
+        cli::superc_env_in(root, key, val, args.as_str());
+    };
     if !b.ok() {
         b.show();
+    }
+    let built = b.exit == 0;
+    return p, built;
+}
+
+// A run of the build `p` of `dispatch_build` (`built` when it built) with environment `env`: its
+// output, "fail" when the build or the run fails.
+fn dispatch_exec(p: &cli::Proj, built: bool, env: str) String {
+    if !built {
         return String::from_str("fail");
     }
+    let root = p.dir();
     let mut cmd = format("\"{}/app\"", root);
     let mut out = format("{}/.out", root);
     let mut err = format("{}/.err", root);
     let rc = cli::run_with(cmd.cstr(), null, out.cstr(), err.cstr(), env);
     let e = cli::read_text(err.as_str());
     if rc != 0 || e.contains("ThreadSanitizer") {
-        eprintln("{} [{}]: exit {}: {}", flags, env, rc, e.as_str());
+        eprintln("[{}]: exit {}: {}", env, rc, e.as_str());
         return String::from_str("fail");
     }
     return cli::read_text(out.as_str());
+}
+
+// Build `DISPATCH` with `flags` (and the build variable `key`=`val`) and run it once: its output,
+// "fail" when it fails.
+fn dispatch_run(flags: str, key: str, val: str) String {
+    let (p, built) = dispatch_build(flags, key, val);
+    return dispatch_exec(&p, built, "");
 }
 
 // The first table entry whose feature the machine has, else the fallback; one choice per process,
@@ -411,19 +445,24 @@ fn dispatch_chooses_once_in_table_order() {
     if cli::on_windows() || cli::on_wasm() || h::simd_lane() || a > 1 {
         return;
     }
-    let all = dispatch_run("", "");
+    // One build: the masked features (`SC_CPU_OFF`) act on its runs.
+    let (p, built) = dispatch_build("", "", "");
+    let all = dispatch_exec(&p, built, "");
     assert(all.as_str() != "fail", "the machine's choice");
-    // The masked features (`SC_CPU_OFF`): the build's own set stays.
-    let none = dispatch_run("", "SC_CPU_OFF=0xFFFFFFFFFFFFFFFF");
+    // The masked features: the build's own set stays.
+    let none = dispatch_exec(&p, built, "SC_CPU_OFF=0xFFFFFFFFFFFFFFFF");
     // macOS x86_64 builds have `sse3`, so there the `lo` row stays.
     let mac = unsafe shim::sc_host_platform() == 1;
-    assert(none.as_str() != "fail" && (a == 1 || none.as_str() == pick(mac, "1", "0")), "the fallback");
+    assert(none.as_str() != "fail", "the run without features");
+    assert(a == 1 || none.as_str() == pick(mac, "1", "0"), "the fallback");
     let hi = pick(a == 0, cpu::Feature::Avx2, cpu::Feature::I8mm) as u64;
-    let off = dispatch_run("", format("SC_CPU_OFF={}", 1u64 << hi).as_str());
-    assert(off.as_str() != "fail" && off.as_str() != "2", "the next entry");
-    assert(dispatch_run("--profile=race", "").as_str() == all.as_str(), "no race");
-    assert(dispatch_run("--profile=release", "").as_str() == all.as_str(), "lto");
-    assert(dispatch_run("--profile=release", "SC_LTO=thin").as_str() == all.as_str(), "thin lto");
+    let off = dispatch_exec(&p, built, format("SC_CPU_OFF={}", 1u64 << hi).as_str());
+    assert(off.as_str() != "fail", "the run without the first entry's feature");
+    assert(off.as_str() != "2", "the next entry");
+    assert(dispatch_run("--profile=race", "", "").as_str() == all.as_str(), "no race");
+    assert(dispatch_run("--profile=release", "", "").as_str() == all.as_str(), "lto");
+    // `SC_LTO` is a variable of the build, not of the run.
+    assert(dispatch_run("--profile=release", "SC_LTO", "thin").as_str() == all.as_str(), "thin lto");
 }
 
 // The steady state of a dispatching call inlines: one acquire load (aarch64 `ldar` or `ldapr`; on

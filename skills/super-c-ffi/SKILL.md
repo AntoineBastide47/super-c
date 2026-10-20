@@ -141,7 +141,10 @@ extern "C" "dirent.h" {
 Opaque types lower to `TYPE_OPAQUE` and render as their bare C name (not `void`), so the
 declaring block must include the header that defines the name: an opaque type used
 without its header fails in the C compile. By-value handles (`clock_t`) also work when
-the C type is a scalar.
+the C type is a scalar. No type of an extern block (an opaque type, a header type, an extern
+`enum`) implements `Free`: it is a C value that copies, so its glue would never be the one owner's
+("'clock_t' is a type of an 'extern \"C\"' block: it cannot implement 'Free'"). Wrap it in a
+struct that implements `Free` (`stdio::File` holds a `*mut FILE`).
 
 ### Register types: `@c.value(size, align)`
 
@@ -161,6 +164,66 @@ array or slice element, a variant payload, a static or const, a pointer or refer
 closure capture, or a generic argument, written or inferred, is "`v128_t` is a register type;
 store it through `Simd<T, N>`". It moves to and from a vector through memory
 (`wasm_v128_load`, `wasm_v128_store`), which the C compiler keeps in registers.
+
+## Header Types
+
+```superc
+extern "C" "sys/stat.h" {
+    @platform(linux | wasm)
+    pub struct stat { pub st_mode: u32, pub st_size: i64 }   // C `struct stat`
+    @platform(macos | ios)
+    pub struct stat { pub st_mode: u16, pub st_size: i64 }
+    pub fn stat(path: *const char, buf: *mut stat) i32;
+}
+
+extern "C" "pthread.h" {
+    @c.import("pthread_attr_t")                                 // a typedef name
+    pub struct pthread_attr_t {}
+}
+```
+
+A `struct` or `union` of an `extern "C"` block is a header type: its C header defines it and owns
+its layout. Super-C emits no definition and no layout of its own. An extern `enum` is a header type
+too: the header defines the type and its constants, which the emitted C names as the header does
+(`RED`), and its layout check (`sizeof == 4`) stays. The block must name the header
+("a struct of an 'extern \"C\"' block is its C header's type: the block needs that header"):
+Super-C cannot see which headers define a type, and a type of the standard headers the runtime
+includes is declared under its header too (`extern "C" "time.h" { struct tm { .. } }`).
+
+- **Spelling.** `struct X`, `union X` and `enum X` are the C tag. `@c.import("name")` pins another
+  spelling: a typedef name (`pthread_attr_t`, `div_t`, a `typedef enum { .. } mode;`), or MSVC's
+  `struct _stat`. A typedef'd type declared without its pin spells a tag C does not define, and the
+  C compile stops at its completeness check (below).
+- **Fields.** The declaration lists some of the header's members, in the header's order; Super-C
+  never names the others. A field type is a C scalar, a raw pointer, a `fn` pointer, a type of an
+  `extern "C"` block, or an array of these ("field 'f' of 'S' has type 'T', which has no C
+  equivalent"). A member named by a Super-C keyword binds under another name with
+  `@c.import("select") pub select_: i32` (on a header type's field only). A field named by a C
+  keyword or a standard-header macro (`errno`) gets a `_` suffix like every Super-C name: pin it
+  the same way. An unknown field at a use is "no field 'f' on 'S'", with a note that the
+  declaration lists the fields.
+- **Checks.** The forward header (`__sc_fwd.h`, which every unit includes) holds, after every
+  header include: `sizeof(T) != 0`; per field the member's kind and size (signedness by
+  `_Generic` over the standard integer types, `_Bool`, `float`, `double`, the complex types, a
+  pointer as no arithmetic type of a pointer's size, an extern type by exact type, an array by its
+  length at each level and then its element); per two consecutive fields
+  `offsetof(prev) + sizeof(prev) <= offsetof(next)`, and for a union each field at offset 0. A
+  wrong declaration stops the C compile: "super-c: field 'stat.st_mode' must be an unsigned
+  integer of 4 bytes in C"; a member the header lacks is a C error at its check. A header that
+  does not define the type stops the C compile at the completeness check, the type's first use in
+  every unit: C has no completeness test that does not stop the compile, so the first error is
+  C's "incomplete type" on the line of "super-c: 'pt' must be a complete C type".
+- **Layout.** Super-C knows no size, alignment or offset. A use whose size C computes is valid: a
+  by-value local, parameter or result, a copy (the type is `Copy`), an array, a slice, `Vector`,
+  `Option`, a field of a Super-C struct, a generic argument, `unsafe zeroed::<T>()`
+  (`(struct stat){0}`), a struct literal (designated: every member it omits, listed or not, is
+  zero), and run-time `sizeof`/`alignof` (`sizeof(struct stat)`). Compile-time evaluation holds a
+  value field by field, so a `const` or `static mut` of the type works (designated static data). A
+  compile-time size is an error: `const N = sizeof(stat)`, `static_assert`, an array length, a
+  repeat count, `type_info` ("the size of 'stat' is its C header's: it has no compile-time
+  value"). `@c.align`, `@c.packed` and `extend X as Free` are errors: the type has no drop glue.
+- **Targets.** Gate a declaration with `@platform` where the members differ (`st_mode` is `u16`
+  on macOS and Windows, `u32` on Linux and wasm; mingw's `st_size` is `i32`).
 
 ## Memory Annotations
 
@@ -346,7 +409,9 @@ operations (dereference, indexing, arithmetic, field access) also require `unsaf
 Two claims about an extern function that the compiler cannot verify, so they are spelled
 `@unsafe(...)` and the binding author answers for them. The attribute lists one or both claims,
 in any order (`@unsafe(safe, const)` = `@unsafe(const, safe)`), each once; a declaration takes
-one `@unsafe(...)`. It applies only to a function in an `extern "C"` block.
+one `@unsafe(...)`. These two claims apply only to a function in an `extern "C"` block; the
+placement claims `link_section` and `naked` apply only outside one (`super-c-language`, Unsafe
+Placement).
 
 ```superc
 extern "C" {
@@ -388,7 +453,7 @@ functions unsafe; a safe wrapper takes the operand as a const parameter and chec
 | `@c.source("file.c")` | extern block | Name a backing C implementation |
 | `@c.link("lib")` | extern block | Declare a link flag |
 | `@c.export("sym")` | function | Pin exact C symbol (external linkage) |
-| `@c.import("sym")` | extern fn | Import with exact C symbol |
+| `@c.import("sym")` | extern fn, extern type, header type field | Import with exact C symbol; the C spelling of an extern type; the C member of a field |
 | `@unsafe(safe, const)` | extern fn | Claims, any order: `safe` = callable without `unsafe`, `const` = body is the compile-time model |
 | `@c.value(size, align)` | opaque extern type | A C register type of that layout (Register types above) |
 | `@c.reads(p, n)` / `@c.writes(p, n)` | extern fn | Reads or writes only `n` bytes through pointer parameter `p` (Memory Annotations above) |
@@ -402,7 +467,10 @@ super-c bindgen header.h -o out.spc     # --link=, --header=, -I, --from=, --cfl
 
 Generates `.spc` bindings from C headers (`src/bindgen/bindgen.spc`). Use it for large C
 APIs where hand-writing bindings is impractical. The generated output follows the `ffi/`
-conventions.
+conventions. A record whose every member has a field form becomes a header type with every
+member, and a tagged enum an extern `enum`: a tagged record or enum spells as its tag, one that
+only a typedef names pins that name, and a member named by a keyword pins its C name. Any other
+record stays an opaque `pub type`.
 
 ## Atomics and Memory-Order Codes
 
@@ -464,4 +532,6 @@ The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L` (the `cstd` value
 | Assuming `String::ptr()` is NUL-terminated | It is not. Use `String::cstr()` |
 | Passing `.ptr()` to an `sc_*` path call (`sc_mkdir`, `sc_stat_isdir` in src/driver_shim.spc) | Use `.cstr()` as for any C call; a heap string whose allocation equals its length has no NUL after it, so failures depend on the length |
 | Inventing an opaque type name (`type CFile;`) | The name must be a real C type a header defines |
+| Mirroring a C struct as a Super-C `struct` | Declare it in the header's extern block: a header type uses the C layout and checks its fields |
+| A typedef'd header type declared as `struct pthread_attr_t {}` | That spells `struct pthread_attr_t`: add `@c.import("pthread_attr_t")` |
 | `@c.import` before the extern block | Put it on the `fn` inside the block |

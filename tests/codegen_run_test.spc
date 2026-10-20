@@ -6,7 +6,7 @@
 import tests::harness as h;
 import tests::cli_harness as cli;
 
-const PRE: str = "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\n";
+const PRE: str = "extern \"C\" { @c.noreturn fn exit(code: i32) void; fn putchar(c: i32) i32; }\n";
 
 // Splice PRE ahead of `body`, build+run the program, and assert it exits with `code`.
 fn run_exit(label: str, body: str, code: i32) {
@@ -364,9 +364,7 @@ fn constant_aggregate_holds_empty_string(b: &mut h::ExitBatch) {
 // A reference inside a constant or static to another constant or static is the address of that
 // item's emitted storage: a whole item, an element or a field of it, a slice of it, a `str`, a chain
 // of references, one returned by a `const fn`, and a `static mut`. A temporary gets its own storage.
-@test
-fn constant_references_address_items() {
-    const SRC: str = M"(extern "C" { fn exit(code: i32) void; }
+const CONST_REFS: str = M"(extern "C" { fn exit(code: i32) void; }
 struct R<'a> { pub r: &'a [i32; 2] }
 struct P { pub x: i32, pub y: [i32; 3] }
 struct N<'a> { pub p: &'a P, pub e: &'a i32, pub s: []'a i32, pub t: &'a str<'a> }
@@ -406,13 +404,21 @@ fn main() i32 {
     unsafe *PC = 4;
     if unsafe CNT != 4 { bad += 32; }
     if CR.r as *const [i32; 2] != &K as *const [i32; 2] || SL.as_ptr() != &K[0] as *const i32 { bad += 64; }
-    unsafe exit(bad);
+    unsafe exit(bad); return 0;
 }
 )";
-    h::expect_exit("references to constants and statics inside constants", SRC, 0);
-    h::expect_c("a reference to a constant addresses its storage", SRC, "R CR = { .r = (void *)&K };");
-    h::expect_c("a reference to a static addresses its storage", SRC, "int32_t *PC = (void *)&CNT;");
-    h::expect_c("a field reference addresses the field", SRC, ".e = (void *)&PP.y[2]");
+
+fn constant_references_address_items(b: &mut h::ExitBatch) {
+    b.add("references to constants and statics inside constants", CONST_REFS, 0);
+}
+
+@test
+fn constant_references_emit_addresses() {
+    let c = h::compile_c(CONST_REFS);
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("R CR = { .r = (void *)&K };"), "a reference to a constant addresses its storage");
+    assert(c.code_has("int32_t *PC = (void *)&CNT;"), "a reference to a static addresses its storage");
+    assert(c.code_has(".e = (void *)&PP.y[2]"), "a field reference addresses the field");
 }
 
 // A constant of a generic enum instance is static data like any other aggregate: the standard
@@ -4738,6 +4744,7 @@ fn exit_cases_01() {
     constant_aggregate_holds_empty_string(&mut b);
     local_constants_of_one_name(&mut b);
     compile_time_layout_and_zero_sized_maps(&mut b);
+    constant_references_address_items(&mut b);
     b.run();
 }
 

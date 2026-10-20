@@ -14,10 +14,13 @@ import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
 import ir::drops as ird;
+import ir::tailcall as irt;
+import ir::recursion as recur;
 import ir::inline as inl;
 import ir::print as irp;
 import ir::verify as irv;
 import emit::probe as prb;
+import utils::errors as diag;
 
 /// Borrow-pass probe regions (SC_BORROW_STATS): lowering, the tape replay, the six analysis
 /// stages, the Free-move rules with the wording, diagnostic emission, and drop elaboration.
@@ -480,6 +483,9 @@ pub struct BorrowCtx {
     /// Package store the driver hands in (null = discard lowerings): every body that lowers is
     /// adopted here so the backend never lowers it again.
     pub keep: *mut irl::Keep,
+    /// The language server's summarizer (null = none): the body of every function checked is
+    /// summarized for the unbounded-recursion check (`ir::recursion`).
+    pub recur: *mut recur::Summarizer,
     pub st: BcStats,
     /// Validation build (SC_BC_VALIDATE): every skipped stage runs and its emptiness is asserted.
     pub validate: bool,
@@ -562,6 +568,7 @@ extend BorrowCtx {
             uni: UniSt::new(),
             lower_pool: Vector::<irl::Lowerer>::new(),
             keep: null,
+            recur: null,
             st: BcStats::new(false, false),
             validate: stdlib::getenv("SC_BC_VALIDATE") != null,
         };
@@ -1089,6 +1096,14 @@ extend tc::TypeChecker {
                 }
             }
         }
+        // The calls of the function to itself, converted or not: `@tail_recurse` requires one.
+        let mut selfs: u32 = 0;
+        let mut clean = true;
+        // Without a keep (the language server) the bodies are elaborated and their self calls
+        // converted only under `@tail_recurse`, for its errors.
+        let f = self.icx.current_fn;
+        let tagged = unsafe (*self.cur_ast()).attr_of(f, AttrKind::ATTR_TAIL_RECURSE) != null;
+        let convert = ctx.keep != null || tagged;
         for oi in 0..n {
             let b = order[oi];
             if ctx.st.pr.on {
@@ -1097,14 +1112,125 @@ extend tc::TypeChecker {
             let n0 = out.len();
             self.bc_gen_sigs(ow, &bodies.at(b).body);
             self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
-            if ctx.keep != null {
+            if convert {
                 // A rejected body never reaches emission, and its elaboration has no correct
                 // schedule to verify (a field moved out of a `Free` value cannot be released).
                 let rejected = self.errors.errors.len() != self.err_wm || out.len() != n0 || ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
                 bc_elaborate(ow, ctx, &mut bodies.index_mut(b).body, !rejected);
+                clean = clean && !rejected;
+                if !rejected {
+                    selfs += self.bc_tail_calls(ow, ctx, &mut bodies.index_mut(b).body);
+                }
             }
             ctx.trim_scratch();
         }
+        if tagged && clean && selfs == 0 {
+            let nm = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(f).as_data.function.name).span;
+            self.errors.emit_span(
+                nm,
+                format(
+                    "'@tail_recurse' function '{}' never calls itself",
+                    diag::span_str(self.source, nm.start, nm.end),
+                ),
+            );
+        }
+    }
+
+    // The tail calls of elaborated body `body` of the function under check (`ir::tailcall`): its
+    // calls to itself become jumps where they can; under `@tail_recurse` each one that cannot is an
+    // error with the reason, and so is a call to it from a closure of it. The calls seen.
+    fn bc_tail_calls(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::CoreBody) u32 {
+        let f = self.icx.current_fn;
+        let m = self.cur_module();
+        let tagged = unsafe (*self.cur_ast()).attr_of(f, AttrKind::ATTR_TAIL_RECURSE) != null;
+        if body.owner.node != f {
+            // A closure of the function: a call of the function runs in a frame of its own.
+            let mut seen: u32 = 0;
+            for bi in 0..body.blocks.len() {
+                let t = body.blocks.at(bi).term;
+                if t.kind == ir::TM_CALL && t.callee.node == f && t.callee.module == m {
+                    seen += 1;
+                    if tagged {
+                        self.bc_tail_err(
+                            t.span,
+                            format("the call is inside a closure, which runs in a frame of its own"),
+                        );
+                    }
+                }
+            }
+            return seen;
+        }
+        let mut misses = Vector::<irt::TailMiss>::new();
+        let done = irt::convert(body, ow, &mut misses);
+        if done != 0 && ctx.validate {
+            bc_validate_elaborated(ow, body);
+        }
+        if tagged {
+            for i in 0..misses.len() {
+                let ms = *misses.at(i);
+                let why = self.bc_tail_reason(body, &ms);
+                self.bc_tail_err(ms.span, why);
+            }
+        }
+        return done + misses.len() as u32;
+    }
+
+    fn bc_tail_err(self: &mut Self, sp: tok::Span, why: String) {
+        self.errors.emit_span(
+            sp,
+            format("'@tail_recurse': this call of the function to itself cannot become a jump: {}", why),
+        );
+    }
+
+    // The words of miss `ms` of `body`.
+    fn bc_tail_reason(self: &mut Self, body: &ir::CoreBody, ms: &irt::TailMiss) String {
+        let mut nm = String::from_str("a temporary");
+        if ms.local != irt::LOCAL_UNKNOWN && ms.local < body.locals.len() as u32 {
+            let ln = body.locals.at(ms.local as usize).name();
+            if ln.end > ln.start {
+                nm = format("'{}'", diag::span_str(self.source, ln.start, ln.end));
+            }
+        } else {
+            nm = String::from_str("a local of the call");
+        }
+        let mut pn = String::new();
+        if ms.reason == irt::TR_ADJUST || ms.reason == irt::TR_BORROW {
+            let ln = body.locals.at((body.returns + ms.arg) as usize).name();
+            pn = format("parameter '{}'", diag::span_str(self.source, ln.start, ln.end));
+        }
+        return switch ms.reason {
+            irt::TR_NOT_TAIL => format("it is not in tail position: the function does not return its result as it is"),
+            irt::TR_DROP => format("{} is dropped after it returns", nm.as_str()),
+            irt::TR_AFTER => if self.bc_in_defer(ms.at) {
+                format("a 'defer' block runs after it returns");
+            } else {
+                format("code runs after it returns");
+            },
+            irt::TR_INSTANCE => format("it may call another instance of the function (other generic arguments)"),
+            irt::TR_ADJUST => format(
+                "the argument for {} has another type than the parameter (another instance, or a conversion the jump does not repeat)",
+                pn.as_str(),
+            ),
+            irt::TR_BORROW => format(
+                "the argument for {} may hold a borrow of {}, which the next iteration overwrites",
+                pn.as_str(),
+                nm.as_str(),
+            ),
+            irt::TR_CANCEL => format("it can accept a task cancellation, whose check runs after it returns"),
+            _ => format("the function takes a raw address of {}, which could be read after the call", nm.as_str()),
+        };
+    }
+
+    // Does `sp` lie in a `defer` statement of the module?
+    fn bc_in_defer(self: &mut Self, sp: tok::Span) bool {
+        let a = unsafe &*self.cur_ast();
+        for i in 0..a.nnodes() {
+            let n = a.at_const(a.nth_id(i));
+            if n.kind == NodeKind::NODE_DEFER && n.span.start <= sp.start && sp.end <= n.span.end {
+                return true;
+            }
+        }
+        return false;
     }
 
     // The `fn(..)` bound type of each generic parameter whose value `body` calls, and the function

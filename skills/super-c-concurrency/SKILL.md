@@ -81,7 +81,8 @@ ranges and consuming `for` loops tick per iteration. Where the body prints no ti
 instance binding no user type), the chunk end is the loop's end. BCE reads `IN_CHUNK`
 (`lim <= end`), so `i < lim` in the chunk proves `i < end`.
 
-Reachability (`Package::co_compute`) starts at the entry argument of every spawn API
+Reachability (`Package::reach_solve`, over one scan per module, `Package::co_scan`) starts at
+the entry argument of every spawn API
 (`runtime::submit`, which `launch` lowers to, `TaskGroup::spawn`,
 `runtime::spawn_coroutine[_env]`) and continues through std. From a reached body it reaches
 every decl declared inside it, every pinned callee, every conformance method named like a

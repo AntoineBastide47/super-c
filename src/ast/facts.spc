@@ -14,6 +14,9 @@
 // pools (the module's `pool` and the package table `gt`, with their instances, const-expression
 // forms and index tables) grow append-only whenever a later stage interns a substituted or replayed
 // type, and an interned entry is never removed or renumbered -- growth changes no existing answer.
+// A batch build frees a table, or its body-arena part, at its last reader (`Ast::Released`: the
+// body-node `call_info` and `mono` entries with the body arena, `method_refs` and `seeds` after the
+// checks); the check holds the table to its snapshot up to that point and to its released length after.
 import ast::ast as *;
 
 /// Read-only view of one module's typed AST. Holds a raw pointer because consumers thread it through
@@ -89,10 +92,7 @@ extend TypedFacts {
         if self.unchecked_view {
             return Option::<u64>::None;
         }
-        return switch self.a().call_info.get(&n) {
-            Some(v) => Option::<u64>::Some(*v),
-            None => Option::<u64>::None,
-        };
+        return self.a().call_info_of(n);
     }
 
     /// The operator method selected at operator node `n` ((module << 32 | node)), or None.
@@ -181,6 +181,10 @@ const WM_N: usize = 22;
 // while the arena is live (the driver releases it after the instance graph; see
 // `Package::release_bodies`).
 const WM_BODY: usize = 4;
+// The entries of the tables the batch driver frees at their last reader (`Ast::Released`).
+const WM_MONO: usize = 11;
+const WM_METHOD_REFS: usize = 12;
+const WM_CALL_INFO: usize = 19;
 const WM_NAMES: [str<'static>; WM_N] = [
     "nodes",
     "children",
@@ -205,6 +209,9 @@ const WM_NAMES: [str<'static>; WM_N] = [
     "op_method",
     "pat_vals",
 ];
+static_assert(WM_NAMES[WM_MONO] == "mono", "WM_MONO names the mono entry");
+static_assert(WM_NAMES[WM_METHOD_REFS] == "method_refs", "WM_METHOD_REFS names the method_refs entry");
+static_assert(WM_NAMES[WM_CALL_INFO] == "call_info", "WM_CALL_INFO names the call_info entry");
 
 /// Snapshot module `a`'s semantic-table lengths, in WM_NAMES order.
 pub const fn watermark(a: &Ast) FactsWatermark {
@@ -237,30 +244,71 @@ pub const fn watermark(a: &Ast) FactsWatermark {
 }
 
 /// Compare a stored watermark against module `a`'s current tables; report every difference through
-/// stderr prefixed with `facts-check:`. Returns the number of changed tables. One strict set applies
+/// stderr prefixed with `facts-check:`. Returns the number of differences. One strict set applies
 /// after EVERY later stage -- borrow checking, lowering, planning, and codegen all read frozen
-/// semantic data; only the intern pools (see the module header) may grow.
+/// semantic data; only the intern pools (see the module header) may grow. A table the batch driver
+/// freed at its last reader must match the snapshot up to its release and its released length
+/// since, and must be released at its point: the body facts with the body arena, `method_refs` and
+/// `seeds` once `after_checks`.
 @c.cold
-pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32) u32 {
+pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_checks: bool) u32 {
     let now = watermark(a);
     let live_body = a.b.nodes.len() != 0;
     let mut d: u32 = 0;
     for k in 0..WM_N {
-        let was = unsafe w.n[k];
-        let cur = unsafe now.n[k];
-        if was == cur || !live_body && k >= WM_BODY && k < 2 * WM_BODY {
+        if !live_body && k >= WM_BODY && k < 2 * WM_BODY {
             continue;
         }
-        let mut s = String::from_str("facts-check: module ");
-        s.push_u64(mid);
-        s.push_str(": ");
-        s.push_str(unsafe WM_NAMES[k]);
-        s.push_str(" ");
-        s.push_u64(was as u64);
-        s.push_str(" -> ");
-        s.push_u64(cur as u64);
-        s.eprintln();
+        let was = unsafe w.n[k];
+        let cur = unsafe now.n[k];
+        let r = if k == WM_MONO {
+            a.mono_rel;
+        } else if k == WM_METHOD_REFS {
+            a.method_refs_rel;
+        } else if k == WM_CALL_INFO {
+            a.call_info_rel;
+        } else {
+            Released { on: false, pre: 0, post: 0 };
+        };
+        if r.on {
+            d += wm_diff(mid, k, was, r.pre as usize, " up to its release");
+            d += wm_diff(mid, k, r.post as usize, cur, " after its release");
+        } else {
+            d += wm_diff(mid, k, was, cur, "");
+        }
+    }
+    if a.call_info_rel.on != a.b.released || a.mono_rel.on != a.b.released {
+        wm_report(mid, "the body facts are not released with the body arena");
+        d += 1;
+    }
+    if after_checks && (!a.method_refs_rel.on || !a.seeds_rel.on) {
+        wm_report(mid, "method_refs and seeds are not released after the checks");
         d += 1;
     }
     return d;
+}
+
+// Report table `k` of module `mid` going from length `was` to `cur` (`when` qualifies it), as 1.
+@c.cold
+fn wm_diff(mid: u32, k: usize, was: usize, cur: usize, when: str) u32 {
+    if was == cur {
+        return 0;
+    }
+    let mut s = String::from_str(unsafe WM_NAMES[k]);
+    s.push_str(" ");
+    s.push_u64(was as u64);
+    s.push_str(" -> ");
+    s.push_u64(cur as u64);
+    s.push_str(when);
+    wm_report(mid, s.as_str());
+    return 1;
+}
+
+@c.cold
+fn wm_report(mid: u32, what: str) {
+    let mut s = String::from_str("facts-check: module ");
+    s.push_u64(mid);
+    s.push_str(": ");
+    s.push_str(what);
+    s.eprintln();
 }

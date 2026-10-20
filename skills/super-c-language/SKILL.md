@@ -70,11 +70,27 @@ fn add(a: i32, b: i32) i32 { return a + b; }
 ```
 
 The return type follows the parameter list with no arrow. `void` is the implicit return
-type when omitted. The main function signature is `fn main() i32` or
-`fn main(args: Vector<str>) i32`.
+type when omitted. The program entry is the root module's top-level `main`, declared
+`fn main() i32` or `fn main(args: Vector<str>) i32`. A `main` in another module, or a method
+named `main`, is an ordinary function of any signature.
 
 A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
 tuple, name it through an alias: `type P = (A, B); fn f() P`.
+
+A direct call of a function to itself whose result the function returns as it is becomes a
+jump in every profile, so the recursion runs in one frame. It stays a call when a drop, a
+`defer` block or a cancellation check runs after it, when it calls another instance (other
+generic arguments), when an argument may hold a borrow of a local of the call, or when the
+function takes a raw address of a local. `@tail_recurse` on the function makes each such call
+an error that names the reason; a call to the function from one of its closures and a function
+that never calls itself are errors too. A function with several results converts when it
+returns the call's results in their order (`let (a, b) = f(..); return a, b;`).
+
+A function or closure with results cannot reach the end of its body ("function 'f' can reach the
+end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
+`@c.noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`, block or `unsafe` block
+whose every way out is one of these. A `while` or a `for` can run no iteration, so it does not end
+a path.
 
 `return pair();` forwards the results of a multi-value call as the return list. The call must
 give as many results as the function returns, each of its return slot's type exactly (no
@@ -175,7 +191,10 @@ for deliberate leaks. At a scope exit the defers run (LIFO) before the scope's l
 also locals declared after the `defer` (a `let _ = f()` result is one): a deferred signal
 (`defer wg.done()`) fires before them, so put locals that must drop first in an inner block.
 
-Assignment frees the old value first: `s.name = fresh;` never leaks.
+Assignment frees the old value first: `s.name = fresh;` never leaks. A store through a raw
+pointer (`unsafe *p = v`, also into an element `p[i]`) frees nothing: it may write into fresh,
+uninitialized storage. To replace an initialized value there, store through a reference
+(`*unsafe &mut *p = v`).
 
 A by-value pattern cannot move an owning part out of a value whose type has a user `free`
 (`switch v { W { s } => .. }` for `extend W as Free`): "cannot move a part out of a value whose
@@ -471,7 +490,12 @@ cannot be written, moved or viewed mutably while the view is live. A `[]mut T` c
 generic `[]T` parameter infers `T` from it); the `[]T` borrows the `[]mut T` shared, and a `[]mut T`
 passed to a call is a mutable use of it, as a `&mut` argument is. A literal coerced to a slice
 (`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
-its block, so its view cannot leave the block or be returned.
+its block, so its view cannot leave the block or be returned. An `if` or `switch` arm whose value
+borrows a temporary of the arm (an array viewed as a slice, `&S { .. }`) keeps the temporary to
+the end of the block around the whole expression, as if the value stood in place of the
+expression: `f(if c { [x] } else { [y, z] })` is valid. A local declared in the arm dies with the
+arm, so its view or reference cannot be the arm's value. An `if` or `switch` argument converts
+each arm to the parameter's type, as a `let`'s annotation does.
 `[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
@@ -518,6 +542,12 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
   whose signature names one, or that fails on every path (it constructs one), is an error at
   its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
   on some paths (a branch, a loop, recursion) is accepted.
+- A header type (a `struct` or `union` of an `extern "C"` block) has no compile-time size,
+  alignment or `type_info`: "the size of 'stat' is its C header's: it has no compile-time value".
+  Its values evaluate field by field.
+- A `const fn` cannot call an extern function or a variadic one ("... but calls a variadic
+  function"). `assert`, `assert_eq` and `assert_ne` are variadic (`std/test.spc`), so a function
+  that checks an invariant with `assert` is a plain `fn`.
 - A `static_assert` in the body of a generic function (one with its own generic parameters,
   or a method of an extend with parameters) holds per instance:
   `static_assert(T::is_signed(), "only signed types")` fails the build at
@@ -546,8 +576,10 @@ fn page_size() usize {
 ```
 
 No `#ifdef` in Super-C. Use `@platform(windows|macos|linux|wasm|ios|android)` and
-`@arch(x86_64|aarch64|wasm32)` on items; `|` inside the attribute is a union, `!x` the
-complement. An item with both `@platform` and `@arch` compiles only where both hold.
+`@arch(x86_64|aarch64|wasm32)` on items and on the members of an `extend` or an `extern` block
+(an interface member takes no attribute); `|` inside the attribute is a union, `!x` the
+complement. An item with both `@platform` and `@arch` compiles only where both hold, and a gate
+that fails removes the item or member before name resolution.
 `--target=` and `--arch=` select the target.
 
 The prelude defines the build settings as constants usable in any expression:
@@ -615,7 +647,12 @@ extern "C" "native.h" {     // discovers native.c beside the .spc file
 
 An opaque `type X;` renders as its bare C name, so it must name a type some included
 header actually defines (`FILE` works because stdio.h is auto-included; an invented name
-fails in the C compile). `@c.source("impl.c")` names an implementation elsewhere.
+fails in the C compile). A `struct`, `union` or `enum` in the block is a header type: the C type
+(`struct stat`, `enum color`, or a typedef name through `@c.import`), with the fields the declaration lists
+and the header's layout, which the C compiler checks field by field; the block must name that
+header. It has no compile-time size and no drop glue (see `super-c-ffi`, Header Types). No type
+of an extern block implements `Free`: wrap it in a struct that does. `@c.source("impl.c")` names an implementation
+elsewhere.
 `@c.link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
 `va_start`, `va_arg`, `va_end`); `va_arg` needs `unsafe` (see `super-c-ffi`).
 
@@ -655,11 +692,10 @@ source text, values, and file:line on failure.
 | `@c.noinline` | Prevent inlining |
 | `@c.noreturn` | Mark non-returning |
 | `@c.align(N)` | Set alignment of a struct, a union or a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
-| `@c.packed` | Pack a struct or a union (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
-| `@c.export("sym")` | Pin exact C symbol |
-| `@c.import("sym")` | Import exact C symbol |
-| `@c.section("s")` | Place in section |
-| `@c.used` | Prevent dead-code elimination |
+| `@c.packed` | Pack a struct or a union outside an `extern "C"` block (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
+| `@c.export("sym")` | Pin exact C symbol; a constant or `static mut` is defined also when no code names it |
+| `@c.import("sym")` | Import exact C symbol; on an extern type, its C spelling; on a header type's field, its C member |
+| `@c.used` | Prevent dead-code elimination; a constant or `static mut` is defined also when no code names it, with C `used` |
 | `@c.unused` | Suppress unused warnings |
 | `@emit_macro` | Export generic as reusable C macro |
 | `@fmt.skip` | Exempt from formatter |
@@ -671,9 +707,12 @@ source text, values, and file:line on failure.
 | `@c.reads(p, bytes)` / `@c.writes(p, bytes)` / `@c.lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
+| `@tail_recurse` | Every call of the function to itself must become a jump (see Functions); a function with a body only |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
 | `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), or `float.to_int_unchecked` (references/operations.md) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
+| `@unsafe(link_section = "s")` | Place a function with a body or a `static mut` in object-file section `s`; a `static mut` in a section is defined also when no code names it (Unsafe Placement below) |
+| `@unsafe(naked)` | The function's `asm` statements are its whole machine code: no prologue or epilogue (Unsafe Placement below) |
 
 A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names
 resolve at module scope (in the `extend` scope for a member; `@c.reads`/`@c.writes` also see the
@@ -692,6 +731,29 @@ An attribute appears at most once on one declaration (item, method, field, varia
 item), whatever its arguments: a second `@c.align`, `@platform`, `@derive`, `@reflect`,
 `@c.link`, or any other is the parse error `duplicate attribute '@NAME'`. Put several values in
 one occurrence (`@derive(Format, Hash)`, `@reflect(a, b = 1)`, `@platform(linux | macos)`).
+
+### Unsafe Placement
+
+`@unsafe(...)` lists claims the compiler cannot check, in any order, each once, in one
+attribute per declaration (`@unsafe(link_section = "__TEXT,__boot,regular,pure_instructions", naked)`).
+A section is written only as `@unsafe(link_section = ...)`: it changes what the linker and the loader
+assume about the symbol. The C definition carries `__attribute__((used, section("s")))`: `used`
+keeps link-time optimization from inlining or dropping the symbol, and its section with it.
+
+- `link_section = "s"`: on a function with a body or a `static mut`, neither in an extern block. The
+  name holds letters, digits, `_`, `.` and `$`. On macOS and iOS (Mach-O) it is
+  `segment,section[,type[,attributes[,stub size]]]`, segment and section 1 to 16 bytes each, `+`
+  between attributes; on the other targets one name. On wasm32 only a `static mut` takes one (a data
+  segment name): every function is in the code section.
+- `naked`: on a function with a body outside an extern block; the C definition is
+  `__attribute__((naked, noinline))`. The body holds only `asm("...");` statements without operands
+  or clobbers (basic assembly, at least one), which need no `unsafe` block; the assembly reads the
+  parameters where the C calling convention puts them and returns itself. Every parameter and the
+  result is an integer, float, `bool`, `char` or raw pointer (one result at most, or `!`). Not generic,
+  not in a generic extend, not a `const fn`, not `@c.inline` or `@c.always_inline`. A call needs no
+  `unsafe`. wasm32 is an error. The C compiler must have naked functions: the C file stops with
+  `#error` unless it is Clang, or GCC 8 or later on x86-64 (GCC has no naked functions on aarch64).
+  The unused-parameter lint skips a naked function.
 
 ## Concurrency
 

@@ -21,26 +21,51 @@ fn expect_c_user_absent(label: str, src: str, needle: str) {
     assert(!c.code_has(needle), label);
 }
 
-// `src` builds, and its run traps with a message holding `msg`.
-fn expect_panics(label: str, src: str, msg: str) {
-    let r = h::compile_and_run(src);
-    assert(r.built, label);
-    let ok = r.exit != 0 && cli::contains_str(r.out, msg);
-    if !ok {
-        eprintln("{}: exit {}: {}", label, r.exit, unsafe str::from_cstr(r.out));
+// Program `s` as a batch module: its one `fn main(argv: Vector<str>) i32` renamed `case_main`, public
+// and `@c.noinline`, so it stays a function of its own.
+fn case_module(s: str) String {
+    let head = "fn main(argv: Vector<str>) i32 {\n";
+    let mut at: isize = -1;
+    let mut i: usize = 0;
+    while i + head.len() <= s.len() {
+        if (i == 0 || s.byte_at(i - 1) == b'\n') && s.slice(i, i + head.len()) == head {
+            assert(at < 0, "one main per program");
+            at = i as isize;
+        }
+        i += 1;
     }
-    assert(ok, label);
+    assert(at >= 0, "the program has `fn main(argv: Vector<str>) i32`");
+    let mut m = String::from_str(s.slice(0, at as usize));
+    m.push_str("@c.noinline\npub fn case_main(argv: Vector<str>) i32 {\n");
+    m.push_str(s.slice(at as usize + head.len(), s.len()));
+    return m;
+}
+
+// The root over modules `case_0` .. `case_<n-1>`: it runs the `case_main` that `BATCH_CASE` names with
+// its own arguments.
+fn case_root(n: usize) String {
+    let mut root = String::from_str("import stdlib;\n");
+    let mut arms = String::new();
+    for k in 0..n {
+        root.format_into("import case_{};\n", k);
+        arms.format_into("    if k == {} {{\n        return case_{}::case_main(argv);\n    }}\n", k, k);
+    }
+    root.format_into(
+        "fn main(argv: Vector<str>) i32 {{\n    let e = stdlib::getenv(\"BATCH_CASE\");\n    let k = if e == null {{\n        -1;\n    }} else {{\n        unsafe str::from_cstr(e).parse_i64().unwrap_or(-1);\n    }};\n{}    return 99;\n}}\n",
+        arms.as_str(),
+    );
+    return root;
 }
 
 fn safety_element_checks(b: &mut h::ExitBatch) {
     // Element index equal to the length.
-    expect_panics(
+    b.add_trap(
         "index == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..2];\n    let i = argv.len() + 1; // == 2 at runtime\n    return s[i];\n}\n",
         "index out of bounds",
     );
     // Empty view element access.
-    expect_panics(
+    b.add_trap(
         "empty view access panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..0];\n    let i = argv.len() - 1; // == 0\n    return s[i];\n}\n",
         "index out of bounds",
@@ -55,31 +80,31 @@ fn safety_element_checks(b: &mut h::ExitBatch) {
 
 fn safety_range_checks(b: &mut h::ExitBatch) {
     // Exclusive range with start > end.
-    expect_panics(
+    b.add_trap(
         "start > end panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 2; // == 3\n    let t: []i32 = s[lo..1];\n    return t.len() as i32;\n}\n",
         "range out of bounds",
     );
     // Exclusive range with end > len.
-    expect_panics(
+    b.add_trap(
         "end > len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 4; // == 5\n    let t: []i32 = s[0..hi];\n    return t.len() as i32;\n}\n",
         "range out of bounds",
     );
     // Inclusive range with end == len.
-    expect_panics(
+    b.add_trap(
         "inclusive end == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 3; // == 4\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
         "index out of bounds",
     );
     // inclusive range with end == usize::MAX: `end + 1` must NOT wrap past the check.
-    expect_panics(
+    b.add_trap(
         "inclusive end == usize::MAX panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = 0xFFFFFFFFFFFFFFFFu64 as usize - 1 + argv.len(); // == usize::MAX\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
         "index out of bounds",
     );
     // A range whose length subtraction would underflow without the ordered check.
-    expect_panics(
+    b.add_trap(
         "underflowing range panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 3; // == 4\n    let t: []i32 = s[lo..2];\n    return t.len() as i32;\n}\n",
         "range out of bounds",
@@ -105,7 +130,7 @@ fn safety_mutation_and_zst(b: &mut h::ExitBatch) {
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    v.push(Z {});\n    let i = argv.len(); // == 1\n    let _ = v[i];\n    return v.len() as i32 - 2;\n}\n",
         0,
     );
-    expect_panics(
+    b.add_trap(
         "zst logical length out of range panics",
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    let i = argv.len() + 1; // == 2\n    let _ = v[i];\n    return 0;\n}\n",
         "index out of bounds",
@@ -258,10 +283,10 @@ fn coalescing_groups_adjacent_checks(b: &mut h::ExitBatch) {
 fn coalescing_panic_parity() {
     // A failing group panics (earlier site, same panic class); disabled BCE panics too.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 61; // == 62: j + 2 is out of bounds\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s;\n}\n";
-    expect_panics("group check panics", SRC, "index out of bounds");
+    h::expect_trap("group check panics", SRC, "index out of bounds");
     // The guard restores the variable when the test ends; the spawned build inherits it.
     let _env2 = cli::set_env("SC_BCE", "0");
-    expect_panics("disabled pass panics identically", SRC, "index out of bounds");
+    h::expect_trap("disabled pass panics identically", SRC, "index out of bounds");
 }
 
 fn coalescing_blocked_by_mutation(b: &mut h::ExitBatch) {
@@ -446,11 +471,11 @@ fn inline_behavior_parity() {
 fn inline_panic_site_parity() {
     // An out-of-range at() panics under every switch combination.
     let BAD: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return *v.at(argv.len() + 5);\n}\n";
-    expect_panics("oob panics (inline+fold on)", BAD, "index out of bounds");
+    h::expect_trap("oob panics (inline+fold on)", BAD, "index out of bounds");
     let _env6 = cli::set_env("SC_BCE_DISABLE", "fold");
-    expect_panics("oob panics (fold off)", BAD, "index out of bounds");
+    h::expect_trap("oob panics (fold off)", BAD, "index out of bounds");
     let _env7 = cli::set_env("SC_INLINE", "0");
-    expect_panics("oob panics (both off)", BAD, "index out of bounds");
+    h::expect_trap("oob panics (both off)", BAD, "index out of bounds");
 }
 
 fn inline_omitted_aggregate_members(b: &mut h::ExitBatch) {
@@ -521,16 +546,23 @@ fn sig_disable_and_inline_parity() {
     // same way in every mode.
     let SRC: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n";
     let BAD: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    return v.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let k = argv.len() + 4;\n    let _ = peek(&v);\n    return v[k];\n}\n";
-    h::expect_exit("sig on", SRC, 0);
-    expect_panics("sig on, oob panics", BAD, "index out of bounds");
+    // One build per setting: both programs share it.
+    let mut on = h::ExitBatch::new();
+    on.add("sig on", SRC, 0);
+    on.add_trap("sig on, oob panics", BAD, "index out of bounds");
+    on.run();
     let _env8 = cli::set_env("SC_BCE_DISABLE", "sig");
-    h::expect_exit("sig off", SRC, 0);
-    expect_panics("sig off, oob panics", BAD, "index out of bounds");
+    let mut off = h::ExitBatch::new();
+    off.add("sig off", SRC, 0);
+    off.add_trap("sig off, oob panics", BAD, "index out of bounds");
+    off.run();
     let _env9 = cli::set_env("SC_INLINE", "0");
     h::expect_exit("sig off, inline off", SRC, 0);
     let _env10 = cli::set_env("SC_BCE_DISABLE", "");
-    h::expect_exit("sig on, inline off", SRC, 0);
-    expect_panics("sig on inline off, oob panics", BAD, "index out of bounds");
+    let mut no_inline = h::ExitBatch::new();
+    no_inline.add("sig on, inline off", SRC, 0);
+    no_inline.add_trap("sig on inline off, oob panics", BAD, "index out of bounds");
+    no_inline.run();
     let _env11 = cli::set_env("SC_INLINE", "");
 }
 
@@ -555,7 +587,7 @@ fn join_versions_are_path_sound() {
     // After a join, the guard on `x` says nothing about `big`, whatever branch the walk saw last.
     let SRC: str = "fn get(v: []i32, s0: usize, c: bool) i32 {\n    let big = s0 + 100;\n    let mut x = s0;\n    if c {\n        x = s0;\n    } else {\n        x = big;\n    }\n    if x < v.len() {\n        return v[big];\n    }\n    return 7;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = Vector::<i32>::new();\n    w.push(1);\n    w.push(2);\n    return get(w[0..2], argv.len() - 1, true);\n}\n";
     expect_c_user_present("the unrelated access keeps its check", SRC, "__sc_bounds(");
-    expect_panics("the unrelated access panics", SRC, "index out of bounds");
+    h::expect_trap("the unrelated access panics", SRC, "index out of bounds");
     // `c || i < len` does not bound `i` on its true edge.
     expect_c_user_present(
         "an or-condition keeps the check",
@@ -575,7 +607,7 @@ fn loop_header_kills_lengths_the_loop_writes() {
     // The bound read before the loop is stale on the second iteration once the body pops.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 2 {\n        v.push(k as i32);\n    }\n    let n = v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += v[i];\n        let _ = v.pop();\n        i += 1;\n    }\n    return x;\n}\n";
     expect_c_user_present("the popped vector keeps its check", SRC, "__sc_bounds(");
-    expect_panics("the stale bound panics", SRC, "index out of bounds");
+    h::expect_trap("the stale bound panics", SRC, "index out of bounds");
 }
 
 fn interval_facts_remove_strided_checks(b: &mut h::ExitBatch) {
@@ -625,29 +657,106 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
     assert(ok, label);
 }
 
+// `vec_check` for several programs in one project build: case k is module `case_k` (`case_module`)
+// under `case_root`, its C is `build/debug/gen/case_k.c`, and each case runs in its own process. On the
+// vector conformance lane (a wasm32 run) or when the build fails, each case builds alone.
+struct VecProgs {
+    labels: Vector<String>,
+    srcs: Vector<String>,
+    present: Vector<bool>,
+    traps: Vector<String>,
+}
+
+extend VecProgs {
+    fn new() VecProgs {
+        return VecProgs {
+            labels: Vector::<String>::new(),
+            srcs: Vector::<String>::new(),
+            present: Vector::<bool>::new(),
+            traps: Vector::<String>::new(),
+        };
+    }
+
+    fn add(self: &mut VecProgs, label: str, src: str, present: bool, trap: str) {
+        self.labels.push(String::from_str(label));
+        self.srcs.push(String::from_str(src));
+        self.present.push(present);
+        self.traps.push(String::from_str(trap));
+    }
+
+    fn check(self: &VecProgs) {
+        if h::simd_lane() {
+            for k in 0..self.srcs.len() {
+                vec_check(
+                    self.labels.at(k).as_str(),
+                    self.srcs.at(k).as_str(),
+                    *self.present.at(k),
+                    self.traps.at(k).as_str(),
+                );
+            }
+            return;
+        }
+        let p = h::diff_proj();
+        for k in 0..self.srcs.len() {
+            p.mkfile(format("case_{}.spc", k).as_str(), case_module(self.srcs.at(k).as_str()).as_str());
+        }
+        p.mkfile("main.spc", case_root(self.srcs.len()).as_str());
+        let b = h::diff_build_in(p, []);
+        let root = b.proj.dir();
+        for k in 0..self.srcs.len() {
+            let label = self.labels.at(k).as_str();
+            let c = cli::read_text(format("{}/build/debug/gen/case_{}.c", root, k).as_str());
+            if !b.built || !c.contains("case_main(") {
+                eprintln("--- case {} builds alone", k);
+                vec_check(label, self.srcs.at(k).as_str(), *self.present.at(k), self.traps.at(k).as_str());
+                continue;
+            }
+            let present = *self.present.at(k);
+            assert(c.contains("__sc_bounds_vec(") == present, label);
+            // a proven vector access leaves no element check either
+            assert(present || !c.contains("__sc_bounds("), label);
+            let mut cmd = format("\"{}/prog{}\"", root, unsafe str::from_cstr(cli::binext()));
+            let mut errp = format("{}/.err", root);
+            let exit = cli::run_with(cmd.cstr(), null, null, errp.cstr(), format("BATCH_CASE={}", k).as_str());
+            let err = cli::read_text(errp.as_str());
+            let trap = self.traps.at(k).as_str();
+            let ok = if trap.len() == 0 {
+                exit == 0;
+            } else {
+                exit != 0 && err.contains(trap);
+            };
+            if !ok {
+                eprintln("{}: exit {}: {}", label, exit, err.as_str());
+            }
+            assert(ok, label);
+        }
+    }
+}
+
 // A vector load or store checks `start <= len && N <= len - start` once (IN_BOUNDS_GROUP): in a loop
 // over `len - len % N` stepping by N the interval and stride facts prove it; against the bare length,
 // or after the slice's owner shrinks, the check stays.
 @test
 fn vector_access_group_checks() {
+    let mut vp = VecProgs::new();
     let STRIDED: str = "import std::simd;\nfn sum(s: []i32, d: []mut i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < n {\n        let v = simd::load::<i32, 4>(s, i);\n        acc = acc.wrapping_add(v);\n        i += 4;\n    }\n    return acc[0] + acc[3] + d.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let mut d = [0; 4];\n    return sum(v[0..v.len()], d) - 18;\n}\n";
-    vec_check("the strided load is proven", STRIDED, false, "");
+    vp.add("the strided load is proven", STRIDED, false, "");
     let BARE: str = "import std::simd;\nfn sum(s: []i32) i32 {\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < s.len() {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as i32);\n    }\n    return sum(v[0..v.len()]);\n}\n";
-    vec_check(
+    vp.add(
         "the bare length keeps the check: the last partial load traps",
         BARE,
         true,
         "4 lanes from 8 but the length is 9",
     );
     let SHRINK: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let n = v.len() - v.len() % 4;\n    let mut t = 0;\n    let mut i: usize = 0;\n    while i < n {\n        t += simd::load::<i32, 4>(v[0..v.len()], i)[0];\n        let _ = v.pop();\n        let _ = v.pop();\n        let _ = v.pop();\n        i += 4;\n    }\n    return t;\n}\n";
-    vec_check(
+    vp.add(
         "a pop in the loop keeps the check: the load past the shrunk length traps",
         SHRINK,
         true,
         "4 lanes from 4 but the length is 5",
     );
     let BETWEEN: str = "import std::simd;\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 7 {\n        v.push(k as i32);\n    }\n    let i = argv.len() + 3; // == 4\n    if i + 4 > v.len() {\n        return 9;\n    }\n    let a = simd::load::<i32, 4>(v[0..v.len()], i);\n    let _ = v.pop();\n    let b = simd::load::<i32, 4>(v[0..v.len()], i);\n    return a[0] + b[0];\n}\n";
-    vec_check(
+    vp.add(
         "a store to the length's base keeps the second check, which traps",
         BETWEEN,
         true,
@@ -656,9 +765,9 @@ fn vector_access_group_checks() {
     // A slice built by a struct literal: its length is the value of its `len` operand, so the loop
     // over that value's aligned part is proven; a later write to the field keeps the check.
     let VIEW: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let s = unsafe Slice::<i32> { ptr: p, len: n };\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
-    vec_check("a view literal's length is its len operand", VIEW, false, "");
+    vp.add("a view literal's length is its len operand", VIEW, false, "");
     let VIEW_SET: str = "import std::simd;\nfn sum(p: *const i32, n: usize) i32 {\n    let mut s = unsafe Slice::<i32> { ptr: p, len: n };\n    unsafe s.len = n - 3;\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
-    vec_check(
+    vp.add(
         "a write to the view's len keeps the check: the second load traps",
         VIEW_SET,
         true,
@@ -667,15 +776,15 @@ fn vector_access_group_checks() {
     // An early-return guard bounds the loop's limit by the other slice's length: both accesses are
     // proven (`i < m <= n <= y.len()`).
     let GUARD: str = "import std::simd;\nfn sum(x: []f32, y: []f32) f32 {\n    let n = x.len();\n    if y.len() < n {\n        return 0.0;\n    }\n    let m = n - n % 4;\n    let mut acc = Simd::<f32, 4>::splat(0.0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc + simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);\n        i += 4;\n    }\n    let mut s = acc[0] + acc[1] + acc[2] + acc[3];\n    for k in m..n {\n        s = s + x[k] * y[k];\n    }\n    return s;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<f32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as f32);\n    }\n    return sum(v[0..v.len()], v[0..v.len()]) as i32 - 204;\n}\n";
-    vec_check("a guard proves the other slice and the scalar tail", GUARD, false, "");
+    vp.add("a guard proves the other slice and the scalar tail", GUARD, false, "");
+    vp.check();
 }
 
 // A whole reassignment of a view kills the length facts of its old value: the next access checks
 // the new length, in straight-line code, in a loop, and after an index operand that reassigns the
 // indexed view.
-@test
-fn safety_reassigned_view() {
-    expect_panics(
+fn safety_reassigned_view(b: &mut h::ExitBatch) {
+    b.add_trap(
         "reassigned view",
         M"(@c.noinline
 fn f(mut x: []u32, y: []u32) u32 {
@@ -694,7 +803,7 @@ fn main(argv: Vector<str>) i32 {
 )",
         "index out of bounds",
     );
-    expect_panics(
+    b.add_trap(
         "view reassigned in a loop",
         M"(@c.noinline
 fn f(mut x: []u32, y: []u32, n: usize) u32 {
@@ -716,7 +825,7 @@ fn main(argv: Vector<str>) i32 {
 )",
         "index out of bounds",
     );
-    expect_panics(
+    b.add_trap(
         "view reassigned by an index operand",
         M"(fn pick(mut x: [][]u32, y: [][]u32, go: bool) u32 {
     if !go {
@@ -736,8 +845,8 @@ fn main(argv: Vector<str>) i32 {
     );
 }
 
-// The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
-// a group builds once where each case built alone.
+// The exit-code and trap cases of the provider functions above, one program per group
+// (`h::ExitBatch`): a group builds once where each case built alone.
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
@@ -757,5 +866,6 @@ fn exit_cases_01() {
     interval_facts_remove_strided_checks(&mut b);
     interval_join_keeps_the_hull(&mut b);
     interval_widening_terminates_on_nested_loops(&mut b);
+    safety_reassigned_view(&mut b);
     b.run();
 }

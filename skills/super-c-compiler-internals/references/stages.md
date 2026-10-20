@@ -156,6 +156,10 @@ Per function (`bc_fn`, extending `TypeChecker`):
    `TM_DROP` terminators and flag temps; the inliner's size verdict is recorded first
    (`CoreBody.inline_size_ok`). Under `SC_BC_VALIDATE=1` the structural verifier and
    `verify_drops` check every elaborated body.
+   Then `bc_tail_calls` converts the function body's calls to itself into jumps
+   (`ir/tailcall.spc`, [core-ir.md](core-ir.md)) and, under `@tail_recurse`, reports each call
+   that stays a call (one in a closure of the function too) and a function that never calls
+   itself; a converted body is verified again under `SC_BC_VALIDATE=1`.
 5. Each spent Lowerer's body and closures are kept as a `KeptBody` in the shared `irl::Keep`
    cache: one elaborated lowering per body, reused by emission (a parallel job keeps its own and absorbs it under the
    engine lock). Every job leases an oracle + context slot from a bounded pool; a module
@@ -180,6 +184,26 @@ modular return-lifetime check) run alongside.
   its conformance and its parameters' bounds name are used by it. A lint `fix` attaches to the last warning emitted
   (`Errors::last_warn`, `src/utils/errors.spc`), so call it right after the warning it
   repairs. When a lint disagrees with the compiler, suspect the lint first.
+- `check_recursion` (`src/ir/recursion.spc`): an **error**, run serially on every build of
+  user modules and in `lint`, over a summary of each kept function body (`Summarizer`: its
+  ends, its calls of reported functions, its branches; the blocks between them left out, so
+  drop elaboration and tail-call conversion do not change the answer). The batch check
+  summarizes only the members of a cyclic component of the direct-call graph of the kept
+  bodies (`check_kept`), a superset of the summaries' calls. The language server
+  runs the same `recur::check` over the summaries its borrow round records per module
+  (`Package.recur`). A path ends at a return, an `assert`, an `unreachable` terminator, or a
+  call of a `@c.noreturn` or extern C function (a verified intrinsic returns); every other
+  call returns. The call graph has the direct calls between the reported functions and
+  methods only (no fn-value, `dyn` or bound call). Tarjan gives the strongly connected
+  components; one worklist walk per component parks a call of a member not yet known to end
+  until that member ends, so each point is visited once. A member that cannot reach an end
+  without such a call is reported at its first call, in source order, of a member that does not
+  end either (`cannot return without calling itself`, or `... calling 'g', which cannot return
+  either`). Unbounded recursion is an error also in tail position: a tail call made a jump
+  loops forever. Traps inside a statement, panics or exits inside another function and task
+  cancellations (the ladder after a cancellation check, cut at its `cancel_ladder_begin`
+  call) are not ends, as in rustc's `unconditional_recursion`. About 4 ms on the compiler's
+  own build with a release compiler (`SC_CEMIT_STATS`, `phase recursion`).
 - `check_always_panics`: an **error**, run on every build of user modules: one job per
   linted module on the item job runner, a private engine leased per worker (the serial
   path scans with the master engine), diagnostics published in declaration order.
@@ -212,14 +236,16 @@ products and 2-by-1 divisions of the wide integers evaluate through the limb cod
 and so do the `Float<E, F>` formats. The interpreter reads a union through the member last written,
 or through another scalar member of its width (`f64_bits`: the bits retyped, `Interp::repun`); any
 other member is no compile-time value, so a `String` past its inline bytes (23 on a 64-bit target),
-whose union shares its length byte with the heap capacity, does not fold. Objects are reclaimed per
-constant and per call: the objects a call allocates (its frame, its by-value argument copies, its
-temporaries) die when it returns unless it stored a reference into an object older than the call
-(`note_wr`) or grew such an object (`note_grow`), both tracked as the lowest such object id since the
-call began (`Interp.wr_min`), or an item cache took one. So the budget bounds the live objects, and a long
-computation (a wide float's text) can meet it. Every store of a reference into an object must go
-through `note_wr`, the in-place `*r = v` copy of `write_place` included: a store it misses lets
-`call` reclaim an object still referenced. The
+whose union shares its length byte with the heap capacity, does not fold. A call's frame and every
+object it allocates belong to the call's region (`IObj.lvl`) and are released when it returns,
+except what it returns or stores into older storage; constant frames, heap blocks, literal bytes
+and item cells live to the end of the evaluation, and `free` returns a block's slots to the
+budget. The memory budget (`--const-eval-memory`, bytes over 24-byte `IVal` slots) charges slots
+and each object's header (`OBJ_SLOTS`), and no object or call count limits an evaluation. The copies
+a frame overwrites stay charged until the frame returns, so a long loop in one frame (a wide
+float's text) can still meet the budget. A pointer into a returned call's storage
+that outlives the call keeps the object as a dead header: reading through it traps "use after
+return". The
 interpreter also models std's `bits.h` helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
 wrapping `sc_w*64` and `sc_mulo_*64`), evaluates an f32 libm function as the f32 function the
 program links (`libm1f`, `libm2f`: `acosf` for an f32 `acos`, never the f64 result narrowed), so a
@@ -265,9 +291,14 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 - **Per-body preparation** (`DropCtx::apply_drops`): a kept body arrives elaborated by
   the borrow pass; a body emission lowered itself (a per-instance re-lowering, a macro
   wrapper) is elaborated here first (`ird::may_schedule`, forest, moves-only facts, CFG,
-  move dataflow, `ird::elaborate_into` + `ird::insert_drops`). Then the inliner splices
+  move dataflow, `ird::elaborate_into` + `ird::insert_drops`) and its calls to itself become
+  jumps (`irt::convert`; the borrow pass converted the kept bodies). Then the inliner splices
   elaborated callees (their drops, flag temps and markers come along; no ownership
-  analysis runs on the merged body), then bounds-check elimination, then rendering.
+  analysis runs on the merged body), then bounds-check elimination, then rendering. Rendering
+  first decides each local's C spelling: `setup_locals` (coalescing, folds), then
+  `emit_body_core_o` over the CFG (copy coalescing, array elements, discarded results, deferred
+  result copies, loop bounds, declarations at their initializing writes, call forwarding; see
+  Direct C in [SKILL.md](../SKILL.md)).
   Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning fields.
 - A designated array literal (`[[i] = v]`) has the type of its spelled count, not the
   destination's length. A store of a shorter source zero-fills the destination, then

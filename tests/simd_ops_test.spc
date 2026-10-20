@@ -176,7 +176,7 @@ fn masks_read_several_times_stay_lane_masks() {
 @test
 fn operator_misuse_is_diagnosed() {
     let main = "\nfn main() i32 {\n    return 0;\n}\n";
-    let cases: [[str; 2]; 11] = [
+    let cases: [[str; 2]; 10] = [
         ["fn f(a: i32x4, b: f32x4) { let _ = a + b; }", "mismatched types"],
         ["fn f(a: f32x4, b: f64) { let _ = a + b; }", "the right operand is the vector type or its lane type"],
         ["fn f(a: f32x4, b: f64) { let _ = b + a; }", "the left operand is the vector type or its lane type"],
@@ -193,13 +193,18 @@ fn operator_misuse_is_diagnosed() {
             "@intrinsic(\"simd.add\")\nfn g(a: f32x4, b: f32x4) f32x4;",
             "'@intrinsic' is reserved for the standard library",
         ],
-        ["@intrinsic(\"simd.nope\")\nfn g(a: f32x4) f32x4;", "unknown intrinsic 'simd.nope'"],
     ];
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str(main);
-        h::expect_build_err(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], src.as_str(), c[1]);
     }
+    // The reserved attribute is the first error of the check; the build reports the unknown name too.
+    h::expect_build_err(
+        "an unknown intrinsic",
+        "@intrinsic(\"simd.nope\")\nfn g(a: f32x4) f32x4;\nfn main() i32 {\n    return 0;\n}\n",
+        "unknown intrinsic 'simd.nope'",
+    );
     h::expect_build_err(
         "widen to a narrower type",
         "fn main() i32 {\n    let v = Simd::<i32, 4>::splat(1).widen::<i16>();\n    return v[0] as i32 - 1;\n}\n",
@@ -384,20 +389,23 @@ fn main(args: Vector<str>) i32 {
     return unsafe b[start + 3] - 2 * unsafe a[start + 3];
 }
 )";
-    h::expect_run("start = len - N", src, "6", "");
-    h::expect_run("start = len - N + 1", src, "7", "index out of bounds: 4 lanes from 7 but the length is 10");
-    h::expect_run("start > len", src, "11", "index out of bounds: 4 lanes from 11 but the length is 10");
     // The largest start of the target: wasm32 in the vector conformance lane.
     let max = if h::simd_lane() {
         "4294967295";
     } else {
         "18446744073709551615";
     };
-    h::expect_run(
-        "start = usize::MAX",
+    let past = format("index out of bounds: 4 lanes from {} but the length is 10", max);
+    h::expect_runs(
+        "a slice access at its bounds",
         src,
-        max,
-        format("index out of bounds: 4 lanes from {} but the length is 10", max).as_str(),
+        ["6", "7", "11", max],
+        [
+            "",
+            "index out of bounds: 4 lanes from 7 but the length is 10",
+            "index out of bounds: 4 lanes from 11 but the length is 10",
+            past.as_str(),
+        ],
     );
     let decls = M"(import std::simd;
 const fn ld(start: usize) i32 {
@@ -495,27 +503,27 @@ fn main() i32 {
 // `[]T` it is borrowed shared.
 @test
 fn vector_access_borrows_its_slice() {
-    h::expect_build_err(
+    h::expect_err_msg(
         "a store under a shared borrow",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let r = &a[0];\n    simd::store(a, 0, Simd::<i32, 4>::splat(0));\n    return *r;\n}\n",
         "borrow",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a load under a mutable borrow",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let m = &mut a[0];\n    let v = simd::load::<i32, 4>(a, 0);\n    *m = v[1];\n    return a[0];\n}\n",
         "borrow",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a store through a `[]mut` view under a shared borrow of it",
         "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let s: []mut i32 = a;\n    let r = &s[0];\n    simd::store(s, 0, Simd::<i32, 4>::splat(7));\n    return *r;\n}\n",
         "borrow",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a `[]mut` view passed to a call under a shared borrow of it",
         "fn g(s: []mut i32) {\n    s[0] = 7;\n}\nfn main() i32 {\n    let mut a = [1, 2, 3, 4];\n    let s: []mut i32 = a;\n    let r = &s[0];\n    g(s);\n    return *r;\n}\n",
         "borrow",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a write through a `[]mut` view while its `[]T` view is live",
         "fn main() i32 {\n    let mut a = [3, 4];\n    let y: []mut i32 = a;\n    let r: []i32 = y;\n    y[0] = 5;\n    return r[0];\n}\n",
         "borrow",

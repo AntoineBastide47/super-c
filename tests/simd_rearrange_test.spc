@@ -107,23 +107,24 @@ fn index_list_rules_are_diagnosed() {
     for c in cases {
         let mut src = String::from_str(pre);
         src.format_into("{}\n}}\nfn main() i32 {{\n    return 0;\n}}\n", c[0]);
-        h::expect_build_err(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], src.as_str(), c[1]);
     }
-    h::expect_build_err(
+    h::expect_err_msg(
         "a constant list of no lanes",
         "import std::simd;\nfn main() i32 {\n    return simd::swizzle(Simd::<i32, 4>::splat(1), [])[0];\n}\n",
         "`Simd<i32, 0>` needs a power-of-two lane count",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a generic list beside a run-time value",
         "import std::simd;\nfn g<const K: usize>(v: Simd<u32, 4>, x: usize) u32 {\n    return simd::swizzle(v, [K, x])[0];\n}\nfn main(a: Vector<str>) i32 {\n    return g::<1>(Simd::<u32, 4>::splat(1), a.len()) as i32;\n}\n",
         "the index list of `swizzle` must be a compile-time constant",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a list past the lanes in a constant's instance",
         "import std::simd;\nconst fn g<const K: usize>(v: Simd<u32, 4>) u32 {\n    return simd::swizzle(v, [K, 0, 0, 0])[0];\n}\nconst C: u32 = g::<5>(Simd::<u32, 4>::splat(1));\nfn main() i32 {\n    return C as i32;\n}\n",
         "constant 'C' cannot be evaluated at compile time: the index list names a lane past the lanes of its operands",
     );
+    // An instance's list is checked when the build lowers the instance.
     h::expect_build_err(
         "a list past the lanes of one instance",
         M"(import std::simd;

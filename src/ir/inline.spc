@@ -2,9 +2,13 @@
 // caller-local BCE pass sees the callee's checks and guards. Runs on the emission path only, over ELABORATED bodies: the borrow pass rewrote
 // every kept body with its drop terminators (`ir::drops`), so a callee splices in with its own
 // drops, flag temps and storage markers, and no ownership analysis runs on the merged body (the
-// caller was elaborated before its splices too). Argument operands are reused in place (read
-// order preserved); every early return becomes a jump to one join block that moves the return
-// slots into the call's destinations.
+// caller was elaborated before its splices too). A parameter the callee never writes, drops or
+// addresses reads its argument in place (`param_facts`, `splice`): a constant argument is the
+// constant, an autoref receiver's `(*self).f` is the caller's `x.f`, and any other argument's place
+// is read where the parameter was when nothing the callee runs can change it (a callee that writes
+// no memory, or a place in a local whose storage no pointer reaches: `exposed`). Every other
+// parameter takes a prelude copy of its argument, in the call's argument order. Every early return
+// becomes a jump to one join block that moves the return slots into the call's destinations.
 //
 // Candidate policy: direct non-variadic calls to known function bodies of at most
 // MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks / MAX_CALLEE_LOCALS locals (VEC_SCALE
@@ -131,6 +135,26 @@ pub const MAX_DEPTH: usize = 6;
 // keep_ix value encoding: slot index, or REJ_BASE | reason for a cached rejection.
 const REJ_BASE: u64 = 0xFFFFFFFF00000000u64;
 
+// How an argument meets its parameter (`run`'s wire, one per argument).
+const W_EXACT: u8 = 0; // the parameter's type
+const W_AUTOREF: u8 = 1; // a place for a reference parameter: the callee receives its address
+const W_DEREF: u8 = 2; // a reference for a by-value parameter: the callee receives the referent
+const W_PTR: u8 = 3; // a pointer or reference of another qualifier: the same C value
+const W_FN: u8 = 4; // a function for a function-pointer parameter
+
+// Parameter facts of a callee (`param_facts`), one byte per parameter.
+const PF_WRITE: u8 = 1; // a store, a call result or a drop names its own storage
+const PF_ADDR: u8 = 2; // its own storage may be addressed: a borrow, a receiver, an array argument
+const PF_PLACE: u8 = 4; // a place of it outside an operand, or a projected place
+const PF_BARE: u8 = 8; // a place of it whose path does not start with a dereference
+
+// How a parameter reads its argument (`splice`), kept in its facts byte from bit SUB_SHIFT.
+const SUB_SHIFT: u8 = 4;
+const SUB_NONE: u8 = 0; // a prelude copy
+const SUB_PLACE: u8 = 1; // the argument's place: `a.f` reads `x.f`
+const SUB_REF: u8 = 2; // through an autoref receiver: `(*self).f` reads `x.f`
+const SUB_CONST: u8 = 3; // the argument constant
+
 /// One cached callee: its lowered, elaborated body plus the generic-parameter decl list in targ
 /// order (extend parameters first, then the function's own).
 struct CalleeInfo {
@@ -197,6 +221,12 @@ pub struct InlineCtx {
     pub xm_ix: Map<u64, u64>, // shape hash -> xms index
     pub xm_key: Vector<Vector<u64>>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
     pub xms: Vector<Map<u64, u64>>,
+    /// Per entry: where the callee's parameter facts under that translation start in `xm_pfs`
+    /// (`param_facts`, one byte per parameter), and whether it writes no memory (0 not computed, 1
+    /// no, 2 yes).
+    pub xm_pfo: Vector<u32>,
+    pub xm_wf: Vector<u8>,
+    pub xm_pfs: Vector<u8>,
     /// Callees with vector index lists over their parameters (`CoreBody.has_lists`) re-lowered under
     /// one call shape's bindings, where the lists resolve: shape hash -> `rl` index, or a rejection.
     pub rl_ix: Map<u64, u64>,
@@ -211,6 +241,10 @@ pub struct InlineCtx {
     pub sc_shape: Vector<u64>,
     pub sc_live: Vector<bool>,
     pub sc_stack: Vector<u32>,
+    pub sc_expo: Vector<u32>, // per caller local: the operations that may address its storage (`exposed`)
+    pub sc_oref: Vector<u32>, // per caller operand: a mark (`unread`)
+    pub sc_orph: Vector<u32>, // the call operands of arguments read in place (`unread`)
+    pub sc_pf: Vector<u8>, // per callee parameter: its `PF_*` facts
 }
 
 fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) {
@@ -489,9 +523,9 @@ extend InlineCtx {
     pub fn xm_bytes(self: &Self) u64 {
         let mut b: u64 = 0;
         for i in 0..self.xms.len() {
-            b += (self.xms.at(i).len() * 17 * 2 + self.xm_key.at(i).len() * 8) as u64;
+            b += (self.xms.at(i).len() * 17 * 2 + self.xm_key.at(i).len() * 8 + 5) as u64;
         }
-        return b + (self.xm_ix.len() * 17 * 2) as u64;
+        return b + (self.xm_ix.len() * 17 * 2 + self.xm_pfs.len()) as u64;
     }
 
     pub fn new(store: *const InlineStore) InlineCtx {
@@ -504,6 +538,9 @@ extend InlineCtx {
             xm_ix: Map::<u64, u64>::new(),
             xm_key: Vector::<Vector<u64>>::new(),
             xms: Vector::<Map<u64, u64>>::new(),
+            xm_pfo: Vector::<u32>::new(),
+            xm_wf: Vector::<u8>::new(),
+            xm_pfs: Vector::<u8>::new(),
             rl_ix: Map::<u64, u64>::new(),
             rl: Vector::<CalleeInfo>::new(),
             sc_blk_origin: Vector::<u32>::new(),
@@ -515,6 +552,10 @@ extend InlineCtx {
             sc_shape: Vector::<u64>::new(),
             sc_live: Vector::<bool>::new(),
             sc_stack: Vector::<u32>::new(),
+            sc_expo: Vector::<u32>::new(),
+            sc_oref: Vector::<u32>::new(),
+            sc_orph: Vector::<u32>::new(),
+            sc_pf: Vector::<u8>::new(),
         };
     }
 
@@ -1034,7 +1075,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &
         }
         // The build filter and the feature checks have read the gates and features: no code of theirs.
         let kd = a.attrs.at(k).kind;
-        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8;
+        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8 || kd == AttrKind::ATTR_TAIL_RECURSE as u8;
         if !benign {
             return REJ_BASE | IJ_NOT_FN as u64;
         }
@@ -1337,6 +1378,15 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     live.resize_default(lw.body.blocks.len());
     let _ = reach(&lw.body, lw.body.entry, &mut live, &mut stack);
     let vec_caller = holds_vector(&lw.body, pkg);
+    // Built at the first splice (`exposed`).
+    let mut expo = replace(&mut cx.sc_expo, Vector::<u32>::new());
+    let mut oref = replace(&mut cx.sc_oref, Vector::<u32>::new());
+    let mut orph = replace(&mut cx.sc_orph, Vector::<u32>::new());
+    orph.truncate(0);
+    let mut expo_on = false;
+    let mut pf = replace(&mut cx.sc_pf, Vector::<u8>::new());
+    // A closure's captures live in its environment, which the closure value owns.
+    let cl = unsafe (&*(*pkg).module_ast_const(lw.body.owner.module)).closure_fact(lw.body.owner.node) != null;
     let budget = MAX_ADDED_STMTS * pick(vec_caller, VEC_SCALE, 1usize);
     let mut bi: usize = 0;
     while bi < lw.body.blocks.len() {
@@ -1523,6 +1573,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 cix = cx.xms.len() as i64;
                 cx.xm_key.push(shape.clone());
                 cx.xms.push(replace(&mut tymap, Map::<u64, u64>::new()));
+                cx.xm_pfo.push(0);
+                cx.xm_wf.push(0);
                 cx.xm_ix.insert(h9, cix as u64);
             }
         }
@@ -1552,7 +1604,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 sty = eff_pty(&lw.body, op.data);
             }
             if pt == sty && pt != TYPE_NONE {
-                wire.push(0);
+                wire.push(W_EXACT);
                 continue;
             }
             let ca = unsafe &*(&*pkg).module_ast_const(cm);
@@ -1564,19 +1616,21 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 let py0 = *ca.type_at(pt);
                 let sy0 = *ca.type_at(sty);
                 let ptr_like = py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) || py0.kind == TypeKind::TYPE_POINTER && sy0.kind == TypeKind::TYPE_REFERENCE;
-                if ptr_like && py0.as_data.elem == sy0.as_data.elem || py0.kind == TypeKind::TYPE_FUNCTION && py0.fn_sig() && sy0.kind == TypeKind::TYPE_FUNCTION && !sy0.fn_sig() {
-                    mode = 0;
+                if ptr_like && py0.as_data.elem == sy0.as_data.elem {
+                    mode = W_PTR;
+                } else if py0.kind == TypeKind::TYPE_FUNCTION && py0.fn_sig() && sy0.kind == TypeKind::TYPE_FUNCTION && !sy0.fn_sig() {
+                    mode = W_FN;
                 }
             }
             if mode == 255 && pt != TYPE_NONE && op.kind == ir::OP_COPY {
                 let py = *ca.type_at(pt);
                 if py.kind == TypeKind::TYPE_REFERENCE && py.as_data.elem == sty {
-                    mode = 1; // autoref: the callee receives a reference to the caller's place
+                    mode = W_AUTOREF; // the callee receives a reference to the caller's place
                 }
                 if mode == 255 && sty != TYPE_NONE {
                     let oy = *ca.type_at(sty);
                     if oy.kind == TypeKind::TYPE_REFERENCE && oy.as_data.elem == pt {
-                        mode = 2; // deref: a reference argument into a by-value parameter
+                        mode = W_DEREF; // a reference argument into a by-value parameter
                     }
                 }
             }
@@ -1623,7 +1677,53 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             alias.truncate(0);
         }
         let prelude = lw.body.blocks.len() + k.blocks.len();
-        splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins);
+        let cma = unsafe &*(*pkg).module_ast_const(cm);
+        let b_old = lw.body.blocks.len();
+        // The facts depend on the callee and its translation only: one computation per call shape.
+        let mut wfree = false;
+        if cix >= 0 && cx.xm_wf[cix as usize] != 0 {
+            pf.truncate(0);
+            let o = cx.xm_pfo[cix as usize] as usize;
+            for q in 0..k.args as usize {
+                pf.push(cx.xm_pfs[o + q]);
+            }
+            wfree = cx.xm_wf[cix as usize] == 2;
+        } else {
+            wfree = param_facts(unsafe &*pkg, k, cma, tyr, &mut pf);
+            if cix >= 0 {
+                cx.xm_pfo.set(cix as usize, cx.xm_pfs.len() as u32);
+                for q in 0..pf.len() {
+                    cx.xm_pfs.push(pf[q]);
+                }
+                cx.xm_wf.set(cix as usize, pick(wfree, 2u8, 1u8));
+            }
+        }
+        // The exposure counts (`exposed`), built at the first decision that reads them; from then on
+        // the call leaves them and what the splice adds joins them.
+        if !expo_on && !wfree && reads_exposure(&lw.body, cma, &t, &wire, &pf) {
+            scan_all(unsafe &*pkg, &lw.body, cma, &mut expo);
+            expo_on = true;
+        }
+        if expo_on {
+            expose_term(unsafe &*pkg, &lw.body, cma, &t, &mut expo, false);
+        }
+        splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins, &expo, &mut pf, wfree, cl);
+        if expo_on && multi {
+            // The splice moved member reads of the call's temporary onto the return slots.
+            scan_all(unsafe &*pkg, &lw.body, cma, &mut expo);
+        } else if expo_on {
+            expo.resize_default(lw.body.locals.len());
+            scan_from(unsafe &*pkg, &lw.body, cma, b_old, &mut expo);
+        }
+        // An argument read in place leaves the call's operand unread (`unread`).
+        if !ki.demand {
+            for j in 0..t.args_len {
+                let o = lw.body.oper_pool[(t.args_start + j) as usize];
+                if pf[j as usize] >> SUB_SHIFT != SUB_NONE && lw.body.operands.at(o as usize).kind != ir::OP_CONST {
+                    orph.push(o);
+                }
+            }
+        }
         live.resize_default(lw.body.blocks.len());
         let _ = reach(&lw.body, prelude as u32, &mut live, &mut stack);
         added += kstmts + k.args as usize + k.returns as usize;
@@ -1638,6 +1738,13 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     cx.sc_shape = shape;
     cx.sc_live = live;
     cx.sc_stack = stack;
+    if orph.len() != 0 {
+        unread(&mut lw.body, &orph, &mut oref);
+    }
+    cx.sc_expo = expo;
+    cx.sc_oref = oref;
+    cx.sc_orph = orph;
+    cx.sc_pf = pf;
 }
 
 /// Every type `k` names, into `out`: the ones a splice or `ground_body` translates.
@@ -1783,6 +1890,511 @@ fn mty(tymap: &Map<u64, u64>, t: TypeId) TypeId {
     return v;
 }
 
+// ---- argument substitution ------------------------------------------------------------------
+// A substituted parameter reads its argument where it was read, so the argument must keep its value
+// (or, for an autoref receiver, its address) from the call to the callee's last read. Only the
+// callee's own code runs in between: it writes its fresh locals, and caller storage only through a
+// pointer, a call, a drop or a substituted receiver. So a place keeps its value when the callee
+// writes no memory (`param_facts`), or when it lies in a local's own storage (`resident`) that no
+// pointer can reach (`exposed`).
+
+/// Whether a value of type `t` (a type of `a`) passes as a pointer or a reference: a call never
+/// takes its address.
+fn ref_like(a: &Ast, t: TypeId) bool {
+    if t == TYPE_NONE {
+        return false;
+    }
+    let k = a.type_at(t).kind;
+    return k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_POINTER;
+}
+
+/// Whether type `t` (of `a`) is an array or may bind to one: C passes an array by its address.
+fn maybe_array(a: &Ast, t: TypeId) bool {
+    if t == TYPE_NONE {
+        return true;
+    }
+    let k = a.type_at(t).kind;
+    return k == TypeKind::TYPE_ARRAY || k == TypeKind::TYPE_GENERIC || k == TypeKind::TYPE_ASSOC || k == TypeKind::TYPE_ERROR || k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR || k == TypeKind::TYPE_FIELD_PROJECTION;
+}
+
+/// Whether place `p` of `b` (types of `a`) is a part of its base local's own storage at a fixed
+/// offset: no dereference, no operand index, and only arrays indexed (a slice's elements are
+/// memory).
+fn resident(b: &ir::CoreBody, a: &Ast, p: ir::PlaceId) bool {
+    let pl = *b.places.at(p as usize);
+    let mut pre = b.locals.at(pl.base as usize).ty;
+    for i in 0..pl.proj_len {
+        let pj = *b.projections.at((pl.proj_start + i) as usize);
+        if pj.kind == ir::PJ_DEREF || pj.kind == ir::PJ_INDEX_OP {
+            return false;
+        }
+        if pj.kind == ir::PJ_INDEX_CONST && (pre == TYPE_NONE || a.type_at(pre).kind != TypeKind::TYPE_ARRAY) {
+            return false;
+        }
+        pre = pj.ty;
+    }
+    return true;
+}
+
+/// Count (`up`) or uncount the operations of `b` that may address the storage of place `p`'s base.
+fn expose(b: &ir::CoreBody, p: ir::PlaceId, cnt: &mut Vector<u32>, up: bool) {
+    if b.place_has_deref(p) {
+        return;
+    }
+    let x = b.places.at(p as usize).base as usize;
+    if up {
+        cnt.set(x, cnt[x] + 1);
+    } else {
+        assert(cnt[x] != 0);
+        cnt.set(x, cnt[x] - 1);
+    }
+}
+
+fn expose_op(b: &ir::CoreBody, o: ir::OperandId, cnt: &mut Vector<u32>, up: bool) {
+    if o != ir::IR_NONE && b.operands.at(o as usize).kind != ir::OP_CONST {
+        expose(b, b.operands.at(o as usize).data, cnt, up);
+    }
+}
+
+// An intrinsic that writes or addresses its operands' storage.
+const fn effect_intrinsic(c: u8) bool {
+    return c == ir::IN_ASM || c == ir::IN_VA_START || c == ir::IN_VA_ARG || c == ir::IN_VA_END;
+}
+
+/// Count the operations of statement `s` that may address a local's storage: a borrow, a slice
+/// view, an array's slice view, a conversion method's receiver, a `dyn` or closure operand, an
+/// effect intrinsic's operand, and an aggregate comparison (dispatched by address).
+fn expose_stmt(b: &ir::CoreBody, a: &Ast, s: &ir::Statement, cnt: &mut Vector<u32>, up: bool) {
+    if s.kind != ir::ST_ASSIGN {
+        return;
+    }
+    let rv = *b.rvalues.at(s.rvalue as usize);
+    if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE {
+        expose(b, rv.a, cnt, up);
+    } else if rv.kind == ir::RV_USE && rv.b != 0 || rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM || rv.kind == ir::RV_DYN {
+        expose_op(b, rv.a, cnt, up);
+    } else if rv.kind == ir::RV_CLOSURE || rv.kind == ir::RV_INTRINSIC && effect_intrinsic(rv.c) {
+        for i in 0..rv.b {
+            expose_op(b, b.oper_pool[(rv.a + i) as usize], cnt, up);
+        }
+    } else if rv.kind == ir::RV_BINARY && rv.target == Ast::builtin(BuiltinType::BT_BOOL) {
+        expose_cmp(b, a, rv.a, cnt, up);
+        expose_cmp(b, a, rv.b, cnt, up);
+    }
+}
+
+// An aggregate operand of a comparison: compared through its address.
+fn expose_cmp(b: &ir::CoreBody, a: &Ast, o: ir::OperandId, cnt: &mut Vector<u32>, up: bool) {
+    let op = *b.operands.at(o as usize);
+    if op.kind != ir::OP_CONST {
+        let t = eff_pty(b, op.data);
+        if t == TYPE_NONE || a.type_at(t).kind != TypeKind::TYPE_BUILTIN && !ref_like(a, t) {
+            expose(b, op.data, cnt, up);
+        }
+    }
+}
+
+/// Count the operations of terminator `t` that may address a local's storage: a drop, a called
+/// value (a closure takes its environment by address), a receiver that is no pointer (an implicit
+/// `&`), and an array argument.
+fn expose_term(p: &loader::Package, b: &ir::CoreBody, a: &Ast, t: &ir::Terminator, cnt: &mut Vector<u32>, up: bool) {
+    if t.kind == ir::TM_DROP {
+        expose(b, t.a, cnt, up);
+    } else if t.kind == ir::TM_CALL {
+        if t.callee.node == NODE_NONE {
+            expose_op(b, t.a, cnt, up);
+        }
+        for i in 0..t.args_len {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize);
+            if op.kind != ir::OP_CONST {
+                let ty = eff_pty(b, op.data);
+                if i == 0 && !ref_like(a, ty) && recv_ref(p, t) || maybe_array(a, ty) {
+                    expose(b, op.data, cnt, up);
+                }
+            }
+        }
+    }
+}
+
+/// Count the blocks of `b` from `b0`: per local, the operations that may address its storage
+/// (`expose_stmt`, `expose_term`).
+fn scan_from(p: &loader::Package, b: &ir::CoreBody, a: &Ast, b0: usize, expo: &mut Vector<u32>) {
+    for bi in b0..b.blocks.len() {
+        let blk = *b.blocks.at(bi);
+        for si in 0..blk.stmt_len {
+            expose_stmt(b, a, b.statements.at((blk.stmt_start + si) as usize), expo, true);
+        }
+        expose_term(p, b, a, &blk.term, expo, true);
+    }
+}
+
+/// `scan_from` over the whole body.
+fn scan_all(p: &loader::Package, b: &ir::CoreBody, a: &Ast, expo: &mut Vector<u32>) {
+    expo.truncate(0);
+    expo.resize_default(b.locals.len());
+    scan_from(p, b, a, 0, expo);
+}
+
+/// Whether a substitution decision for call `t` of `b` (types of `a`) reads the exposure counts
+/// (`splice`, for a callee that writes memory): an argument read in place at a fixed offset of a
+/// local, or an autoref receiver elsewhere, of a parameter that admits it (`pf`).
+fn reads_exposure(b: &ir::CoreBody, a: &Ast, t: &ir::Terminator, wire: &Vector<u8>, pf: &Vector<u8>) bool {
+    for j in 0..t.args_len {
+        let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+        let f = pf[j as usize];
+        let w = wire[j as usize];
+        if op.kind == ir::OP_CONST {
+            continue;
+        }
+        if w == W_AUTOREF && (f & (PF_BARE | PF_WRITE)) == 0 && !resident(b, a, op.data) {
+            return true;
+        }
+        if w != W_AUTOREF && w != W_FN && w != W_DEREF && (f & (PF_WRITE | PF_ADDR)) == 0 && resident(b, a, op.data) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Mark (`mark[o] = 2`) operand `o` when it is a candidate (`mark[o] == 1`): something references it.
+fn ref_mark(o: ir::OperandId, mark: &mut Vector<u32>) {
+    if o != ir::IR_NONE && mark[o as usize] == 1 {
+        mark.set(o as usize, 2);
+    }
+}
+
+/// The call operands `orph` of arguments read in place that nothing in `b` references any more
+/// become a unit constant, so no pass that scans the operand pool counts them as reads. One that a
+/// statement, a terminator or a projection still references (an operand the lowering shared) stays.
+fn unread(b: &mut ir::CoreBody, orph: &Vector<u32>, mark: &mut Vector<u32>) {
+    mark.truncate(0);
+    mark.resize_default(b.operands.len());
+    for i in 0..orph.len() {
+        mark.set(orph[i] as usize, 1);
+    }
+    for bi in 0..b.blocks.len() {
+        let blk = *b.blocks.at(bi);
+        for si in 0..blk.stmt_len {
+            let s = *b.statements.at((blk.stmt_start + si) as usize);
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_DYN {
+                ref_mark(rv.a, mark);
+            } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
+                ref_mark(rv.a, mark);
+                ref_mark(rv.b, mark);
+            } else if rv.kind == ir::RV_SLICE {
+                ref_mark(rv.b, mark);
+                ref_mark(rv.item.node, mark);
+            } else if ir::has_op_range(&rv) {
+                for i in 0..rv.b {
+                    ref_mark(b.oper_pool[(rv.a + i) as usize], mark);
+                }
+            }
+        }
+        let t = blk.term;
+        if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT || t.kind == ir::TM_CALL && t.callee.node == NODE_NONE {
+            ref_mark(t.a, mark);
+        }
+        if t.kind == ir::TM_ASSERT || t.kind == ir::TM_CALL {
+            for i in 0..t.args_len {
+                ref_mark(b.oper_pool[(t.args_start + i) as usize], mark);
+            }
+        }
+    }
+    for q in 0..b.projections.len() {
+        let pj = *b.projections.at(q);
+        if pj.kind == ir::PJ_INDEX_OP {
+            ref_mark(pj.data, mark);
+        }
+    }
+    // The body's own unit constant, else a new one.
+    let mut unit = ir::IR_NONE;
+    for c in 0..b.constants.len() {
+        if b.constants.at(c).kind == ir::CK_UNIT {
+            unit = c as u32;
+            break;
+        }
+    }
+    for i in 0..orph.len() {
+        let o = orph[i] as usize;
+        if mark[o] != 1 {
+            continue;
+        }
+        mark.set(o, 0);
+        if unit == ir::IR_NONE {
+            b.constants.push(
+                ir::Constant {
+                    kind: ir::CK_UNIT,
+                    ty: Ast::builtin(BuiltinType::BT_VOID),
+                    val: 0,
+                    raw: tok::Span::empty(),
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+            );
+            unit = b.constants.len() as u32 - 1;
+        }
+        let od = b.operands.index_mut(o);
+        od.kind = ir::OP_CONST;
+        od.data = unit;
+    }
+}
+
+/// Whether call `t`'s first parameter may be a reference, so the C call takes a receiver that is
+/// no pointer by its address (`CEmit::emit_call_arg`). A function value takes its arguments as
+/// they are.
+fn recv_ref(p: &loader::Package, t: &ir::Terminator) bool {
+    if t.callee.node == NODE_NONE {
+        return false;
+    }
+    if Ast::in_body(t.callee.node) {
+        return true;
+    }
+    let fa = unsafe &*p.module_ast_const(t.callee.module);
+    let fnn = fa.at_const(t.callee.node);
+    if fnn.kind != NodeKind::NODE_FUNCTION {
+        return true;
+    }
+    let ps = fnn.as_data.function.params;
+    if ps.len == 0 {
+        return false;
+    }
+    let pn = fa.at_const(unsafe fa.list(ps)[0]);
+    if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+        return true;
+    }
+    let pty = fa.type_of(pn.as_data.parameter.ty);
+    if pty == TYPE_NONE {
+        return true;
+    }
+    let k = fa.type_at(pty).kind;
+    return k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_GENERIC || k == TypeKind::TYPE_ASSOC || k == TypeKind::TYPE_ERROR;
+}
+
+/// Whether item `d` (an item local's) holds one value for the whole program: a constant that is no
+/// static and no extern, a const-generic parameter, or a function.
+fn item_fixed(p: &loader::Package, d: DefId) bool {
+    if d.node == NODE_NONE || Ast::in_body(d.node) || !p.modules.at(d.module as usize).has_ast {
+        return false;
+    }
+    let n = (unsafe &*p.module_ast_const(d.module)).at_const(d.node);
+    if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_GENERIC_PARAM {
+        return true;
+    }
+    return n.kind == NodeKind::NODE_CONST && !n.as_data.const_def.is_static_mut && !n.as_data.const_def.is_extern;
+}
+
+/// Whether local `x` of `b` can change while code that holds no pointer it was given runs: an
+/// operation addresses it (`cnt`), or it is an item that can change (`item_fixed`), an array
+/// argument (a pointer in C) or a closure's capture (`cl`: the environment is the closure value's).
+fn exposed(p: &loader::Package, b: &ir::CoreBody, a: &Ast, x: u32, cnt: &Vector<u32>, cl: bool) bool {
+    let d = b.locals.at(x as usize);
+    if d.storage == ir::LS_STATIC_REF {
+        return !item_fixed(p, d.item);
+    }
+    if d.storage == ir::LS_ARG && (cl || maybe_array(a, d.ty)) {
+        return true;
+    }
+    return cnt[x as usize] != 0;
+}
+
+/// Whether call `t` of `b` hands the storage of local `x` to its callee: an autoref receiver
+/// (`wire`) whose place lies in `x`.
+fn receives(b: &ir::CoreBody, t: &ir::Terminator, wire: &Vector<u8>, x: u32) bool {
+    for j in 0..t.args_len {
+        let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+        if wire[j as usize] == W_AUTOREF && op.kind != ir::OP_CONST && b.places.at(op.data as usize).base == x {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the address of place `p` of `b` stays the same while the callee runs: the callee
+/// writes no memory (`wfree`), or `p` lies at a fixed offset in a local (`resident`), or in the
+/// referent of a local pointer that nothing else can change (`exposed`).
+fn addr_kept(pk: &loader::Package, b: &ir::CoreBody, a: &Ast, p: ir::PlaceId, cnt: &Vector<u32>, cl: bool, wfree: bool) bool {
+    if wfree || resident(b, a, p) {
+        return true;
+    }
+    let pl = *b.places.at(p as usize);
+    if pl.proj_len == 0 || b.projections.at(pl.proj_start as usize).kind != ir::PJ_DEREF {
+        return false;
+    }
+    let mut pre = b.projections.at(pl.proj_start as usize).ty;
+    for i in 1..pl.proj_len {
+        let pj = *b.projections.at((pl.proj_start + i) as usize);
+        if pj.kind == ir::PJ_DEREF || pj.kind == ir::PJ_INDEX_OP {
+            return false;
+        }
+        if pj.kind == ir::PJ_INDEX_CONST && (pre == TYPE_NONE || a.type_at(pre).kind != TypeKind::TYPE_ARRAY) {
+            return false;
+        }
+        pre = pj.ty;
+    }
+    return !exposed(pk, b, a, pl.base, cnt, cl);
+}
+
+// The intrinsics that write no memory.
+const fn pure_intrinsic(c: u8) bool {
+    return c == ir::IN_SIZEOF || c == ir::IN_ALIGNOF || c == ir::IN_TYPE_INFO || c == ir::IN_ZEROED || c == ir::IN_DANGLING || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || ir::is_check(
+        c,
+    );
+}
+
+// Add `bits` to the facts of the parameter place `p` of `k` names, if any.
+fn pmark(k: &ir::CoreBody, p: ir::PlaceId, bits: u8, pf: &mut Vector<u8>) {
+    let x = k.places.at(p as usize).base;
+    if x >= k.returns && x < k.returns + k.args {
+        let j = (x - k.returns) as usize;
+        pf.set(j, pf[j] | bits);
+    }
+}
+
+fn pmark_op(k: &ir::CoreBody, o: ir::OperandId, bits: u8, pf: &mut Vector<u8>) {
+    if o != ir::IR_NONE && k.operands.at(o as usize).kind != ir::OP_CONST {
+        let p = k.operands.at(o as usize).data;
+        if !k.place_has_deref(p) {
+            pmark(k, p, bits, pf);
+        }
+    }
+}
+
+// Mark a use of place `p` of `k` (an operand's read when `operand`): a projected place or another
+// use is PF_PLACE, a path that does not start with a dereference PF_BARE; its index operands are reads.
+fn pf_use(k: &ir::CoreBody, p: ir::PlaceId, operand: bool, pf: &mut Vector<u8>) {
+    let pl = *k.places.at(p as usize);
+    let lead = pl.proj_len != 0 && k.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF;
+    pmark(k, p, pick(pl.proj_len != 0 || !operand, PF_PLACE, 0u8) | pick(lead, 0u8, PF_BARE), pf);
+    for q in 0..pl.proj_len {
+        let pj = *k.projections.at((pl.proj_start + q) as usize);
+        if pj.kind == ir::PJ_INDEX_OP {
+            pf_use_op(k, pj.data, pf);
+        }
+    }
+}
+
+fn pf_use_op(k: &ir::CoreBody, o: ir::OperandId, pf: &mut Vector<u8>) {
+    if o != ir::IR_NONE && k.operands.at(o as usize).kind != ir::OP_CONST {
+        pf_use(k, k.operands.at(o as usize).data, true, pf);
+    }
+}
+
+// Mark the uses of rvalue `rv`'s places and operands (`pf_use`).
+fn pf_uses(k: &ir::CoreBody, rv: &ir::Rvalue, pf: &mut Vector<u8>) {
+    if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_DYN {
+        pf_use_op(k, rv.a, pf);
+    } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
+        pf_use_op(k, rv.a, pf);
+        pf_use_op(k, rv.b, pf);
+    } else if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+        pf_use(k, rv.a, false, pf);
+    } else if rv.kind == ir::RV_SLICE {
+        pf_use(k, rv.a, false, pf);
+        pf_use_op(k, rv.b, pf);
+        pf_use_op(k, rv.item.node, pf);
+    } else if ir::has_op_range(rv) {
+        for i in 0..rv.b {
+            pf_use_op(k, k.oper_pool[(rv.a + i) as usize], pf);
+        }
+    }
+}
+
+/// The `PF_*` facts of each parameter of callee `k` (into `pf`; types translated by `tymap` into
+/// those of caller module `a`), and whether `k` writes no memory a caller place can name: no call,
+/// no drop, no store through a dereference, an index or into a static, no effect operation.
+fn param_facts(p: &loader::Package, k: &ir::CoreBody, a: &Ast, tymap: &Map<u64, u64>, pf: &mut Vector<u8>) bool {
+    pf.truncate(0);
+    pf.resize_default(k.args as usize);
+    let mut wfree = true;
+    for bi in 0..k.blocks.len() {
+        let blk = *k.blocks.at(bi);
+        for si in 0..blk.stmt_len {
+            let s = *k.statements.at((blk.stmt_start + si) as usize);
+            // A storage marker of a substituted parameter marks a local nothing reads.
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let own = !k.place_has_deref(s.place);
+            pf_use(k, s.place, false, pf);
+            pmark(k, s.place, pick(own, PF_WRITE, 0u8), pf);
+            let dp = *k.places.at(s.place as usize);
+            if !own || k.locals.at(dp.base as usize).storage == ir::LS_STATIC_REF {
+                wfree = false;
+            }
+            for q in 0..dp.proj_len {
+                let pk = k.projections.at((dp.proj_start + q) as usize).kind;
+                if pk == ir::PJ_INDEX_OP || pk == ir::PJ_INDEX_CONST {
+                    wfree = false; // a slice's element is memory
+                }
+            }
+            let rv = *k.rvalues.at(s.rvalue as usize);
+            pf_uses(k, &rv, pf);
+            if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE {
+                pmark(k, rv.a, pick(!k.place_has_deref(rv.a), PF_ADDR, 0u8), pf);
+            } else if rv.kind == ir::RV_USE && rv.b != 0 || rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM {
+                pmark_op(k, rv.a, PF_ADDR, pf);
+            } else if rv.kind == ir::RV_DYN {
+                pmark_op(k, rv.a, PF_ADDR, pf);
+                wfree = false;
+            } else if rv.kind == ir::RV_CLOSURE || rv.kind == ir::RV_INTRINSIC && effect_intrinsic(rv.c) {
+                for i in 0..rv.b {
+                    pmark_op(k, k.oper_pool[(rv.a + i) as usize], PF_ADDR, pf);
+                }
+                wfree = false;
+            } else if rv.kind == ir::RV_INTRINSIC && !pure_intrinsic(rv.c) || rv.kind == ir::RV_SIMD && ir::simd_writes(
+                rv.c,
+            ) {
+                wfree = false;
+            }
+        }
+        let t = blk.term;
+        if t.kind == ir::TM_SWITCH {
+            pf_use_op(k, t.a, pf);
+        } else if t.kind == ir::TM_ASSERT {
+            pf_use_op(k, t.a, pf);
+            for i in 0..t.args_len {
+                pf_use_op(k, k.oper_pool[(t.args_start + i) as usize], pf);
+            }
+        }
+        if t.kind == ir::TM_DROP {
+            pf_use(k, t.a, false, pf);
+            pmark(k, t.a, pick(!k.place_has_deref(t.a), PF_WRITE, 0u8), pf);
+            if t.args_len == 1 && t.args_start >= k.returns && t.args_start < k.returns + k.args {
+                let j = (t.args_start - k.returns) as usize;
+                pf.set(j, pf[j] | PF_WRITE);
+            }
+            wfree = false;
+        } else if t.kind == ir::TM_CALL {
+            for d in 0..t.dests_len {
+                let dp = k.dest_pool[(t.dests_start + d) as usize];
+                pf_use(k, dp, false, pf);
+                pmark(k, dp, pick(!k.place_has_deref(dp), PF_WRITE, 0u8), pf);
+            }
+            if t.callee.node == NODE_NONE {
+                pf_use_op(k, t.a, pf);
+                pmark_op(k, t.a, PF_ADDR, pf);
+            }
+            for i in 0..t.args_len {
+                let o = k.oper_pool[(t.args_start + i) as usize];
+                pf_use_op(k, o, pf);
+                if k.operands.at(o as usize).kind != ir::OP_CONST {
+                    let ty = mty(tymap, eff_pty(k, k.operands.at(o as usize).data));
+                    if i == 0 && !ref_like(a, ty) && recv_ref(p, &t) || maybe_array(a, ty) {
+                        pmark_op(k, o, PF_ADDR, pf);
+                    }
+                }
+            }
+            wfree = false;
+        } else if t.kind != ir::TM_GOTO && t.kind != ir::TM_SWITCH && t.kind != ir::TM_RETURN && t.kind != ir::TM_ASSERT && t.kind != ir::TM_UNREACHABLE {
+            wfree = false;
+        }
+    }
+    return wfree;
+}
+
 /// Append the callee body to the caller with every index rebased, rewrite the call block to jump
 /// into it, and join every callee return back to the call's continuation.
 fn splice(
@@ -1796,11 +2408,54 @@ fn splice(
     wire: &Vector<u8>,
     blk_origin: &mut Vector<u32>,
     origins: &mut Vector<Origin>,
+    expo: &Vector<u32>,
+    pf: &mut Vector<u8>,
+    wfree: bool,
+    cl: bool,
 ) {
     let k = &ki.body;
     let pkg9 = lw.pkg;
     let b = &mut lw.body;
     let sp = t.span;
+    // How each parameter reads its argument, decided over the caller as the call left it.
+    {
+        let ca = unsafe &*(&*pkg9).module_ast_const(b.module);
+        for j in 0..k.args {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+            let f = pf[j as usize];
+            let w = wire[j as usize];
+            let mut sub = SUB_NONE;
+            if op.kind == ir::OP_CONST {
+                let ck = b.constants.at(op.data as usize).kind;
+                if w == W_EXACT && (ck == ir::CK_INT || ck == ir::CK_FLOAT || ck == ir::CK_BOOL || ck == ir::CK_STR) && (f & (PF_WRITE | PF_ADDR | PF_PLACE)) == 0 {
+                    sub = SUB_CONST;
+                }
+            } else if w == W_AUTOREF {
+                if (f & (PF_BARE | PF_WRITE)) == 0 && !maybe_array(ca, eff_pty(b, op.data)) && addr_kept(
+                    unsafe &*pkg9,
+                    b,
+                    ca,
+                    op.data,
+                    expo,
+                    cl,
+                    wfree,
+                ) {
+                    sub = SUB_REF;
+                }
+            } else if w != W_FN && (f & (PF_WRITE | PF_ADDR)) == 0 {
+                let x = b.places.at(op.data as usize).base;
+                if wfree || w != W_DEREF && resident(b, ca, op.data) && !exposed(unsafe &*pkg9, b, ca, x, expo, cl) && !receives(
+                    b,
+                    t,
+                    wire,
+                    x,
+                ) {
+                    sub = SUB_PLACE;
+                }
+            }
+            pf.set(j as usize, f | sub << SUB_SHIFT);
+        }
+    }
     // A spliced loop keeps its callee's tick rule: the merged body prints ticks by the instance only
     // when both do.
     if !k.inst_ticks && k.has_safepoint() {
@@ -1858,9 +2513,49 @@ fn splice(
     }
     for i in 0..k.places.len() {
         let mut pl = *k.places.at(i);
+        let x = pl.base;
         pl.base += l0;
         pl.proj_start += j0;
         pl.ty = mty(tymap, pl.ty);
+        let sub = if x >= k.returns && x < k.returns + k.args {
+            pf[(x - k.returns) as usize] >> SUB_SHIFT;
+        } else {
+            SUB_NONE;
+        };
+        if sub == SUB_PLACE || sub == SUB_REF {
+            // The argument's path, then the parameter's: past its dereference for a receiver.
+            let j = x - k.returns;
+            let ap = *b.places.at(b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize).data as usize);
+            let skip = pick(sub == SUB_REF, 1u32, 0u32);
+            if ap.proj_len == 0 && !(sub == SUB_PLACE && wire[j as usize] == W_DEREF) {
+                // A whole local: the parameter's own path, already copied (a receiver place no use
+                // names has no dereference to drop).
+                pl.base = ap.base;
+                if pl.proj_len != 0 {
+                    pl.proj_start += skip;
+                    pl.proj_len -= skip;
+                }
+                b.places.push(pl);
+                continue;
+            }
+            let start = b.projections.len() as u32;
+            for q in 0..ap.proj_len {
+                let pj = *b.projections.at((ap.proj_start + q) as usize);
+                b.projections.push(pj);
+            }
+            if sub == SUB_PLACE && wire[j as usize] == W_DEREF {
+                b.projections.push(
+                    ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: b.locals.at(pl.base as usize).ty },
+                );
+            }
+            for q in skip..pl.proj_len {
+                let pj = *b.projections.at((pl.proj_start + q) as usize);
+                b.projections.push(pj);
+            }
+            pl.base = ap.base;
+            pl.proj_start = start;
+            pl.proj_len = b.projections.len() as u32 - start;
+        }
         b.places.push(pl);
     }
     for i in 0..k.constants.len() {
@@ -1883,7 +2578,16 @@ fn splice(
         let mut o = *k.operands.at(i);
         o.ty = mty(tymap, o.ty);
         let mut v: i64 = 0;
-        if (o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE) && k.places.at(o.data as usize).proj_len == 0 && param_value(
+        let px = if o.kind == ir::OP_CONST {
+            ir::IR_NONE;
+        } else {
+            k.places.at(o.data as usize).base;
+        };
+        if px >= k.returns && px < k.returns + k.args && pf[(px - k.returns) as usize] >> SUB_SHIFT == SUB_CONST {
+            // A read of a parameter whose argument is a constant: the constant.
+            o.kind = ir::OP_CONST;
+            o.data = b.operands.at(b.oper_pool[(t.args_start + px - k.returns) as usize] as usize).data;
+        } else if (o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE) && k.places.at(o.data as usize).proj_len == 0 && param_value(
             unsafe &*pkg9,
             k.locals.at(k.places.at(o.data as usize).base as usize).item,
             b.module,
@@ -2028,18 +2732,22 @@ fn splice(
         b.blocks.push(ir::BasicBlock { stmt_start: kb.stmt_start + s0, stmt_len: kb.stmt_len, term: tm, sealed: true });
         blk_origin.push(orec);
     }
-    // prelude: parameter temps take the call's argument operands (original read order), each with
-    // the call's own implicit adjustment (autoref/deref) reproduced in IR, then jump to the entry
+    // prelude: the parameters that read no argument in place take the call's argument operands
+    // (original read order), each with the call's own implicit adjustment (autoref/deref) reproduced
+    // in IR, then jump to the entry
     {
         let ps = b.statements.len() as u32;
         for j in 0..k.args {
+            if pf[j as usize] >> SUB_SHIFT != SUB_NONE {
+                continue;
+            }
             let al = l0 + k.returns + j;
             let opid = b.oper_pool[(t.args_start + j) as usize];
             let mode = wire[j as usize];
-            if mode == 0 {
+            if mode == W_EXACT || mode == W_PTR || mode == W_FN {
                 b.assign_local_use(al, opid, sp);
-            } else if mode == 1 {
-                // autoref: the callee's reference parameter takes the caller's place directly
+            } else if mode == W_AUTOREF {
+                // the callee's reference parameter takes the caller's place directly
                 let aty = b.locals.at(al as usize).ty;
                 let src9 = b.operands.at(opid as usize).data;
                 let a9 = unsafe &*(&*pkg9).module_ast_const(b.module);
@@ -2070,7 +2778,12 @@ fn splice(
             }
         }
         b.blocks.push(
-            ir::BasicBlock { stmt_start: ps, stmt_len: k.args, term: ir::goto_term(b0 + k.entry, sp), sealed: true },
+            ir::BasicBlock {
+                stmt_start: ps,
+                stmt_len: b.statements.len() as u32 - ps,
+                term: ir::goto_term(b0 + k.entry, sp),
+                sealed: true,
+            },
         );
         blk_origin.push(orec);
     }

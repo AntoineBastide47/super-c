@@ -83,7 +83,10 @@ module's row from live syntax, `emit_dep_row`) have run. The per-instance check 
 the evaluator's view of the keep has closed, so a condition such as `T::is_signed()` lowers
 its non-generic callee from syntax. The constant pre-pass before emission copies the kept
 bodies it touches (`Interp.copy_kept`) before the view closes, so emission's constants need
-no syntax. A NODE_BODY read after the release is a bounds abort in
+no syntax. The `call_info` and `mono` entries of body-arena nodes go with the arena
+(`Ast::release_body_facts`, in `Package::release_bodies`); the freed `mono` entries'
+distinct type arguments stay in `Ast.mono_live` for the emission liveness. A NODE_BODY
+read after the release is a bounds abort in
 `Vector::at`. `super-c lint` does not reach emission and keeps every arena. The LSP
 releases per document, see below. The measurements and the reader inventory are in
 [core-ir-publication.md](core-ir-publication.md).
@@ -97,9 +100,12 @@ What emission reads of a body after the release, and the owned record that carri
 | a closure's captures (names and types), parameter and return types, mutable-capture and borrowed-capture masks; a `fn(..)` type written in a body | `Ast.closure_facts` / `cap_facts` (`ClosureFact`, `CapFact`): recorded by `check_closure_in` and by the `fn` type lowering; the checker sets mask bits while it checks the body (`tc_note_capture_mut`) and at a plain `fn(..)` bound (`tc_borrow_owned_caps`), the borrow checker (`flow_ir`) adds the mutable bits Core IR shows; types remapped at publication |
 | inline assembly text | `CoreBody.asms` / `asm_spans` (`AsmRec`), copied by `lower_asm`; the rvalue's `item.node` is the record index |
 | the declarations a `free` method's body touches (free-glue completion) | `Ast.free_touched`, recorded by `tc_record_free_touches` after the body check |
+| the type arguments of a body's recorded instantiations (`mono`), for the emission liveness (`emit_live_row`) | `Ast.mono_live`: their distinct type ids, recorded by `release_body_facts` |
 
 The `SC_FACTS_CHECK` watermarks carry the body arena's counts separately and skip them
-once the arena is released.
+once the arena is released. They hold `call_info` and `mono` to their snapshot up to the body
+facts release and to their released length after it (`Ast::Released`), and require that release
+exactly when the arena is released (the freeze contract in [SKILL.md](../SKILL.md)).
 
 ## Results
 

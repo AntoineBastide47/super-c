@@ -1130,9 +1130,19 @@ extend Parser {
             Span::new(start, self.node_span(ty).end),
             NodeAs { field: FieldData { name: name, ty: ty, is_public: is_public } },
         );
-        if fattrs.len() > 0 {
+        // `@c.import("select")` on a header type's field names its C member, which a Super-C keyword
+        // cannot spell.
+        let pin = self.in_extern && fattrs.len() == 1 && fattrs[0].kind == AttrKind::ATTR_IMPORT as u8;
+        if pin {
+            self.ast.has_member_pins = true;
+        } else if fattrs.len() > 0 {
             let sp0 = self.ast.at_const(fid).span;
-            self.errors.emit_span(sp0, format("only '@reflect' applies to a field declaration"));
+            self.errors.emit_span(
+                sp0,
+                format(
+                    "only '@reflect' applies to a field declaration, and '@c.import' to a field of an 'extern \"C\"' struct or union",
+                ),
+            );
         }
         self.add_attrs_to(&mut fattrs, fid);
         return fid;
@@ -1539,6 +1549,20 @@ extend Parser {
         return __decl;
     }
 
+    // Header type `decl` (`what`: "a struct", "a union", "an enum") of an extern block whose header is
+    // `header`: only a header can define the C type, since Super-C cannot see which header does.
+    fn need_header(self: &mut Self, header: NodeId, decl: NodeId, what: str) {
+        if header != NODE_NONE && self.node_span(header).end - self.node_span(header).start > 2 {
+            return;
+        }
+        let sp = self.node_span(decl);
+        self.errors.emit_span(
+            sp,
+            format("{} of an 'extern \"C\"' block is its C header's type: the block needs that header", what),
+        );
+        self.errors.note(format("write 'extern \"C\" \"<header>.h\" {{ .. }}' with the header that defines it"));
+    }
+
     pub fn parse_extern(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
@@ -1592,18 +1616,20 @@ extend Parser {
                 }
                 self.ast.push(f);
             } else if self.check(TokenType::Enum) {
-                // Same contract as an extern struct: C declares the enum, this only names its constants.
+                // Same contract as an extern struct: C declares the enum (`enum color`, or the
+                // `@c.import` pin), this only names its constants.
                 let ed = self.parse_enum();
                 if ed != NODE_NONE {
                     self.ast.at(ed).as_data.aggregate.is_public = is_public;
                     self.ast.at(ed).as_data.aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, ed);
+                    self.need_header(header, ed, "an enum");
                     self.ast.push(ed);
                 }
             } else if self.check(TokenType::Struct) || self.check(TokenType::Union) {
-                // The HEADER defines this type; the members only state its layout so field access and
-                // sizeof work. Codegen emits no definition and spells it the way C does, which is what
-                // makes the binding's type the same type the bound functions take.
+                // The HEADER defines this type and owns its layout; the members name some of its fields.
+                // Codegen emits no definition and spells it the way C does (`struct tm`, or the
+                // `@c.import` pin), which makes the binding's type the type the bound functions take.
                 let is_union = self.check(TokenType::Union);
                 let sd = self.parse_struct(); // one shape; `union` only sets the flag below
                 if sd != NODE_NONE {
@@ -1618,6 +1644,7 @@ extend Parser {
                     self.ast.at(sd).as_data.aggregate.is_public = is_public;
                     self.ast.at(sd).as_data.aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, sd);
+                    self.need_header(header, sd, pick(is_union, "a union", "a struct"));
                     self.ast.push(sd);
                 }
             } else if self.check(TokenType::Type) {
@@ -4034,6 +4061,8 @@ extend Parser {
             AttrKind::ATTR_BLOCKING as i32;
         } else if self.text_is(ns, "no_const") {
             AttrKind::ATTR_NO_CONST as i32;
+        } else if self.text_is(ns, "tail_recurse") {
+            AttrKind::ATTR_TAIL_RECURSE as i32;
         } else {
             -1;
         };
@@ -4059,9 +4088,10 @@ extend Parser {
             return true;
         }
         if syntax.parts == 1 && ns.kind() == TokenType::Unsafe {
-            // `@unsafe(safe, const)`: claims about an extern function that the compiler cannot
+            // `@unsafe(safe, const, naked, link_section = "s")`: claims that the compiler cannot
             // verify, so they are spelled as unsafe. Any order; each claim once.
             let mut claims: u32 = 0;
+            let mut section = Span::empty();
             let mut ok = syntax.has_args && argc != 0;
             let mut i: usize = 0;
             while ok && i < argc {
@@ -4070,12 +4100,29 @@ extend Parser {
                     UNSAFE_CONST;
                 } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "safe") {
                     UNSAFE_SAFE;
+                } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "naked") {
+                    UNSAFE_NAKED;
+                } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "link_section") {
+                    UNSAFE_LINK_SECTION;
                 } else {
                     0u32;
                 };
                 if bit == 0 {
                     ok = false;
                     break;
+                }
+                if bit == UNSAFE_LINK_SECTION {
+                    // `link_section = "name"`: the string is the section, without its quotes.
+                    if i + 2 >= argc || self.attr_arg(&syntax, i + 1).kind() != TokenType::Equal || self.attr_arg(
+                        &syntax,
+                        i + 2,
+                    ).kind() != TokenType::StringLiteral {
+                        ok = false;
+                        break;
+                    }
+                    let v = self.attr_arg(&syntax, i + 2);
+                    section = Span::new(v.start() + 1, v.end() - 1);
+                    i = i + 2;
                 }
                 if (claims & bit) != 0 {
                     self.errors.emit_span(
@@ -4096,12 +4143,12 @@ extend Parser {
                     i = i + 1;
                 }
             }
-            *out = Attr { kind: AttrKind::ATTR_UNSAFE as u8, arg: claims, str_span: Span::empty() };
+            *out = Attr { kind: AttrKind::ATTR_UNSAFE as u8, arg: claims, str_span: section };
             if !ok {
                 self.errors.emit_span(
                     ns.span(),
                     format(
-                        "attribute '@unsafe' takes a list of the claims 'safe' and 'const', e.g. '@unsafe(safe, const)'",
+                        "attribute '@unsafe' takes a list of the claims 'safe', 'const', 'naked' and 'link_section = \"name\"', e.g. '@unsafe(safe, const)'",
                     ),
                 );
             }
@@ -4335,7 +4382,7 @@ extend Parser {
                 );
                 self.errors.note(
                     format(
-                        "supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, section, packed, and align",
+                        "supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, packed, and align",
                     ),
                 );
             }
@@ -4475,6 +4522,9 @@ extend Parser {
                         for k in 0..attrs.len() {
                             if attrs[k].kind == attr.kind {
                                 attrs.index_mut(k).arg = attrs[k].arg | attr.arg;
+                                if (attr.arg & UNSAFE_LINK_SECTION) != 0 {
+                                    attrs.index_mut(k).str_span = attr.str_span;
+                                }
                             }
                         }
                     }
@@ -4508,20 +4558,30 @@ extend Parser {
         for i in 0..attrs.len() {
             let mut attr = attrs[i];
             if attr.kind == AttrKind::ATTR_UNSAFE as u8 {
+                let ok = owner != NODE_NONE;
+                let isfn = ok && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
                 // FN_EXTERN is set only on a function declared in an extern block.
-                let in_extern = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION && self.ast.at_const(
+                let in_extern = isfn && self.ast.at_const(owner).as_data.function.is_extern();
+                let def = isfn && !in_extern && self.ast.at_const(owner).as_data.function.body != NODE_NONE;
+                let stat = ok && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
                     owner,
-                ).as_data.function.is_extern();
-                if !in_extern {
-                    let sp = if owner != NODE_NONE {
+                ).as_data.const_def.is_extern;
+                let why = if (attr.arg & (UNSAFE_SAFE | UNSAFE_CONST)) != 0 && !in_extern {
+                    "'@unsafe(safe)' and '@unsafe(const)' may only be applied to a function in an 'extern \"C\"' block";
+                } else if (attr.arg & UNSAFE_NAKED) != 0 && !def {
+                    "'@unsafe(naked)' may only be applied to a function with a body outside an 'extern \"C\"' block";
+                } else if (attr.arg & UNSAFE_LINK_SECTION) != 0 && !def && !stat {
+                    "'@unsafe(link_section = ...)' may only be applied to a function with a body outside an 'extern \"C\"' block, or to a 'static mut' outside one";
+                } else {
+                    "";
+                };
+                if why.len() != 0 {
+                    let sp = if ok {
                         self.node_span(owner);
                     } else {
                         self.raw_peek().span();
                     };
-                    self.errors.emit_span(
-                        sp,
-                        format("'@unsafe(...)' may only be applied to a function in an 'extern \"C\"' block"),
-                    );
+                    self.errors.emit_span(sp, format("{}", why));
                     continue;
                 }
             }
@@ -4531,6 +4591,12 @@ extend Parser {
             }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
                 pick(fnk, "", "may only be applied to a function");
+            } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
+                pick(
+                    fnk && self.ast.at_const(owner).as_data.function.body != NODE_NONE,
+                    "",
+                    "may only be applied to a function with a body",
+                );
             } else if attr.kind == AttrKind::ATTR_C_VALUE as u8 {
                 self.ast.has_c_value = true;
                 pick(
@@ -4547,9 +4613,9 @@ extend Parser {
                     "may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function",
                 );
             } else if attr.kind == AttrKind::ATTR_ALIGN as u8 {
-                // The layout of a struct (its C definition, or the C header's for an extern one) and
-                // the C object of a static read it; on any other owner it would change nothing.
-                let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
+                // The layout of a struct and the C object of a static read it; on any other owner it
+                // would change nothing. A header struct's layout is its C header's.
+                let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT && !self.in_extern || self.ast.at_const(
                     owner,
                 ).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
                     owner,
@@ -4561,9 +4627,9 @@ extend Parser {
                 );
             } else if attr.kind == AttrKind::ATTR_PACKED as u8 {
                 pick(
-                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT,
+                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT && !self.in_extern,
                     "",
-                    "may only be applied to a struct or a union",
+                    "may only be applied to a struct or a union outside an 'extern \"C\"' block",
                 );
             } else {
                 "";
@@ -4865,6 +4931,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("simd_impl");
         return;
     }
+    if kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
+        out.push_str("tail_recurse");
+        return;
+    }
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
         if (unsafe C_ATTR_KINDS[i]) as u8 == kind {
@@ -4875,7 +4945,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes outside the `c.` namespace, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 18] = [
+const ATTR_NAMES: [str<'static>; 21] = [
     "emit_macro",
     "bench",
     "test",
@@ -4891,15 +4961,18 @@ const ATTR_NAMES: [str<'static>; 18] = [
     "unsafe(safe)",
     "unsafe(const)",
     "unsafe(safe, const)",
+    "unsafe(naked)",
+    "unsafe(link_section = \"name\")",
     "intrinsic",
     "target_feature",
     "simd_impl",
+    "tail_recurse",
 ];
 
 // The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
 // `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,
 // `reads` and `writes` take constant expressions (`attr_expr_args`), and `lane_access` none.
-const C_ATTR_NAMES: [str<'static>; 18] = [
+const C_ATTR_NAMES: [str<'static>; 17] = [
     "inline",
     "always_inline",
     "noinline",
@@ -4911,7 +4984,6 @@ const C_ATTR_NAMES: [str<'static>; 18] = [
     "align",
     "export",
     "import",
-    "section",
     "source",
     "link",
     "value",
@@ -4920,14 +4992,14 @@ const C_ATTR_NAMES: [str<'static>; 18] = [
     "lane_access",
 ];
 const C_ATTR_ALIGN: usize = 8;
-const C_ATTR_STR_END: usize = 14;
+const C_ATTR_STR_END: usize = 13;
 
 // Duplicate-check kinds beyond AttrKind (every kind stays below 64, the width of the seen mask):
 // `@derive` and `@reflect` keep no Attr record, and an unrecognized attribute has no kind.
 const ATTR_SEEN_DERIVE: u8 = 62;
 const ATTR_SEEN_REFLECT: u8 = 63;
 const ATTR_SEEN_NONE: u8 = 255;
-const C_ATTR_KINDS: [AttrKind; 18] = [
+const C_ATTR_KINDS: [AttrKind; 17] = [
     AttrKind::ATTR_INLINE,
     AttrKind::ATTR_ALWAYS_INLINE,
     AttrKind::ATTR_NOINLINE,
@@ -4939,7 +5011,6 @@ const C_ATTR_KINDS: [AttrKind; 18] = [
     AttrKind::ATTR_ALIGN,
     AttrKind::ATTR_EXPORT,
     AttrKind::ATTR_IMPORT,
-    AttrKind::ATTR_SECTION,
     AttrKind::ATTR_C_SOURCE,
     AttrKind::ATTR_C_LINK,
     AttrKind::ATTR_C_VALUE,

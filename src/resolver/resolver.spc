@@ -2014,7 +2014,10 @@ extend Resolver {
                 if seen[k9 - 1] && !used[k9 - 1] && nd.as_data.let_stmt.name != NODE_NONE {
                     self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
                 }
-            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE && !nd.as_data.function.is_intrinsic() || nd.kind == NodeKind::NODE_CLOSURE {
+            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE && !nd.as_data.function.is_intrinsic() && (self.ast.unsafe_claims(
+                i,
+            ) & UNSAFE_NAKED) == 0 || nd.kind == NodeKind::NODE_CLOSURE {
+                // Not for a naked function: its assembly reads the parameters where the calling convention puts them.
                 let params = if nd.kind == NodeKind::NODE_CLOSURE {
                     nd.as_data.closure.params;
                 } else {

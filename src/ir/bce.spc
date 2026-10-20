@@ -175,6 +175,9 @@ pub struct Bce {
     pub la_off: Vector<i64>,
     pub ll_dest: Vector<u32>,
     pub ll_pl: Vector<u32>,
+    // Per place: the view a direct read of its prelude `len` field measures (`len_prefixes`), or
+    // IR_NONE.
+    pub lenpre: Vector<u32>,
 }
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
@@ -248,6 +251,7 @@ extend Bce {
             la_off: Vector::<i64>::new(),
             ll_dest: Vector::<u32>::new(),
             ll_pl: Vector::<u32>::new(),
+            lenpre: Vector::<u32>::new(),
         };
     }
 
@@ -293,6 +297,40 @@ extend Bce {
         return 0 - 1;
     }
 
+    /// For each place of `b` that reads the prelude `len` field of a view in place (not through the
+    /// `[r, deref, .len]` reference read `oper_len_lp` resolves), a new place naming that view
+    /// (`lenpre`): its length identity then matches the view's `len` checks. A spliced callee's
+    /// `len()` reads its receiver's field so when the receiver is the caller's place.
+    fn len_prefixes(self: &mut Self, b: &mut ir::CoreBody) {
+        let n = b.places.len();
+        self.lenpre.clear();
+        self.lenpre.resize_default(n);
+        for i in 0..n {
+            self.lenpre.set(i, ir::IR_NONE);
+            let p = *b.places.at(i);
+            if p.proj_len == 0 {
+                continue;
+            }
+            let last = *b.projections.at((p.proj_start + p.proj_len - 1) as usize);
+            if last.kind != ir::PJ_FIELD || last.data == ir::PJ_UNION_FIELD {
+                continue;
+            }
+            if p.proj_len == 2 && b.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF {
+                continue;
+            }
+            let vt = if p.proj_len == 1 {
+                b.locals.at(p.base as usize).ty;
+            } else {
+                b.projections.at((p.proj_start + p.proj_len - 2) as usize).ty;
+            };
+            if !self.fx.is_prelude_field(b, vt, last.sub, "len") {
+                continue;
+            }
+            self.lenpre.set(i, b.places.len() as u32);
+            b.places.push(ir::Place { base: p.base, proj_start: p.proj_start, proj_len: p.proj_len - 1, ty: vt });
+        }
+    }
+
     /// The len-place identity carried by a resolved local, when its binding is still current.
     const fn len_place_of(self: &Self, l: u32) LenBind {
         let lb = *self.lenof.at(l as usize);
@@ -328,6 +366,10 @@ extend Bce {
         let l = self.fx.whole_local(b, op.data);
         if l != ir::IR_NONE {
             return self.len_place_of(self.fx.copy_root(l));
+        }
+        if op.data as usize < self.lenpre.len() && self.lenpre[op.data as usize] != ir::IR_NONE {
+            // A `len` field read in place of a view (an inlined `len()` reads its receiver's field).
+            return self.len_capture(b, self.lenpre[op.data as usize], 0);
         }
         let p = *b.places.at(op.data as usize);
         if p.proj_len != 2 {
@@ -1673,6 +1715,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     if !any {
         return "";
     }
+    z.len_prefixes(b);
     z.begin_body(b, pkg);
     // the integer facts serve only the checks, solved on demand: a body with no check allocates no
     // solver state

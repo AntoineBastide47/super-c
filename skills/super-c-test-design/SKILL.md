@@ -15,7 +15,8 @@ fixtures, helpers, runner flags).
 
 - Pick the cheapest oracle that observes the behavior (the ladder below). Go up a rung only
   when the lower one cannot see the behavior.
-- Put exit-code cases in `h::ExitBatch`, never one `expect_exit` test per case.
+- Put exit-code and trap cases in `h::ExitBatch`, never one `expect_exit` or `expect_trap` test
+  per case.
 - Leave the object cache on. Use `cli::superc_in`; use `SC_NO_CACHE=1` only in a test that
   counts compiles or checks staleness through mtimes.
 - Do not add sanitizers to a test. CI runs every suite with `super-c test --sanitizers`.
@@ -32,7 +33,8 @@ fixtures, helpers, runner flags).
   it in the test.
 - Every test is isolated by fork; shared state goes through `@test_init(global)`, and the
   suite's global fixture belongs to `tests/harness.spc` (the prelude snapshot).
-- A failing case must name itself: `ExitBatch` and the differential oracles report the label.
+- A failing case must name itself: `ExitBatch`, `cli::Batch` and the differential oracles report
+  the label.
 
 ## The oracle ladder
 
@@ -49,10 +51,16 @@ Cheapest first.
 
 Rules for the costly rungs:
 
+- Rung 2 sees the first diagnostic of the resolve, type check and borrow check. It does not see
+  a program that imports `std::parallel` or an ffi module such as `stdlib` (the in-process
+  prelude does not load them), a later error of the same program, or an error the build reports
+  after the borrow check (an instance's lowering, the constant flush before emission). Check those
+  with `h::expect_build_err` or `cli::Batch`.
 - Rung 4: group the exit-code cases of a file into provider functions
   `fn name(b: &mut h::ExitBatch)` and run them from `exit_cases_NN` tests of about 20 cases.
-  One build serves every case. A case that needs its own `main` signature or a build flag
-  stays alone.
+  One build serves every case; `add_trap` adds a case that must fail with a message. A case whose
+  `main` is neither `fn main()` nor `fn main(NAME: Vector<str>)`, a case that needs a build flag,
+  and a case about a root module's bare C names stay alone.
 - Rung 5: one project per test, reused across its steps. A strict whole-tree compile
   (`p.cc_build`) goes through the object cache, so a unit already compiled with the same
   flags and text is not compiled again.

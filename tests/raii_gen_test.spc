@@ -4,9 +4,9 @@
 // scope-exit free, move-into-call, conditional move, binding reassignment, container deep-free, and nested
 // switch in all three modes (move-out, borrow-peek, free-elaboration of a bound-but-not-moved payload).
 //
-// Soundness oracle: `Tr::free` does `putchar(self.id)`, so each tracker prints its unique id byte exactly
-// when it is freed. The one RAII invariant (every value freed EXACTLY once) becomes: the MULTISET of
-// bytes printed == the multiset of ids constructed (a missing byte is a leak, a doubled byte a double-free).
+// Soundness oracle: `Tr::free` prints its unique id in decimal, so each tracker prints its id exactly when
+// it is freed. The one RAII invariant (every value freed EXACTLY once) becomes: the MULTISET of ids
+// printed == the multiset of ids constructed (a missing id is a leak, a doubled id a double-free).
 // Each batch is built + run through `super-c build` (via h::compile_and_run) and must exit 0 with a
 // matching free multiset. (The C suite additionally links under ASan; `super-c build` uses plain cc, so the
 // multiset check (not ASan) is what catches leaks / double-frees here.)
@@ -14,9 +14,7 @@
 // FULL depth, matching tests/raii_gen_test.c (MAX_SWITCH_DEPTH=6, MAX_GENERAL_DEPTH=5): OR switch chains
 // through depth 6 and ORB general chains through depth 5 (depth 3 for reassignment, Vector drop and pop,
 // see `run_general`): hundreds of scenarios per op. Scenarios batch
-// into programs (ID_CAP ids each) and the ops fork-parallelize across @tests; within a fork the batches
-// build+run serially (no OpenMP fan-out), so raii_gen is the slow part of the run: the cost of exhaustive
-// RAII coverage. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
+// into programs (ID_CAP ids each, so one program per op) and the ops fork-parallelize across @tests. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
 import tests::harness as h;
 import stdio;
 import stdlib;
@@ -34,11 +32,14 @@ const OP_SW_MOVE: i32 = 7; // nested switch moves the leaf Tr out; it frees at s
 const OP_SW_FREE: i32 = 8; // nested switch binds-but-doesn't-move the leaf -> free elaboration at the arm
 const OP_SW_PEEK: i32 = 9; // nested borrow-peek; the scrutinee stays owned and frees at scope exit
 
-const ID_CAP: i32 = 60; // ids map to bytes 48.. ; keep them printable (48+59 = 107 < 127)
-const PROG_CAP: i32 = 524288; // 512 KiB per-batch program buffer
+// Ids print in decimal, so one program holds every scenario of an op (at most 363 shapes, three ids
+// each): one build per test.
+const ID_CAP: i32 = 1200;
+const PROG_CAP: i32 = 4194304; // 4 MiB per-batch program buffer
+const CALLS_CAP: i32 = 65536;
 
-// TR_PRE: exit/putchar bindings + the leaf tracker whose `free` prints its id byte.
-const TR_PRE: str = "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\nstruct Tr { pub id: i32 }\nextend Tr as Free { fn free(self: &mut Tr) { unsafe putchar(self.id); } }\n";
+// TR_PRE: exit/putchar bindings + the leaf tracker whose `free` prints its id in decimal and a space.
+const TR_PRE: str = "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\nfn pr(n: i32) { if n >= 10 { pr(n / 10); } unsafe putchar(48 + n % 10); }\nstruct Tr { pub id: i32 }\nextend Tr as Free { fn free(self: &mut Tr) { pr(self.id); unsafe putchar(32); } }\n";
 
 // Bounded scratch buffers (`{}` zero-fills; Super-C has no `[v; N]` repeat literal).
 struct Buf16 {
@@ -59,19 +60,11 @@ struct Buf2048 {
 struct Buf8192 {
     pub b: [char; 8192],
 }
-struct Hist {
-    pub c: [i32; 256],
-}
 
 // Bounded append into `b` at offset `at` (cap-limited); returns the new end offset. Always NUL-terminates.
 fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
-    let mut n = (unsafe cstring::strlen(s)) as i32;
-    if at + n >= cap {
-        n = cap - 1 - at;
-    }
-    if n < 0 {
-        n = 0;
-    }
+    let n = (unsafe cstring::strlen(s)) as i32;
+    assert(at + n < cap, "raii-gen: a generated text fits its buffer");
     unsafe cstring::memcpy(b + at as usize, s, n as usize);
     let end = at + n;
     unsafe b[end as usize] = 0 as char;
@@ -176,50 +169,58 @@ fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char
     return ap(b, a, cap, &tail.b[0]);
 }
 
-// True if the two NUL-terminated byte strings are equal as MULTISETS (order-independent free-trace check).
-fn multiset_eq(a: *const char, b: *const char) bool {
-    if a == null || b == null {
+// Whether `out`, the free trace (each freed id in decimal and a space), frees every id of `exp` exactly
+// once and nothing else (order-independent: a missing id is a leak, a doubled one a double free).
+fn frees_each_once(out: *const char, exp: &Vector<i32>) bool {
+    if out == null {
         return false;
     }
-    let mut ca = Hist {};
-    let mut cb = Hist {};
-    let mut i: usize = 0;
-    loop {
-        let ch = unsafe a[i];
-        if ch == 0 as char {
-            break;
-        }
-        let k = (ch as u8) as usize;
-        unsafe ca.c[k] = unsafe ca.c[k] + 1;
-        i = i + 1;
+    let mut left = Vector::<i32>::new();
+    for _ in 0..ID_CAP + 1 {
+        left.push(0);
     }
-    i = 0;
-    loop {
-        let ch = unsafe b[i];
-        if ch == 0 as char {
-            break;
-        }
-        let k = (ch as u8) as usize;
-        unsafe cb.c[k] = unsafe cb.c[k] + 1;
-        i = i + 1;
+    for id in exp.iter() {
+        left.set((*id) as usize, *left.at((*id) as usize) + 1);
     }
-    for j in 0..256 {
-        if unsafe ca.c[j] != unsafe cb.c[j] {
+    let text = unsafe str::from_cstr(out);
+    let mut n: i32 = -1;
+    for i in 0..text.len() {
+        let c = text.byte_at(i);
+        if c >= b'0' && c <= b'9' {
+            n = if n < 0 {
+                0;
+            } else {
+                n * 10;
+            } + (c - b'0') as i32;
+            if n > ID_CAP {
+                return false;
+            }
+        } else if c == b' ' && n >= 0 {
+            if *left.at(n as usize) == 0 {
+                return false;
+            }
+            left.set(n as usize, *left.at(n as usize) - 1);
+            n = -1;
+        } else {
             return false;
         }
     }
-    return true;
+    for k in left.iter() {
+        if *k != 0 {
+            return false;
+        }
+    }
+    return n < 0;
 }
 
 // A batch accumulator: scenario functions append into `prog`, their call lines into `calls`, and their
-// constructed id bytes into `exp`. When the id budget fills, `flush` assembles + builds + runs the batch.
+// constructed ids into `exp`. When the id budget fills, `flush` assembles + builds + runs the batch.
 struct Gen {
     pub prog: *mut char,
     pub at: i32,
-    pub calls: [char; 16384],
+    pub calls: *mut char,
     pub cat: i32,
-    pub exp: [char; 256],
-    pub eat: i32,
+    pub exp: Vector<i32>,
     pub idc: i32,
     pub sc: i32,
     pub nbatch: i32,
@@ -227,17 +228,17 @@ struct Gen {
 
 fn new_gen() Gen {
     let p = (unsafe stdlib::malloc(PROG_CAP as usize)) as *mut char;
-    let mut g = Gen { prog: p, at: 0, cat: 0, eat: 0, idc: 0, sc: 0, nbatch: 0 };
+    let c = (unsafe stdlib::malloc(CALLS_CAP as usize)) as *mut char;
+    unsafe c[0] = 0 as char;
+    let mut g = Gen { prog: p, at: 0, calls: c, cat: 0, exp: Vector::<i32>::new(), idc: 0, sc: 0, nbatch: 0 };
     g.at = ap(g.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
     return g;
 }
 
 extend Gen {
-    // Record one id byte into the expected-free multiset.
-    const fn push_id(self: &mut Gen, id: i32) {
-        unsafe self.exp[self.eat as usize] = id as char;
-        self.eat = self.eat + 1;
-        unsafe self.exp[self.eat as usize] = 0 as char;
+    // Record one id into the expected-free multiset.
+    fn push_id(self: &mut Gen, id: i32) {
+        self.exp.push(id);
     }
 
     // Emit one scenario for shape `sh` and operation `op`; flush first if the id budget would overflow.
@@ -248,18 +249,18 @@ extend Gen {
         let mut tb = Buf1024 {};
         let _ = ty(&mut tb.b[0], 0, 1024, sh, 0);
         let tp = (&tb.b[0]) as *const char;
-        let id0 = 48 + self.idc;
+        let id0 = 1 + self.idc;
         self.idc = self.idc + 1;
         let mut id1 = 0;
         let mut id2 = 0;
         self.push_id(id0);
         if id_need(op) >= 2 {
-            id1 = 48 + self.idc;
+            id1 = 1 + self.idc;
             self.idc = self.idc + 1;
             self.push_id(id1);
         }
         if id_need(op) >= 3 {
-            id2 = 48 + self.idc;
+            id2 = 1 + self.idc;
             self.idc = self.idc + 1;
             self.push_id(id2);
         }
@@ -386,7 +387,7 @@ extend Gen {
         }
 
         unsafe stdio::snprintf(&mut cb.b[0], 256, "  acc = acc + sc%d(%s);\n".ptr() as *const char, sc, callarg(op));
-        self.cat = ap(&mut self.calls[0], self.cat, 16384, &cb.b[0]);
+        self.cat = ap(self.calls, self.cat, CALLS_CAP, &cb.b[0]);
         self.sc = self.sc + 1;
     }
 
@@ -397,23 +398,22 @@ extend Gen {
             return;
         }
         self.at = ap(self.prog, self.at, PROG_CAP, "fn main() i32 { let mut acc = 0;\n".ptr() as *const char);
-        self.at = ap(self.prog, self.at, PROG_CAP, &self.calls[0]);
+        self.at = ap(self.prog, self.at, PROG_CAP, self.calls);
         self.at = ap(
             self.prog,
             self.at,
             PROG_CAP,
-            "  if acc == i32::MAX { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr() as *const char,
+            "  if acc == i32::MAX { unsafe putchar(33); }\n  unsafe exit(0);\n  return 0; }\n".ptr() as *const char,
         );
         let src = unsafe str::from_raw(self.prog as *const u8, self.at as usize);
         let r = h::compile_and_run(src);
         assert(r.built, "raii-gen: batch failed to build");
         assert_eq(r.exit, 0);
-        assert(multiset_eq(r.out, &self.exp[0]), "raii-gen: free multiset mismatch (leak or double-free)");
+        assert(frees_each_once(r.out, &self.exp), "raii-gen: free multiset mismatch (leak or double-free)");
         self.at = ap(self.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
         self.cat = 0;
-        self.calls[0] = 0 as char;
-        self.eat = 0;
-        self.exp[0] = 0 as char;
+        unsafe self.calls[0] = 0 as char;
+        self.exp.clear();
         self.idc = 0;
         self.sc = 0;
         self.nbatch = self.nbatch + 1;
@@ -424,6 +424,10 @@ extend Gen {
         if self.prog != null {
             unsafe stdlib::free(self.prog);
             self.prog = null;
+        }
+        if self.calls != null {
+            unsafe stdlib::free(self.calls);
+            self.calls = null;
         }
     }
 }

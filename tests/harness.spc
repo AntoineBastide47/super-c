@@ -383,6 +383,15 @@ extend CompiledC as Free {
 pub fn compile_c(src: str) CompiledC {
     return compile_c_of(src, false, unsafe shim::sc_host_arch());
 }
+/// The text of the C function that `def` opens in `code`, to its closing brace at a line start.
+pub fn c_fn<'a>(code: str<'a>, def: str) str<'a> {
+    let at = code.find(def);
+    assert(at >= 0, "the function is defined");
+    let rest = code.slice(at as usize, code.len());
+    let end = rest.find("\n}\n");
+    assert(end >= 0, "the definition ends");
+    return rest.slice(def.len(), end as usize);
+}
 /// Only the user snippet's own translation unit (needle absence must not trip on std code).
 pub fn compile_c_user(src: str) CompiledC {
     return compile_c_of(src, true, unsafe shim::sc_host_arch());
@@ -611,23 +620,76 @@ fn build_script(dir: str, bin: str) bool {
 pub fn expect_exit(label: str, src: str, code: i32) {
     let r = compile_and_run(src);
     assert(r.built, label);
-    assert_eq(r.exit, code);
+    if r.exit != code {
+        eprintln("{}: exit {}, expected {}", label, r.exit, code);
+    }
+    assert(r.exit == code, label);
 }
 
-/// Exit-code cases built as one program. `run` gives each case's source its own module `c<k>` of a
-/// scratch program, with its `fn main()` renamed `case_main` and made public, builds the program
-/// once, and runs it once per case with the argument `k`. A case whose `main` takes parameters, and
-/// every case of a program that does not build (two cases whose C declarations clash, a case that
-/// does not compile), builds alone through `expect_exit`, so a failure still names its case.
+/// Assert that `src` builds and its run fails with output (stdout and stderr) holding `msg`.
+pub fn expect_trap(label: str, src: str, msg: str) {
+    let r = compile_and_run(src);
+    assert(r.built, label);
+    let ok = r.exit != 0 && cli::contains_str(r.out, msg);
+    if !ok {
+        eprintln("{}: exit {}: {}", label, r.exit, unsafe str::from_cstr(r.out));
+    }
+    assert(ok, label);
+}
+
+/// Exit-code and trap cases built as one program. `run` gives each case's source its own module `c<k>`
+/// of a scratch program, with its `fn main()` or `fn main(NAME: Vector<str>)` renamed `case_main` and
+/// made public, builds the program once, and runs it once per case with the argument `k`; a case
+/// whose `main` takes the arguments gets them without `k`, as a run of its own program does. A case
+/// with another `main`, and every case of a program that does not build (two cases whose C
+/// declarations clash, a case that does not compile), builds alone through `expect_exit` or
+/// `expect_trap`, so a failure still names its case.
 pub struct ExitBatch {
     labels: Vector<String>,
     srcs: Vector<String>,
     codes: Vector<i32>,
+    traps: Vector<String>,
+}
+
+// The `main` of case program `s`: the offset of its `fn main(`, the offset of the `)` that ends its
+// parameters, and whether it takes the arguments (`NAME: Vector<str>`). The offset is -1 when `s` has
+// no `main` of these two forms, or more than one `fn main(`.
+fn case_main_of(s: str) (isize, usize, bool) {
+    let at = s.find("fn main(");
+    if at < 0 {
+        return -1, 0, false;
+    }
+    let open = at as usize + 8;
+    let rest = s.slice(open, s.len());
+    let close = rest.find(")");
+    if close < 0 || rest.find("fn main(") >= 0 {
+        return -1, 0, false;
+    }
+    let params = rest.slice(0, close as usize);
+    if params.len() == 0 {
+        return at, open + close as usize, false;
+    }
+    let colon = params.find(": Vector<str>");
+    if colon <= 0 || colon as usize + 13 != params.len() {
+        return -1, 0, false;
+    }
+    for i in 0..colon as usize {
+        let c = params.byte_at(i);
+        if !(c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9') {
+            return -1, 0, false;
+        }
+    }
+    return at, open + close as usize, true;
 }
 
 extend ExitBatch {
     pub fn new() ExitBatch {
-        return ExitBatch { labels: Vector::<String>::new(), srcs: Vector::<String>::new(), codes: Vector::<i32>::new() };
+        return ExitBatch {
+            labels: Vector::<String>::new(),
+            srcs: Vector::<String>::new(),
+            codes: Vector::<i32>::new(),
+            traps: Vector::<String>::new(),
+        };
     }
 
     /// Add the case `label`: `src` must build and exit with `code`.
@@ -635,17 +697,34 @@ extend ExitBatch {
         self.labels.push(String::from_str(label));
         self.srcs.push(String::from_str(src));
         self.codes.push(code);
+        self.traps.push(String::new());
     }
 
-    /// Build the cases and check each one's exit code.
+    /// Add the case `label`: `src` must build and its run must fail with output holding `msg`.
+    pub fn add_trap(self: &mut Self, label: str, src: str, msg: str) {
+        self.labels.push(String::from_str(label));
+        self.srcs.push(String::from_str(src));
+        self.codes.push(0);
+        self.traps.push(String::from_str(msg));
+    }
+
+    // Case `k` built as its own program.
+    fn alone(self: &Self, k: usize) {
+        if self.traps[k].len() == 0 {
+            expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+        } else {
+            expect_trap(self.labels[k].as_str(), self.srcs[k].as_str(), self.traps[k].as_str());
+        }
+    }
+
+    /// Build the cases and check each one's exit code or trap.
     pub fn run(self: &Self) {
         let mut root = String::new();
         let mut batched = Vector::<usize>::new();
         for k in 0..self.srcs.len() {
-            let s = self.srcs[k].as_str();
-            let at = s.find("fn main()");
-            if at < 0 || s.slice(at as usize + 9, s.len()).find("fn main()") >= 0 {
-                expect_exit(self.labels[k].as_str(), s, self.codes[k]);
+            let (at, _, _) = case_main_of(self.srcs[k].as_str());
+            if at < 0 {
+                self.alone(k);
             } else {
                 batched.push(k);
             }
@@ -653,40 +732,48 @@ extend ExitBatch {
         if batched.len() <= 1 {
             // One case gains nothing from a batch: it builds as its own program.
             for i in 0..batched.len() {
-                let k = batched[i];
-                expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+                self.alone(batched[i]);
             }
             return;
         }
         let mut dir = scratch_dir();
         assert(dir.len() != 0, "harness: no scratch directory for the batch");
         let d = dir.as_str();
-        // The argument vector is gone before a case runs: a case may end the process with `exit`,
-        // and the leak check would count a vector still held.
+        // The argument vector is gone before a case without arguments runs: a case may end the process
+        // with `exit`, and the leak check would count a vector still held.
         let mut body = String::from_str(
-            "fn case_index(args: Vector<str>) i64 {\n    return args.at(1).parse_i64().unwrap();\n}\n\nfn main(args: Vector<str>) i32 {\n    let k = case_index(args);\n",
+            "fn case_index(args: &Vector<str>) i64 {\n    return args.at(1).parse_i64().unwrap();\n}\n\n// The arguments without the case index: those of a run of the case's own program.\nfn case_args(args: Vector<str>) Vector<str> {\n    let mut a = args;\n    let _ = a.pop();\n    return a;\n}\n\nfn case_end(_args: Vector<str>) {}\n\nfn main(args: Vector<str>) i32 {\n    let k = case_index(&args);\n    let a = case_args(args);\n",
         );
         for i in 0..batched.len() {
             let s = self.srcs[batched[i]].as_str();
-            let at = s.find("fn main()") as usize;
-            let mut m = String::from_str(s.slice(0, at));
+            let (at, close, takes) = case_main_of(s);
+            let mut m = String::from_str(s.slice(0, at as usize));
             if !m.as_str().ends_with("pub ") {
                 m.push_str("pub ");
             }
-            m.push_str("fn case_main()");
-            let rest = s.slice(at + 9, s.len());
-            m.push_str(rest);
+            m.push_str("fn case_main(");
+            m.push_str(s.slice(at as usize + 8, s.len()));
             assert(write_text(format("{}/c{}.spc", d, i).as_str(), m.as_str()), "harness: cannot write a batch case");
             root.format_into("import c{};\n", i);
+            let args = if takes {
+                "a";
+            } else {
+                "";
+            };
+            body.format_into("    if k == {} {{\n", i);
+            if !takes {
+                body.push_str("        case_end(a);\n");
+            }
             // A `main` without a return type ends the process with 0 when it returns.
+            let rest = s.slice(close + 1, s.len());
             let mut e: usize = 0;
             while e < rest.len() && rest.byte_at(e) == b' ' {
                 e += 1;
             }
             if e < rest.len() && rest.byte_at(e) == b'{' {
-                body.format_into("    if k == {} {{\n        c{}::case_main();\n        return 0;\n    }}\n", i, i);
+                body.format_into("        c{}::case_main({});\n        return 0;\n    }}\n", i, args);
             } else {
-                body.format_into("    if k == {} {{\n        return c{}::case_main();\n    }}\n", i, i);
+                body.format_into("        return c{}::case_main({});\n    }}\n", i, args);
             }
         }
         body.push_str("    return 255;\n}\n");
@@ -696,24 +783,45 @@ extend ExitBatch {
         if !build_script(d, bin.as_str()) {
             rm_dir(dir.cstr());
             for i in 0..batched.len() {
-                let k = batched[i];
-                expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+                self.alone(batched[i]);
             }
             return;
         }
         let mut outp = format("{}/out", d);
         let mut exits = Vector::<i32>::new();
+        let mut outs = Vector::<String>::new();
         for i in 0..batched.len() {
             let mut run = format("\"{}\" {}", bin.as_str(), i);
             exits.push(cli::run_with(run.cstr(), null, outp.cstr(), null, ""));
+            outs.push(cli::read_text(outp.as_str()));
         }
         rm_dir(dir.cstr());
         for i in 0..batched.len() {
             let k = batched[i];
-            if exits[i] != self.codes[k] {
-                eprintln("{}: exit {}, expected {}", self.labels[k].as_str(), exits[i], self.codes[k]);
+            let msg = self.traps[k].as_str();
+            let ok = if msg.len() == 0 {
+                exits[i] == self.codes[k];
+            } else {
+                exits[i] != 0 && outs[i].contains(msg);
+            };
+            if !ok && msg.len() == 0 {
+                eprintln(
+                    "{}: exit {}, expected {}: {}",
+                    self.labels[k].as_str(),
+                    exits[i],
+                    self.codes[k],
+                    outs[i].as_str(),
+                );
+            } else if !ok {
+                eprintln(
+                    "{}: exit {}, expected a trap with '{}': {}",
+                    self.labels[k].as_str(),
+                    exits[i],
+                    msg,
+                    outs[i].as_str(),
+                );
             }
-            assert(exits[i] == self.codes[k], self.labels[k].as_str());
+            assert(ok, self.labels[k].as_str());
         }
     }
 }
@@ -806,8 +914,19 @@ pub struct DiffRun {
 /// run many times: UBSan checks its arithmetic without AddressSanitizer's start-up, which makes each
 /// run several times slower.
 pub fn diff_build(src: str, opts: []str) DiffBuild {
-    let exe = cli::superc_path(); // resolved before the chdir below
-    let p = cli::proj_new();
+    let p = diff_proj();
+    p.mkfile("main.spc", src);
+    return diff_build_in(p, opts);
+}
+
+/// The scratch project of `diff_build` without its sources (`diff_build_in` writes its build.toml).
+pub fn diff_proj() cli::Proj {
+    return cli::proj_new();
+}
+
+/// `diff_build` of the project `p` of `diff_proj`, its sources written: its `build.toml` (root
+/// `main.spc`) is written here, from `opts`.
+pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     let mut wasm = simd_lane();
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -826,7 +945,7 @@ pub fn diff_build(src: str, opts: []str) DiffBuild {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
         },
     );
-    p.mkfile("main.spc", src);
+    let exe = cli::superc_path(); // resolved before the chdir below
     let mut root = String::from_str(p.dir());
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
@@ -879,38 +998,76 @@ pub fn expect_build_err(label: str, src: str, needle: str) {
     assert(ok, label);
 }
 
+/// `expect_build_err` for every case of `b` (see `cli::Batch`), each program the root of a
+/// `diff_proj` project.
+pub fn expect_build_errs(mut b: cli::Batch) {
+    assert(b.file.eq_str("main.spc"), "a case alone is the project's root");
+    b.forbid("C compile failed");
+    b.forbid("internal");
+    while b.next() {
+        let p = diff_proj();
+        let _ = b.write(&p, "main.spc");
+        let r = diff_build_in(p, []);
+        b.take(
+            if r.built {
+                0;
+            } else {
+                1;
+            },
+            r.diag.as_str(),
+        );
+    }
+}
+
 /// Assert that `src` builds and its run with argument `arg` traps with `msg` on stderr, or exits 0
 /// when `msg` is empty; a sanitizer report fails it either way.
 pub fn expect_run(label: str, src: str, arg: str, msg: str) {
+    expect_runs(label, src, [arg], [msg]);
+}
+
+/// `expect_run` of `src` for each argument `args[i]` with trap text `msgs[i]`, from one build per
+/// option set: the runs differ only in their argument.
+pub fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
+    let b = diff_build(src, []);
+    if !b.built {
+        eprintln("{}: {}", label, b.diag.as_str());
+    }
+    assert(b.built, label);
+    // The runs of `b` come first: the scalar build moves the working directory into its own scratch
+    // directory, which it removes when it drops.
+    for i in 0..args.len() {
+        let r = diff_run(&b, args[i]);
+        let msg = msgs[i];
+        let ok = !r.err.contains("runtime error:") && !r.err.contains("Sanitizer") && if msg.len() == 0 {
+            r.exit == 0;
+        } else {
+            r.exit != 0 && r.err.contains(msg);
+        };
+        if !ok {
+            eprintln("{} (argument {}): exit {}: {}{}", label, args[i], r.exit, r.out.as_str(), r.err.as_str());
+        }
+        assert(ok, label);
+    }
     // The scalar lowering and the hardware entries give the same results: in the lane without the
     // wasm feature, on an aarch64 host (Neon in every build) with the planner off.
     let neon = !simd_lane() && unsafe shim::sc_host_arch() == 1;
     if simd_lane() || neon {
-        let d = if neon {
-            same_output(src, ["SC_SIMD_SCALAR=1"], [], [arg]);
+        let scalar: [str; 1] = if neon {
+            ["SC_SIMD_SCALAR=1"];
         } else {
-            same_output(src, ["--target-feature=-simd128"], [], [arg]);
+            ["--target-feature=-simd128"];
+        };
+        let a = diff_build(src, scalar);
+        let d = if a.built {
+            same_runs(&a, &b, args);
+        } else {
+            format("the program does not build with options A:\n{}", a.diag.as_str());
         };
         if d.len() != 0 {
             eprintln("{}: scalar and vector entries: {}", label, d.as_str());
         }
         assert(d.len() == 0, label);
     }
-    let b = diff_build(src, []);
-    if !b.built {
-        eprintln("{}: {}", label, b.diag.as_str());
-    }
-    assert(b.built, label);
-    let r = diff_run(&b, arg);
-    let ok = !r.err.contains("runtime error:") && !r.err.contains("Sanitizer") && if msg.len() == 0 {
-        r.exit == 0;
-    } else {
-        r.exit != 0 && r.err.contains(msg);
-    };
-    if !ok {
-        eprintln("{}: exit {}: {}{}", label, r.exit, r.out.as_str(), r.err.as_str());
-    }
-    assert(ok, label);
 }
 
 /// Run the program `b` built with `args` (a command-line fragment) and capture its output.
@@ -964,9 +1121,16 @@ pub fn same_output(src: str, opts_a: []str, opts_b: []str, runs: []str) String {
         r.format_into("the program does not build with options B:\n{}", b.diag.as_str());
         return r;
     }
+    return same_runs(&a, &b, runs);
+}
+
+/// `same_output` over two builds the caller made (both built): run each once per entry of `runs`
+/// and describe the first difference, empty when none.
+pub fn same_runs(a: &DiffBuild, b: &DiffBuild, runs: []str) String {
+    let mut r = String::new();
     for args in runs {
-        let ra = diff_run(&a, args);
-        let rb = diff_run(&b, args);
+        let ra = diff_run(a, args);
+        let rb = diff_run(b, args);
         if sanitizer_report(ra.err.as_str()) || sanitizer_report(rb.err.as_str()) {
             r.format_into(
                 "run '{}': sanitizer report\nA stderr:\n{}B stderr:\n{}",

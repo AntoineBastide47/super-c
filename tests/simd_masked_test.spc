@@ -264,14 +264,17 @@ fn main(args: Vector<str>) i32 {
     return w[1] - w[1];
 }
 )";
-    h::expect_run(
-        "an index past the slice",
+    // An index past the slice, the lowest of two, a start past.
+    h::expect_runs(
+        "masked traps",
         src,
-        "6",
-        "lane 1: index out of bounds: the index is 6 but the length is 6",
+        ["6", "5", "3"],
+        [
+            "lane 1: index out of bounds: the index is 6 but the length is 6",
+            "lane 3: index out of bounds: the index is 6 but the length is 6",
+            "lane 3: index out of bounds: the index is 3 + 3 but the length is 6",
+        ],
     );
-    h::expect_run("the lowest of two", src, "5", "lane 3: index out of bounds: the index is 6 but the length is 6");
-    h::expect_run("a start past", src, "3", "lane 3: index out of bounds: the index is 3 + 3 but the length is 6");
 }
 
 // A masked store needs its slice mutably borrowed: a live shared borrow conflicts, as for `store`.
@@ -286,7 +289,7 @@ fn masked_stores_borrow_their_slice() {
     for c in calls {
         let mut src = String::from_str(pre);
         src.format_into("{}\n    return *r;\n}}\n", c);
-        h::expect_build_err(c, src.as_str(), "borrow");
+        h::expect_err_msg(c, src.as_str(), "borrow");
     }
 }
 

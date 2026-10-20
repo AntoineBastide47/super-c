@@ -48,7 +48,9 @@ borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, vi
   |                          until cemit_package releases it (syntax-ownership.md)
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
-lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build;
+lint + panics + flush     -- lint_unused_items, check_recursion (ir::recursion: unbounded
+  |                          recursion over summaries of the kept bodies, an error, every build),
+  |                          check_always_panics (an error, every build;
   |                          one job per linted module, a private engine per worker), then
   |                          cir.flush_asserts, flush_inst_asserts, cir.flush_consts
   |                          (deferred static_asserts, the per-instance asserts of generic
@@ -90,6 +92,11 @@ Order facts that surprise people:
   the body's analyses): the keep holds elaborated bodies, the inliner splices elaborated
   callees, and emission elaborates only the bodies it lowers itself (per-instance
   re-lowerings, wrappers). It is not a pipeline stage.
+- Self tail calls become jumps in the same per-body step, after drop elaboration
+  (`flow_ir::bc_tail_calls`, `ir::tailcall::convert`; emission converts the bodies it
+  lowers itself, before the inliner), in every profile. `@tail_recurse` errors come from
+  the borrow pass; without a keep (the language server, the in-process `compile` harness) only
+  a `@tail_recurse` function's bodies are elaborated and converted, for its errors.
 
 ## Identity Model
 
@@ -199,8 +206,11 @@ declaration index (`ensure_index`, built in deterministic module and source orde
   module**; single-file programs emit plain C names.
 - A module prefixes with just its **last path segment** when no other non-prelude module
   shares it; the full `a__b__` path otherwise.
-- Prelude modules are never prefixed. `main` is never prefixed. An extern function IS
-  its C symbol: never prefixed, never suffixed.
+- Prelude modules are never prefixed. The program entry (`Package::is_entry`: the root
+  module's top-level `main`, `Package.root`; each listed file of a batch lint) is never prefixed,
+  and the driver renames it `__sc_user_main` under the C `main` wrapper. Every other `main` (another
+  module's, a method) is an ordinary function: prefixed, unchecked against the entry signatures,
+  linted. An extern function IS its C symbol: never prefixed, never suffixed.
 
 ## Core IR
 
@@ -227,7 +237,25 @@ instead of reading past the new length.
 
 **Layout queries in the typechecker** (the type size limit, packed-field alignment) go through
 `tc_layout`, which holds the engine lock: the layout service's cache is shared by the module
-jobs. A type larger than the target's `isize::MAX` sets `Layout.big`.
+jobs. A type larger than the target's `isize::MAX` sets `Layout.big`. The service reads a member's
+type from its record (`Ast::member_ty`: a field's own slot, which the declaration's check writes),
+and a member the check has not recorded yet answers not-ok and caches nothing (`Svc.pending`), as
+`@c.align` does below: a static_assert evaluated before that check is deferred and folds later.
+
+**Header types:** a `struct` or `union` of an `extern "C"` block has its C header's layout. The
+service answers not-ok for it and for everything that holds it by value, with `Layout.hm`/`hn`
+naming the declaration (`field_offset` is -1), so no consumer folds a size: ZST elision treats it
+as material, the emitter spells `sizeof(struct stat)`, and the evaluator's size, alignment and
+`type_info` queries trap with a text that names it (`Interp::header_trap`); values still evaluate
+slot by slot. The type spells as its tag or its `@c.import` pin (`Mangler::ctype`,
+`driver::emit::extern_c_name`), a field as its `@c.import` pin when the module has one
+(`Ast.has_member_pins`, `Mangler::field_ident`), and `driver::emit::header_type_checks` writes
+the field checks into the forward header after every include (`cemit_extern_includes`). An extern
+`enum` spells as its tag (`enum color`) or pin the same way and gets the completeness check; its
+layout stays the 4-byte C enum the service models. The parser rejects a header type (`struct`,
+`union` or `enum`) in a block without a header (`Parser::need_header`); the checker restricts field types to C types
+(`tc_header_field`) and rejects a `Free` conformance on every type of an extern block
+(`tc_extern_type`), so none has drop glue.
 
 **One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of `KeptBody`
 records (the elaborated body and its closures) keyed by body. Borrowck's lowerings are recycled into it, and emission's
@@ -287,9 +315,26 @@ later stage interns a substituted type; a publication checkpoint renumbers provi
 ids into final ids and remaps every retained table in the same step, and a final id is
 never removed or renumbered.
 
-Enforcement is report-only and env-gated: under `SC_FACTS_CHECK` the driver snapshots
-per-module watermarks after typecheck and verifies them **twice**: after borrowck and
-after codegen.
+A batch build frees four tables, or their body-arena part, at their last reader. Each release is
+a named state, `Ast::Released` (`on`, and the table's length just before and just after the
+release):
+
+| Table | Freed | Release point |
+|-------|-------|---------------|
+| `call_info`, `mono` | the entries of body-arena nodes | with the module's body arena (`Ast::release_body_facts`, in `bc_job` and `Package::release_bodies`) |
+| `method_refs` | the whole table | after the lints (`Ast::release_checked_tables` in `run_package`; the unused-item lint is the last reader) |
+| `seeds` | the whole table | at the same point (a batch build never re-resolves after its type check) |
+
+Every later read or write of a freed part is an assertion failure (`call_info_of`,
+`set_call_info`, `type_args`, `mono_slot`, `set_type_args`, `method_refs_live`,
+`push_method_ref`, `seed_resolution`, `init_resolutions`). The LSP and `super-c lint` never
+call these releases.
+
+Enforcement is env-gated: under `SC_FACTS_CHECK` the driver snapshots per-module watermarks
+after typecheck and verifies them **twice**: after borrowck (a difference fails the build) and
+after codegen (reported). A released table must match its snapshot up to its release and its
+released length after it. The check also requires each release at its point: the body facts
+exactly when the body arena is released, and `method_refs` and `seeds` by the codegen check.
 
 ## Borrow Checker
 
@@ -371,6 +416,15 @@ than defining a new context. Two layers:
      a loan on the array place held by the view's origin, never a move. Lowering builds a
      literal coerced to a slice as an array temp, and registers an unregistered array temp
      in its scope (`own_temp`): its storage ends, and an owning one drops, at the block's end.
+     The value of an `if`, `switch` or value-block arm (`lower_value_into`) takes the conversions
+     the checker recorded on the arm (`apply_adjust` on the arm block, `arm_view` when the whole
+     expression is typed as the slice of the arms' arrays). A temporary that value borrows (an
+     array viewed as a slice, a `&` operand: the nodes of `Lowerer.ext`, `ExtCx`) is registered in
+     the scope around the whole expression (`ext_depth_for`, nested value expressions in arm-value
+     position share the outermost one), so its storage ends there; an arm's own locals end with the
+     arm and the loan analysis rejects a value borrowing one. The emitter declares a local at its
+     initializing write only when that block also dominates the storage ends of a borrowed local
+     (`compute_fusion`), so the C scope holds every read through the borrow.
    - Stores through a `&mut` argument (a signature tie to the parameter's pointee, or a
      `&mut self` receiver whose pointee holds borrows) flow into a frame-owned container at
      once; through a reference they are recorded (`StoreVia`) and `resolve_stores` resolves
@@ -492,7 +546,11 @@ than defining a new context. Two layers:
    - Every borrow job (one per module) leases an `Owner` + `BorrowCtx` slot from a
      mutex-guarded pool (`bc_slot_take`/`bc_slot_give`: never hold the guard across the
      job), so at most one slot per concurrently running job ever exists; the serial
-     path's single slot serves every body.
+     path's single slot serves every body. A slot returned after every job has leased one
+     has no next lease and is freed at once (`BcPool.unleased`), except under
+     `SC_BORROW_STATS` or `SC_ITEM_STATS`, whose reports read every slot after the stage.
+     The always-panics engines follow the same rule: an engine returned after the last
+     lease folds its counters and fold failures into the master (`st_absorb`) and is freed.
 
 Callee resolution is never re-derived: the typechecker's `call_info` side table is the
 bridge (`bc_call_info`).
@@ -632,7 +690,9 @@ The constant-trap scan (`tc_ct_check`, after each binary, unary and assignment n
 operation (operations.md); a mandatory evaluation (`tc_mandatory_const`,
 static_assert, a discriminant, an array length or repeat count) whose expression it reported
 (`ct_n` moved) reports nothing more. The always-panics pass runs only when type checking passed,
-so it never repeats one.
+so it never repeats one; each probe (`Interp::lint_body`) runs at most `IT_PROBE_STEPS` (65536)
+steps. The engine's hash-keyed caches (`body_ix`, `lane_memo`, the call memo) compare the whole
+key on a hit: a hash two keys share is a miss.
 
 Driver protocol: `cir.all_typed` and `record_folds` are set **before the first body
 lowers** (the constant contexts lowering evaluates, such as build conditions, repeat counts
@@ -640,6 +700,11 @@ and range bounds, must behave exactly as under the backend's own lowering); lowe
 folds a call outside a constant context; `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
 (a callee outside the item's visibility) at the end, and a top-level `static_assert`
 that still does not fold then is an error; `report_fold_errs` surfaces
+emission-time fold failures. After the always-panics pass and `flush_consts`,
+`Interp::release_pass` frees the callee bodies lowered since `Interp::body_mark` (taken
+before the pass), except those lowered from a body arena, and the retained dead-object
+storage; the constant pass before emission lowers again the few it needs (from live syntax,
+so with the same result).
 emission-time fold failures. A `static_assert` in a generic function's body holds per
 instance. The resolver records each function whose body holds one and that has its own
 generic parameters or sits in an extend with parameters (`Ast.assert_fns`); a checked call
@@ -657,15 +722,30 @@ instance it demands, once per instance; after a failure in the graph's check
 check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
 (`graph::items::visible`) is a refusal, whatever a worker has done with it.
 
+A constant's result depends on that constant alone, never on which constants were
+evaluated before it. The call memo lives for one evaluation. A referenced constant and a
+fold a lowering asks for inside a run (`eval_g`, `eval_lanes`) evaluate isolated
+(`Interp::iso_enter`): their own steps, call depth, instance nesting, memory and call
+memo; their objects are released after, except the storage a pointer-holding result
+points into, which stays outside the referrer's budget. Each reference is charged a copy
+of the value. A fold's trap is dropped: the evaluation that asked for it reports its own.
+A nested fold's failure holds for the rest of the evaluation (`fold_fail`, `lane_fail`).
+
 Constant dependencies do not nest on the native stack: an evaluation that reaches
 `IT_ITEM_NEST` (16) nested constants evaluates the requester's remaining constant
 dependencies dependency-first from an explicit work stack (`prefetch_items`), keeping
-scalar results in `item_memo`, aggregates in `item_objs` (cloned per reference) and
+scalar results in `item_memo`, pointer-free aggregates in `item_aggs` (a frozen copy each
+reference thaws), aggregates with pointers in `item_objs` (cloned per reference) and
 failures in `item_fail` (replayed with the trap they raised). Across evaluations,
-`item_aggs` keeps a frozen copy of each pointer-free aggregate constant (thawed per
-reference) and `item_dead` each constant that failed with a trap no budget caused.
-Nesting the stack cannot see (through function bodies, lowering-time folds) stops at
-`IT_ITEM_MAX_NEST` (64) with "constant evaluation nests too deeply".
+`item_memo`, `item_aggs` and `item_dead` (each constant that failed with a trap no budget
+caused) persist. A constant or fold the work stack cannot see (through a function body or a
+lowering) nests at most `IT_DEFER_DEPTH` (64) native levels above the outermost nested
+evaluation: past that the attempt is dropped, the outermost evaluation evaluates the deep
+one first (`Interp::defer_retry`, one at a time) and runs again, so neither a dependency
+chain nor the call stack a fold starts under decides a result, and a long cycle still
+reports "cyclic constant dependency".
+Generic-constant instances nest up to `IT_ITEM_MAX_NEST` (64) inside one constant's
+evaluation ("constant evaluation nests too deeply").
 
 Every const initializer evaluates during the type check: a trap is an error at the
 constant (a call-free initializer leaves a trap raised in a referenced constant to that
@@ -883,12 +963,49 @@ longer emits.
 
 4. **Near-zero global state.** Per-compile state lives in per-compile contexts (Lexer,
    Parser, Ast, TypeChecker, ...); const tables are built by `const fn` and held by
-   value. The lone `static mut` in the compiler proper is the loader's `G_LOAD_JOBS`
-   worker-count knob.
+   value. The `static mut`s of the compiler proper are process-wide settings, diagnostics and
+   one cache: the loader's settings (`G_LOAD_JOBS`, `G_ARCH`, `G_FEATURES`), the build record
+   (`driver::stats`), the type-stats counters (`TS_*` in `src/ast/ast.spc`) and the emission
+   phase's `DropCtx` pool (`G_DPOOL`, freed at the end of the drain). No semantic decision
+   lives in one. List them with `grep -rn 'static mut' src`.
 
 5. **Direct C.** The emitted C moves a value with an assignment, a compound literal or a lane
-   loop, never `memcpy` into a temporary, and declares no temporary that only copies a value:
-   a single-use result writes its reader's place (coalescing, `vec_forward`), and a single-use
-   pure value is spelled at its read (`sx_inline`, `vec_literals`, `vec_fusion`). `memcpy` and
-   `memmove` remain where C has no other legal spelling: an array copy, a bitcast (a type pun),
-   and a raw pointer that may overlap its operand.
+   loop, never `memcpy` into a temporary, and declares no temporary that only copies a value.
+   The per-body decisions in `src/emit/cemit.spc`:
+   - A copy shares one C variable with its source. `setup_locals` merges a single-use
+     temporary into its copy's destination; `coalesce_copies` does it over the CFG when the
+     source is dead after the copy and the destination holds no value the source's live range
+     can reach (`copy_range`, `live_from`): an `if` or `switch` value and a short-circuit result
+     write the binding in each arm, through chains of copies. A temporary copy of an immutable
+     binding or parameter spells the binding. An array literal's element value writes `d[k]` at
+     its definition (`compute_elems`). A vector result writes its local (`vec_forward`).
+   - A local declares at its initializing write when that write dominates every access
+     (`compute_fusion`): a drop flag at the entry (`bool _5 = false;`), a local of a loop when
+     every access lies inside the loop's braces (no do-loop test, no exit), any local in the goto
+     layout. A borrowed local's storage ends must lie in that scope too.
+   - A single-use pure value is spelled at its read (`sx_inline`): in its block, along a goto
+     chain (`sx_gpred`), past a guard whose other edges only panic (`sx_spred`) and past a call
+     (`sx_cpred`) when the value cannot panic and reads no memory and no local a pointer
+     reaches; as the base of a place read through a pointer; as a value argument (`by_value_arg`).
+     A constant temporary is spelled at every read (`const_folds`). A binding the source names
+     folds only inside its block. C orders no operands: a reader, a call's arguments included,
+     holds at most one folded expression that can panic (`one_panic_per_reader`). A spliced
+     callee's parameter reads its argument in place unless the callee can reach the argument's
+     storage (`ir::inline::param_facts`, `exposed`); `vec_literals`, `vec_fusion` fold vectors.
+   - A single-use call result is spelled at its read (`compute_call_fwd`): along the same goto
+     chains, through copies folded at their read, into a literal's member and into a field or
+     element of a local's own storage, when nothing between emits and no other operand can
+     change in the call (`fwd_keeps`).
+   - A value nothing reads has no variable: a call's result or a check's index is a statement
+     of its own (`compute_discards`; an external C function keeps its result, since its header
+     may declare it `warn_unused_result`), and a proven check's other operands are no reads.
+     A copy into the result slot moves past the drops to its `return` (`compute_ret_defer`).
+   - A zero value inside another literal is left out: C zero-fills the member, and gcc's
+     `-Wmissing-braces` rejects a nested `{ 0 }` (`zero_lit_d`).
+   - A temporary remains where an effect between would change its value: a call result held
+     while the destination's old value is read or dropped (an inlined `replace`, `x = f()` over
+     an owning `x`), a value read before a write to its inputs, several calls in one literal (C11
+     6.7.9p23 leaves their order unspecified), an `if` value passed as an argument, a value
+     merged at a join and returned.
+   `memcpy` and `memmove` remain where C has no other legal spelling: an array copy, a bitcast (a
+   type pun), and a raw pointer that may overlap its operand.

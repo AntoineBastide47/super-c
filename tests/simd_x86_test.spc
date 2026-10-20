@@ -146,12 +146,17 @@ fn a_program_without_vectors_emits_the_same_c() {
     assert(emitted(vsrc, x86).contains("__sc_si_x86_64__add_f32x4"), "a vector operation calls its entry");
 }
 
-// The C definition of vector struct `name` a build with `flags` emits for `src`.
-fn vector_def(src: str, flags: str, name: str) String {
+// The project of a build of `src` with `flags`.
+fn vector_build(src: str, flags: str) cli::Proj {
     let p = cli::proj_new();
     p.mkfile("main.spc", src);
     let r = p.compile_flags(flags, "main.spc");
     assert(r.ok(), flags);
+    return p;
+}
+
+// The C definition of vector struct `name` that build `p` emitted.
+fn vector_def(p: &cli::Proj, name: str) String {
     return cli::read_text(format("{}/build/debug/raw/__sc_t/{}.h", p.dir(), name).as_str());
 }
 
@@ -161,22 +166,24 @@ fn vector_def(src: str, flags: str, name: str) String {
 @test
 fn a_wide_vector_is_one_c_vector_where_the_build_has_its_register() {
     let src = "fn main(args: Vector<str>) i32 {\n    let v = f32x8::splat(args.len() as f32);\n    let w = f32x16::splat(2.0);\n    return (v + v).get(0) as i32 + (w + w).get(0) as i32 - 6;\n}\n";
-    let base = vector_def(src, "--arch=x86_64 --target=linux", "__sc_v8_f32");
-    assert(base.contains("__sc_v4_f32 c[2];") && !base.contains("vector_size(32)"), "the baseline names the chunks");
-    let v3 = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v3", "__sc_v8_f32");
+    let pb = vector_build(src, "--arch=x86_64 --target=linux");
+    let base = vector_def(&pb, "__sc_v8_f32");
+    assert(base.contains("__sc_v4_f32 c[2];"), "the baseline names the chunks");
+    assert(!base.contains("vector_size(32)"), "the baseline has no 32-byte vector");
+    let avx = vector_build(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v3");
+    let v3 = vector_def(&avx, "__sc_v8_f32");
     assert(
-        v3.contains("typedef float __sc_g8_f32 __attribute__((vector_size(32), aligned(16)));") && v3.contains(
-            "__sc_g8_f32 l;",
-        ) && !v3.contains(" c["),
-        "AVX: one 32-byte vector",
+        v3.contains("typedef float __sc_g8_f32 __attribute__((vector_size(32), aligned(16)));"),
+        "AVX: a 32-byte vector type",
     );
-    let v3w = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v3", "__sc_v16_f32");
+    assert(v3.contains("__sc_g8_f32 l;"), "AVX: one 32-byte vector");
+    assert(!v3.contains(" c["), "AVX: no chunks");
+    let v3w = vector_def(&avx, "__sc_v16_f32");
     assert(v3w.contains("__sc_v4_f32 c[4];"), "AVX: a 64-byte vector keeps its chunks");
-    let v4 = vector_def(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v4", "__sc_v16_f32");
-    assert(
-        v4.contains("__attribute__((vector_size(64), aligned(16)))") && !v4.contains(" c["),
-        "AVX-512F: one 64-byte vector",
-    );
+    let p4 = vector_build(src, "--arch=x86_64 --target=linux --target-cpu=x86-64-v4");
+    let v4 = vector_def(&p4, "__sc_v16_f32");
+    assert(v4.contains("__attribute__((vector_size(64), aligned(16)))"), "AVX-512F: one 64-byte vector");
+    assert(!v4.contains(" c["), "AVX-512F: no chunks");
 }
 
 const RELEASE: [str; 1] = ["--profile=release"];

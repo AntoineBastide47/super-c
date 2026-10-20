@@ -178,8 +178,9 @@ measurement (`SC_ITEM_STATS`) read, before the release.
 | IR printer, verifier and tests (`ir/print.spc`, `ir/verify.spc`, `tests/core_ir_test.spc`) | every pool | module arena: names for the print | none needed |
 
 Two syntax consumers run before the first lowering and are not blockers: the coroutine and
-cancellation reachability scans (`Package::co_compute`, `cancel_compute`, 14.9 ms, every node
-of every module; lowering reads their marks to place safepoints) and `Keep::reserve_bodies`
+cancellation reachability (`Package::reach_compute`: one `co_scan` per module over every node,
+14.9 ms, then `reach_solve`; lowering reads its marks to place safepoints; the language server
+keeps the scans per module and solves them alone) and `Keep::reserve_bodies`
 (one pass over every node to count functions and closures).
 
 ## The semantic facts and their fields

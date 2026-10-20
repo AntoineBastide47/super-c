@@ -45,6 +45,20 @@ fn stats_switches_report_in_one_build() {
     assert(r.out_has("\"lto\":\"flags\",\"lto_reason\":\"\""), "the debug profile leaves LTO to its flag arrays");
 }
 
+// The borrow pass frees each analysis slot once no job will lease it again, except under the borrow
+// probe: SC_BORROW_STATS reads every slot after the stage, its retained scratch included.
+@test
+fn borrow_probe_reads_the_slots_after_the_stage() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", PROG);
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_BORROW_STATS", "1", "build");
+    assert(r.ok(), "the build succeeds");
+    assert(r.out_has("borrow-probe"), "the probe report is printed");
+    assert(r.out_has("retained scratch: forest "), "the report reads the slot's retained scratch");
+}
+
 // SC_BUILD_MEM turns the runtime allocation tracker on for the build: the record then carries the
 // allocation calls, requested bytes, live bytes and the per-phase survivors at every memory boundary.
 @test

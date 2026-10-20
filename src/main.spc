@@ -310,14 +310,18 @@ fn lint_project(
     }
     loader::set_load_target(co.arch, cf::close(lf));
     let mut rc = 0;
+    // A directory with its own build.toml, listed or found below a listed one, is another project:
+    // it lints below, from its own directory.
+    let mut nested = Vector::<String>::new();
     if lint_alt().len() != 0 {
         // Manifest layout: every path resolves against the project root, so ALL listed paths share
         // one closure: collect them into a single package and run the pipeline once.
         let mut files = Vector::<String>::new();
-        let mut nested = Vector::<String>::new();
         for k in 0..paths.len() {
             let pa = paths.at(k).as_str();
-            if is_dir(pa) {
+            if is_dir(pa) && pa != "." && has_manifest(pa) {
+                nested.push(String::from_str(pa));
+            } else if is_dir(pa) {
                 if spc_collect_in(pa, "lint", &mut files, &mut nested) != 0 {
                     rc = 1;
                 }
@@ -391,30 +395,42 @@ fn lint_project(
                 rc = 1;
             }
         }
-        // A nested project (its own build.toml) lints as from its own directory: its manifest, its
-        // imports.
-        let home = canon_cwd();
-        for k in 0..nested.len() {
-            let mut nd = nested.at(k).clone();
-            if unsafe shim::sc_chdir(nd.cstr()) != 0 {
-                eprintln("lint: cannot enter '{}'", nd.as_str());
-                rc = 1;
-                continue;
-            }
-            let np = project_paths();
-            if lint_project(&np, co, bo, cpu_set, std_dir, fix, sc) != 0 {
-                eprintln("lint: the findings above are in the project '{}'", nd.as_str());
-                rc = 1;
-            }
-            let mut hc = home.clone();
-            assert(unsafe shim::sc_chdir(hc.cstr()) == 0, "lint: cannot return to the working directory");
-        }
     } else {
+        // No `src/`: each listed path lints alone, a directory as one batch rooted at itself, a file
+        // with its imports beside it.
         for k in 0..paths.len() {
-            if run_lint(paths.at(k).as_str(), std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc) != 0 {
+            let pa = paths.at(k).as_str();
+            if is_dir(pa) && pa != "." && has_manifest(pa) {
+                nested.push(String::from_str(pa));
+            } else if is_dir(pa) {
+                let mut files = Vector::<String>::new();
+                if spc_collect_in(pa, "lint", &mut files, &mut nested) != 0 {
+                    rc = 1;
+                }
+                if lint_batch(&files, pa, "", std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc, false) != 0 {
+                    rc = 1;
+                }
+            } else if lint_one(pa, "", std_dir, co.ce_steps, co.ce_mem, co.target, fix, sc) != 0 {
                 rc = 1;
             }
         }
+    }
+    // A nested project lints as from its own directory: its manifest, its imports.
+    let home = canon_cwd();
+    for k in 0..nested.len() {
+        let mut nd = nested.at(k).clone();
+        if unsafe shim::sc_chdir(nd.cstr()) != 0 {
+            eprintln("lint: cannot enter '{}'", nd.as_str());
+            rc = 1;
+            continue;
+        }
+        let np = project_paths();
+        if lint_project(&np, co, bo, cpu_set, std_dir, fix, sc) != 0 {
+            eprintln("lint: the findings above are in the project '{}'", nd.as_str());
+            rc = 1;
+        }
+        let mut hc = home.clone();
+        assert(unsafe shim::sc_chdir(hc.cstr()) == 0, "lint: cannot return to the working directory");
     }
     return rc;
 }
@@ -617,6 +633,13 @@ fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
     return spc_collect_in(dir, cmd, files, null);
 }
 
+// Directory `dir` holds a build.toml: it is a project of its own.
+fn has_manifest(dir: str) bool {
+    let mut man = String::from_str(dir);
+    man.push_str("/build.toml");
+    return unsafe shim::sc_stat_isdir(man.cstr()) == 0;
+}
+
 // `spc_collect`; with `nested`, a subdirectory holding its own build.toml is another project: its path
 // goes to `nested` and its files are not collected (its imports resolve against itself).
 fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut Vector<String>) i32 {
@@ -632,9 +655,7 @@ fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut V
         p.push_byte(b'/');
         p.push_string(names.at(i));
         if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
-            let mut man = p.clone();
-            man.push_str("/build.toml");
-            if nested != null && unsafe shim::sc_stat_isdir(man.cstr()) == 0 {
+            if nested != null && has_manifest(p.as_str()) {
                 unsafe (*nested).push(p);
             } else if spc_collect_in(p.as_str(), cmd, files, nested) != 0 {
                 rc = 1;
@@ -725,30 +746,6 @@ fn lint_batch(
     }
     // A final plain pass prints what remains and sets the exit code.
     return lint_batch(files, root, alt, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
-}
-
-// `super-c lint <path>`: a file loads as its own root (its import closure + prelude) and is linted
-// there; a directory lints every .spc under it in one shared package. Lints files that are not part
-// of any binary's import closure.
-fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
-    if is_dir(path) {
-        // Every file under the directory resolves imports against the directory itself.
-        let droot = if lint_alt().len() != 0 {
-            ".";
-        } else {
-            path;
-        };
-        let mut files = Vector::<String>::new();
-        let crc = spc_collect(path, "lint", &mut files);
-        let brc = lint_batch(&files, droot, lint_alt(), std_dir, ce_steps, ce_mem, target, fix, sc, false);
-        return (crc != 0 || brc != 0) as i32;
-    }
-    let froot = if lint_alt().len() != 0 {
-        ".";
-    } else {
-        "";
-    };
-    return lint_one(path, froot, std_dir, ce_steps, ce_mem, target, fix, sc);
 }
 
 // `super-c fmt [<path>...]`: canonical formatting. Rewrites files in place by default (only when they

@@ -1684,6 +1684,16 @@ extend Mangler {
         }
     }
 
+    /// The C member field `fid` of module `m` names: the `@c.import` pin of a header type's field
+    /// (`Ast.has_member_pins`), else the field's name as `ident` spells it.
+    pub fn field_ident(self: &mut Self, m: ModuleId, fid: NodeId, out: &mut String) {
+        let a = self.p().module_ast_const(m);
+        if unsafe (*a).has_member_pins && self.sym_override(m, fid, out) {
+            return;
+        }
+        self.ident(m, unsafe (*a).at_const(unsafe (*a).at_const(fid).as_data.field.name).as_data.name.text, out);
+    }
+
     /// An extern name as C spells it: the declared symbol, suffixed only when it is a C keyword. A
     /// standard-header macro of that name stays, since C code naming the symbol sees the same macro.
     pub fn c_ident(self: &mut Self, m: ModuleId, s: tok::Span, out: &mut String) {
@@ -2267,7 +2277,8 @@ extend Mangler {
         }
         let src = self.p().modules.at(fm as usize).source.as_str();
         let ftxt = src.slice(fname.start as usize, fname.end as usize);
-        let is_main = target.node == NODE_NONE && ftxt == "main";
+        // Only the program entry is the C `main` the driver renames; any other `main` is ordinary.
+        let is_main = target.node == NODE_NONE && ftxt == "main" && self.p().is_entry(fm, fnode);
         let st = out.len();
         if !is_main {
             self.modpfx(fm, out);
@@ -3076,7 +3087,14 @@ extend Mangler {
             // empty base): no temporary per spelling on this path.
             let dn = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl);
             if dn.as_data.aggregate.is_extern {
+                // A header struct, union or enum is its C tag (`struct stat`, `enum color`);
+                // `@c.import("pthread_attr_t")` pins a typedef name.
                 if !self.sym_override(y.module, y.as_data.decl, out) {
+                    if y.kind == TypeKind::TYPE_ENUM {
+                        out.push_str("enum ");
+                    } else {
+                        out.push_str(if_s(dn.as_data.aggregate.is_union, "union ", "struct "));
+                    }
                     self.c_ident(
                         y.module,
                         unsafe (*self.p().module_ast_const(y.module)).at_const(dn.as_data.aggregate.name).as_data.name.text,

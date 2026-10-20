@@ -171,7 +171,11 @@ fn deep_recursion_fits_the_default_stack() {
     assert_eq(runs(), 1500 * 1501 / 2);
 }
 
+// The return no run reaches keeps the recursion legal: one that cannot return is a compile error.
 fn forever(n: u64) u64 {
+    if n == u64::MAX {
+        return n;
+    }
     let mut pad = Array::<u64, 32>::new();
     pad[31] = n;
     unsafe atomic::store_usize(&mut unsafe G_FRAME, ((&mut pad[0]) as *mut u64) as usize, 0);

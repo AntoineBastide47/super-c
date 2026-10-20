@@ -61,12 +61,9 @@ extend tc::TypeChecker {
     /// build, so their memo tables and vector capacities survive across modules.
     pub fn borrowck(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         let tp = ctx.st.pr.start();
-        if unsafe (&*self.package).co_state == 0 {
+        if unsafe (&*self.package).co_state == 0 || unsafe (&*self.package).cancel_state == 0 {
             // Single-threaded phase: the const package pointer is the one place mutated (cir precedent).
-            unsafe (&mut *self.package).co_compute();
-        }
-        if unsafe (&*self.package).cancel_state == 0 {
-            unsafe (&mut *self.package).cancel_compute();
+            unsafe (&mut *self.package).reach_compute();
         }
         ctx.st.pr.stop(bfi::BP_REACH, tp);
         let a = self.cur_ast();
@@ -1984,6 +1981,9 @@ extend tc::TypeChecker {
                     if ctx.keep != null {
                         unsafe (&mut *ctx.keep).put(&lw);
                     }
+                    if ctx.recur != null && lw.body.owner.node == id {
+                        unsafe (&mut *ctx.recur).add(unsafe &*self.package, &lw.body);
+                    }
                     ctx.lower_pool.push(lw);
                 },
                 _ => {
@@ -3318,12 +3318,6 @@ extend tc::TypeChecker {
     /// The typechecker's recorded callee for call `id`: fmod<<40 | fdecl<<8 | receiver-skip (the
     /// call_info side table); 0 = no resolution recorded, and bc_call skips the call-boundary analyses.
     pub fn bc_call_info(self: &Self, id: NodeId) u64 {
-        switch unsafe (*self.cur_ast()).call_info.get(&id) {
-            Some(v) => {
-                return *v;
-            },
-            _ => {},
-        };
-        return 0u64;
+        return unsafe (*self.cur_ast()).call_info_of(id).unwrap_or(0u64);
     }
 }

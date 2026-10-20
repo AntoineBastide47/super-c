@@ -590,8 +590,21 @@ pub fn init() i32 { return 0; }
 ```
 
 Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
-`import("sym")`, `section("s")`, `used`, `unused`. `export` and `import` fix a function's C name.
+`import("sym")`, `used`, `unused`. `export` and `import` fix a function's C name.
 `@emit_macro` on a generic struct or enum also writes it as a C macro, for use from plain C.
+
+Two placements break what the compiler can check, so they are written `@unsafe(...)`:
+`@unsafe(link_section = "s")` puts a function or a `static mut` in object-file section `s`
+(`"segment,section"` on macOS and iOS), and `@unsafe(naked)` makes a function's `asm("...");`
+statements its whole machine code, with no prologue or epilogue:
+
+```superc
+@arch(aarch64)
+@unsafe(naked)
+fn add_one(x: i64) i64 {
+    asm("add x0, x0, #1\n\tret");
+}
+```
 
 ### Testing
 

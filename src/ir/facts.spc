@@ -1611,6 +1611,12 @@ extend Facts {
             self.deref_write(b, pl);
             return;
         }
+        if self.buf_place(b, pl) {
+            // An element of a view's buffer (a receiver read in place: `v.ptr[i]`), as through a
+            // reference: heap memory, not the view's own fields.
+            self.buf();
+            return;
+        }
         self.kill_path(b, p.base, pl);
     }
 
@@ -2086,6 +2092,8 @@ extend Facts {
             } else {
                 self.lfl |= 1;
             }
+        } else if self.buf_place(b, pl) {
+            self.lfl |= 2; // an element of a view's buffer, as `write_place` takes it
         } else {
             self.lop(2, p.base, pl);
         }

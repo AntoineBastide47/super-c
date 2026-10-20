@@ -95,6 +95,34 @@ fn whole_project_lint_roots_a_nested_project_at_its_manifest() {
 }
 
 @test
+fn lint_without_src_roots_a_nested_project_at_its_manifest() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    // A project without `src/`: each top-level directory lints rooted at itself, except a project of
+    // its own below it, which lints from its own directory, as its build resolves it.
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile("tools/t/build.toml", "bin = \"t\"\nroot = \"main.spc\"\n");
+    p.mkfile("tools/t/main.spc", "import util;\n\nfn main() i32 {\n    return util::u();\n}\n");
+    p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the lint passes");
+    assert(!r.out_has("cannot open module"), "the nested project resolves its own imports");
+    p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
+    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(w.exit != 0, "the lint fails on the nested project's warning");
+    assert(w.out_shows("unused variable 'unused'"), "the nested project is linted");
+}
+
+@test
 fn build_of_a_directory_builds_its_project() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
     // dependent guest command, so it runs on native and Windows only.
@@ -215,5 +243,31 @@ fn std_dir_env_names_the_std_tree() {
     missing.format_into("{}/missing", root);
     // The emit stamp records the tree: the same out-dir does not reuse the first build.
     let bad = cli::superc_env_in(root, "SC_STD_DIR", missing.as_str(), "build");
-    assert(!bad.ok() && bad.out_has("cannot open module 'std::simd::math'"), "a tree without the module fails");
+    assert(bad.exit == 1, "a missing tree fails the build");
+    assert(bad.out_has("cannot find the standard library"), "the build names the missing tree");
+}
+
+// A std directory that does not exist is one error that names it, not a failed import per module.
+@test
+fn a_missing_std_dir_is_one_error() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let mut missing = String::new();
+    missing.format_into("{}/missing", root);
+    let r = cli::superc_env_in(root, "SC_STD_DIR", missing.as_str(), "build main.spc");
+    let msg = format(
+        "error: cannot find the standard library: '{}' is not a directory\n  = note: std is looked up beside the compiler and in its two parent directories; SC_STD_DIR names another one\n",
+        missing.as_str(),
+    );
+    let out = r.text();
+    if r.exit != 1 || out.find(msg.as_str()) < 0 {
+        r.show();
+    }
+    assert(r.exit == 1, "the build exits 1");
+    assert(out.find(msg.as_str()) >= 0, "the error names the directory and where std is looked up");
+    let first = out.find("cannot find the standard library");
+    let rest = out.slice(first as usize + 1, out.len());
+    assert(rest.find("cannot find the standard library") < 0, "the error appears once");
+    assert(!r.out_has("cannot open module"), "no import reports the missing tree");
 }

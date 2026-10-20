@@ -35,6 +35,13 @@ pub const fn inst_depth_why() str<'static> {
 /// Statements `compute_inline` steps over between a candidate's definition and its read.
 const INLINE_LOOKAHEAD: u32 = 256;
 
+/// A reader that holds a definition folded into a call argument, an intrinsic operand or an index
+/// (`compute_inline`).
+const RD_NEW: u32 = 0x80000000;
+
+/// Definitions `fold_reads` walks for one candidate before it calls its read set incomplete.
+const FOLD_READS_MAX: u32 = 64;
+
 /// Longest chain of folded temporaries one read spells (see `compute_inline`); well under
 /// RENDER_NEST_MAX so a chain nests inside other renderer levels.
 const INLINE_CHAIN_MAX: u32 = 64;
@@ -190,6 +197,9 @@ pub struct CEmit {
     sx_used: Vector<bool>,
     /// `sx_addr[l]`: the body takes the address of local `l` or of a part of it (`&`, a raw address).
     sx_addr: Vector<bool>,
+    /// `sx_rtrap[r]`: whether rvalue `r`'s own operation can panic (`rv_traps`): 0 not yet asked, 1
+    /// no, 2 yes. Sized by `compute_inline`.
+    sx_rtrap: Vector<u8>,
     /// `sx_gload[r]`: for the gather of rvalue `r`, the slice load (an rvalue) that defined its index
     /// vector earlier in its block with nothing between that writes memory (`gather_loads`): its lane
     /// loop reads the indexes from that slice. IR_NONE otherwise.
@@ -452,6 +462,7 @@ extend CEmit {
             sx_addr: Vector::<bool>::new(),
             sx_gload: Vector::<u32>::new(),
             sx_inline: Vector::<u32>::new(),
+            sx_rtrap: Vector::<u8>::new(),
             sx_call_fwd: Vector::<bool>::new(),
             sx_cs_pool: String::new(),
             sx_cs_off: Vector::<u32>::new(),
@@ -1190,7 +1201,14 @@ extend CEmit {
             let a2 = self.p().module_ast_const(rm);
             let it = *unsafe (*a2).instance(ay.as_data.inst);
             if !param_box && self.agg_name(it.module, it.decl) == "Box" {
+                // A folded definition (`&b`) binds looser than the member access.
+                let op9 = *b.operands.at(opid as usize);
+                let folded = op9.kind != ir::OP_CONST && b.places.at(op9.data as usize).proj_len == 0 && *self.sx_inline.at(
+                    b.places.at(op9.data as usize).base as usize,
+                ) != ir::IR_NONE;
+                dst.push_str(mbe::if_s(folded, "(", ""));
                 let ok = self.emit_operand(b, opid, dst);
+                dst.push_str(mbe::if_s(folded, ")", ""));
                 dst.push_str(mbe::if_s(through_ref, "->ptr", ".ptr"));
                 return ok;
             }
@@ -1644,9 +1662,13 @@ extend CEmit {
             }
             let mut nm = self.sget();
             // A `&mut T` is exclusive for the whole call: `restrict` lets C keep its referent's
-            // fields in registers across stores through other pointers.
+            // fields in registers across stores through other pointers. A parameter the body writes
+            // (a `mut` one, or one a tail call to itself stores into) is not: C leaves a store of
+            // one `restrict` parameter's value into another undefined.
             let py = self.rty_y(b, b.locals.at(l).ty);
-            if py.kind == TypeKind::TYPE_REFERENCE && py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+            if py.kind == TypeKind::TYPE_REFERENCE && py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !b.locals.at(
+                l,
+            ).is_mutable {
                 nm.push_str("restrict ");
             }
             self.lspell(l as u32, &mut nm);
@@ -1690,6 +1712,9 @@ extend CEmit {
             return false;
         }
         self.out.push_str(" {\n");
+        if (unsafe (*self.p().module_ast_const(b.owner.module)).unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
+            return self.emit_naked_body(b);
+        }
         self.dispatch_prologue(b, name, split, ret_void, pnames.as_str());
         for k in 0..views.len() {
             // The body reads the view through its usual local.
@@ -1729,6 +1754,22 @@ extend CEmit {
             self.out.push_str("));\n");
         }
         return self.emit_body_core(b);
+    }
+
+    // The body of naked function `b`: its `asm` statements alone, as basic assembly (`tc_check_naked`),
+    // then a guard that stops a C compiler without naked functions, which would add a prologue.
+    fn emit_naked_body(self: &mut Self, b: &ir::CoreBody) bool {
+        let src = self.p().modules.at(b.owner.module as usize).source.as_str();
+        for i in 0..b.asms.len() {
+            let t = b.asms.at(i).template;
+            self.out.push_str("  __asm__ volatile (");
+            self.out.push_str(src.slice(t.start as usize, t.end as usize));
+            self.out.push_str(");\n");
+        }
+        self.out.push_str(
+            "}\n#if !defined(__clang__) && !(defined(__GNUC__) && __GNUC__ >= 8 && defined(__x86_64__))\n#error \"'@unsafe(naked)' needs Clang, or GCC 8 or later on x86-64\"\n#endif\n",
+        );
+        return true;
     }
 
     // Whether `(b.module, t)` resolves to the prelude `[]mut T` view (`SliceMut<T>`).
@@ -2737,46 +2778,6 @@ extend CEmit {
         return false;
     }
 
-    // Whether operand `opid` reads local `base` through any projection (a whole or field/element read).
-    const fn op_reads_base(self: &Self, b: &ir::CoreBody, opid: u32, base: u32) bool {
-        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
-            return false;
-        }
-        let op = *b.operands.at(opid as usize);
-        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
-            return false;
-        }
-        return b.places.at(op.data as usize).base == base;
-    }
-
-    // Whether an inlinable-kind rvalue reads local `base` (as an operand or the place it projects
-    // from), which tests whether a statement between a temp's definition and its use writes one of
-    // the definition's inputs.
-    fn rvalue_reads_base(self: &Self, b: &ir::CoreBody, rid: u32, base: u32) bool {
-        let rv = *b.rvalues.at(rid as usize);
-        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
-            return self.op_reads_base(b, rv.a, base);
-        }
-        if rv.kind == ir::RV_BINARY {
-            return self.op_reads_base(b, rv.a, base) || self.op_reads_base(b, rv.b, base);
-        }
-        if CEmit::is_likely(&rv) {
-            return self.op_reads_base(b, b.oper_pool[rv.a as usize], base);
-        }
-        if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
-            return b.places.at(rv.a as usize).base == base;
-        }
-        if rv.kind == ir::RV_AGGREGATE {
-            for i in 0..rv.b {
-                if self.op_reads_base(b, b.oper_pool[(rv.a + i) as usize], base) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return false;
-    }
-
     // Whether an operand reads through a projection (dereference, field, or index), so it reads
     // memory rather than a whole local value.
     const fn op_is_projected(self: &Self, b: &ir::CoreBody, opid: u32) bool {
@@ -2853,12 +2854,22 @@ extend CEmit {
         return false;
     }
 
-    // Whether statement `s`, sitting between a single-use temp's definition (rvalue `def_rv`, which
-    // reads memory iff `reads_mem`) and its read, leaves that definition's value unchanged, so the
-    // definition may fold past it. Safe when: a marker, or a pure whole/projected store that neither
-    // writes an input the definition reads nor writes memory the definition depends on. Any effecting
-    // statement (asm, allocation) blocks it.
-    fn inline_safe_between(self: &Self, b: &ir::CoreBody, s: &ir::Statement, def_rv: u32, reads_mem: bool) bool {
+    // Whether statement `s`, sitting between a single-use temp's definition (which reads memory iff
+    // `reads_mem`, and the locals `rset[x] == stamp` marks, or any local when `rall`: `fold_reads`)
+    // and its read, leaves that definition's value unchanged, so the definition may fold past it.
+    // Safe when: a marker, or a pure whole/projected store that neither writes an input the
+    // definition reads nor writes memory the definition depends on. Any effecting statement (asm,
+    // allocation) blocks it.
+    fn inline_safe_between(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        s: &ir::Statement,
+        reads_mem: bool,
+        rset: &Vector<u32>,
+        stamp: u32,
+        rall: bool,
+        traps: bool,
+    ) bool {
         if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
             return true;
         }
@@ -2870,15 +2881,343 @@ extend CEmit {
             return false;
         }
         let pl = *b.places.at(s.place as usize);
-        if self.rvalue_reads_base(b, def_rv, pl.base) {
-            // Writes a local the definition reads.
+        if rall || rset[pl.base as usize] == stamp {
+            // Writes a local the definition reads, or one a definition folded into it reads.
             return false;
         }
         if pl.proj_len != 0 && reads_mem {
             // A projected store may alias the definition's memory.
             return false;
         }
-        return true;
+        // Two operations that can panic keep their order: the first one in source order reports.
+        return !traps || !self.rv_traps(b, s.rvalue);
+    }
+
+    // Mark (`rset[x] = stamp`) every local the spelling of rvalue `rid` (candidate `cand`'s
+    // definition) may read once the definitions it reads fold into it: the bases of its places and
+    // operands, their index operands, and through each whole-local operand that folds, that
+    // operand's definition. An operand before `cand` folds when `sx_inline` says so; a later one may
+    // still be chosen, so it counts when it has one foldable definition (`ndef`, `blocked`, `def_rvs`
+    // as `compute_inline` builds them). False when the walk passes FOLD_READS_MAX definitions: the
+    // set is then incomplete.
+    fn fold_reads(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        rid: u32,
+        cand: u32,
+        ndef: &Vector<u32>,
+        blocked: &Vector<bool>,
+        def_rvs: &Vector<u32>,
+        rset: &mut Vector<u32>,
+        stamp: u32,
+        traps: &mut bool,
+    ) bool {
+        let mut work = self.uget();
+        let mut ops = self.uget();
+        work.push(rid);
+        *traps = false;
+        let mut seen: u32 = 0;
+        let mut ok = true;
+        while work.len() != 0 {
+            let r = work[work.len() - 1];
+            work.truncate(work.len() - 1);
+            seen += 1;
+            if seen > FOLD_READS_MAX {
+                ok = false;
+                break;
+            }
+            // The rvalue's operands and places, then each one's reads.
+            ops.truncate(0);
+            let rv = *b.rvalues.at(r as usize);
+            *traps = *traps || self.rv_traps(b, r);
+            if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
+                ops.push(rv.a);
+            } else if rv.kind == ir::RV_BINARY {
+                ops.push(rv.a);
+                ops.push(rv.b);
+            } else if CEmit::is_likely(&rv) {
+                ops.push(b.oper_pool[rv.a as usize]);
+            } else if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+                CEmit::read_place(b, rv.a, rset, stamp, &mut ops);
+            } else if rv.kind == ir::RV_AGGREGATE {
+                for i in 0..rv.b {
+                    ops.push(b.oper_pool[(rv.a + i) as usize]);
+                }
+            }
+            let mut k: usize = 0;
+            while k < ops.len() {
+                let o = ops[k];
+                k += 1;
+                if o == ir::IR_NONE || b.operands.at(o as usize).kind == ir::OP_CONST {
+                    continue;
+                }
+                let p = b.operands.at(o as usize).data;
+                CEmit::read_place(b, p, rset, stamp, &mut ops);
+                let pl = *b.places.at(p as usize);
+                let x = pl.base as usize;
+                let folds = if x < cand as usize {
+                    *self.sx_inline.at(x) != ir::IR_NONE;
+                } else {
+                    !blocked[x] && ndef[x] == 1;
+                };
+                if pl.proj_len == 0 && folds && def_rvs[x] != ir::IR_NONE {
+                    work.push(def_rvs[x]);
+                }
+            }
+        }
+        self.uput(ops);
+        self.uput(work);
+        *traps = *traps || !ok;
+        return ok;
+    }
+
+    // C evaluates the operands of an operation, the members of a literal and the slots of a
+    // multi-return carrier in no fixed order, so two folded definitions that can panic (`rv_traps`,
+    // through their own folded operands) never meet in one: the reader keeps only its last such
+    // operand folded, and each earlier one panics at its definition, in source order. A definition
+    // precedes its reads in its block, so one pass in statement order sees each operand first.
+    fn one_panic_per_reader(self: &mut Self, b: &ir::CoreBody, def_idx: &Vector<u32>) {
+        let n = b.locals.len();
+        // Per local: whether its folded spelling can panic, 0 not yet asked, 1 no, 2 yes.
+        let mut tr = self.uget();
+        tr.resize_default(n);
+        let mut locs = self.uget();
+        for bi in 0..b.blocks.len() {
+            let blk = *b.blocks.at(bi);
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind == ir::ST_ASSIGN {
+                    locs.truncate(0);
+                    CEmit::rvalue_fold_locs(b, s.rvalue, &mut locs);
+                    self.keep_last_panic(b, &locs, &mut tr, def_idx);
+                }
+            }
+            if blk.term.kind == ir::TM_RETURN && b.returns > 1 {
+                locs.truncate(0);
+                for r in 0..b.returns {
+                    locs.push(r);
+                }
+                self.keep_last_panic(b, &locs, &mut tr, def_idx);
+            }
+        }
+        self.uput(locs);
+        self.uput(tr);
+    }
+
+    // The locals rvalue `rid` reads that a fold may spell in place (`fold_locs`).
+    fn rvalue_fold_locs(b: &ir::CoreBody, rid: u32, locs: &mut Vector<u32>) {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_DYN {
+            CEmit::fold_locs(b, rv.a, locs);
+        } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
+            CEmit::fold_locs(b, rv.a, locs);
+            CEmit::fold_locs(b, rv.b, locs);
+        } else if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+            CEmit::fold_place_locs(b, rv.a, locs);
+        } else if ir::has_op_range(&rv) {
+            for i in 0..rv.b {
+                CEmit::fold_locs(b, b.oper_pool[(rv.a + i) as usize], locs);
+            }
+        }
+    }
+
+    // Whether the folded spelling of local `x` can panic: its definition's operation, or a folded
+    // operand of it (`tr` memoizes). Past INLINE_CHAIN_MAX links the answer is yes.
+    fn fold_traps(self: &mut Self, b: &ir::CoreBody, x: u32, tr: &mut Vector<u32>, depth: u32) bool {
+        let d = *self.sx_inline.at(x as usize);
+        if d == ir::IR_NONE {
+            return false;
+        }
+        if tr[x as usize] != 0 {
+            return tr[x as usize] == 2;
+        }
+        if depth == INLINE_CHAIN_MAX {
+            return true;
+        }
+        let mut t = self.rv_traps(b, d);
+        if !t {
+            let mut locs = self.uget();
+            CEmit::rvalue_fold_locs(b, d, &mut locs);
+            for i in 0..locs.len() {
+                if !t && self.fold_traps(b, locs[i], tr, depth + 1) {
+                    t = true;
+                }
+            }
+            self.uput(locs);
+        }
+        tr.set(x as usize, pick(t, 2u32, 1u32));
+        return t;
+    }
+
+    // Unfold every local of `locs` that folds and can panic (`fold_traps`) but the one defined last
+    // (`def_idx`, within the reader's block).
+    fn keep_last_panic(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        locs: &Vector<u32>,
+        tr: &mut Vector<u32>,
+        def_idx: &Vector<u32>,
+    ) {
+        let mut folded: usize = 0;
+        for i in 0..locs.len() {
+            if *self.sx_inline.at(locs[i] as usize) != ir::IR_NONE {
+                folded += 1;
+            }
+        }
+        if folded < 2 {
+            return;
+        }
+        let mut last = ir::IR_NONE;
+        for i in 0..locs.len() {
+            let x = locs[i];
+            if self.fold_traps(b, x, tr, 0) && (last == ir::IR_NONE || def_idx[x as usize] > def_idx[last as usize]) {
+                last = x;
+            }
+        }
+        for i in 0..locs.len() {
+            let x = locs[i];
+            if x != last && self.fold_traps(b, x, tr, 0) {
+                self.sx_inline.set(x as usize, ir::IR_NONE);
+            }
+        }
+    }
+
+    // The locals operand `opid` reads that a fold may spell in place: a whole local, a place's
+    // index operands.
+    fn fold_locs(b: &ir::CoreBody, opid: u32, locs: &mut Vector<u32>) {
+        if opid == ir::IR_NONE || b.operands.at(opid as usize).kind == ir::OP_CONST {
+            return;
+        }
+        let p = b.operands.at(opid as usize).data;
+        if b.places.at(p as usize).proj_len == 0 {
+            locs.push(b.places.at(p as usize).base);
+        } else {
+            CEmit::fold_place_locs(b, p, locs);
+        }
+    }
+
+    fn fold_place_locs(b: &ir::CoreBody, p: u32, locs: &mut Vector<u32>) {
+        let pl = *b.places.at(p as usize);
+        for i in 0..pl.proj_len {
+            let pj = *b.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_INDEX_OP {
+                CEmit::fold_locs(b, pj.data, locs);
+            }
+        }
+    }
+
+    // Whether rvalue `rid`'s own operation can panic: an integer helper that checks (`arith_fn`), or
+    // a signed negation. Its folded operands are not considered.
+    fn rv_traps(self: &mut Self, b: &ir::CoreBody, rid: u32) bool {
+        let k = self.sx_rtrap[rid as usize];
+        if k != 0 {
+            return k == 2;
+        }
+        let rv = *b.rvalues.at(rid as usize);
+        let mut t = false;
+        if rv.kind == ir::RV_BINARY {
+            let mut bt = BuiltinType::BT_VOID;
+            let f = self.arith_fn(b, &rv, &mut bt);
+            t = f.len() != 0 && f != "fmod" && f != "fmodf";
+        } else if rv.kind == ir::RV_UNARY && (rv.b as u8) as tt::TokenType == tt::TokenType::Minus {
+            t = int_signed(self.int_builtin(b, b.operands.at(rv.a as usize).ty));
+        }
+        self.sx_rtrap.set(rid as usize, pick(t, 2u8, 1u8));
+        return t;
+    }
+
+    // `fold_reads` of place `p`: its base, and its index operands into `ops`.
+    fn read_place(b: &ir::CoreBody, p: u32, rset: &mut Vector<u32>, stamp: u32, ops: &mut Vector<u32>) {
+        let pl = *b.places.at(p as usize);
+        rset.set(pl.base as usize, stamp);
+        for i in 0..pl.proj_len {
+            let pj = *b.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_INDEX_OP {
+                ops.push(pj.data);
+            }
+        }
+    }
+
+    // Whether place `p` indexes by a bare read of local `l`.
+    fn place_indexes_by(self: &Self, b: &ir::CoreBody, p: u32, l: u32) bool {
+        let pl = *b.places.at(p as usize);
+        for i in 0..pl.proj_len {
+            let pj = *b.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_INDEX_OP && self.op_is_bare_local(b, pj.data, l) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn op_indexes_by(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
+        return opid != ir::IR_NONE && b.operands.at(opid as usize).kind != ir::OP_CONST && self.place_indexes_by(
+            b,
+            b.operands.at(opid as usize).data,
+            l,
+        );
+    }
+
+    // Whether intrinsic `c` spells its operand `i` exactly once: a check's operands, where a proven
+    // check spells only the value it returns, and a chunk's end.
+    const fn spells_operand(c: u8, i: u32) bool {
+        if c == ir::IN_BOUNDS {
+            return i < 2;
+        }
+        if c == ir::IN_BOUNDS_GROUP || c == ir::IN_RANGE_BOUNDS {
+            return i < 3;
+        }
+        if c == ir::IN_BOUNDS_PROVEN || c == ir::IN_BOUNDS_GROUP_PROVEN {
+            return i == 0;
+        }
+        return (c == ir::IN_RANGE_BOUNDS_PROVEN || c == ir::IN_CHUNK) && i == 1;
+    }
+
+    // Whether statement `s` reads local `l` once where a folded definition spells as written: an
+    // operand an intrinsic spells once (`spells_operand`), or the index of a place its rvalue reads.
+    // A store's own place is no such position: C evaluates it unordered with its value, which may
+    // be a forwarded call.
+    fn stmt_new_read(self: &Self, b: &ir::CoreBody, s: &ir::Statement, l: u32) bool {
+        let rv = *b.rvalues.at(s.rvalue as usize);
+        if rv.kind == ir::RV_INTRINSIC && ir::has_op_range(&rv) {
+            for i in 0..rv.b {
+                if self.op_is_bare_local(b, b.oper_pool[(rv.a + i) as usize], l) {
+                    return CEmit::spells_operand(rv.c, i);
+                }
+            }
+            return false;
+        }
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
+            return self.op_indexes_by(b, rv.a, l);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_indexes_by(b, rv.a, l) || self.op_indexes_by(b, rv.b, l);
+        }
+        if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+            return self.place_indexes_by(b, rv.a, l);
+        }
+        if rv.kind == ir::RV_AGGREGATE {
+            for i in 0..rv.b {
+                if self.op_indexes_by(b, b.oper_pool[(rv.a + i) as usize], l) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Whether call `t` reads local `l` once where a folded definition spells as written: an argument
+    // after the receiver (a receiver may take an implicit `&` or spell twice through a `dyn`
+    // table), or the index of an argument's place after the receiver. A destination is no such
+    // position: C evaluates it unordered with the call.
+    fn call_new_read(self: &Self, b: &ir::CoreBody, t: &ir::Terminator, l: u32) bool {
+        for i in 1..t.args_len {
+            let o = b.oper_pool[(t.args_start + i) as usize];
+            if self.op_is_bare_local(b, o, l) || self.op_indexes_by(b, o, l) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Select single-use pure temporaries whose one read is adjacent to their definition (nothing
@@ -2889,6 +3228,8 @@ extend CEmit {
     // INLINE_LOOKAHEAD statements (a read farther away leaves the temporary declared).
     fn compute_inline(self: &mut Self, b: &ir::CoreBody, coal_root: &Vector<bool>) {
         let n = b.locals.len();
+        self.sx_rtrap.clear();
+        self.sx_rtrap.resize_default(b.rvalues.len());
         self.sx_inline.clear();
         for _l in 0..n {
             self.sx_inline.push(ir::IR_NONE);
@@ -3000,10 +3341,20 @@ extend CEmit {
                 }
             }
         }
+        // Per reader (a statement, then a block's terminator): the definitions folded into it, and
+        // RD_NEW once one of them sits in a call argument, an intrinsic operand or an index. C leaves
+        // the order of a call's arguments and of an operator's operands unspecified, so such a
+        // reader takes one fold only: two folded expressions that may trap never race.
+        let mut rd = self.uget();
+        rd.resize_default(b.statements.len() + b.blocks.len());
+        // Per local: the candidate whose folded spelling reads it (`fold_reads`, stamp = candidate + 1).
+        let mut rset = self.uget();
+        rset.resize_default(n);
         for l in 0..n {
             let ls = b.locals.at(l).storage;
             let pattern = b.locals.at(l).dkind == ir::LK_PATTERN;
-            if ls != ir::LS_TEMP && !(ls == ir::LS_USER && (!b.locals.at(l).is_mutable || pattern)) {
+            // A spliced callee's parameter or binding (LS_INL) folds like a temporary.
+            if ls != ir::LS_TEMP && ls != ir::LS_INL && !(ls == ir::LS_USER && (!b.locals.at(l).is_mutable || pattern)) {
                 continue;
             }
             if *self.sx_coal.at(l) != l as u32 || l < b.returns as usize {
@@ -3031,6 +3382,10 @@ extend CEmit {
             let blk = *b.blocks.at(bd as usize);
             let drv = *def_rv.at(l);
             let reads_mem = *mem_taint.at(l);
+            // The read set (`fold_reads`), built when the first statement between needs it.
+            let mut traps = false;
+            let mut rall = false;
+            let mut rs_on = false;
             // Fold the definition forward to its single read, stepping over statements that provably
             // leave the definition's value intact (they neither write an input nor alias its memory).
             // The read is a later statement's operand or the block's switch discriminant; any statement
@@ -3043,17 +3398,44 @@ extend CEmit {
                     ok = false;
                     break;
                 }
-                let s2 = *b.statements.at((blk.stmt_start + sk) as usize);
+                let rs = (blk.stmt_start + sk) as usize;
+                let s2 = *b.statements.at(rs);
                 if s2.kind == ir::ST_ASSIGN && self.rvalue_reads_local_bare(b, s2.rvalue, l as u32) {
                     // An array copy is a `memcpy` from the temp's storage: it needs the temp itself.
-                    if scalar || b.rvalues.at(s2.rvalue as usize).kind == ir::RV_USE && self.arr_n(b, b.locals.at(l).ty) < 0 {
+                    if (scalar || b.rvalues.at(s2.rvalue as usize).kind == ir::RV_USE && self.arr_n(
+                        b,
+                        b.locals.at(l).ty,
+                    ) < 0) && (rd[rs] & RD_NEW) == 0 {
                         self.sx_inline.set(l, drv);
+                        rd.set(rs, rd[rs] + 1);
                     }
                     // The sole read; stop whether or not it was a foldable position.
                     inlined = true;
                     break;
                 }
-                if !self.inline_safe_between(b, &s2, drv, reads_mem) {
+                if s2.kind == ir::ST_ASSIGN && scalar && self.stmt_new_read(b, &s2, l as u32) {
+                    if rd[rs] == 0 {
+                        self.sx_inline.set(l, drv);
+                        rd.set(rs, RD_NEW | 1);
+                    }
+                    inlined = true;
+                    break;
+                }
+                if !rs_on && s2.kind == ir::ST_ASSIGN {
+                    rall = !self.fold_reads(
+                        b,
+                        drv,
+                        l as u32,
+                        &ndef,
+                        &blocked,
+                        &def_rv,
+                        &mut rset,
+                        l as u32 + 1,
+                        &mut traps,
+                    );
+                    rs_on = true;
+                }
+                if !self.inline_safe_between(b, &s2, reads_mem, &rset, l as u32 + 1, rall, traps) {
                     ok = false;
                     break;
                 }
@@ -3066,7 +3448,17 @@ extend CEmit {
             ) {
                 self.sx_inline.set(l, drv);
             }
+            let rt = b.statements.len() + bd as usize;
+            if !inlined && ok && scalar && blk.term.kind == ir::TM_CALL && rd[rt] == 0 && self.call_new_read(
+                b,
+                &blk.term,
+                l as u32,
+            ) {
+                self.sx_inline.set(l, drv);
+                rd.set(rt, RD_NEW | 1);
+            }
         }
+        self.uput(rd);
         // Multi-return slots (locals 0..returns) are read only by the synthesized carrier
         // `(name_ret){ ._0 = _0, .. }`, never as an operand, so the loop above skips them. A slot with
         // one pure definition and no operand reads folds into that carrier field, provided its
@@ -3084,12 +3476,29 @@ extend CEmit {
                 }
                 let drv = *def_rv.at(l);
                 let reads_mem = *mem_taint.at(l);
+                let mut traps = false;
+                let mut rall = false;
+                let mut rs_on = false;
                 let blk = *b.blocks.at(bd as usize);
                 let mut ok = true;
                 let mut sk = *def_idx.at(l) + 1;
                 while sk < blk.stmt_len {
                     let s = *b.statements.at((blk.stmt_start + sk) as usize);
-                    if !self.inline_safe_between(b, &s, drv, reads_mem) {
+                    if !rs_on && s.kind == ir::ST_ASSIGN {
+                        rall = !self.fold_reads(
+                            b,
+                            drv,
+                            l as u32,
+                            &ndef,
+                            &blocked,
+                            &def_rv,
+                            &mut rset,
+                            l as u32 + 1,
+                            &mut traps,
+                        );
+                        rs_on = true;
+                    }
+                    if !self.inline_safe_between(b, &s, reads_mem, &rset, l as u32 + 1, rall, traps) {
                         ok = false;
                         break;
                     }
@@ -3100,6 +3509,7 @@ extend CEmit {
                 }
             }
         }
+        self.uput(rset);
         // A repeat spells its element at every lane or element: an element that computes binds once.
         for i in 0..b.rvalues.len() {
             let rv = *b.rvalues.at(i);
@@ -3117,6 +3527,7 @@ extend CEmit {
         self.vec_literals(b);
         // A load or lane-wise operation that only the next lane loop reads: that loop computes its lanes.
         self.vec_fusion(b);
+        self.one_panic_per_reader(b, &def_idx);
         // A fold chain spells nested inside its final read: one renderer level and one C bracket
         // level per link. Every link past INLINE_CHAIN_MAX stays a declared temporary and starts a
         // new chain, so an expression of any length renders within RENDER_NEST_MAX. A definition
@@ -3634,6 +4045,9 @@ extend CEmit {
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
             return CEmit::op_chain(b, rv.a, chain);
         }
+        if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+            return CEmit::place_chain(b, rv.a, chain);
+        }
         let mut d: u32 = 0;
         if rv.kind == ir::RV_BINARY {
             d = CEmit::op_chain(b, rv.a, chain);
@@ -3662,9 +4076,25 @@ extend CEmit {
         }
         let pl = *b.places.at(op.data as usize);
         if pl.proj_len != 0 {
-            return 0;
+            return CEmit::place_chain(b, op.data, chain);
         }
         return chain[pl.base as usize];
+    }
+
+    // The longest fold chain among place `p`'s index operands.
+    const fn place_chain(b: &ir::CoreBody, p: u32, chain: &Vector<u32>) u32 {
+        let pl = *b.places.at(p as usize);
+        let mut d: u32 = 0;
+        for i in 0..pl.proj_len {
+            let pj = *b.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_INDEX_OP && b.operands.at(pj.data as usize).kind != ir::OP_CONST {
+                let ip = *b.places.at(b.operands.at(pj.data as usize).data as usize);
+                if ip.proj_len == 0 && chain[ip.base as usize] > d {
+                    d = chain[ip.base as usize];
+                }
+            }
+        }
+        return d;
     }
 
     // Build the current body's write index (see `wx_on`) unless it is built: two counting passes
@@ -3975,8 +4405,10 @@ extend CEmit {
     // whole-local store with a single-initializer rvalue, and that write's block must dominate every
     // WRITE to the local, which, with the checker's definite-init guarantee, also dominates every
     // read (a read the init did not dominate would need a write the init did not dominate). So the
-    // fused declaration is in scope and has run before any use on every path. Two near-linear passes:
-    // first write per local, then a write-domination sweep.
+    // fused declaration is in scope and has run before any use on every path. A borrow of the local
+    // is read where the local is not: the block must also dominate the local's storage ends, so
+    // the declaration's C scope holds every point where the borrow may be read. Two near-linear
+    // passes: first write and borrows per local, then a write-domination sweep.
     fn compute_fusion(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
         let n = b.locals.len();
         self.sx_fuse.clear();
@@ -3988,10 +4420,12 @@ extend CEmit {
         let mut bad = self.bget();
         let mut nread = self.uget();
         let mut direct_array = self.bget();
+        let mut borrowed = self.bget();
         seen.resize_default(n);
         bad.resize_default(n);
         nread.resize_default(n);
         direct_array.resize_default(n);
+        borrowed.resize_default(n);
         for _l in 0..n {
             init_blk.push(cfl::NONE);
         }
@@ -4010,6 +4444,15 @@ extend CEmit {
                     wl = *self.sx_coal.at(pl.base as usize);
                     ok_init = pl.proj_len == 0 && self.fusable_init_rvalue(b, &rv0);
                     is_array_init = rv0.kind == ir::RV_AGGREGATE && rv0.c == ir::AGG_ARRAY;
+                    let mut src = ir::IR_NONE;
+                    if rv0.kind == ir::RV_REF || rv0.kind == ir::RV_ADDR || rv0.kind == ir::RV_SLICE {
+                        src = rv0.a;
+                    } else if rv0.kind == ir::RV_USE && rv0.b != 0 && b.operands.at(rv0.a as usize).kind != ir::OP_CONST {
+                        src = b.operands.at(rv0.a as usize).data; // an array's slice view
+                    }
+                    if src != ir::IR_NONE && !b.place_has_deref(src) {
+                        borrowed.set((*self.sx_coal.at(b.places.at(src as usize).base as usize)) as usize, true);
+                    }
                 }
                 if wl != ir::IR_NONE && !*seen.at(wl as usize) {
                     seen.set(wl as usize, true);
@@ -4060,6 +4503,11 @@ extend CEmit {
                 let s = *b.statements.at((blk.stmt_start + si) as usize);
                 if s.kind == ir::ST_ASSIGN {
                     self.dom_check_place(b, cf, s.place, bi, &init_blk, &mut bad);
+                } else if s.kind == ir::ST_STORAGE_DEAD {
+                    let l = (*self.sx_coal.at(s.a as usize)) as usize;
+                    if *borrowed.at(l) && *init_blk.at(l) != cfl::NONE && !cf.dominates(*init_blk.at(l), bi) {
+                        bad.set(l, true);
+                    }
                 }
             }
             let t = blk.term;
@@ -4076,6 +4524,14 @@ extend CEmit {
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
                 let rb = *self.sx_coal.at(b.places.at(op.data as usize).base as usize);
                 nread.set(rb as usize, *nread.at(rb as usize) + 1);
+            }
+        }
+        // A guarded drop reads its move flag, a local carried on args_start, not an operand.
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP && t.args_len == 1 {
+                let fl = (*self.sx_coal.at(t.args_start as usize)) as usize;
+                nread.set(fl, *nread.at(fl) + 1);
             }
         }
         for l in 0..n {
@@ -4121,6 +4577,7 @@ extend CEmit {
         self.bput(seen);
         self.bput(bad);
         self.bput(direct_array);
+        self.bput(borrowed);
     }
 
     // Whether a statement produces C output (so it "runs" between a forwarded call and its use).
@@ -4161,10 +4618,13 @@ extend CEmit {
         let mut deref = self.uget();
         let mut bad = self.bget();
         let mut ncall = self.uget();
+        // Locals a pointer may reach: a borrow, a slice, a call argument or a drop takes their storage.
+        let mut esc = self.bget();
         bare.resize_default(n);
         deref.resize_default(n);
         bad.resize_default(n);
         ncall.resize_default(n);
+        esc.resize_default(n);
         for o in 0..b.operands.len() {
             let op = *b.operands.at(o);
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
@@ -4189,10 +4649,38 @@ extend CEmit {
                 if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
                     bad.set(b.places.at(rv.a as usize).base as usize, true);
                 }
+                if (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE) && !b.place_has_deref(
+                    rv.a,
+                ) {
+                    esc.set(b.places.at(rv.a as usize).base as usize, true);
+                } else if rv.kind == ir::RV_USE && rv.b != 0 && b.operands.at(rv.a as usize).kind != ir::OP_CONST {
+                    esc.set(b.places.at(b.operands.at(rv.a as usize).data as usize).base as usize, true);
+                } else if ir::has_op_range(&rv) && rv.kind != ir::RV_AGGREGATE && rv.kind != ir::RV_SIMD {
+                    // A closure takes its by-reference captures, inline assembly its outputs.
+                    for i in 0..rv.b {
+                        let op = *b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize);
+                        if op.kind != ir::OP_CONST {
+                            esc.set(b.places.at(op.data as usize).base as usize, true);
+                        }
+                    }
+                }
             }
         }
         for bi in 0..b.blocks.len() {
             let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP {
+                esc.set(b.places.at(t.a as usize).base as usize, true);
+            } else if t.kind == ir::TM_CALL {
+                for i in 0..t.args_len {
+                    let op = *b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize);
+                    if op.kind != ir::OP_CONST && !b.place_has_deref(op.data) {
+                        esc.set(b.places.at(op.data as usize).base as usize, true);
+                    }
+                }
+                if t.callee.node == NODE_NONE && b.operands.at(t.a as usize).kind != ir::OP_CONST {
+                    esc.set(b.places.at(b.operands.at(t.a as usize).data as usize).base as usize, true);
+                }
+            }
             if t.kind == ir::TM_DROP && !self.drop_emits_nothing(b, &t) {
                 bad.set(b.places.at(t.a as usize).base as usize, true);
             } else if t.kind == ir::TM_CALL {
@@ -4260,7 +4748,12 @@ extend CEmit {
                         }
                         break;
                     }
-                    used = scalar || b.rvalues.at(s.rvalue as usize).kind == ir::RV_USE;
+                    used = (scalar || b.rvalues.at(s.rvalue as usize).kind == ir::RV_USE) && self.fwd_keeps(
+                        b,
+                        &s,
+                        root,
+                        &esc,
+                    );
                     // The sole read, but not a foldable position -> keep the temp.
                     before = !used;
                     break;
@@ -4281,10 +4774,225 @@ extend CEmit {
                 self.sx_call_fwd.set(root as usize, true);
             }
         }
+        self.agg_call_fwd(b, cf, &bare, &deref, &bad, &ncall, &esc);
         self.uput(bare);
         self.uput(deref);
         self.uput(ncall);
         self.bput(bad);
+        self.bput(esc);
+    }
+
+    // Forward the results of a run of calls into the aggregate store they fill. Calls `_a = f(..)`,
+    // `_b = g(..)` in a chain of blocks that emit nothing else, followed by `x = [_a, _b]`, spell
+    // `x[0] = f(..); x[1] = g(..);`: each call moves to its element's store, past only the calls
+    // after it, so a forwarded set is a suffix of the chain in element order. A store the emitter
+    // writes as one initializer (a compound literal, a fused array declaration) evaluates its
+    // members unordered: one call forwards, and only when it cannot change the other members.
+    fn agg_call_fwd(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        bare: &Vector<u32>,
+        deref: &Vector<u32>,
+        bad: &Vector<bool>,
+        ncall: &Vector<u32>,
+        esc: &Vector<bool>,
+    ) {
+        let mut done = self.bget();
+        let mut chain = self.uget();
+        done.resize_default(b.blocks.len());
+        for oi in 0..cf.order.len() {
+            let head = *cf.order.at(oi);
+            if *done.at(head as usize) || b.blocks.at(head as usize).term.kind != ir::TM_CALL {
+                continue;
+            }
+            // The chain: call blocks, each the only content of its block after the first, ending in
+            // the block whose first emitted statement is the use.
+            chain.clear();
+            let mut c = head;
+            loop {
+                done.set(c as usize, true);
+                chain.push(c);
+                let nx = cf.succ(b, c, 0);
+                if nx == cfl::NONE || *done.at(nx as usize) || b.blocks.at(nx as usize).term.kind != ir::TM_CALL || chain.len() >= b.blocks.len() {
+                    c = nx;
+                    break;
+                }
+                let nb = *b.blocks.at(nx as usize);
+                let mut emits = false;
+                for si in 0..nb.stmt_len {
+                    emits = emits || self.stmt_emits(b, b.statements.at((nb.stmt_start + si) as usize));
+                }
+                if emits {
+                    c = nx;
+                    break;
+                }
+                c = nx;
+            }
+            if c == cfl::NONE {
+                continue;
+            }
+            let ublk = *b.blocks.at(c as usize);
+            let mut sx = ir::IR_NONE;
+            for si in 0..ublk.stmt_len {
+                if self.stmt_emits(b, b.statements.at((ublk.stmt_start + si) as usize)) {
+                    sx = ublk.stmt_start + si;
+                    break;
+                }
+            }
+            if sx == ir::IR_NONE {
+                continue;
+            }
+            let s = *b.statements.at(sx as usize);
+            if s.kind != ir::ST_ASSIGN || b.rvalues.at(s.rvalue as usize).kind != ir::RV_AGGREGATE {
+                continue;
+            }
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            let pl = *b.places.at(s.place as usize);
+            let sroot = *self.sx_coal.at(pl.base as usize);
+            let elementwise = rv.c == ir::AGG_ARRAY && pl.proj_len == 0 && self.rty_y(b, b.locals.at(sroot as usize).ty).kind == TypeKind::TYPE_ARRAY && !*self.sx_fuse.at(
+                sroot as usize,
+            );
+            // Walk the chain from its end: each forwarded call fills an earlier element than the
+            // one after it.
+            let mut next_elem = rv.b;
+            let mut first = chain.len();
+            let mut k = chain.len();
+            while k > 0 {
+                k -= 1;
+                let at = self.agg_call_elem(b, chain[k], &rv, bare, deref, bad, ncall);
+                if at >= next_elem || !elementwise && first != chain.len() {
+                    break;
+                }
+                next_elem = at;
+                first = k;
+            }
+            if first == chain.len() {
+                continue;
+            }
+            if !elementwise {
+                // One call in an initializer: every other member must be a value it cannot change.
+                let mut kept = true;
+                for i in 0..rv.b {
+                    let opid = b.oper_pool[(rv.a + i) as usize];
+                    if i != next_elem && opid != ir::IR_NONE && !self.fwd_value_kept(b, opid, esc) {
+                        kept = false;
+                    }
+                }
+                if !kept {
+                    continue;
+                }
+            }
+            for j in first..chain.len() {
+                let t = b.blocks.at(chain[j] as usize).term;
+                let r = b.places.at(b.dest_pool[t.dests_start as usize] as usize).base;
+                self.sx_call_fwd.set(r as usize, true);
+                self.sx_call_fwd.set((*self.sx_coal.at(r as usize)) as usize, true);
+            }
+        }
+        self.bput(done);
+        self.uput(chain);
+    }
+
+    // The element of aggregate `rv` that the result of call block `bi` fills, when that result can
+    // be spelled there: its only use, a single-return call into a whole fresh local that holds no
+    // fixed array and no erased type. `rv.b` (no element) otherwise.
+    fn agg_call_elem(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        bi: u32,
+        rv: &ir::Rvalue,
+        bare: &Vector<u32>,
+        deref: &Vector<u32>,
+        bad: &Vector<bool>,
+        ncall: &Vector<u32>,
+    ) u32 {
+        let t = b.blocks.at(bi as usize).term;
+        if t.dests_len != 1 {
+            return rv.b;
+        }
+        let dp = *b.places.at(b.dest_pool[t.dests_start as usize] as usize);
+        let r = dp.base;
+        let root = *self.sx_coal.at(r as usize);
+        if dp.proj_len != 0 || r < b.returns || *self.sx_call_fwd.at(root as usize) || *ncall.at(r as usize) != 1 || *bad.at(
+            r as usize,
+        ) || *bad.at(root as usize) || *bare.at(root as usize) != 1 || *deref.at(root as usize) != 0 {
+            return rv.b;
+        }
+        if self.erased(b, b.locals.at(root as usize).ty) || self.arr_n(b, b.locals.at(root as usize).ty) > 0 {
+            return rv.b;
+        }
+        for i in 0..rv.b {
+            if self.op_is_bare_local(b, b.oper_pool[(rv.a + i) as usize], root) {
+                return i;
+            }
+        }
+        return rv.b;
+    }
+
+    // Whether statement `s`, which reads the result `root` of the call before it, may spell that
+    // call: C evaluates a call unordered with the other operand of an operator and with the address
+    // of the store's place, so neither may read what the call can change. A constant, and a local no
+    // pointer reaches (`esc`) read whole, are safe; so is a store's place whose address only such
+    // locals give (one leading dereference, indexes by them).
+    fn fwd_keeps(self: &Self, b: &ir::CoreBody, s: &ir::Statement, root: u32, esc: &Vector<bool>) bool {
+        let rv = *b.rvalues.at(s.rvalue as usize);
+        if rv.kind == ir::RV_BINARY {
+            let other = if self.op_is_call_use(b, rv.a, root) {
+                rv.b;
+            } else {
+                rv.a;
+            };
+            if !self.fwd_value_kept(b, other, esc) {
+                return false;
+            }
+        }
+        let pl = *b.places.at(s.place as usize);
+        for i in 0..pl.proj_len {
+            let pj = *b.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_DEREF && i != 0 || pj.kind == ir::PJ_INDEX_OP && !self.fwd_value_kept(b, pj.data, esc) {
+                return false;
+            }
+            if (pj.kind == ir::PJ_DEREF || pj.kind == ir::PJ_INDEX_OP || pj.kind == ir::PJ_INDEX_CONST) && !self.fwd_local_kept(
+                b,
+                pl.base,
+                esc,
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // An operand a call cannot change: a constant, or a whole local `fwd_local_kept` admits that
+    // spells as itself.
+    fn fwd_value_kept(self: &Self, b: &ir::CoreBody, opid: u32, esc: &Vector<bool>) bool {
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            return true;
+        }
+        let pl = *b.places.at(op.data as usize);
+        return pl.proj_len == 0 && *self.sx_inline.at(pl.base as usize) == ir::IR_NONE && !*self.sx_call_fwd.at(
+            pl.base as usize,
+        ) && self.fwd_local_kept(b, pl.base, esc);
+    }
+
+    // A local a call cannot change: no pointer reaches it (`esc`), and it is no item that can change
+    // (a constant's value is fixed), no array argument (a pointer in C) and no closure capture
+    // (environment storage).
+    fn fwd_local_kept(self: &Self, b: &ir::CoreBody, l: u32, esc: &Vector<bool>) bool {
+        let d = b.locals.at(l as usize);
+        if d.storage == ir::LS_STATIC_REF {
+            if d.item.node == NODE_NONE || Ast::in_body(d.item.node) {
+                return false;
+            }
+            let n = unsafe (*self.p().module_ast_const(d.item.module)).at_const(d.item.node);
+            return n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_GENERIC_PARAM || n.kind == NodeKind::NODE_CONST && !n.as_data.const_def.is_static_mut && !n.as_data.const_def.is_extern;
+        }
+        if esc[l as usize] || self.cap_on && l >= self.cap_base && l < b.returns + b.args {
+            return false;
+        }
+        return d.storage != ir::LS_ARG || self.rty_y(b, d.ty).kind != TypeKind::TYPE_ARRAY;
     }
 
     fn assert_call_use(self: &mut Self, b: &ir::CoreBody, blk: &ir::BasicBlock, l: u32) bool {
@@ -6313,11 +7021,7 @@ extend CEmit {
                     fnm.push_str("_");
                     fnm.push_u64(i);
                 } else {
-                    self.mg.ident(
-                        am,
-                        unsafe (*sa).at_const(unsafe (*sa).at_const(fid).as_data.field.name).as_data.name.text,
-                        &mut fnm,
-                    );
+                    self.mg.field_ident(am, fid, &mut fnm);
                 }
                 let op = *b.operands.at(opid as usize);
                 let y = self.rty_y(b, op.ty);
@@ -10103,12 +10807,11 @@ extend CEmit {
                     let am = self.agg_module_res(fm, ft);
                     let fa = self.p().module_ast_const(am);
                     let sn = unsafe (*fa).at_const(pj.sub);
-                    let nm = if pj.kind == ir::PJ_DOWNCAST {
-                        sn.as_data.variant.name;
+                    if pj.kind == ir::PJ_DOWNCAST {
+                        self.mg.ident(am, unsafe (*fa).at_const(sn.as_data.variant.name).as_data.name.text, dst);
                     } else {
-                        sn.as_data.field.name;
-                    };
-                    self.mg.ident(am, unsafe (*fa).at_const(nm).as_data.name.text, dst);
+                        self.mg.field_ident(am, pj.sub, dst);
+                    }
                 }
             } else if pj.kind == ir::PJ_INDEX_CONST || pj.kind == ir::PJ_INDEX_OP {
                 // Container instances index through their storage member: Array wraps a C array
@@ -15560,11 +16263,7 @@ extend CEmit {
                 }
                 dst.push_str(".");
                 let fid = unsafe (*sa).list(ms)[i as usize];
-                self.mg.ident(
-                    am,
-                    unsafe (*sa).at_const(unsafe (*sa).at_const(fid).as_data.field.name).as_data.name.text,
-                    dst,
-                );
+                self.mg.field_ident(am, fid, dst);
                 dst.push_str(" = ");
                 ok = self.emit_operand(b, opid, dst);
                 emitted += 1;

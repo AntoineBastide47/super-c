@@ -1,7 +1,8 @@
 // FFI bindings for common filesystem and directory APIs. Import with `import filesystem;`. Every call
 // site requires `unsafe`.
 // Struct layouts such as `stat` and `dirent` vary by platform, so APIs that fill or return those structs
-// use `*mut void` / `*const void`; provide platform-specific layout glue when you need field access.
+// use `*mut void` / `*const void`. For field access, declare the fields you need as a header type
+// (`struct stat` in an `extern "C" "sys/stat.h"` block, gated per platform) and pass a pointer to it.
 //
 // One block per backing header, because that is what gets each header included in the emitted C: none of
 // these are among the standard headers the runtime prologue carries, so a single unnamed block would leave

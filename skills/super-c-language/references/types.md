@@ -11,7 +11,7 @@
 | `f32` `f64` | 4/8 | IEEE-754 floats |
 | `c32` `c64` | 8/16 | C `_Complex` floats |
 | `void` | 0 | Unit type |
-| `never` | 0 | Bottom type (`@c.noreturn` calls) |
+| `never` | 0 | Bottom type (`@c.noreturn` calls): converts to any type; an operator operand of it takes the other operand's type; no method applies to it |
 
 Every integer and float type has the associated constants `MIN` and `MAX` (Rust's values; a
 float's are its most negative and largest finite values; `isize`/`usize` follow the target's
@@ -100,7 +100,9 @@ the explicit `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` metho
 
 Standard C layout (not auto-rounded to power-of-2). Fields ordered as declared. Use
 `@c.packed` for wire formats. Use `@c.align(N)` for cache-line alignment. Verify sizes
-with `static_assert(sizeof(T) == N, "...")`.
+with `static_assert(sizeof(T) == N, "...")`. A `struct` or `union` of an `extern "C"` block
+is a header type: its C header owns the layout, so only the C compiler knows its size (see
+`super-c-ffi`, Header Types).
 
 No type may exceed the target's `isize::MAX` bytes ("the type '..' is too large for the target"),
 nor an array `u32::MAX` elements ("array length N exceeds the maximum of 4294967295").
@@ -119,7 +121,9 @@ nor an array `u32::MAX` elements ("array length N exceeds the maximum of 4294967
 
 Raw-pointer operations require `unsafe`. Reference operations are safe. `&T` and `*const T`
 lower to `const T*` in C; `&mut T` and `*mut T` lower to `T*`, and a `&mut T` parameter to `T *restrict`: the
-C compiler assumes nothing else reaches the referent during the call. Unsafe code that
+C compiler assumes nothing else reaches the referent during the call. A parameter the body writes
+(a `mut` one, or one a self tail call stores into) is a plain `T*`: C leaves a store of one
+`restrict` parameter's value into another undefined. Unsafe code that
 reaches a live `&mut` referent through another path (a raw pointer, a second reference)
 while the call runs is undefined behavior. A by-value `[]mut T` parameter is exclusive the same
 way: function `f` is defined as `f__r`, which takes it as `T *restrict` and a `size_t` length,

@@ -28,6 +28,13 @@ extend CliResult {
         }
         return contains_str(self.out, needle);
     }
+    /// The captured output (empty when none was captured).
+    pub fn text(self: &CliResult) str {
+        if self.out == null {
+            return "";
+        }
+        return unsafe str::from_cstr(self.out);
+    }
     /// Check for `needle`; print the captured output if absent.
     pub fn out_shows(self: &CliResult, needle: str) bool {
         if self.out_has(needle) {
@@ -458,6 +465,9 @@ extend Proj {
         };
         let mut objs = Vector::<String>::new();
         let rc = ocache::compile_units(&ccv, &cfv, raw.as_str(), &units, ns.as_str(), &mut objs);
+        // The compile claimed the suite's free job slots, which a claim keeps until its process exits:
+        // give them back now, so the test's later builds and the other tests run in parallel.
+        unsafe shim::sc_jobserver_release_claim();
         if rc != 0 {
             return CliResult { exit: rc, out: null };
         }
@@ -609,6 +619,14 @@ extend Proj {
         assert(r.exit != 0, "expected nonzero exit on a bad program");
         assert(r.out_has(want), "diagnostic missing expected text");
     }
+
+    /// Check every case of `b` (see `Batch`) through `compile_flags` with `b.flags`.
+    pub fn expect_batch(self: &Proj, mut b: Batch) {
+        while b.next() {
+            let r = self.compile_flags(b.flags.as_str(), b.write(self, "case_root.spc"));
+            b.take(r.exit, r.text());
+        }
+    }
 }
 
 extend Proj as Free {
@@ -745,4 +763,308 @@ pub fn dir_corrupt_suffix(dir: str, suffix: str) i32 {
         }
     }
     return names.len() as i32;
+}
+
+/// A family of negative cases checked in few compiles. Case k, named by its label, is the program
+/// `head`, `src`, `tail`, and its check is that a diagnostic holds `want`, at `at` ("L:C" in that program) when `at` is not
+/// empty, and under `one` that the program reports exactly one error. A round compiles every case not
+/// yet verified at once: case k is module `case_k` (file `case_k.spc`, the case's program unchanged)
+/// of a root that imports them all, so the cases share no names. A round verifies a case only by an
+/// error the compiler locates in the case's own file, so one case's message never satisfies another's
+/// check. The errors of a stage stop the compiler before the next stage, so each round verifies the
+/// cases of one more stage. After a round that verifies none, each remaining case compiles alone, as
+/// file `file`, and takes the check of its own program: `want` anywhere in the output, or in the
+/// diagnostic at `at`. Drive it with `next`, `write` and `take` (`Proj::expect_batch`,
+/// `h::expect_build_errs`).
+pub struct Batch {
+    head: String,
+    tail: String,
+    /// The file a case compiled alone is written to.
+    pub file: String,
+    /// The compiler flags of `Proj::expect_batch`.
+    pub flags: String,
+    /// Each case reports exactly one error.
+    pub one: bool,
+    forbid: Vector<String>,
+    labels: Vector<String>,
+    srcs: Vector<String>,
+    wants: Vector<String>,
+    ats: Vector<String>,
+    // The verified cases, the cases of the current program, the case it holds alone (-1: a round),
+    // whether the rounds have ended, and the programs handed out.
+    done: Vector<bool>,
+    sel: Vector<bool>,
+    alone: isize,
+    solo: bool,
+    programs: usize,
+}
+
+// One rendered diagnostic of a compiler's output: whether it is an error, the base name of the file
+// of its primary location and that location ("L:C"; both empty without one), and the byte range of
+// its text, from its kind to the next diagnostic.
+struct Diag {
+    pub error: bool,
+    pub file: String,
+    pub loc: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+// The diagnostics of `out`. Each starts at a line `error: ` or `warning: `; its first `--> PATH:L:C`
+// line is its primary location.
+fn diags_of(out: str) Vector<Diag> {
+    let mut ds = Vector::<Diag>::new();
+    let mut located = false;
+    let mut at: usize = 0;
+    while at < out.len() {
+        let nl = out.slice(at, out.len()).find("\n");
+        let end = if nl < 0 {
+            out.len();
+        } else {
+            at + nl as usize + 1;
+        };
+        let line = out.slice(at, end);
+        if line.starts_with("error: ") || line.starts_with("warning: ") {
+            if ds.len() > 0 {
+                ds.index_mut(ds.len() - 1).end = at;
+            }
+            let d = Diag {
+                error: line.starts_with("error: "),
+                file: String::new(),
+                loc: String::new(),
+                start: at,
+                end: out.len(),
+            };
+            ds.push(d);
+            located = false;
+        } else if line.starts_with("--> ") && ds.len() > 0 && !located {
+            located = true;
+            let l = line.slice(4, line.len()).trim_end();
+            // PATH:L:C, where PATH may hold a drive colon: split at the last two colons.
+            let mut cuts: usize = 0;
+            let mut k = l.len();
+            while k > 0 && cuts < 2 {
+                k -= 1;
+                if l.byte_at(k) == b':' {
+                    cuts += 1;
+                }
+            }
+            if cuts == 2 {
+                let mut base: usize = 0;
+                for i in 0..k {
+                    if l.byte_at(i) == b'/' || l.byte_at(i) == b'\\' {
+                        base = i + 1;
+                    }
+                }
+                let d = ds.index_mut(ds.len() - 1);
+                d.file = String::from_str(l.slice(base, k));
+                d.loc = String::from_str(l.slice(k + 1, l.len()));
+            }
+        }
+        at = end;
+    }
+    return ds;
+}
+
+extend Batch {
+    /// An empty batch whose case programs start with `head` and end with `tail`.
+    pub fn new(head: str, tail: str) Batch {
+        return Batch {
+            head: String::from_str(head),
+            tail: String::from_str(tail),
+            file: String::from_str("main.spc"),
+            flags: String::new(),
+            one: false,
+            forbid: Vector::<String>::new(),
+            labels: Vector::<String>::new(),
+            srcs: Vector::<String>::new(),
+            wants: Vector::<String>::new(),
+            ats: Vector::<String>::new(),
+            done: Vector::<bool>::new(),
+            sel: Vector::<bool>::new(),
+            alone: -1,
+            solo: false,
+            programs: 0,
+        };
+    }
+
+    /// Add the case `label` whose diagnostic holds `want`, located anywhere in its program.
+    pub fn add(self: &mut Batch, label: str, src: str, want: str) {
+        self.add_at(label, src, want, "");
+    }
+
+    /// Add the case `label` whose diagnostic holds `want` at `at` ("L:C" in its program).
+    pub fn add_at(self: &mut Batch, label: str, src: str, want: str, at: str) {
+        self.labels.push(String::from_str(label));
+        self.srcs.push(String::from_str(src));
+        self.wants.push(String::from_str(want));
+        self.ats.push(String::from_str(at));
+        self.done.push(false);
+    }
+
+    /// Fail every check whose output contains `text`.
+    pub fn forbid(self: &mut Batch, text: str) {
+        self.forbid.push(String::from_str(text));
+    }
+
+    // The program of case `k`.
+    fn program(self: &Batch, k: usize) String {
+        let mut s = self.head.clone();
+        s.push_string(self.srcs.at(k));
+        s.push_string(&self.tail);
+        return s;
+    }
+
+    /// Choose the next program and return true, or return false when every case is verified. `write`
+    /// writes the program, and the result of its compile goes to `take`.
+    pub fn next(self: &mut Batch) bool {
+        self.programs += 1;
+        // Each round verifies a case or ends the rounds, and each program after them verifies a case.
+        assert(self.programs <= self.srcs.len() + 2, "each program verifies a case or ends the rounds");
+        self.sel.clear();
+        self.alone = -1;
+        let mut n: usize = 0;
+        if !self.solo {
+            for j in 0..self.srcs.len() {
+                let s = !*self.done.at(j);
+                self.sel.push(s);
+                n += s as usize;
+            }
+            // A last case compiles alone at once: a round would cost as much and might not verify it.
+            self.solo = n <= 1;
+        }
+        if self.solo {
+            self.sel.clear();
+            for j in 0..self.srcs.len() {
+                let s = !*self.done.at(j) && self.alone < 0;
+                if s {
+                    self.alone = j as isize;
+                }
+                self.sel.push(s);
+            }
+            if self.alone < 0 {
+                return false;
+            }
+            eprintln("--- case {} ({}) compiles alone", self.alone, self.labels.at(self.alone as usize).as_str());
+        }
+        return true;
+    }
+
+    /// Write the program `next` chose into `p` and return the file to compile: in a round each
+    /// case's file and the root `root` that imports them, else the case's program as `file`.
+    pub fn write<'a>(self: &'a Batch, p: &Proj, root: str<'a>) str<'a> {
+        if self.alone >= 0 {
+            p.mkfile(self.file.as_str(), self.program(self.alone as usize).as_str());
+            return self.file.as_str();
+        }
+        let mut main = String::new();
+        for j in 0..self.srcs.len() {
+            if *self.sel.at(j) {
+                p.mkfile(format("case_{}.spc", j).as_str(), self.program(j).as_str());
+                main.format_into("import case_{};\n", j);
+            }
+        }
+        main.push_str("fn main() i32 {\n    return 0;\n}\n");
+        p.mkfile(root, main.as_str());
+        return root;
+    }
+
+    /// Record the compile of the program `next` chose: its exit status and output. Asserts the check
+    /// of a case compiled alone.
+    pub fn take(self: &mut Batch, exit: i32, out: str) {
+        if self.alone >= 0 {
+            let k = self.alone as usize;
+            assert(self.alone_ok(k, exit, out), self.labels.at(k).as_str());
+            self.done.set(k, true);
+            return;
+        }
+        let ds = diags_of(out);
+        // The case of each diagnostic (-1: none).
+        let mut of = Vector::<isize>::new();
+        for d in ds.iter() {
+            let mut c: isize = -1;
+            if d.file.starts_with("case_") && d.file.ends_with(".spc") {
+                let k = d.file.as_str().slice(5, d.file.len() - 4).parse_usize().unwrap_or(self.srcs.len());
+                if k < self.srcs.len() && *self.sel.at(k) {
+                    c = k as isize;
+                }
+            }
+            of.push(c);
+        }
+        let mut stray = exit == 0;
+        for i in 0..ds.len() {
+            stray = stray || self.one && ds.at(i).error && *of.at(i) < 0;
+        }
+        for f in self.forbid.iter() {
+            stray = stray || out.contains(f.as_str());
+        }
+        let mut verified: usize = 0;
+        for j in 0..self.srcs.len() {
+            if !*self.sel.at(j) {
+                continue;
+            }
+            let at = self.ats.at(j).as_str();
+            let mut errors: usize = 0;
+            let mut found = false;
+            for i in 0..ds.len() {
+                if *of.at(i) != j as isize {
+                    continue;
+                }
+                let d = ds.at(i);
+                if d.error {
+                    errors += 1;
+                }
+                let held = out.slice(d.start, d.end).contains(self.wants.at(j).as_str());
+                found = found || held && (at.len() == 0 || d.loc.eq_str(at));
+            }
+            if !stray && found && errors >= 1 && (!self.one || errors == 1) {
+                self.done.set(j, true);
+                verified += 1;
+            }
+        }
+        self.solo = verified == 0;
+    }
+
+    // Whether `out`, the output of a compile of case `k` alone that exited `exit`, passes the case's
+    // check; prints the case and the output when it does not.
+    fn alone_ok(self: &Batch, k: usize, exit: i32, out: str) bool {
+        let want = self.wants.at(k).as_str();
+        let at = self.ats.at(k).as_str();
+        let mut ok = exit != 0;
+        for f in self.forbid.iter() {
+            ok = ok && !out.contains(f.as_str());
+        }
+        if at.len() == 0 {
+            ok = ok && out.contains(want);
+        } else {
+            let mut found = false;
+            for d in diags_of(out).iter() {
+                found = found || d.file.equals(&self.file) && d.loc.eq_str(at) && out.slice(d.start, d.end).contains(
+                    want,
+                );
+            }
+            ok = ok && found;
+        }
+        if self.one {
+            let mut errors: usize = 0;
+            for line in out.lines() {
+                if line.starts_with("error: ") {
+                    errors += 1;
+                }
+            }
+            ok = ok && errors == 1;
+        }
+        if !ok {
+            eprintln(
+                "--- case {} ({}): expected '{}' at '{}', exit {}; program:",
+                k,
+                self.labels.at(k).as_str(),
+                want,
+                at,
+                exit,
+            );
+            eprintln("{}--- output:\n{}", self.program(k).as_str(), out);
+        }
+        return ok;
+    }
 }

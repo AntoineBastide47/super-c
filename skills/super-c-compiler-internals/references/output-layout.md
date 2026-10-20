@@ -111,8 +111,9 @@ the header of the type it collides with.
   their order, and the repeats a direct-mapped filter lets through (`tn_seen`,
   `tn_recent`), never reach the output.
 - Layout checks live in the definition header of the checked type, so a unit checks the
-  types it includes and a new type changes no unit; an extern aggregate (defined by a C
-  header) keeps its check in its module's first shard. The checks are rendered with
+  types it includes and a new type changes no unit; an extern enum keeps its check in its
+  module's first shard. A header struct or union has no layout check: its field checks
+  follow the extern-block includes in `__sc_fwd.h`, so every unit runs them once. The checks are rendered with
   `no_edges` set: they record no use edge and no type need for the module's unit.
 - The headers of `extern "C" "<header>"` blocks are global (`__sc_fwd.h`): every TU can
   call a header-declared extern function, so the Core IR inliner splices a callee that

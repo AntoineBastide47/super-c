@@ -1,6 +1,6 @@
 // FFI bindings for the pthread thread calls. Import with `import pthread;`.
-// Mutexes, condition variables and read/write locks are not bound: their storage size is platform-defined
-// and Super-C cannot allocate it, so a binding could only be called on storage of a guessed size. Use
+// Mutexes, condition variables and read/write locks are not bound: an initialized one must not be copied,
+// and a header type (`@c.import("pthread_mutex_t") struct pthread_mutex_t {}`) is a `Copy` value. Use
 // `std::parallel::sync` (Mutex, Condvar, RwLock) instead.
 // Carries `@c.link("pthread")` off Android. Every call site except `pthread_self` requires `unsafe`.
 

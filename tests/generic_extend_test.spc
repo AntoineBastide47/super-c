@@ -3,6 +3,7 @@
 // Mul<V<N>>`): methods, operators, bounds, `dyn` values, inherited defaults, constants, associated
 // types and path calls, inlined and called alike; and the declaration and overlap errors.
 import tests::harness as h;
+import tests::cli_harness as cli;
 
 const PROGRAM: str = M"(interface Lane {}
 extend f32 as Lane {}
@@ -77,10 +78,31 @@ fn main(args: Vector<str>) i32 {
 }
 )";
 
+// `src` builds, exits 0 (`expect_exit`), and gives the same output with `SC_INLINE=0`
+// (`expect_same_output`): one build serves both checks.
+fn expect_exit_zero_inlined_and_called(label: str, src: str) {
+    let b = h::diff_build(src, []);
+    let a = h::diff_build(src, ["SC_INLINE=0"]);
+    if !a.built || !b.built {
+        eprintln("{}: {}{}", label, a.diag.as_str(), b.diag.as_str());
+    }
+    assert(a.built, label);
+    assert(b.built, label);
+    let d = h::same_runs(&a, &b, [""]);
+    if d.len() != 0 {
+        eprintln("{}: inlined and called: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
+    let r = h::diff_run(&b, "");
+    if r.exit != 0 {
+        eprintln("{}: exit {}: {}", label, r.exit, r.err.as_str());
+    }
+    assert(r.exit == 0, label);
+}
+
 @test
 fn a_generic_conformance_reaches_every_type_its_bounds_admit() {
-    h::expect_exit("generic conformances", PROGRAM, 0);
-    h::expect_same_output("inlined and called", PROGRAM, ["SC_INLINE=0"], []);
+    expect_exit_zero_inlined_and_called("generic conformances", PROGRAM);
 }
 
 @test
@@ -106,21 +128,21 @@ fn declarations_are_checked() {
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str("fn main() i32 {\n    return 0;\n}\n");
-        h::expect_build_err(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], src.as_str(), c[1]);
     }
     // Two generic conformances of one interface whose arguments meet for a type, and a type the
     // bounds do not admit.
-    h::expect_build_err(
+    h::expect_err_msg(
         "two generic conformances",
         "interface I {}\ninterface J { fn g(self: &Self) i32; }\nextend<T: I> T as J { fn g(self: &Self) i32 { return 1; } }\nextend<U: Copy> U as J { fn g(self: &Self) i32 { return 2; } }\nfn main() i32 {\n    return 0;\n}\n",
         "conflicting conformances to 'J'",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a type outside the bounds",
         "interface I {}\nextend f32 as I {}\ninterface J { fn g(self: &Self) i32; }\nextend<T: I> T as J { fn g(self: &Self) i32 { return 1; } }\nfn h<U: J>(u: U) i32 { return u.g(); }\nfn main() i32 {\n    return h(3u8);\n}\n",
         "type 'u8' does not satisfy bound 'J'",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a method of a generic conformance outside its bounds",
         "interface I {}\nextend f32 as I {}\ninterface J { fn g(self: &Self) i32; }\nextend<T: I> T as J { fn g(self: &Self) i32 { return 1; } }\nfn main() i32 {\n    return 2i32.g();\n}\n",
         "cannot call 'i32::g': unsatisfied interface bounds",
@@ -151,8 +173,7 @@ fn main() i32 {
     return (r[3] != 3.0 || s[0] != 2.0 || C[3] != 8.0 || d[1] != 4.0) as i32;
 }
 )";
-    h::expect_exit("an array length parameter", src, 0);
-    h::expect_same_output("inlined and called", src, ["SC_INLINE=0"], []);
+    expect_exit_zero_inlined_and_called("an array length parameter", src);
 }
 
 // An instance a generic conformance gives only through a bound or a `dyn` value is checked like any
@@ -165,14 +186,17 @@ fn instances_through_bounds_and_dyn_are_checked() {
     bound.push_str(
         "fn via<U: Take<[f32; 1]>>(u: U) usize { return u.take(&[1.0]); }\nfn main() i32 {\n    return via(1.0f32) as i32;\n}\n",
     );
-    h::expect_build_err("through a bound", bound.as_str(), "array length N - 2 is negative (-1) for N = 1");
-    h::expect_build_err("the bound call demands it", bound.as_str(), "demanded here");
+    // The build checks an instance when it lowers it.
+    let mut b = cli::Batch::new("", "");
+    b.add("through a bound", bound.as_str(), "array length N - 2 is negative (-1) for N = 1");
+    b.add("the bound call demands it", bound.as_str(), "demanded here");
     let mut dyn_ = String::from_str(decl);
     dyn_.push_str(
         "fn main() i32 {\n    let x = 1.0f32;\n    let d: &dyn Take<[f32; 1]> = &x;\n    return d.take(&[1.0]) as i32;\n}\n",
     );
-    h::expect_build_err("through dyn", dyn_.as_str(), "array length N - 2 is negative (-1) for N = 1");
-    h::expect_build_err("the dyn call demands it", dyn_.as_str(), "demanded here");
+    b.add("through dyn", dyn_.as_str(), "array length N - 2 is negative (-1) for N = 1");
+    b.add("the dyn call demands it", dyn_.as_str(), "demanded here");
+    h::expect_build_errs(b);
 }
 
 // Reflection lists the methods of the generic conformances whose bounds the type satisfies, a

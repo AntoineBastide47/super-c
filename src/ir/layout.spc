@@ -29,6 +29,11 @@ pub struct Layout {
     pub unbound: bool,
     /// A failure because the size exceeds the target's `isize::MAX`: no object can be that large.
     pub big: bool,
+    /// A failure because the type holds a header struct or union by value (`extern "C"` block
+    /// `struct`/`union`): its C header owns the layout. `hn` is that declaration in module `hm`,
+    /// NODE_NONE otherwise.
+    pub hm: ModuleId,
+    pub hn: NodeId,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
@@ -52,6 +57,8 @@ struct LayoutAcc {
     pub is_union: bool,
     pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
     pub big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
+    pub hm: ModuleId, // set by acc_field on a field holding a header type (see Layout.hn)
+    pub hn: NodeId,
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
@@ -59,6 +66,8 @@ struct LayoutAcc {
 pub struct EnumLayout {
     pub unbound: bool, // see Layout.unbound
     pub ok: bool,
+    pub hm: ModuleId, // see Layout.hn
+    pub hn: NodeId,
     pub payload_off: u64, // tag sits at 0
     pub size: u64,
     pub align: u64,
@@ -140,18 +149,21 @@ extend Svc {
         return self.a(m).attr_of(decl, kind);
     }
 
-    // A member type node's recorded type (TYPE_NONE when the checker recorded none).
-    const fn mtype(self: &Self, m: ModuleId, id: NodeId) TypeId {
+    // The layout of aggregate or payload member `mid` (a field, or a tuple member's type node), from
+    // its recorded type (`Ast::member_ty`): a field's own record is what the declaration's check
+    // writes, while its annotation's type is recorded only when something resolves the annotation.
+    fn member_layout(self: &mut Self, m: ModuleId, mid: NodeId, env: *const LayoutEnv, depth: i32) Layout {
         let ast = self.a(m);
-        if ast.valid(id) {
-            return ast.type_of(id);
+        if !ast.valid(mid) {
+            return Layout { ok: false };
         }
-        return TYPE_NONE;
-    }
-
-    // The layout of the member whose type annotation is `tn`.
-    fn member_layout(self: &mut Self, m: ModuleId, tn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
-        return self.layout_of(m, self.mtype(m, tn), env, depth);
+        let t = ast.member_ty(mid);
+        if t == TYPE_NONE {
+            // The declaration's check has not recorded the member yet: the layout is not known yet.
+            self.pending += 1;
+            return Layout { ok: false };
+        }
+        return self.layout_of(m, t, env, depth);
     }
 
     // The element count of array length type `lt` (pool `m`) under `env`: a count, a const
@@ -253,8 +265,8 @@ extend Svc {
         return false;
     }
 
-    /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, unbound
-    /// generic, recursive by-value cycle).
+    /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, header
+    /// struct or union, unbound generic, recursive by-value cycle).
     pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
         return self.layout_of(m, t, null, 0);
     }
@@ -362,7 +374,7 @@ extend Svc {
         if y.kind == TypeKind::TYPE_ARRAY {
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {
-                return Layout { ok: false, unbound: el.unbound, big: el.big };
+                return Layout { ok: false, unbound: el.unbound, big: el.big, hm: el.hm, hn: el.hn };
             }
             if el.size == 0 {
                 // A zero-sized element gives size 0 for every length (and keeps the element
@@ -472,11 +484,13 @@ extend Svc {
     }
 
     // Accumulate the member typed by annotation `tn` into `acc`; false = unfoldable.
-    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, tn: NodeId, env: *const LayoutEnv, depth: i32) bool {
-        let fl = self.member_layout(m, tn, env, depth);
+    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, mid: NodeId, env: *const LayoutEnv, depth: i32) bool {
+        let fl = self.member_layout(m, mid, env, depth);
         if !fl.ok {
             unsafe (*acc).unbound = fl.unbound;
             unsafe (*acc).big = fl.big;
+            unsafe (*acc).hm = fl.hm;
+            unsafe (*acc).hn = fl.hn;
             return false;
         }
         let mut fa = fl.align;
@@ -531,10 +545,14 @@ extend Svc {
         }
         if dkind == NodeKind::NODE_ENUM {
             let e = self.enum_shape(dm, dn, env, depth);
-            return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound };
+            return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound, hm: e.hm, hn: e.hn };
         }
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
+        }
+        if ast.at_const(dn).as_data.aggregate.is_extern {
+            // The header defines the struct; the declaration lists only some of its fields.
+            return Layout { ok: false, hm: dm, hn: dn };
         }
         let is_union = ast.at_const(dn).as_data.aggregate.is_union;
         let is_tuple = ast.at_const(dn).as_data.aggregate.is_tuple;
@@ -547,12 +565,8 @@ extend Svc {
             if !is_tuple && fkind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let mut ftn = fid;
-            if !is_tuple {
-                ftn = ast.at_const(fid).as_data.field.ty;
-            }
-            if !self.acc_field(&mut acc, dm, ftn, env, depth) {
-                return Layout { ok: false, unbound: acc.unbound, big: acc.big };
+            if !self.acc_field(&mut acc, dm, fid, env, depth) {
+                return Layout { ok: false, unbound: acc.unbound, big: acc.big, hm: acc.hm, hn: acc.hn };
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
@@ -592,16 +606,11 @@ extend Svc {
             if pl.len == 0 {
                 continue;
             }
-            let struct_payload = ast.at_const(mid).as_data.variant.struct_payload;
             let mut vs = LayoutAcc {};
             for k in 0..pl.len {
                 let pid = unsafe ast.list(pl)[k as usize];
-                let mut tn = pid;
-                if struct_payload {
-                    tn = ast.at_const(pid).as_data.field.ty;
-                }
-                if !self.acc_field(&mut vs, dm, tn, env, depth) {
-                    return EnumLayout { ok: false, unbound: vs.unbound };
+                if !self.acc_field(&mut vs, dm, pid, env, depth) {
+                    return EnumLayout { ok: false, unbound: vs.unbound, hm: vs.hm, hn: vs.hn };
                 }
             }
             vs.size = round_up(vs.size, vs.align);
@@ -647,10 +656,10 @@ extend Svc {
         }
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
-        if ast.at_const(dn).kind != NodeKind::NODE_STRUCT || ast.at_const(dn).as_data.aggregate.is_union {
-            if ast.at_const(dn).kind != NodeKind::NODE_STRUCT {
-                return -1;
-            }
+        if ast.at_const(dn).kind != NodeKind::NODE_STRUCT || ast.at_const(dn).as_data.aggregate.is_extern {
+            return -1; // a header struct's offsets are its header's
+        }
+        if ast.at_const(dn).as_data.aggregate.is_union {
             // every union member sits at offset 0
             return 0;
         }
@@ -660,11 +669,11 @@ extend Svc {
         let mut off: u64 = 0;
         for i in 0..fs.len {
             let fid = unsafe ast.list(fs)[i as usize];
-            // tuple members are bare type nodes; named members carry their type in field.ty
+            // tuple members are bare type nodes; a named member is a field
             if !is_tuple && ast.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let fl = self.member_layout(dm, ast.member_type_node(fid, is_tuple), env, 1);
+            let fl = self.member_layout(dm, fid, env, 1);
             if !fl.ok {
                 return -1;
             }

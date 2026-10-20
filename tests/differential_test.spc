@@ -50,12 +50,19 @@ fn same_output_with_bounds_checks_forced() {
     src.push_str(
         "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    for k in 0..opr::<usize>(9) {\n        v.push(k as i64);\n    }\n    let mut acc: i64 = 0;\n    for i in 0..v.len() {\n        acc += v[i];\n    }\n    println(\"{}\", acc);\n    let mut i: usize = 0;\n    while i < 13 {\n        acc += v[i];\n        i += 4;\n    }\n    println(\"{}\", acc);\n    return 0;\n}\n",
     );
-    h::expect_same_output("a strided loop past the end traps with and without BCE", src.as_str(), [], ["SC_BCE=0"]);
-    // The strided loop reads v[12] of 9: the run prints the full loop's sum, then traps.
     let b = h::diff_build(src.as_str(), []);
-    assert(b.built);
+    let z = h::diff_build(src.as_str(), ["SC_BCE=0"]);
+    if !b.built || !z.built {
+        eprintln("{}{}", b.diag.as_str(), z.diag.as_str());
+    }
+    assert(b.built, "the program builds with BCE");
+    assert(z.built, "the program builds without BCE");
+    let d = h::same_runs(&b, &z, [""]);
+    assert(d.len() == 0, d.as_str());
+    // The strided loop reads v[12] of 9: the run prints the full loop's sum, then traps.
     let r = h::diff_run(&b, "");
-    assert(r.out.as_str() == "36\n" && r.err.contains("super-c: index out of bounds"), "the strided loop traps");
+    assert(r.out.as_str() == "36\n", "the full loop's sum prints");
+    assert(r.err.contains("super-c: index out of bounds"), "the strided loop traps");
 }
 
 // An add, a wrapping add, a signed shift, a float division, a saturating cast and a const fn call: one
@@ -263,14 +270,25 @@ const MULW: str = "@c.noinline\nfn mulw(a: u64, b: u64) u64 {\n    return a.wrap
 
 @test
 fn asm_host_function() {
-    if ARCH == Arch::AArch64 {
-        h::expect_asm("aarch64 multiply", MULW, ["--profile=release"], "mulw", ["mul"], ["bl", "x0"]);
-    } else {
-        h::expect_asm("x86_64 multiply", MULW, ["--profile=release"], "mulw", ["imul"], ["call", "rax"]);
+    // One build serves the three checks (`asm_check` is `diff_build`, `asm_text` and `asm_match`).
+    let b = h::diff_build(MULW, ["--profile=release"]);
+    assert(b.built, b.diag.as_str());
+    let mut code = String::new();
+    let t = h::asm_text(&b, ["--profile=release"], "mulw", &mut code);
+    assert(t.len() == 0, t.as_str());
+    // The lane builds every program for wasm32: a host instruction check does not apply.
+    if !h::simd_lane() {
+        let m = if ARCH == Arch::AArch64 {
+            h::asm_match(code.as_str(), "mulw", ["mul"], ["bl", "x0"]);
+        } else {
+            h::asm_match(code.as_str(), "mulw", ["imul"], ["call", "rax"]);
+        };
+        assert(m.len() == 0, m.as_str());
     }
-    let d = h::asm_check(MULW, ["--profile=release"], "mulw", ["div"], []);
+    let d = h::asm_match(code.as_str(), "mulw", ["div"], []);
     assert(d.contains("contains 'div'"), "a missing instruction is reported");
-    let n = h::asm_check(MULW, ["--profile=release"], "no_such_fn", [], []);
+    let mut none = String::new();
+    let n = h::asm_text(&b, ["--profile=release"], "no_such_fn", &mut none);
     assert(n.contains("no translation unit defines"), "an unknown function is reported");
 }
 

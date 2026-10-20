@@ -2,20 +2,21 @@
 // through tests::harness. Every expect_ok/expect_error case is transcribed verbatim; the C
 // AST-inspection cases (computed scalar/pointer/reference/literal/inferred/str-member types) are dropped.
 import tests::harness as h;
+import tests::cli_harness as cli;
 import driver_shim as shim;
 
 @test
 fn ok() {
     h::expect_ok(
         "field access",
-        "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; }\n",
+        "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; return y; }\n",
     );
     h::expect_ok(
         "method call binds self",
-        "struct P { pub x: i32, }\nextend P { fn get(self: P) i32 { return self.x; } }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n",
+        "struct P { pub x: i32, }\nextend P { fn get(self: P) i32 { return self.x; } }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); return 0; }\n",
     );
     h::expect_ok("entry point fn main() i32", "fn main() i32 { return 0; }\n");
-    h::expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len(); }\n");
+    h::expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len(); return 0; }\n");
     h::expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return unsafe s.ptr()[0]; }\n");
     h::expect_ok(
         "private field reachable via self",
@@ -30,11 +31,11 @@ fn ok() {
         "field and same-named method coexist",
         "struct S { pub len: i32, }\nextend S { pub fn len(self: &S) i32 { return self.len; } }\nfn use(s: S) i32 { return s.len + s.len(); }\n",
     );
-    h::expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; }\n");
-    h::expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
+    h::expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; return 0; }\n");
+    h::expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; return 0; }\n");
     h::expect_ok(
         "float literals initialize floats",
-        "fn main() i32 { let f: f64 = 0.0; let g: f32 = 5.0; let h: f64 = -3.0; }\n",
+        "fn main() i32 { let f: f64 = 0.0; let g: f32 = 5.0; let h: f64 = -3.0; return 0; }\n",
     );
     h::expect_err_msg(
         "an int literal never initializes a float",
@@ -55,13 +56,13 @@ fn ok() {
     );
     h::expect_ok(
         "char literal coerces to any int slot",
-        "fn take(b: u8) u8 { return b; }\nfn main() i32 { let x: u8 = 'l'; let y: u32 = 'A'; let z: u8 = take('z'); }\n",
+        "fn take(b: u8) u8 { return b; }\nfn main() i32 { let x: u8 = 'l'; let y: u32 = 'A'; let z: u8 = take('z'); return 0; }\n",
     );
     h::expect_ok(
         "call argument types",
-        "fn add(a: i32, b: i32) i32 { return a; }\nfn main() i32 { let z: i32 = add(1, 2); }\n",
+        "fn add(a: i32, b: i32) i32 { return a; }\nfn main() i32 { let z: i32 = add(1, 2); return 0; }\n",
     );
-    h::expect_ok("bool condition", "fn main() i32 { if (true) { } }\n");
+    h::expect_ok("bool condition", "fn main() i32 { if (true) { } return 0; }\n");
     h::expect_ok("switch name binding", "fn classify(c: u8) i32 { return switch c { 0 => 1, n => 2, _ => 0, }; }\n");
     h::expect_ok(
         "struct pattern field",
@@ -4430,6 +4431,182 @@ fn array_slice_view_borrows() {
     b.run();
 }
 
+// Arm values that borrow arm temporaries: literal views of block arms (the argument of a call, a
+// `let`'s value, `switch` arms).
+const ARM_VIEWS: str = M"(fn total(xs: []usize) usize {
+    let mut n: usize = 0;
+    for x in xs {
+        n += x;
+    }
+    return n;
+}
+
+fn main(args: Vector<str>) i32 {
+    let k = args.len();
+    let a = total(if k > 5 {
+        [k, k + 1];
+    } else {
+        [k + 2, k + 3];
+    });
+    let s: []usize = if k > 5 {
+        [k];
+    } else {
+        [k + 4, k + 5, k + 6];
+    };
+    let t: []usize = switch k {
+        0 => {
+            [k];
+        },
+        _ => {
+            [k * 10, k * 20];
+        },
+    };
+    return (a != 2 * k + 5 || total(s) != 3 * k + 15 || total(t) != 30 * k) as i32;
+}
+)";
+
+// Bare `switch` arm literals, `&` of struct literals, owning arrays an arm returns before, and a block
+// arm converted to `dyn`.
+const ARM_OWNED: str = M"(interface Shape {
+    fn area(self: &Self) usize;
+}
+
+struct Sq {
+    pub s: usize,
+}
+
+extend Sq as Shape {
+    fn area(self: &Sq) usize {
+        return self.s * self.s;
+    }
+}
+
+struct Named {
+    pub s: String,
+}
+
+fn total(xs: []usize) usize {
+    let mut n: usize = 0;
+    for x in xs {
+        n += x;
+    }
+    return n;
+}
+
+fn lens(xs: []String) usize {
+    let mut n: usize = 0;
+    for i in 0..xs.len() {
+        n += xs[i].len();
+    }
+    return n;
+}
+
+fn name_len(r: &Named) usize {
+    return r.s.len();
+}
+
+fn early(k: usize) usize {
+    let s: []String = if k == 1 {
+        [String::from("abc"), String::from("de")];
+    } else {
+        if k == 2 {
+            return 100;
+        }
+        [String::from("x")];
+    };
+    let r = name_len(if k == 1 {
+        &Named { s: String::from("four") };
+    } else {
+        &Named { s: String::from("fivee") };
+    });
+    return lens(s) + r;
+}
+
+fn main(args: Vector<str>) i32 {
+    let k = args.len();
+    let q = Sq { s: k + 2 };
+    let w = Sq { s: k };
+    let d: &dyn Shape = if k > 5 {
+        &w;
+    } else {
+        &q;
+    };
+    let t = total(switch k {
+        0 => [k],
+        1 => [k, k + 1],
+        _ => [k * 3, k, k],
+    });
+    return (d.area() != 9 || t != 3 || early(k) != 9 || early(0) != 6 || early(2) != 100) as i32;
+}
+)";
+
+// The occurrences of `needle` in `s`.
+fn occurrences(s: str, needle: str) usize {
+    let mut n: usize = 0;
+    let mut at: usize = 0;
+    while at < s.len() {
+        let k = s.slice(at, s.len()).find(needle);
+        if k < 0 {
+            break;
+        }
+        n += 1;
+        at += k as usize + needle.len();
+    }
+    return n;
+}
+
+// In the C of the function that `def` opens in `code`, the lowering keeps the storage of the arm
+// temporaries outside the arms: `arrays` arrays and `literals` struct literals (declarations that
+// start with `lit`, none when it is empty) declare before the first branch, and no arm declares
+// one. The C block of an arm ends with the arm: a declaration there would leave the views dangling.
+fn expect_arm_storage(label: str, code: str, def: str, arrays: usize, lit: str, literals: usize) {
+    let f = h::c_fn(code, def);
+    let at = f.find("if (");
+    assert(at >= 0, label);
+    let head = f.slice(0, at as usize);
+    let body = f.slice(at as usize, f.len());
+    let lits = lit.len() == 0 || occurrences(head, lit) == literals && !body.contains(lit);
+    let ok = occurrences(head, "];\n") == arrays && !body.contains("] = {") && lits;
+    if !ok {
+        eprintln("{}: {}", label, f);
+    }
+    assert(ok, label);
+}
+
+// The value of an `if` or `switch` arm that borrows a temporary of the arm (an array viewed as a
+// slice, the operand of `&`) keeps it to the end of the block around the expression, as the temporary
+// of the same value written in place of the expression would live; a local of the arm dies with the
+// arm. Lowering: each arm temporary declares outside the arm, and its drop follows the last read
+// through the value. The programs run in `arm_value_programs`.
+@test
+fn arm_values_borrow_temporaries() {
+    h::expect_err_msg(
+        "a view of an arm's local",
+        "fn first(xs: []u8) u8 { return xs[0]; }\nfn main() i32 {\n    let k = 1;\n    return first(if k > 0 {\n        let a = [7u8];\n        a;\n    } else {\n        [8u8];\n    }) as i32;\n}\n",
+        "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:6:9",
+    );
+    let v = h::compile_c_user(ARM_VIEWS);
+    assert(v.ok(), "the views compile");
+    let vc = unsafe str::from_cstr(v.code);
+    expect_arm_storage("each arm's array", vc, "int32_t __sc_user_main(Vector__str args) {\n", 6, "", 0);
+    let o = h::compile_c_user(ARM_OWNED);
+    assert(o.ok(), "the owning arms compile");
+    let oc = unsafe str::from_cstr(o.code);
+    expect_arm_storage("the owning arrays and struct literals", oc, "size_t early(size_t k) {\n", 2, "  Named _", 2);
+    expect_arm_storage("the switch arms' arrays", oc, "int32_t __sc_user_main(Vector__str args) {\n", 3, "", 0);
+    let e = h::c_fn(oc, "size_t early(size_t k) {\n");
+    let read_s = e.find("lens(s)");
+    let read_r = e.find("name_len(");
+    assert(read_s >= 0 && e.find("String__free(") > read_s, "the arrays drop after the read through `s`");
+    assert(read_r >= 0 && e.find("Named__free__d(") > read_r, "the struct literals drop after the read through `r`");
+}
+
+// The programs of `arm_values_borrow_temporaries` read their arms' values to the expected results.
+fn arm_value_programs(b: &mut h::ExitBatch) {
+    b.add("views of block arms' literals", ARM_VIEWS, 0);
+    b.add("arm values that borrow owning temporaries, and a dyn arm", ARM_OWNED, 0);
+}
+
 // A `&'static` receiver taken by implicit autoref borrows the receiver for the whole program: a local
 // is rejected, a constant or a `&'static` reference is accepted.
 @test
@@ -5625,12 +5802,11 @@ fn owning_constants() {
 
 // `@arch` is `@platform`'s sibling on the instruction-set axis: it gates items on the ISA being built
 // for, defaulting to the host and overridable with `--arch=`.
-@test
-fn arch_gate() {
+fn arch_gate(b: &mut h::ExitBatch) {
     // The host's instruction set (loader codes: 0 x86_64, 1 aarch64, 2 wasm32).
     let host = unsafe shim::sc_host_arch();
     let names: []str = ["x86_64", "aarch64", "wasm32"];
-    h::expect_exit(
+    b.add(
         "only the matching architecture's item survives",
         "@arch(x86_64)\nfn which() i32 { return 1; }\n@arch(aarch64)\nfn which() i32 { return 2; }\n@arch(wasm32)\nfn which() i32 { return 3; }\nfn main() i32 { return which(); }\n",
         host + 1,
@@ -5642,7 +5818,11 @@ fn arch_gate() {
         names[((host + 2) % 3) as usize],
         names[host as usize],
     );
-    h::expect_exit("a list gates on any of its architectures", src.as_str(), 0);
+    b.add("a list gates on any of its architectures", src.as_str(), 0);
+}
+
+@test
+fn arch_gate_rejects() {
     h::expect_err_msg(
         "an unknown architecture is rejected",
         "@arch(sparc)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
@@ -5658,14 +5838,13 @@ fn arch_gate() {
 // Six platforms on the gate axis. iOS and Android are their OWN values, not aliases of Darwin and
 // Linux: their libc surface genuinely differs (bionic version-gates declarations glibc has always had,
 // iOS forbids fork/exec), so code must be able to say which one it means. Negation covers the whole set.
-@test
-fn platform_gate_values() {
-    h::expect_exit(
+fn platform_gate_values(b: &mut h::ExitBatch) {
+    b.add(
         "every platform is nameable",
         "@platform(windows | macos | linux | wasm | ios | android)\nfn here() i32 { return 0; }\nfn main() i32 { return here(); }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "negation covers the platforms it does not name",
         "@platform(!windows)\nfn which() i32 { return 1; }\n@platform(windows)\nfn which() i32 { return 2; }\nfn main() i32 { return which(); }\n",
         if unsafe shim::sc_host_platform() == 0 {
@@ -5674,6 +5853,10 @@ fn platform_gate_values() {
             1;
         },
     );
+}
+
+@test
+fn platform_gate_rejects() {
     h::expect_err_msg(
         "an unknown platform names the whole set",
         "@platform(solaris)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
@@ -5708,9 +5891,8 @@ fn gated_static_assert() {
 }
 
 // A struct/union/enum declared inside an `extern "C" "hdr.h"` block is the HEADER's type: the members
-// only state its layout, so field access and sizeof work while the emitted C keeps using the header's own
-// definition. That claim is checked: the layout static_assert compares the model against the header, per
-// target, and `@c.import` pins the C spelling for a tag the header never typedef'd.
+// name some of its fields, and the emitted C keeps using the header's own definition and checks each
+// field against it (tests/header_type_test.spc).
 @test
 fn extern_aggregates() {
     h::expect_err_msg(
@@ -7810,16 +7992,19 @@ fn closure_argument_and_lifetime_regions() {
 // share what is stored, whichever endpoint stores or reads.
 @test
 fn interior_mutability_stores() {
-    h::expect_build_err(
+    // The programs import std::parallel, which the in-process compile does not load: a build.
+    let mut b = cli::Batch::new("", "");
+    b.add(
         "a short borrow sent, read from the receiver after the sender is gone",
         "import std::parallel::channel as *;\nfn main() i32 {\n    let ch = Channel::<&i32>::unbounded();\n    let rx = ch.receiver();\n    {\n        let b = Box::<i32>::new(52);\n        let tx = ch.sender();\n        let _ = tx.send(&*b);\n    }\n    let r = rx.recv().unwrap();\n    return *r;\n}\n",
         "destroyed at the end of this block",
     );
-    h::expect_build_err(
+    b.add(
         "a short borrow pushed through a mutex guard",
         "import std::parallel::sync as *;\nfn main() i32 {\n    let m = Mutex::<Vector<&i32>>::new(Vector::<&i32>::new());\n    {\n        let b = Box::<i32>::new(52);\n        let mut g = m.lock();\n        g.push(&*b);\n    }\n    let g = m.lock();\n    return **g.at(0);\n}\n",
         "destroyed at the end of this block",
     );
+    h::expect_build_errs(b);
     h::expect_run(
         "long enough borrows through a channel and a mutex",
         "import std::parallel::channel as *;\nimport std::parallel::sync as *;\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let ch = Channel::<&i32>::unbounded();\n    let rx = ch.receiver();\n    let tx = ch.sender();\n    let _ = tx.send(&*b);\n    let r = rx.recv().unwrap();\n    let m = Mutex::<Vector<&i32>>::new(Vector::<&i32>::new());\n    {\n        let mut g = m.lock();\n        g.push(r);\n    }\n    let g = m.lock();\n    return **g.at(0) - 52;\n}\n",
@@ -8033,5 +8218,8 @@ fn exit_cases_00() {
 fn exit_cases_01() {
     let mut b = h::ExitBatch::new();
     whole_value_writes_through_self_fold(&mut b);
+    arch_gate(&mut b);
+    platform_gate_values(&mut b);
+    arm_value_programs(&mut b);
     b.run();
 }
